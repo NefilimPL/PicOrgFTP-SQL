@@ -419,7 +419,7 @@ class Be(BU.Tk):
 			if A.path.isdir(c_):
 				try:A.rename(c_,F)
 				except E as T:U(f"Rename folder NO-LED to NO-LED failed in load_existing_files: {T}")
-		C._clear_all_slots();C.original_files={}
+		C._clear_all_slots()
 		if not A.path.isdir(F):return
 		V_=[B for B in A.listdir(F)if A.path.isfile(A.path.join(F,B))]
 		if V_:
@@ -654,7 +654,7 @@ class Be(BU.Tk):
 			else:C._mark_slot(D_,AR)
 			C.focus_force()
 	def _clear_all_slots(C):
-		C.pending_additions.clear();C.pending_deletions.clear()
+		C.pending_additions.clear();C.pending_deletions.clear();C.original_files.clear()
 		for A_ in C.slots:
 			A_[f]=I;A_[y].configure(image=B,text=AU);A_[y].image=I;A_[A7].place_forget();A_[A3].place_forget()
 			if AS in A_:A_[AS].configure(highlightthickness=0,highlightbackground=A8,highlightcolor=A8)
