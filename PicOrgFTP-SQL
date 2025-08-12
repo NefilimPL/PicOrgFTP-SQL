@@ -312,6 +312,14 @@ def Bc(sheet_name,value):
 	try:H.save(o)
 	except E as J_:O.showerror(Ac,f"Nie udało się zapisać pliku list.xlsx:\n{J_}");U(f"Nie udało się zapisać pliku Excel (usuwanie {A_} z {B_}): {J_}");return
 	e(f"Usunięto wartość '{A_}' z listy {B_}.")
+def Bf(sheet_name,values):
+	B_=sheet_name;C_=values;D_=Av(o)
+	if D_:E_=f"przez użytkownika '{D_}'"if Aq(D_,G)else Ap;O.showerror(Ao,f"Nie można zapisać listy. Plik Excel jest otwarty {E_}. Zamknij plik i spróbuj ponownie.");U(f"Próba sortowania listy {B_}, plik Excel zablokowany {E_}.");return
+	F=Ah(o);H=F[B_];H.delete_rows(1,H.max_row)
+	for I_ in C_:H.append([I_])
+	try:F.save(o)
+	except E as J_:O.showerror(Ac,f"Nie udało się zapisać pliku list.xlsx:\n{J_}");U(f"Nie udało się zapisać pliku Excel (sortowanie {B_}): {J_}");return
+	e(f"Przesortowano listę {B_}.")
 def Bd(ean,name,typ,model,col1,col2,col3,extra):
 	R=ean;K_=col1;M_=model;N_=typ;P_=name;F_=col3;H_=col2;X_=Av(o)
 	if X_:i_=f"przez użytkownika '{X_}'"if Aq(X_,G)else Ap;O.showerror(Ao,f"Nie można zapisać danych. Plik Excel jest otwarty {i_}. Zamknij plik i spróbuj ponownie.");U(f"Próba zapisu wpisu EAN {R}, plik Excel zablokowany {i_}.");return h
@@ -375,8 +383,7 @@ class Be(BU.Tk):
 		if not D_:return
 		if D_.upper()not in C.lists[n]:
 			if O.askyesno(AJ,f"Nazwa '{D_}' nie istnieje na liście. Czy dodać ją do listy?"):
-				H=C._open_list_editor(n);C.wait_window(H);C.lists=A5();C.entries=C.lists.get(W,{})
-				if W in C.lists:C.lists.pop(W)
+				H=C._open_list_editor(n);C.wait_window(H)
 				C.combo_name[S]=C.lists[n]
 				if D_.upper()not in[A.upper()for A in C.lists[n]]:C.var_name.set(B);return
 			else:C.var_name.set(B);return
@@ -392,8 +399,7 @@ class Be(BU.Tk):
 		if not G_ or not D_:return
 		if D_.upper()not in C.lists[t]:
 			if O.askyesno(AJ,f"Typ '{D_}' nie istnieje na liście. Czy dodać go do listy?"):
-				H=C._open_list_editor(t);C.wait_window(H);C.lists=A5();C.entries=C.lists.get(W,{})
-				if W in C.lists:C.lists.pop(W)
+				H=C._open_list_editor(t);C.wait_window(H)
 				C.combo_type[S]=C.lists[t]
 				if D_.upper()not in[A.upper()for A in C.lists[t]]:C.var_type.set(B);return
 			else:C.var_type.set(B);return
@@ -454,8 +460,7 @@ class Be(BU.Tk):
 		if not o or not p or not e_:return
 		if e_.upper()not in D.lists[s]:
 			if O.askyesno(AJ,f"Model '{e_}' nie istnieje na liście. Czy chcesz dodać go do listy?"):
-				A6_=D._open_list_editor(s);D.wait_window(A6_);D.lists=A5();D.entries=D.lists.get(W,{})
-				if W in D.lists:D.lists.pop(W)
+				A6_=D._open_list_editor(s);D.wait_window(A6_)
 				D.combo_model[S]=D.lists[s]
 				if e_.upper()not in[A.upper()for A in D.lists[s]]:D.var_model.set(B);return
 			else:D.var_model.set(B);return
@@ -555,8 +560,7 @@ class Be(BU.Tk):
 		if J_:
 			P_=AI.join(J_);R_=f"Kolor '{J_[0]}' nie istnieje na liście. Czy dodać nowy wpis?"if Q(J_)==1 else f"Kolory '{P_}' nie istnieją na liście. Czy dodać nowe wpisy?"
 			if O.askyesno(AJ,R_):
-				T=C._open_list_editor(Y);C.wait_window(T);C.lists=A5();C.entries=C.lists.get(W,{})
-				if W in C.lists:C.lists.pop(W)
+				T=C._open_list_editor(Y);C.wait_window(T)
 				C.combo_color1[S]=C.lists[Y];C.combo_color2[S]=C.lists[Y];C.combo_color3[S]=C.lists[Y]
 				if H_.upper()not in[A.upper()for A in C.lists[Y]]:C.var_color1.set(B);return
 				if F_ and F_.upper()not in[A.upper()for A in C.lists[Y]]:C.var_color2.set(B)
@@ -592,8 +596,7 @@ class Be(BU.Tk):
 		else:
 			if D_.upper()not in[A.upper()for A in C.lists[d]]:
 				if O.askyesno(AJ,f"Wartość '{D_}' nie istnieje na liście dodatków. Dodać do listy?"):
-					M_=C._open_list_editor(d);C.wait_window(M_);C.lists=A5();C.entries=C.lists.get(W,{})
-					if W in C.lists:C.lists.pop(W)
+					M_=C._open_list_editor(d);C.wait_window(M_)
 					C.combo_extra[S]=C.lists[d]
 					if D_.upper()not in[A.upper()for A in C.lists[d]]:C.var_extra.set(B);D_=B
 				else:C.var_extra.set(B);D_=B;C.combo_extra.configure(style=j);return
@@ -671,7 +674,7 @@ class Be(BU.Tk):
 		for(A_,B_)in M_.items():
 			V_=E.lists[A_];D_=F.Listbox(B_,height=5,width=U);O_=C.Scrollbar(B_,orient=An,command=D_.yview);D_.configure(yscrollcommand=O_.set);L_=C.Frame(B_);L_.pack(side=AV,fill='y',padx=5,pady=5);O_.pack(side=AV,fill='y',pady=5);D_.pack(side=Am,fill=z,expand=J,padx=5,pady=5)
 			for G_ in V_:D_.insert(F.END,G_)
-			C.Button(L_,text='Dodaj',command=lambda k=A_,l=D_:E._add_list_item(k,l)).pack(fill='x',pady=2);C.Button(L_,text='Usuń',command=lambda k=A_,l=D_:E._remove_list_item(k,l)).pack(fill='x',pady=2)
+			C.Button(L_,text='Dodaj',command=lambda k=A_,l=D_:E._add_list_item(k,l)).pack(fill='x',pady=2);C.Button(L_,text='Usuń',command=lambda k=A_,l=D_:E._remove_list_item(k,l)).pack(fill='x',pady=2);C.Button(L_,text='Sortuj',command=lambda k=A_,l=D_:E._sort_list(k,l)).pack(fill='x',pady=2)
 		return H_
 	def _add_list_item(C,key,listbox):
 		B_=key;D_=BI.askstring('Dodaj',f"Nowa wartość do listy {B_}:")
@@ -697,6 +700,16 @@ class Be(BU.Tk):
 			elif B_==s:A.combo_model[S]=A.lists[B_]
 			elif B_==Y:A.combo_color1[S]=A.lists[B_];A.combo_color2[S]=A.lists[B_];A.combo_color3[S]=A.lists[B_]
 			elif B_==d:A.combo_extra[S]=A.lists[B_]
+	def _sort_list(C,key,listbox):
+		B_=key;D_=listbox;C.lists[B_]=sorted([A for A in C.lists[B_] if A],key=G)
+		D_.delete(0,F.END)
+		for E_ in C.lists[B_]:D_.insert(F.END,E_)
+		if B_==n:C.combo_name[S]=C.lists[B_]
+		elif B_==t:C.combo_type[S]=C.lists[B_]
+		elif B_==s:C.combo_model[S]=C.lists[B_]
+		elif B_==Y:C.combo_color1[S]=C.lists[B_];C.combo_color2[S]=C.lists[B_];C.combo_color3[S]=C.lists[B_]
+		elif B_==d:C.combo_extra[S]=C.lists[B_]
+		Bf(AE[B_],C.lists[B_])
 	def _on_submit(C):
 		A2='was_existing';t='inter_set';s='del_set';p='add_set';o='pending_del_leftover';n='pending_add_leftover';k='ftp_skipped';j='sql_rows';d='sql_queries';c='ftp_time';b='ftp_deleted';Z='ftp_sent';Y='ftp_error_msg';S='sql_time';P='sql_error_msg';K='error_set'
 		if not(C.var_name.get().strip()and C.var_type.get().strip()and C.var_model.get().strip()and C.var_color1.get().strip()):O.showwarning(BB,'Uzupełnij wszystkie wymagane pola oznaczone * przed zatwierdzeniem.');return
