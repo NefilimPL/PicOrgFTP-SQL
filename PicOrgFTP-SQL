@@ -728,7 +728,15 @@ class Be(BU.Tk):
 				if s_:Av_.append(s_.upper())
 				BX_=g.join(Av_);i_=A.path.join(i_,BX_,b_ if b_!=B else L);A.makedirs(i_,exist_ok=J);BM_=[]
 				try:
-					if A.path.exists(AN):Af.rmtree(AN)
+					if A.path.exists(AN):
+						for Ba in A.listdir(AN):
+							Bb=A.path.join(AN,Ba)
+							try:
+								if A.path.isdir(Bb):
+									Af.rmtree(Bb)
+								else:
+									A.remove(Bb)
+							except PermissionError as R:U(f"Brak dostępu do usunięcia {Bb}: {R}")
 					A.makedirs(AN,exist_ok=J)
 				except E as R:U(f"Nie udało się przygotować folderu kopii zapasowej: {R}")
 				backed_up=[]
