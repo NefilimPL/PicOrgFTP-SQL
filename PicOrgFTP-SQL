@@ -99,6 +99,7 @@ H='ftp'
 E=Exception
 G=str
 B=''
+PORT=21
 import sys,os as A,subprocess as BH,shutil as Af,getpass,platform as BR
 from datetime import datetime as A9
 import time as Ag,tempfile,uuid
@@ -119,7 +120,7 @@ from tkinterdnd2 import TkinterDnD as BU,DND_ALL,DND_FILES as BJ
 from PIL import Image as AA,ImageTk
 from openpyxl import Workbook as BV,load_workbook as Ah
 import ftplib as AB,socket as BK,pyodbc,mysql.connector,ctypes,json as Ar,base64 as BL
-AC='C:\\Pictures'
+AC=r'C:\Pictures'
 l=A.path.join(AC,'_ZDJECIA PRZEROBIONE_')
 o=A.path.join(AC,'lists.xlsx')
 AD=A.path.join(AC,'config.json')
@@ -131,6 +132,7 @@ AO=getpass.getuser()
 AF=BR.node()
 BW=['ODBC Driver 18 for SQL Server','ODBC Driver 17 for SQL Server','SQL Server Native Client 11.0','SQL Server']
 AP="UPDATE object_query_1 SET {col} = 'https://xml.wipmebgroup.pl/img/{filename}' WHERE EAN = '{ean}' OR Towar_powiazany_z_SKU = '{ean}'"
+DEFAULT_CONFIG={H:{v:r'SERVER_FOR_FTP',r:PORT,N:r'LOGIN_FOR_FTP',M:r'PASSOWRD_FOR_FTP',m:r'/PHOTOS/'},P:{c:r'SERVER_FOR_SQL',b:r'BASE_FOR_SQL',N:r'LOGIN_FOR_SQL',M:r'PASSWORD_FOR_SQL'},K:{c:r'10.10.0.5',b:r'pimcore',N:r'phpmyadmin',M:r'dd198378'},p:K,w:AP,u:J}
 APP_SECRET='secret_v1'
 OLD_HOST_KEY=(AF or B)+'secret_OLD'
 Ai=OLD_HOST_KEY
@@ -152,7 +154,7 @@ def AH(enc_data):
 		if v2 and all(ord(ch)>=9 for ch in v2):return v2
 	return v
 def BY():
-	B={H:{v:'SERVER_FOR_FTP',r:PORT,N:'LOGIN_FOR_FTP',M:'PASSOWRD_FOR_FTP',m:'/PHOTOS/'},P:{c:'SERVER_FOR_SQL',b:'BASE_FOR_SQL',N:'LOGIN_FOR_SQL',M:'PASSWORD_FOR_SQL'},K:{c:'10.10.0.5',b:'pimcore',N:'phpmyadmin',M:'dd198378'},p:K,w:AP,u:J}
+	B=Ar.loads(Ar.dumps(DEFAULT_CONFIG))
 	if not A.path.isdir(A.path.dirname(AD)):A.makedirs(A.path.dirname(AD),exist_ok=J)
 	if not A.path.exists(AD):
 		I_={H:{v:B[H][v],r:B[H][r],N:i(B[H][N]),M:i(B[H][M]),m:B[H][m]},P:{c:B[P][c],b:B[P][b],N:i(B[P][N]),M:i(B[P][M])},K:{c:B[K][c],b:B[K][b],N:i(B[K][N]),M:i(B[K][M])},p:B[p],w:B[w],u:B[u]}
