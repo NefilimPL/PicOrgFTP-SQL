@@ -120,7 +120,7 @@ from tkinterdnd2 import TkinterDnD as BU,DND_ALL,DND_FILES as BJ
 from PIL import Image as AA,ImageTk
 from openpyxl import Workbook as BV,load_workbook as Ah
 import ftplib as AB,socket as BK,pyodbc,mysql.connector,ctypes,json as Ar,base64 as BL
-AC=r'C:\Pictures'
+AC=A.path.join(A.path.expanduser('~'),'Pictures')
 l=A.path.join(AC,'_ZDJECIA PRZEROBIONE_')
 o=A.path.join(AC,'lists.xlsx')
 AD=A.path.join(AC,'config.json')
@@ -132,7 +132,7 @@ AO=getpass.getuser()
 AF=BR.node()
 BW=['ODBC Driver 18 for SQL Server','ODBC Driver 17 for SQL Server','SQL Server Native Client 11.0','SQL Server']
 AP="UPDATE object_query_1 SET {col} = 'https://xml.wipmebgroup.pl/img/{filename}' WHERE EAN = '{ean}' OR Towar_powiazany_z_SKU = '{ean}'"
-DEFAULT_CONFIG={H:{v:r'SERVER_FOR_FTP',r:PORT,N:r'LOGIN_FOR_FTP',M:r'PASSOWRD_FOR_FTP',m:r'/PHOTOS/'},P:{c:r'SERVER_FOR_SQL',b:r'BASE_FOR_SQL',N:r'LOGIN_FOR_SQL',M:r'PASSWORD_FOR_SQL'},K:{c:r'10.10.0.5',b:r'pimcore',N:r'phpmyadmin',M:r'dd198378'},p:K,w:AP,u:J}
+DEFAULT_CONFIG={H:{v:B,r:PORT,N:B,M:B,m:r'/PHOTOS/'},P:{c:B,b:B,N:B,M:B},K:{c:B,b:B,N:B,M:B},p:K,w:AP,u:J}
 APP_SECRET='secret_v1'
 OLD_HOST_KEY=(AF or B)+'secret_OLD'
 Ai=OLD_HOST_KEY
@@ -154,27 +154,33 @@ def AH(enc_data):
 		if v2 and all(ord(ch)>=9 for ch in v2):return v2
 	return v
 def BY():
-	B=Ar.loads(Ar.dumps(DEFAULT_CONFIG))
-	if not A.path.isdir(A.path.dirname(AD)):A.makedirs(A.path.dirname(AD),exist_ok=J)
-	if not A.path.exists(AD):
-		I_={H:{v:B[H][v],r:B[H][r],N:i(B[H][N]),M:i(B[H][M]),m:B[H][m]},P:{c:B[P][c],b:B[P][b],N:i(B[P][N]),M:i(B[P][M])},K:{c:B[K][c],b:B[K][b],N:i(B[K][N]),M:i(B[K][M])},p:B[p],w:B[w],u:B[u]}
-		try:
-			with x(AD,T,encoding=k)as D_:Ar.dump(I_,D_,indent=4)
-		except E as F_:
-			try:
-				with x(AM,'a',encoding=k)as G_:G_.write(f"[{A9.now().strftime(A6)}] [USER: {AO}] [PC: {AF}] ERROR: Failed to create config.json: {F_}\n")
-			except:pass
-	else:
-		try:
-			with x(AD,'r',encoding=k)as D_:C=Ar.load(D_)
-			B[H][v]=C.get(H,{}).get(v,B[H][v]);B[H][r]=C.get(H,{}).get(r,B[H][r]);B[H][N]=AH(C.get(H,{}).get(N,i(B[H][N])));B[H][M]=AH(C.get(H,{}).get(M,i(B[H][M])));B[H][m]=C.get(H,{}).get(m,B[H][m]);B[P][c]=C.get(P,{}).get(c,B[P][c]);B[P][b]=C.get(P,{}).get(b,B[P][b]);B[P][N]=AH(C.get(P,{}).get(N,i(B[P][N])));B[P][M]=AH(C.get(P,{}).get(M,i(B[P][M])));B[K][c]=C.get(K,{}).get(c,B[K][c]);B[K][b]=C.get(K,{}).get(b,B[K][b]);B[K][N]=AH(C.get(K,{}).get(N,i(B[K][N])));B[K][M]=AH(C.get(K,{}).get(M,i(B[K][M])));B[p]=C.get(p,B[p]);B[w]=C.get(w,B[w]);B[u]=C.get(u,B[u])
-			try:BZ(B)
-			except E:pass
-		except E as F_:
-			try:
-				with x(AM,'a',encoding=k)as G_:G_.write(f"[{A9.now().strftime(A6)}] [USER: {AO}] [PC: {AF}] ERROR: Failed to load config.json: {F_}\n")
-			except:pass
-	return B
+        global AD
+        B=Ar.loads(Ar.dumps(DEFAULT_CONFIG))
+        config_path=AD
+        if not A.path.exists(config_path):
+                C_=BT.askdirectory(title='Wskaż folder z plikiem konfiguracyjnym')
+                if C_:
+                        config_path=A.path.join(C_,'config.json')
+                if not A.path.exists(config_path):
+                        I_={H:{v:B[H][v],r:B[H][r],N:i(B[H][N]),M:i(B[H][M]),m:B[H][m]},P:{c:B[P][c],b:B[P][b],N:i(B[P][N]),M:i(B[P][M])},K:{c:B[K][c],b:B[K][b],N:i(B[K][N]),M:i(B[K][M])},p:B[p],w:B[w],u:B[u]}
+                        try:
+                                A.makedirs(A.path.dirname(config_path),exist_ok=J)
+                                with x(config_path,T,encoding=k)as D_:Ar.dump(I_,D_,indent=4)
+                        except E as F_:
+                                try:
+                                        with x(AM,'a',encoding=k)as G_:G_.write(f"[{A9.now().strftime(A6)}] [USER: {AO}] [PC: {AF}] ERROR: Failed to create config.json: {F_}\n")
+                                except:pass
+        AD=config_path
+        try:
+                with x(AD,'r',encoding=k)as D_:C=Ar.load(D_)
+                B[H][v]=C.get(H,{}).get(v,B[H][v]);B[H][r]=C.get(H,{}).get(r,B[H][r]);B[H][N]=AH(C.get(H,{}).get(N,i(B[H][N])));B[H][M]=AH(C.get(H,{}).get(M,i(B[H][M])));B[H][m]=C.get(H,{}).get(m,B[H][m]);B[P][c]=C.get(P,{}).get(c,B[P][c]);B[P][b]=C.get(P,{}).get(b,B[P][b]);B[P][N]=AH(C.get(P,{}).get(N,i(B[P][N])));B[P][M]=AH(C.get(P,{}).get(M,i(B[P][M])));B[K][c]=C.get(K,{}).get(c,B[K][c]);B[K][b]=C.get(K,{}).get(b,B[K][b]);B[K][N]=AH(C.get(K,{}).get(N,i(B[K][N])));B[K][M]=AH(C.get(K,{}).get(M,i(B[K][M])));B[p]=C.get(p,B[p]);B[w]=C.get(w,B[w]);B[u]=C.get(u,B[u])
+                try:BZ(B)
+                except E:pass
+        except E as F_:
+                try:
+                        with x(AM,'a',encoding=k)as G_:G_.write(f"[{A9.now().strftime(A6)}] [USER: {AO}] [PC: {AF}] ERROR: Failed to load config.json: {F_}\n")
+                except:pass
+        return B
 def BZ(config):
 	A_=config;C_={H:{v:A_[H][v],r:A_[H][r],N:i(A_[H][N]),M:i(A_[H][M]),m:A_[H][m]},P:{c:A_[P][c],b:A_[P][b],N:i(A_[P][N]),M:i(A_[P][M])},K:{c:A_[K][c],b:A_[K][b],N:i(A_[K][N]),M:i(A_[K][M])},p:A_.get(p,K),w:A_.get(w,AP),u:A_.get(u,J)}
 	try:
