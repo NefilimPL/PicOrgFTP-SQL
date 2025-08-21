@@ -142,7 +142,11 @@ from PIL import Image as AA, ImageTk
 from openpyxl import Workbook as BV, load_workbook as Ah
 import ftplib as AB, socket as BK, pyodbc, mysql.connector, ctypes, json as Ar, base64 as BL
 
-AC = A.path.join(A.path.expanduser("~"), "Pictures")
+# Opcjonalna lokalizacja bazowa. Wstaw własną ścieżkę,
+# aby wymusić zapis plików w innym katalogu niż domyślny "Pictures".
+BASE_DIR_OVERRIDE = ""
+
+AC = BASE_DIR_OVERRIDE or A.path.join(A.path.expanduser("~"), "Pictures")
 l = A.path.join(AC, "_ZDJECIA PRZEROBIONE_")
 o = A.path.join(AC, "lists.xlsx")
 AD = A.path.join(AC, "config.json")
@@ -213,9 +217,10 @@ def load_config():
     B = Ar.loads(Ar.dumps(DEFAULT_CONFIG))
     config_path = AD
     if not A.path.exists(config_path):
-        C_ = BT.askdirectory(title="Wskaż folder z plikiem konfiguracyjnym")
-        if C_:
-            config_path = A.path.join(C_, "config.json")
+        if not BASE_DIR_OVERRIDE:
+            C_ = BT.askdirectory(title="Wskaż folder z plikiem konfiguracyjnym")
+            if C_:
+                config_path = A.path.join(C_, "config.json")
         if not A.path.exists(config_path):
             I_ = {
                 H: {
