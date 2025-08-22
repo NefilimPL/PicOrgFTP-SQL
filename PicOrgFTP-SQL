@@ -259,6 +259,7 @@ def load_config():
                 K: {c: B[K][c], b: B[K][b], N: encrypt(B[K][N]), M: encrypt(B[K][M])},
                 p: B[p],
                 w: B[w],
+                ft: B[ft],
                 u: B[u],
             }
             try:
@@ -292,6 +293,7 @@ def load_config():
         B[K][M] = decrypt(C.get(K, {}).get(M, encrypt(B[K][M])))
         B[p] = C.get(p, B[p])
         B[w] = C.get(w, B[w])
+        B[ft] = C.get(ft, B[ft])
         B[u] = C.get(u, B[u])
         try:
             save_config(B)
@@ -322,6 +324,7 @@ def save_config(config):
         K: {c: A_[K][c], b: A_[K][b], N: encrypt(A_[K][N]), M: encrypt(A_[K][M])},
         p: A_.get(p, K),
         w: A_.get(w, SQL_UPDATE_TEMPLATE),
+        ft: A_.get(ft, J),
         u: A_.get(u, J),
     }
     try:
