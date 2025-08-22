@@ -1,3 +1,47 @@
+# --- Konfigurowalne ustawienia ---
+# Opcjonalna lokalizacja bazowa. Wstaw własną ścieżkę,
+# aby wymusić zapis plików w innym katalogu niż domyślny "Pictures".
+BASE_DIR_OVERRIDE = r""
+
+# Klucz używany do prostego szyfrowania danych konfiguracyjnych.
+APP_SECRET = "secret_v1"
+
+# Domyślny port serwera FTP.
+PORT = 21
+
+# Zapytanie SQL aktualizujące ścieżkę do obrazu.
+SQL_UPDATE_TEMPLATE = (
+    "UPDATE object_query_1 SET {col} = 'https://xml.wipmebgroup.pl/img/{filename}' "
+    "WHERE EAN = '{ean}' OR Towar_powiazany_z_SKU = '{ean}'"
+)
+
+# Domyślne dane konfiguracyjne wykorzystywane przy pierwszym uruchomieniu.
+DEFAULT_CONFIG = {
+    "ftp": {
+        "host": r"",
+        "port": PORT,
+        "user": r"",
+        "pass": r"",
+        "path": r"/PHOTOS/",
+    },
+    "sql": {
+        "server": r"",
+        "database": r"",
+        "user": r"",
+        "pass": r"",
+    },
+    "mysql": {
+        "server": r"",
+        "database": r"",
+        "user": r"",
+        "pass": r"",
+    },
+    "db_type": r"mysql",
+    "sql_query": SQL_UPDATE_TEMPLATE,
+    "enable_sql_update": True,
+}
+# --- Koniec konfiguracji ---
+
 # Komunikaty dla użytkownika
 PROCESSING_MSG = "Trwa przetwarzanie. Poczekaj na zakończenie bieżącej operacji."
 OPERATION_TITLE = "Operacja w toku"
@@ -108,13 +152,15 @@ H = "ftp"
 E = Exception
 G = str
 B = ""
-PORT = 21
 import sys, os as A, subprocess as BH, shutil as Af, getpass, platform as BR
 from datetime import datetime as A9
 import time as Ag, tempfile, uuid
 from tkinter import scrolledtext as BS
 import threading
 
+AO = getpass.getuser()
+AF = BR.node()
+OLD_HOST_KEY = (AF or B) + "secret_OLD"
 
 def ensure_package(pkg_name, import_name=I):
     A = pkg_name
@@ -136,10 +182,6 @@ from PIL import Image as AA, ImageTk
 from openpyxl import Workbook as BV, load_workbook as Ah
 import ftplib as AB, socket as BK, pyodbc, mysql.connector, ctypes, json as Ar, base64 as BL
 
-# Opcjonalna lokalizacja bazowa. Wstaw własną ścieżkę,
-# aby wymusić zapis plików w innym katalogu niż domyślny "Pictures".
-BASE_DIR_OVERRIDE = r""
-
 AC = BASE_DIR_OVERRIDE or A.path.join(A.path.expanduser("~"), "Pictures")
 l = A.path.join(AC, "_ZDJECIA PRZEROBIONE_")
 o = A.path.join(AC, "lists.xlsx")
@@ -148,25 +190,12 @@ AM = A.path.join(AC, "error_log.txt")
 BM = A.path.join(AC, "changes_log.txt")
 AN = A.path.join(AC, "temp_backup")
 AE = {n: n, t: t, s: s, Y: Y, d: d, W: W}
-AO = getpass.getuser()
-AF = BR.node()
 BW = [
     "ODBC Driver 18 for SQL Server",
     "ODBC Driver 17 for SQL Server",
     "SQL Server Native Client 11.0",
     "SQL Server",
 ]
-AP = "UPDATE object_query_1 SET {col} = 'https://xml.wipmebgroup.pl/img/{filename}' WHERE EAN = '{ean}' OR Towar_powiazany_z_SKU = '{ean}'"
-DEFAULT_CONFIG = {
-    H: {v: B, r: PORT, N: B, M: B, m: r"/PHOTOS/"},
-    P: {c: B, b: B, N: B, M: B},
-    K: {c: B, b: B, N: B, M: B},
-    p: K,
-    w: AP,
-    u: J,
-}
-APP_SECRET = "secret_v1"
-OLD_HOST_KEY = (AF or B) + "secret_OLD"
 Ai = OLD_HOST_KEY
 AG = AQ
 
@@ -290,7 +319,7 @@ def save_config(config):
         P: {c: A_[P][c], b: A_[P][b], N: encrypt(A_[P][N]), M: encrypt(A_[P][M])},
         K: {c: A_[K][c], b: A_[K][b], N: encrypt(A_[K][N]), M: encrypt(A_[K][M])},
         p: A_.get(p, K),
-        w: A_.get(w, AP),
+        w: A_.get(w, SQL_UPDATE_TEMPLATE),
         u: A_.get(u, J),
     }
     try:
@@ -2288,7 +2317,7 @@ class App(BU.Tk):
                                 ext = A.path.splitext(Bs)[1].lower()
                                 short_name = f"{K_}_{Az_}{ext}"
                                 try:
-                                    AX_ = D.get(w, AP)
+                                    AX_ = D.get(w, SQL_UPDATE_TEMPLATE)
                                     AC_ = AX_.format(
                                         col=B3_, filename=short_name, ean=K_
                                     )
@@ -2299,7 +2328,7 @@ class App(BU.Tk):
                                 if Aj(cur, A3, -1) >= 0:
                                     CANCEL_LABEL += cur.rowcount
                             elif Az_ in C.original_files:
-                                AX_ = D.get(w, AP)
+                                AX_ = D.get(w, SQL_UPDATE_TEMPLATE)
                                 AY_ = I
                                 AZ_ = I
                                 try:
@@ -2752,7 +2781,7 @@ class App(BU.Tk):
             row=3, column=0, sticky="ne", padx=5, pady=2
         )
         h_ = F.Text(S, width=80, height=3)
-        h_.insert(A_, D.get(w, AP))
+        h_.insert(A_, D.get(w, SQL_UPDATE_TEMPLATE))
         h_.grid(row=3, column=1, padx=5, pady=2, sticky=T)
         C.Label(S, text="Test połączenia SQL:").grid(
             row=4, column=0, sticky=R, padx=5, pady=5
