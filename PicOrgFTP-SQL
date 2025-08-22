@@ -1135,7 +1135,6 @@ class App(BU.Tk):
         C.original_files = {}
         if not A.path.isdir(F):
             return
-
         def worker():
             try:
                 V_ = [
