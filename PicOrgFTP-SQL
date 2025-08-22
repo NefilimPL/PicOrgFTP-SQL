@@ -107,7 +107,8 @@ AK = "Błąd"
 A6 = "%Y-%m-%d %H:%M:%S"
 A7 = "x_lbl"
 A8 = "#aaa"
-A3 = "ftp_lbl"
+A3 = "v_lbl"
+A5 = "ftp_lbl"
 A4 = "green"
 A2 = "<<ComboboxSelected>>"
 y = "img_lbl"
@@ -1014,10 +1015,16 @@ class App(BU.Tk):
             P_ = F.Label(E_, text="✓", fg=AT, bg=A4)
             P_.place(relx=1.0, rely=1.0, anchor="se")
             P_.place_forget()
+            Q_ = F.Label(E_, text="FTP", fg=AT, bg=A4)
+            Q_.place(relx=1.0, rely=1.0, anchor="se", x=-25)
+            Q_.place_forget()
+            R_ = C.Progressbar(E_, mode="indeterminate")
+            R_.place(relx=0, rely=1.0, relwidth=1.0, anchor="sw")
+            R_.place_forget()
             D_.drag_source_register(1, BJ)
             D_.dnd_bind("<<DragInitCmd>>", lambda e, i=G_: B._on_drag_init(e, i))
             D_.dnd_bind("<<DragEndCmd>>", lambda e: B._on_drag_end(e))
-            B.slots.append({Aa: V_, "label": W_, y: D_, A7: K_, A3: P_, f: I, AS: H_})
+            B.slots.append({Aa: V_, "label": W_, y: D_, A7: K_, A3: P_, A5: Q_, "prog": R_, f: I, AS: H_})
         for O_ in Ax(U):
             B.slots_frame.columnconfigure(O_, weight=1)
 
@@ -1170,6 +1177,16 @@ class App(BU.Tk):
         C.original_files = {}
         if not A.path.isdir(F):
             return
+        def start_pb(idx):
+            B_ = C.slots[idx]["prog"]
+            B_.place(relx=0, rely=1.0, relwidth=1.0, anchor="sw")
+            B_.start()
+
+        def stop_pb(idx):
+            B_ = C.slots[idx]["prog"]
+            B_.stop()
+            B_.place_forget()
+
         def worker():
             try:
                 V_ = [
@@ -1251,6 +1268,7 @@ class App(BU.Tk):
                     C._mark_slot(X_, A4)
                 else:
                     G_[A3].place_forget()
+                    G_[A5].place_forget()
             for X_, G_ in A0(C.slots):
                 R_ = G_[Aa]
                 if ftp_presence.get(R_):
@@ -1260,8 +1278,14 @@ class App(BU.Tk):
                         G_[A3].configure(text="✓", fg=AT, bg=A4)
                     G_[A3].place(relx=1.0, rely=1.0, anchor="se")
                     G_[A3].lift(G_[y])
+                    if G_[f] in C.temp_downloads:
+                        G_[A5].place(relx=1.0, rely=1.0, anchor="se", x=-25)
+                        G_[A5].lift(G_[y])
+                    else:
+                        G_[A5].place_forget()
                 else:
                     G_[A3].place_forget()
+                    G_[A5].place_forget()
 
         threading.Thread(target=worker, daemon=J).start()
 
@@ -1707,6 +1731,8 @@ class App(BU.Tk):
         B.slots[C_][f] = E_
         B._update_slot_ui(C_)
         B.slots[C_][A7].place(x=0, y=0)
+        B.slots[C_][A3].place_forget()
+        B.slots[C_][A5].place_forget()
         B._mark_slot(C_, AR)
 
     def _update_slot_ui(J, idx):
@@ -1714,8 +1740,11 @@ class App(BU.Tk):
         F_ = D_[f]
         C_ = D_[y]
         K_ = D_[A7]
+        L_ = D_["prog"]
         if not F_:
             return
+        L_.place(relx=0, rely=1.0, relwidth=1.0, anchor="sw")
+        L_.start()
         try:
             G_ = AA.open(F_)
             G_.thumbnail((100, 100), AA.LANCZOS)
@@ -1725,6 +1754,8 @@ class App(BU.Tk):
         except E:
             C_.configure(text=A.path.basename(F_), image=B)
             C_.image = I
+        L_.stop()
+        L_.place_forget()
         K_.place(x=0, y=0)
 
     def _remove_file(C, idx):
@@ -1749,6 +1780,10 @@ class App(BU.Tk):
             E_[y].configure(image=B, text=AU)
             E_[y].image = I
             E_[A7].place_forget()
+            E_[A3].place_forget()
+            E_[A5].place_forget()
+            E_["prog"].stop()
+            E_["prog"].place_forget()
             if G_:
                 C._mark_slot(D_, I)
             else:
@@ -1770,6 +1805,9 @@ class App(BU.Tk):
             A_[y].image = I
             A_[A7].place_forget()
             A_[A3].place_forget()
+            A_[A5].place_forget()
+            A_["prog"].stop()
+            A_["prog"].place_forget()
             if AS in A_:
                 A_[AS].configure(
                     highlightthickness=0, highlightbackground=A8, highlightcolor=A8
