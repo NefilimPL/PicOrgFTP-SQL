@@ -144,7 +144,7 @@ import ftplib as AB, socket as BK, pyodbc, mysql.connector, ctypes, json as Ar, 
 
 # Opcjonalna lokalizacja bazowa. Wstaw własną ścieżkę,
 # aby wymusić zapis plików w innym katalogu niż domyślny "Pictures".
-BASE_DIR_OVERRIDE = ""
+BASE_DIR_OVERRIDE = r""
 
 AC = BASE_DIR_OVERRIDE or A.path.join(A.path.expanduser("~"), "Pictures")
 l = A.path.join(AC, "_ZDJECIA PRZEROBIONE_")
@@ -854,7 +854,7 @@ class App(BU.Tk):
         B._build_form()
         B._build_slots()
         B.edit_mode = h
-        B.edit_btn_default = B.btn_edit.cget("bg")
+        B.edit_btn_default = B.btn_edit.cget("background")
         H_ = Q(E_)
         B.combo_name.existing_count = H_
         set_app(B)
@@ -966,7 +966,7 @@ class App(BU.Tk):
         Q_.grid(row=0, column=3, padx=5)
         A.btn_submit = C.Button(B_, text="Aktualizuj", command=A._on_submit)
         A.btn_submit.grid(row=8, column=0, pady=10)
-        A.btn_edit = F.Button(B_, text="Edytuj dane", command=A._on_edit)
+        A.btn_edit = C.Button(B_, text="Edytuj dane", command=A._on_edit)
         A.btn_edit.grid(row=8, column=1, padx=5, pady=10)
         A.btn_open = C.Button(B_, text="Otwórz folder", command=A._open_current_folder)
         A.btn_open.grid(row=8, column=2, padx=5, pady=10)
@@ -2662,12 +2662,64 @@ class App(BU.Tk):
             log_error(f"Nie udało się otworzyć folderu {C_}: {P_}")
 
     def _on_edit(C):
-        C.edit_mode = not C.edit_mode
-        if C.edit_mode:
-            C.btn_edit.configure(bg=LIGHT_GREEN, relief="sunken")
-        else:
-            C.btn_edit.configure(bg=C.edit_btn_default, relief="raised")
+        if C.loaded_ean is I or C.loaded_ean not in C.entries:
+            O.showwarning(NO_DATA_MSG, "Wczytaj istniejący wpis do edycji.")
+            return
+        old_ean = C.loaded_ean
+        new_ean = C.var_ean.get().strip() or q
+        name = C.var_name.get().strip()
+        typ = C.var_type.get().strip()
+        model = C.var_model.get().strip()
+        col1 = C.var_color1.get().strip()
+        col2 = C.var_color2.get().strip()
+        col3 = C.var_color3.get().strip()
+        extra = C.var_extra.get().strip()
+        old_entry = C.entries.get(old_ean, {})
 
+        def build_path(name, typ, model, c1, c2, c3, extra):
+            base = A.path.join(l, name.upper(), typ.upper(), model.upper())
+            colors = [c1.upper()]
+            if c2:
+                colors.append(c2.upper())
+            if c3:
+                colors.append(c3.upper())
+            color_part = g.join(colors)
+            extra_part = extra.strip().replace(a, g).upper() if extra.strip() else L
+            return A.path.join(base, color_part, extra_part)
+
+        old_path = build_path(
+            old_entry.get(Ae, B),
+            old_entry.get(Ad, B),
+            old_entry.get(AZ, B),
+            old_entry.get(AY, B),
+            old_entry.get(AX, B),
+            old_entry.get(AW, B),
+            old_entry.get(d, B),
+        )
+        new_path = build_path(name, typ, model, col1, col2, col3, extra)
+
+        if old_path and new_path and old_path != new_path and A.path.exists(old_path):
+            A.makedirs(A.path.dirname(new_path), exist_ok=J)
+            try:
+                A.rename(old_path, new_path)
+            except E as err:
+                log_error(f"Błąd zmiany folderu {old_path} na {new_path}: {err}")
+
+        if old_ean.upper() != new_ean.upper() and A.path.exists(new_path):
+            for fname in A.listdir(new_path):
+                if fname.upper().startswith(old_ean.upper()):
+                    new_fname = new_ean + fname[len(old_ean):]
+                    try:
+                        A.rename(A.path.join(new_path, fname), A.path.join(new_path, new_fname))
+                    except E as err:
+                        log_error(f"Błąd zmiany nazwy pliku {fname}: {err}")
+
+        if update_ean_entry(old_ean, new_ean, name, typ, model, col1, col2, col3, extra):
+            C.entries = prepare_excel_lists().get(W, {})
+            C.loaded_ean = new_ean
+            O.showinfo("Zaktualizowano", f"Zmieniono dane dla EAN {new_ean}.")
+        else:
+            O.showerror(AK, "Nie udało się zaktualizować danych.")
     def _open_settings(A):
         a = "Zmień dane (Administrator)"
         Y = "*"
