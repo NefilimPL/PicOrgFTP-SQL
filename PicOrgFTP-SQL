@@ -156,7 +156,6 @@ E = Exception
 G = str
 B = ""
 import sys, os as A, subprocess as BH, shutil as Af, getpass, platform as BR
-import os
 from datetime import datetime as A9
 import time as Ag, tempfile, uuid
 from tkinter import scrolledtext as BS
@@ -2250,7 +2249,7 @@ class App(BU.Tk):
                             P_ = BO_.split(a)
                             if Q(P_) >= 2:
                                 An_ = P_[0]
-                                Bi = os.path.splitext(P_[1])[0]
+                                Bi = P_[1]
                                 Bj = A.path.splitext(BO_)[1]
                                 if An_ and Q(An_) == 13 and An_.isdigit():
                                     BM_.append(f"{An_}_{Bi}{Bj}")
@@ -2322,7 +2321,7 @@ class App(BU.Tk):
                                     Ao_ = P_[0] if P_ else B
                                     if not (Ao_ and Q(Ao_) == 13 and Ao_.isdigit()):
                                         continue
-                                    Bl = os.path.splitext(P_[1])[0] if Q(P_) > 1 else B
+                                    Bl = P_[1] if Q(P_) > 1 else B
                                     Bm = A.path.splitext(X_)[1]
                                     BT = f"{Ao_}_{Bl}{Bm}"
                                     Bn = A.path.join(i_, X_)
