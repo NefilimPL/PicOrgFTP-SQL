@@ -38,6 +38,7 @@ DEFAULT_CONFIG = {
     },
     "db_type": r"mysql",
     "sql_query": SQL_UPDATE_TEMPLATE,
+    "enable_ftp_update": True,
     "enable_sql_update": True,
 }
 # --- Koniec konfiguracji ---
@@ -113,6 +114,7 @@ y = "img_lbl"
 z = "both"
 A0 = enumerate
 x = open
+ft = "enable_ftp_update"
 u = "enable_sql_update"
 v = "host"
 w = "sql_query"
@@ -257,6 +259,7 @@ def load_config():
                 K: {c: B[K][c], b: B[K][b], N: encrypt(B[K][N]), M: encrypt(B[K][M])},
                 p: B[p],
                 w: B[w],
+                ft: B[ft],
                 u: B[u],
             }
             try:
@@ -290,6 +293,7 @@ def load_config():
         B[K][M] = decrypt(C.get(K, {}).get(M, encrypt(B[K][M])))
         B[p] = C.get(p, B[p])
         B[w] = C.get(w, B[w])
+        B[ft] = C.get(ft, B[ft])
         B[u] = C.get(u, B[u])
         try:
             save_config(B)
@@ -320,6 +324,7 @@ def save_config(config):
         K: {c: A_[K][c], b: A_[K][b], N: encrypt(A_[K][N]), M: encrypt(A_[K][M])},
         p: A_.get(p, K),
         w: A_.get(w, SQL_UPDATE_TEMPLATE),
+        ft: A_.get(ft, J),
         u: A_.get(u, J),
     }
     try:
@@ -2232,6 +2237,8 @@ class App(BU.Tk):
                 if not result_data[K]:
                     if not (K_ and Q(K_) == 13 and K_.isdigit()):
                         A__ = J
+                    elif not D.get(ft, J):
+                        log_info("Pominięto wysyłanie plików na FTP (wyłączone w ustawieniach).")
                     else:
                         ftp = AB.FTP()
                         try:
@@ -2741,6 +2748,12 @@ class App(BU.Tk):
 
         Ay = C.Button(Q, text=AA_, command=Ax)
         Ay.grid(row=6, column=1, padx=5, pady=5, sticky=R)
+        C.Label(Q, text="Aktualizuj pliki na FTP:").grid(
+            row=7, column=0, sticky=R, padx=5, pady=2
+        )
+        ftp_update_var = F.BooleanVar(value=D.get(ft, J))
+        ftp_update_cb = C.Checkbutton(Q, variable=ftp_update_var)
+        ftp_update_cb.grid(row=7, column=1, sticky=T, padx=5, pady=2)
         C.Label(S, text="Typ bazy danych:").grid(
             row=0, column=0, sticky=R, padx=5, pady=2
         )
@@ -2900,6 +2913,7 @@ class App(BU.Tk):
             D[H][N] = x_.get().strip()
             D[H][M] = y_.get()
             D[H][m] = g_.get().strip()
+            D[ft] = bool(ftp_update_var.get())
             D[P][c] = AK.get().strip()
             D[P][b] = AM.get().strip()
             D[P][N] = AO.get().strip()
