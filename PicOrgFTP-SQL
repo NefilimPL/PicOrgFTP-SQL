@@ -839,6 +839,7 @@ class App(BU.Tk):
         B.model_select_win_open = h
         B.dragging_idx = I
         B.original_files = {}
+        B.temp_downloads = []
         B.is_processing = h
         B._build_form()
         B._build_slots()
@@ -1195,6 +1196,7 @@ class App(BU.Tk):
                 original_files[R_] = W_
                 slot_paths[R_] = d_
             ftp_presence = {}
+            ftp_files = {}
             K_ = C.var_ean.get().strip()
             if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
                 try:
@@ -1209,9 +1211,26 @@ class App(BU.Tk):
                     except AB.error_perm:
                         e_ = []
                     j_ = {A.path.basename(B) for B in e_}
-                    for label in slot_paths.keys():
-                        if any(A.startswith(f"{K_}_{label}") for A in j_):
-                            ftp_presence[label] = J
+                    for B_ in j_:
+                        if not B_.startswith(f"{K_}_"):
+                            continue
+                        P_ = B_.split(a)
+                        if Q(P_) > 1:
+                            U_ = P_[1]
+                            ftp_presence[U_] = J
+                            ftp_files[U_] = B_
+                    for U_, D_ in ftp_files.items():
+                        if U_ not in slot_paths:
+                            try:
+                                BH_ = A.path.splitext(D_)[1]
+                                tmp = tempfile.NamedTemporaryFile(delete=h, suffix=BH_)
+                                O_.retrbinary(f"RETR {D_}", tmp.write)
+                                tmp.close()
+                                slot_paths[U_] = tmp.name
+                                original_files[U_] = D_
+                                C.temp_downloads.append(tmp.name)
+                            except E:
+                                pass
                     O_.quit()
                 except E as T:
                     log_error(f"FTP check error for EAN {K_}: {T}")
@@ -1235,7 +1254,10 @@ class App(BU.Tk):
             for X_, G_ in A0(C.slots):
                 R_ = G_[Aa]
                 if ftp_presence.get(R_):
-                    G_[A3].configure(text="✓", fg=AT, bg=A4)
+                    if G_[f] in C.temp_downloads:
+                        G_[A3].configure(text="FTP", fg=AT, bg=A4)
+                    else:
+                        G_[A3].configure(text="✓", fg=AT, bg=A4)
                     G_[A3].place(relx=1.0, rely=1.0, anchor="se")
                     G_[A3].lift(G_[y])
                 else:
@@ -1736,6 +1758,12 @@ class App(BU.Tk):
     def _clear_all_slots(C):
         C.pending_additions.clear()
         C.pending_deletions.clear()
+        for path in C.temp_downloads:
+            try:
+                A.remove(path)
+            except E:
+                pass
+        C.temp_downloads = []
         for A_ in C.slots:
             A_[f] = I
             A_[y].configure(image=B, text=AU)
