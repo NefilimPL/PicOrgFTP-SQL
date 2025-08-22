@@ -1135,18 +1135,6 @@ class App(BU.Tk):
         C.original_files = {}
         if not A.path.isdir(F):
             return
-
-        for G_ in C.slots:
-            G_[y].configure(image=B, text="Wczytywanie")
-            G_[y].image = I
-
-        K_ = C.var_ean.get().strip()
-        if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
-            for G_ in C.slots:
-                G_[A3].configure(text="⌛", fg=AT, bg=AR)
-                G_[A3].place(relx=1.0, rely=1.0, anchor="se")
-                G_[A3].lift(G_[y])
-
         def worker():
             try:
                 V_ = [
@@ -1210,8 +1198,6 @@ class App(BU.Tk):
                     C._mark_slot(X_, A4)
                 else:
                     G_[A3].place_forget()
-                    G_[y].configure(image=B, text=AU)
-                    G_[y].image = I
             for X_, G_ in A0(C.slots):
                 R_ = G_[Aa]
                 if ftp_presence.get(R_):
