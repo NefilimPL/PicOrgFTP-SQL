@@ -144,7 +144,7 @@ import ftplib as AB, socket as BK, pyodbc, mysql.connector, ctypes, json as Ar, 
 
 # Opcjonalna lokalizacja bazowa. Wstaw własną ścieżkę,
 # aby wymusić zapis plików w innym katalogu niż domyślny "Pictures".
-BASE_DIR_OVERRIDE = ""
+BASE_DIR_OVERRIDE = r""
 
 AC = BASE_DIR_OVERRIDE or A.path.join(A.path.expanduser("~"), "Pictures")
 l = A.path.join(AC, "_ZDJECIA PRZEROBIONE_")
