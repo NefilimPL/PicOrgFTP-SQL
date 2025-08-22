@@ -1,5 +1,5 @@
 # PicOrgFTP-SQL
-Picture orgraniser with ability to send to FTP and SQL
+Python Picture orgraniser with ability to send to FTP and SQL
 
 ## Działanie
 
