@@ -1216,7 +1216,6 @@ class App(BU.Tk):
                     except AB.error_perm:
                         e_ = []
                     j_ = [A.path.basename(B) for B in e_]
-                    A.makedirs(AN, exist_ok=J)
                     for slot in C.slots:
                         label = slot[Aa]
                         matches = [A for A in j_ if A.startswith(f"{K_}_{label}")]
@@ -1224,12 +1223,11 @@ class App(BU.Tk):
                             ftp_presence[label] = J
                             if label not in slot_paths:
                                 BT_ = matches[0]
-                                local_path = A.path.join(AN, BT_)
+                                local_path = A.path.join(F, BT_)
                                 try:
                                     with x(local_path, "wb") as Br:
                                         O_.retrbinary(f"RETR {BT_}", Br.write)
                                     downloaded[label] = local_path
-                                    C.pending_ftp_deletions.add(BT_)
                                     log_info(f"Pobrano plik {BT_} z FTP")
                                 except E as T:
                                     log_error(f"Błąd pobierania {BT_} z FTP: {T}")
