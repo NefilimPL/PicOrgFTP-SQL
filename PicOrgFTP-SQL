@@ -108,6 +108,7 @@ A6 = "%Y-%m-%d %H:%M:%S"
 A7 = "x_lbl"
 A8 = "#aaa"
 A3 = "ftp_lbl"
+A5 = "ftp_present"
 A4 = "green"
 A2 = "<<ComboboxSelected>>"
 y = "img_lbl"
@@ -827,6 +828,7 @@ class App(BU.Tk):
         B.var_ean = F.StringVar()
         B.pending_additions = {}
         B.pending_deletions = {}
+        B.pending_ftp_deletions = set()
         B.opt_resize = F.BooleanVar(value=J)
         B.opt_compress = F.BooleanVar(value=h)
         B.opt_maxsize = F.BooleanVar(value=h)
@@ -1016,7 +1018,7 @@ class App(BU.Tk):
             D_.drag_source_register(1, BJ)
             D_.dnd_bind("<<DragInitCmd>>", lambda e, i=G_: B._on_drag_init(e, i))
             D_.dnd_bind("<<DragEndCmd>>", lambda e: B._on_drag_end(e))
-            B.slots.append({Aa: V_, "label": W_, y: D_, A7: K_, A3: P_, f: I, AS: H_})
+            B.slots.append({Aa: V_, "label": W_, y: D_, A7: K_, A3: P_, A5: h, f: I, AS: H_})
         for O_ in Ax(U):
             B.slots_frame.columnconfigure(O_, weight=1)
 
@@ -1132,6 +1134,7 @@ class App(BU.Tk):
 
     def _load_existing_files(C):
         """Load images from disk and check FTP copies without blocking GUI."""
+        C.pending_ftp_deletions.clear()
         F = A.path.join(
             l,
             C.var_name.get().strip().upper(),
@@ -1168,7 +1171,10 @@ class App(BU.Tk):
         C._clear_all_slots()
         C.original_files = {}
         if not A.path.isdir(F):
-            return
+            try:
+                A.makedirs(F)
+            except E:
+                pass
         def worker():
             try:
                 V_ = [
@@ -1195,6 +1201,7 @@ class App(BU.Tk):
                 original_files[R_] = W_
                 slot_paths[R_] = d_
             ftp_presence = {}
+            downloaded = {}
             K_ = C.var_ean.get().strip()
             if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
                 try:
@@ -1208,19 +1215,33 @@ class App(BU.Tk):
                         e_ = O_.nlst()
                     except AB.error_perm:
                         e_ = []
-                    j_ = {A.path.basename(B) for B in e_}
-                    for label in slot_paths.keys():
-                        if any(A.startswith(f"{K_}_{label}") for A in j_):
+                    j_ = [A.path.basename(B) for B in e_]
+                    A.makedirs(AN, exist_ok=J)
+                    for slot in C.slots:
+                        label = slot[Aa]
+                        matches = [A for A in j_ if A.startswith(f"{K_}_{label}")]
+                        if matches:
                             ftp_presence[label] = J
+                            if label not in slot_paths:
+                                BT_ = matches[0]
+                                local_path = A.path.join(AN, BT_)
+                                try:
+                                    with x(local_path, "wb") as Br:
+                                        O_.retrbinary(f"RETR {BT_}", Br.write)
+                                    downloaded[label] = local_path
+                                    C.pending_ftp_deletions.add(BT_)
+                                    log_info(f"Pobrano plik {BT_} z FTP")
+                                except E as T:
+                                    log_error(f"Błąd pobierania {BT_} z FTP: {T}")
                     O_.quit()
                 except E as T:
                     log_error(f"FTP check error for EAN {K_}: {T}")
             C.after(
                 0,
-                lambda: finalize(original_files, slot_paths, ftp_presence, ean_guess),
+                lambda: finalize(original_files, slot_paths, ftp_presence, ean_guess, downloaded),
             )
 
-        def finalize(original_files, slot_paths, ftp_presence, ean_guess):
+        def finalize(original_files, slot_paths, ftp_presence, ean_guess, downloaded):
             if ean_guess and C.var_ean.get().strip() == B:
                 C.var_ean.set(ean_guess)
             C.original_files = original_files
@@ -1235,11 +1256,18 @@ class App(BU.Tk):
             for X_, G_ in A0(C.slots):
                 R_ = G_[Aa]
                 if ftp_presence.get(R_):
+                    G_[A5] = J
                     G_[A3].configure(text="✓", fg=AT, bg=A4)
                     G_[A3].place(relx=1.0, rely=1.0, anchor="se")
                     G_[A3].lift(G_[y])
                 else:
+                    G_[A5] = h
                     G_[A3].place_forget()
+            for X_, G_ in A0(C.slots):
+                R_ = G_[Aa]
+                if R_ in downloaded:
+                    G_[A3].place_forget()
+                    C._add_file_to_slot(X_, downloaded[R_])
 
         threading.Thread(target=worker, daemon=J).start()
 
@@ -1719,14 +1747,18 @@ class App(BU.Tk):
                 return
             G_ = h
             if D_ in C.pending_additions:
-                C.pending_additions.pop(D_, I)
+                T_ = C.pending_additions.pop(D_, I)
                 G_ = J
+                if E_.get(A5):
+                    C.pending_deletions[D_] = T_
             elif F_.startswith(l) and A.path.isfile(F_):
                 C.pending_deletions[D_] = F_
             E_[f] = I
             E_[y].configure(image=B, text=AU)
             E_[y].image = I
             E_[A7].place_forget()
+            E_[A3].place_forget()
+            E_[A5] = h
             if G_:
                 C._mark_slot(D_, I)
             else:
@@ -1736,12 +1768,14 @@ class App(BU.Tk):
     def _clear_all_slots(C):
         C.pending_additions.clear()
         C.pending_deletions.clear()
+        C.pending_ftp_deletions.clear()
         for A_ in C.slots:
             A_[f] = I
             A_[y].configure(image=B, text=AU)
             A_[y].image = I
             A_[A7].place_forget()
             A_[A3].place_forget()
+            A_[A5] = h
             if AS in A_:
                 A_[AS].configure(
                     highlightthickness=0, highlightbackground=A8, highlightcolor=A8
@@ -1955,17 +1989,18 @@ class App(BU.Tk):
                 i_ = A.path.join(i_, BX_, b_ if b_ != B else L)
                 A.makedirs(i_, exist_ok=J)
                 BM_ = []
+                backup_dir = A.path.join(AN, "backup")
                 try:
-                    if A.path.exists(AN):
-                        Af.rmtree(AN)
-                    A.makedirs(AN, exist_ok=J)
+                    if A.path.exists(backup_dir):
+                        Af.rmtree(backup_dir)
+                    A.makedirs(backup_dir, exist_ok=J)
                 except E as R:
                     log_error(f"Nie udało się przygotować folderu kopii zapasowej: {R}")
                 backed_up = []
                 for T in set(C.pending_deletions.values()):
                     if T and A.path.isfile(T):
                         try:
-                            Af.copy2(T, A.path.join(AN, A.path.basename(T)))
+                            Af.copy2(T, A.path.join(backup_dir, A.path.basename(T)))
                             backed_up.append(A.path.basename(T))
                         except E as R:
                             log_error(
@@ -2149,6 +2184,11 @@ class App(BU.Tk):
                             Af.copy2(src_path, S_)
                             log_info(f"Dodano/zmodyfikowano plik {c_}")
                         C.slots[F_][f] = S_
+                        if src_path.startswith(AN) and A.path.isfile(src_path):
+                            try:
+                                A.remove(src_path)
+                            except E:
+                                pass
                     except E as y:
                         log_error(
                             f"Nie udało się skopiować pliku {A.path.basename(src_path)}: {y}"
@@ -2221,6 +2261,8 @@ class App(BU.Tk):
                         )
                         result_data[K].add(F_)
                         Am_[F_] = T
+                BM_ = list(set(BM_) | C.pending_ftp_deletions)
+                C.pending_ftp_deletions.clear()
                 result_data[n] = BE_
                 result_data[o] = Am_
                 add_set = AJ_
