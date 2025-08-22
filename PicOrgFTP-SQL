@@ -1026,6 +1026,26 @@ class App(BU.Tk):
         A_[S] = all_values
         A_.existing_count = existing_count
 
+    def _download_missing_from_ftp(B, ftp_conn, slot_paths, ftp_files, original_files):
+        local_labels = set(slot_paths.keys())
+        for label, ftp_name in ftp_files.items():
+            if label not in local_labels:
+                ext = A.path.splitext(ftp_name)[1]
+                tmp = tempfile.NamedTemporaryFile(delete=h, suffix=ext)
+                try:
+                    ftp_conn.retrbinary(f"RETR {ftp_name}", tmp.write)
+                    tmp.close()
+                    slot_paths[label] = tmp.name
+                    original_files[label] = ftp_name
+                    B.temp_downloads.append(tmp.name)
+                except E as err:
+                    tmp.close()
+                    try:
+                        A.remove(tmp.name)
+                    except E:
+                        pass
+                    log_error(f"Nie udało się pobrać pliku {ftp_name}: {err}")
+
     def _on_name_commit(C):
         D_ = C.var_name.get().strip()
         if not D_:
@@ -1219,18 +1239,7 @@ class App(BU.Tk):
                             U_ = P_[1]
                             ftp_presence[U_] = J
                             ftp_files[U_] = B_
-                    for U_, D_ in ftp_files.items():
-                        if U_ not in slot_paths:
-                            try:
-                                BH_ = A.path.splitext(D_)[1]
-                                tmp = tempfile.NamedTemporaryFile(delete=h, suffix=BH_)
-                                O_.retrbinary(f"RETR {D_}", tmp.write)
-                                tmp.close()
-                                slot_paths[U_] = tmp.name
-                                original_files[U_] = D_
-                                C.temp_downloads.append(tmp.name)
-                            except E:
-                                pass
+                    C._download_missing_from_ftp(O_, slot_paths, ftp_files, original_files)
                     O_.quit()
                 except E as T:
                     log_error(f"FTP check error for EAN {K_}: {T}")
@@ -1248,6 +1257,8 @@ class App(BU.Tk):
                 if R_ in slot_paths:
                     G_[f] = slot_paths[R_]
                     C._update_slot_ui(X_)
+                    if G_[f] in C.temp_downloads:
+                        C.pending_additions[X_] = G_[f]
                     C._mark_slot(X_, A4)
                 else:
                     G_[A3].place_forget()
@@ -2177,6 +2188,12 @@ class App(BU.Tk):
                             Af.copy2(src_path, S_)
                             log_info(f"Dodano/zmodyfikowano plik {c_}")
                         C.slots[F_][f] = S_
+                        if src_path in C.temp_downloads:
+                            try:
+                                A.remove(src_path)
+                            except E:
+                                pass
+                            C.temp_downloads.remove(src_path)
                     except E as y:
                         log_error(
                             f"Nie udało się skopiować pliku {A.path.basename(src_path)}: {y}"
