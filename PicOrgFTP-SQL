@@ -734,6 +734,44 @@ def save_ean_entry(ean, name, typ, model, col1, col2, col3, extra):
     return J
 
 
+def update_ean_entry(old_ean, new_ean, name, typ, model, col1, col2, col3, extra):
+    old = old_ean
+    new = new_ean
+    V = Ah(o)
+    X = V[AE[W]]
+    old = G(old).strip().upper()
+    new = G(new).strip().upper()
+    name = G(name).strip().upper()
+    typ = G(typ).strip().upper()
+    model = G(model).strip().upper()
+    col1 = G(col1).strip().upper()
+    col2 = G(col2).strip().upper() if col2 else B
+    col3 = G(col3).strip().upper() if col3 else B
+    extra = G(extra).strip()
+    if extra == B or extra.upper() in [L, L]:
+        extra = L
+    else:
+        extra = extra.replace(a, g).upper()
+    found = h
+    for row in X.iter_rows(min_row=2):
+        ean_cell = row[0].value
+        if ean_cell and G(ean_cell).strip().upper() == old:
+            row[0].value = new
+            row[1].value = name
+            row[2].value = typ
+            row[3].value = model
+            row[4].value = col1
+            row[5].value = col2 or B
+            row[6].value = col3 or B
+            row[7].value = extra
+            found = J
+            break
+    if found:
+        V.save(o)
+        return J
+    return h
+
+
 def connect_db():
     C_ = D.get(p, K).lower()
     if C_ == K:
@@ -810,10 +848,13 @@ class App(BU.Tk):
         B.loading_by_ean = h
         B.model_select_win_open = h
         B.dragging_idx = I
+        B.loaded_ean = I
         B.original_files = {}
         B.is_processing = h
         B._build_form()
         B._build_slots()
+        B.edit_mode = h
+        B.edit_btn_default = B.btn_edit.cget("bg")
         H_ = Q(E_)
         B.combo_name.existing_count = H_
         set_app(B)
@@ -924,7 +965,9 @@ class App(BU.Tk):
         Q_ = C.Button(B_, text=SETTINGS_LABEL, command=A._open_settings)
         Q_.grid(row=0, column=3, padx=5)
         A.btn_submit = C.Button(B_, text="Aktualizuj", command=A._on_submit)
-        A.btn_submit.grid(row=8, column=0, columnspan=2, pady=10)
+        A.btn_submit.grid(row=8, column=0, pady=10)
+        A.btn_edit = F.Button(B_, text="Edytuj dane", command=A._on_edit)
+        A.btn_edit.grid(row=8, column=1, padx=5, pady=10)
         A.btn_open = C.Button(B_, text="Otwórz folder", command=A._open_current_folder)
         A.btn_open.grid(row=8, column=2, padx=5, pady=10)
         A.ui_log = BS.ScrolledText(B_, width=48, height=8, state=Ak, wrap="word")
@@ -1028,6 +1071,8 @@ class App(BU.Tk):
         I = [A for A in C.lists[t] if A not in E_]
         C._refresh_combobox_list(C.combo_type, E_ + I, existing_count=Q(E_))
         C.combo_type.configure(state=X)
+        if C.edit_mode:
+            return
         C.var_type.set(B)
         C.var_model.set(B)
         C.var_color1.set(B)
@@ -1089,6 +1134,8 @@ class App(BU.Tk):
         I = [A for A in C.lists[s] if A not in E_]
         C._refresh_combobox_list(C.combo_model, E_ + I, existing_count=Q(E_))
         C.combo_model.configure(state=X)
+        if C.edit_mode:
+            return
         C.var_model.set(B)
         C.var_color1.set(B)
         C.var_color2.set(B)
@@ -1232,6 +1279,8 @@ class App(BU.Tk):
         D.combo_color3[S] = D.lists[Y]
         for AA_ in (D.combo_color1, D.combo_color2, D.combo_color3):
             AA_.configure(state=X)
+        if D.edit_mode:
+            return
         D.var_color1.set(B)
         D.var_color2.set(B)
         D.var_color3.set(B)
@@ -1431,7 +1480,7 @@ class App(BU.Tk):
         H_ = C.var_color1.get().strip()
         F_ = C.var_color2.get().strip()
         G_ = C.var_color3.get().strip()
-        if C.var_ean.get().strip():
+        if C.var_ean.get().strip() and not C.edit_mode:
             C.var_ean.set(B)
         if not M_ or not N_ or not H_:
             return
@@ -1509,7 +1558,8 @@ class App(BU.Tk):
         C.btn_submit.configure(state=X)
         C.btn_open.configure(state=X)
         C.var_extra.set(C.var_extra.get().strip())
-        C._load_existing_files()
+        if not C.edit_mode:
+            C._load_existing_files()
 
     def _on_extra_commit(C):
         D_ = C.var_extra.get().strip()
@@ -1555,7 +1605,7 @@ class App(BU.Tk):
                 C.combo_extra.configure(style=Z)
             else:
                 C.combo_extra.configure(style=j)
-        if G_ and H_ and I_ and F_:
+        if G_ and H_ and I_ and F_ and not C.edit_mode:
             C._load_existing_files()
 
     def _select_file(A, idx):
@@ -1839,9 +1889,65 @@ class App(BU.Tk):
             b_ = b_.replace(a, g).upper()
         K_ = C.var_ean.get().strip()
         BY_ = K_.upper() != q and K_ in C.entries
-        BZ_ = save_ean_entry(
-            K_, AE_, AF_, AG_, AH_, p_ or B, s_ or B, b_ if b_ != B else L
-        )
+        if C.edit_mode:
+            old_ean = C.loaded_ean
+            if old_ean is I or old_ean not in C.entries:
+                O.showwarning(NO_DATA_MSG, "Wczytaj istniejący wpis do edycji.")
+                return
+            old_entry = C.entries.get(old_ean, {})
+
+            def build_path(name, typ, model, c1, c2, c3, extra):
+                base = A.path.join(l, name.upper(), typ.upper(), model.upper())
+                colors = [c1.upper()]
+                if c2:
+                    colors.append(c2.upper())
+                if c3:
+                    colors.append(c3.upper())
+                color_part = g.join(colors)
+                extra_part = extra.strip().replace(a, g).upper() if extra.strip() else L
+                return A.path.join(base, color_part, extra_part)
+
+            old_path = build_path(
+                old_entry.get(Ae, B),
+                old_entry.get(Ad, B),
+                old_entry.get(AZ, B),
+                old_entry.get(AY, B),
+                old_entry.get(AX, B),
+                old_entry.get(AW, B),
+                old_entry.get(d, B),
+            )
+            new_path = build_path(AE_, AF_, AG_, AH_, p_, s_, b_ if b_ != B else L)
+            if old_path and new_path and old_path != new_path and A.path.exists(old_path):
+                A.makedirs(A.path.dirname(new_path), exist_ok=J)
+                try:
+                    A.rename(old_path, new_path)
+                except E as err:
+                    log_error(f"Błąd zmiany folderu {old_path} na {new_path}: {err}")
+                else:
+                    for idx, d_ in A0(C.slots):
+                        if d_[f] and d_[f].startswith(old_path):
+                            C.slots[idx][f] = d_[f].replace(old_path, new_path, 1)
+            if old_ean and old_ean.upper() != K_.upper() and A.path.exists(new_path):
+                for fname in A.listdir(new_path):
+                    if fname.upper().startswith(old_ean.upper()):
+                        new_fname = K_ + fname[len(old_ean):]
+                        old_file = A.path.join(new_path, fname)
+                        new_file = A.path.join(new_path, new_fname)
+                        try:
+                            if A.path.exists(new_file):
+                                A.remove(new_file)
+                            A.rename(old_file, new_file)
+                        except E as err:
+                            log_error(f"Błąd zmiany nazwy pliku {fname}: {err}")
+                        else:
+                            for idx, d_ in A0(C.slots):
+                                if d_[f] and A.path.basename(d_[f]) == fname:
+                                    C.slots[idx][f] = new_file
+            BZ_ = update_ean_entry(old_ean, K_, AE_, AF_, AG_, AH_, p_ or B, s_ or B, b_ if b_ != B else L)
+        else:
+            BZ_ = save_ean_entry(
+                K_, AE_, AF_, AG_, AH_, p_ or B, s_ or B, b_ if b_ != B else L
+            )
         if BZ_ is h:
             return
         else:
@@ -1851,6 +1957,8 @@ class App(BU.Tk):
                     C.entries = BC_[W]
             except E as R:
                 log_error(f"Failed to reload entries after saving: {R}")
+        if C.edit_mode:
+            C.loaded_ean = K_
         C.is_processing = J
         C.btn_submit.configure(state=V)
         C.btn_open.configure(state=V)
@@ -2402,6 +2510,9 @@ class App(BU.Tk):
             C.btn_submit.configure(state=X)
             C.btn_open.configure(state=X)
             C.is_processing = h
+            if C.edit_mode:
+                C.edit_mode = h
+                C.btn_edit.configure(bg=C.edit_btn_default, relief="raised")
             err_set = result_data.get(K, set()) or set()
             add_set = result_data.get(p, set())
             del_set = result_data.get(s, set())
@@ -2511,9 +2622,11 @@ class App(BU.Tk):
                 A.var_extra.set(F_)
             A._on_extra_commit()
             A.var_ean.set(D_)
+            A.loaded_ean = D_
         else:
             A._load_existing_files()
             O.showinfo("Nie znaleziono", f"Brak zapisanych danych dla EAN {D_}.")
+            A.loaded_ean = I
 
     def _open_current_folder(B):
         F_ = B.var_name.get().strip()
@@ -2547,6 +2660,13 @@ class App(BU.Tk):
         except E as P_:
             O.showerror(AK, f"Nie udało się otworzyć folderu:\n{P_}")
             log_error(f"Nie udało się otworzyć folderu {C_}: {P_}")
+
+    def _on_edit(C):
+        C.edit_mode = not C.edit_mode
+        if C.edit_mode:
+            C.btn_edit.configure(bg=LIGHT_GREEN, relief="sunken")
+        else:
+            C.btn_edit.configure(bg=C.edit_btn_default, relief="raised")
 
     def _open_settings(A):
         a = "Zmień dane (Administrator)"
