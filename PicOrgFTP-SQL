@@ -1168,7 +1168,10 @@ class App(BU.Tk):
         C._clear_all_slots()
         C.original_files = {}
         if not A.path.isdir(F):
-            return
+            try:
+                A.makedirs(F)
+            except E:
+                pass
         def worker():
             try:
                 V_ = [
@@ -1195,6 +1198,7 @@ class App(BU.Tk):
                 original_files[R_] = W_
                 slot_paths[R_] = d_
             ftp_presence = {}
+            downloaded = {}
             K_ = C.var_ean.get().strip()
             if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
                 try:
@@ -1208,19 +1212,31 @@ class App(BU.Tk):
                         e_ = O_.nlst()
                     except AB.error_perm:
                         e_ = []
-                    j_ = {A.path.basename(B) for B in e_}
-                    for label in slot_paths.keys():
-                        if any(A.startswith(f"{K_}_{label}") for A in j_):
+                    j_ = [A.path.basename(B) for B in e_]
+                    for slot in C.slots:
+                        label = slot[Aa]
+                        matches = [A for A in j_ if A.startswith(f"{K_}_{label}")]
+                        if matches:
                             ftp_presence[label] = J
+                            if label not in slot_paths:
+                                BT_ = matches[0]
+                                local_path = A.path.join(F, BT_)
+                                try:
+                                    with x(local_path, "wb") as Br:
+                                        O_.retrbinary(f"RETR {BT_}", Br.write)
+                                    downloaded[label] = local_path
+                                    log_info(f"Pobrano plik {BT_} z FTP")
+                                except E as T:
+                                    log_error(f"Błąd pobierania {BT_} z FTP: {T}")
                     O_.quit()
                 except E as T:
                     log_error(f"FTP check error for EAN {K_}: {T}")
             C.after(
                 0,
-                lambda: finalize(original_files, slot_paths, ftp_presence, ean_guess),
+                lambda: finalize(original_files, slot_paths, ftp_presence, ean_guess, downloaded),
             )
 
-        def finalize(original_files, slot_paths, ftp_presence, ean_guess):
+        def finalize(original_files, slot_paths, ftp_presence, ean_guess, downloaded):
             if ean_guess and C.var_ean.get().strip() == B:
                 C.var_ean.set(ean_guess)
             C.original_files = original_files
@@ -1240,6 +1256,11 @@ class App(BU.Tk):
                     G_[A3].lift(G_[y])
                 else:
                     G_[A3].place_forget()
+            for X_, G_ in A0(C.slots):
+                R_ = G_[Aa]
+                if R_ in downloaded:
+                    G_[A3].place_forget()
+                    C._add_file_to_slot(X_, downloaded[R_])
 
         threading.Thread(target=worker, daemon=J).start()
 
