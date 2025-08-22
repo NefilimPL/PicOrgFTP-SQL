@@ -1133,7 +1133,9 @@ class App(BU.Tk):
                     )
         C._clear_all_slots()
         C.original_files = {}
+        C.is_processing = J
         if not A.path.isdir(F):
+            C.is_processing = h
             return
         def worker():
             try:
@@ -1190,7 +1192,6 @@ class App(BU.Tk):
             if ean_guess and C.var_ean.get().strip() == B:
                 C.var_ean.set(ean_guess)
             C.original_files = original_files
-            for X_, G_ in A0(C.slots):
                 R_ = G_[Aa]
                 if R_ in slot_paths:
                     G_[f] = slot_paths[R_]
