@@ -1214,7 +1214,6 @@ class App(BU.Tk):
                 slot_paths[R_] = d_
             ftp_presence = {}
             ftp_files = {}
-            slot_idx = {G_[Aa]: X_ for X_, G_ in A0(C.slots)}
             K_ = C.var_ean.get().strip()
             if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
                 try:
@@ -1239,9 +1238,6 @@ class App(BU.Tk):
                             ftp_files[U_] = B_
                     for U_, D_ in ftp_files.items():
                         if U_ not in slot_paths:
-                            idx = slot_idx.get(U_)
-                            if idx is not I:
-                                C.after(0, lambda i=idx: start_pb(i))
                             try:
                                 BH_ = A.path.splitext(D_)[1]
                                 tmp = tempfile.NamedTemporaryFile(delete=h, suffix=BH_)
@@ -1252,9 +1248,6 @@ class App(BU.Tk):
                                 C.temp_downloads.append(tmp.name)
                             except E:
                                 pass
-                            finally:
-                                if idx is not I:
-                                    C.after(0, lambda i=idx: stop_pb(i))
                     O_.quit()
                 except E as T:
                     log_error(f"FTP check error for EAN {K_}: {T}")
@@ -1279,6 +1272,10 @@ class App(BU.Tk):
             for X_, G_ in A0(C.slots):
                 R_ = G_[Aa]
                 if ftp_presence.get(R_):
+                    if G_[f] in C.temp_downloads:
+                        G_[A3].configure(text="FTP", fg=AT, bg=A4)
+                    else:
+                        G_[A3].configure(text="✓", fg=AT, bg=A4)
                     G_[A3].place(relx=1.0, rely=1.0, anchor="se")
                     G_[A3].lift(G_[y])
                     if G_[f] in C.temp_downloads:
