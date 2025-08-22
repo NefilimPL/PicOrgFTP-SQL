@@ -854,7 +854,7 @@ class App(BU.Tk):
         B._build_form()
         B._build_slots()
         B.edit_mode = h
-        B.edit_btn_default = B.btn_edit.cget("bg")
+        B.edit_btn_default = B.btn_edit.cget("background")
         H_ = Q(E_)
         B.combo_name.existing_count = H_
         set_app(B)
@@ -966,7 +966,7 @@ class App(BU.Tk):
         Q_.grid(row=0, column=3, padx=5)
         A.btn_submit = C.Button(B_, text="Aktualizuj", command=A._on_submit)
         A.btn_submit.grid(row=8, column=0, pady=10)
-        A.btn_edit = F.Button(B_, text="Edytuj dane", command=A._on_edit)
+        A.btn_edit = C.Button(B_, text="Edytuj dane", command=A._on_edit)
         A.btn_edit.grid(row=8, column=1, padx=5, pady=10)
         A.btn_open = C.Button(B_, text="Otwórz folder", command=A._open_current_folder)
         A.btn_open.grid(row=8, column=2, padx=5, pady=10)
