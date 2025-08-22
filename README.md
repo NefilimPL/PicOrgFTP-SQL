@@ -11,8 +11,8 @@ drag-and-drop. Po uzupełnieniu wymaganych pól i zatwierdzeniu:
    struktury `NAZWA/TYP/MODEL/KOLOR1_KOLOR2_KOLOR3/DODATEK`.
 2. Zdjęcia są optymalizowane, konwertowane do JPEG/PNG i otrzymują nazwę
    `EAN_slot.ext`.
-3. Nowe pliki są wysyłane na serwer FTP, a stare wersje o tym samym EAN mogą
-   zostać usunięte.
+3. Jeżeli włączono `enable_ftp_update`, nowe pliki są wysyłane na serwer FTP,
+   a stare wersje o tym samym EAN mogą zostać usunięte.
 4. Jeżeli włączono `enable_sql_update`, wykonywane jest zapytanie SQL, które
    aktualizuje ścieżki obrazów w bazie `sql` lub `mysql`.
 
@@ -39,7 +39,7 @@ skryptu do własnych potrzeb. Można tam zmienić m.in.:
   surowych łańcuchów `r""`, dzięki czemu nie trzeba uciekać znaków specjalnych.
   Sekcje `ftp`, `sql` i `mysql` zawierają odpowiednio pola `host`/`server`,
   `port`, `user`, `pass` (oraz `path` dla FTP). Pozostałe klucze to `db_type`,
-  `sql_query` i `enable_sql_update`.
+  `sql_query`, `enable_ftp_update` i `enable_sql_update`.
 
 Zmiana tych wartości przed uruchomieniem skryptu umożliwia szybkie dostosowanie
 działania programu do własnego środowiska.
