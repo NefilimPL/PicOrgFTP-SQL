@@ -1097,6 +1097,7 @@ class App(BU.Tk):
         C._clear_all_slots()
 
     def _load_existing_files(C):
+        """Load images from disk and check FTP copies without blocking GUI."""
         F = A.path.join(
             l,
             C.var_name.get().strip().upper(),
@@ -1134,54 +1135,93 @@ class App(BU.Tk):
         C.original_files = {}
         if not A.path.isdir(F):
             return
-        V_ = [B for B in A.listdir(F) if A.path.isfile(A.path.join(F, B))]
-        if V_:
-            i_ = V_[0]
-            P_ = i_.split(a)
-            if P_ and C.var_ean.get().strip() == B:
-                C.var_ean.set(P_[0])
-        for W_ in V_:
-            d_ = A.path.join(F, W_)
-            if not A.path.isfile(d_):
-                continue
-            P_ = W_.split(a)
-            if Q(P_) < 2:
-                continue
-            R_ = P_[1]
-            C.original_files[R_] = W_
-            for X_, G_ in A0(C.slots):
-                if G_[Aa] == R_:
-                    G_[f] = d_
-                    C._update_slot_ui(X_)
-                    C._mark_slot(X_, A4)
-                    break
+
+        for G_ in C.slots:
+            G_[y].configure(image=B, text="Wczytywanie")
+            G_[y].image = I
+
         K_ = C.var_ean.get().strip()
         if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
+            for G_ in C.slots:
+                G_[A3].configure(text="⌛", fg=AT, bg=AR)
+                G_[A3].place(relx=1.0, rely=1.0, anchor="se")
+                G_[A3].lift(G_[y])
+
+        def worker():
             try:
-                O_ = AB.FTP()
-                O_.connect(D[H][v], D[H][r], timeout=10)
-                O_.login(D[H][N], D[H][M])
-                O_.set_pasv(J)
-                if D[H][m]:
-                    O_.cwd(D[H][m])
+                V_ = [
+                    B for B in A.listdir(F) if A.path.isfile(A.path.join(F, B))
+                ]
+            except E:
+                V_ = []
+            original_files = {}
+            slot_paths = {}
+            ean_guess = I
+            if V_:
+                i_ = V_[0]
+                P_ = i_.split(a)
+                if P_ and C.var_ean.get().strip() == B:
+                    ean_guess = P_[0]
+            for W_ in V_:
+                d_ = A.path.join(F, W_)
+                if not A.path.isfile(d_):
+                    continue
+                P_ = W_.split(a)
+                if Q(P_) < 2:
+                    continue
+                R_ = P_[1]
+                original_files[R_] = W_
+                slot_paths[R_] = d_
+            ftp_presence = {}
+            K_ = C.var_ean.get().strip()
+            if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
                 try:
-                    e_ = O_.nlst()
-                except AB.error_perm:
-                    e_ = []
-                j_ = {A.path.basename(B) for B in e_}
-                for X_, G_ in A0(C.slots):
-                    R_ = G_[Aa]
-                    if any(A.startswith(f"{K_}_{R_}") for A in j_):
-                        G_[A3].configure(text="✓", fg=AT, bg=A4)
-                        G_[A3].place(relx=1.0, rely=1.0, anchor="se")
-                        G_[A3].lift(G_[y])
-                    else:
-                        G_[A3].place_forget()
-                O_.quit()
-            except E as T:
-                log_error(f"FTP check error for EAN {K_}: {T}")
-                for G_ in C.slots:
+                    O_ = AB.FTP()
+                    O_.connect(D[H][v], D[H][r], timeout=10)
+                    O_.login(D[H][N], D[H][M])
+                    O_.set_pasv(J)
+                    if D[H][m]:
+                        O_.cwd(D[H][m])
+                    try:
+                        e_ = O_.nlst()
+                    except AB.error_perm:
+                        e_ = []
+                    j_ = {A.path.basename(B) for B in e_}
+                    for label in slot_paths.keys():
+                        if any(A.startswith(f"{K_}_{label}") for A in j_):
+                            ftp_presence[label] = J
+                    O_.quit()
+                except E as T:
+                    log_error(f"FTP check error for EAN {K_}: {T}")
+            C.after(
+                0,
+                lambda: finalize(original_files, slot_paths, ftp_presence, ean_guess),
+            )
+
+        def finalize(original_files, slot_paths, ftp_presence, ean_guess):
+            if ean_guess and C.var_ean.get().strip() == B:
+                C.var_ean.set(ean_guess)
+            C.original_files = original_files
+            for X_, G_ in A0(C.slots):
+                R_ = G_[Aa]
+                if R_ in slot_paths:
+                    G_[f] = slot_paths[R_]
+                    C._update_slot_ui(X_)
+                    C._mark_slot(X_, A4)
+                else:
                     G_[A3].place_forget()
+                    G_[y].configure(image=B, text=AU)
+                    G_[y].image = I
+            for X_, G_ in A0(C.slots):
+                R_ = G_[Aa]
+                if ftp_presence.get(R_):
+                    G_[A3].configure(text="✓", fg=AT, bg=A4)
+                    G_[A3].place(relx=1.0, rely=1.0, anchor="se")
+                    G_[A3].lift(G_[y])
+                else:
+                    G_[A3].place_forget()
+
+        threading.Thread(target=worker, daemon=J).start()
 
     def _on_model_commit(D):
         H = "new"
