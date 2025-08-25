@@ -372,7 +372,11 @@ def load_localization(language=I):
 
 D = load_config()
 L = load_localization(D.get("language"))
+L_EN = load_localization("en")
 PROCESSING_MSG = L.get("processing", PROCESSING_MSG)
+PROCESSING_UI_MSG = L.get(
+    "processing_ui", ">>> Processing, please wait..."
+)
 OPERATION_TITLE = L.get("operation_title", OPERATION_TITLE)
 NETWORK_ERROR_MSG = L.get("network_error", NETWORK_ERROR_MSG)
 PATH_NOT_FOUND_MSG = L.get("path_not_found", PATH_NOT_FOUND_MSG)
@@ -568,7 +572,7 @@ def rotate_log(path, max_bytes=1073741824, backups=3):
         pass
 
 
-def log_error(message):
+def log_error(message, ui_message=None):
     A_ = message
     try:
         rotate_log(AM)
@@ -580,14 +584,14 @@ def log_error(message):
     try:
         if AG:
             if threading.current_thread() != threading.main_thread():
-                AG.after(0, lambda msg=A_: AG._ui_log(f"❗ {msg}"))
+                AG.after(0, lambda msg=(ui_message or A_): AG._ui_log(f"❗ {msg}"))
             else:
-                AG._ui_log(f"❗ {A_}")
+                AG._ui_log(f"❗ {ui_message or A_}")
     except E:
         pass
 
 
-def log_info(message):
+def log_info(message, ui_message=None):
     A_ = message
     try:
         rotate_log(BM)
@@ -599,11 +603,23 @@ def log_info(message):
     try:
         if AG:
             if threading.current_thread() != threading.main_thread():
-                AG.after(0, lambda msg=A_: AG._ui_log(f"• {msg}"))
+                AG.after(0, lambda msg=(ui_message or A_): AG._ui_log(f"• {msg}"))
             else:
-                AG._ui_log(f"• {A_}")
+                AG._ui_log(f"• {ui_message or A_}")
     except E:
         pass
+
+
+def log_error_loc(key, **kwargs):
+    file_msg = L_EN.get(key, key).format(**kwargs)
+    ui_msg = L.get(key, file_msg).format(**kwargs)
+    log_error(file_msg, ui_msg)
+
+
+def log_info_loc(key, **kwargs):
+    file_msg = L_EN.get(key, key).format(**kwargs)
+    ui_msg = L.get(key, file_msg).format(**kwargs)
+    log_info(file_msg, ui_msg)
 
 
 def is_admin():
@@ -730,7 +746,7 @@ def prepare_excel_lists():
             F.save(o)
         except E as V_:
             O.showerror(AK, LIST_CREATE_FAILED_MSG.format(error=V_))
-            log_error(f"Nie udało się utworzyć pliku Excel: {V_}")
+            log_error_loc("excel_create_failed", error=V_)
     F = Ah(o)
     L_ = {}
     for D_ in AE.values():
@@ -785,9 +801,14 @@ def add_to_list(sheet_name, value):
         D_ = f"przez użytkownika '{C_}'" if Aq(C_, G) else Ap
         O.showerror(
             Ao,
-            f"Nie można zapisać listy. Plik Excel jest otwarty {D_}. Zamknij plik i spróbuj ponownie.",
+            L.get(
+                "excel_file_open",
+                f"Nie można zapisać listy. Plik Excel jest otwarty {D_}. Zamknij plik i spróbuj ponownie.",
+            ).format(reason=D_),
         )
-        log_error(f"Próba dodania '{A_}' do listy {B_}, plik Excel zablokowany {D_}.")
+        log_error_loc(
+            "excel_add_locked", value=A_, list=B_, reason=D_
+        )
         return
     F = Ah(o)
     H = F[B_]
@@ -798,11 +819,11 @@ def add_to_list(sheet_name, value):
             F.save(o)
         except E as I_:
             O.showerror(Ac, LIST_SAVE_FAILED_MSG.format(error=I_))
-            log_error(
-                f"Nie udało się zapisać pliku Excel (dodawanie {A_} do {B_}): {I_}"
+            log_error_loc(
+                "excel_add_save_failed", value=A_, list=B_, error=I_
             )
             return
-        log_info(f"Dodano wartość '{A_}' do listy {B_}.")
+        log_info_loc("list_value_added", value=A_, list=B_)
 
 
 def remove_from_list(sheet_name, value):
@@ -813,9 +834,14 @@ def remove_from_list(sheet_name, value):
         F_ = f"przez użytkownika '{C_}'" if Aq(C_, G) else Ap
         O.showerror(
             Ao,
-            f"Nie można zapisać listy. Plik Excel jest otwarty {F_}. Zamknij plik i spróbuj ponownie.",
+            L.get(
+                "excel_file_open",
+                f"Nie można zapisać listy. Plik Excel jest otwarty {F_}. Zamknij plik i spróbuj ponownie.",
+            ).format(reason=F_),
         )
-        log_error(f"Próba usunięcia '{A_}' z listy {B_}, plik Excel zablokowany {F_}.")
+        log_error_loc(
+            "excel_remove_locked", value=A_, list=B_, reason=F_
+        )
         return
     H = Ah(o)
     I_ = H[B_]
@@ -828,9 +854,11 @@ def remove_from_list(sheet_name, value):
         H.save(o)
     except E as J_:
         O.showerror(Ac, LIST_SAVE_FAILED_MSG.format(error=J_))
-        log_error(f"Nie udało się zapisać pliku Excel (usuwanie {A_} z {B_}): {J_}")
+        log_error_loc(
+            "excel_remove_save_failed", value=A_, list=B_, error=J_
+        )
         return
-    log_info(f"Usunięto wartość '{A_}' z listy {B_}.")
+    log_info_loc("list_value_removed", value=A_, list=B_)
 
 
 def save_ean_entry(ean, name, typ, model, col1, col2, col3, extra):
@@ -846,9 +874,14 @@ def save_ean_entry(ean, name, typ, model, col1, col2, col3, extra):
         i_ = f"przez użytkownika '{X_}'" if Aq(X_, G) else Ap
         O.showerror(
             Ao,
-            f"Nie można zapisać danych. Plik Excel jest otwarty {i_}. Zamknij plik i spróbuj ponownie.",
+            L.get(
+                "excel_data_file_open",
+                f"Nie można zapisać danych. Plik Excel jest otwarty {i_}. Zamknij plik i spróbuj ponownie.",
+            ).format(reason=i_),
         )
-        log_error(f"Próba zapisu wpisu EAN {R}, plik Excel zablokowany {i_}.")
+        log_error_loc(
+            "excel_entry_save_locked", ean=R, reason=i_
+        )
         return h
     j = Ah(o)
     V = j[AE[W]]
@@ -958,7 +991,9 @@ def save_ean_entry(ean, name, typ, model, col1, col2, col3, extra):
         j.save(o)
     except E as k_:
         O.showerror(Ac, LIST_DATA_SAVE_FAILED_MSG.format(error=k_))
-        log_error(f"Nie udało się zapisać wpisu EAN {R} do Excel: {k_}")
+        log_error_loc(
+            "excel_entry_save_failed", ean=R, error=k_
+        )
         return h
     return J
 
@@ -1064,7 +1099,10 @@ class App(BU.Tk):
         G_.grid(row=0, column=0, sticky=R)
         A._add_tooltip(
             G_,
-            "Pełna nazwa mebla bez kolorów, typu i modelu, np: 'Maggiore', 'LUNA', 'SLANT'.",
+            L.get(
+                "name_tooltip",
+                "Pełna nazwa mebla bez kolorów, typu i modelu, np: 'Maggiore', 'LUNA', 'SLANT'.",
+            ),
         )
         A.combo_name = C.Combobox(
             B_, textvariable=A.var_name, values=A.lists[n], state=X
@@ -1078,7 +1116,10 @@ class App(BU.Tk):
         H_.grid(row=1, column=0, sticky=R)
         A._add_tooltip(
             H_,
-            "Typ mebla, np: 'KOMODA', 'RTV', 'STÓŁ' (można dodać długość, np. 'RTV 100', 'SZAFA 80').",
+            L.get(
+                "type_tooltip",
+                "Typ mebla, np: 'KOMODA', 'RTV', 'STÓŁ' (można dodać długość, np. 'RTV 100', 'SZAFA 80').",
+            ),
         )
         A.combo_type = C.Combobox(
             B_, textvariable=A.var_type, values=A.lists[t], state=V
@@ -1090,7 +1131,13 @@ class App(BU.Tk):
         A.combo_type.bind(D_, A._on_key_release)
         I_ = C.Label(B_, text=MODEL_LABEL)
         I_.grid(row=2, column=0, sticky=R)
-        A._add_tooltip(I_, "Model lub wersja mebla, np: 'MA03', 'Li01', 'SOL-05'.")
+        A._add_tooltip(
+            I_,
+            L.get(
+                "model_tooltip",
+                "Model lub wersja mebla, np: 'MA03', 'Li01', 'SOL-05'.",
+            ),
+        )
         A.combo_model = C.Combobox(
             B_, textvariable=A.var_model, values=A.lists[s], state=V
         )
@@ -1100,7 +1147,9 @@ class App(BU.Tk):
         A.combo_model.bind(D_, A._on_key_release)
         J_ = C.Label(B_, text=COLOR1_LABEL)
         J_.grid(row=3, column=0, sticky=R)
-        A._add_tooltip(J_, "Główny kolor mebla (wymagany).")
+        A._add_tooltip(
+            J_, L.get("color1_tooltip", "Główny kolor mebla (wymagany).")
+        )
         A.combo_color1 = C.Combobox(
             B_, textvariable=A.var_color1, values=A.lists[Y], state=V
         )
@@ -1111,7 +1160,9 @@ class App(BU.Tk):
         A.combo_color1.bind(D_, A._on_key_release)
         K_ = C.Label(B_, text=COLOR2_LABEL)
         K_.grid(row=4, column=0, sticky=R)
-        A._add_tooltip(K_, "Drugi kolor mebla (opcjonalnie).")
+        A._add_tooltip(
+            K_, L.get("color2_tooltip", "Drugi kolor mebla (opcjonalnie).")
+        )
         A.combo_color2 = C.Combobox(
             B_, textvariable=A.var_color2, values=A.lists[Y], state=V
         )
@@ -1122,7 +1173,9 @@ class App(BU.Tk):
         A.combo_color2.bind(D_, A._on_key_release)
         L_ = C.Label(B_, text=COLOR3_LABEL)
         L_.grid(row=5, column=0, sticky=R)
-        A._add_tooltip(L_, "Trzeci kolor mebla (opcjonalnie).")
+        A._add_tooltip(
+            L_, L.get("color3_tooltip", "Trzeci kolor mebla (opcjonalnie).")
+        )
         A.combo_color3 = C.Combobox(
             B_, textvariable=A.var_color3, values=A.lists[Y], state=V
         )
@@ -1135,7 +1188,10 @@ class App(BU.Tk):
         M_.grid(row=6, column=0, sticky=R)
         A._add_tooltip(
             M_,
-            "Dodatkowe informacje, np. LED, RGB (pozostaw puste, jeśli brak dodatków).",
+            L.get(
+                "extra_tooltip",
+                "Dodatkowe informacje, np. LED, RGB (pozostaw puste, jeśli brak dodatków).",
+            ),
         )
         A.combo_extra = C.Combobox(
             B_, textvariable=A.var_extra, values=A.lists[d], state=V
@@ -1149,7 +1205,10 @@ class App(BU.Tk):
         N_.grid(row=7, column=0, sticky=R)
         A._add_tooltip(
             N_,
-            "13-cyfrowy kod EAN produktu. Jeśli nie podany, zostanie użyte 'BRAK-EAN'.",
+            L.get(
+                "ean_tooltip",
+                "13-cyfrowy kod EAN produktu. Jeśli nie podany, zostanie użyte 'BRAK-EAN'.",
+            ),
         )
         A.entry_ean = C.Entry(B_, textvariable=A.var_ean, state=X)
         A.entry_ean.grid(row=7, column=1, padx=5, pady=2)
@@ -1473,8 +1532,10 @@ class App(BU.Tk):
                 except E as T:
                     log_error(f"FTP check error for EAN {K_}: {T}")
                 if not C.logged_counts:
-                    log_info(
-                        f"Znaleziono zdjęcia: Lokalne = {Q(original_files)} / FTP = {Q(remote_files)}"
+                    log_info_loc(
+                        "found_images_counts",
+                        local=Q(original_files),
+                        ftp=Q(remote_files),
                     )
                     C.logged_counts = J
             C.after(
@@ -2203,7 +2264,7 @@ class App(BU.Tk):
             except:
                 pass
         C.ui_log.configure(state=Az)
-        C.ui_log.insert(F.END, ">>> Trwa przetwarzanie, proszę czekać...\n")
+        C.ui_log.insert(F.END, PROCESSING_UI_MSG + "\n")
         C.ui_log.configure(state=Ak)
         result_data = {}
 
@@ -2241,7 +2302,7 @@ class App(BU.Tk):
                         Af.rmtree(AN)
                     A.makedirs(AN, exist_ok=J)
                 except E as R:
-                    log_error(f"Nie udało się przygotować folderu kopii zapasowej: {R}")
+                    log_error_loc("backup_folder_failed", error=R)
                 backed_up = []
                 for T in set(C.pending_deletions.values()):
                     if T and A.path.isfile(T):
@@ -2249,11 +2310,15 @@ class App(BU.Tk):
                             Af.copy2(T, A.path.join(AN, A.path.basename(T)))
                             backed_up.append(A.path.basename(T))
                         except E as R:
-                            log_error(
-                                f"Nie udało się wykonać kopii zapasowej pliku {A.path.basename(T)}: {R}"
+                            log_error_loc(
+                                "backup_file_failed",
+                                file=A.path.basename(T),
+                                error=R,
                             )
                 if backed_up:
-                    log_info(f"Wykonano kopię zapasową plików: {AI.join(backed_up)}")
+                    log_info_loc(
+                        "backup_files_done", files=AI.join(backed_up)
+                    )
                 if C.ftp_remote_only:
                     for label, info in C.ftp_remote_only.items():
                         for idx, slot in A0(C.slots):
@@ -2279,12 +2344,20 @@ class App(BU.Tk):
                                 dest = A.path.join(i_, c_)
                                 try:
                                     Af.copy2(info["temp_path"], dest)
-                                    log_info(f"Pobrano plik {info['filename']} z FTP jako {c_}")
+                                    log_info_loc(
+                                        "ftp_file_downloaded",
+                                        file=info["filename"],
+                                        temp=c_,
+                                    )
                                     files_to_upload.append(c_)
                                     C.slots[idx][f] = dest
                                     C.ftp_downloaded_final.add(c_)
                                 except E as R:
-                                    log_error(f"Błąd zapisu pliku {info['filename']}: {R}")
+                                    log_error_loc(
+                                        "file_save_error",
+                                        file=info["filename"],
+                                        error=R,
+                                    )
                                 break
                     C.ftp_remote_only = {}
                 AJ_ = set(C.pending_additions.keys())
@@ -2349,26 +2422,33 @@ class App(BU.Tk):
                                 try:
                                     if A.path.exists(old_path):
                                         A.remove(old_path)
-                                        log_info(
-                                            f"Usunięto plik {A.path.basename(old_path)} (przed dodaniem nowego)"
+                                        log_info_loc(
+                                            "deleted_file_before_add",
+                                            file=A.path.basename(old_path),
                                         )
                                 except E as z:
-                                    log_error(
-                                        f"Nie udało się usunąć starego pliku {A.path.basename(old_path)}: {z}"
+                                    log_error_loc(
+                                        "remove_old_file_failed",
+                                        file=A.path.basename(old_path),
+                                        error=z,
                                     )
                             elif A.path.exists(S_):
                                 try:
                                     A.remove(S_)
                                 except E as z:
-                                    log_error(
-                                        f"Nie udało się usunąć pliku {A.path.basename(S_)} przed nadpisaniem: {z}"
+                                    log_error_loc(
+                                        "remove_file_before_overwrite_failed",
+                                        file=A.path.basename(S_),
+                                        error=z,
                                     )
                         elif A.path.exists(S_):
                             try:
                                 A.remove(S_)
                             except E as z:
-                                log_error(
-                                    f"Nie udało się usunąć pliku {A.path.basename(S_)} przed nadpisaniem: {z}"
+                                log_error_loc(
+                                    "remove_file_before_overwrite_failed",
+                                    file=A.path.basename(S_),
+                                    error=z,
                                 )
                         ext_lower = BH_.lower()
                         if ext_lower in [F, O, V, ".bmp", ".gif"]:
@@ -2404,10 +2484,12 @@ class App(BU.Tk):
                                                 quality -= 5
                                                 A1.save(S_, quality=quality, optimize=J)
                                         except E as R:
-                                            log_error(
-                                                f"Błąd zmniejszania rozmiaru pliku {c_}: {R}"
+                                            log_error_loc(
+                                                "file_resize_error",
+                                                file=c_,
+                                                error=R,
                                             )
-                            log_info(f"Dodano/zmodyfikowano obraz {c_}")
+                            log_info_loc("image_added_modified", file=c_)
                         elif ext_lower in [".tif", ".tiff"]:
                             if C.opt_convert_tif.get():
                                 target_fmt = C.tif_target_format.get().upper()
@@ -2427,8 +2509,10 @@ class App(BU.Tk):
                                     try:
                                         A.remove(S_)
                                     except E as z:
-                                        log_error(
-                                            f"Nie udało się usunąć pliku {A.path.basename(S_)} przed nadpisaniem: {z}"
+                                        log_error_loc(
+                                            "remove_file_before_overwrite_failed",
+                                            file=A.path.basename(S_),
+                                            error=z,
                                         )
                                 A1 = AA.open(src_path)
                                 if C.opt_resize.get():
@@ -2458,21 +2542,25 @@ class App(BU.Tk):
                                                 quality -= 5
                                                 A1.save(S_, quality=quality, optimize=J)
                                         except E as R:
-                                            log_error(
-                                                f"Błąd zmniejszania rozmiaru pliku {c_}: {R}"
+                                            log_error_loc(
+                                                "file_resize_error",
+                                                file=c_,
+                                                error=R,
                                             )
-                                log_info(f"Dodano/zmodyfikowano obraz {c_}")
+                                log_info_loc("image_added_modified", file=c_)
                             else:
                                 Af.copy2(src_path, S_)
-                                log_info(f"Dodano/zmodyfikowano plik {c_}")
+                                log_info_loc("file_added_modified", file=c_)
                         else:
                             Af.copy2(src_path, S_)
-                            log_info(f"Dodano/zmodyfikowano plik {c_}")
+                            log_info_loc("file_added_modified", file=c_)
                         files_to_upload.append(c_)
                         C.slots[F_][f] = S_
                     except E as y:
-                        log_error(
-                            f"Nie udało się skopiować pliku {A.path.basename(src_path)}: {y}"
+                        log_error_loc(
+                            "file_copy_failed",
+                            file=A.path.basename(src_path),
+                            error=y,
                         )
                         result_data[K].add(F_)
                         BE_[F_] = src_path
@@ -2500,7 +2588,9 @@ class App(BU.Tk):
                                 if A.path.exists(new_path):
                                     A.remove(new_path)
                                 A.rename(path, new_path)
-                                log_info(f"Zmieniono nazwę pliku {X_} na {new_name}")
+                                log_info_loc(
+                                    "file_renamed", old=X_, new=new_name
+                                )
                                 for F_, d_ in A0(C.slots):
                                     if d_[f] and A.path.basename(d_[f]) == X_:
                                         C.slots[F_][f] = new_path
@@ -2509,7 +2599,9 @@ class App(BU.Tk):
                                     Bh_ = files_to_upload.index(X_)
                                     files_to_upload[Bh_] = new_name
                             except E as y:
-                                log_error(f"Błąd zmiany nazw plików na EAN {K_}: {y}")
+                                log_error_loc(
+                                    "file_rename_error", ean=K_, error=y
+                                )
                                 for i, d_ in A0(C.slots):
                                     if d_[f] and A.path.basename(d_[f]) == X_:
                                         result_data[K].add(i)
@@ -2542,7 +2634,9 @@ class App(BU.Tk):
                     try:
                         if A.path.isfile(T):
                             A.remove(T)
-                            log_info(f"Usunięto plik {A.path.basename(T)}")
+                            log_info_loc(
+                                "file_deleted", file=A.path.basename(T)
+                            )
                             BO_ = A.path.basename(T)
                             P_ = BO_.split(a)
                             if Q(P_) >= 2:
@@ -2552,8 +2646,10 @@ class App(BU.Tk):
                                 if An_ and Q(An_) == 13 and An_.isdigit():
                                     BM_.append(f"{An_}_{Bi}{Bj}")
                     except E as y:
-                        log_error(
-                            f"Nie udało się usunąć pliku {A.path.basename(T)}: {y}"
+                        log_error_loc(
+                            "file_delete_failed",
+                            file=A.path.basename(T),
+                            error=y,
                         )
                         result_data[K].add(F_)
                         Am_[F_] = T
@@ -2577,7 +2673,7 @@ class App(BU.Tk):
                     if not (K_ and Q(K_) == 13 and K_.isdigit()):
                         A__ = J
                     elif not D.get(ft, J):
-                        log_info("Pominięto wysyłanie plików na FTP (wyłączone w ustawieniach).")
+                        log_info_loc("ftp_upload_skipped_settings")
                     else:
                         ftp = AB.FTP()
                         try:
@@ -2613,8 +2709,8 @@ class App(BU.Tk):
                                 ftp_error = h
                                 for X_ in files_local:
                                     if X_ in C.ftp_downloaded_final:
-                                        log_info(
-                                            f"Pominięto wysyłanie pliku {X_} (pobrano z FTP)"
+                                        log_info_loc(
+                                            "ftp_upload_skipped_downloaded", file=X_
                                         )
                                         continue
                                     P_ = X_.split(a)
@@ -2629,13 +2725,15 @@ class App(BU.Tk):
                                         with x(Bn, "rb") as Bo:
                                             ftp.storbinary(f"STOR {BT}", Bo)
                                             BQ += 1
-                                            log_info(
-                                                f"Wysłano plik {X_} jako {BT} na FTP"
+                                            log_info_loc(
+                                                "ftp_file_uploaded", file=X_, target=BT
                                             )
                                     except E as AU:
                                         Y_ = f"Błąd wysyłania pliku {X_}: {AU}"
-                                        log_error(
-                                            f"Błąd wysyłania pliku {X_} na FTP: {AU}"
+                                        log_error_loc(
+                                            "ftp_upload_error_file",
+                                            file=X_,
+                                            error=AU,
                                         )
                                         ftp_error = J
                                         break
@@ -2645,17 +2743,22 @@ class App(BU.Tk):
                                         try:
                                             ftp.delete(AV_)
                                             BR_ += 1
-                                            log_info(f"Usunięto plik {AV_} na FTP")
+                                            log_info_loc(
+                                                "ftp_file_deleted", file=AV_
+                                            )
                                         except E as AU:
                                             Bp = G(AU)
                                             if As in Bp:
-                                                log_info(
-                                                    f"Plik {AV_} nie istnieje na FTP (nie było potrzeby usuwać)"
+                                                log_info_loc(
+                                                    "ftp_file_missing_no_delete",
+                                                    file=AV_,
                                                 )
                                             else:
                                                 Ap.append(AV_)
-                                                log_error(
-                                                    f"Nie udało się usunąć pliku {AV_} na FTP: {AU}"
+                                                log_error_loc(
+                                                    "ftp_delete_error",
+                                                    file=AV_,
+                                                    error=AU,
                                                 )
                                     if Ap:
                                         if not Y_:
@@ -2731,9 +2834,10 @@ class App(BU.Tk):
                         if Aq_ > 0:
                             conn.commit()
                             if Aq_:
-                                log_info(
-                                    f"Zaktualizowano bazę danych dla EAN {K_}: "
-                                    + AI.join([f"{B3_} = ..." for B3_ in []])
+                                log_info_loc(
+                                    "db_update_success_log",
+                                    ean=K_,
+                                    cols=AI.join([f"{B3_} = ..." for B3_ in []]),
                                 )
                         cur.close()
                         conn.close()
@@ -2760,7 +2864,9 @@ class App(BU.Tk):
                 result_data[j] = CANCEL_LABEL
                 result_data[S] = INCOMPLETE_DATA_MSG
             except E as exc:
-                log_error(f"Nieoczekiwany błąd podczas przetwarzania: {exc}")
+                log_error_loc(
+                    "processing_unexpected_error", error=exc
+                )
                 result_data[K] = set(range(len(C.slots)))
                 result_data[Y] = "Operacja przerwana z powodu błędu."
                 result_data[P] = G(exc)
@@ -2852,23 +2958,48 @@ class App(BU.Tk):
                 O.showinfo(SAVED_LABEL, UPDATE_SUCCESS_MSG.format(ean=K_val))
             if not A__:
                 status = "OK" if not Y_ else Y_
-                log_info(
-                    f"FTP: wysłano {result_data[Z]} plików, usunięto {result_data[b]}, czas {result_data[c]} ms, status: {status}"
+                log_info_loc(
+                    "ftp_summary",
+                    uploaded=result_data[Z],
+                    deleted=result_data[b],
+                    time=result_data[c],
+                    status=status,
                 )
             if D.get(u, J):
                 if result_data[P]:
-                    log_info(f"SQL: błąd – {result_data[P]} (czas {result_data[S]} ms)")
+                    log_info_loc(
+                        "sql_error", error=result_data[P], time=result_data[S]
+                    )
                 else:
-                    log_info(
-                        f"SQL: zapytań {result_data[d]}, zmienionych wierszy ~{result_data[j]}, czas {result_data[S]} ms"
+                    log_info_loc(
+                        "sql_summary",
+                        queries=result_data[d],
+                        rows=result_data[j],
+                        time=result_data[S],
                     )
             if result_data.get(A2, Ay):
-                log_info(
-                    f"Zaktualizowano wpis: EAN={K_val}, NAZWA={AE_}, TYP={AF_}, MODEL={AG_}, KOLOR1={AH_}, KOLOR2={p_}, KOLOR3={s_}, DODATKI={b_}"
+                log_info_loc(
+                    "entry_updated_log",
+                    ean=K_val,
+                    name=AE_,
+                    type=AF_,
+                    model=AG_,
+                    color1=AH_,
+                    color2=p_,
+                    color3=s_,
+                    extras=b_,
                 )
             else:
-                log_info(
-                    f"Dodano nowy wpis: EAN={K_val}, NAZWA={AE_}, TYP={AF_}, MODEL={AG_}, KOLOR1={AH_}, KOLOR2={p_}, KOLOR3={s_}, DODATKI={b_}"
+                log_info_loc(
+                    "entry_added_log",
+                    ean=K_val,
+                    name=AE_,
+                    type=AF_,
+                    model=AG_,
+                    color1=AH_,
+                    color2=p_,
+                    color3=s_,
+                    extras=b_,
                 )
 
     def _load_by_ean(A):
@@ -2947,7 +3078,7 @@ class App(BU.Tk):
                 BH.run(["xdg-open", C_], check=h)
         except E as P_:
             O.showerror(AK, FOLDER_OPEN_FAILED_MSG.format(error=P_))
-            log_error(f"Nie udało się otworzyć folderu {C_}: {P_}")
+            log_error_loc("folder_open_error", path=C_, error=P_)
 
     def _open_settings(A):
         a = CHANGE_DATA_ADMIN_LABEL
@@ -3236,14 +3367,14 @@ class App(BU.Tk):
         def LIGHT_GREEN():
             if is_admin():
                 Ad(X)
-                log_info("Odblokowano edycję ustawień FTP (administrator).")
+                log_info_loc("settings_ftp_unlocked")
             else:
                 O.showwarning(A6_, A5_)
 
         def NO_DATA_MSG():
             if is_admin():
                 Ae(X)
-                log_info("Odblokowano edycję ustawień SQL (administrator).")
+                log_info_loc("settings_sql_unlocked")
             else:
                 O.showwarning(A6_, A5_)
 
@@ -3276,7 +3407,7 @@ class App(BU.Tk):
             D[u] = bool(Ab.get())
             save_config(D)
             a_.destroy()
-            log_info("Zapisano ustawienia (obrazy/FTP/SQL).")
+            log_info_loc("settings_saved")
 
         C.Button(A4, text=SAVE_LABEL, command=BD_).grid(row=0, column=0, padx=5)
 
