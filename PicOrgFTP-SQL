@@ -1198,48 +1198,22 @@ class App(BU.Tk):
                 R_ = P_[1]
                 original_files[R_] = W_
                 slot_paths[R_] = d_
-            ftp_presence = {}
-            K_ = C.var_ean.get().strip()
-            if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
-                try:
-                    O_ = AB.FTP()
-                    O_.connect(D[H][v], D[H][r], timeout=10)
-                    O_.login(D[H][N], D[H][M])
-                    O_.set_pasv(J)
-                    if D[H][m]:
-                        O_.cwd(D[H][m])
-                    for label, _ in Aw:
-                        try:
-                            if O_.nlst(f"{K_}_{label}*"):
-                                ftp_presence[label] = J
-                        except AB.error_perm:
-                            pass
-                    O_.quit()
-                except E as T:
-                    log_error(f"FTP check error for EAN {K_}: {T}")
-            C.after(
-                0,
-                lambda: finalize(original_files, slot_paths, ftp_presence, ean_guess),
-            )
+            C.after(0, lambda: finalize(original_files, slot_paths, ean_guess))
 
-        def finalize(original_files, slot_paths, ftp_presence, ean_guess):
+        def finalize(original_files, slot_paths, ean_guess):
             if ean_guess and C.var_ean.get().strip() == B:
                 C.var_ean.set(ean_guess)
             C.original_files = original_files
             ean = C.var_ean.get().strip()
+            ean_valid = ean and Q(ean) == 13 and ean.isdigit() and ean.upper() != q
             for X_, G_ in A0(C.slots):
                 R_ = G_[Aa]
                 if R_ in slot_paths:
                     G_[f] = slot_paths[R_]
                     C._update_slot_ui(X_)
                     C._mark_slot(X_, A4)
-                    if ftp_presence.get(R_):
-                        G_[A3].configure(text="✓", fg=AT, bg=A4)
-                        G_[A3].place(relx=1.0, rely=1.0, anchor="se")
-                        G_[A3].lift(G_[y])
-                    else:
-                        G_[A3].place_forget()
-                elif ftp_presence.get(R_):
+                    G_[A3].place_forget()
+                elif ean_valid:
                     G_[y].configure(image=B, text=A5)
                     G_[y].image = I
                     G_[A3].place_forget()
@@ -1264,12 +1238,19 @@ class App(BU.Tk):
             if D[H][m]:
                 ftp.cwd(D[H][m])
             prefix = f"{ean}_{label}"
-            files = ftp.nlst(prefix + "*")
+            try:
+                files = ftp.nlst(prefix + "*")
+            except AB.error_perm:
+                files = []
             if files:
                 fname = files[0]
                 bio = BN()
-                ftp.retrbinary(f"RETR {fname}", bio.write)
-                ftp.quit()
+                try:
+                    ftp.retrbinary(f"RETR {fname}", bio.write)
+                except AB.error_perm:
+                    files = []
+            ftp.quit()
+            if files:
                 data = bio.getvalue()
                 bio.seek(0)
                 img = AA.open(bio)
@@ -1283,7 +1264,6 @@ class App(BU.Tk):
                 C.after(0, updater)
                 C.ftp_downloads[label] = (fname, data)
             else:
-                ftp.quit()
                 C.after(0, lambda: C.slots[idx][y].configure(text=AU))
         except E as T:
             log_error(f"FTP download error for {ean}_{label}: {T}")
