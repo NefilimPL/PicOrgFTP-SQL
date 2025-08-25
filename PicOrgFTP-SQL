@@ -2292,6 +2292,18 @@ class App(BU.Tk):
                                     if d_[f] and A.path.basename(d_[f]) == X_:
                                         result_data[K].add(i)
                                         break
+                for idx, slot in A0(C.slots):
+                    path = slot[f]
+                    if (
+                        path
+                        and A.path.isfile(path)
+                        and idx not in C.pending_deletions
+                        and slot[Aa] not in C.ftp_presence
+                    ):
+                        fname = A.path.basename(path)
+                        if fname not in files_to_upload:
+                            files_to_upload.append(fname)
+                        C.pending_additions.setdefault(idx, path)
                 Am_ = {}
                 for F_, T in list(C.pending_deletions.items()):
                     if F_ in result_data[K]:
