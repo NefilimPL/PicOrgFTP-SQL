@@ -43,3 +43,13 @@ skryptu do własnych potrzeb. Można tam zmienić m.in.:
 
 Zmiana tych wartości przed uruchomieniem skryptu umożliwia szybkie dostosowanie
 działania programu do własnego środowiska.
+
+## Tłumaczenia
+
+Teksty interfejsu przechowywane są w plikach JSON w katalogu `locales/`. Każdy
+plik ma nazwę w formacie `xx.json`, gdzie `xx` to kod języka (np. `pl` lub
+`en`). Aplikacja podczas startu wykrywa wszystkie dostępne pliki i wybiera
+język na podstawie zmiennej środowiskowej `APP_LANG` lub ustawień systemowych.
+Dodanie nowego języka polega na utworzeniu kolejnego pliku w `locales/` z
+odpowiednimi kluczami i tłumaczeniami – nie jest wymagana modyfikacja kodu
+źródłowego.

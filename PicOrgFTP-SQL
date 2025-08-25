@@ -44,8 +44,9 @@ DEFAULT_CONFIG = {
 # --- Koniec konfiguracji ---
 
 # Komunikaty dla użytkownika
-PROCESSING_MSG = "Trwa przetwarzanie. Poczekaj na zakończenie bieżącej operacji."
-OPERATION_TITLE = "Operacja w toku"
+from i18n import t
+PROCESSING_MSG = t("processing")
+OPERATION_TITLE = t("operation_in_progress")
 
 # Podstawowe ustawienia
 A_ = "1.0"
@@ -58,19 +59,19 @@ Aj = getattr
 AQ = None
 
 # Komunikaty o błędach
-NETWORK_ERROR_MSG = "Błąd sieciowy lub brak internetu"
-PATH_NOT_FOUND_MSG = "Nie znaleziono ścieżki na serwerze"
-NO_SUCH_FILE_MSG = "No such file"
-LOGIN_DATA_ERROR_MSG = "Błędne dane logowania"
-LOGIN_INCORRECT_MSG = "Login incorrect"
-NO_DATA_MSG = "Brak danych"
-MISSING_FIELDS_MSG = "Uzupełnij wszystkie wymagane pola przed dodaniem pliku."
-INCOMPLETE_DATA_MSG = "Niekompletne dane"
+NETWORK_ERROR_MSG = t("network_error")
+PATH_NOT_FOUND_MSG = t("path_not_found")
+NO_SUCH_FILE_MSG = t("no_such_file")
+LOGIN_DATA_ERROR_MSG = t("login_data_error")
+LOGIN_INCORRECT_MSG = t("login_incorrect")
+NO_DATA_MSG = t("no_data")
+MISSING_FIELDS_MSG = t("missing_fields")
+INCOMPLETE_DATA_MSG = t("incomplete_data")
 
 # Oznaczenia interfejsu
-CANCEL_LABEL = "Anuluj"
-SETTINGS_LABEL = "Ustawienia"
-EDIT_LISTS_LABEL = "Edytuj listy"
+CANCEL_LABEL = t("cancel")
+SETTINGS_LABEL = t("settings")
+EDIT_LISTS_LABEL = t("edit_lists")
 LIGHT_GREEN = "lightgreen"
 OPEN_FURNITURE = "open_furniture"
 NON_PIC = "non_pic"

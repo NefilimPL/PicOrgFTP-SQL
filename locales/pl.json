@@ -1,0 +1,15 @@
+{
+  "processing": "Trwa przetwarzanie. Poczekaj na zakończenie bieżącej operacji.",
+  "operation_in_progress": "Operacja w toku",
+  "network_error": "Błąd sieciowy lub brak internetu",
+  "path_not_found": "Nie znaleziono ścieżki na serwerze",
+  "no_such_file": "No such file",
+  "login_data_error": "Błędne dane logowania",
+  "login_incorrect": "Login incorrect",
+  "no_data": "Brak danych",
+  "missing_fields": "Uzupełnij wszystkie wymagane pola przed dodaniem pliku.",
+  "incomplete_data": "Niekompletne dane",
+  "cancel": "Anuluj",
+  "settings": "Ustawienia",
+  "edit_lists": "Edytuj listy"
+}

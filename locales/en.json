@@ -1,0 +1,15 @@
+{
+  "processing": "Processing. Please wait for the current operation to finish.",
+  "operation_in_progress": "Operation in progress",
+  "network_error": "Network error or no internet connection",
+  "path_not_found": "Path not found on server",
+  "no_such_file": "No such file",
+  "login_data_error": "Incorrect login data",
+  "login_incorrect": "Login incorrect",
+  "no_data": "No data",
+  "missing_fields": "Fill in all required fields before adding a file.",
+  "incomplete_data": "Incomplete data",
+  "cancel": "Cancel",
+  "settings": "Settings",
+  "edit_lists": "Edit lists"
+}
