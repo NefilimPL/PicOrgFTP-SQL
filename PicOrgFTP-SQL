@@ -827,6 +827,8 @@ class App(BU.Tk):
         B.var_ean = F.StringVar()
         B.pending_additions = {}
         B.pending_deletions = {}
+        B.ftp_remote_only = {}
+        B.ftp_downloaded_final = set()
         B.opt_resize = F.BooleanVar(value=J)
         B.opt_compress = F.BooleanVar(value=h)
         B.opt_maxsize = F.BooleanVar(value=h)
@@ -1178,6 +1180,7 @@ class App(BU.Tk):
                 V_ = []
             original_files = {}
             slot_paths = {}
+            remote_info = {}
             ean_guess = I
             if V_:
                 i_ = V_[0]
@@ -1197,6 +1200,7 @@ class App(BU.Tk):
             ftp_presence = {}
             K_ = C.var_ean.get().strip()
             if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
+                remote_files = {}
                 try:
                     O_ = AB.FTP()
                     O_.connect(D[H][v], D[H][r], timeout=10)
@@ -1209,21 +1213,44 @@ class App(BU.Tk):
                     except AB.error_perm:
                         e_ = []
                     j_ = {A.path.basename(B) for B in e_}
-                    for label in slot_paths.keys():
-                        if any(A.startswith(f"{K_}_{label}") for A in j_):
-                            ftp_presence[label] = J
+                    for name in j_:
+                        if name.startswith(f"{K_}_"):
+                            rest = name[len(f"{K_}_"):]
+                            label = rest.split(".")[0]
+                            remote_files[label] = name
+                    for label, fname in remote_files.items():
+                        if label not in slot_paths:
+                            temp_dir = tempfile.gettempdir()
+                            temp_path = A.path.join(temp_dir, fname)
+                            try:
+                                with x(temp_path, "wb") as fh:
+                                    O_.retrbinary(f"RETR {fname}", fh.write)
+                                slot_paths[label] = temp_path
+                                ftp_presence[label] = fname
+                                remote_info[label] = {"filename": fname, "temp_path": temp_path}
+                            except E as T:
+                                log_error(f"FTP download error for {fname}: {T}")
+                        else:
+                            ftp_presence[label] = fname
                     O_.quit()
                 except E as T:
                     log_error(f"FTP check error for EAN {K_}: {T}")
+                log_info(
+                    f"Znaleziono zdjęcia: Lokalne = {Q(original_files)} / FTP = {Q(remote_files)}"
+                )
             C.after(
                 0,
-                lambda: finalize(original_files, slot_paths, ftp_presence, ean_guess),
+                lambda: finalize(
+                    original_files, slot_paths, ftp_presence, remote_info, ean_guess
+                ),
             )
 
-        def finalize(original_files, slot_paths, ftp_presence, ean_guess):
+        def finalize(original_files, slot_paths, ftp_presence, remote_info, ean_guess):
             if ean_guess and C.var_ean.get().strip() == B:
                 C.var_ean.set(ean_guess)
             C.original_files = original_files
+            C.ftp_remote_only = remote_info
+            C.ftp_downloaded_final = set()
             for X_, G_ in A0(C.slots):
                 R_ = G_[Aa]
                 if R_ in slot_paths:
@@ -1973,6 +2000,38 @@ class App(BU.Tk):
                             )
                 if backed_up:
                     log_info(f"Wykonano kopię zapasową plików: {AI.join(backed_up)}")
+                if C.ftp_remote_only:
+                    for label, info in C.ftp_remote_only.items():
+                        for idx, slot in A0(C.slots):
+                            if slot[Aa] == label:
+                                Az_ = Aw[idx][0]
+                                Be_ = label_category(Aw[idx][1])
+                                P_ = [
+                                    K_ if K_ else q,
+                                    Az_,
+                                    Be_,
+                                    AE_.upper(),
+                                    AF_.upper(),
+                                    AG_.upper(),
+                                    AH_.upper(),
+                                ]
+                                if p_:
+                                    P_.append(p_.upper())
+                                if s_:
+                                    P_.append(s_.upper())
+                                P_.append(b_ if b_ != B else L)
+                                ext = A.path.splitext(info["filename"])[1]
+                                c_ = a.join(P_) + ext
+                                dest = A.path.join(i_, c_)
+                                try:
+                                    Af.copy2(info["temp_path"], dest)
+                                    log_info(f"Pobrano plik {info['filename']} z FTP jako {c_}")
+                                    C.slots[idx][f] = dest
+                                    C.ftp_downloaded_final.add(c_)
+                                except E as R:
+                                    log_error(f"Błąd zapisu pliku {info['filename']}: {R}")
+                                break
+                    C.ftp_remote_only = {}
                 AJ_ = set(C.pending_additions.keys())
                 AL_ = set(C.pending_deletions.keys())
                 AM_ = AJ_ & AL_
@@ -2277,6 +2336,11 @@ class App(BU.Tk):
                                     files_local = []
                                 ftp_error = h
                                 for X_ in files_local:
+                                    if X_ in C.ftp_downloaded_final:
+                                        log_info(
+                                            f"Pominięto wysyłanie pliku {X_} (pobrano z FTP)"
+                                        )
+                                        continue
                                     P_ = X_.split(a)
                                     Ao_ = P_[0] if P_ else B
                                     if not (Ao_ and Q(Ao_) == 13 and Ao_.isdigit()):
