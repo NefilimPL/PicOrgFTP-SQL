@@ -1447,7 +1447,8 @@ class App(BU.Tk):
                 S_.append(b_)
             h_ = g.join(S_)
             F = A.path.join(F, h_)
-        I_ = C.var_extra.get().strip()
+        I_raw = C.var_extra.get()
+        I_ = G(I_raw).strip()
         I_ = I_.replace(a, g)
         if I_ == B:
             I_ = L
@@ -1886,7 +1887,8 @@ class App(BU.Tk):
         C.entry_ean.configure(state=X)
         C.btn_submit.configure(state=X)
         C.btn_open.configure(state=X)
-        C.var_extra.set(C.var_extra.get().strip())
+        extra_raw = C.var_extra.get()
+        C.var_extra.set(G(extra_raw).strip())
         if not C.suppress_scan:
             C._load_existing_files()
 
