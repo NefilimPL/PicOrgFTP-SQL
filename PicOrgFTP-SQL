@@ -838,6 +838,7 @@ class App(BU.Tk):
         B.opt_convert_tif = F.BooleanVar(value=J)
         B.tif_target_format = F.StringVar(value=At)
         B.loading_by_ean = h
+        B.suppress_scan = h
         B.model_select_win_open = h
         B.dragging_idx = I
         B.original_files = {}
@@ -1322,7 +1323,7 @@ class App(BU.Tk):
         D.btn_submit.configure(state=V)
         D.btn_open.configure(state=V)
         D._clear_all_slots()
-        if not D.loading_by_ean:
+        if not (D.loading_by_ean or D.suppress_scan):
             k_ = []
             if A.path.isdir(T):
                 for A2 in A.listdir(T):
@@ -1590,7 +1591,8 @@ class App(BU.Tk):
         C.btn_submit.configure(state=X)
         C.btn_open.configure(state=X)
         C.var_extra.set(C.var_extra.get().strip())
-        C._load_existing_files()
+        if not C.suppress_scan:
+            C._load_existing_files()
 
     def _on_extra_commit(C):
         D_ = C.var_extra.get().strip()
@@ -1636,7 +1638,7 @@ class App(BU.Tk):
                 C.combo_extra.configure(style=Z)
             else:
                 C.combo_extra.configure(style=j)
-        if G_ and H_ and I_ and F_:
+        if G_ and H_ and I_ and F_ and not C.suppress_scan:
             C._load_existing_files()
 
     def _select_file(A, idx):
@@ -2613,24 +2615,29 @@ class App(BU.Tk):
             M_ = C_.get(AX, B) or B
             N_ = C_.get(AW, B) or B
             F_ = C_.get(d, B) or B
-            A.var_name.set(G_)
-            A._on_name_commit()
-            A.var_type.set(H_)
-            A._on_type_commit()
-            A.var_model.set(I_)
-            A.loading_by_ean = J
-            A._on_model_commit()
-            A.loading_by_ean = h
-            A.var_color1.set(K_)
-            A.var_color2.set(M_)
-            A.var_color3.set(N_)
-            A._on_color_commit()
-            if F_.upper() == L:
-                A.var_extra.set(B)
-            else:
-                A.var_extra.set(F_)
-            A._on_extra_commit()
-            A.var_ean.set(D_)
+            A.suppress_scan = J
+            try:
+                A.var_name.set(G_)
+                A._on_name_commit()
+                A.var_type.set(H_)
+                A._on_type_commit()
+                A.var_model.set(I_)
+                A.loading_by_ean = J
+                A._on_model_commit()
+                A.loading_by_ean = h
+                A.var_color1.set(K_)
+                A.var_color2.set(M_)
+                A.var_color3.set(N_)
+                A._on_color_commit()
+                if F_.upper() == L:
+                    A.var_extra.set(B)
+                else:
+                    A.var_extra.set(F_)
+                A._on_extra_commit()
+                A.var_ean.set(D_)
+            finally:
+                A.suppress_scan = h
+            A._load_existing_files()
         else:
             A._load_existing_files()
             O.showinfo("Nie znaleziono", f"Brak zapisanych danych dla EAN {D_}.")
