@@ -43,9 +43,35 @@ DEFAULT_CONFIG = {
 }
 # --- Koniec konfiguracji ---
 
+# Lokalizacja
+import locale, os, json
+translations = {}
+
+
+def load_translations(lang_code=None):
+    global translations
+    system_lang = locale.getdefaultlocale()[0]
+    lang = lang_code or (system_lang.split("_")[0] if system_lang else "eng")
+    if lang == "uk":
+        lang = "ua"
+    base_dir = os.path.dirname(__file__)
+    try:
+        with open(os.path.join(base_dir, "locales", f"{lang}.json"), encoding="utf-8") as f:
+            translations = json.load(f)
+    except FileNotFoundError:
+        with open(os.path.join(base_dir, "locales", "eng.json"), encoding="utf-8") as f:
+            translations = json.load(f)
+
+
+def t(key, **kwargs):
+    return translations.get(key, key).format(**kwargs)
+
+
+load_translations()
+
 # Komunikaty dla użytkownika
-PROCESSING_MSG = "Trwa przetwarzanie. Poczekaj na zakończenie bieżącej operacji."
-OPERATION_TITLE = "Operacja w toku"
+PROCESSING_MSG = t("processing")
+OPERATION_TITLE = t("operation_title")
 
 # Podstawowe ustawienia
 A_ = "1.0"
@@ -58,19 +84,19 @@ Aj = getattr
 AQ = None
 
 # Komunikaty o błędach
-NETWORK_ERROR_MSG = "Błąd sieciowy lub brak internetu"
-PATH_NOT_FOUND_MSG = "Nie znaleziono ścieżki na serwerze"
+NETWORK_ERROR_MSG = t("network_error")
+PATH_NOT_FOUND_MSG = t("path_not_found")
 NO_SUCH_FILE_MSG = "No such file"
-LOGIN_DATA_ERROR_MSG = "Błędne dane logowania"
+LOGIN_DATA_ERROR_MSG = t("login_data_error")
 LOGIN_INCORRECT_MSG = "Login incorrect"
-NO_DATA_MSG = "Brak danych"
-MISSING_FIELDS_MSG = "Uzupełnij wszystkie wymagane pola przed dodaniem pliku."
-INCOMPLETE_DATA_MSG = "Niekompletne dane"
+NO_DATA_MSG = t("no_data")
+MISSING_FIELDS_MSG = t("missing_fields")
+INCOMPLETE_DATA_MSG = t("incomplete_data")
 
 # Oznaczenia interfejsu
-CANCEL_LABEL = "Anuluj"
-SETTINGS_LABEL = "Ustawienia"
-EDIT_LISTS_LABEL = "Edytuj listy"
+CANCEL_LABEL = t("cancel")
+SETTINGS_LABEL = t("settings")
+EDIT_LISTS_LABEL = t("edit_lists")
 LIGHT_GREEN = "lightgreen"
 OPEN_FURNITURE = "open_furniture"
 NON_PIC = "non_pic"
@@ -94,7 +120,7 @@ Ab = "red"
 AT = "white"
 AU = "Brak pliku"
 AV = "right"
-Ac = "Błąd zapisu"
+Ac = t("save_error")
 AW = "KOLOR3"
 AX = "KOLOR2"
 AY = "KOLOR1"
@@ -102,8 +128,8 @@ AZ = "MODEL"
 Ad = "TYP"
 Ae = "NAZWA"
 AI = ", "
-AJ = "Brak na liście"
-AK = "Błąd"
+AJ = t("not_in_list")
+AK = t("error")
 A6 = "%Y-%m-%d %H:%M:%S"
 A7 = "x_lbl"
 A8 = "#aaa"
@@ -960,11 +986,11 @@ class App(BU.Tk):
         Q_.grid(row=0, column=3, padx=5)
         A.btn_submit = C.Button(B_, text="Aktualizuj", command=A._on_submit)
         A.btn_submit.grid(row=8, column=0, columnspan=2, pady=10)
-        A.btn_open = C.Button(B_, text="Otwórz folder", command=A._open_current_folder)
+        A.btn_open = C.Button(B_, text=t("open_folder"), command=A._open_current_folder)
         A.btn_open.grid(row=8, column=2, padx=5, pady=10)
         A.ui_log = BS.ScrolledText(B_, width=48, height=8, state=Ak, wrap="word")
         A.ui_log.grid(row=0, column=4, rowspan=9, padx=10, sticky="nsew")
-        S_ = C.Button(B_, text="Wyczyść log", command=lambda: A._ui_log(clear=Al))
+        S_ = C.Button(B_, text=t("clear_log"), command=lambda: A._ui_log(clear=Al))
         S_.grid(row=8, column=3, padx=5, pady=10, sticky="e")
         B_.grid_columnconfigure(4, weight=1)
 
@@ -1642,7 +1668,7 @@ class App(BU.Tk):
             if D_.upper() not in [A.upper() for A in C.lists[d]]:
                 if O.askyesno(
                     AJ,
-                    f"Wartość '{D_}' nie istnieje na liście dodatków. Dodać do listy?",
+                    t("value_not_exists_add_question", value=D_),
                 ):
                     M_ = C._open_list_editor(d)
                     C.wait_window(M_)

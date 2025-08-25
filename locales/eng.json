@@ -1,0 +1,19 @@
+{
+  "processing": "Processing. Please wait for the current operation to finish.",
+  "operation_title": "Operation in progress",
+  "network_error": "Network error or no internet",
+  "path_not_found": "Path not found on server",
+  "login_data_error": "Incorrect login data",
+  "missing_fields": "Fill in all required fields before adding a file.",
+  "incomplete_data": "Incomplete data",
+  "no_data": "No data",
+  "cancel": "Cancel",
+  "settings": "Settings",
+  "edit_lists": "Edit lists",
+  "save_error": "Save error",
+  "not_in_list": "Not in list",
+  "error": "Error",
+  "open_folder": "Open folder",
+  "clear_log": "Clear log",
+  "value_not_exists_add_question": "Value '{value}' does not exist in the extras list. Add it?"
+}
