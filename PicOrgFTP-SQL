@@ -1051,9 +1051,6 @@ class App(BU.Tk):
     def _set_icon_status(C, icon, present):
         if not icon:
             return
-        if present is I:
-            icon.place_forget()
-            return
         icon.place(relx=1.0, rely=1.0, anchor="se", x=getattr(icon, "offset_x", 0))
         icon.config(bg="green" if present else "red")
 
@@ -1291,26 +1288,20 @@ class App(BU.Tk):
                 C.suppress_next_lookup = J
                 C.var_ean.set(ean_guess)
                 C.suppress_next_lookup = h
-        C.original_files = original_files
-        C.ftp_remote_only = remote_info
-        C.ftp_presence = ftp_presence
-        C.ftp_downloaded_final = set()
-        for X_, G_ in A0(C.slots):
-            R_ = G_[Aa]
-            if R_ in slot_paths:
-                G_[f] = slot_paths[R_]
-                C._update_slot_ui(X_)
-                C._mark_slot(X_, A4)
-            else:
-                G_[f] = I
-            has_local = R_ in original_files
-            has_ftp = R_ in ftp_presence
-            if has_local or has_ftp:
-                C._set_icon_status(G_["local_icon"], has_local)
-                C._set_icon_status(G_["ftp_icon"], has_ftp)
-            else:
-                C._set_icon_status(G_["local_icon"], I)
-                C._set_icon_status(G_["ftp_icon"], I)
+            C.original_files = original_files
+            C.ftp_remote_only = remote_info
+            C.ftp_presence = ftp_presence
+            C.ftp_downloaded_final = set()
+            for X_, G_ in A0(C.slots):
+                R_ = G_[Aa]
+                if R_ in slot_paths:
+                    G_[f] = slot_paths[R_]
+                    C._update_slot_ui(X_)
+                    C._mark_slot(X_, A4)
+                else:
+                    G_[f] = I
+                C._set_icon_status(G_["local_icon"], R_ in original_files)
+                C._set_icon_status(G_["ftp_icon"], R_ in ftp_presence)
 
         threading.Thread(target=worker, daemon=J).start()
 
