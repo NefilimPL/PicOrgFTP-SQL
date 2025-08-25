@@ -827,7 +827,9 @@ class App(BU.Tk):
         B.var_ean = F.StringVar()
         B.pending_additions = {}
         B.pending_deletions = {}
+        B.pending_ftp_deletions = {}
         B.ftp_remote_only = {}
+        B.ftp_presence = {}
         B.ftp_downloaded_final = set()
         B.opt_resize = F.BooleanVar(value=J)
         B.opt_compress = F.BooleanVar(value=h)
@@ -1250,6 +1252,7 @@ class App(BU.Tk):
                 C.var_ean.set(ean_guess)
             C.original_files = original_files
             C.ftp_remote_only = remote_info
+            C.ftp_presence = ftp_presence
             C.ftp_downloaded_final = set()
             for X_, G_ in A0(C.slots):
                 R_ = G_[Aa]
@@ -1750,10 +1753,24 @@ class App(BU.Tk):
                 G_ = J
             elif F_.startswith(l) and A.path.isfile(F_):
                 C.pending_deletions[D_] = F_
+            elif not F_.startswith(l):
+                label = E_[Aa]
+                remote_name = I
+                info = C.ftp_remote_only.pop(label, I)
+                if info:
+                    remote_name = info.get("filename")
+                elif label in C.ftp_presence:
+                    remote_name = C.ftp_presence.get(label)
+                if remote_name:
+                    C.pending_ftp_deletions[D_] = remote_name
             E_[f] = I
             E_[y].configure(image=B, text=AU)
             E_[y].image = I
             E_[A7].place_forget()
+            try:
+                E_[A3].place_forget()
+            except E:
+                pass
             if G_:
                 C._mark_slot(D_, I)
             else:
@@ -1763,6 +1780,7 @@ class App(BU.Tk):
     def _clear_all_slots(C):
         C.pending_additions.clear()
         C.pending_deletions.clear()
+        C.pending_ftp_deletions.clear()
         for A_ in C.slots:
             A_[f] = I
             A_[y].configure(image=B, text=AU)
@@ -2073,6 +2091,8 @@ class App(BU.Tk):
                     P_.append(b_ if b_ != B else L)
                     BH_ = A.path.splitext(src_path)[1]
                     c_ = a.join(P_) + BH_
+                    if F_ in C.pending_ftp_deletions and C.pending_ftp_deletions[F_] == c_:
+                        C.pending_ftp_deletions.pop(F_, I)
                     S_ = A.path.join(i_, c_)
                     try:
                         if F_ in C.pending_deletions:
@@ -2280,6 +2300,9 @@ class App(BU.Tk):
                         )
                         result_data[K].add(F_)
                         Am_[F_] = T
+                for Cz_ in C.pending_ftp_deletions.values():
+                    if Cz_:
+                        BM_.append(Cz_)
                 result_data[n] = BE_
                 result_data[o] = Am_
                 add_set = AJ_
