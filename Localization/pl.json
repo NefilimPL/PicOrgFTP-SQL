@@ -1,0 +1,19 @@
+{
+  "processing": "Trwa przetwarzanie. Poczekaj na zakończenie bieżącej operacji.",
+  "operation_title": "Operacja w toku",
+  "network_error": "Błąd sieciowy lub brak internetu",
+  "path_not_found": "Nie znaleziono ścieżki na serwerze",
+  "login_data_error": "Błędne dane logowania",
+  "missing_fields": "Uzupełnij wszystkie wymagane pola przed dodaniem pliku.",
+  "incomplete_data": "Niekompletne dane",
+  "no_data": "Brak danych",
+  "cancel": "Anuluj",
+  "settings": "Ustawienia",
+  "edit_lists": "Edytuj listy",
+  "save_error": "Błąd zapisu",
+  "not_in_list": "Brak na liście",
+  "error": "Błąd",
+  "open_folder": "Otwórz folder",
+  "clear_log": "Wyczyść log",
+  "value_not_exists_add_question": "Wartość '{value}' nie istnieje na liście dodatków. Dodać do listy?"
+}
