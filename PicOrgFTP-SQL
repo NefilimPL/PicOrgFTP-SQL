@@ -128,6 +128,7 @@ k = "utf-8"
 n = "NAZWY"
 j = "TCombobox"
 f = "filepath"
+B0 = "mark"
 g = "-"
 a = "_"
 h = Ay
@@ -1018,7 +1019,7 @@ class App(BU.Tk):
             D_.drag_source_register(1, BJ)
             D_.dnd_bind("<<DragInitCmd>>", lambda e, i=G_: B._on_drag_init(e, i))
             D_.dnd_bind("<<DragEndCmd>>", lambda e: B._on_drag_end(e))
-            B.slots.append({Aa: V_, "label": W_, y: D_, A7: K_, A3: P_, f: I, AS: H_})
+            B.slots.append({Aa: V_, "label": W_, y: D_, A7: K_, A3: P_, f: I, AS: H_, B0: I})
         for O_ in Ax(U):
             B.slots_frame.columnconfigure(O_, weight=1)
 
@@ -1982,6 +1983,7 @@ class App(BU.Tk):
                 i_ = A.path.join(i_, BX_, b_ if b_ != B else L)
                 A.makedirs(i_, exist_ok=J)
                 BM_ = []
+                files_to_upload = []
                 try:
                     if A.path.exists(AN):
                         Af.rmtree(AN)
@@ -2026,6 +2028,7 @@ class App(BU.Tk):
                                 try:
                                     Af.copy2(info["temp_path"], dest)
                                     log_info(f"Pobrano plik {info['filename']} z FTP jako {c_}")
+                                    files_to_upload.append(c_)
                                     C.slots[idx][f] = dest
                                     C.ftp_downloaded_final.add(c_)
                                 except E as R:
@@ -2053,7 +2056,11 @@ class App(BU.Tk):
                 AM_ = AJ_ & AL_
                 BE_ = {}
                 for F_, src_path in list(C.pending_additions.items()):
+                    if F_ not in C.pending_deletions and C.slots[F_].get(B0) != AR:
+                        C.pending_additions.pop(F_, I)
+                        continue
                     if not A.path.isfile(src_path):
+                        C.pending_additions.pop(F_, I)
                         continue
                     Az_ = Aw[F_][0]
                     Be_ = label_category(Aw[F_][1])
@@ -2207,6 +2214,7 @@ class App(BU.Tk):
                         else:
                             Af.copy2(src_path, S_)
                             log_info(f"Dodano/zmodyfikowano plik {c_}")
+                        files_to_upload.append(c_)
                         C.slots[F_][f] = S_
                     except E as y:
                         log_error(
@@ -2243,6 +2251,9 @@ class App(BU.Tk):
                                     if d_[f] and A.path.basename(d_[f]) == X_:
                                         C.slots[F_][f] = new_path
                                         break
+                                if X_ in files_to_upload:
+                                    Bh_ = files_to_upload.index(X_)
+                                    files_to_upload[Bh_] = new_name
                             except E as y:
                                 log_error(f"Błąd zmiany nazw plików na EAN {K_}: {y}")
                                 for i, d_ in A0(C.slots):
@@ -2282,9 +2293,9 @@ class App(BU.Tk):
                         Am_[F_] = T
                 result_data[n] = BE_
                 result_data[o] = Am_
-                add_set = AJ_
-                del_set = AL_
-                inter_set = AM_
+                add_set = set(C.pending_additions.keys())
+                del_set = set(C.pending_deletions.keys())
+                inter_set = add_set & del_set
                 result_data[p] = add_set
                 result_data[s] = del_set
                 result_data[t] = inter_set
@@ -2325,15 +2336,11 @@ class App(BU.Tk):
                             Y_ = f"Inny błąd: {R}"
                         else:
                             try:
-                                files_local = []
-                                try:
-                                    files_local = [
-                                        B
-                                        for B in A.listdir(i_)
-                                        if A.path.isfile(A.path.join(i_, B))
-                                    ]
-                                except E:
-                                    files_local = []
+                                files_local = [
+                                    B
+                                    for B in files_to_upload
+                                    if A.path.isfile(A.path.join(i_, B))
+                                ]
                                 ftp_error = h
                                 for X_ in files_local:
                                     if X_ in C.ftp_downloaded_final:
@@ -3030,7 +3037,9 @@ class App(BU.Tk):
         B_ = color
         E_ = {AR: "#0000ff", A4: "#00ff00", "gray": "#808080", Ab: "#ff0000"}
         C_ = E_.get(B_, "#000000")
-        A_ = D.slots[idx].get(AS)
+        slot = D.slots[idx]
+        slot[B0] = B_
+        A_ = slot.get(AS)
         if A_:
             if B_ is I:
                 A_.configure(
