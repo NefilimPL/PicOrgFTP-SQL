@@ -1208,14 +1208,12 @@ class App(BU.Tk):
                     O_.set_pasv(J)
                     if D[H][m]:
                         O_.cwd(D[H][m])
-                    try:
-                        e_ = O_.nlst()
-                    except AB.error_perm:
-                        e_ = []
-                    j_ = {A.path.basename(B) for B in e_}
-                    for label in slot_paths.keys():
-                        if any(A.startswith(f"{K_}_{label}") for A in j_):
-                            ftp_presence[label] = J
+                    for label, _ in Aw:
+                        try:
+                            if O_.nlst(f"{K_}_{label}*"):
+                                ftp_presence[label] = J
+                        except AB.error_perm:
+                            pass
                     O_.quit()
                 except E as T:
                     log_error(f"FTP check error for EAN {K_}: {T}")
