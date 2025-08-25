@@ -845,6 +845,8 @@ class App(BU.Tk):
         B.dragging_idx = I
         B.original_files = {}
         B.is_processing = h
+        B.logged_counts = h
+        B.suppress_next_lookup = h
         B._build_form()
         B._build_slots()
         H_ = Q(E_)
@@ -1137,6 +1139,10 @@ class App(BU.Tk):
 
     def _load_existing_files(C):
         """Load images from disk and check FTP copies without blocking GUI."""
+        if C.suppress_next_lookup:
+            C.suppress_next_lookup = h
+            return
+        C.logged_counts = h
         F = A.path.join(
             l,
             C.var_name.get().strip().upper(),
@@ -1238,9 +1244,11 @@ class App(BU.Tk):
                     O_.quit()
                 except E as T:
                     log_error(f"FTP check error for EAN {K_}: {T}")
-                log_info(
-                    f"Znaleziono zdjęcia: Lokalne = {Q(original_files)} / FTP = {Q(remote_files)}"
-                )
+                if not C.logged_counts:
+                    log_info(
+                        f"Znaleziono zdjęcia: Lokalne = {Q(original_files)} / FTP = {Q(remote_files)}"
+                    )
+                    C.logged_counts = J
             C.after(
                 0,
                 lambda: finalize(
@@ -1250,7 +1258,9 @@ class App(BU.Tk):
 
         def finalize(original_files, slot_paths, ftp_presence, remote_info, ean_guess):
             if ean_guess and C.var_ean.get().strip() == B:
+                C.suppress_next_lookup = J
                 C.var_ean.set(ean_guess)
+                C.suppress_next_lookup = h
             C.original_files = original_files
             C.ftp_remote_only = remote_info
             C.ftp_presence = ftp_presence
