@@ -107,7 +107,6 @@ AK = "Błąd"
 A6 = "%Y-%m-%d %H:%M:%S"
 A7 = "x_lbl"
 A8 = "#aaa"
-A3 = "ftp_lbl"
 A4 = "green"
 A2 = "<<ComboboxSelected>>"
 y = "img_lbl"
@@ -1018,15 +1017,42 @@ class App(BU.Tk):
             X_ = F.Label(E_, text="...", fg=AT, bg="black")
             X_.bind(Q_, lambda e, i=G_: B._select_file(i))
             X_.place(relx=1.0, rely=0, anchor="ne")
-            P_ = F.Label(E_, text="✓", fg=AT, bg=A4)
-            P_.place(relx=1.0, rely=1.0, anchor="se")
-            P_.place_forget()
+            local_icon = F.Canvas(
+                E_,
+                width=30,
+                height=20,
+                highlightthickness=0,
+                bd=1,
+                relief="solid",
+            )
+            local_icon.create_text(15, 10, text="LOCAL", font=("Arial", 7), fill="white")
+            local_icon.offset_x = -30
+            local_icon.place(relx=1.0, rely=1.0, anchor="se", x=local_icon.offset_x)
+            local_icon.place_forget()
+            ftp_icon = F.Canvas(
+                E_,
+                width=30,
+                height=20,
+                highlightthickness=0,
+                bd=1,
+                relief="solid",
+            )
+            ftp_icon.create_text(15, 10, text="FTP", font=("Arial", 7), fill="white")
+            ftp_icon.offset_x = 0
+            ftp_icon.place(relx=1.0, rely=1.0, anchor="se", x=ftp_icon.offset_x)
+            ftp_icon.place_forget()
             D_.drag_source_register(1, BJ)
             D_.dnd_bind("<<DragInitCmd>>", lambda e, i=G_: B._on_drag_init(e, i))
             D_.dnd_bind("<<DragEndCmd>>", lambda e: B._on_drag_end(e))
-            B.slots.append({Aa: V_, "label": W_, y: D_, A7: K_, A3: P_, f: I, AS: H_, B0: I})
+            B.slots.append({Aa: V_, "label": W_, y: D_, A7: K_, "local_icon": local_icon, "ftp_icon": ftp_icon, f: I, AS: H_, B0: I})
         for O_ in Ax(U):
             B.slots_frame.columnconfigure(O_, weight=1)
+
+    def _set_icon_status(C, icon, present):
+        if not icon:
+            return
+        icon.place(relx=1.0, rely=1.0, anchor="se", x=getattr(icon, "offset_x", 0))
+        icon.config(bg="green" if present else "red")
 
     def _refresh_combobox_list(B, combobox, all_values, existing_count=0):
         A_ = combobox
@@ -1273,15 +1299,9 @@ class App(BU.Tk):
                     C._update_slot_ui(X_)
                     C._mark_slot(X_, A4)
                 else:
-                    G_[A3].place_forget()
-            for X_, G_ in A0(C.slots):
-                R_ = G_[Aa]
-                if ftp_presence.get(R_):
-                    G_[A3].configure(text="✓", fg=AT, bg=A4)
-                    G_[A3].place(relx=1.0, rely=1.0, anchor="se")
-                    G_[A3].lift(G_[y])
-                else:
-                    G_[A3].place_forget()
+                    G_[f] = I
+                C._set_icon_status(G_["local_icon"], R_ in original_files)
+                C._set_icon_status(G_["ftp_icon"], R_ in ftp_presence)
 
         threading.Thread(target=worker, daemon=J).start()
 
@@ -1729,6 +1749,7 @@ class App(BU.Tk):
         B._update_slot_ui(C_)
         B.slots[C_][A7].place(x=0, y=0)
         B._mark_slot(C_, AR)
+        B._set_icon_status(B.slots[C_]["local_icon"], J)
 
     def _update_slot_ui(J, idx):
         D_ = J.slots[idx]
@@ -1780,10 +1801,7 @@ class App(BU.Tk):
             E_[y].configure(image=B, text=AU)
             E_[y].image = I
             E_[A7].place_forget()
-            try:
-                E_[A3].place_forget()
-            except E:
-                pass
+            C._set_icon_status(E_["local_icon"], h)
             if G_:
                 C._mark_slot(D_, I)
             else:
@@ -1799,7 +1817,10 @@ class App(BU.Tk):
             A_[y].configure(image=B, text=AU)
             A_[y].image = I
             A_[A7].place_forget()
-            A_[A3].place_forget()
+            A_["local_icon"].place_forget()
+            A_["local_icon"].delete("slash")
+            A_["ftp_icon"].place_forget()
+            A_["ftp_icon"].delete("slash")
             if AS in A_:
                 A_[AS].configure(
                     highlightthickness=0, highlightbackground=A8, highlightcolor=A8
