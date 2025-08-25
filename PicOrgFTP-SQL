@@ -40,6 +40,7 @@ DEFAULT_CONFIG = {
     "sql_query": SQL_UPDATE_TEMPLATE,
     "enable_ftp_update": True,
     "enable_sql_update": True,
+    "language": "auto",
 }
 # --- Koniec konfiguracji ---
 
@@ -154,7 +155,7 @@ H = "ftp"
 E = Exception
 G = str
 B = ""
-import sys, os as A, subprocess as BH, shutil as Af, getpass, platform as BR
+import sys, os as A, subprocess as BH, shutil as Af, getpass, platform as BR, locale as BO
 from datetime import datetime as A9
 import time as Ag, tempfile, uuid
 from tkinter import scrolledtext as BS
@@ -191,6 +192,7 @@ AD = A.path.join(AC, "config.json")
 AM = A.path.join(AC, "error_log.txt")
 BM = A.path.join(AC, "changes_log.txt")
 AN = A.path.join(AC, "temp_backup")
+LC = A.path.join(AC, "Localization")
 AE = {n: n, t: t, s: s, Y: Y, d: d, W: W}
 BW = [
     "ODBC Driver 18 for SQL Server",
@@ -261,6 +263,7 @@ def load_config():
                 w: B[w],
                 ft: B[ft],
                 u: B[u],
+                "language": B.get("language", "auto"),
             }
             try:
                 A.makedirs(A.path.dirname(config_path), exist_ok=J)
@@ -295,6 +298,7 @@ def load_config():
         B[w] = C.get(w, B[w])
         B[ft] = C.get(ft, B[ft])
         B[u] = C.get(u, B[u])
+        B["language"] = C.get("language", B["language"])
         try:
             save_config(B)
         except E:
@@ -326,6 +330,7 @@ def save_config(config):
         w: A_.get(w, SQL_UPDATE_TEMPLATE),
         ft: A_.get(ft, J),
         u: A_.get(u, J),
+        "language": A_.get("language", "auto"),
     }
     try:
         with x(AD, T, encoding=k) as D_:
@@ -341,7 +346,56 @@ def save_config(config):
             pass
 
 
+def load_localization(language=I):
+    B = language
+    if not B or B == "auto":
+        try:
+            B = (BO.getdefaultlocale()[0] or "en").split("_")[0]
+        except E:
+            B = "en"
+    C_ = {"pl": "pl.json", "ua": "ua.json", "en": "eng.json"}
+    F = C_.get(B.lower(), "eng.json")
+    paths = [
+        A.path.join(LC, F),
+        A.path.join(A.path.dirname(A.path.abspath(__file__)), "Localization", F),
+    ]
+    for path in paths:
+        if A.path.exists(path):
+            try:
+                with x(path, "r", encoding=k) as D_:
+                    return Ar.load(D_)
+            except E:
+                pass
+    return {}
+
+
 D = load_config()
+L = load_localization(D.get("language"))
+PROCESSING_MSG = L.get("processing", PROCESSING_MSG)
+OPERATION_TITLE = L.get("operation_title", OPERATION_TITLE)
+NETWORK_ERROR_MSG = L.get("network_error", NETWORK_ERROR_MSG)
+PATH_NOT_FOUND_MSG = L.get("path_not_found", PATH_NOT_FOUND_MSG)
+LOGIN_DATA_ERROR_MSG = L.get("login_data_error", LOGIN_DATA_ERROR_MSG)
+MISSING_FIELDS_MSG = L.get("missing_fields", MISSING_FIELDS_MSG)
+INCOMPLETE_DATA_MSG = L.get("incomplete_data", INCOMPLETE_DATA_MSG)
+NO_DATA_MSG = L.get("no_data", NO_DATA_MSG)
+CANCEL_LABEL = L.get("cancel", CANCEL_LABEL)
+SETTINGS_LABEL = L.get("settings", SETTINGS_LABEL)
+EDIT_LISTS_LABEL = L.get("edit_lists", EDIT_LISTS_LABEL)
+Ac = L.get("save_error", Ac)
+AJ = L.get("not_in_list", AJ)
+AK = L.get("error", AK)
+OPEN_FOLDER_LABEL = L.get("open_folder", "Otwórz folder")
+CLEAR_LOG_LABEL = L.get("clear_log", "Wyczyść log")
+VALUE_NOT_EXISTS_QUESTION = L.get(
+    "value_not_exists_add_question",
+    "Wartość '{value}' nie istnieje na liście dodatków. Dodać do listy?",
+)
+CHANGE_LANGUAGE_LABEL = L.get("change_language", "Zmień język")
+LANGUAGE_PROMPT = L.get("language_prompt", "Kod języka (pl, ua, eng):")
+RESTART_TO_APPLY_LABEL = L.get(
+    "restart_to_apply", "Uruchom ponownie aplikację, aby zastosować zmiany"
+)
 
 
 def rotate_log(path, max_bytes=1073741824, backups=3):
@@ -960,11 +1014,11 @@ class App(BU.Tk):
         Q_.grid(row=0, column=3, padx=5)
         A.btn_submit = C.Button(B_, text="Aktualizuj", command=A._on_submit)
         A.btn_submit.grid(row=8, column=0, columnspan=2, pady=10)
-        A.btn_open = C.Button(B_, text="Otwórz folder", command=A._open_current_folder)
+        A.btn_open = C.Button(B_, text=OPEN_FOLDER_LABEL, command=A._open_current_folder)
         A.btn_open.grid(row=8, column=2, padx=5, pady=10)
         A.ui_log = BS.ScrolledText(B_, width=48, height=8, state=Ak, wrap="word")
         A.ui_log.grid(row=0, column=4, rowspan=9, padx=10, sticky="nsew")
-        S_ = C.Button(B_, text="Wyczyść log", command=lambda: A._ui_log(clear=Al))
+        S_ = C.Button(B_, text=CLEAR_LOG_LABEL, command=lambda: A._ui_log(clear=Al))
         S_.grid(row=8, column=3, padx=5, pady=10, sticky="e")
         B_.grid_columnconfigure(4, weight=1)
 
@@ -1642,7 +1696,7 @@ class App(BU.Tk):
             if D_.upper() not in [A.upper() for A in C.lists[d]]:
                 if O.askyesno(
                     AJ,
-                    f"Wartość '{D_}' nie istnieje na liście dodatków. Dodać do listy?",
+                    VALUE_NOT_EXISTS_QUESTION.format(value=D_),
                 ):
                     M_ = C._open_list_editor(d)
                     C.wait_window(M_)
@@ -2811,6 +2865,10 @@ class App(BU.Tk):
         )
         q.grid(row=4, column=2, sticky=T)
 
+        C.Button(L, text=CHANGE_LANGUAGE_LABEL, command=A._change_language).grid(
+            row=5, column=0, columnspan=4, pady=5
+        )
+
         def Am(*B):
             l_.configure(state=X if A.opt_resize.get() else V)
 
@@ -3085,6 +3143,17 @@ class App(BU.Tk):
         C.Button(A4, text=CANCEL_LABEL, command=Af).grid(row=0, column=1, padx=5)
         a_.protocol("WM_DELETE_WINDOW", Af)
         Z.select(0)
+
+    def _change_language(A):
+        B = BI.askstring(SETTINGS_LABEL, LANGUAGE_PROMPT)
+        if B:
+            D["language"] = B.lower()
+            try:
+                save_config(D)
+            except E:
+                O.showerror(AK, Ac)
+            else:
+                O.showinfo(SETTINGS_LABEL, RESTART_TO_APPLY_LABEL)
 
     def _style_combobox_list(L, combobox):
         A_ = combobox

@@ -15,5 +15,8 @@
   "error": "Помилка",
   "open_folder": "Відкрити папку",
   "clear_log": "Очистити лог",
-  "value_not_exists_add_question": "Значення '{value}' відсутнє у списку додатків. Додати до списку?"
+  "value_not_exists_add_question": "Значення '{value}' відсутнє у списку додатків. Додати до списку?",
+  "change_language": "Змінити мову",
+  "language_prompt": "Код мови (pl, ua, eng):",
+  "restart_to_apply": "Перезапустіть застосунок, щоб застосувати зміни"
 }

@@ -15,5 +15,8 @@
   "error": "Error",
   "open_folder": "Open folder",
   "clear_log": "Clear log",
-  "value_not_exists_add_question": "Value '{value}' does not exist in the extras list. Add it?"
+  "value_not_exists_add_question": "Value '{value}' does not exist in the extras list. Add it?",
+  "change_language": "Change language",
+  "language_prompt": "Language code (pl, ua, eng):",
+  "restart_to_apply": "Restart application to apply changes"
 }
