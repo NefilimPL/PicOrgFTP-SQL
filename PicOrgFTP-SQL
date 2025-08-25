@@ -1206,14 +1206,25 @@ class App(BU.Tk):
                     O_.connect(D[H][v], D[H][r], timeout=10)
                     O_.login(D[H][N], D[H][M])
                     O_.set_pasv(J)
-                    if D[H][m]:
-                        O_.cwd(D[H][m])
+                    server_path = D[H][m]
+                    if server_path:
+                        O_.cwd(server_path)
                     for label, _ in Aw:
+                        cmd = f"{K_}_{label}*"
                         try:
-                            if O_.nlst(f"{K_}_{label}*"):
+                            log_info(
+                                f"FTP NLST '{cmd}' for EAN {K_}, label {label}, path {server_path}"
+                            )
+                            files = O_.nlst(cmd)
+                            log_info(
+                                f"FTP NLST returned {files} for EAN {K_}, label {label}, path {server_path}"
+                            )
+                            if files:
                                 ftp_presence[label] = J
-                        except AB.error_perm:
-                            pass
+                        except E as T:
+                            log_error(
+                                f"FTP NLST '{cmd}' failed for EAN {K_}, label {label}, path {server_path}: {T}"
+                            )
                     O_.quit()
                 except E as T:
                     log_error(f"FTP check error for EAN {K_}: {T}")
@@ -1261,14 +1272,45 @@ class App(BU.Tk):
             ftp.connect(D[H][v], D[H][r], timeout=10)
             ftp.login(D[H][N], D[H][M])
             ftp.set_pasv(J)
-            if D[H][m]:
-                ftp.cwd(D[H][m])
+            server_path = D[H][m]
+            if server_path:
+                ftp.cwd(server_path)
             prefix = f"{ean}_{label}"
-            files = ftp.nlst(prefix + "*")
+            cmd = prefix + "*"
+            try:
+                log_info(
+                    f"FTP NLST '{cmd}' for EAN {ean}, label {label}, path {server_path}"
+                )
+                files = ftp.nlst(cmd)
+                log_info(
+                    f"FTP NLST returned {files} for EAN {ean}, label {label}, path {server_path}"
+                )
+            except E as T:
+                log_error(
+                    f"FTP NLST '{cmd}' failed for EAN {ean}, label {label}, path {server_path}: {T}"
+                )
+                ftp.quit()
+                C.after(0, lambda: C.slots[idx][y].configure(text=AU))
+                return
             if files:
                 fname = files[0]
                 bio = BN()
-                ftp.retrbinary(f"RETR {fname}", bio.write)
+                retr_cmd = f"RETR {fname}"
+                try:
+                    log_info(
+                        f"FTP RETR '{retr_cmd}' for EAN {ean}, label {label}, path {server_path}"
+                    )
+                    ftp.retrbinary(retr_cmd, bio.write)
+                    log_info(
+                        f"FTP RETR success for EAN {ean}, label {label}, path {server_path}"
+                    )
+                except E as T:
+                    log_error(
+                        f"FTP RETR '{retr_cmd}' failed for EAN {ean}, label {label}, path {server_path}: {T}"
+                    )
+                    ftp.quit()
+                    C.after(0, lambda: C.slots[idx][y].configure(text=AU))
+                    return
                 ftp.quit()
                 data = bio.getvalue()
                 bio.seek(0)
