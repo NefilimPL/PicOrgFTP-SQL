@@ -1018,13 +1018,11 @@ class App(BU.Tk):
             X_.bind(Q_, lambda e, i=G_: B._select_file(i))
             X_.place(relx=1.0, rely=0, anchor="ne")
             local_icon = F.Canvas(E_, width=30, height=20, highlightthickness=0)
-            local_icon.create_rectangle(0, 0, 30, 20, outline="black")
             local_icon.create_text(15, 10, text="LOCAL", font=("Arial", 7))
             local_icon.offset_x = -30
             local_icon.place(relx=1.0, rely=1.0, anchor="se", x=local_icon.offset_x)
             local_icon.place_forget()
             ftp_icon = F.Canvas(E_, width=30, height=20, highlightthickness=0)
-            ftp_icon.create_rectangle(0, 0, 30, 20, outline="black")
             ftp_icon.create_text(15, 10, text="FTP", font=("Arial", 7))
             ftp_icon.offset_x = 0
             ftp_icon.place(relx=1.0, rely=1.0, anchor="se", x=ftp_icon.offset_x)
@@ -1042,9 +1040,7 @@ class App(BU.Tk):
         icon.place(relx=1.0, rely=1.0, anchor="se", x=getattr(icon, "offset_x", 0))
         icon.delete("slash")
         if not present:
-            w = int(icon.cget("width"))
-            h = int(icon.cget("height"))
-            icon.create_line(0, 0, w, h, fill="red", width=2, tags="slash")
+            icon.create_line(0, 0, 20, 20, fill="red", width=2, tags="slash")
 
     def _refresh_combobox_list(B, combobox, all_values, existing_count=0):
         A_ = combobox
