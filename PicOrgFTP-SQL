@@ -92,7 +92,8 @@ AS = "frame"
 Aa = "prefix"
 Ab = "red"
 AT = "white"
-AU = "Brak pliku"
+AU = "Brak plików"
+A5 = "Wczytywanie"
 AV = "right"
 Ac = "Błąd zapisu"
 AW = "KOLOR3"
@@ -181,6 +182,7 @@ import tkinter as F
 from tkinter import ttk as C, filedialog as BT, messagebox as O, simpledialog as BI
 from tkinterdnd2 import TkinterDnD as BU, DND_ALL, DND_FILES as BJ
 from PIL import Image as AA, ImageTk
+from io import BytesIO as BN
 from openpyxl import Workbook as BV, load_workbook as Ah
 import ftplib as AB, socket as BK, pyodbc, mysql.connector, ctypes, json as Ar, base64 as BL
 
@@ -839,6 +841,7 @@ class App(BU.Tk):
         B.model_select_win_open = h
         B.dragging_idx = I
         B.original_files = {}
+        B.ftp_downloads = {}
         B.is_processing = h
         B._build_form()
         B._build_slots()
@@ -1165,16 +1168,17 @@ class App(BU.Tk):
                     log_error(
                         f"Rename folder NO-LED to NO-LED failed in load_existing_files: {T}"
                     )
-        C._clear_all_slots()
+        C._clear_all_slots(loading=J)
         C.original_files = {}
-        if not A.path.isdir(F):
-            return
         def worker():
-            try:
-                V_ = [
-                    B for B in A.listdir(F) if A.path.isfile(A.path.join(F, B))
-                ]
-            except E:
+            if A.path.isdir(F):
+                try:
+                    V_ = [
+                        B for B in A.listdir(F) if A.path.isfile(A.path.join(F, B))
+                    ]
+                except E:
+                    V_ = []
+            else:
                 V_ = []
             original_files = {}
             slot_paths = {}
@@ -1204,14 +1208,12 @@ class App(BU.Tk):
                     O_.set_pasv(J)
                     if D[H][m]:
                         O_.cwd(D[H][m])
-                    try:
-                        e_ = O_.nlst()
-                    except AB.error_perm:
-                        e_ = []
-                    j_ = {A.path.basename(B) for B in e_}
-                    for label in slot_paths.keys():
-                        if any(A.startswith(f"{K_}_{label}") for A in j_):
-                            ftp_presence[label] = J
+                    for label, _ in Aw:
+                        try:
+                            if O_.nlst(f"{K_}_{label}*"):
+                                ftp_presence[label] = J
+                        except AB.error_perm:
+                            pass
                     O_.quit()
                 except E as T:
                     log_error(f"FTP check error for EAN {K_}: {T}")
@@ -1224,24 +1226,68 @@ class App(BU.Tk):
             if ean_guess and C.var_ean.get().strip() == B:
                 C.var_ean.set(ean_guess)
             C.original_files = original_files
+            ean = C.var_ean.get().strip()
             for X_, G_ in A0(C.slots):
                 R_ = G_[Aa]
                 if R_ in slot_paths:
                     G_[f] = slot_paths[R_]
                     C._update_slot_ui(X_)
                     C._mark_slot(X_, A4)
-                else:
+                    if ftp_presence.get(R_):
+                        G_[A3].configure(text="✓", fg=AT, bg=A4)
+                        G_[A3].place(relx=1.0, rely=1.0, anchor="se")
+                        G_[A3].lift(G_[y])
+                    else:
+                        G_[A3].place_forget()
+                elif ftp_presence.get(R_):
+                    G_[y].configure(image=B, text=A5)
+                    G_[y].image = I
                     G_[A3].place_forget()
-            for X_, G_ in A0(C.slots):
-                R_ = G_[Aa]
-                if ftp_presence.get(R_):
-                    G_[A3].configure(text="✓", fg=AT, bg=A4)
-                    G_[A3].place(relx=1.0, rely=1.0, anchor="se")
-                    G_[A3].lift(G_[y])
+                    threading.Thread(
+                        target=C._download_slot_from_ftp,
+                        args=(X_, R_, ean),
+                        daemon=J,
+                    ).start()
                 else:
+                    G_[y].configure(image=B, text=AU)
+                    G_[y].image = I
                     G_[A3].place_forget()
 
         threading.Thread(target=worker, daemon=J).start()
+
+    def _download_slot_from_ftp(C, idx, label, ean):
+        try:
+            ftp = AB.FTP()
+            ftp.connect(D[H][v], D[H][r], timeout=10)
+            ftp.login(D[H][N], D[H][M])
+            ftp.set_pasv(J)
+            if D[H][m]:
+                ftp.cwd(D[H][m])
+            prefix = f"{ean}_{label}"
+            files = ftp.nlst(prefix + "*")
+            if files:
+                fname = files[0]
+                bio = BN()
+                ftp.retrbinary(f"RETR {fname}", bio.write)
+                ftp.quit()
+                data = bio.getvalue()
+                bio.seek(0)
+                img = AA.open(bio)
+                img.thumbnail((100, 100), AA.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                def updater():
+                    slot = C.slots[idx]
+                    slot[y].configure(image=photo, text=B)
+                    slot[y].image = photo
+                    C._mark_slot(idx, A4)
+                C.after(0, updater)
+                C.ftp_downloads[label] = (fname, data)
+            else:
+                ftp.quit()
+                C.after(0, lambda: C.slots[idx][y].configure(text=AU))
+        except E as T:
+            log_error(f"FTP download error for {ean}_{label}: {T}")
+            C.after(0, lambda: C.slots[idx][y].configure(text=AU))
 
     def _on_model_commit(D):
         H = "new"
@@ -1733,12 +1779,13 @@ class App(BU.Tk):
                 C._mark_slot(D_, AR)
             C.focus_force()
 
-    def _clear_all_slots(C):
+    def _clear_all_slots(C, loading=h):
         C.pending_additions.clear()
         C.pending_deletions.clear()
+        C.ftp_downloads.clear()
         for A_ in C.slots:
             A_[f] = I
-            A_[y].configure(image=B, text=AU)
+            A_[y].configure(image=B, text=A5 if loading else AU)
             A_[y].image = I
             A_[A7].place_forget()
             A_[A3].place_forget()
@@ -1954,6 +2001,18 @@ class App(BU.Tk):
                 BX_ = g.join(Av_)
                 i_ = A.path.join(i_, BX_, b_ if b_ != B else L)
                 A.makedirs(i_, exist_ok=J)
+                for label, (fname, data) in C.ftp_downloads.items():
+                    try:
+                        Bq = A.path.join(i_, fname)
+                        with x(Bq, "wb") as Bs:
+                            Bs.write(data)
+                        for Ba_, slot in A0(C.slots):
+                            if slot[Aa] == label:
+                                slot[f] = Bq
+                                break
+                    except E as R:
+                        log_error(f"Failed to save FTP file {fname}: {R}")
+                C.ftp_downloads.clear()
                 BM_ = []
                 try:
                     if A.path.exists(AN):

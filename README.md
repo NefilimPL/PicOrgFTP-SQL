@@ -9,11 +9,14 @@ drag-and-drop. Po uzupełnieniu wymaganych pól i zatwierdzeniu:
 
 1. Pliki są kopiowane do katalogu `_ZDJECIA PRZEROBIONE_` i układane według
    struktury `NAZWA/TYP/MODEL/KOLOR1_KOLOR2_KOLOR3/DODATEK`.
-2. Zdjęcia są optymalizowane, konwertowane do JPEG/PNG i otrzymują nazwę
+2. Brakujące zdjęcia są pobierane z serwera FTP i prezentowane w oknach
+   podglądu. Kliknięcie przycisku **Aktualizuj** zapisuje pobrane pliki w
+   lokalnej strukturze katalogów.
+3. Zdjęcia są optymalizowane, konwertowane do JPEG/PNG i otrzymują nazwę
    `EAN_slot.ext`.
-3. Jeżeli włączono `enable_ftp_update`, nowe pliki są wysyłane na serwer FTP,
+4. Jeżeli włączono `enable_ftp_update`, nowe pliki są wysyłane na serwer FTP,
    a stare wersje o tym samym EAN mogą zostać usunięte.
-4. Jeżeli włączono `enable_sql_update`, wykonywane jest zapytanie SQL, które
+5. Jeżeli włączono `enable_sql_update`, wykonywane jest zapytanie SQL, które
    aktualizuje ścieżki obrazów w bazie `sql` lub `mysql`.
 
 Działania programu są zapisywane w `changes_log.txt`, a ewentualne błędy w
