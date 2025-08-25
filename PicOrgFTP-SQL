@@ -1017,13 +1017,27 @@ class App(BU.Tk):
             X_ = F.Label(E_, text="...", fg=AT, bg="black")
             X_.bind(Q_, lambda e, i=G_: B._select_file(i))
             X_.place(relx=1.0, rely=0, anchor="ne")
-            local_icon = F.Canvas(E_, width=30, height=20, highlightthickness=0)
-            local_icon.create_text(15, 10, text="LOCAL", font=("Arial", 7))
+            local_icon = F.Canvas(
+                E_,
+                width=30,
+                height=20,
+                highlightthickness=0,
+                bd=1,
+                relief="solid",
+            )
+            local_icon.create_text(15, 10, text="LOCAL", font=("Arial", 7), fill="white")
             local_icon.offset_x = -30
             local_icon.place(relx=1.0, rely=1.0, anchor="se", x=local_icon.offset_x)
             local_icon.place_forget()
-            ftp_icon = F.Canvas(E_, width=30, height=20, highlightthickness=0)
-            ftp_icon.create_text(15, 10, text="FTP", font=("Arial", 7))
+            ftp_icon = F.Canvas(
+                E_,
+                width=30,
+                height=20,
+                highlightthickness=0,
+                bd=1,
+                relief="solid",
+            )
+            ftp_icon.create_text(15, 10, text="FTP", font=("Arial", 7), fill="white")
             ftp_icon.offset_x = 0
             ftp_icon.place(relx=1.0, rely=1.0, anchor="se", x=ftp_icon.offset_x)
             ftp_icon.place_forget()
@@ -1038,9 +1052,7 @@ class App(BU.Tk):
         if not icon:
             return
         icon.place(relx=1.0, rely=1.0, anchor="se", x=getattr(icon, "offset_x", 0))
-        icon.delete("slash")
-        if not present:
-            icon.create_line(0, 0, 20, 20, fill="red", width=2, tags="slash")
+        icon.config(bg="green" if present else "red")
 
     def _refresh_combobox_list(B, combobox, all_values, existing_count=0):
         A_ = combobox
