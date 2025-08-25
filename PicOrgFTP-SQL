@@ -1280,6 +1280,9 @@ class App(BU.Tk):
                     slot[y].configure(image=photo, text=B)
                     slot[y].image = photo
                     C._mark_slot(idx, A4)
+                    slot[A3].configure(text="✓", fg=AT, bg=A4)
+                    slot[A3].place(relx=1.0, rely=1.0, anchor="se")
+                    slot[A3].lift(slot[y])
                 C.after(0, updater)
                 C.ftp_downloads[label] = (fname, data)
             else:
