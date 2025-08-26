@@ -194,11 +194,12 @@ BM = A.path.join(AC, "changes_log.txt")
 AN = A.path.join(AC, "temp_backup")
 LC_DEFAULT = A.path.join(A.path.expanduser("~"), "Gui zdjęcia config", "Localization")
 LC = LC_DEFAULT
-LOC_BASE_URL = "https://raw.githubusercontent.com/wipmebgroup/PicOrgFTP-SQL/Localization/Localization"
+# Domyślne odnośniki do plików lokalizacyjnych wykorzystywane,
+# gdy w konfiguracji nie zdefiniowano własnej listy.
 LOC_URLS_DEFAULT = [
-    f"{LOC_BASE_URL}/eng.json",
-    f"{LOC_BASE_URL}/pl.json",
-    f"{LOC_BASE_URL}/ua.json",
+    "https://raw.githubusercontent.com/NefilimPL/PicOrgFTP-SQL/refs/heads/Localization/Localization/eng.json?token=GHSAT0AAAAAADJUE6CWS236ZWFLCMJ52VD62FNP3DA",
+    "https://raw.githubusercontent.com/NefilimPL/PicOrgFTP-SQL/refs/heads/Localization/Localization/pl.json?token=GHSAT0AAAAAADJUE6CXMMYCQNGIQBJKBDOW2FNP3DQ",
+    "https://raw.githubusercontent.com/NefilimPL/PicOrgFTP-SQL/refs/heads/Localization/Localization/eng.json?token=GHSAT0AAAAAADJUE6CWS236ZWFLCMJ52VD62FNP3DA",
 ]
 LOC_URLS = LOC_URLS_DEFAULT[:]
 DEFAULT_CONFIG["loc_path"] = LC_DEFAULT
@@ -3245,7 +3246,7 @@ class App(BU.Tk):
         browse_btn.grid(row=1, column=2, padx=5, pady=2)
 
         C.Label(U, text=LOC_URLS_LABEL).grid(row=2, column=0, sticky=R, padx=5, pady=2)
-        url_text = F.Text(U, width=40, height=4, state=V)
+        url_text = BS.ScrolledText(U, width=80, height=5, state=V, wrap="none")
         url_text.grid(row=2, column=1, padx=5, pady=2, sticky=T)
         url_text.configure(state=X)
         url_text.insert(A_, "\n".join(D.get("loc_urls", LOC_URLS)))
