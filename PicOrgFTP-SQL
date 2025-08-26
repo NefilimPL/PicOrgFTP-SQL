@@ -361,17 +361,19 @@ def save_config(config):
 def download_localizations():
     files = ["eng.json", "pl.json", "ua.json"]
     base = f"https://raw.githubusercontent.com/{LOC_REPO}/{LOC_BRANCH}/{LOC_DIR}"
+    ok = J
     try:
         A.makedirs(LC, exist_ok=J)
     except E:
-        return
+        return Ay
     for fname in files:
         url = f"{base}/{fname}"
         try:
             with BN.urlopen(url) as resp, x(A.path.join(LC, fname), "wb") as f_:
                 f_.write(resp.read())
         except E:
-            pass
+            ok = Ay
+    return ok
 
 
 def load_localization(language=I):
@@ -403,7 +405,7 @@ LC = D.get("loc_path", LC_DEFAULT) or LC_DEFAULT
 LOC_REPO = D.get("loc_repo", LOC_REPO)
 LOC_BRANCH = D.get("loc_branch", LOC_BRANCH)
 LOC_DIR = D.get("loc_dir", LOC_DIR)
-download_localizations()
+LOC_DL_OK = download_localizations()
 LANG = load_localization(D.get("language"))
 LANG_EN = load_localization("en")
 NO_FILE_LABEL = LANG.get("no_file", NO_FILE_FALLBACK)
@@ -3195,6 +3197,7 @@ class App(BU.Tk):
             width=10,
         )
         lang_combo.grid(row=0, column=1, padx=5, pady=2, sticky=T)
+        lang_combo.configure(postcommand=lambda c=lang_combo: A._style_combobox_list(c))
         C.Label(U, text=LOC_PATH_LABEL).grid(row=1, column=0, sticky=R, padx=5, pady=2)
         loc_var = F.StringVar(value=D.get("loc_path", LC))
         loc_entry = C.Entry(U, textvariable=loc_var, width=40, state=i_)
@@ -3483,7 +3486,8 @@ class App(BU.Tk):
             D["loc_path"] = loc_var.get().strip()
             LC = D["loc_path"]
             save_config(D)
-            download_localizations()
+            if not download_localizations():
+                O.showwarning(SETTINGS_LABEL, LANG.get("loc_download_failed", "Localization files unavailable. Check repository access."))
             a_.destroy()
             log_info_loc("settings_saved")
 
@@ -3609,6 +3613,8 @@ class App(BU.Tk):
 
 if __name__ == "__main__":
     A1 = App()
+    if not LOC_DL_OK:
+        O.showwarning(SETTINGS_LABEL, LANG_EN.get("loc_download_failed", "Localization files unavailable. Check repository access."))
     for BQ in (
         A1.combo_name,
         A1.combo_type,

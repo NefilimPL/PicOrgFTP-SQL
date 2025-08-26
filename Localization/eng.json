@@ -21,6 +21,7 @@
   "language_tab": "Language",
   "language_label": "Language:",
   "loc_path_label": "Localization folder:",
+  "loc_download_failed": "Localization files unavailable. Check repository access.",
   "no_file": "No file",
   "restart_to_apply": "Restart application to apply changes",
   "warning": "Warning",
