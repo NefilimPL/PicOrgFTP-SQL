@@ -195,13 +195,9 @@ BM = A.path.join(AC, "changes_log.txt")
 AN = A.path.join(AC, "temp_backup")
 LC_DEFAULT = A.path.join(A.path.expanduser("~"), "Gui zdjęcia config", "Localization")
 LC = LC_DEFAULT
-LOC_REPO = "wipmebgroup/PicOrgFTP-SQL"
-LOC_BRANCH = "Localization"
-LOC_DIR = "Localization"
+LOC_URL = "https://raw.githubusercontent.com/wipmebgroup/PicOrgFTP-SQL/Localization/Localization"
 DEFAULT_CONFIG.setdefault("loc_path", LC_DEFAULT)
-DEFAULT_CONFIG.setdefault("loc_repo", LOC_REPO)
-DEFAULT_CONFIG.setdefault("loc_branch", LOC_BRANCH)
-DEFAULT_CONFIG.setdefault("loc_dir", LOC_DIR)
+DEFAULT_CONFIG.setdefault("loc_url", LOC_URL)
 AE = {n: n, t: t, s: s, Y: Y, d: d, W: W}
 BW = [
     "ODBC Driver 18 for SQL Server",
@@ -358,18 +354,20 @@ def save_config(config):
             pass
 
 
-def download_localizations():
+def download_localizations(force=Ay):
     files = ["eng.json", "pl.json", "ua.json"]
-    base = f"https://raw.githubusercontent.com/{LOC_REPO}/{LOC_BRANCH}/{LOC_DIR}"
     ok = J
     try:
         A.makedirs(LC, exist_ok=J)
     except E:
         return Ay
     for fname in files:
-        url = f"{base}/{fname}"
+        dest = A.path.join(LC, fname)
+        if not force and A.path.exists(dest):
+            continue
+        url = f"{LOC_URL.rstrip('/')}/{fname}"
         try:
-            with BN.urlopen(url) as resp, x(A.path.join(LC, fname), "wb") as f_:
+            with BN.urlopen(url) as resp, x(dest, "wb") as f_:
                 f_.write(resp.read())
         except E:
             ok = Ay
@@ -402,9 +400,7 @@ def load_localization(language=I):
 
 D = load_config()
 LC = D.get("loc_path", LC_DEFAULT) or LC_DEFAULT
-LOC_REPO = D.get("loc_repo", LOC_REPO)
-LOC_BRANCH = D.get("loc_branch", LOC_BRANCH)
-LOC_DIR = D.get("loc_dir", LOC_DIR)
+LOC_URL = D.get("loc_url", LOC_URL)
 LOC_DL_OK = download_localizations()
 LANG = load_localization(D.get("language"))
 LANG_EN = load_localization("en")
@@ -412,6 +408,11 @@ NO_FILE_LABEL = LANG.get("no_file", NO_FILE_FALLBACK)
 LANGUAGE_TAB_LABEL = LANG.get("language_tab", "Język")
 LANGUAGE_LABEL = LANG.get("language_label", "Język:")
 LOC_PATH_LABEL = LANG.get("loc_path_label", "Folder lokalizacji:")
+LOC_URL_LABEL = LANG.get("loc_url_label", "URL lokalizacji:")
+UPDATE_LOC_LABEL = LANG.get("loc_update_label", "Aktualizuj")
+LOC_UPDATE_SUCCESS_MSG = LANG.get(
+    "loc_update_success", "Zaktualizowano pliki lokalizacyjne"
+)
 PROCESSING_MSG = LANG.get("processing", PROCESSING_MSG)
 PROCESSING_UI_MSG = LANG.get(
     "processing_ui", ">>> Processing, please wait..."
@@ -3193,7 +3194,7 @@ class App(BU.Tk):
             U,
             textvariable=lang_var,
             values=["auto", "pl", "ua", "en"],
-            state=V,
+            state="readonly",
             width=10,
         )
         lang_combo.grid(row=0, column=1, padx=5, pady=2, sticky=T)
@@ -3210,14 +3211,40 @@ class App(BU.Tk):
 
         browse_btn = C.Button(U, text=CHOOSE_LABEL, command=browse_loc, state=V)
         browse_btn.grid(row=1, column=2, padx=5, pady=2)
+
+        C.Label(U, text=LOC_URL_LABEL).grid(row=2, column=0, sticky=R, padx=5, pady=2)
+        url_var = F.StringVar(value=D.get("loc_url", LOC_URL))
+        url_entry = C.Entry(U, textvariable=url_var, width=40, state=i_)
+        url_entry.grid(row=2, column=1, padx=5, pady=2, sticky=T)
+        update_btn = C.Button(U, text=UPDATE_LOC_LABEL, state=V)
+        update_btn.grid(row=2, column=2, padx=5, pady=2)
+
+        def update_loc():
+            global LOC_URL, LC
+            LOC_URL = url_var.get().strip()
+            LC = loc_var.get().strip()
+            if download_localizations(J):
+                O.showinfo(SETTINGS_LABEL, LOC_UPDATE_SUCCESS_MSG)
+            else:
+                O.showwarning(
+                    SETTINGS_LABEL,
+                    LANG.get(
+                        "loc_download_failed",
+                        "Localization files unavailable. Check repository access.",
+                    ),
+                )
+
+        update_btn.configure(command=update_loc)
+
         lang_unlock_btn = C.Button(U, text=a)
-        lang_unlock_btn.grid(row=2, column=0, sticky=R, padx=5, pady=5)
+        lang_unlock_btn.grid(row=3, column=0, sticky=R, padx=5, pady=5)
 
         def unlock_lang():
             if is_admin():
-                lang_combo.configure(state="readonly")
                 loc_entry.configure(state=X)
                 browse_btn.configure(state=X)
+                url_entry.configure(state=X)
+                update_btn.configure(state=X)
             else:
                 O.showwarning(A6_, A5_)
 
@@ -3461,7 +3488,7 @@ class App(BU.Tk):
         A4.pack(pady=5)
 
         def BD_():
-            global LC
+            global LC, LOC_URL
             D[H][v] = s.get().strip()
             try:
                 D[H][r] = int(t.get())
@@ -3484,7 +3511,9 @@ class App(BU.Tk):
             D[u] = bool(Ab.get())
             D["language"] = lang_var.get().strip()
             D["loc_path"] = loc_var.get().strip()
+            D["loc_url"] = url_var.get().strip()
             LC = D["loc_path"]
+            LOC_URL = D["loc_url"]
             save_config(D)
             if not download_localizations():
                 O.showwarning(SETTINGS_LABEL, LANG.get("loc_download_failed", "Localization files unavailable. Check repository access."))
