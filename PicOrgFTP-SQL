@@ -1592,9 +1592,26 @@ class App(BU.Tk):
                 P_ = W_.split(a)
                 if Q(P_) < 2:
                     continue
-                R_ = P_[1]
-                original_files[R_] = W_
-                slot_paths[R_] = d_
+                label_part = P_[1]
+                label = label_part.split(".")[0]
+                norm_label = label.zfill(2)
+                ext = A.path.splitext(label_part)[1]
+                if label != norm_label:
+                    normalized_name = f"{P_[0]}_{norm_label}{ext}"
+                    normalized_path = A.path.join(F, normalized_name)
+                    try:
+                        A.rename(d_, normalized_path)
+                        log_info_loc(
+                            "file_renamed", old=W_, new=normalized_name
+                        )
+                        W_ = normalized_name
+                        d_ = normalized_path
+                    except E as T:
+                        log_error_loc(
+                            "file_rename_error", old=W_, new=normalized_name, error=T
+                        )
+                original_files[norm_label] = W_
+                slot_paths[norm_label] = d_
             ftp_presence = {}
             K_ = C.var_ean.get().strip()
             if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
@@ -1613,16 +1630,24 @@ class App(BU.Tk):
                     j_ = {A.path.basename(B) for B in e_}
                     for name in j_:
                         if name.startswith(f"{K_}_"):
-                            rest = name[len(f"{K_}_"):]
-                            label = rest.split(".")[0]
-                            remote_files[label] = name
+                            rest = name[len(f"{K_}_") :]
+                            label_raw = rest.split(".")[0]
+                            norm_label = label_raw.zfill(2)
+                            remote_files[norm_label] = name
                     for label, fname in remote_files.items():
                         if label not in slot_paths:
                             temp_dir = tempfile.gettempdir()
-                            temp_path = A.path.join(temp_dir, fname)
+                            temp_path_raw = A.path.join(temp_dir, fname)
                             try:
-                                with x(temp_path, "wb") as fh:
+                                with x(temp_path_raw, "wb") as fh:
                                     O_.retrbinary(f"RETR {fname}", fh.write)
+                                ext = A.path.splitext(fname)[1]
+                                normalized_fname = f"{K_}_{label}{ext}"
+                                temp_path = A.path.join(temp_dir, normalized_fname)
+                                try:
+                                    A.rename(temp_path_raw, temp_path)
+                                except E:
+                                    temp_path = temp_path_raw
                                 slot_paths[label] = temp_path
                                 ftp_presence[label] = fname
                                 remote_info[label] = {"filename": fname, "temp_path": temp_path}
@@ -2892,6 +2917,13 @@ class App(BU.Tk):
                             Az_ = d_[Aa]
                             B3_ = d_["label"]
                             if d_[f]:
+                                if Az_ in C.ftp_presence:
+                                    remote_fname = C.ftp_presence.get(Az_)
+                                    parts = remote_fname.split(a)
+                                    if Q(parts) >= 2:
+                                        remote_label = parts[1].split(".")[0]
+                                        if remote_label != Az_:
+                                            continue
                                 Bs = A.path.basename(d_[f])
                                 ext = A.path.splitext(Bs)[1].lower()
                                 short_name = f"{K_}_{Az_}{ext}"
