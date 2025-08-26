@@ -3410,8 +3410,8 @@ class App(BU.Tk):
             D[w] = h_.get(A_, "end").strip()
             D[u] = bool(Ab.get())
             save_config(D)
-            a_.destroy()
             log_info_loc("settings_saved")
+            Af()
 
         C.Button(A4, text=SAVE_LABEL, command=BD_).grid(row=0, column=0, padx=5)
 
