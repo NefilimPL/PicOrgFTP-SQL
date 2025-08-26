@@ -1182,6 +1182,7 @@ class App(BU.Tk):
         B.is_processing = h
         B.logged_counts = h
         B.suppress_next_lookup = h
+        B.ftp_status_var = F.StringVar()
         B._build_form()
         B._build_slots()
         H_ = Q(E_)
@@ -1325,6 +1326,8 @@ class App(BU.Tk):
         A.ui_log.grid(row=0, column=4, rowspan=9, padx=10, sticky="nsew")
         S_ = C.Button(B_, text=CLEAR_LOG_LABEL, command=lambda: A._ui_log(clear=Al))
         S_.grid(row=8, column=3, padx=5, pady=10, sticky="e")
+        A.lbl_ftp_status = C.Label(B_, textvariable=A.ftp_status_var)
+        A.lbl_ftp_status.grid(row=9, column=4, sticky="w", padx=10)
         B_.grid_columnconfigure(4, weight=1)
 
     def _build_slots(B):
@@ -1616,6 +1619,7 @@ class App(BU.Tk):
             K_ = C.var_ean.get().strip()
             if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
                 remote_files = {}
+                total_remote = 0
                 try:
                     O_ = AB.FTP()
                     O_.connect(D[H][v], D[H][r], timeout=10)
@@ -1634,6 +1638,8 @@ class App(BU.Tk):
                             label_raw = rest.split(".")[0]
                             norm_label = label_raw.zfill(2)
                             remote_files[norm_label] = name
+                    total_remote = Q(remote_files)
+                    processed_remote = 0
                     for label, fname in remote_files.items():
                         if label not in slot_paths:
                             temp_dir = tempfile.gettempdir()
@@ -1655,9 +1661,19 @@ class App(BU.Tk):
                                 log_error(f"FTP download error for {fname}: {T}")
                         else:
                             ftp_presence[label] = fname
+                        processed_remote += 1
+                        C.after(
+                            0,
+                            lambda c=processed_remote, t=total_remote: C.ftp_status_var.set(
+                                f"{c}/{t} files downloaded"
+                            ),
+                        )
                     O_.quit()
                 except E as T:
                     log_error(f"FTP check error for EAN {K_}: {T}")
+                finally:
+                    if total_remote:
+                        C.after(0, lambda: C.ftp_status_var.set(B))
                 if not C.logged_counts:
                     log_info_loc(
                         "found_images_counts",
