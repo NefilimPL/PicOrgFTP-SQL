@@ -21,7 +21,7 @@
   "language_tab": "Мова",
   "language_label": "Мова:",
   "loc_path_label": "Папка локалізації:",
-  "loc_url_label": "URL локалізації:",
+  "loc_urls_label": "Посилання локалізації:",
   "loc_update_label": "Оновити",
   "loc_update_success": "Файли локалізації оновлено.",
   "loc_download_failed": "Файли локалізації недоступні. Перевірте доступ до репозиторію.",
