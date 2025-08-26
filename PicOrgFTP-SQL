@@ -1569,7 +1569,11 @@ class App(BU.Tk):
         C.original_files = {}
         if not A.path.isdir(F):
             return
+        from tkinter import ttk
+        progress = ttk.Progressbar(C, mode="indeterminate")
+        progress.pack(side="top", fill="x", padx=10, pady=5)
         def worker():
+            C.after(0, progress.start)
             try:
                 V_ = [
                     B for B in A.listdir(F) if A.path.isfile(A.path.join(F, B))
@@ -1691,6 +1695,9 @@ class App(BU.Tk):
                     G_[f] = I
                 C._set_icon_status(G_["local_icon"], R_ in original_files)
                 C._set_icon_status(G_["ftp_icon"], R_ in ftp_presence)
+            progress.stop()
+            progress.pack_forget()
+            progress.destroy()
 
         threading.Thread(target=worker, daemon=J).start()
 
