@@ -195,7 +195,13 @@ BM = A.path.join(AC, "changes_log.txt")
 AN = A.path.join(AC, "temp_backup")
 LC_DEFAULT = A.path.join(A.path.expanduser("~"), "Gui zdjęcia config", "Localization")
 LC = LC_DEFAULT
+LOC_REPO = "wipmebgroup/PicOrgFTP-SQL"
+LOC_BRANCH = "Localization"
+LOC_DIR = "Localization"
 DEFAULT_CONFIG.setdefault("loc_path", LC_DEFAULT)
+DEFAULT_CONFIG.setdefault("loc_repo", LOC_REPO)
+DEFAULT_CONFIG.setdefault("loc_branch", LOC_BRANCH)
+DEFAULT_CONFIG.setdefault("loc_dir", LOC_DIR)
 AE = {n: n, t: t, s: s, Y: Y, d: d, W: W}
 BW = [
     "ODBC Driver 18 for SQL Server",
@@ -354,9 +360,7 @@ def save_config(config):
 
 def download_localizations():
     files = ["eng.json", "pl.json", "ua.json"]
-    base = (
-        "https://raw.githubusercontent.com/wipmebgroup/PicOrgFTP-SQL/Localization/Localization"
-    )
+    base = f"https://raw.githubusercontent.com/{LOC_REPO}/{LOC_BRANCH}/{LOC_DIR}"
     try:
         A.makedirs(LC, exist_ok=J)
     except E:
@@ -396,6 +400,9 @@ def load_localization(language=I):
 
 D = load_config()
 LC = D.get("loc_path", LC_DEFAULT) or LC_DEFAULT
+LOC_REPO = D.get("loc_repo", LOC_REPO)
+LOC_BRANCH = D.get("loc_branch", LOC_BRANCH)
+LOC_DIR = D.get("loc_dir", LOC_DIR)
 download_localizations()
 LANG = load_localization(D.get("language"))
 LANG_EN = load_localization("en")
@@ -3139,11 +3146,11 @@ class App(BU.Tk):
         L = C.Frame(Z)
         Q = C.Frame(Z)
         S = C.Frame(Z)
-        T = C.Frame(Z)
+        U = C.Frame(Z)
         Z.add(L, text=IMAGES_TAB_LABEL)
         Z.add(Q, text=FTP_TAB_LABEL)
         Z.add(S, text=SQL_TAB_LABEL)
-        Z.add(T, text=LANGUAGE_TAB_LABEL)
+        Z.add(U, text=LANGUAGE_TAB_LABEL)
         C.Label(L, text=IMAGE_SETTINGS_LABEL).grid(
             row=0, column=0, columnspan=4, padx=5, pady=5, sticky=T
         )
@@ -3178,19 +3185,19 @@ class App(BU.Tk):
             width=5,
         )
         q.grid(row=4, column=2, sticky=T)
-        C.Label(T, text=LANGUAGE_LABEL).grid(row=0, column=0, sticky=R, padx=5, pady=2)
+        C.Label(U, text=LANGUAGE_LABEL).grid(row=0, column=0, sticky=R, padx=5, pady=2)
         lang_var = F.StringVar(value=D.get("language", "auto"))
         lang_combo = C.Combobox(
-            T,
+            U,
             textvariable=lang_var,
             values=["auto", "pl", "ua", "en"],
             state=V,
             width=10,
         )
         lang_combo.grid(row=0, column=1, padx=5, pady=2, sticky=T)
-        C.Label(T, text=LOC_PATH_LABEL).grid(row=1, column=0, sticky=R, padx=5, pady=2)
+        C.Label(U, text=LOC_PATH_LABEL).grid(row=1, column=0, sticky=R, padx=5, pady=2)
         loc_var = F.StringVar(value=D.get("loc_path", LC))
-        loc_entry = C.Entry(T, textvariable=loc_var, width=40, state=i_)
+        loc_entry = C.Entry(U, textvariable=loc_var, width=40, state=i_)
         loc_entry.grid(row=1, column=1, padx=5, pady=2, sticky=T)
 
         def browse_loc():
@@ -3198,9 +3205,9 @@ class App(BU.Tk):
             if A_:
                 loc_var.set(A_)
 
-        browse_btn = C.Button(T, text=CHOOSE_LABEL, command=browse_loc, state=V)
+        browse_btn = C.Button(U, text=CHOOSE_LABEL, command=browse_loc, state=V)
         browse_btn.grid(row=1, column=2, padx=5, pady=2)
-        lang_unlock_btn = C.Button(T, text=a)
+        lang_unlock_btn = C.Button(U, text=a)
         lang_unlock_btn.grid(row=2, column=0, sticky=R, padx=5, pady=5)
 
         def unlock_lang():
