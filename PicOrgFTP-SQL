@@ -40,6 +40,7 @@ DEFAULT_CONFIG = {
     "sql_query": SQL_UPDATE_TEMPLATE,
     "enable_ftp_update": True,
     "enable_sql_update": True,
+    "language": "auto",
 }
 # --- Koniec konfiguracji ---
 
@@ -154,7 +155,7 @@ H = "ftp"
 E = Exception
 G = str
 B = ""
-import sys, os as A, subprocess as BH, shutil as Af, getpass, platform as BR
+import sys, os as A, subprocess as BH, shutil as Af, getpass, platform as BR, locale as BO
 from datetime import datetime as A9
 import time as Ag, tempfile, uuid
 from tkinter import scrolledtext as BS
@@ -191,6 +192,7 @@ AD = A.path.join(AC, "config.json")
 AM = A.path.join(AC, "error_log.txt")
 BM = A.path.join(AC, "changes_log.txt")
 AN = A.path.join(AC, "temp_backup")
+LC = A.path.join(AC, "Localization")
 AE = {n: n, t: t, s: s, Y: Y, d: d, W: W}
 BW = [
     "ODBC Driver 18 for SQL Server",
@@ -261,6 +263,7 @@ def load_config():
                 w: B[w],
                 ft: B[ft],
                 u: B[u],
+                "language": B.get("language", "auto"),
             }
             try:
                 A.makedirs(A.path.dirname(config_path), exist_ok=J)
@@ -295,6 +298,7 @@ def load_config():
         B[w] = C.get(w, B[w])
         B[ft] = C.get(ft, B[ft])
         B[u] = C.get(u, B[u])
+        B["language"] = C.get("language", B["language"])
         try:
             save_config(B)
         except E:
@@ -326,12 +330,13 @@ def save_config(config):
         w: A_.get(w, SQL_UPDATE_TEMPLATE),
         ft: A_.get(ft, J),
         u: A_.get(u, J),
+        "language": A_.get("language", "auto"),
     }
     try:
         with x(AD, T, encoding=k) as D_:
             Ar.dump(C_, D_, indent=4)
     except E as B_:
-        O.showerror(AK, f"Nie udało się zapisać pliku konfiguracyjnego:\n{B_}")
+        O.showerror(AK, CONFIG_SAVE_FAILED_MSG.format(error=B_))
         try:
             with x(AM, "a", encoding=k) as F_:
                 F_.write(
@@ -341,7 +346,207 @@ def save_config(config):
             pass
 
 
+def load_localization(language=I):
+    B = language
+    if not B or B == "auto":
+        try:
+            BO.setlocale(BO.LC_ALL, "")
+            B = (BO.getlocale()[0] or "en").split("_")[0]
+        except E:
+            B = "en"
+    C_ = {"pl": "pl.json", "ua": "ua.json", "en": "eng.json"}
+    F = C_.get(B.lower(), "eng.json")
+    paths = [
+        A.path.join(LC, F),
+        A.path.join(A.path.dirname(A.path.abspath(__file__)), "Localization", F),
+    ]
+    for path in paths:
+        if A.path.exists(path):
+            try:
+                with x(path, "r", encoding=k) as D_:
+                    return Ar.load(D_)
+            except E:
+                pass
+    return {}
+
+
 D = load_config()
+LANG = load_localization(D.get("language"))
+LANG_EN = load_localization("en")
+PROCESSING_MSG = LANG.get("processing", PROCESSING_MSG)
+PROCESSING_UI_MSG = LANG.get(
+    "processing_ui", ">>> Processing, please wait..."
+)
+OPERATION_TITLE = LANG.get("operation_title", OPERATION_TITLE)
+NETWORK_ERROR_MSG = LANG.get("network_error", NETWORK_ERROR_MSG)
+PATH_NOT_FOUND_MSG = LANG.get("path_not_found", PATH_NOT_FOUND_MSG)
+LOGIN_DATA_ERROR_MSG = LANG.get("login_data_error", LOGIN_DATA_ERROR_MSG)
+MISSING_FIELDS_MSG = LANG.get("missing_fields", MISSING_FIELDS_MSG)
+INCOMPLETE_DATA_MSG = LANG.get("incomplete_data", INCOMPLETE_DATA_MSG)
+NO_DATA_MSG = LANG.get("no_data", NO_DATA_MSG)
+CANCEL_LABEL = LANG.get("cancel", CANCEL_LABEL)
+SETTINGS_LABEL = LANG.get("settings", SETTINGS_LABEL)
+EDIT_LISTS_LABEL = LANG.get("edit_lists", EDIT_LISTS_LABEL)
+Ac = LANG.get("save_error", Ac)
+AJ = LANG.get("not_in_list", AJ)
+AK = LANG.get("error", AK)
+OPEN_FOLDER_LABEL = LANG.get("open_folder", "Otwórz folder")
+CLEAR_LOG_LABEL = LANG.get("clear_log", "Wyczyść log")
+VALUE_NOT_EXISTS_QUESTION = LANG.get(
+    "value_not_exists_add_question",
+    "Wartość '{value}' nie istnieje na liście dodatków. Dodać do listy?",
+)
+CHANGE_LANGUAGE_LABEL = LANG.get("change_language", "Zmień język")
+LANGUAGE_PROMPT = LANG.get("language_prompt", "Kod języka (pl, ua, eng):")
+RESTART_TO_APPLY_LABEL = LANG.get(
+    "restart_to_apply", "Uruchom ponownie aplikację, aby zastosować zmiany"
+)
+
+CONFIG_SAVE_FAILED_MSG = LANG.get(
+    "config_save_failed",
+    "Nie udało się zapisać pliku konfiguracyjnego:\n{error}",
+)
+LIST_CREATE_FAILED_MSG = LANG.get(
+    "list_create_failed",
+    "Nie udało się utworzyć pliku list.xlsx:\n{error}",
+)
+LIST_SAVE_FAILED_MSG = LANG.get(
+    "list_save_failed",
+    "Nie udało się zapisać pliku list.xlsx:\n{error}",
+)
+LIST_DATA_SAVE_FAILED_MSG = LANG.get(
+    "list_data_save_failed",
+    "Nie udało się zapisać danych do pliku list.xlsx:\n{error}",
+)
+FOLDER_OPEN_FAILED_MSG = LANG.get(
+    "folder_open_failed",
+    "Nie udało się otworzyć folderu:\n{error}",
+)
+OPERATION_ERRORS_MSG = LANG.get(
+    "operation_errors",
+    "Operacja zakończyła się z błędami. Sprawdź logi oraz folder kopii zapasowej: {backup}",
+)
+FTP_SEND_FAILED_MSG = LANG.get(
+    "ftp_send_failed",
+    "Dane lokalne zostały zapisane, jednak wysyłanie plików na serwer FTP nie powiodło się.\nPowód: {reason}",
+)
+FTP_SKIPPED_NO_EAN_MSG = LANG.get(
+    "ftp_skipped_no_ean",
+    "Dane lokalne zostały zapisane, jednak nie wysłano zdjęć na FTP z powodu braku prawidłowego kodu EAN-13.",
+)
+SQL_UPDATE_FAILED_MSG = LANG.get(
+    "sql_update_failed",
+    "Dane lokalne oraz FTP zostały zaktualizowane, jednak wystąpił błąd podczas aktualizacji bazy danych.\nPowód: {reason}",
+)
+SAVED_LABEL = LANG.get("saved", "Zapisano")
+UPDATE_SUCCESS_MSG = LANG.get(
+    "update_success", "Zaktualizowano dane dla EAN {ean}."
+)
+NO_EAN_LABEL = LANG.get("no_ean", "Brak EAN")
+ENTER_EAN_TO_LOAD_MSG = LANG.get(
+    "enter_ean_to_load", "Wprowadź kod EAN, aby wczytać dane."
+)
+CANNOT_SEARCH_NO_EAN_MSG = LANG.get(
+    "cannot_search_no_ean", "Nie można wyszukać danych dla 'BRAK-EAN'."
+)
+NOT_FOUND_LABEL = LANG.get("not_found", "Nie znaleziono")
+NO_SAVED_DATA_FOR_EAN_MSG = LANG.get(
+    "no_saved_data_for_ean", "Brak zapisanych danych dla EAN {ean}."
+)
+FILL_REQUIRED_BEFORE_OPEN_MSG = LANG.get(
+    "fill_required_before_open",
+    "Uzupełnij wszystkie wymagane pola (nazwa, typ, model, kolor 1) przed otwarciem folderu.",
+)
+CHANGE_DATA_ADMIN_LABEL = LANG.get(
+    "change_data_admin", "Zmień dane (Administrator)"
+)
+DATABASE_LABEL = LANG.get("database_label", "Baza danych:")
+SERVER_LABEL = LANG.get("server_label", "Serwer:")
+MSSQL_SERVER_LABEL = LANG.get("mssql_server", "MS SQL Server")
+TEST_BUTTON_LABEL = LANG.get("test_button", "Testuj")
+CONNECTED_LABEL = LANG.get("connected", "Połączono")
+PASSWORD_LABEL = LANG.get("password_label", "Hasło:")
+USER_LABEL = LANG.get("user_label", "Użytkownik:")
+MYSQL_LABEL = LANG.get("mysql_label", "MySQL")
+SAVE_LABEL = LANG.get("save", "Zapisz")
+NO_PERMISSIONS_LABEL = LANG.get("no_permissions", "Brak uprawnień")
+RUN_AS_ADMIN_MSG = LANG.get(
+    "run_as_admin",
+    "Uruchom operację z uprawnieniami administratora, aby edytować te ustawienia.",
+)
+IMAGE_SETTINGS_LABEL = LANG.get(
+    "image_settings", "Ustawienia przetwarzania obrazów:"
+)
+RESIZE_LABEL = LANG.get(
+    "resize_label", "Zmniejszaj obrazy większe niż"
+)
+PX_MAX_LABEL = LANG.get("px_max_label", "px (max wymiar)")
+COMPRESS_LABEL = LANG.get(
+    "compress_label", "Kompresuj JPEG (jakość)"
+)
+LIMIT_SIZE_LABEL = LANG.get(
+    "limit_size_label", "Ogranicz rozmiar pliku do"
+)
+CONVERT_TIF_LABEL = LANG.get(
+    "convert_tif_label", "Konwertuj .tif na"
+)
+FTP_SERVER_LABEL = LANG.get("ftp_server_label", "Serwer FTP:")
+PORT_LABEL = LANG.get("port_label", "Port:")
+FTP_PATH_LABEL = LANG.get(
+    "ftp_path_label", "Ścieżka (katalog) na serwerze:"
+)
+FTP_TEST_LABEL = LANG.get(
+    "ftp_test_label", "Test połączenia FTP:"
+)
+FTP_UPDATE_LABEL = LANG.get(
+    "ftp_update_label", "Aktualizuj pliki na FTP:"
+)
+DB_TYPE_LABEL = LANG.get("db_type_label", "Typ bazy danych:")
+SQL_UPDATE_LABEL = LANG.get(
+    "sql_update_label", "Aktualizuj bazę przy zapisie:"
+)
+SQL_QUERY_LABEL = LANG.get("sql_query_label", "Zapytanie SQL:")
+SQL_TEST_LABEL = LANG.get("sql_test_label", "Test połączenia SQL:")
+NAME_LABEL = LANG.get("name_label", "Nazwa mebla*:")
+TYPE_LABEL = LANG.get("type_label", "Typ mebla*:")
+MODEL_LABEL = LANG.get("model_label", "Model mebla*:")
+COLOR1_LABEL = LANG.get("color1_label", "Kolor 1*:")
+COLOR2_LABEL = LANG.get("color2_label", "Kolor 2:")
+COLOR3_LABEL = LANG.get("color3_label", "Kolor 3:")
+EXTRA_LABEL = LANG.get("extra_label", "Dodatkowe:")
+EAN_OPTIONAL_LABEL = LANG.get(
+    "ean_optional_label", "EAN (opcjonalnie):"
+)
+LOAD_LABEL = LANG.get("load_label", "Wczytaj")
+UPDATE_LABEL = LANG.get("update_label", "Aktualizuj")
+CHOOSE_LABEL = LANG.get("choose_label", "Wybierz")
+NEW_COMBINATION_LABEL = LANG.get("new_combination_label", "Nowa kombinacja")
+FTP_ERROR_LABEL = LANG.get("ftp_error", "Błąd FTP")
+SQL_ERROR_LABEL = LANG.get("sql_error", "Błąd SQL")
+IMAGES_TAB_LABEL = LANG.get("images_tab", "Obrazy")
+FTP_TAB_LABEL = LANG.get("ftp_tab", "FTP")
+SQL_TAB_LABEL = LANG.get("sql_tab", "SQL")
+WARNING_LABEL = LANG.get("warning", "Uwaga")
+SELECT_COMBINATION_TITLE = LANG.get(
+    "select_combination_title", "Wybierz istniejącą kombinację"
+)
+SELECT_COMBINATION_PROMPT = LANG.get(
+    "select_combination_prompt",
+    "Wybierz istniejącą kombinację kolorów:",
+)
+SELECT_FILE_TITLE = LANG.get("select_file_title", "Wybierz plik")
+OTHER_ERROR_MSG = LANG.get("other_error", "Inny błąd: {error}")
+FTP_GENERIC_ERROR_MSG = LANG.get("ftp_generic_error", "Błąd FTP: {error}")
+FILL_REQUIRED_BEFORE_SUBMIT_MSG = LANG.get(
+    "fill_required_before_submit",
+    "Uzupełnij wszystkie wymagane pola oznaczone * przed zatwierdzeniem.",
+)
+EAN_PROMPT_TITLE = LANG.get("ean_prompt_title", "EAN")
+EAN_MISSING_PROMPT = LANG.get(
+    "ean_missing_prompt",
+    "Nie podano EAN.\nWprowadź kod EAN (13 cyfr) lub pozostaw puste aby użyć 'BRAK-EAN':",
+)
+APP_TITLE = LANG.get("app_title", "Katalogowanie zdjęć mebli")
 
 
 def rotate_log(path, max_bytes=1073741824, backups=3):
@@ -367,7 +572,7 @@ def rotate_log(path, max_bytes=1073741824, backups=3):
         pass
 
 
-def log_error(message):
+def log_error(message, ui_message=None):
     A_ = message
     try:
         rotate_log(AM)
@@ -379,14 +584,14 @@ def log_error(message):
     try:
         if AG:
             if threading.current_thread() != threading.main_thread():
-                AG.after(0, lambda msg=A_: AG._ui_log(f"❗ {msg}"))
+                AG.after(0, lambda msg=(ui_message or A_): AG._ui_log(f"❗ {msg}"))
             else:
-                AG._ui_log(f"❗ {A_}")
+                AG._ui_log(f"❗ {ui_message or A_}")
     except E:
         pass
 
 
-def log_info(message):
+def log_info(message, ui_message=None):
     A_ = message
     try:
         rotate_log(BM)
@@ -398,11 +603,23 @@ def log_info(message):
     try:
         if AG:
             if threading.current_thread() != threading.main_thread():
-                AG.after(0, lambda msg=A_: AG._ui_log(f"• {msg}"))
+                AG.after(0, lambda msg=(ui_message or A_): AG._ui_log(f"• {msg}"))
             else:
-                AG._ui_log(f"• {A_}")
+                AG._ui_log(f"• {ui_message or A_}")
     except E:
         pass
+
+
+def log_error_loc(key, **kwargs):
+    file_msg = LANG_EN.get(key, key).format(**kwargs)
+    ui_msg = LANG.get(key, file_msg).format(**kwargs)
+    log_error(file_msg, ui_msg)
+
+
+def log_info_loc(key, **kwargs):
+    file_msg = LANG_EN.get(key, key).format(**kwargs)
+    ui_msg = LANG.get(key, file_msg).format(**kwargs)
+    log_info(file_msg, ui_msg)
 
 
 def is_admin():
@@ -528,8 +745,8 @@ def prepare_excel_lists():
         try:
             F.save(o)
         except E as V_:
-            O.showerror(AK, f"Nie udało się utworzyć pliku list.xlsx:\n{V_}")
-            log_error(f"Nie udało się utworzyć pliku Excel: {V_}")
+            O.showerror(AK, LIST_CREATE_FAILED_MSG.format(error=V_))
+            log_error_loc("excel_create_failed", error=V_)
     F = Ah(o)
     L_ = {}
     for D_ in AE.values():
@@ -584,9 +801,14 @@ def add_to_list(sheet_name, value):
         D_ = f"przez użytkownika '{C_}'" if Aq(C_, G) else Ap
         O.showerror(
             Ao,
-            f"Nie można zapisać listy. Plik Excel jest otwarty {D_}. Zamknij plik i spróbuj ponownie.",
+            LANG.get(
+                "excel_file_open",
+                f"Nie można zapisać listy. Plik Excel jest otwarty {D_}. Zamknij plik i spróbuj ponownie.",
+            ).format(reason=D_),
         )
-        log_error(f"Próba dodania '{A_}' do listy {B_}, plik Excel zablokowany {D_}.")
+        log_error_loc(
+            "excel_add_locked", value=A_, list=B_, reason=D_
+        )
         return
     F = Ah(o)
     H = F[B_]
@@ -596,12 +818,12 @@ def add_to_list(sheet_name, value):
         try:
             F.save(o)
         except E as I_:
-            O.showerror(Ac, f"Nie udało się zapisać pliku list.xlsx:\n{I_}")
-            log_error(
-                f"Nie udało się zapisać pliku Excel (dodawanie {A_} do {B_}): {I_}"
+            O.showerror(Ac, LIST_SAVE_FAILED_MSG.format(error=I_))
+            log_error_loc(
+                "excel_add_save_failed", value=A_, list=B_, error=I_
             )
             return
-        log_info(f"Dodano wartość '{A_}' do listy {B_}.")
+        log_info_loc("list_value_added", value=A_, list=B_)
 
 
 def remove_from_list(sheet_name, value):
@@ -612,9 +834,14 @@ def remove_from_list(sheet_name, value):
         F_ = f"przez użytkownika '{C_}'" if Aq(C_, G) else Ap
         O.showerror(
             Ao,
-            f"Nie można zapisać listy. Plik Excel jest otwarty {F_}. Zamknij plik i spróbuj ponownie.",
+            LANG.get(
+                "excel_file_open",
+                f"Nie można zapisać listy. Plik Excel jest otwarty {F_}. Zamknij plik i spróbuj ponownie.",
+            ).format(reason=F_),
         )
-        log_error(f"Próba usunięcia '{A_}' z listy {B_}, plik Excel zablokowany {F_}.")
+        log_error_loc(
+            "excel_remove_locked", value=A_, list=B_, reason=F_
+        )
         return
     H = Ah(o)
     I_ = H[B_]
@@ -626,10 +853,12 @@ def remove_from_list(sheet_name, value):
     try:
         H.save(o)
     except E as J_:
-        O.showerror(Ac, f"Nie udało się zapisać pliku list.xlsx:\n{J_}")
-        log_error(f"Nie udało się zapisać pliku Excel (usuwanie {A_} z {B_}): {J_}")
+        O.showerror(Ac, LIST_SAVE_FAILED_MSG.format(error=J_))
+        log_error_loc(
+            "excel_remove_save_failed", value=A_, list=B_, error=J_
+        )
         return
-    log_info(f"Usunięto wartość '{A_}' z listy {B_}.")
+    log_info_loc("list_value_removed", value=A_, list=B_)
 
 
 def save_ean_entry(ean, name, typ, model, col1, col2, col3, extra):
@@ -645,9 +874,14 @@ def save_ean_entry(ean, name, typ, model, col1, col2, col3, extra):
         i_ = f"przez użytkownika '{X_}'" if Aq(X_, G) else Ap
         O.showerror(
             Ao,
-            f"Nie można zapisać danych. Plik Excel jest otwarty {i_}. Zamknij plik i spróbuj ponownie.",
+            LANG.get(
+                "excel_data_file_open",
+                f"Nie można zapisać danych. Plik Excel jest otwarty {i_}. Zamknij plik i spróbuj ponownie.",
+            ).format(reason=i_),
         )
-        log_error(f"Próba zapisu wpisu EAN {R}, plik Excel zablokowany {i_}.")
+        log_error_loc(
+            "excel_entry_save_locked", ean=R, reason=i_
+        )
         return h
     j = Ah(o)
     V = j[AE[W]]
@@ -756,8 +990,10 @@ def save_ean_entry(ean, name, typ, model, col1, col2, col3, extra):
     try:
         j.save(o)
     except E as k_:
-        O.showerror(Ac, f"Nie udało się zapisać danych do pliku list.xlsx:\n{k_}")
-        log_error(f"Nie udało się zapisać wpisu EAN {R} do Excel: {k_}")
+        O.showerror(Ac, LIST_DATA_SAVE_FAILED_MSG.format(error=k_))
+        log_error_loc(
+            "excel_entry_save_failed", ean=R, error=k_
+        )
         return h
     return J
 
@@ -802,7 +1038,7 @@ def connect_db():
 class App(BU.Tk):
     def __init__(B):
         super().__init__()
-        B.title("Katalogowanie zdjęć mebli")
+        B.title(APP_TITLE)
         B.geometry("1200x800")
         B.style = C.Style()
         B.style.theme_use("clam")
@@ -859,11 +1095,14 @@ class App(BU.Tk):
         E_ = "<Return>"
         B_ = C.Frame(A)
         B_.pack(side="top", fill="x", padx=10, pady=10)
-        G_ = C.Label(B_, text="Nazwa mebla*:")
+        G_ = C.Label(B_, text=NAME_LABEL)
         G_.grid(row=0, column=0, sticky=R)
         A._add_tooltip(
             G_,
-            "Pełna nazwa mebla bez kolorów, typu i modelu, np: 'Maggiore', 'LUNA', 'SLANT'.",
+            LANG.get(
+                "name_tooltip",
+                "Pełna nazwa mebla bez kolorów, typu i modelu, np: 'Maggiore', 'LUNA', 'SLANT'.",
+            ),
         )
         A.combo_name = C.Combobox(
             B_, textvariable=A.var_name, values=A.lists[n], state=X
@@ -873,11 +1112,14 @@ class App(BU.Tk):
         A.combo_name.bind(A2, lambda e: A._on_name_commit())
         A.combo_name.bind(F_, lambda e: A._on_name_commit())
         A.combo_name.bind(D_, A._on_key_release)
-        H_ = C.Label(B_, text="Typ mebla*:")
+        H_ = C.Label(B_, text=TYPE_LABEL)
         H_.grid(row=1, column=0, sticky=R)
         A._add_tooltip(
             H_,
-            "Typ mebla, np: 'KOMODA', 'RTV', 'STÓŁ' (można dodać długość, np. 'RTV 100', 'SZAFA 80').",
+            LANG.get(
+                "type_tooltip",
+                "Typ mebla, np: 'KOMODA', 'RTV', 'STÓŁ' (można dodać długość, np. 'RTV 100', 'SZAFA 80').",
+            ),
         )
         A.combo_type = C.Combobox(
             B_, textvariable=A.var_type, values=A.lists[t], state=V
@@ -887,9 +1129,15 @@ class App(BU.Tk):
         A.combo_type.bind(A2, lambda e: A._on_type_commit())
         A.combo_type.bind(F_, lambda e: A._on_type_commit())
         A.combo_type.bind(D_, A._on_key_release)
-        I_ = C.Label(B_, text="Model mebla*:")
+        I_ = C.Label(B_, text=MODEL_LABEL)
         I_.grid(row=2, column=0, sticky=R)
-        A._add_tooltip(I_, "Model lub wersja mebla, np: 'MA03', 'Li01', 'SOL-05'.")
+        A._add_tooltip(
+            I_,
+            LANG.get(
+                "model_tooltip",
+                "Model lub wersja mebla, np: 'MA03', 'Li01', 'SOL-05'.",
+            ),
+        )
         A.combo_model = C.Combobox(
             B_, textvariable=A.var_model, values=A.lists[s], state=V
         )
@@ -897,9 +1145,11 @@ class App(BU.Tk):
         A.combo_model.bind(E_, lambda e: A._on_model_commit())
         A.combo_model.bind(A2, lambda e: A._on_model_commit())
         A.combo_model.bind(D_, A._on_key_release)
-        J_ = C.Label(B_, text="Kolor 1*:")
+        J_ = C.Label(B_, text=COLOR1_LABEL)
         J_.grid(row=3, column=0, sticky=R)
-        A._add_tooltip(J_, "Główny kolor mebla (wymagany).")
+        A._add_tooltip(
+            J_, LANG.get("color1_tooltip", "Główny kolor mebla (wymagany).")
+        )
         A.combo_color1 = C.Combobox(
             B_, textvariable=A.var_color1, values=A.lists[Y], state=V
         )
@@ -908,9 +1158,11 @@ class App(BU.Tk):
         A.combo_color1.bind(A2, lambda e: A._on_color_commit())
         A.combo_color1.bind(F_, lambda e: A._on_color_commit())
         A.combo_color1.bind(D_, A._on_key_release)
-        K_ = C.Label(B_, text="Kolor 2:")
+        K_ = C.Label(B_, text=COLOR2_LABEL)
         K_.grid(row=4, column=0, sticky=R)
-        A._add_tooltip(K_, "Drugi kolor mebla (opcjonalnie).")
+        A._add_tooltip(
+            K_, LANG.get("color2_tooltip", "Drugi kolor mebla (opcjonalnie).")
+        )
         A.combo_color2 = C.Combobox(
             B_, textvariable=A.var_color2, values=A.lists[Y], state=V
         )
@@ -919,9 +1171,11 @@ class App(BU.Tk):
         A.combo_color2.bind(A2, lambda e: A._on_color_commit())
         A.combo_color2.bind(F_, lambda e: A._on_color_commit())
         A.combo_color2.bind(D_, A._on_key_release)
-        L_ = C.Label(B_, text="Kolor 3:")
+        L_ = C.Label(B_, text=COLOR3_LABEL)
         L_.grid(row=5, column=0, sticky=R)
-        A._add_tooltip(L_, "Trzeci kolor mebla (opcjonalnie).")
+        A._add_tooltip(
+            L_, LANG.get("color3_tooltip", "Trzeci kolor mebla (opcjonalnie).")
+        )
         A.combo_color3 = C.Combobox(
             B_, textvariable=A.var_color3, values=A.lists[Y], state=V
         )
@@ -930,11 +1184,14 @@ class App(BU.Tk):
         A.combo_color3.bind(A2, lambda e: A._on_color_commit())
         A.combo_color3.bind(F_, lambda e: A._on_color_commit())
         A.combo_color3.bind(D_, A._on_key_release)
-        M_ = C.Label(B_, text="Dodatkowe:")
+        M_ = C.Label(B_, text=EXTRA_LABEL)
         M_.grid(row=6, column=0, sticky=R)
         A._add_tooltip(
             M_,
-            "Dodatkowe informacje, np. LED, RGB (pozostaw puste, jeśli brak dodatków).",
+            LANG.get(
+                "extra_tooltip",
+                "Dodatkowe informacje, np. LED, RGB (pozostaw puste, jeśli brak dodatków).",
+            ),
         )
         A.combo_extra = C.Combobox(
             B_, textvariable=A.var_extra, values=A.lists[d], state=V
@@ -944,27 +1201,30 @@ class App(BU.Tk):
         A.combo_extra.bind(A2, lambda e: A._on_extra_commit())
         A.combo_extra.bind(F_, lambda e: A._on_extra_commit())
         A.combo_extra.bind(D_, A._on_key_release)
-        N_ = C.Label(B_, text="EAN (opcjonalnie):")
+        N_ = C.Label(B_, text=EAN_OPTIONAL_LABEL)
         N_.grid(row=7, column=0, sticky=R)
         A._add_tooltip(
             N_,
-            "13-cyfrowy kod EAN produktu. Jeśli nie podany, zostanie użyte 'BRAK-EAN'.",
+            LANG.get(
+                "ean_tooltip",
+                "13-cyfrowy kod EAN produktu. Jeśli nie podany, zostanie użyte 'BRAK-EAN'.",
+            ),
         )
         A.entry_ean = C.Entry(B_, textvariable=A.var_ean, state=X)
         A.entry_ean.grid(row=7, column=1, padx=5, pady=2)
-        O_ = C.Button(B_, text="Wczytaj", command=A._load_by_ean)
+        O_ = C.Button(B_, text=LOAD_LABEL, command=A._load_by_ean)
         O_.grid(row=7, column=2, padx=5, pady=2)
         P_ = C.Button(B_, text=EDIT_LISTS_LABEL, command=A._open_list_editor)
         P_.grid(row=0, column=2, padx=20)
         Q_ = C.Button(B_, text=SETTINGS_LABEL, command=A._open_settings)
         Q_.grid(row=0, column=3, padx=5)
-        A.btn_submit = C.Button(B_, text="Aktualizuj", command=A._on_submit)
+        A.btn_submit = C.Button(B_, text=UPDATE_LABEL, command=A._on_submit)
         A.btn_submit.grid(row=8, column=0, columnspan=2, pady=10)
-        A.btn_open = C.Button(B_, text="Otwórz folder", command=A._open_current_folder)
+        A.btn_open = C.Button(B_, text=OPEN_FOLDER_LABEL, command=A._open_current_folder)
         A.btn_open.grid(row=8, column=2, padx=5, pady=10)
         A.ui_log = BS.ScrolledText(B_, width=48, height=8, state=Ak, wrap="word")
         A.ui_log.grid(row=0, column=4, rowspan=9, padx=10, sticky="nsew")
-        S_ = C.Button(B_, text="Wyczyść log", command=lambda: A._ui_log(clear=Al))
+        S_ = C.Button(B_, text=CLEAR_LOG_LABEL, command=lambda: A._ui_log(clear=Al))
         S_.grid(row=8, column=3, padx=5, pady=10, sticky="e")
         B_.grid_columnconfigure(4, weight=1)
 
@@ -1187,7 +1447,10 @@ class App(BU.Tk):
                 S_.append(b_)
             h_ = g.join(S_)
             F = A.path.join(F, h_)
-        I_ = C.var_extra.get().strip()
+        I_raw = C.var_extra.get()
+        if isinstance(I_raw, dict):
+            I_raw = B
+        I_ = G(I_raw).strip()
         I_ = I_.replace(a, g)
         if I_ == B:
             I_ = L
@@ -1272,8 +1535,10 @@ class App(BU.Tk):
                 except E as T:
                     log_error(f"FTP check error for EAN {K_}: {T}")
                 if not C.logged_counts:
-                    log_info(
-                        f"Znaleziono zdjęcia: Lokalne = {Q(original_files)} / FTP = {Q(remote_files)}"
+                    log_info_loc(
+                        "found_images_counts",
+                        local=Q(original_files),
+                        ftp=Q(remote_files),
                     )
                     C.logged_counts = J
             C.after(
@@ -1394,9 +1659,9 @@ class App(BU.Tk):
                     return
                 D.model_select_win_open = J
                 P_ = F.Toplevel(D)
-                P_.title("Wybierz istniejącą kombinację")
+                P_.title(SELECT_COMBINATION_TITLE)
                 P_.grab_set()
-                F.Label(P_, text="Wybierz istniejącą kombinację kolorów:").pack(pady=5)
+                F.Label(P_, text=SELECT_COMBINATION_PROMPT).pack(pady=5)
                 v = C.Frame(P_)
                 v.pack(padx=10, fill=z, expand=J)
                 m = []
@@ -1435,8 +1700,8 @@ class App(BU.Tk):
 
                 n = C.Frame(P_)
                 n.pack(pady=5)
-                C.Button(n, text="Wybierz", command=AG_).grid(row=0, column=0, padx=5)
-                C.Button(n, text="Nowa kombinacja", command=AH_).grid(
+                C.Button(n, text=CHOOSE_LABEL, command=AG_).grid(row=0, column=0, padx=5)
+                C.Button(n, text=NEW_COMBINATION_LABEL, command=AH_).grid(
                     row=0, column=1, padx=5
                 )
                 C.Button(n, text=CANCEL_LABEL, command=lambda: P_.destroy()).grid(
@@ -1624,7 +1889,8 @@ class App(BU.Tk):
         C.entry_ean.configure(state=X)
         C.btn_submit.configure(state=X)
         C.btn_open.configure(state=X)
-        C.var_extra.set(C.var_extra.get().strip())
+        extra_raw = C.var_extra.get()
+        C.var_extra.set(G(extra_raw).strip())
         if not C.suppress_scan:
             C._load_existing_files()
 
@@ -1642,7 +1908,7 @@ class App(BU.Tk):
             if D_.upper() not in [A.upper() for A in C.lists[d]]:
                 if O.askyesno(
                     AJ,
-                    f"Wartość '{D_}' nie istnieje na liście dodatków. Dodać do listy?",
+                    VALUE_NOT_EXISTS_QUESTION.format(value=D_),
                 ):
                     M_ = C._open_list_editor(d)
                     C.wait_window(M_)
@@ -1691,7 +1957,7 @@ class App(BU.Tk):
             ("Obrazy/PDF/DOC", "*.jpg *.jpeg *.png *.pdf *.doc *.docx"),
             ("Wszystkie pliki", "*.*"),
         ]
-        B_ = BT.askopenfilename(title="Wybierz plik", filetypes=C_)
+        B_ = BT.askopenfilename(title=SELECT_FILE_TITLE, filetypes=C_)
         if B_:
             A._add_file_to_slot(idx, B_)
 
@@ -1946,15 +2212,15 @@ class App(BU.Tk):
         ):
             O.showwarning(
                 NO_DATA_MSG,
-                "Uzupełnij wszystkie wymagane pola oznaczone * przed zatwierdzeniem.",
+                FILL_REQUIRED_BEFORE_SUBMIT_MSG,
             )
             return
         if C.var_extra.get().strip() == B:
             C.var_extra.set(L)
         if not C.var_ean.get().strip():
             Ai_ = BI.askstring(
-                "EAN",
-                "Nie podano EAN.\nWprowadź kod EAN (13 cyfr) lub pozostaw puste aby użyć 'BRAK-EAN':",
+                EAN_PROMPT_TITLE,
+                EAN_MISSING_PROMPT,
             )
             if Ai_ is I or Ai_.strip() == B:
                 Ai_ = q
@@ -2002,7 +2268,7 @@ class App(BU.Tk):
             except:
                 pass
         C.ui_log.configure(state=Az)
-        C.ui_log.insert(F.END, ">>> Trwa przetwarzanie, proszę czekać...\n")
+        C.ui_log.insert(F.END, PROCESSING_UI_MSG + "\n")
         C.ui_log.configure(state=Ak)
         result_data = {}
 
@@ -2040,7 +2306,7 @@ class App(BU.Tk):
                         Af.rmtree(AN)
                     A.makedirs(AN, exist_ok=J)
                 except E as R:
-                    log_error(f"Nie udało się przygotować folderu kopii zapasowej: {R}")
+                    log_error_loc("backup_folder_failed", error=R)
                 backed_up = []
                 for T in set(C.pending_deletions.values()):
                     if T and A.path.isfile(T):
@@ -2048,11 +2314,15 @@ class App(BU.Tk):
                             Af.copy2(T, A.path.join(AN, A.path.basename(T)))
                             backed_up.append(A.path.basename(T))
                         except E as R:
-                            log_error(
-                                f"Nie udało się wykonać kopii zapasowej pliku {A.path.basename(T)}: {R}"
+                            log_error_loc(
+                                "backup_file_failed",
+                                file=A.path.basename(T),
+                                error=R,
                             )
                 if backed_up:
-                    log_info(f"Wykonano kopię zapasową plików: {AI.join(backed_up)}")
+                    log_info_loc(
+                        "backup_files_done", files=AI.join(backed_up)
+                    )
                 if C.ftp_remote_only:
                     for label, info in C.ftp_remote_only.items():
                         for idx, slot in A0(C.slots):
@@ -2078,12 +2348,20 @@ class App(BU.Tk):
                                 dest = A.path.join(i_, c_)
                                 try:
                                     Af.copy2(info["temp_path"], dest)
-                                    log_info(f"Pobrano plik {info['filename']} z FTP jako {c_}")
+                                    log_info_loc(
+                                        "ftp_file_downloaded",
+                                        file=info["filename"],
+                                        temp=c_,
+                                    )
                                     files_to_upload.append(c_)
                                     C.slots[idx][f] = dest
                                     C.ftp_downloaded_final.add(c_)
                                 except E as R:
-                                    log_error(f"Błąd zapisu pliku {info['filename']}: {R}")
+                                    log_error_loc(
+                                        "file_save_error",
+                                        file=info["filename"],
+                                        error=R,
+                                    )
                                 break
                     C.ftp_remote_only = {}
                 AJ_ = set(C.pending_additions.keys())
@@ -2148,26 +2426,33 @@ class App(BU.Tk):
                                 try:
                                     if A.path.exists(old_path):
                                         A.remove(old_path)
-                                        log_info(
-                                            f"Usunięto plik {A.path.basename(old_path)} (przed dodaniem nowego)"
+                                        log_info_loc(
+                                            "deleted_file_before_add",
+                                            file=A.path.basename(old_path),
                                         )
                                 except E as z:
-                                    log_error(
-                                        f"Nie udało się usunąć starego pliku {A.path.basename(old_path)}: {z}"
+                                    log_error_loc(
+                                        "remove_old_file_failed",
+                                        file=A.path.basename(old_path),
+                                        error=z,
                                     )
                             elif A.path.exists(S_):
                                 try:
                                     A.remove(S_)
                                 except E as z:
-                                    log_error(
-                                        f"Nie udało się usunąć pliku {A.path.basename(S_)} przed nadpisaniem: {z}"
+                                    log_error_loc(
+                                        "remove_file_before_overwrite_failed",
+                                        file=A.path.basename(S_),
+                                        error=z,
                                     )
                         elif A.path.exists(S_):
                             try:
                                 A.remove(S_)
                             except E as z:
-                                log_error(
-                                    f"Nie udało się usunąć pliku {A.path.basename(S_)} przed nadpisaniem: {z}"
+                                log_error_loc(
+                                    "remove_file_before_overwrite_failed",
+                                    file=A.path.basename(S_),
+                                    error=z,
                                 )
                         ext_lower = BH_.lower()
                         if ext_lower in [F, O, V, ".bmp", ".gif"]:
@@ -2203,10 +2488,12 @@ class App(BU.Tk):
                                                 quality -= 5
                                                 A1.save(S_, quality=quality, optimize=J)
                                         except E as R:
-                                            log_error(
-                                                f"Błąd zmniejszania rozmiaru pliku {c_}: {R}"
+                                            log_error_loc(
+                                                "file_resize_error",
+                                                file=c_,
+                                                error=R,
                                             )
-                            log_info(f"Dodano/zmodyfikowano obraz {c_}")
+                            log_info_loc("image_added_modified", file=c_)
                         elif ext_lower in [".tif", ".tiff"]:
                             if C.opt_convert_tif.get():
                                 target_fmt = C.tif_target_format.get().upper()
@@ -2226,8 +2513,10 @@ class App(BU.Tk):
                                     try:
                                         A.remove(S_)
                                     except E as z:
-                                        log_error(
-                                            f"Nie udało się usunąć pliku {A.path.basename(S_)} przed nadpisaniem: {z}"
+                                        log_error_loc(
+                                            "remove_file_before_overwrite_failed",
+                                            file=A.path.basename(S_),
+                                            error=z,
                                         )
                                 A1 = AA.open(src_path)
                                 if C.opt_resize.get():
@@ -2257,21 +2546,25 @@ class App(BU.Tk):
                                                 quality -= 5
                                                 A1.save(S_, quality=quality, optimize=J)
                                         except E as R:
-                                            log_error(
-                                                f"Błąd zmniejszania rozmiaru pliku {c_}: {R}"
+                                            log_error_loc(
+                                                "file_resize_error",
+                                                file=c_,
+                                                error=R,
                                             )
-                                log_info(f"Dodano/zmodyfikowano obraz {c_}")
+                                log_info_loc("image_added_modified", file=c_)
                             else:
                                 Af.copy2(src_path, S_)
-                                log_info(f"Dodano/zmodyfikowano plik {c_}")
+                                log_info_loc("file_added_modified", file=c_)
                         else:
                             Af.copy2(src_path, S_)
-                            log_info(f"Dodano/zmodyfikowano plik {c_}")
+                            log_info_loc("file_added_modified", file=c_)
                         files_to_upload.append(c_)
                         C.slots[F_][f] = S_
                     except E as y:
-                        log_error(
-                            f"Nie udało się skopiować pliku {A.path.basename(src_path)}: {y}"
+                        log_error_loc(
+                            "file_copy_failed",
+                            file=A.path.basename(src_path),
+                            error=y,
                         )
                         result_data[K].add(F_)
                         BE_[F_] = src_path
@@ -2299,7 +2592,9 @@ class App(BU.Tk):
                                 if A.path.exists(new_path):
                                     A.remove(new_path)
                                 A.rename(path, new_path)
-                                log_info(f"Zmieniono nazwę pliku {X_} na {new_name}")
+                                log_info_loc(
+                                    "file_renamed", old=X_, new=new_name
+                                )
                                 for F_, d_ in A0(C.slots):
                                     if d_[f] and A.path.basename(d_[f]) == X_:
                                         C.slots[F_][f] = new_path
@@ -2308,7 +2603,9 @@ class App(BU.Tk):
                                     Bh_ = files_to_upload.index(X_)
                                     files_to_upload[Bh_] = new_name
                             except E as y:
-                                log_error(f"Błąd zmiany nazw plików na EAN {K_}: {y}")
+                                log_error_loc(
+                                    "file_rename_error", ean=K_, error=y
+                                )
                                 for i, d_ in A0(C.slots):
                                     if d_[f] and A.path.basename(d_[f]) == X_:
                                         result_data[K].add(i)
@@ -2341,7 +2638,9 @@ class App(BU.Tk):
                     try:
                         if A.path.isfile(T):
                             A.remove(T)
-                            log_info(f"Usunięto plik {A.path.basename(T)}")
+                            log_info_loc(
+                                "file_deleted", file=A.path.basename(T)
+                            )
                             BO_ = A.path.basename(T)
                             P_ = BO_.split(a)
                             if Q(P_) >= 2:
@@ -2351,8 +2650,10 @@ class App(BU.Tk):
                                 if An_ and Q(An_) == 13 and An_.isdigit():
                                     BM_.append(f"{An_}_{Bi}{Bj}")
                     except E as y:
-                        log_error(
-                            f"Nie udało się usunąć pliku {A.path.basename(T)}: {y}"
+                        log_error_loc(
+                            "file_delete_failed",
+                            file=A.path.basename(T),
+                            error=y,
                         )
                         result_data[K].add(F_)
                         Am_[F_] = T
@@ -2376,7 +2677,7 @@ class App(BU.Tk):
                     if not (K_ and Q(K_) == 13 and K_.isdigit()):
                         A__ = J
                     elif not D.get(ft, J):
-                        log_info("Pominięto wysyłanie plików na FTP (wyłączone w ustawieniach).")
+                        log_info_loc("ftp_upload_skipped_settings")
                     else:
                         ftp = AB.FTP()
                         try:
@@ -2412,8 +2713,8 @@ class App(BU.Tk):
                                 ftp_error = h
                                 for X_ in files_local:
                                     if X_ in C.ftp_downloaded_final:
-                                        log_info(
-                                            f"Pominięto wysyłanie pliku {X_} (pobrano z FTP)"
+                                        log_info_loc(
+                                            "ftp_upload_skipped_downloaded", file=X_
                                         )
                                         continue
                                     P_ = X_.split(a)
@@ -2428,13 +2729,15 @@ class App(BU.Tk):
                                         with x(Bn, "rb") as Bo:
                                             ftp.storbinary(f"STOR {BT}", Bo)
                                             BQ += 1
-                                            log_info(
-                                                f"Wysłano plik {X_} jako {BT} na FTP"
+                                            log_info_loc(
+                                                "ftp_file_uploaded", file=X_, target=BT
                                             )
                                     except E as AU:
                                         Y_ = f"Błąd wysyłania pliku {X_}: {AU}"
-                                        log_error(
-                                            f"Błąd wysyłania pliku {X_} na FTP: {AU}"
+                                        log_error_loc(
+                                            "ftp_upload_error_file",
+                                            file=X_,
+                                            error=AU,
                                         )
                                         ftp_error = J
                                         break
@@ -2444,17 +2747,22 @@ class App(BU.Tk):
                                         try:
                                             ftp.delete(AV_)
                                             BR_ += 1
-                                            log_info(f"Usunięto plik {AV_} na FTP")
+                                            log_info_loc(
+                                                "ftp_file_deleted", file=AV_
+                                            )
                                         except E as AU:
                                             Bp = G(AU)
                                             if As in Bp:
-                                                log_info(
-                                                    f"Plik {AV_} nie istnieje na FTP (nie było potrzeby usuwać)"
+                                                log_info_loc(
+                                                    "ftp_file_missing_no_delete",
+                                                    file=AV_,
                                                 )
                                             else:
                                                 Ap.append(AV_)
-                                                log_error(
-                                                    f"Nie udało się usunąć pliku {AV_} na FTP: {AU}"
+                                                log_error_loc(
+                                                    "ftp_delete_error",
+                                                    file=AV_,
+                                                    error=AU,
                                                 )
                                     if Ap:
                                         if not Y_:
@@ -2530,9 +2838,10 @@ class App(BU.Tk):
                         if Aq_ > 0:
                             conn.commit()
                             if Aq_:
-                                log_info(
-                                    f"Zaktualizowano bazę danych dla EAN {K_}: "
-                                    + AI.join([f"{B3_} = ..." for B3_ in []])
+                                log_info_loc(
+                                    "db_update_success_log",
+                                    ean=K_,
+                                    cols=AI.join([f"{B3_} = ..." for B3_ in []]),
                                 )
                         cur.close()
                         conn.close()
@@ -2559,7 +2868,9 @@ class App(BU.Tk):
                 result_data[j] = CANCEL_LABEL
                 result_data[S] = INCOMPLETE_DATA_MSG
             except E as exc:
-                log_error(f"Nieoczekiwany błąd podczas przetwarzania: {exc}")
+                log_error_loc(
+                    "processing_unexpected_error", error=exc
+                )
                 result_data[K] = set(range(len(C.slots)))
                 result_data[Y] = "Operacja przerwana z powodu błędu."
                 result_data[P] = G(exc)
@@ -2579,7 +2890,7 @@ class App(BU.Tk):
         C.after(100, check_thread)
 
         def finalize():
-            A = "Uwaga"
+            A = WARNING_LABEL
             for widget in [
                 C.combo_name,
                 C.combo_type,
@@ -2630,54 +2941,79 @@ class App(BU.Tk):
             if err_set:
                 O.showwarning(
                     A,
-                    f"Operacja zakończyła się z błędami. Sprawdź logi oraz folder kopii zapasowej: {AN}",
+                    OPERATION_ERRORS_MSG.format(backup=AN),
                 )
             elif Y_:
                 O.showerror(
-                    "Błąd FTP",
-                    f"Dane lokalne zostały zapisane, jednak wysyłanie plików na serwer FTP nie powiodło się.\nPowód: {Y_}",
+                    FTP_ERROR_LABEL,
+                    FTP_SEND_FAILED_MSG.format(reason=Y_),
                 )
             elif A__:
                 O.showwarning(
                     A,
-                    "Dane lokalne zostały zapisane, jednak nie wysłano zdjęć na FTP z powodu braku prawidłowego kodu EAN-13.",
+                    FTP_SKIPPED_NO_EAN_MSG,
                 )
             elif result_data[P]:
                 O.showerror(
-                    "Błąd SQL",
-                    f"Dane lokalne oraz FTP zostały zaktualizowane, jednak wystąpił błąd podczas aktualizacji bazy danych.\nPowód: {result_data[P]}",
+                    SQL_ERROR_LABEL,
+                    SQL_UPDATE_FAILED_MSG.format(reason=result_data[P]),
                 )
             else:
-                O.showinfo("Zapisano", f"Zaktualizowano dane dla EAN {K_val}.")
+                O.showinfo(SAVED_LABEL, UPDATE_SUCCESS_MSG.format(ean=K_val))
             if not A__:
                 status = "OK" if not Y_ else Y_
-                log_info(
-                    f"FTP: wysłano {result_data[Z]} plików, usunięto {result_data[b]}, czas {result_data[c]} ms, status: {status}"
+                log_info_loc(
+                    "ftp_summary",
+                    uploaded=result_data[Z],
+                    deleted=result_data[b],
+                    time=result_data[c],
+                    status=status,
                 )
             if D.get(u, J):
                 if result_data[P]:
-                    log_info(f"SQL: błąd – {result_data[P]} (czas {result_data[S]} ms)")
+                    log_info_loc(
+                        "sql_error", error=result_data[P], time=result_data[S]
+                    )
                 else:
-                    log_info(
-                        f"SQL: zapytań {result_data[d]}, zmienionych wierszy ~{result_data[j]}, czas {result_data[S]} ms"
+                    log_info_loc(
+                        "sql_summary",
+                        queries=result_data[d],
+                        rows=result_data[j],
+                        time=result_data[S],
                     )
             if result_data.get(A2, Ay):
-                log_info(
-                    f"Zaktualizowano wpis: EAN={K_val}, NAZWA={AE_}, TYP={AF_}, MODEL={AG_}, KOLOR1={AH_}, KOLOR2={p_}, KOLOR3={s_}, DODATKI={b_}"
+                log_info_loc(
+                    "entry_updated_log",
+                    ean=K_val,
+                    name=AE_,
+                    type=AF_,
+                    model=AG_,
+                    color1=AH_,
+                    color2=p_,
+                    color3=s_,
+                    extras=b_,
                 )
             else:
-                log_info(
-                    f"Dodano nowy wpis: EAN={K_val}, NAZWA={AE_}, TYP={AF_}, MODEL={AG_}, KOLOR1={AH_}, KOLOR2={p_}, KOLOR3={s_}, DODATKI={b_}"
+                log_info_loc(
+                    "entry_added_log",
+                    ean=K_val,
+                    name=AE_,
+                    type=AF_,
+                    model=AG_,
+                    color1=AH_,
+                    color2=p_,
+                    color3=s_,
+                    extras=b_,
                 )
 
     def _load_by_ean(A):
-        E_ = "Brak EAN"
+        E_ = NO_EAN_LABEL
         D_ = A.var_ean.get().strip()
         if not D_:
-            O.showwarning(E_, "Wprowadź kod EAN, aby wczytać dane.")
+            O.showwarning(E_, ENTER_EAN_TO_LOAD_MSG)
             return
         if D_.upper() == q:
-            O.showwarning(E_, "Nie można wyszukać danych dla 'BRAK-EAN'.")
+            O.showwarning(E_, CANNOT_SEARCH_NO_EAN_MSG)
             return
         if D_ in A.entries:
             C_ = A.entries[D_]
@@ -2713,7 +3049,7 @@ class App(BU.Tk):
             A._load_existing_files()
         else:
             A._load_existing_files()
-            O.showinfo("Nie znaleziono", f"Brak zapisanych danych dla EAN {D_}.")
+            O.showinfo(NOT_FOUND_LABEL, NO_SAVED_DATA_FOR_EAN_MSG.format(ean=D_))
 
     def _open_current_folder(B):
         F_ = B.var_name.get().strip()
@@ -2726,7 +3062,7 @@ class App(BU.Tk):
         if not (F_ and G_ and H_ and I_):
             O.showwarning(
                 NO_DATA_MSG,
-                "Uzupełnij wszystkie wymagane pola (nazwa, typ, model, kolor 1) przed otwarciem folderu.",
+                FILL_REQUIRED_BEFORE_OPEN_MSG,
             )
             return
         C_ = A.path.join(l, F_.upper(), G_.upper(), H_.upper())
@@ -2745,24 +3081,24 @@ class App(BU.Tk):
             else:
                 BH.run(["xdg-open", C_], check=h)
         except E as P_:
-            O.showerror(AK, f"Nie udało się otworzyć folderu:\n{P_}")
-            log_error(f"Nie udało się otworzyć folderu {C_}: {P_}")
+            O.showerror(AK, FOLDER_OPEN_FAILED_MSG.format(error=P_))
+            log_error_loc("folder_open_error", path=C_, error=P_)
 
     def _open_settings(A):
-        a = "Zmień dane (Administrator)"
+        a = CHANGE_DATA_ADMIN_LABEL
         Y = "*"
         i_ = "readonly"
-        A5_ = "Uruchom operację z uprawnieniami administratora, aby edytować te ustawienia."
-        A6_ = "Brak uprawnień"
+        A5_ = RUN_AS_ADMIN_MSG
+        A6_ = NO_PERMISSIONS_LABEL
         Ag_ = a
-        A7_ = "Baza danych:"
-        A8_ = "Serwer:"
-        A9_ = "MS SQL Server"
-        AA_ = "Testuj"
-        AC_ = "Połączono"
-        j_ = "Hasło:"
-        k_ = "Użytkownik:"
-        f_ = "MySQL"
+        A7_ = DATABASE_LABEL
+        A8_ = SERVER_LABEL
+        A9_ = MSSQL_SERVER_LABEL
+        AA_ = TEST_BUTTON_LABEL
+        AC_ = CONNECTED_LABEL
+        j_ = PASSWORD_LABEL
+        k_ = USER_LABEL
+        f_ = MYSQL_LABEL
         Y_ = "write"
         d_ = i_
         a_ = F.Toplevel(A)
@@ -2773,27 +3109,27 @@ class App(BU.Tk):
         L = C.Frame(Z)
         Q = C.Frame(Z)
         S = C.Frame(Z)
-        Z.add(L, text="Obrazy")
-        Z.add(Q, text="FTP")
-        Z.add(S, text="SQL")
-        C.Label(L, text="Ustawienia przetwarzania obrazów:").grid(
+        Z.add(L, text=IMAGES_TAB_LABEL)
+        Z.add(Q, text=FTP_TAB_LABEL)
+        Z.add(S, text=SQL_TAB_LABEL)
+        C.Label(L, text=IMAGE_SETTINGS_LABEL).grid(
             row=0, column=0, columnspan=4, padx=5, pady=5, sticky=T
         )
         Ah = C.Checkbutton(L, text=B, variable=A.opt_resize)
         Ah.grid(row=1, column=0, padx=5, sticky=T)
-        C.Label(L, text="Zmniejszaj obrazy większe niż").grid(row=1, column=1, sticky=T)
+        C.Label(L, text=RESIZE_LABEL).grid(row=1, column=1, sticky=T)
         l_ = C.Entry(L, textvariable=A.resize_max_dim, width=5)
         l_.grid(row=1, column=2)
-        C.Label(L, text="px (max wymiar)").grid(row=1, column=3, sticky=T)
+        C.Label(L, text=PX_MAX_LABEL).grid(row=1, column=3, sticky=T)
         Ai = C.Checkbutton(L, text=B, variable=A.opt_compress)
         Ai.grid(row=2, column=0, padx=5, sticky=T)
-        C.Label(L, text="Kompresuj JPEG (jakość)").grid(row=2, column=1, sticky=T)
+        C.Label(L, text=COMPRESS_LABEL).grid(row=2, column=1, sticky=T)
         n = C.Spinbox(L, from_=10, to=100, textvariable=A.compress_quality, width=5)
         n.grid(row=2, column=2, sticky=T)
         C.Label(L, text="%").grid(row=2, column=3, sticky=T)
         Aj = C.Checkbutton(L, text=B, variable=A.opt_maxsize)
         Aj.grid(row=3, column=0, padx=5, sticky=T)
-        C.Label(L, text="Ogranicz rozmiar pliku do").grid(row=3, column=1, sticky=T)
+        C.Label(L, text=LIMIT_SIZE_LABEL).grid(row=3, column=1, sticky=T)
         o = C.Spinbox(
             L, from_=100, to=10000, increment=100, textvariable=A.max_file_kb, width=6
         )
@@ -2801,7 +3137,7 @@ class App(BU.Tk):
         C.Label(L, text="KB").grid(row=3, column=3, sticky=T)
         Ak = C.Checkbutton(L, text=B, variable=A.opt_convert_tif)
         Ak.grid(row=4, column=0, padx=5, sticky=T)
-        C.Label(L, text="Konwertuj .tif na").grid(row=4, column=1, sticky=T)
+        C.Label(L, text=CONVERT_TIF_LABEL).grid(row=4, column=1, sticky=T)
         q = C.Combobox(
             L,
             textvariable=A.tif_target_format,
@@ -2810,6 +3146,10 @@ class App(BU.Tk):
             width=5,
         )
         q.grid(row=4, column=2, sticky=T)
+
+        C.Button(L, text=CHANGE_LANGUAGE_LABEL, command=A._change_language).grid(
+            row=5, column=0, columnspan=4, pady=5
+        )
 
         def Am(*B):
             l_.configure(state=X if A.opt_resize.get() else V)
@@ -2830,11 +3170,11 @@ class App(BU.Tk):
         n.configure(state=X if A.opt_compress.get() else V)
         o.configure(state=X if A.opt_maxsize.get() else V)
         q.configure(state=d_ if A.opt_convert_tif.get() else V)
-        C.Label(Q, text="Serwer FTP:").grid(row=0, column=0, sticky=R, padx=5, pady=2)
+        C.Label(Q, text=FTP_SERVER_LABEL).grid(row=0, column=0, sticky=R, padx=5, pady=2)
         s = F.StringVar(value=D[H][v])
         AD_ = C.Entry(Q, textvariable=s, width=30)
         AD_.grid(row=0, column=1, padx=5, pady=2)
-        C.Label(Q, text="Port:").grid(row=1, column=0, sticky=R, padx=5, pady=2)
+        C.Label(Q, text=PORT_LABEL).grid(row=1, column=0, sticky=R, padx=5, pady=2)
         t = F.IntVar(value=D[H][r])
         AE_ = C.Entry(Q, textvariable=t, width=6)
         AE_.grid(row=1, column=1, sticky=T, padx=5, pady=2)
@@ -2846,7 +3186,7 @@ class App(BU.Tk):
         y_ = F.StringVar(value=D[H][M])
         AG_ = C.Entry(Q, textvariable=y_, show=Y, width=30)
         AG_.grid(row=3, column=1, padx=5, pady=2)
-        C.Label(Q, text="Ścieżka (katalog) na serwerze:").grid(
+        C.Label(Q, text=FTP_PATH_LABEL).grid(
             row=4, column=0, sticky=R, padx=5, pady=2
         )
         g_ = F.StringVar(value=D[H][m])
@@ -2854,7 +3194,7 @@ class App(BU.Tk):
         AH_.grid(row=4, column=1, padx=5, pady=2)
         AI_ = C.Button(Q, text=a)
         AI_.grid(row=5, column=0, sticky=R, padx=5, pady=5)
-        C.Label(Q, text="Test połączenia FTP:").grid(
+        C.Label(Q, text=FTP_TEST_LABEL).grid(
             row=6, column=0, sticky=R, padx=5, pady=5
         )
         AJ_ = F.StringVar(value=B)
@@ -2877,11 +3217,11 @@ class App(BU.Tk):
                 elif As in D_ or NO_SUCH_FILE_MSG in D_:
                     A_ = PATH_NOT_FOUND_MSG
                 else:
-                    A_ = f"Błąd FTP: {D_}"
+                    A_ = FTP_GENERIC_ERROR_MSG.format(error=D_)
             except (BK.gaierror, CONNECTION_REFUSED_ERROR, TIMEOUT_ERROR, Au) as F_:
                 A_ = NETWORK_ERROR_MSG
             except E as F_:
-                A_ = f"Inny błąd: {F_}"
+                A_ = OTHER_ERROR_MSG.format(error=F_)
             else:
                 A_ = AC_
                 try:
@@ -2892,13 +3232,13 @@ class App(BU.Tk):
 
         Ay = C.Button(Q, text=AA_, command=Ax)
         Ay.grid(row=6, column=1, padx=5, pady=5, sticky=R)
-        C.Label(Q, text="Aktualizuj pliki na FTP:").grid(
+        C.Label(Q, text=FTP_UPDATE_LABEL).grid(
             row=7, column=0, sticky=R, padx=5, pady=2
         )
         ftp_update_var = F.BooleanVar(value=D.get(ft, J))
         ftp_update_cb = C.Checkbutton(Q, variable=ftp_update_var)
         ftp_update_cb.grid(row=7, column=1, sticky=T, padx=5, pady=2)
-        C.Label(S, text="Typ bazy danych:").grid(
+        C.Label(S, text=DB_TYPE_LABEL).grid(
             row=0, column=0, sticky=R, padx=5, pady=2
         )
         A0 = F.StringVar(value=f_ if D.get(p, K).lower() == K else A9_)
@@ -2954,19 +3294,19 @@ class App(BU.Tk):
                 U.grid()
 
         A1.bind(A2, Az)
-        C.Label(S, text="Aktualizuj bazę przy zapisie:").grid(
+        C.Label(S, text=SQL_UPDATE_LABEL).grid(
             row=2, column=0, sticky=R, padx=5, pady=2
         )
         Ab = F.BooleanVar(value=D.get(u, J))
         Ac = C.Checkbutton(S, variable=Ab)
         Ac.grid(row=2, column=1, sticky=T, padx=5, pady=2)
-        C.Label(S, text="Zapytanie SQL:").grid(
+        C.Label(S, text=SQL_QUERY_LABEL).grid(
             row=3, column=0, sticky="ne", padx=5, pady=2
         )
         h_ = F.Text(S, width=80, height=3)
         h_.insert(A_, D.get(w, SQL_UPDATE_TEMPLATE))
         h_.grid(row=3, column=1, padx=5, pady=2, sticky=T)
-        C.Label(S, text="Test połączenia SQL:").grid(
+        C.Label(S, text=SQL_TEST_LABEL).grid(
             row=4, column=0, sticky=R, padx=5, pady=5
         )
         A3_ = F.StringVar(value=B)
@@ -3031,14 +3371,14 @@ class App(BU.Tk):
         def LIGHT_GREEN():
             if is_admin():
                 Ad(X)
-                log_info("Odblokowano edycję ustawień FTP (administrator).")
+                log_info_loc("settings_ftp_unlocked")
             else:
                 O.showwarning(A6_, A5_)
 
         def NO_DATA_MSG():
             if is_admin():
                 Ae(X)
-                log_info("Odblokowano edycję ustawień SQL (administrator).")
+                log_info_loc("settings_sql_unlocked")
             else:
                 O.showwarning(A6_, A5_)
 
@@ -3071,9 +3411,9 @@ class App(BU.Tk):
             D[u] = bool(Ab.get())
             save_config(D)
             a_.destroy()
-            log_info("Zapisano ustawienia (obrazy/FTP/SQL).")
+            log_info_loc("settings_saved")
 
-        C.Button(A4, text="Zapisz", command=BD_).grid(row=0, column=0, padx=5)
+        C.Button(A4, text=SAVE_LABEL, command=BD_).grid(row=0, column=0, padx=5)
 
         def Af():
             A.opt_resize.trace_remove(Y_, Ap)
@@ -3085,6 +3425,17 @@ class App(BU.Tk):
         C.Button(A4, text=CANCEL_LABEL, command=Af).grid(row=0, column=1, padx=5)
         a_.protocol("WM_DELETE_WINDOW", Af)
         Z.select(0)
+
+    def _change_language(A):
+        B = BI.askstring(SETTINGS_LABEL, LANGUAGE_PROMPT)
+        if B:
+            D["language"] = B.lower()
+            try:
+                save_config(D)
+            except E:
+                O.showerror(AK, Ac)
+            else:
+                O.showinfo(SETTINGS_LABEL, RESTART_TO_APPLY_LABEL)
 
     def _style_combobox_list(L, combobox):
         A_ = combobox
