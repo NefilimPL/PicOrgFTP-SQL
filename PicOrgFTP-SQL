@@ -1685,19 +1685,25 @@ class App(BU.Tk):
             C.ftp_remote_only = remote_info
             C.ftp_presence = ftp_presence
             C.ftp_downloaded_final = set()
-            for X_, G_ in A0(C.slots):
+            def process_next(idx=0):
+                if idx >= Q(C.slots):
+                    progress.stop()
+                    progress.pack_forget()
+                    progress.destroy()
+                    return
+                G_ = C.slots[idx]
                 R_ = G_[Aa]
                 if R_ in slot_paths:
                     G_[f] = slot_paths[R_]
-                    C._update_slot_ui(X_)
-                    C._mark_slot(X_, A4)
+                    C._update_slot_ui(idx)
+                    C._mark_slot(idx, A4)
                 else:
                     G_[f] = I
                 C._set_icon_status(G_["local_icon"], R_ in original_files)
                 C._set_icon_status(G_["ftp_icon"], R_ in ftp_presence)
-            progress.stop()
-            progress.pack_forget()
-            progress.destroy()
+                C.after(0, lambda: process_next(idx + 1))
+
+            C.after(0, process_next)
 
         threading.Thread(target=worker, daemon=J).start()
 
