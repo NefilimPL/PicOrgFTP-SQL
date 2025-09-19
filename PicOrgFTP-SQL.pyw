@@ -192,6 +192,7 @@ from openpyxl import Workbook as BV, load_workbook as Ah
 import ftplib as AB, socket as BK, pyodbc, mysql.connector, ctypes, json as Ar, base64 as BL
 
 BASE_DIR_SETTINGS_PATH = A.path.join(A.path.dirname(A.path.abspath(__file__)), BASE_DIR_SETTINGS_FILE)
+BASE_DIR_OVERRIDE_WARNING = I
 
 
 def _load_base_dir_override(settings_path, template, fallback_value):
@@ -204,7 +205,6 @@ def _load_base_dir_override(settings_path, template, fallback_value):
             if Aq(new_value, str):
                 override_value = new_value.strip()
         else:
-            override_value = template.get("base_dir_override", fallback_value)
             try:
                 with x(settings_path, T, encoding=k) as settings_file:
                     Ar.dump(template, settings_file, indent=4)
@@ -215,9 +215,31 @@ def _load_base_dir_override(settings_path, template, fallback_value):
     return override_value if Aq(override_value, str) else fallback_value
 
 
-BASE_DIR_OVERRIDE = _load_base_dir_override(BASE_DIR_SETTINGS_PATH, BASE_DIR_SETTINGS_TEMPLATE, BASE_DIR_OVERRIDE)
+def _validate_base_dir_override(override_value, fallback_dir):
+    if not Aq(override_value, str):
+        return B, I
+    candidate = override_value.strip()
+    if not candidate:
+        return B, I
+    try:
+        if A.path.isdir(candidate):
+            return candidate, I
+    except E:
+        pass
+    warning_msg = (
+        "Nie można uzyskać dostępu do katalogu wskazanego w pliku \"local_settings.json\":\n"
+        f"{candidate}\n\n"
+        f"Program użyje teraz lokalnego katalogu \"Pictures\" w folderze użytkownika ({fallback_dir}). "
+        "Zweryfikuj proszę, czy ścieżka podana w pliku \"local_settings.json\" istnieje."
+    )
+    return B, warning_msg
 
-AC = BASE_DIR_OVERRIDE or A.path.join(A.path.expanduser("~"), "Pictures")
+
+BASE_DIR_OVERRIDE = _load_base_dir_override(BASE_DIR_SETTINGS_PATH, BASE_DIR_SETTINGS_TEMPLATE, BASE_DIR_OVERRIDE)
+PICTURES_DIR = A.path.join(A.path.expanduser("~"), "Pictures")
+BASE_DIR_OVERRIDE, BASE_DIR_OVERRIDE_WARNING = _validate_base_dir_override(BASE_DIR_OVERRIDE, PICTURES_DIR)
+
+AC = BASE_DIR_OVERRIDE or PICTURES_DIR
 l = A.path.join(AC, "_ZDJECIA PRZEROBIONE_")
 o = A.path.join(AC, "lists.xlsx")
 AD = A.path.join(AC, "config.json")
@@ -3766,6 +3788,8 @@ class App(BU.Tk):
 
 if __name__ == "__main__":
     A1 = App()
+    if BASE_DIR_OVERRIDE_WARNING:
+        O.showwarning(SETTINGS_LABEL, BASE_DIR_OVERRIDE_WARNING)
     if not LOC_DL_OK:
         O.showwarning(SETTINGS_LABEL, LANG_EN.get("loc_download_failed", "Localization files unavailable. Check repository access."))
     for BQ in (
