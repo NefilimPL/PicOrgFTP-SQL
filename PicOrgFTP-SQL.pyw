@@ -7,7 +7,7 @@ BASE_DIR_OVERRIDE = r""
 # Nazwa lokalnego pliku konfiguracyjnego z ustawieniami katalogu bazowego.
 BASE_DIR_SETTINGS_FILE = "local_settings.json"
 # Domyślna struktura wspomnianego pliku.
-BASE_DIR_SETTINGS_TEMPLATE = {"base_dir_override": r"C:\TEST\GUI_ZDJ"}
+BASE_DIR_SETTINGS_TEMPLATE = {"base_dir_override": "C:/TEST/GUI_ZDJ"}
 
 # Klucz używany do prostego szyfrowania danych konfiguracyjnych.
 APP_SECRET = "secret_v1"
