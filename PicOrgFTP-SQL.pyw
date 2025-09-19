@@ -1,8 +1,13 @@
 ################################ skrypt w wersji v0.3.3 ################################
 # --- Konfigurowalne ustawienia ---
 # Opcjonalna lokalizacja bazowa. Wstaw własną ścieżkę,
-# aby wymusić zapis plików w innym katalogu niż domyślny "Pictures".
+# aby wymusić zapis plików w innym katalogu niż domyślny "Pictures"
+# (wartość może zostać nadpisana wpisem w `local_settings.json`).
 BASE_DIR_OVERRIDE = r""
+# Nazwa lokalnego pliku konfiguracyjnego z ustawieniami katalogu bazowego.
+BASE_DIR_SETTINGS_FILE = "local_settings.json"
+# Domyślna struktura wspomnianego pliku.
+BASE_DIR_SETTINGS_TEMPLATE = {"base_dir_override": r"C:\TEST\GUI_ZDJ"}
 
 # Klucz używany do prostego szyfrowania danych konfiguracyjnych.
 APP_SECRET = "secret_v1"
@@ -185,6 +190,32 @@ from tkinterdnd2 import TkinterDnD as BU, DND_ALL, DND_FILES as BJ
 from PIL import Image as AA, ImageTk
 from openpyxl import Workbook as BV, load_workbook as Ah
 import ftplib as AB, socket as BK, pyodbc, mysql.connector, ctypes, json as Ar, base64 as BL
+
+BASE_DIR_SETTINGS_PATH = A.path.join(A.path.dirname(A.path.abspath(__file__)), BASE_DIR_SETTINGS_FILE)
+
+
+def _load_base_dir_override(settings_path, template, fallback_value):
+    override_value = fallback_value
+    try:
+        if A.path.exists(settings_path):
+            with x(settings_path, "r", encoding=k) as settings_file:
+                data = Ar.load(settings_file)
+            new_value = data.get("base_dir_override", fallback_value)
+            if Aq(new_value, str):
+                override_value = new_value.strip()
+        else:
+            override_value = template.get("base_dir_override", fallback_value)
+            try:
+                with x(settings_path, T, encoding=k) as settings_file:
+                    Ar.dump(template, settings_file, indent=4)
+            except E:
+                pass
+    except E:
+        pass
+    return override_value if Aq(override_value, str) else fallback_value
+
+
+BASE_DIR_OVERRIDE = _load_base_dir_override(BASE_DIR_SETTINGS_PATH, BASE_DIR_SETTINGS_TEMPLATE, BASE_DIR_OVERRIDE)
 
 AC = BASE_DIR_OVERRIDE or A.path.join(A.path.expanduser("~"), "Pictures")
 l = A.path.join(AC, "_ZDJECIA PRZEROBIONE_")

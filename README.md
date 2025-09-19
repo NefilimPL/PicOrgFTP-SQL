@@ -14,11 +14,11 @@ The script provides a graphical interface where you enter the product name, type
 Program actions are logged to `changes_log.txt` and errors to `error_log.txt`. On first run a `config.json` file with connection settings is created.
 
 ### Configuration
-By default the `config.json` file is saved in the user's `Pictures` directory. To permanently point to a different starting location, set the `BASE_DIR_OVERRIDE` constant at the beginning of the `PicOrgFTP-SQL` file.
+By default the `config.json` file is saved in the user's `Pictures` directory. To permanently point to a different starting location, edit the `base_dir_override` entry inside the `local_settings.json` file located next to `PicOrgFTP-SQL.pyw` (the file is created automatically if missing).
 
 The first lines of the file contain a configuration section that makes the script easy to adjust. You can change:
 
-- `BASE_DIR_OVERRIDE` – base directory used to store data.
+- `base_dir_override` in `local_settings.json` – base directory used to store data.
 - `APP_SECRET` – key used for encrypting configuration data.
 - `PORT` – default FTP server port.
 - `SQL_UPDATE_TEMPLATE` – default SQL query that updates image paths.
@@ -39,11 +39,11 @@ Skrypt udostępnia graficzny interfejs, w którym wprowadza się nazwę, typ, mo
 Działania programu są zapisywane w `changes_log.txt`, a ewentualne błędy w `error_log.txt`. Przy pierwszym uruchomieniu tworzony jest plik `config.json` z ustawieniami połączeń.
 
 ### Konfiguracja
-Domyślnie plik `config.json` zapisywany jest w katalogu `Pictures` w folderze użytkownika. Aby na stałe wskazać inną lokalizację startową, ustaw ścieżkę w stałej `BASE_DIR_OVERRIDE` na początku pliku `PicOrgFTP-SQL`.
+Domyślnie plik `config.json` zapisywany jest w katalogu `Pictures` w folderze użytkownika. Aby na stałe wskazać inną lokalizację startową, zmodyfikuj pole `base_dir_override` w pliku `local_settings.json` znajdującym się obok `PicOrgFTP-SQL.pyw` (plik tworzy się automatycznie, jeżeli go brakuje).
 
 Pierwsze linie pliku zawierają sekcję konfiguracyjną ułatwiającą dostosowanie skryptu do własnych potrzeb. Można tam zmienić m.in.:
 
-- `BASE_DIR_OVERRIDE` – katalog startowy do zapisu danych.
+- `base_dir_override` w `local_settings.json` – katalog startowy do zapisu danych.
 - `APP_SECRET` – klucz używany do szyfrowania danych konfiguracji.
 - `PORT` – domyślny port serwera FTP.
 - `SQL_UPDATE_TEMPLATE` – domyślne zapytanie SQL aktualizujące ścieżkę obrazów w bazie.
