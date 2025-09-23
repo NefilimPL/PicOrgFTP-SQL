@@ -25,6 +25,7 @@ from .common import (
     k,
     m,
     p,
+    r,
     u,
     v,
     w,
