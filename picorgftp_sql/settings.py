@@ -6,8 +6,15 @@ from .common import *  # noqa: F401,F403 - legacy global names
 def _resolve_settings_root():
     if getattr(sys, "frozen", False):
         base_path = A.path.dirname(sys.executable)
+        return base_path or A.getcwd()
+    module_dir = A.path.dirname(A.path.abspath(__file__))
+    project_root = A.path.abspath(A.path.join(module_dir, A.pardir))
+    root_settings = A.path.join(project_root, BASE_DIR_SETTINGS_FILE)
+    root_marker = A.path.join(project_root, "PicOrgFTP-SQL.pyw")
+    if A.path.exists(root_settings) or A.path.exists(root_marker):
+        base_path = project_root
     else:
-        base_path = A.path.dirname(A.path.abspath(__file__))
+        base_path = module_dir
     return base_path or A.getcwd()
 
 

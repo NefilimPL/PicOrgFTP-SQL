@@ -257,6 +257,7 @@ EAN_OPTIONAL_LABEL = LANG.get(
     "ean_optional_label", "EAN (opcjonalnie):"
 )
 LOAD_LABEL = LANG.get("load_label", "Wczytaj")
+OPEN_FOLDER_LABEL = LANG.get("open_folder", "Otwórz folder")
 UPDATE_LABEL = LANG.get("update_label", "Aktualizuj")
 CHOOSE_LABEL = LANG.get("choose_label", "Wybierz")
 NEW_COMBINATION_LABEL = LANG.get("new_combination_label", "Nowa kombinacja")
