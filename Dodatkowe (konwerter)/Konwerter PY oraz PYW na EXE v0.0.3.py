@@ -1,4 +1,3 @@
-# build_exe_mysql.py
 import subprocess, os, sys, tempfile
 from PIL import Image
 
@@ -40,7 +39,6 @@ def convert_to_ico(path):
 
 def make_runtime_hook():
     code = """
-# runtime-hook: upewnij się, że locale ENG jest załadowane
 try:
     import importlib, mysql.connector.errors as _err
     _ce = importlib.import_module("mysql.connector.locales.eng.client_error")

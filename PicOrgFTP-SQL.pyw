@@ -1,27 +1,16 @@
-################################ skrypt w wersji v0.3.3 ################################
-# --- Konfigurowalne ustawienia ---
-# Katalog roboczy aplikacji jest odczytywany z pliku `local_settings.json`.
-# Poniższa wartość służy jedynie do wstępnego uzupełnienia pliku przy pierwszym
-# uruchomieniu (wpis w `local_settings.json` zawsze ma pierwszeństwo).
 BASE_DIR_OVERRIDE = r""
-# Nazwa lokalnego pliku konfiguracyjnego z ustawieniami katalogu bazowego.
 BASE_DIR_SETTINGS_FILE = "local_settings.json"
-# Domyślna struktura wspomnianego pliku.
 BASE_DIR_SETTINGS_TEMPLATE = {"base_dir_override": BASE_DIR_OVERRIDE}
 
-# Klucz używany do prostego szyfrowania danych konfiguracyjnych.
 APP_SECRET = "secret_v1"
 
-# Domyślny port serwera FTP.
 PORT = 21
 
-# Zapytanie SQL aktualizujące ścieżkę do obrazu.
 SQL_UPDATE_TEMPLATE = (
     "UPDATE object_query_1 SET {col} = 'https://xml.wipmebgroup.pl/img/{filename}' "
     "WHERE EAN = '{ean}' OR Towar_powiazany_z_SKU = '{ean}'"
 )
 
-# Domyślne dane konfiguracyjne wykorzystywane przy pierwszym uruchomieniu.
 DEFAULT_CONFIG = {
     "ftp": {
         "host": r"",
@@ -48,13 +37,9 @@ DEFAULT_CONFIG = {
     "enable_sql_update": True,
     "loc_path": r"",
 }
-# --- Koniec konfiguracji ---
-
-# Komunikaty dla użytkownika
 PROCESSING_MSG = "Trwa przetwarzanie. Poczekaj na zakończenie bieżącej operacji."
 OPERATION_TITLE = "Operacja w toku"
 
-# Podstawowe ustawienia
 A_ = "1.0"
 Az = "normal"
 Ay = False
@@ -64,7 +49,6 @@ Ak = "disabled"
 Aj = getattr
 AQ = None
 
-# Komunikaty o błędach
 NETWORK_ERROR_MSG = "Błąd sieciowy lub brak internetu"
 PATH_NOT_FOUND_MSG = "Nie znaleziono ścieżki na serwerze"
 NO_SUCH_FILE_MSG = "No such file"
@@ -87,7 +71,6 @@ BASE_DIR_PROMPT_REASON_MSG = (
     "odczytywane dane."
 )
 
-# Oznaczenia interfejsu
 CANCEL_LABEL = "Anuluj"
 SETTINGS_LABEL = "Ustawienia"
 EDIT_LISTS_LABEL = "Edytuj listy"
@@ -96,7 +79,6 @@ OPEN_FURNITURE = "open_furniture"
 NON_PIC = "non_pic"
 ELEMENT_PIC = "element_pic"
 
-# Klasy wyjątków
 TIMEOUT_ERROR = TimeoutError
 CONNECTION_REFUSED_ERROR = ConnectionRefusedError
 As = "550"
@@ -343,8 +325,6 @@ BM = A.path.join(AC, "changes_log.txt")
 AN = A.path.join(AC, "temp_backup")
 LC_DEFAULT = A.path.join(A.path.expanduser("~"), "Gui zdjęcia config", "Localization")
 LC = LC_DEFAULT
-# Domyślne odnośniki do plików lokalizacyjnych wykorzystywane,
-# gdy w konfiguracji nie zdefiniowano własnej listy.
 LOC_URLS_DEFAULT = [
     "https://github.com/NefilimPL/test/tree/bf78a63668181c8a9ef9fd765d116190a669472f/test"
     
