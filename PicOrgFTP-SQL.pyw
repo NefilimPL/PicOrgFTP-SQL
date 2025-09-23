@@ -1,7 +1,8 @@
 """Application entry point."""
 
 from picorgftp_sql.app import App
-from picorgftp_sql.common import O, SETTINGS_LABEL, BASE_DIR_OVERRIDE_WARNING
+from picorgftp_sql.common import O, SETTINGS_LABEL
+from picorgftp_sql.settings import BASE_DIR_OVERRIDE_WARNING
 from picorgftp_sql.localization import LANG_EN, LOC_DL_OK
 
 
