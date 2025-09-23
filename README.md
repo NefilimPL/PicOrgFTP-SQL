@@ -14,7 +14,7 @@ The script provides a graphical interface where you enter the product name, type
 Program actions are logged to `changes_log.txt` and errors to `error_log.txt`. On first run a `config.json` file with connection settings is created.
 
 ### Configuration
-By default the `config.json` file is saved in the user's `Pictures` directory. To permanently point to a different starting location, edit the `base_dir_override` entry inside the `local_settings.json` file located next to `PicOrgFTP-SQL.pyw` (the file is created automatically if missing). You can use forward slashes in the path (e.g. `C:/TEST/GUI_ZDJ`) to avoid escaping backslashes on Windows. If the configured folder cannot be accessed, the application falls back to the user's `Pictures` directory and displays a warning asking you to verify the path in `local_settings.json`.
+The application stores its working files in the directory defined in the `local_settings.json` file located next to `PicOrgFTP-SQL.pyw`. The file is created automatically on first launch; if it does not contain a path, the script asks for a folder and saves the selected location back to `local_settings.json`. You can use forward slashes in the path (e.g. `C:/TEST/GUI_ZDJ`) to avoid escaping backslashes on Windows. If the configured folder later becomes unavailable, the application asks you to point to a new location.
 
 The first lines of the file contain a configuration section that makes the script easy to adjust. You can change:
 
@@ -39,7 +39,7 @@ Skrypt udostępnia graficzny interfejs, w którym wprowadza się nazwę, typ, mo
 Działania programu są zapisywane w `changes_log.txt`, a ewentualne błędy w `error_log.txt`. Przy pierwszym uruchomieniu tworzony jest plik `config.json` z ustawieniami połączeń.
 
 ### Konfiguracja
-Domyślnie plik `config.json` zapisywany jest w katalogu `Pictures` w folderze użytkownika. Aby na stałe wskazać inną lokalizację startową, zmodyfikuj pole `base_dir_override` w pliku `local_settings.json` znajdującym się obok `PicOrgFTP-SQL.pyw` (plik tworzy się automatycznie, jeżeli go brakuje). W ścieżce możesz użyć ukośników (np. `C:/TEST/GUI_ZDJ`), aby uniknąć konieczności podwójnego wpisywania ukośników odwrotnych w systemie Windows. Jeżeli wskazany katalog jest niedostępny, aplikacja automatycznie wraca do lokalnego folderu `Pictures` użytkownika i wyświetla ostrzeżenie z prośbą o weryfikację ścieżki w `local_settings.json`.
+Aplikacja zapisuje pliki robocze w katalogu zdefiniowanym w pliku `local_settings.json`, znajdującym się obok `PicOrgFTP-SQL.pyw`. Plik tworzy się automatycznie przy pierwszym uruchomieniu; jeżeli nie zawiera ścieżki, skrypt poprosi o wskazanie folderu i zapisze wybór do `local_settings.json`. W ścieżce możesz użyć ukośników (np. `C:/TEST/GUI_ZDJ`), aby uniknąć konieczności podwójnego wpisywania ukośników odwrotnych w systemie Windows. Jeżeli zapisany katalog stanie się niedostępny, aplikacja poprosi o wybranie nowej lokalizacji.
 
 Pierwsze linie pliku zawierają sekcję konfiguracyjną ułatwiającą dostosowanie skryptu do własnych potrzeb. Można tam zmienić m.in.:
 
