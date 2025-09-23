@@ -7,7 +7,7 @@ from .system_utils import get_file_lock_user, is_admin
 from .database import connect_db
 from .config import save_config
 from . import config, localization
-from .settings import AN, l
+from .settings import AE, AN, l
 
 D = config.CONFIG
 LC = localization.LC
