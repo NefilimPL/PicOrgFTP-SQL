@@ -1,6 +1,6 @@
 """Shared constants, imports and helper utilities for PicOrgFTP-SQL."""
 
-################################ skrypt w wersji v0.3.3 ################################
+################################ Aktualne ustawienia startowe aplikacji ################################
 # --- Konfigurowalne ustawienia ---
 # Katalog roboczy aplikacji jest odczytywany z pliku `local_settings.json`.
 # Poniższa wartość służy jedynie do wstępnego uzupełnienia pliku przy pierwszym

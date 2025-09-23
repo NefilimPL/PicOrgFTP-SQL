@@ -1,4 +1,4 @@
-# build_exe_mysql.py
+# Pomocniczy skrypt PyInstaller do tworzenia plików EXE z obsługą mysql-connector
 import subprocess, os, sys, tempfile
 from PIL import Image
 
