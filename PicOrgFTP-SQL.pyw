@@ -1,13 +1,13 @@
 ################################ skrypt w wersji v0.3.3 ################################
 # --- Konfigurowalne ustawienia ---
-# Opcjonalna lokalizacja bazowa. Wstaw własną ścieżkę,
-# aby wymusić zapis plików w innym katalogu niż domyślny "Pictures"
-# (wartość może zostać nadpisana wpisem w `local_settings.json`).
+# Katalog roboczy aplikacji jest odczytywany z pliku `local_settings.json`.
+# Poniższa wartość służy jedynie do wstępnego uzupełnienia pliku przy pierwszym
+# uruchomieniu (wpis w `local_settings.json` zawsze ma pierwszeństwo).
 BASE_DIR_OVERRIDE = r""
 # Nazwa lokalnego pliku konfiguracyjnego z ustawieniami katalogu bazowego.
 BASE_DIR_SETTINGS_FILE = "local_settings.json"
 # Domyślna struktura wspomnianego pliku.
-BASE_DIR_SETTINGS_TEMPLATE = {"base_dir_override": "C:/TEST/GUI_ZDJ"}
+BASE_DIR_SETTINGS_TEMPLATE = {"base_dir_override": BASE_DIR_OVERRIDE}
 
 # Klucz używany do prostego szyfrowania danych konfiguracyjnych.
 APP_SECRET = "secret_v1"
@@ -73,6 +73,19 @@ LOGIN_INCORRECT_MSG = "Login incorrect"
 NO_DATA_MSG = "Brak danych"
 MISSING_FIELDS_MSG = "Uzupełnij wszystkie wymagane pola przed dodaniem pliku."
 INCOMPLETE_DATA_MSG = "Niekompletne dane"
+
+BASE_DIR_PROMPT_TITLE = "Wybierz katalog roboczy"
+BASE_DIR_PROMPT_REQUIRED_MSG = (
+    "Nie wskazano katalogu roboczego. Aplikacja zostanie zamknięta."
+)
+BASE_DIR_INVALID_SELECTION_MSG = (
+    "Nie udało się uzyskać dostępu do wskazanego katalogu. Wybierz inną lokalizację."
+)
+BASE_DIR_PROMPT_REASON_MSG = (
+    "W pliku \"local_settings.json\" nie zapisano katalogu bazowego lub wskazana "
+    "ścieżka jest niedostępna. Wskaż folder, w którym mają być zapisywane i "
+    "odczytywane dane."
+)
 
 # Oznaczenia interfejsu
 CANCEL_LABEL = "Anuluj"
@@ -191,7 +204,15 @@ from PIL import Image as AA, ImageTk
 from openpyxl import Workbook as BV, load_workbook as Ah
 import ftplib as AB, socket as BK, pyodbc, mysql.connector, ctypes, json as Ar, base64 as BL
 
-BASE_DIR_SETTINGS_PATH = A.path.join(A.path.dirname(A.path.abspath(__file__)), BASE_DIR_SETTINGS_FILE)
+def _resolve_settings_root():
+    if getattr(sys, "frozen", False):
+        base_path = A.path.dirname(sys.executable)
+    else:
+        base_path = A.path.dirname(A.path.abspath(__file__))
+    return base_path or A.getcwd()
+
+
+BASE_DIR_SETTINGS_PATH = A.path.join(_resolve_settings_root(), BASE_DIR_SETTINGS_FILE)
 BASE_DIR_OVERRIDE_WARNING = I
 
 
@@ -215,31 +236,105 @@ def _load_base_dir_override(settings_path, template, fallback_value):
     return override_value if Aq(override_value, str) else fallback_value
 
 
-def _validate_base_dir_override(override_value, fallback_dir):
-    if not Aq(override_value, str):
-        return B, I
-    candidate = override_value.strip()
-    if not candidate:
-        return B, I
+def _save_base_dir_override(settings_path, template, value):
+    data = dict(template)
     try:
-        if A.path.isdir(candidate):
-            return candidate, I
+        if A.path.exists(settings_path):
+            with x(settings_path, "r", encoding=k) as settings_file:
+                existing = Ar.load(settings_file)
+            if Aq(existing, dict):
+                data.update(existing)
     except E:
         pass
-    warning_msg = (
-        "Nie można uzyskać dostępu do katalogu wskazanego w pliku \"local_settings.json\":\n"
-        f"{candidate}\n\n"
-        f"Program użyje teraz lokalnego katalogu \"Pictures\" w folderze użytkownika ({fallback_dir}). "
-        "Zweryfikuj proszę, czy ścieżka podana w pliku \"local_settings.json\" istnieje."
-    )
-    return B, warning_msg
+    data["base_dir_override"] = value
+    try:
+        with x(settings_path, T, encoding=k) as settings_file:
+            Ar.dump(data, settings_file, indent=4)
+    except E:
+        pass
 
 
-BASE_DIR_OVERRIDE = _load_base_dir_override(BASE_DIR_SETTINGS_PATH, BASE_DIR_SETTINGS_TEMPLATE, BASE_DIR_OVERRIDE)
-PICTURES_DIR = A.path.join(A.path.expanduser("~"), "Pictures")
-BASE_DIR_OVERRIDE, BASE_DIR_OVERRIDE_WARNING = _validate_base_dir_override(BASE_DIR_OVERRIDE, PICTURES_DIR)
+def _ensure_directory_access(path):
+    try:
+        if not A.path.isdir(path):
+            A.makedirs(path, exist_ok=J)
+        return J, I
+    except E as exc:
+        return Ay, exc
 
-AC = BASE_DIR_OVERRIDE or PICTURES_DIR
+
+def _prompt_for_base_dir(settings_path, template, current_value, message):
+    root = F.Tk()
+    root.withdraw()
+    try:
+        if message:
+            try:
+                O.showwarning(SETTINGS_LABEL, message)
+            except E:
+                pass
+        initial_dir = current_value or A.path.expanduser("~")
+        while J:
+            selected = BT.askdirectory(
+                parent=root,
+                title=BASE_DIR_PROMPT_TITLE,
+                initialdir=initial_dir,
+            )
+            if not selected:
+                try:
+                    O.showerror(SETTINGS_LABEL, BASE_DIR_PROMPT_REQUIRED_MSG)
+                except E:
+                    pass
+                raise SystemExit(0)
+            selected = selected.strip()
+            if not selected:
+                try:
+                    O.showwarning(SETTINGS_LABEL, BASE_DIR_INVALID_SELECTION_MSG)
+                except E:
+                    pass
+                continue
+            ok, error = _ensure_directory_access(selected)
+            if ok:
+                _save_base_dir_override(settings_path, template, selected)
+                return selected, I
+            initial_dir = selected
+            try:
+                details = f"\n\n{error}" if error else B
+                O.showerror(SETTINGS_LABEL, f"{BASE_DIR_INVALID_SELECTION_MSG}{details}")
+            except E:
+                pass
+    finally:
+        try:
+            root.destroy()
+        except E:
+            pass
+
+
+def _ensure_base_dir_override(settings_path, template, fallback_value):
+    override_value = _load_base_dir_override(settings_path, template, fallback_value)
+    candidate = override_value.strip() if Aq(override_value, str) else B
+    if candidate:
+        ok, error = _ensure_directory_access(candidate)
+        if ok:
+            return candidate, I
+        message = (
+            "Nie można uzyskać dostępu do katalogu wskazanego w pliku \"local_settings.json\":\n"
+            f"{candidate}\n\n"
+            f"{BASE_DIR_PROMPT_REASON_MSG}"
+        )
+        if error:
+            message = f"{message}\n\n{error}"
+    else:
+        message = BASE_DIR_PROMPT_REASON_MSG
+    return _prompt_for_base_dir(settings_path, template, candidate, message)
+
+
+BASE_DIR_OVERRIDE, BASE_DIR_OVERRIDE_WARNING = _ensure_base_dir_override(
+    BASE_DIR_SETTINGS_PATH,
+    BASE_DIR_SETTINGS_TEMPLATE,
+    BASE_DIR_OVERRIDE,
+)
+
+AC = BASE_DIR_OVERRIDE
 l = A.path.join(AC, "_ZDJECIA PRZEROBIONE_")
 o = A.path.join(AC, "lists.xlsx")
 AD = A.path.join(AC, "config.json")
