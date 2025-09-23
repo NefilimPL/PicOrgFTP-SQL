@@ -1,12 +1,51 @@
-"""Excel-related helpers for managing lists and entries."""
+"""Utilities for maintaining the Excel lists used by the application."""
 
-from .common import *  # noqa: F401,F403
-from .settings import AE, o
+from __future__ import annotations
+
+import os
+from typing import Dict
+
+from openpyxl import Workbook, load_workbook
+from tkinter import messagebox
+
+from .common import ELEMENT_PIC, NON_PIC, OPEN_FURNITURE
 from .logging_utils import log_error_loc, log_info_loc
 from .system_utils import get_file_lock_user
 from . import localization
+from .settings import EXCEL_SHEETS, LISTS_WORKBOOK_PATH
 
-Aw = [
+ENTRY_SHEET = "ENTRIES"
+NAME_HEADER = "NAZWA"
+TYPE_HEADER = "TYP"
+MODEL_HEADER = "MODEL"
+COLOR1_HEADER = "KOLOR1"
+COLOR2_HEADER = "KOLOR2"
+COLOR3_HEADER = "KOLOR3"
+EXTRA_HEADER = "DODATKI"
+EXTRAS_SHEET = "DODATKI"
+ENTRY_HEADERS = [
+    "EAN",
+    NAME_HEADER,
+    TYPE_HEADER,
+    MODEL_HEADER,
+    COLOR1_HEADER,
+    COLOR2_HEADER,
+    COLOR3_HEADER,
+    EXTRA_HEADER,
+]
+
+NO_EAN_PLACEHOLDER = "BRAK-EAN"
+NO_LED_VALUE = "NO-LED"
+EMPTY = ""
+UNDERSCORE = "_"
+HYPHEN = "-"
+LOCKED_TITLE = "Plik zablokowany"
+LOCKED_REASON_OTHER_PROCESS = "przez inny proces"
+ERROR_TITLE = "Błąd"
+WRITE_ERROR_TITLE = "Błąd zapisu"
+
+# Order used by the GUI when building slot labels.
+SLOT_LABELS = [
     ("01", "Assembly_instruction"),
     ("02", "Assembly_instruction1"),
     ("03", "DETAIL_pic"),
@@ -36,7 +75,9 @@ Aw = [
 ]
 
 
-def label_category(label):
+def label_category(label: str) -> str:
+    """Return a human-readable category for a slot label."""
+
     base = label.rstrip("0123456789")
     if base.startswith("LED_"):
         base = base[4:]
@@ -59,249 +100,277 @@ def label_category(label):
         return "NO-EAN"
     if NON_PIC in lowered:
         return "NON-PIC"
-    return base.replace(a, g).upper()
+    return base.replace(UNDERSCORE, HYPHEN).upper()
 
 
-def prepare_excel_lists():
-    if not A.path.isdir(A.path.dirname(o)):
-        A.makedirs(A.path.dirname(o), exist_ok=J)
-    if not A.path.exists(o):
-        workbook = BV()
-        workbook.remove(workbook.active)
-        for sheet_name in AE.values():
-            sheet = workbook.create_sheet(title=sheet_name)
-            if sheet_name == W:
-                sheet.append(["EAN", Ae, Ad, AZ, AY, AX, AW, d])
-        try:
-            workbook.save(o)
-        except E as exc:
-            O.showerror(AK, localization.LIST_CREATE_FAILED_MSG.format(error=exc))
-            log_error_loc("excel_create_failed", error=exc)
-    workbook = Ah(o)
-    lists = {}
-    for sheet_name in AE.values():
+def _ensure_workbook_exists() -> None:
+    base_dir = os.path.dirname(LISTS_WORKBOOK_PATH)
+    if not os.path.isdir(base_dir):
+        os.makedirs(base_dir, exist_ok=True)
+    if os.path.exists(LISTS_WORKBOOK_PATH):
+        return
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    for sheet_name in EXCEL_SHEETS.values():
+        sheet = workbook.create_sheet(title=sheet_name)
+        if sheet_name == ENTRY_SHEET:
+            sheet.append(ENTRY_HEADERS)
+    try:
+        workbook.save(LISTS_WORKBOOK_PATH)
+    except Exception as exc:  # pylint: disable=broad-except
+        messagebox.showerror(ERROR_TITLE, localization.LIST_CREATE_FAILED_MSG.format(error=exc))
+        log_error_loc("excel_create_failed", error=exc)
+
+
+def _load_workbook():
+    _ensure_workbook_exists()
+    return load_workbook(LISTS_WORKBOOK_PATH)
+
+
+def prepare_excel_lists() -> Dict[str, Dict[str, dict] | list]:
+    """Load all Excel lists into memory."""
+
+    workbook = _load_workbook()
+    lists: Dict[str, Dict[str, dict] | list] = {}
+    for sheet_name in EXCEL_SHEETS.values():
         sheet = workbook[sheet_name]
-        if sheet_name == W:
-            entries = {}
-            for row in sheet.iter_rows(min_row=2, values_only=J):
-                if not row[0]:
+        if sheet_name == ENTRY_SHEET:
+            entries: Dict[str, dict] = {}
+            for row in sheet.iter_rows(min_row=2, values_only=True):
+                ean = (row[0] or EMPTY).strip()
+                if not ean:
                     continue
-                ean = G(row[0]).strip()
-                name = G(row[1]) if row[1] else B
-                typ = G(row[2]) if row[2] else B
-                model = G(row[3]) if row[3] else B
-                col1 = G(row[4]) if row[4] else B
-                col2 = G(row[5]) if row[5] else B
-                col3 = G(row[6]) if row[6] else B
-                extra = G(row[7]) if row[7] else B
-                name = name.strip().upper()
-                typ = typ.strip().upper()
-                model = model.strip().upper()
-                col1 = col1.strip().upper()
-                col2 = col2.strip().upper()
-                col3 = col3.strip().upper()
-                extra = extra.strip().replace(a, g).upper()
-                entries[ean] = {Ae: name, Ad: typ, AZ: model, AY: col1, AX: col2, AW: col3, d: extra}
+                name = (row[1] or EMPTY).strip().upper()
+                furniture_type = (row[2] or EMPTY).strip().upper()
+                model = (row[3] or EMPTY).strip().upper()
+                color1 = (row[4] or EMPTY).strip().upper()
+                color2 = (row[5] or EMPTY).strip().upper()
+                color3 = (row[6] or EMPTY).strip().upper()
+                extra = (row[7] or EMPTY).strip().replace(UNDERSCORE, HYPHEN).upper()
+                entries[ean.strip()] = {
+                    NAME_HEADER: name,
+                    TYPE_HEADER: furniture_type,
+                    MODEL_HEADER: model,
+                    COLOR1_HEADER: color1,
+                    COLOR2_HEADER: color2,
+                    COLOR3_HEADER: color3,
+                    EXTRA_HEADER: extra,
+                }
             lists[sheet_name] = entries
         else:
-            values = []
+            values: list[str] = []
             for cell in sheet["A"]:
-                if cell.value:
-                    raw = G(cell.value).strip()
-                    if sheet_name == d:
-                        raw = raw.replace(a, g)
-                    raw = raw.upper()
-                    if raw not in values:
-                        values.append(raw)
+                if not cell.value:
+                    continue
+                raw = str(cell.value).strip()
+                if sheet_name == EXTRAS_SHEET:
+                    raw = raw.replace(UNDERSCORE, HYPHEN)
+                normalized = raw.upper()
+                if normalized not in values:
+                    values.append(normalized)
             lists[sheet_name] = values
     return lists
 
 
-def add_to_list(sheet_name, value):
+def _show_locked_dialog(reason: str) -> None:
+    title = LOCKED_TITLE
+    text = localization.LANG.get(
+        "excel_file_open",
+        "Nie można zapisać listy. Plik Excel jest otwarty {reason}. Zamknij plik i spróbuj ponownie.",
+    ).format(reason=reason)
+    messagebox.showerror(title, text)
+
+
+def _save_workbook(workbook: Workbook, error_event: str, **context) -> bool:
+    try:
+        workbook.save(LISTS_WORKBOOK_PATH)
+        return True
+    except Exception as exc:  # pylint: disable=broad-except
+        messagebox.showerror(WRITE_ERROR_TITLE, localization.LIST_SAVE_FAILED_MSG.format(error=exc))
+        context.setdefault("error", exc)
+        log_error_loc(error_event, **context)
+        return False
+
+
+def add_to_list(sheet_name: str, value: str) -> None:
     if not value:
         return
-    normalized = G(value).strip().upper()
-    if sheet_name == AE[d]:
-        normalized = normalized.replace(a, g)
-    locked_by = get_file_lock_user(o)
+    normalized = value.strip().upper()
+    if sheet_name == EXCEL_SHEETS[EXTRAS_SHEET]:
+        normalized = normalized.replace(UNDERSCORE, HYPHEN)
+    locked_by = get_file_lock_user(LISTS_WORKBOOK_PATH)
     if locked_by:
-        reason = f"przez użytkownika '{locked_by}'" if Aq(locked_by, G) else Ap
-        O.showerror(
-            Ao,
-            localization.LANG.get(
-                "excel_file_open",
-                "Nie można zapisać listy. Plik Excel jest otwarty {reason}. Zamknij plik i spróbuj ponownie.",
-            ).format(reason=reason),
-        )
+        reason = f"przez użytkownika '{locked_by}'" if isinstance(locked_by, str) else LOCKED_REASON_OTHER_PROCESS
+        _show_locked_dialog(reason)
         log_error_loc("excel_add_locked", value=normalized, list=sheet_name, reason=reason)
         return
-    workbook = Ah(o)
+    workbook = _load_workbook()
     sheet = workbook[sheet_name]
-    existing = [G(cell.value).strip().upper() for cell in sheet["A"] if cell.value]
-    if normalized not in existing:
-        sheet.append([normalized])
-        try:
-            workbook.save(o)
-        except E as exc:
-            O.showerror(Ac, localization.LIST_SAVE_FAILED_MSG.format(error=exc))
-            log_error_loc("excel_add_save_failed", value=normalized, list=sheet_name, error=exc)
-            return
+    existing = {str(cell.value).strip().upper() for cell in sheet["A"] if cell.value}
+    if normalized in existing:
+        return
+    sheet.append([normalized])
+    if _save_workbook(
+        workbook,
+        "excel_add_save_failed",
+        value=normalized,
+        list=sheet_name,
+    ):
         log_info_loc("list_value_added", value=normalized, list=sheet_name)
 
 
-def remove_from_list(sheet_name, value):
-    locked_by = get_file_lock_user(o)
+def remove_from_list(sheet_name: str, value: str) -> None:
+    locked_by = get_file_lock_user(LISTS_WORKBOOK_PATH)
     if locked_by:
-        reason = f"przez użytkownika '{locked_by}'" if Aq(locked_by, G) else Ap
-        O.showerror(
-            Ao,
-            localization.LANG.get(
-                "excel_file_open",
-                "Nie można zapisać listy. Plik Excel jest otwarty {reason}. Zamknij plik i spróbuj ponownie.",
-            ).format(reason=reason),
-        )
+        reason = f"przez użytkownika '{locked_by}'" if isinstance(locked_by, str) else LOCKED_REASON_OTHER_PROCESS
+        _show_locked_dialog(reason)
         log_error_loc("excel_remove_locked", value=value, list=sheet_name, reason=reason)
         return
-    workbook = Ah(o)
+    workbook = _load_workbook()
     sheet = workbook[sheet_name]
-    removed = Ay
+    removed = False
     for row in list(sheet.iter_rows(min_row=1)):
         cell = row[0]
-        if cell.value and G(cell.value).strip().upper() == G(value).strip().upper():
+        if cell.value and str(cell.value).strip().upper() == value.strip().upper():
             sheet.delete_rows(cell.row)
-            removed = J
+            removed = True
             break
-    if removed:
-        try:
-            workbook.save(o)
-        except E as exc:
-            O.showerror(Ac, localization.LIST_SAVE_FAILED_MSG.format(error=exc))
-            log_error_loc("excel_remove_save_failed", value=value, list=sheet_name, error=exc)
-            return
+    if removed and _save_workbook(
+        workbook,
+        "excel_remove_save_failed",
+        value=value,
+        list=sheet_name,
+    ):
         log_info_loc("list_value_removed", value=value, list=sheet_name)
 
 
-def save_ean_entry(ean, name, typ, model, col1, col2, col3, extra):
-    locked_by = get_file_lock_user(o)
+def _update_row(row, name, furniture_type, model, color1, color2, color3, extra_value):
+    row[1].value = name
+    row[2].value = furniture_type
+    row[3].value = model
+    row[4].value = color1
+    row[5].value = color2 or EMPTY
+    row[6].value = color3 or EMPTY
+    row[7].value = extra_value
+
+
+def save_ean_entry(
+    ean: str,
+    name: str,
+    furniture_type: str,
+    model: str,
+    color1: str,
+    color2: str,
+    color3: str,
+    extra: str,
+) -> bool:
+    locked_by = get_file_lock_user(LISTS_WORKBOOK_PATH)
     if locked_by:
-        reason = f"przez użytkownika '{locked_by}'" if Aq(locked_by, G) else Ap
-        O.showerror(
-            Ao,
-            localization.LANG.get(
-                "excel_data_file_open",
-                "Nie można zapisać danych. Plik Excel jest otwarty {reason}. Zamknij plik i spróbuj ponownie.",
-            ).format(reason=reason),
-        )
+        reason = f"przez użytkownika '{locked_by}'" if isinstance(locked_by, str) else LOCKED_REASON_OTHER_PROCESS
+        messagebox = localization.O if hasattr(localization, "O") else None
+        if messagebox:
+            messagebox.showerror(
+                LOCKED_TITLE,
+                localization.LANG.get(
+                    "excel_data_file_open",
+                    "Nie można zapisać danych. Plik Excel jest otwarty {reason}. Zamknij plik i spróbuj ponownie.",
+                ).format(reason=reason),
+            )
         log_error_loc("excel_entry_save_locked", ean=ean, reason=reason)
-        return h
-    workbook = Ah(o)
-    sheet = workbook[AE[W]]
-    name = G(name).strip().upper()
-    typ = G(typ).strip().upper()
-    model = G(model).strip().upper()
-    col1 = G(col1).strip().upper()
-    col2 = G(col2).strip().upper() if col2 else B
-    col3 = G(col3).strip().upper() if col3 else B
-    extra_value = G(extra).strip()
-    if extra_value == B or extra_value.upper() in [L, L]:
-        extra_value = L
+        return False
+
+    workbook = _load_workbook()
+    sheet = workbook[EXCEL_SHEETS[ENTRY_SHEET]]
+
+    name = str(name).strip().upper()
+    furniture_type = str(furniture_type).strip().upper()
+    model = str(model).strip().upper()
+    color1 = str(color1).strip().upper()
+    color2 = str(color2).strip().upper() if color2 else EMPTY
+    color3 = str(color3).strip().upper() if color3 else EMPTY
+    extra_raw = str(extra).strip()
+    if not extra_raw or extra_raw.upper() in {NO_LED_VALUE, NO_LED_VALUE.upper()}:
+        extra_value = NO_LED_VALUE
     else:
-        extra_value = extra_value.replace(a, g).upper()
-    updated = h
-    target_row = I
+        extra_value = extra_raw.replace(UNDERSCORE, HYPHEN).upper()
+
+    updated = False
+    target_row = None
     for row in sheet.iter_rows(min_row=2):
         raw_ean = row[0].value
-        if raw_ean is I:
+        if raw_ean is None:
             continue
-        if G(raw_ean).upper() == G(ean).upper():
+        if str(raw_ean).strip().upper() == str(ean).strip().upper():
             target_row = row
-            updated = J
+            updated = True
             break
-    if target_row:
-        target_row[1].value = name
-        target_row[2].value = typ
-        target_row[3].value = model
-        target_row[4].value = col1
-        target_row[5].value = col2 or B
-        target_row[6].value = col3 or B
-        target_row[7].value = extra_value
+
+    if target_row is not None:
+        _update_row(target_row, name, furniture_type, model, color1, color2, color3, extra_value)
     else:
-        trimmed = G(ean).strip()
-        if trimmed.upper() != q:
-            candidate = I
+        trimmed = str(ean).strip()
+        if trimmed.upper() != NO_EAN_PLACEHOLDER:
+            candidate = None
             for row in sheet.iter_rows(min_row=2):
-                raw = G(row[0].value).strip().upper() if row[0].value else B
-                if raw == q:
-                    existing_name = G(row[1].value).strip().upper() if row[1].value else B
-                    existing_typ = G(row[2].value).strip().upper() if row[2].value else B
-                    existing_model = G(row[3].value).strip().upper() if row[3].value else B
-                    existing_col1 = G(row[4].value).strip().upper() if row[4].value else B
-                    existing_col2 = G(row[5].value).strip().upper() if row[5].value else B
-                    existing_col3 = G(row[6].value).strip().upper() if row[6].value else B
-                    existing_extra = G(row[7].value).strip() if row[7].value else B
-                    existing_extra = existing_extra.replace(a, g).upper()
+                raw = str(row[0].value or EMPTY).strip().upper()
+                if raw == NO_EAN_PLACEHOLDER:
+                    existing = {
+                        NAME_HEADER: str(row[1].value or EMPTY).strip().upper(),
+                        TYPE_HEADER: str(row[2].value or EMPTY).strip().upper(),
+                        MODEL_HEADER: str(row[3].value or EMPTY).strip().upper(),
+                        COLOR1_HEADER: str(row[4].value or EMPTY).strip().upper(),
+                        COLOR2_HEADER: str(row[5].value or EMPTY).strip().upper(),
+                        COLOR3_HEADER: str(row[6].value or EMPTY).strip().upper(),
+                        EXTRA_HEADER: str(row[7].value or EMPTY).strip().replace(UNDERSCORE, HYPHEN).upper(),
+                    }
                     if (
-                        existing_name == name
-                        and existing_typ == typ
-                        and existing_model == model
-                        and existing_col1 == col1
-                        and existing_col2 == (col2 or B)
-                        and existing_col3 == (col3 or B)
-                        and existing_extra == extra_value
+                        existing[NAME_HEADER] == name
+                        and existing[TYPE_HEADER] == furniture_type
+                        and existing[MODEL_HEADER] == model
+                        and existing[COLOR1_HEADER] == color1
+                        and existing[COLOR2_HEADER] == color2.upper()
+                        and existing[COLOR3_HEADER] == color3.upper()
+                        and existing[EXTRA_HEADER] == extra_value
                     ):
                         candidate = row
-                        updated = J
+                        updated = True
                         break
-            if candidate:
-                candidate[0].value = G(ean)
-                candidate[1].value = name
-                candidate[2].value = typ
-                candidate[3].value = model
-                candidate[4].value = col1
-                candidate[5].value = col2 or B
-                candidate[6].value = col3 or B
-                candidate[7].value = extra_value
+            if candidate is not None:
+                candidate[0].value = str(ean)
+                _update_row(candidate, name, furniture_type, model, color1, color2, color3, extra_value)
             else:
-                sheet.append([G(ean), name, typ, model, col1, col2 or B, col3 or B, extra_value])
+                sheet.append(
+                    [
+                        str(ean),
+                        name,
+                        furniture_type,
+                        model,
+                        color1,
+                        color2 or EMPTY,
+                        color3 or EMPTY,
+                        extra_value,
+                    ]
+                )
         else:
-            candidate = I
-            for row in sheet.iter_rows(min_row=2):
-                raw = G(row[0].value).strip().upper() if row[0].value else B
-                if raw == q:
-                    existing_name = G(row[1].value).strip().upper() if row[1].value else B
-                    existing_typ = G(row[2].value).strip().upper() if row[2].value else B
-                    existing_model = G(row[3].value).strip().upper() if row[3].value else B
-                    existing_col1 = G(row[4].value).strip().upper() if row[4].value else B
-                    existing_col2 = G(row[5].value).strip().upper() if row[5].value else B
-                    existing_col3 = G(row[6].value).strip().upper() if row[6].value else B
-                    existing_extra = G(row[7].value).strip() if row[7].value else B
-                    existing_extra = existing_extra.replace(a, g).upper()
-                    if (
-                        existing_name == name
-                        and existing_typ == typ
-                        and existing_model == model
-                        and existing_col1 == col1
-                        and existing_col2 == (col2 or B)
-                        and existing_col3 == (col3 or B)
-                        and existing_extra == extra_value
-                    ):
-                        candidate = row
-                        updated = J
-                        break
-            if candidate:
-                candidate[1].value = name
-                candidate[2].value = typ
-                candidate[3].value = model
-                candidate[4].value = col1
-                candidate[5].value = col2 or B
-                candidate[6].value = col3 or B
-                candidate[7].value = extra_value
-            else:
-                sheet.append([G(ean), name, typ, model, col1, col2 or B, col3 or B, extra_value])
-    try:
-        workbook.save(o)
-    except E as exc:
-        O.showerror(Ac, localization.LIST_DATA_SAVE_FAILED_MSG.format(error=exc))
-        log_error_loc("excel_entry_save_failed", ean=ean, error=exc)
-        return h
-    return J
+            sheet.append(
+                [
+                    str(ean),
+                    name,
+                    furniture_type,
+                    model,
+                    color1,
+                    color2 or EMPTY,
+                    color3 or EMPTY,
+                    extra_value,
+                ]
+            )
+
+    if _save_workbook(workbook, "excel_entry_save_failed", ean=ean):
+        action = "updated" if updated else "added"
+        log_info_loc("excel_entry_saved", ean=ean, action=action)
+        return True
+    return False
+
+
+# Backwards compatibility with the original constant name expected by app.py
+Aw = SLOT_LABELS

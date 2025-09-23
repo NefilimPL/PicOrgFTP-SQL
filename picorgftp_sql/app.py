@@ -1,13 +1,20 @@
 """Main Tkinter application class."""
 
 from .common import *  # noqa: F401,F403
-from .excel_utils import Aw, add_to_list, label_category, prepare_excel_lists, remove_from_list, save_ean_entry
+from .excel_utils import (
+    SLOT_LABELS,
+    add_to_list,
+    label_category,
+    prepare_excel_lists,
+    remove_from_list,
+    save_ean_entry,
+)
 from .logging_utils import log_error, log_error_loc, log_info, log_info_loc, set_app
 from .system_utils import get_file_lock_user, is_admin
 from .database import connect_db
 from .config import save_config
 from . import config, localization
-from .settings import AE, AN, l
+from .settings import EXCEL_SHEETS, AN, l
 
 D = config.CONFIG
 LC = localization.LC
@@ -233,7 +240,7 @@ class App(BU.Tk):
         B.slots_frame = N_
         B.slots = []
         U = 5
-        for G_, (V_, W_) in A0(Aw):
+        for G_, (V_, W_) in A0(SLOT_LABELS):
             Z_, O_ = divmod(G_, U)
             H_ = F.Frame(
                 B.slots_frame,
@@ -1143,7 +1150,7 @@ class App(BU.Tk):
         B_ = key
         D_ = BI.askstring("Dodaj", f"Nowa wartość do listy {B_}:")
         if D_:
-            add_to_list(AE[B_], D_)
+            add_to_list(EXCEL_SHEETS[B_], D_)
             if D_.strip().upper() not in [A.upper() for A in C.lists[B_]]:
                 C.lists[B_] = C.lists[B_] + [
                     D_.strip().upper() if B_ != d else D_.strip().replace(a, g).upper()
@@ -1174,7 +1181,7 @@ class App(BU.Tk):
         F_ = E_[0]
         C_ = D_.get(F_)
         if O.askyesno("Usuń", f"Czy usunąć '{C_}' z listy {B_}?"):
-            remove_from_list(AE[B_], C_)
+            remove_from_list(EXCEL_SHEETS[B_], C_)
             if C_ in A.lists[B_] or C_.upper() in [A.upper() for A in A.lists[B_]]:
                 A.lists[B_] = [
                     A_ for A_ in A.lists[B_] if A_.upper() != C_.strip().upper()
@@ -1333,8 +1340,8 @@ class App(BU.Tk):
                     for label, info in C.ftp_remote_only.items():
                         for idx, slot in A0(C.slots):
                             if slot[Aa] == label:
-                                Az_ = Aw[idx][0]
-                                Be_ = label_category(Aw[idx][1])
+                                Az_ = SLOT_LABELS[idx][0]
+                                Be_ = label_category(SLOT_LABELS[idx][1])
                                 P_ = [
                                     K_ if K_ else q,
                                     Az_,
@@ -1397,8 +1404,8 @@ class App(BU.Tk):
                     if not A.path.isfile(src_path):
                         C.pending_additions.pop(F_, I)
                         continue
-                    Az_ = Aw[F_][0]
-                    Be_ = label_category(Aw[F_][1])
+                    Az_ = SLOT_LABELS[F_][0]
+                    Be_ = label_category(SLOT_LABELS[F_][1])
                     P_ = [
                         K_ if K_ else q,
                         Az_,
@@ -2275,8 +2282,8 @@ class App(BU.Tk):
             row=6, column=0, sticky=R, padx=5, pady=5
         )
         AJ_ = F.StringVar(value=B)
-        Aw = C.Entry(Q, textvariable=AJ_, width=50, state=d_)
-        Aw.grid(row=6, column=1, padx=5, pady=5, sticky=T)
+        sql_query_entry = C.Entry(Q, textvariable=AJ_, width=50, state=d_)
+        sql_query_entry.grid(row=6, column=1, padx=5, pady=5, sticky=T)
 
         def Ax():
             A_ = B

@@ -142,7 +142,7 @@ BASE_DIR_OVERRIDE, BASE_DIR_OVERRIDE_WARNING = _ensure_base_dir_override(
 
 AC = BASE_DIR_OVERRIDE
 l = A.path.join(AC, "_ZDJECIA PRZEROBIONE_")
-o = A.path.join(AC, "lists.xlsx")
+LISTS_WORKBOOK_PATH = A.path.join(AC, "lists.xlsx")
 AD = A.path.join(AC, "config.json")
 AM = A.path.join(AC, "error_log.txt")
 BM = A.path.join(AC, "changes_log.txt")
@@ -155,7 +155,7 @@ LOC_URLS_DEFAULT = [
 LOC_URLS = LOC_URLS_DEFAULT[:]
 DEFAULT_CONFIG["loc_path"] = LC_DEFAULT
 DEFAULT_CONFIG["loc_urls"] = LOC_URLS_DEFAULT
-AE = {n: n, t: t, s: s, Y: Y, d: d, W: W}
+EXCEL_SHEETS = {n: n, t: t, s: s, Y: Y, d: d, W: W}
 BW = [
     "ODBC Driver 18 for SQL Server",
     "ODBC Driver 17 for SQL Server",
