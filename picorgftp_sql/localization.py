@@ -1,0 +1,288 @@
+"""Localization handling and translated UI strings."""
+
+from .common import *  # noqa: F401,F403 - reuse legacy globals
+from . import config, settings
+
+LANG_CFG = "language.json"
+LC = settings.LC
+LOC_URLS = settings.LOC_URLS
+
+
+def load_language_pref():
+    try:
+        with x(A.path.join(LC, LANG_CFG), "r", encoding=k) as handle:
+            return Ar.load(handle).get("language", "auto")
+    except E:
+        return "auto"
+
+
+def save_language_pref(lang):
+    try:
+        A.makedirs(LC, exist_ok=J)
+        with x(A.path.join(LC, LANG_CFG), T, encoding=k) as handle:
+            Ar.dump({"language": lang}, handle, indent=4)
+    except E:
+        pass
+
+
+def _expand_github_tree(url):
+    try:
+        parts = BP.urlparse(url)
+        segments = [seg for seg in parts.path.split("/") if seg]
+        if Q(segments) >= 4 and segments[2] == "tree":
+            owner, repo, _tree, ref, *sub = segments
+            api = (
+                f"https://api.github.com/repos/{owner}/{repo}/contents/"
+                f"{'/'.join(sub)}?ref={ref}"
+            )
+            with BN.urlopen(api) as response:
+                items = Ar.loads(response.read().decode(k))
+            return [item.get("download_url") for item in items if item.get("type") == "file"]
+    except E:
+        return []
+    return []
+
+
+def download_localizations(force=Ay):
+    ok = J
+    try:
+        A.makedirs(LC, exist_ok=J)
+    except E:
+        return Ay
+    for url in LOC_URLS:
+        targets = []
+        if "github.com" in url and "/tree/" in url:
+            targets = _expand_github_tree(url)
+            if not targets:
+                ok = Ay
+                continue
+        else:
+            targets = [url]
+        for target in targets:
+            filename = A.path.basename(BP.urlparse(target).path)
+            if not filename:
+                ok = Ay
+                continue
+            destination = A.path.join(LC, filename)
+            if not force and A.path.exists(destination):
+                continue
+            try:
+                with BN.urlopen(target) as response, x(destination, "wb") as handle:
+                    handle.write(response.read())
+            except E:
+                ok = Ay
+    return ok
+
+
+def load_localization(language=I):
+    lang_code = language
+    if not lang_code or lang_code == "auto":
+        try:
+            BO.setlocale(BO.LC_ALL, "")
+            lang_code = (BO.getlocale()[0] or "en").split("_")[0]
+        except E:
+            lang_code = "en"
+    mapping = {"pl": "pl.json", "ua": "ua.json", "en": "eng.json"}
+    filename = mapping.get(lang_code.lower(), "eng.json")
+    paths = [
+        A.path.join(LC, filename),
+        A.path.join(A.path.dirname(A.path.abspath(__file__)), "Localization", filename),
+    ]
+    for path in paths:
+        if A.path.exists(path):
+            try:
+                with x(path, "r", encoding=k) as handle:
+                    return Ar.load(handle)
+            except E:
+                pass
+    return {}
+
+
+D = config.CONFIG
+LC = D.get("loc_path", settings.LC_DEFAULT) or settings.LC_DEFAULT
+LOC_URLS = D.get("loc_urls", settings.LOC_URLS_DEFAULT)
+LANG_PREF = load_language_pref()
+LOC_DL_OK = download_localizations()
+LANG = load_localization(LANG_PREF)
+LANG_EN = load_localization("en")
+
+settings.LC = LC
+settings.LOC_URLS = LOC_URLS
+
+NO_FILE_LABEL = LANG.get("no_file", NO_FILE_FALLBACK)
+LANGUAGE_TAB_LABEL = LANG.get("language_tab", "Język")
+LANGUAGE_LABEL = LANG.get("language_label", "Język:")
+LOC_PATH_LABEL = LANG.get("loc_path_label", "Folder lokalizacji:")
+LOC_URLS_LABEL = LANG.get("loc_urls_label", "Linki lokalizacji:")
+UPDATE_LOC_LABEL = LANG.get("loc_update_label", "Aktualizuj")
+LOC_UPDATE_SUCCESS_MSG = LANG.get(
+    "loc_update_success", "Zaktualizowano pliki lokalizacyjne"
+)
+PROCESSING_MSG = LANG.get("processing", PROCESSING_MSG)
+PROCESSING_UI_MSG = LANG.get(
+    "processing_ui", ">>> Processing, please wait..."
+)
+OPERATION_TITLE = LANG.get("operation_title", OPERATION_TITLE)
+NETWORK_ERROR_MSG = LANG.get("network_error", NETWORK_ERROR_MSG)
+PATH_NOT_FOUND_MSG = LANG.get("path_not_found", PATH_NOT_FOUND_MSG)
+LOGIN_DATA_ERROR_MSG = LANG.get("login_data_error", LOGIN_DATA_ERROR_MSG)
+MISSING_FIELDS_MSG = LANG.get("missing_fields", MISSING_FIELDS_MSG)
+INCOMPLETE_DATA_MSG = LANG.get("incomplete_data", INCOMPLETE_DATA_MSG)
+NO_DATA_MSG = LANG.get("no_data", NO_DATA_MSG)
+CANCEL_LABEL = LANG.get("cancel", CANCEL_LABEL)
+SETTINGS_LABEL = LANG.get("settings", SETTINGS_LABEL)
+EDIT_LISTS_LABEL = LANG.get("edit_lists", EDIT_LISTS_LABEL)
+Ac = LANG.get("save_error", Ac)
+AJ = LANG.get("not_in_list", AJ)
+AK = LANG.get("error", AK)
+CHANGE_LANGUAGE_LABEL = LANG.get("change_language", "Zmień język")
+LANGUAGE_PROMPT = LANG.get("language_prompt", "Kod języka (pl, ua, eng):")
+RESTART_TO_APPLY_LABEL = LANG.get(
+    "restart_to_apply", "Uruchom ponownie aplikację, aby zastosować zmiany"
+)
+CONFIG_SAVE_FAILED_MSG = LANG.get(
+    "config_save_failed",
+    config.CONFIG_SAVE_FAILED_MSG,
+)
+config.CONFIG_SAVE_FAILED_MSG = CONFIG_SAVE_FAILED_MSG
+LIST_CREATE_FAILED_MSG = LANG.get(
+    "list_create_failed",
+    "Nie udało się utworzyć pliku list.xlsx:\n{error}",
+)
+LIST_SAVE_FAILED_MSG = LANG.get(
+    "list_save_failed",
+    "Nie udało się zapisać pliku list.xlsx:\n{error}",
+)
+LIST_DATA_SAVE_FAILED_MSG = LANG.get(
+    "list_data_save_failed",
+    "Nie udało się zapisać danych do pliku list.xlsx:\n{error}",
+)
+FOLDER_OPEN_FAILED_MSG = LANG.get(
+    "folder_open_failed",
+    "Nie udało się otworzyć folderu:\n{error}",
+)
+OPERATION_ERRORS_MSG = LANG.get(
+    "operation_errors",
+    "Operacja zakończyła się z błędami. Sprawdź logi oraz folder kopii zapasowej: {backup}",
+)
+FTP_SEND_FAILED_MSG = LANG.get(
+    "ftp_send_failed",
+    "Dane lokalne zostały zapisane, jednak wysyłanie plików na serwer FTP nie powiodło się.\nPowód: {reason}",
+)
+FTP_SKIPPED_NO_EAN_MSG = LANG.get(
+    "ftp_skipped_no_ean",
+    "Dane lokalne zostały zapisane, jednak nie wysłano zdjęć na FTP z powodu braku prawidłowego kodu EAN-13.",
+)
+SQL_UPDATE_FAILED_MSG = LANG.get(
+    "sql_update_failed",
+    "Dane lokalne oraz FTP zostały zaktualizowane, jednak wystąpił błąd podczas aktualizacji bazy danych.\nPowód: {reason}",
+)
+SAVED_LABEL = LANG.get("saved", "Zapisano")
+UPDATE_SUCCESS_MSG = LANG.get(
+    "update_success", "Zaktualizowano dane dla EAN {ean}."
+)
+NO_EAN_LABEL = LANG.get("no_ean", "Brak EAN")
+ENTER_EAN_TO_LOAD_MSG = LANG.get(
+    "enter_ean_to_load", "Wprowadź kod EAN, aby wczytać dane."
+)
+CANNOT_SEARCH_NO_EAN_MSG = LANG.get(
+    "cannot_search_no_ean", "Nie można wyszukać danych dla 'BRAK-EAN'."
+)
+NOT_FOUND_LABEL = LANG.get("not_found", "Nie znaleziono")
+NO_SAVED_DATA_FOR_EAN_MSG = LANG.get(
+    "no_saved_data_for_ean", "Brak zapisanych danych dla EAN {ean}."
+)
+FILL_REQUIRED_BEFORE_OPEN_MSG = LANG.get(
+    "fill_required_before_open",
+    "Uzupełnij wszystkie wymagane pola (nazwa, typ, model, kolor 1) przed otwarciem folderu.",
+)
+CHANGE_DATA_ADMIN_LABEL = LANG.get(
+    "change_data_admin", "Zmień dane (Administrator)"
+)
+DATABASE_LABEL = LANG.get("database_label", "Baza danych:")
+SERVER_LABEL = LANG.get("server_label", "Serwer:")
+MSSQL_SERVER_LABEL = LANG.get("mssql_server", "MS SQL Server")
+TEST_BUTTON_LABEL = LANG.get("test_button", "Testuj")
+CONNECTED_LABEL = LANG.get("connected", "Połączono")
+PASSWORD_LABEL = LANG.get("password_label", "Hasło:")
+USER_LABEL = LANG.get("user_label", "Użytkownik:")
+MYSQL_LABEL = LANG.get("mysql_label", "MySQL")
+SAVE_LABEL = LANG.get("save", "Zapisz")
+NO_PERMISSIONS_LABEL = LANG.get("no_permissions", "Brak uprawnień")
+RUN_AS_ADMIN_MSG = LANG.get(
+    "run_as_admin",
+    "Uruchom operację z uprawnieniami administratora, aby edytować te ustawienia.",
+)
+IMAGE_SETTINGS_LABEL = LANG.get(
+    "image_settings", "Ustawienia przetwarzania obrazów:"
+)
+RESIZE_LABEL = LANG.get(
+    "resize_label", "Zmniejszaj obrazy większe niż"
+)
+PX_MAX_LABEL = LANG.get("px_max_label", "px (max wymiar)")
+COMPRESS_LABEL = LANG.get(
+    "compress_label", "Kompresuj JPEG (jakość)"
+)
+LIMIT_SIZE_LABEL = LANG.get(
+    "limit_size_label", "Ogranicz rozmiar pliku do"
+)
+CONVERT_TIF_LABEL = LANG.get(
+    "convert_tif_label", "Konwertuj .tif na"
+)
+FTP_SERVER_LABEL = LANG.get("ftp_server_label", "Serwer FTP:")
+PORT_LABEL = LANG.get("port_label", "Port:")
+FTP_PATH_LABEL = LANG.get(
+    "ftp_path_label", "Ścieżka (katalog) na serwerze:"
+)
+FTP_TEST_LABEL = LANG.get(
+    "ftp_test_label", "Test połączenia FTP:"
+)
+FTP_UPDATE_LABEL = LANG.get(
+    "ftp_update_label", "Aktualizuj pliki na FTP:"
+)
+DB_TYPE_LABEL = LANG.get("db_type_label", "Typ bazy danych:")
+SQL_UPDATE_LABEL = LANG.get(
+    "sql_update_label", "Aktualizuj bazę przy zapisie:"
+)
+SQL_QUERY_LABEL = LANG.get("sql_query_label", "Zapytanie SQL:")
+SQL_TEST_LABEL = LANG.get("sql_test_label", "Test połączenia SQL:")
+NAME_LABEL = LANG.get("name_label", "Nazwa mebla*:")
+TYPE_LABEL = LANG.get("type_label", "Typ mebla*:")
+MODEL_LABEL = LANG.get("model_label", "Model mebla*:")
+COLOR1_LABEL = LANG.get("color1_label", "Kolor 1*:")
+COLOR2_LABEL = LANG.get("color2_label", "Kolor 2:")
+COLOR3_LABEL = LANG.get("color3_label", "Kolor 3:")
+EXTRA_LABEL = LANG.get("extra_label", "Dodatkowe:")
+EAN_OPTIONAL_LABEL = LANG.get(
+    "ean_optional_label", "EAN (opcjonalnie):"
+)
+LOAD_LABEL = LANG.get("load_label", "Wczytaj")
+UPDATE_LABEL = LANG.get("update_label", "Aktualizuj")
+CHOOSE_LABEL = LANG.get("choose_label", "Wybierz")
+NEW_COMBINATION_LABEL = LANG.get("new_combination_label", "Nowa kombinacja")
+FTP_ERROR_LABEL = LANG.get("ftp_error", "Błąd FTP")
+SQL_ERROR_LABEL = LANG.get("sql_error", "Błąd SQL")
+IMAGES_TAB_LABEL = LANG.get("images_tab", "Obrazy")
+FTP_TAB_LABEL = LANG.get("ftp_tab", "FTP")
+SQL_TAB_LABEL = LANG.get("sql_tab", "SQL")
+WARNING_LABEL = LANG.get("warning", "Uwaga")
+SELECT_COMBINATION_TITLE = LANG.get(
+    "select_combination_title", "Wybierz istniejącą kombinację"
+)
+SELECT_COMBINATION_PROMPT = LANG.get(
+    "select_combination_prompt",
+    "Wybierz istniejącą kombinację kolorów:",
+)
+SELECT_FILE_TITLE = LANG.get("select_file_title", "Wybierz plik")
+OTHER_ERROR_MSG = LANG.get("other_error", "Inny błąd: {error}")
+FTP_GENERIC_ERROR_MSG = LANG.get("ftp_generic_error", "Błąd FTP: {error}")
+FILL_REQUIRED_BEFORE_SUBMIT_MSG = LANG.get(
+    "fill_required_before_submit",
+    "Uzupełnij wszystkie wymagane pola oznaczone * przed zatwierdzeniem.",
+)
+EAN_PROMPT_TITLE = LANG.get("ean_prompt_title", "EAN")
+EAN_MISSING_PROMPT = LANG.get(
+    "ean_missing_prompt",
+    "Nie podano EAN.\nWprowadź kod EAN (13 cyfr) lub pozostaw puste aby użyć 'BRAK-EAN':",
+)
+APP_TITLE = LANG.get("app_title", "Katalogowanie zdjęć mebli")
