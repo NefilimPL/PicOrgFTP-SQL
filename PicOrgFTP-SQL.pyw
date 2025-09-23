@@ -204,7 +204,15 @@ from PIL import Image as AA, ImageTk
 from openpyxl import Workbook as BV, load_workbook as Ah
 import ftplib as AB, socket as BK, pyodbc, mysql.connector, ctypes, json as Ar, base64 as BL
 
-BASE_DIR_SETTINGS_PATH = A.path.join(A.path.dirname(A.path.abspath(__file__)), BASE_DIR_SETTINGS_FILE)
+def _resolve_settings_root():
+    if getattr(sys, "frozen", False):
+        base_path = A.path.dirname(sys.executable)
+    else:
+        base_path = A.path.dirname(A.path.abspath(__file__))
+    return base_path or A.getcwd()
+
+
+BASE_DIR_SETTINGS_PATH = A.path.join(_resolve_settings_root(), BASE_DIR_SETTINGS_FILE)
 BASE_DIR_OVERRIDE_WARNING = I
 
 
