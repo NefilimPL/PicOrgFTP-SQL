@@ -8,34 +8,58 @@ def _resolve_settings_root():
 
     if getattr(sys, "frozen", False):
         meipass = getattr(sys, "_MEIPASS", B) or A.getenv("_MEIPASS2", B)
-        frozen_candidates = []
-        appdata = A.getenv("APPDATA") or A.getenv("LOCALAPPDATA")
-        if appdata:
-            frozen_candidates.append(
-                A.path.join(appdata, "PicOrgFTP-SQL")
-            )
+        meipass_abs = I
+        if meipass:
+            try:
+                meipass_abs = A.path.abspath(meipass)
+            except (ValueError, OSError):
+                meipass_abs = I
+        candidates = []
         exe_dir = A.path.dirname(getattr(sys, "executable", B) or B)
         if exe_dir:
-            frozen_candidates.append(exe_dir)
+            candidates.append(exe_dir)
         if sys.argv:
-            argv_path = A.path.dirname(A.path.abspath(sys.argv[0]))
-            if argv_path:
-                frozen_candidates.append(argv_path)
-        frozen_candidates.append(A.getcwd())
+            try:
+                argv_path = A.path.dirname(A.path.abspath(sys.argv[0]))
+            except (ValueError, OSError, TypeError):
+                argv_path = B
+            if argv_path and argv_path not in candidates:
+                candidates.append(argv_path)
+        try:
+            cwd = A.getcwd()
+        except E:
+            cwd = B
+        if cwd and cwd not in candidates:
+            candidates.append(cwd)
 
-        for candidate in frozen_candidates:
+        existing = []
+        fallback = []
+        for candidate in candidates:
             if not candidate:
                 continue
-            candidate_abs = A.path.abspath(candidate)
-            if meipass:
+            try:
+                candidate_abs = A.path.abspath(candidate)
+            except (ValueError, OSError):
+                continue
+            if meipass_abs:
                 try:
-                    meipass_abs = A.path.abspath(meipass)
                     if A.path.commonpath([candidate_abs, meipass_abs]) == meipass_abs:
                         continue
                 except (ValueError, OSError):
                     pass
-            return candidate_abs
-        return exe_dir or A.getcwd()
+            settings_file = A.path.join(candidate_abs, BASE_DIR_SETTINGS_FILE)
+            if A.path.isfile(settings_file):
+                existing.append(candidate_abs)
+            else:
+                fallback.append(candidate_abs)
+        if existing:
+            return existing[0]
+        if fallback:
+            return fallback[0]
+        try:
+            return exe_dir or cwd or A.getcwd()
+        except E:
+            return exe_dir or cwd or B
 
     module_dir = A.path.dirname(A.path.abspath(__file__))
     project_root = A.path.abspath(A.path.join(module_dir, A.pardir))
