@@ -1124,7 +1124,11 @@ class App(BU.Tk):
         I_ = C.Notebook(H_)
         I_.pack(expand=J, fill=z, padx=5, pady=5)
         M_ = {}
-        P_ = [(n, "Nazwy"), (t, "Typy"), (s, "Modele"), (Y, "Kolory"), (d, "Dodatki")]
+        Aq_ = (n, t, s, Y, d)
+        P_ = [
+            (A_, LIST_EDITOR_TAB_LABELS.get(A_, A_))
+            for A_ in Aq_
+        ]
         N_ = 0
         for R_, (A_, S_) in A0(P_):
             B_ = C.Frame(I_)
@@ -1134,7 +1138,7 @@ class App(BU.Tk):
                 N_ = R_
         I_.select(N_)
         K_ = 0
-        for T in (n, t, s, Y, d):
+        for T in Aq_:
             for G_ in E.lists[T]:
                 if G_ and Q(G_) > K_:
                     K_ = Q(G_)
@@ -1151,16 +1155,24 @@ class App(BU.Tk):
             for G_ in V_:
                 D_.insert(F.END, G_)
             C.Button(
-                L_, text="Dodaj", command=lambda k=A_, l=D_: E._add_list_item(k, l)
+                L_,
+                text=LIST_ADD_BUTTON_LABEL,
+                command=lambda k=A_, l=D_: E._add_list_item(k, l),
             ).pack(fill="x", pady=2)
             C.Button(
-                L_, text="Usuń", command=lambda k=A_, l=D_: E._remove_list_item(k, l)
+                L_,
+                text=LIST_REMOVE_BUTTON_LABEL,
+                command=lambda k=A_, l=D_: E._remove_list_item(k, l),
             ).pack(fill="x", pady=2)
         return H_
 
     def _add_list_item(C, key, listbox):
         B_ = key
-        D_ = BI.askstring("Dodaj", f"Nowa wartość do listy {B_}:")
+        E_ = LIST_EDITOR_TAB_LABELS.get(B_, B_)
+        D_ = BI.askstring(
+            LIST_ADD_DIALOG_TITLE,
+            LIST_ADD_PROMPT_MSG.format(list=E_),
+        )
         if D_:
             add_to_list(EXCEL_SHEETS[B_], D_)
             if D_.strip().upper() not in [A.upper() for A in C.lists[B_]]:
@@ -1192,7 +1204,11 @@ class App(BU.Tk):
             return
         F_ = E_[0]
         C_ = D_.get(F_)
-        if O.askyesno("Usuń", f"Czy usunąć '{C_}' z listy {B_}?"):
+        G_ = LIST_EDITOR_TAB_LABELS.get(B_, B_)
+        if O.askyesno(
+            LIST_REMOVE_DIALOG_TITLE,
+            LIST_REMOVE_PROMPT_MSG.format(value=C_, list=G_),
+        ):
             remove_from_list(EXCEL_SHEETS[B_], C_)
             if C_ in A.lists[B_] or C_.upper() in [A.upper() for A in A.lists[B_]]:
                 A.lists[B_] = [
