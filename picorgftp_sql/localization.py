@@ -53,7 +53,7 @@ def _normalize_language_code(value):
 
 
 def _iter_settings_paths():
-    """Return candidate ``local_settings.json`` locations in priority order."""
+    """Return candidate ``local_settings.json`` locations split by origin."""
 
     candidates = []
     inside_meipass = []
@@ -115,7 +115,7 @@ def _iter_settings_paths():
     package_root = A.path.dirname(module_dir)
     register(A.path.join(package_root, BASE_DIR_SETTINGS_FILE))
 
-    return candidates + inside_meipass
+    return candidates, inside_meipass
 
 
 def _update_settings_path(path):
@@ -213,8 +213,9 @@ def _load_packaged_localization(filename):
 def load_language_pref():
     """Read the saved language preference from ``local_settings.json``."""
 
-    candidates = _iter_settings_paths()
-    for settings_path in candidates:
+    primary_candidates, packaged_candidates = _iter_settings_paths()
+    first_external = primary_candidates[0] if primary_candidates else I
+    for settings_path in primary_candidates:
         try:
             with x(settings_path, "r", encoding=k) as handle:
                 data = Ar.load(handle)
@@ -226,6 +227,30 @@ def load_language_pref():
             if normalized:
                 _update_settings_path(settings_path)
                 return normalized
+    for settings_path in packaged_candidates:
+        try:
+            with x(settings_path, "r", encoding=k) as handle:
+                data = Ar.load(handle)
+        except E:
+            continue
+        if not Aq(data, dict):
+            continue
+        raw_value = data.get(LANGUAGE_KEY, LANGUAGE_DEFAULT)
+        normalized = _normalize_language_code(raw_value) or LANGUAGE_DEFAULT
+        target_path = first_external or settings_path
+        if normalized:
+            _update_settings_path(target_path)
+            if target_path and target_path != settings_path:
+                try:
+                    A.makedirs(A.path.dirname(target_path) or ".", exist_ok=J)
+                except E:
+                    pass
+                try:
+                    with x(target_path, T, encoding=k) as handle:
+                        Ar.dump(data, handle, indent=4)
+                except E:
+                    pass
+            return normalized
     for root in _iter_localization_roots():
         legacy_path = A.path.join(root, LANG_CFG)
         try:
@@ -235,7 +260,9 @@ def load_language_pref():
                 value = legacy_data.get(LANGUAGE_KEY, LANGUAGE_DEFAULT)
                 normalized = _normalize_language_code(value) or LANGUAGE_DEFAULT
                 if normalized:
-                    target_path = candidates[0] if candidates else LOCAL_SETTINGS_PATH
+                    target_path = first_external or (
+                        packaged_candidates[0] if packaged_candidates else LOCAL_SETTINGS_PATH
+                    )
                     _update_settings_path(target_path)
                     try:
                         save_language_pref(normalized)
@@ -251,8 +278,10 @@ def load_language_pref():
                     return normalized
         except E:
             pass
-    if candidates:
-        _update_settings_path(candidates[0])
+    if first_external:
+        _update_settings_path(first_external)
+    elif packaged_candidates:
+        _update_settings_path(packaged_candidates[0])
     return LANGUAGE_DEFAULT
 
 
