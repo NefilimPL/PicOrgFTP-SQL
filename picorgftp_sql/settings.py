@@ -3,12 +3,28 @@
 from .common import *  # noqa: F401,F403 - legacy global names
 
 
+def _user_settings_root():
+    """Return a user-writable folder for storing ``local_settings.json``."""
+
+    home = A.path.expanduser("~") or A.getcwd()
+    if A.name == "nt":
+        base = A.environ.get("APPDATA") or A.path.join(home, "AppData", "Roaming")
+    else:
+        base = A.environ.get("XDG_CONFIG_HOME") or A.path.join(home, ".config")
+    base = base or home
+    return A.path.join(base, "PicOrgFTP-SQL")
+
+
 def _resolve_settings_root():
     """Return the folder that should host ``local_settings.json``."""
 
     if getattr(sys, "frozen", False):
-        base_path = A.path.dirname(sys.executable)
-        return base_path or A.getcwd()
+        exe_dir = A.path.dirname(sys.executable) or A.getcwd()
+        portable_settings = A.path.join(exe_dir, BASE_DIR_SETTINGS_FILE)
+        if A.path.exists(portable_settings):
+            return exe_dir
+        user_dir = _user_settings_root()
+        return user_dir or exe_dir or A.getcwd()
     module_dir = A.path.dirname(A.path.abspath(__file__))
     project_root = A.path.abspath(A.path.join(module_dir, A.pardir))
     root_settings = A.path.join(project_root, BASE_DIR_SETTINGS_FILE)
@@ -37,6 +53,8 @@ def _load_base_dir_override(settings_path, template, fallback_value):
                 override_value = new_value.strip()
         else:
             try:
+                parent = A.path.dirname(settings_path) or "."
+                A.makedirs(parent, exist_ok=J)
                 with x(settings_path, T, encoding=k) as settings_file:
                     Ar.dump(template, settings_file, indent=4)
             except E:
@@ -59,6 +77,11 @@ def _save_base_dir_override(settings_path, template, value):
     except E:
         pass
     data["base_dir_override"] = value
+    try:
+        parent = A.path.dirname(settings_path) or "."
+        A.makedirs(parent, exist_ok=J)
+    except E:
+        pass
     try:
         with x(settings_path, T, encoding=k) as settings_file:
             Ar.dump(data, settings_file, indent=4)
