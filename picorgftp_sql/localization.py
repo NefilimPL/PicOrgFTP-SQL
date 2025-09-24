@@ -8,6 +8,129 @@ LOCAL_SETTINGS_PATH = settings.BASE_DIR_SETTINGS_PATH
 LANGUAGE_KEY = LANGUAGE_PREF_KEY
 LANGUAGE_DEFAULT = LANGUAGE_PREF_DEFAULT
 LC = settings.LC
+ACTIVE_SETTINGS_PATH = LOCAL_SETTINGS_PATH
+
+
+def _normalize_language_code(value):
+    """Map assorted language identifiers to the supported short codes."""
+
+    if not Aq(value, str):
+        return B
+    code = value.strip().lower()
+    if not code:
+        return B
+    aliases = {
+        "auto": LANGUAGE_DEFAULT,
+        "pl-pl": "pl",
+        "pl_pl": "pl",
+        "pol": "pl",
+        "polish": "pl",
+        "en-gb": "en",
+        "en_gb": "en",
+        "en-us": "en",
+        "en_us": "en",
+        "eng": "en",
+        "english": "en",
+        "ua-ua": "ua",
+        "ua_ua": "ua",
+        "uk": "ua",
+        "uk-ua": "ua",
+        "uk_ua": "ua",
+        "ukrainian": "ua",
+    }
+    normalized = aliases.get(code)
+    if normalized:
+        return normalized
+    if code.startswith("pl-") or code.startswith("pl_"):
+        return "pl"
+    if code.startswith("en-") or code.startswith("en_"):
+        return "en"
+    if code.startswith("ua-") or code.startswith("ua_"):
+        return "ua"
+    if code.startswith("uk-") or code.startswith("uk_"):
+        return "ua"
+    return code
+
+
+def _iter_settings_paths():
+    """Return candidate ``local_settings.json`` locations in priority order."""
+
+    candidates = []
+    inside_meipass = []
+    seen = set()
+    meipass = getattr(sys, "_MEIPASS", B) or A.getenv("_MEIPASS2", B)
+    try:
+        meipass_abs = A.path.abspath(meipass) if meipass else I
+    except (TypeError, ValueError, OSError):
+        meipass_abs = I
+
+    def register(path):
+        if not path:
+            return
+        try:
+            resolved = A.path.abspath(path)
+        except (TypeError, ValueError, OSError):
+            return
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        if meipass_abs:
+            try:
+                if A.path.commonpath([resolved, meipass_abs]) == meipass_abs:
+                    inside_meipass.append(resolved)
+                    return
+            except (ValueError, OSError):
+                pass
+        candidates.append(resolved)
+
+    register(LOCAL_SETTINGS_PATH)
+    try:
+        settings_dir = A.path.dirname(A.path.abspath(LOCAL_SETTINGS_PATH))
+    except (TypeError, ValueError, OSError):
+        settings_dir = B
+    if settings_dir:
+        register(A.path.join(settings_dir, BASE_DIR_SETTINGS_FILE))
+
+    exe_dir = A.path.dirname(getattr(sys, "executable", B) or B)
+    if exe_dir:
+        register(A.path.join(exe_dir, BASE_DIR_SETTINGS_FILE))
+
+    if sys.argv:
+        try:
+            argv_dir = A.path.dirname(A.path.abspath(sys.argv[0]))
+        except (TypeError, ValueError, OSError):
+            argv_dir = B
+        if argv_dir:
+            register(A.path.join(argv_dir, BASE_DIR_SETTINGS_FILE))
+
+    try:
+        cwd = A.getcwd()
+    except E:
+        cwd = B
+    if cwd:
+        register(A.path.join(cwd, BASE_DIR_SETTINGS_FILE))
+
+    module_dir = A.path.dirname(A.path.abspath(__file__))
+    register(A.path.join(module_dir, BASE_DIR_SETTINGS_FILE))
+    package_root = A.path.dirname(module_dir)
+    register(A.path.join(package_root, BASE_DIR_SETTINGS_FILE))
+
+    return candidates + inside_meipass
+
+
+def _update_settings_path(path):
+    """Synchronize the active settings file location across modules."""
+
+    if not path:
+        return
+    try:
+        resolved = A.path.abspath(path)
+    except (TypeError, ValueError, OSError):
+        return
+    global LOCAL_SETTINGS_PATH, ACTIVE_SETTINGS_PATH
+    ACTIVE_SETTINGS_PATH = resolved
+    LOCAL_SETTINGS_PATH = resolved
+    settings.BASE_DIR_SETTINGS_PATH = resolved
 
 
 def _iter_localization_roots():
@@ -66,20 +189,43 @@ def _iter_localization_roots():
     return roots
 
 
+def _load_packaged_localization(filename):
+    """Load packaged translations using importlib resources as a fallback."""
+
+    try:
+        from importlib import resources
+    except E:
+        return I
+    package = f"{__package__}.Localization" if __package__ else "Localization"
+    try:
+        if hasattr(resources, "files"):
+            ref = resources.files(package).joinpath(filename)
+            with ref.open("r", encoding=k) as handle:
+                data = Ar.load(handle)
+        else:
+            raw = resources.read_text(package, filename, encoding=k)
+            data = Ar.loads(raw)
+    except E:
+        return I
+    return data if Aq(data, dict) else I
+
+
 def load_language_pref():
     """Read the saved language preference from ``local_settings.json``."""
 
-    try:
-        with x(LOCAL_SETTINGS_PATH, "r", encoding=k) as handle:
-            data = Ar.load(handle)
+    candidates = _iter_settings_paths()
+    for settings_path in candidates:
+        try:
+            with x(settings_path, "r", encoding=k) as handle:
+                data = Ar.load(handle)
+        except E:
+            continue
         if Aq(data, dict):
-            value = data.get(LANGUAGE_KEY, LANGUAGE_DEFAULT)
-            if Aq(value, str):
-                value = value.strip() or LANGUAGE_DEFAULT
-                if value:
-                    return value
-    except E:
-        pass
+            raw_value = data.get(LANGUAGE_KEY, LANGUAGE_DEFAULT)
+            normalized = _normalize_language_code(raw_value) or LANGUAGE_DEFAULT
+            if normalized:
+                _update_settings_path(settings_path)
+                return normalized
     for root in _iter_localization_roots():
         legacy_path = A.path.join(root, LANG_CFG)
         try:
@@ -87,35 +233,43 @@ def load_language_pref():
                 legacy_data = Ar.load(handle)
             if Aq(legacy_data, dict):
                 value = legacy_data.get(LANGUAGE_KEY, LANGUAGE_DEFAULT)
-                if Aq(value, str):
-                    value = value.strip() or LANGUAGE_DEFAULT
-                    if value:
-                        try:
-                            save_language_pref(value)
-                        except E:
-                            pass
-                        try:
-                            A.remove(legacy_path)
-                        except E:
-                            pass
-                        global LC
-                        LC = root if A.path.isdir(root) else A.path.dirname(root)
-                        settings.LC = LC or settings.LC
-                        return value
+                normalized = _normalize_language_code(value) or LANGUAGE_DEFAULT
+                if normalized:
+                    target_path = candidates[0] if candidates else LOCAL_SETTINGS_PATH
+                    _update_settings_path(target_path)
+                    try:
+                        save_language_pref(normalized)
+                    except E:
+                        pass
+                    try:
+                        A.remove(legacy_path)
+                    except E:
+                        pass
+                    global LC
+                    LC = root if A.path.isdir(root) else A.path.dirname(root)
+                    settings.LC = LC or settings.LC
+                    return normalized
         except E:
             pass
+    if candidates:
+        _update_settings_path(candidates[0])
     return LANGUAGE_DEFAULT
 
 
 def save_language_pref(lang):
     """Persist the user's language preference to ``local_settings.json``."""
 
-    value = lang.strip() if Aq(lang, str) else LANGUAGE_DEFAULT
-    if not value:
-        value = LANGUAGE_DEFAULT
+    normalized = _normalize_language_code(lang)
+    value = normalized if normalized else LANGUAGE_DEFAULT
+    target_path = ACTIVE_SETTINGS_PATH or LOCAL_SETTINGS_PATH or settings.BASE_DIR_SETTINGS_PATH
+    if target_path:
+        _update_settings_path(target_path)
+    path = ACTIVE_SETTINGS_PATH or LOCAL_SETTINGS_PATH or target_path
+    if not path:
+        return
     data = dict(BASE_DIR_SETTINGS_TEMPLATE)
     try:
-        with x(LOCAL_SETTINGS_PATH, "r", encoding=k) as handle:
+        with x(path, "r", encoding=k) as handle:
             existing = Ar.load(handle)
         if Aq(existing, dict):
             data.update(existing)
@@ -123,11 +277,11 @@ def save_language_pref(lang):
         pass
     data[LANGUAGE_KEY] = value
     try:
-        A.makedirs(A.path.dirname(LOCAL_SETTINGS_PATH) or ".", exist_ok=J)
+        A.makedirs(A.path.dirname(path) or ".", exist_ok=J)
     except E:
         pass
     try:
-        with x(LOCAL_SETTINGS_PATH, T, encoding=k) as handle:
+        with x(path, T, encoding=k) as handle:
             Ar.dump(data, handle, indent=4)
     except E:
         pass
@@ -136,15 +290,18 @@ def save_language_pref(lang):
 def load_localization(language=I):
     """Load translation strings for the requested language code."""
 
-    lang_code = language
-    if not lang_code or lang_code == "auto":
+    global LC
+    lang_code = _normalize_language_code(language) or LANGUAGE_DEFAULT
+    if not lang_code or lang_code == LANGUAGE_DEFAULT:
         try:
             BO.setlocale(BO.LC_ALL, "")
-            lang_code = (BO.getlocale()[0] or "en").split("_")[0]
+            detected = BO.getlocale()[0] or "en"
         except E:
-            lang_code = "en"
+            detected = "en"
+        lang_code = _normalize_language_code(detected) or "en"
     mapping = {"pl": "pl.json", "ua": "ua.json", "en": "eng.json"}
-    filename = mapping.get(lang_code.lower(), "eng.json")
+    lookup = lang_code.lower() if Aq(lang_code, str) else "en"
+    filename = mapping.get(lookup, "eng.json")
     for root in _iter_localization_roots():
         candidate = A.path.join(root, filename)
         if not A.path.exists(candidate):
@@ -155,11 +312,15 @@ def load_localization(language=I):
         except E:
             continue
         if Aq(data, dict):
-            global LC
             resolved_root = root if A.path.isdir(root) else A.path.dirname(root)
             LC = resolved_root or LC
             settings.LC = LC or settings.LC
             return data
+    packaged = _load_packaged_localization(filename)
+    if Aq(packaged, dict):
+        LC = settings.LC_DEFAULT
+        settings.LC = LC or settings.LC
+        return packaged
     return {}
 
 
