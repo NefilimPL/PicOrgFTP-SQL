@@ -40,9 +40,11 @@ def load_localization(language=I):
             lang_code = "en"
     mapping = {"pl": "pl.json", "ua": "ua.json", "en": "eng.json"}
     filename = mapping.get(lang_code.lower(), "eng.json")
+    module_dir = A.path.dirname(A.path.abspath(__file__))
     paths = [
         A.path.join(LC, filename),
-        A.path.join(A.path.dirname(A.path.abspath(__file__)), "Localization", filename),
+        A.path.join(module_dir, "Localization", filename),
+        A.path.join(A.path.dirname(module_dir), "Localization", filename),
     ]
     for path in paths:
         if A.path.exists(path):
