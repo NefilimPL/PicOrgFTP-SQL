@@ -159,9 +159,9 @@ AD = A.path.join(AC, "config.json")
 AM = A.path.join(AC, "error_log.txt")
 BM = A.path.join(AC, "changes_log.txt")
 AN = A.path.join(AC, "temp_backup")
-LC_DEFAULT = A.path.join(A.path.expanduser("~"), "Gui zdjęcia config", "Localization")
+MODULE_DIR = A.path.dirname(A.path.abspath(__file__))
+LC_DEFAULT = A.path.join(MODULE_DIR, "Localization")
 LC = LC_DEFAULT
-DEFAULT_CONFIG["loc_path"] = LC_DEFAULT
 EXCEL_SHEETS = {n: n, t: t, s: s, Y: Y, d: d, W: W}
 BW = [
     "ODBC Driver 18 for SQL Server",
