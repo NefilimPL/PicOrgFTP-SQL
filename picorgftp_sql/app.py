@@ -18,9 +18,7 @@ from .settings import EXCEL_SHEETS, AN, l
 
 D = config.CONFIG
 LC = localization.LC
-LOC_URLS = localization.LOC_URLS
 LANG_PREF = localization.LANG_PREF
-LOC_DL_OK = localization.LOC_DL_OK
 
 from .localization import *  # noqa: F401,F403
 class App(BU.Tk):
@@ -2206,44 +2204,13 @@ class App(BU.Tk):
         browse_btn = C.Button(U, text=CHOOSE_LABEL, command=browse_loc, state=V)
         browse_btn.grid(row=1, column=2, padx=5, pady=2)
 
-        C.Label(U, text=LOC_URLS_LABEL).grid(row=2, column=0, sticky=R, padx=5, pady=2)
-        url_text = BS.ScrolledText(U, width=80, height=5, state=V, wrap="none")
-        url_text.grid(row=2, column=1, padx=5, pady=2, sticky=T)
-        url_text.configure(state=X)
-        url_text.insert(A_, "\n".join(D.get("loc_urls", LOC_URLS)))
-        url_text.configure(state=V)
-        update_btn = C.Button(U, text=UPDATE_LOC_LABEL, state=V)
-        update_btn.grid(row=2, column=2, padx=5, pady=2)
-
-        def update_loc():
-            global LOC_URLS, LC
-            urls = [u.strip() for u in url_text.get(A_, "end").splitlines() if u.strip()]
-            LOC_URLS = urls
-            LC = loc_var.get().strip()
-            localization.LOC_URLS = LOC_URLS
-            localization.LC = LC
-            if download_localizations(J):
-                O.showinfo(SETTINGS_LABEL, LOC_UPDATE_SUCCESS_MSG)
-            else:
-                O.showwarning(
-                    SETTINGS_LABEL,
-                    LANG.get(
-                        "loc_download_failed",
-                        "Localization files unavailable. Check repository access.",
-                    ),
-                )
-
-        update_btn.configure(command=update_loc)
-
         lang_unlock_btn = C.Button(U, text=a)
-        lang_unlock_btn.grid(row=3, column=0, sticky=R, padx=5, pady=5)
+        lang_unlock_btn.grid(row=2, column=0, sticky=R, padx=5, pady=5)
 
         def unlock_lang():
             if is_admin():
                 loc_entry.configure(state=X)
                 browse_btn.configure(state=X)
-                url_text.configure(state=X)
-                update_btn.configure(state=X)
             else:
                 O.showwarning(A6_, A5_)
 
@@ -2487,7 +2454,7 @@ class App(BU.Tk):
         A4.pack(pady=5)
 
         def BD_():
-            global LC, LOC_URLS, LANG_PREF
+            global LC, LANG_PREF
             D[H][v] = s.get().strip()
             try:
                 D[H][r] = int(t.get())
@@ -2509,11 +2476,8 @@ class App(BU.Tk):
             D[w] = h_.get(A_, "end").strip()
             D[u] = bool(Ab.get())
             D["loc_path"] = loc_var.get().strip()
-            D["loc_urls"] = [u.strip() for u in url_text.get(A_, "end").splitlines() if u.strip()]
             LC = D["loc_path"]
-            LOC_URLS = D["loc_urls"]
             localization.LC = LC
-            localization.LOC_URLS = LOC_URLS
             new_lang_pref = lang_var.get().strip()
             save_language_pref(new_lang_pref)
             LANG_PREF = new_lang_pref

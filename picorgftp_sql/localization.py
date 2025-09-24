@@ -5,7 +5,6 @@ from . import config, settings
 
 LANG_CFG = "language.json"
 LC = settings.LC
-LOC_URLS = settings.LOC_URLS
 
 
 def load_language_pref():
@@ -29,64 +28,6 @@ def save_language_pref(lang):
         pass
 
 
-def _expand_github_tree(url):
-    """Resolve a GitHub tree URL to the list of file download links."""
-
-    try:
-        parts = BP.urlparse(url)
-        segments = [seg for seg in parts.path.split("/") if seg]
-        if Q(segments) >= 4 and segments[2] == "tree":
-            owner, repo, _tree, ref, *sub = segments
-            api = (
-                f"https://api.github.com/repos/{owner}/{repo}/contents/"
-                f"{'/'.join(sub)}?ref={ref}"
-            )
-            with BN.urlopen(api) as response:
-                items = Ar.loads(response.read().decode(k))
-            return [item.get("download_url") for item in items if item.get("type") == "file"]
-    except E:
-        return []
-    return []
-
-
-def download_localizations(force=Ay):
-    """Download all configured localization files.
-
-    When ``force`` is ``True`` existing files are overwritten, otherwise they
-    are skipped to avoid unnecessary network traffic.
-    """
-
-    ok = J
-    try:
-        A.makedirs(LC, exist_ok=J)
-    except E:
-        return Ay
-    for url in LOC_URLS:
-        targets = []
-        if "github.com" in url and "/tree/" in url:
-            targets = _expand_github_tree(url)
-            if not targets:
-                ok = Ay
-                continue
-        else:
-            targets = [url]
-        for target in targets:
-            # Determine the actual filename that should be created on disk.
-            filename = A.path.basename(BP.urlparse(target).path)
-            if not filename:
-                ok = Ay
-                continue
-            destination = A.path.join(LC, filename)
-            if not force and A.path.exists(destination):
-                continue
-            try:
-                with BN.urlopen(target) as response, x(destination, "wb") as handle:
-                    handle.write(response.read())
-            except E:
-                ok = Ay
-    return ok
-
-
 def load_localization(language=I):
     """Load translation strings for the requested language code."""
 
@@ -99,9 +40,11 @@ def load_localization(language=I):
             lang_code = "en"
     mapping = {"pl": "pl.json", "ua": "ua.json", "en": "eng.json"}
     filename = mapping.get(lang_code.lower(), "eng.json")
+    module_dir = A.path.dirname(A.path.abspath(__file__))
     paths = [
         A.path.join(LC, filename),
-        A.path.join(A.path.dirname(A.path.abspath(__file__)), "Localization", filename),
+        A.path.join(module_dir, "Localization", filename),
+        A.path.join(A.path.dirname(module_dir), "Localization", filename),
     ]
     for path in paths:
         if A.path.exists(path):
@@ -115,24 +58,16 @@ def load_localization(language=I):
 
 D = config.CONFIG
 LC = D.get("loc_path", settings.LC_DEFAULT) or settings.LC_DEFAULT
-LOC_URLS = D.get("loc_urls", settings.LOC_URLS_DEFAULT)
 LANG_PREF = load_language_pref()
-LOC_DL_OK = download_localizations()
 LANG = load_localization(LANG_PREF)
 LANG_EN = load_localization("en")
 
 settings.LC = LC
-settings.LOC_URLS = LOC_URLS
 
 NO_FILE_LABEL = LANG.get("no_file", NO_FILE_FALLBACK)
 LANGUAGE_TAB_LABEL = LANG.get("language_tab", "Język")
 LANGUAGE_LABEL = LANG.get("language_label", "Język:")
 LOC_PATH_LABEL = LANG.get("loc_path_label", "Folder lokalizacji:")
-LOC_URLS_LABEL = LANG.get("loc_urls_label", "Linki lokalizacji:")
-UPDATE_LOC_LABEL = LANG.get("loc_update_label", "Aktualizuj")
-LOC_UPDATE_SUCCESS_MSG = LANG.get(
-    "loc_update_success", "Zaktualizowano pliki lokalizacyjne"
-)
 PROCESSING_MSG = LANG.get("processing", PROCESSING_MSG)
 PROCESSING_UI_MSG = LANG.get(
     "processing_ui", ">>> Processing, please wait..."

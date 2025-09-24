@@ -31,7 +31,7 @@ from .common import (
     w,
 )
 from .encryption import decrypt, encrypt
-from .settings import AC, AM, BASE_DIR_OVERRIDE, LC_DEFAULT, LOC_URLS_DEFAULT
+from .settings import AC, AM, BASE_DIR_OVERRIDE, LC_DEFAULT
 
 CONFIG_PATH = A.path.join(AC, "config.json")
 CONFIG_SAVE_FAILED_MSG = "Nie udało się zapisać pliku konfiguracyjnego:\n{error}"
@@ -78,7 +78,6 @@ def load_config():
                 ft: config_copy[ft],
                 u: config_copy[u],
                 "loc_path": config_copy.get("loc_path", LC_DEFAULT),
-                "loc_urls": config_copy.get("loc_urls", LOC_URLS_DEFAULT),
             }
             try:
                 # Ensure the configuration directory exists before writing.
@@ -116,11 +115,6 @@ def load_config():
         config_copy[ft] = raw_config.get(ft, config_copy[ft])
         config_copy[u] = raw_config.get(u, config_copy[u])
         config_copy["loc_path"] = raw_config.get("loc_path", config_copy["loc_path"])
-        urls = raw_config.get("loc_urls")
-        if urls is None:
-            single = raw_config.get("loc_url")
-            urls = [single] if single else config_copy.get("loc_urls", LOC_URLS_DEFAULT)
-        config_copy["loc_urls"] = urls
         try:
             # Saving back the normalised structure keeps missing keys aligned
             # with future versions of the configuration schema.
@@ -168,7 +162,6 @@ def save_config(config):
         ft: config.get(ft, True),
         u: config.get(u, True),
         "loc_path": config.get("loc_path", LC_DEFAULT),
-        "loc_urls": config.get("loc_urls", LOC_URLS_DEFAULT),
     }
     try:
         with open(CONFIG_PATH, "w", encoding=k) as handle:
