@@ -104,6 +104,8 @@ def label_category(label: str) -> str:
 
 
 def _ensure_workbook_exists() -> None:
+    """Create the workbook on disk if it is missing."""
+
     base_dir = os.path.dirname(LISTS_WORKBOOK_PATH)
     if not os.path.isdir(base_dir):
         os.makedirs(base_dir, exist_ok=True)
@@ -123,6 +125,8 @@ def _ensure_workbook_exists() -> None:
 
 
 def _load_workbook():
+    """Load the shared workbook, ensuring it exists first."""
+
     _ensure_workbook_exists()
     return load_workbook(LISTS_WORKBOOK_PATH)
 
@@ -173,6 +177,8 @@ def prepare_excel_lists() -> Dict[str, Dict[str, dict] | list]:
 
 
 def _show_locked_dialog(reason: str) -> None:
+    """Inform the user that the workbook is locked by another process."""
+
     title = LOCKED_TITLE
     text = localization.LANG.get(
         "excel_file_open",
@@ -182,6 +188,8 @@ def _show_locked_dialog(reason: str) -> None:
 
 
 def _save_workbook(workbook: Workbook, error_event: str, **context) -> bool:
+    """Persist the workbook and log a translated error message on failure."""
+
     try:
         workbook.save(LISTS_WORKBOOK_PATH)
         return True
@@ -193,6 +201,8 @@ def _save_workbook(workbook: Workbook, error_event: str, **context) -> bool:
 
 
 def add_to_list(sheet_name: str, value: str) -> None:
+    """Append a new normalised value to the given list sheet."""
+
     if not value:
         return
     normalized = value.strip().upper()
@@ -220,6 +230,8 @@ def add_to_list(sheet_name: str, value: str) -> None:
 
 
 def remove_from_list(sheet_name: str, value: str) -> None:
+    """Remove the first occurrence of ``value`` from the target sheet."""
+
     locked_by = get_file_lock_user(LISTS_WORKBOOK_PATH)
     if locked_by:
         reason = f"przez użytkownika '{locked_by}'" if isinstance(locked_by, str) else LOCKED_REASON_OTHER_PROCESS
@@ -245,6 +257,8 @@ def remove_from_list(sheet_name: str, value: str) -> None:
 
 
 def _update_row(row, name, furniture_type, model, color1, color2, color3, extra_value):
+    """Mutate a worksheet row with the supplied normalised values."""
+
     row[1].value = name
     row[2].value = furniture_type
     row[3].value = model
@@ -264,6 +278,8 @@ def save_ean_entry(
     color3: str,
     extra: str,
 ) -> bool:
+    """Insert or update a row in the entries sheet, handling locks gracefully."""
+
     locked_by = get_file_lock_user(LISTS_WORKBOOK_PATH)
     if locked_by:
         reason = f"przez użytkownika '{locked_by}'" if isinstance(locked_by, str) else LOCKED_REASON_OTHER_PROCESS

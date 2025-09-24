@@ -9,6 +9,8 @@ LOC_URLS = settings.LOC_URLS
 
 
 def load_language_pref():
+    """Read the saved language preference if the file exists."""
+
     try:
         with x(A.path.join(LC, LANG_CFG), "r", encoding=k) as handle:
             return Ar.load(handle).get("language", "auto")
@@ -17,6 +19,8 @@ def load_language_pref():
 
 
 def save_language_pref(lang):
+    """Persist the user's language preference to disk."""
+
     try:
         A.makedirs(LC, exist_ok=J)
         with x(A.path.join(LC, LANG_CFG), T, encoding=k) as handle:
@@ -26,6 +30,8 @@ def save_language_pref(lang):
 
 
 def _expand_github_tree(url):
+    """Resolve a GitHub tree URL to the list of file download links."""
+
     try:
         parts = BP.urlparse(url)
         segments = [seg for seg in parts.path.split("/") if seg]
@@ -44,6 +50,12 @@ def _expand_github_tree(url):
 
 
 def download_localizations(force=Ay):
+    """Download all configured localization files.
+
+    When ``force`` is ``True`` existing files are overwritten, otherwise they
+    are skipped to avoid unnecessary network traffic.
+    """
+
     ok = J
     try:
         A.makedirs(LC, exist_ok=J)
@@ -59,6 +71,7 @@ def download_localizations(force=Ay):
         else:
             targets = [url]
         for target in targets:
+            # Determine the actual filename that should be created on disk.
             filename = A.path.basename(BP.urlparse(target).path)
             if not filename:
                 ok = Ay
@@ -75,6 +88,8 @@ def download_localizations(force=Ay):
 
 
 def load_localization(language=I):
+    """Load translation strings for the requested language code."""
+
     lang_code = language
     if not lang_code or lang_code == "auto":
         try:

@@ -6,6 +6,10 @@ from . import config
 
 
 def connect_db():
+    """Establish a database connection based on the configured backend."""
+
+    # The user can toggle between MySQL and MSSQL, so detect the current
+    # preference and build an appropriate connection object.
     db_type = config.CONFIG.get(p, K).lower()
     if db_type == K:
         mysql_cfg = config.CONFIG[K]
@@ -29,6 +33,7 @@ def connect_db():
     except E:
         drivers_seen = []
     for driver in BW:
+        # Iterate through known driver names until one successfully connects.
         try:
             conn_str = (
                 f"DRIVER={{{driver}}};SERVER={server};DATABASE={database};"
@@ -48,4 +53,6 @@ def connect_db():
         f"Architektura: {arch}\n"
         f"Ostatni błąd: {last_exc}"
     )
+    # Raising an exception bubbles the detailed message up to the UI and
+    # logging layer for troubleshooting.
     raise E(msg)
