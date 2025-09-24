@@ -17,7 +17,6 @@ from . import config, localization
 from .settings import EXCEL_SHEETS, AN, l
 
 D = config.CONFIG
-LC = localization.LC
 LANG_PREF = localization.LANG_PREF
 
 from .localization import *  # noqa: F401,F403
@@ -2207,30 +2206,6 @@ class App(BU.Tk):
         )
         lang_combo.grid(row=0, column=1, padx=5, pady=2, sticky=T)
         lang_combo.configure(postcommand=lambda c=lang_combo: A._style_combobox_list(c))
-        C.Label(U, text=LOC_PATH_LABEL).grid(row=1, column=0, sticky=R, padx=5, pady=2)
-        loc_var = F.StringVar(value=D.get("loc_path", LC))
-        loc_entry = C.Entry(U, textvariable=loc_var, width=40, state=i_)
-        loc_entry.grid(row=1, column=1, padx=5, pady=2, sticky=T)
-
-        def browse_loc():
-            A_ = BT.askdirectory(title=LOC_PATH_LABEL)
-            if A_:
-                loc_var.set(A_)
-
-        browse_btn = C.Button(U, text=CHOOSE_LABEL, command=browse_loc, state=V)
-        browse_btn.grid(row=1, column=2, padx=5, pady=2)
-
-        lang_unlock_btn = C.Button(U, text=a)
-        lang_unlock_btn.grid(row=2, column=0, sticky=R, padx=5, pady=5)
-
-        def unlock_lang():
-            if is_admin():
-                loc_entry.configure(state=X)
-                browse_btn.configure(state=X)
-            else:
-                O.showwarning(A6_, A5_)
-
-        lang_unlock_btn.configure(command=unlock_lang)
 
         def Am(*B):
             l_.configure(state=X if A.opt_resize.get() else V)
@@ -2470,7 +2445,7 @@ class App(BU.Tk):
         A4.pack(pady=5)
 
         def BD_():
-            global LC, LANG_PREF
+            global LANG_PREF
             D[H][v] = s.get().strip()
             try:
                 D[H][r] = int(t.get())
@@ -2491,9 +2466,6 @@ class App(BU.Tk):
             D[p] = K if A0.get() == f_ else "mssql"
             D[w] = h_.get(A_, "end").strip()
             D[u] = bool(Ab.get())
-            D["loc_path"] = loc_var.get().strip()
-            LC = D["loc_path"]
-            localization.LC = LC
             new_lang_pref = lang_var.get().strip()
             save_language_pref(new_lang_pref)
             LANG_PREF = new_lang_pref

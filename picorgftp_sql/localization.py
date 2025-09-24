@@ -101,8 +101,7 @@ def load_localization(language=I):
     return {}
 
 
-D = config.CONFIG
-LC = D.get("loc_path", settings.LC_DEFAULT) or settings.LC_DEFAULT
+LC = LC or settings.LC_DEFAULT
 LANG_PREF = load_language_pref()
 LANG = load_localization(LANG_PREF)
 LANG_EN = load_localization("en")
@@ -112,7 +111,6 @@ settings.LC = LC
 NO_FILE_LABEL = LANG.get("no_file", NO_FILE_FALLBACK)
 LANGUAGE_TAB_LABEL = LANG.get("language_tab", "Język")
 LANGUAGE_LABEL = LANG.get("language_label", "Język:")
-LOC_PATH_LABEL = LANG.get("loc_path_label", "Folder lokalizacji:")
 PROCESSING_MSG = LANG.get("processing", PROCESSING_MSG)
 PROCESSING_UI_MSG = LANG.get(
     "processing_ui", ">>> Processing, please wait..."

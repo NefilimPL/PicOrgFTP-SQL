@@ -55,7 +55,6 @@ DEFAULT_CONFIG = {
     "sql_query": SQL_UPDATE_TEMPLATE,
     "enable_ftp_update": True,
     "enable_sql_update": True,
-    "loc_path": r"",
 }
 # --- Koniec konfiguracji ---
 
