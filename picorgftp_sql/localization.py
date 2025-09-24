@@ -10,6 +10,62 @@ LANGUAGE_DEFAULT = LANGUAGE_PREF_DEFAULT
 LC = settings.LC
 
 
+def _iter_localization_roots():
+    """Yield directories that may host localization resources."""
+
+    roots = []
+    seen = set()
+
+    def register(path):
+        if not path:
+            return
+        try:
+            candidate = A.path.abspath(path)
+        except (TypeError, ValueError, OSError):
+            return
+        if not candidate or candidate in seen:
+            return
+        seen.add(candidate)
+        roots.append(candidate)
+
+    def register_base(base_path):
+        if not base_path:
+            return
+        register(A.path.join(base_path, "Localization"))
+        register(base_path)
+
+    try:
+        settings_dir = A.path.dirname(A.path.abspath(LOCAL_SETTINGS_PATH))
+    except (TypeError, ValueError, OSError):
+        settings_dir = B
+    register_base(settings_dir)
+
+    exe_dir = A.path.dirname(getattr(sys, "executable", B) or B)
+    register_base(exe_dir)
+
+    if sys.argv:
+        try:
+            argv_dir = A.path.dirname(A.path.abspath(sys.argv[0]))
+        except (TypeError, ValueError, OSError):
+            argv_dir = B
+        register_base(argv_dir)
+
+    try:
+        cwd = A.getcwd()
+    except E:
+        cwd = B
+    register_base(cwd)
+
+    register(LC)
+
+    module_dir = A.path.dirname(A.path.abspath(__file__))
+    register_base(module_dir)
+    package_root = A.path.dirname(module_dir)
+    register_base(package_root)
+
+    return roots
+
+
 def load_language_pref():
     """Read the saved language preference from ``local_settings.json``."""
 
@@ -24,26 +80,30 @@ def load_language_pref():
                     return value
     except E:
         pass
-    legacy_path = A.path.join(LC, LANG_CFG)
-    try:
-        with x(legacy_path, "r", encoding=k) as handle:
-            legacy_data = Ar.load(handle)
-        if Aq(legacy_data, dict):
-            value = legacy_data.get(LANGUAGE_KEY, LANGUAGE_DEFAULT)
-            if Aq(value, str):
-                value = value.strip() or LANGUAGE_DEFAULT
-                if value:
-                    try:
-                        save_language_pref(value)
-                    except E:
-                        pass
-                    try:
-                        A.remove(legacy_path)
-                    except E:
-                        pass
-                    return value
-    except E:
-        pass
+    for root in _iter_localization_roots():
+        legacy_path = A.path.join(root, LANG_CFG)
+        try:
+            with x(legacy_path, "r", encoding=k) as handle:
+                legacy_data = Ar.load(handle)
+            if Aq(legacy_data, dict):
+                value = legacy_data.get(LANGUAGE_KEY, LANGUAGE_DEFAULT)
+                if Aq(value, str):
+                    value = value.strip() or LANGUAGE_DEFAULT
+                    if value:
+                        try:
+                            save_language_pref(value)
+                        except E:
+                            pass
+                        try:
+                            A.remove(legacy_path)
+                        except E:
+                            pass
+                        global LC
+                        LC = root if A.path.isdir(root) else A.path.dirname(root)
+                        settings.LC = LC or settings.LC
+                        return value
+        except E:
+            pass
     return LANGUAGE_DEFAULT
 
 
@@ -85,19 +145,21 @@ def load_localization(language=I):
             lang_code = "en"
     mapping = {"pl": "pl.json", "ua": "ua.json", "en": "eng.json"}
     filename = mapping.get(lang_code.lower(), "eng.json")
-    module_dir = A.path.dirname(A.path.abspath(__file__))
-    paths = [
-        A.path.join(LC, filename),
-        A.path.join(module_dir, "Localization", filename),
-        A.path.join(A.path.dirname(module_dir), "Localization", filename),
-    ]
-    for path in paths:
-        if A.path.exists(path):
-            try:
-                with x(path, "r", encoding=k) as handle:
-                    return Ar.load(handle)
-            except E:
-                pass
+    for root in _iter_localization_roots():
+        candidate = A.path.join(root, filename)
+        if not A.path.exists(candidate):
+            continue
+        try:
+            with x(candidate, "r", encoding=k) as handle:
+                data = Ar.load(handle)
+        except E:
+            continue
+        if Aq(data, dict):
+            global LC
+            resolved_root = root if A.path.isdir(root) else A.path.dirname(root)
+            LC = resolved_root or LC
+            settings.LC = LC or settings.LC
+            return data
     return {}
 
 
