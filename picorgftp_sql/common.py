@@ -8,8 +8,15 @@
 BASE_DIR_OVERRIDE = r""
 # Nazwa lokalnego pliku konfiguracyjnego z ustawieniami katalogu bazowego.
 BASE_DIR_SETTINGS_FILE = "local_settings.json"
+# Klucz przechowujący preferowany język interfejsu użytkownika.
+LANGUAGE_PREF_KEY = "language"
+# Wartość domyślna dla ustawień językowych (automatyczny wybór).
+LANGUAGE_PREF_DEFAULT = "auto"
 # Domyślna struktura wspomnianego pliku.
-BASE_DIR_SETTINGS_TEMPLATE = {"base_dir_override": BASE_DIR_OVERRIDE}
+BASE_DIR_SETTINGS_TEMPLATE = {
+    "base_dir_override": BASE_DIR_OVERRIDE,
+    LANGUAGE_PREF_KEY: LANGUAGE_PREF_DEFAULT,
+}
 
 # Klucz używany do prostego szyfrowania danych konfiguracyjnych.
 APP_SECRET = "secret_v1"

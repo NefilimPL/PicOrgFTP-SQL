@@ -4,26 +4,71 @@ from .common import *  # noqa: F401,F403 - reuse legacy globals
 from . import config, settings
 
 LANG_CFG = "language.json"
+LOCAL_SETTINGS_PATH = settings.BASE_DIR_SETTINGS_PATH
+LANGUAGE_KEY = LANGUAGE_PREF_KEY
+LANGUAGE_DEFAULT = LANGUAGE_PREF_DEFAULT
 LC = settings.LC
 
 
 def load_language_pref():
-    """Read the saved language preference if the file exists."""
+    """Read the saved language preference from ``local_settings.json``."""
 
     try:
-        with x(A.path.join(LC, LANG_CFG), "r", encoding=k) as handle:
-            return Ar.load(handle).get("language", "auto")
+        with x(LOCAL_SETTINGS_PATH, "r", encoding=k) as handle:
+            data = Ar.load(handle)
+        if Aq(data, dict):
+            value = data.get(LANGUAGE_KEY, LANGUAGE_DEFAULT)
+            if Aq(value, str):
+                value = value.strip() or LANGUAGE_DEFAULT
+                if value:
+                    return value
     except E:
-        return "auto"
+        pass
+    legacy_path = A.path.join(LC, LANG_CFG)
+    try:
+        with x(legacy_path, "r", encoding=k) as handle:
+            legacy_data = Ar.load(handle)
+        if Aq(legacy_data, dict):
+            value = legacy_data.get(LANGUAGE_KEY, LANGUAGE_DEFAULT)
+            if Aq(value, str):
+                value = value.strip() or LANGUAGE_DEFAULT
+                if value:
+                    try:
+                        save_language_pref(value)
+                    except E:
+                        pass
+                    try:
+                        A.remove(legacy_path)
+                    except E:
+                        pass
+                    return value
+    except E:
+        pass
+    return LANGUAGE_DEFAULT
 
 
 def save_language_pref(lang):
-    """Persist the user's language preference to disk."""
+    """Persist the user's language preference to ``local_settings.json``."""
 
+    value = lang.strip() if Aq(lang, str) else LANGUAGE_DEFAULT
+    if not value:
+        value = LANGUAGE_DEFAULT
+    data = dict(BASE_DIR_SETTINGS_TEMPLATE)
     try:
-        A.makedirs(LC, exist_ok=J)
-        with x(A.path.join(LC, LANG_CFG), T, encoding=k) as handle:
-            Ar.dump({"language": lang}, handle, indent=4)
+        with x(LOCAL_SETTINGS_PATH, "r", encoding=k) as handle:
+            existing = Ar.load(handle)
+        if Aq(existing, dict):
+            data.update(existing)
+    except E:
+        pass
+    data[LANGUAGE_KEY] = value
+    try:
+        A.makedirs(A.path.dirname(LOCAL_SETTINGS_PATH) or ".", exist_ok=J)
+    except E:
+        pass
+    try:
+        with x(LOCAL_SETTINGS_PATH, T, encoding=k) as handle:
+            Ar.dump(data, handle, indent=4)
     except E:
         pass
 

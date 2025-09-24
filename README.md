@@ -19,6 +19,7 @@ The application stores its working files in the directory defined in the `local_
 The first lines of the file contain a configuration section that makes the script easy to adjust. You can change:
 
 - `base_dir_override` in `local_settings.json` – base directory used to store data.
+- `language` in `local_settings.json` – preferred interface language (`auto`, `pl`, `ua`, `eng`).
 - `APP_SECRET` – key used for encrypting configuration data.
 - `PORT` – default FTP server port.
 - `SQL_UPDATE_TEMPLATE` – default SQL query that updates image paths.
@@ -44,6 +45,7 @@ Aplikacja zapisuje pliki robocze w katalogu zdefiniowanym w pliku `local_setting
 Pierwsze linie pliku zawierają sekcję konfiguracyjną ułatwiającą dostosowanie skryptu do własnych potrzeb. Można tam zmienić m.in.:
 
 - `base_dir_override` w `local_settings.json` – katalog startowy do zapisu danych.
+- `language` w `local_settings.json` – preferowany język interfejsu (`auto`, `pl`, `ua`, `eng`).
 - `APP_SECRET` – klucz używany do szyfrowania danych konfiguracji.
 - `PORT` – domyślny port serwera FTP.
 - `SQL_UPDATE_TEMPLATE` – domyślne zapytanie SQL aktualizujące ścieżkę obrazów w bazie.
