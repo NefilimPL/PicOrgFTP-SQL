@@ -7,8 +7,36 @@ def _resolve_settings_root():
     """Return the folder that should host ``local_settings.json``."""
 
     if getattr(sys, "frozen", False):
-        base_path = A.path.dirname(sys.executable)
-        return base_path or A.getcwd()
+        meipass = getattr(sys, "_MEIPASS", B) or A.getenv("_MEIPASS2", B)
+        frozen_candidates = []
+        appdata = A.getenv("APPDATA") or A.getenv("LOCALAPPDATA")
+        if appdata:
+            frozen_candidates.append(
+                A.path.join(appdata, "PicOrgFTP-SQL")
+            )
+        exe_dir = A.path.dirname(getattr(sys, "executable", B) or B)
+        if exe_dir:
+            frozen_candidates.append(exe_dir)
+        if sys.argv:
+            argv_path = A.path.dirname(A.path.abspath(sys.argv[0]))
+            if argv_path:
+                frozen_candidates.append(argv_path)
+        frozen_candidates.append(A.getcwd())
+
+        for candidate in frozen_candidates:
+            if not candidate:
+                continue
+            candidate_abs = A.path.abspath(candidate)
+            if meipass:
+                try:
+                    meipass_abs = A.path.abspath(meipass)
+                    if A.path.commonpath([candidate_abs, meipass_abs]) == meipass_abs:
+                        continue
+                except (ValueError, OSError):
+                    pass
+            return candidate_abs
+        return exe_dir or A.getcwd()
+
     module_dir = A.path.dirname(A.path.abspath(__file__))
     project_root = A.path.abspath(A.path.join(module_dir, A.pardir))
     root_settings = A.path.join(project_root, BASE_DIR_SETTINGS_FILE)
@@ -37,6 +65,10 @@ def _load_base_dir_override(settings_path, template, fallback_value):
                 override_value = new_value.strip()
         else:
             try:
+                A.makedirs(A.path.dirname(settings_path) or ".", exist_ok=J)
+            except E:
+                pass
+            try:
                 with x(settings_path, T, encoding=k) as settings_file:
                     Ar.dump(template, settings_file, indent=4)
             except E:
@@ -59,6 +91,10 @@ def _save_base_dir_override(settings_path, template, value):
     except E:
         pass
     data["base_dir_override"] = value
+    try:
+        A.makedirs(A.path.dirname(settings_path) or ".", exist_ok=J)
+    except E:
+        pass
     try:
         with x(settings_path, T, encoding=k) as settings_file:
             Ar.dump(data, settings_file, indent=4)
