@@ -3439,33 +3439,19 @@ class App(BU.Tk):
         )
         lang_combo.grid(row=0, column=1, padx=5, pady=2, sticky=T)
         lang_combo.configure(postcommand=lambda c=lang_combo: A._style_combobox_list(c))
-        C.Label(U, text=LOC_PATH_LABEL).grid(row=1, column=0, sticky=R, padx=5, pady=2)
-        loc_var = F.StringVar(value=D.get("loc_path", LC))
-        loc_entry = C.Entry(U, textvariable=loc_var, width=40, state=i_)
-        loc_entry.grid(row=1, column=1, padx=5, pady=2, sticky=T)
-
-        def browse_loc():
-            A_ = BT.askdirectory(title=LOC_PATH_LABEL)
-            if A_:
-                loc_var.set(A_)
-
-        browse_btn = C.Button(U, text=CHOOSE_LABEL, command=browse_loc, state=V)
-        browse_btn.grid(row=1, column=2, padx=5, pady=2)
-
-        C.Label(U, text=LOC_URLS_LABEL).grid(row=2, column=0, sticky=R, padx=5, pady=2)
+        C.Label(U, text=LOC_URLS_LABEL).grid(row=1, column=0, sticky=R, padx=5, pady=2)
         url_text = BS.ScrolledText(U, width=80, height=5, state=V, wrap="none")
-        url_text.grid(row=2, column=1, padx=5, pady=2, sticky=T)
+        url_text.grid(row=1, column=1, padx=5, pady=2, sticky=T)
         url_text.configure(state=X)
         url_text.insert(A_, "\n".join(D.get("loc_urls", LOC_URLS)))
         url_text.configure(state=V)
         update_btn = C.Button(U, text=UPDATE_LOC_LABEL, state=V)
-        update_btn.grid(row=2, column=2, padx=5, pady=2)
+        update_btn.grid(row=1, column=2, padx=5, pady=2)
 
         def update_loc():
-            global LOC_URLS, LC
+            global LOC_URLS
             urls = [u.strip() for u in url_text.get(A_, "end").splitlines() if u.strip()]
             LOC_URLS = urls
-            LC = loc_var.get().strip()
             if download_localizations(J):
                 O.showinfo(SETTINGS_LABEL, LOC_UPDATE_SUCCESS_MSG)
             else:
@@ -3480,12 +3466,10 @@ class App(BU.Tk):
         update_btn.configure(command=update_loc)
 
         lang_unlock_btn = C.Button(U, text=a)
-        lang_unlock_btn.grid(row=3, column=0, sticky=R, padx=5, pady=5)
+        lang_unlock_btn.grid(row=2, column=0, sticky=R, padx=5, pady=5)
 
         def unlock_lang():
             if is_admin():
-                loc_entry.configure(state=X)
-                browse_btn.configure(state=X)
                 url_text.configure(state=X)
                 update_btn.configure(state=X)
             else:
@@ -3731,7 +3715,7 @@ class App(BU.Tk):
         A4.pack(pady=5)
 
         def BD_():
-            global LC, LOC_URLS, LANG_PREF
+            global LOC_URLS, LANG_PREF
             D[H][v] = s.get().strip()
             try:
                 D[H][r] = int(t.get())
@@ -3752,9 +3736,7 @@ class App(BU.Tk):
             D[p] = K if A0.get() == f_ else "mssql"
             D[w] = h_.get(A_, "end").strip()
             D[u] = bool(Ab.get())
-            D["loc_path"] = loc_var.get().strip()
             D["loc_urls"] = [u.strip() for u in url_text.get(A_, "end").splitlines() if u.strip()]
-            LC = D["loc_path"]
             LOC_URLS = D["loc_urls"]
             save_language_pref(lang_var.get().strip())
             LANG_PREF = lang_var.get().strip()
