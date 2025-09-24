@@ -38,6 +38,10 @@ CONFIG_SAVE_FAILED_MSG = "Nie udało się zapisać pliku konfiguracyjnego:\n{err
 
 
 def load_config():
+    """Return a configuration dictionary, creating defaults when necessary."""
+
+    # Work on a copy so that callers modifying the result do not mutate
+    # DEFAULT_CONFIG, which acts as a template for new installations.
     global CONFIG_PATH
     config_copy = Ar.loads(Ar.dumps(DEFAULT_CONFIG))
     config_path = CONFIG_PATH
@@ -47,6 +51,8 @@ def load_config():
             if chosen_dir:
                 config_path = A.path.join(chosen_dir, "config.json")
         if not A.path.exists(config_path):
+            # Persist an initial configuration with encrypted secrets so the
+            # application can be used immediately after installation.
             initial = {
                 H: {
                     v: config_copy[H][v],
@@ -75,6 +81,7 @@ def load_config():
                 "loc_urls": config_copy.get("loc_urls", LOC_URLS_DEFAULT),
             }
             try:
+                # Ensure the configuration directory exists before writing.
                 A.makedirs(A.path.dirname(config_path), exist_ok=True)
                 with open(config_path, "w", encoding=k) as handle:
                     Ar.dump(initial, handle, indent=4)
@@ -115,6 +122,8 @@ def load_config():
             urls = [single] if single else config_copy.get("loc_urls", LOC_URLS_DEFAULT)
         config_copy["loc_urls"] = urls
         try:
+            # Saving back the normalised structure keeps missing keys aligned
+            # with future versions of the configuration schema.
             save_config(config_copy)
         except E:
             pass
@@ -131,6 +140,9 @@ def load_config():
 
 
 def save_config(config):
+    """Serialise the provided configuration dictionary to disk."""
+
+    # Persist secrets in encrypted form to avoid storing clear text credentials.
     payload = {
         H: {
             v: config[H][v],

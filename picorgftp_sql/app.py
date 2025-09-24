@@ -25,6 +25,8 @@ LOC_DL_OK = localization.LOC_DL_OK
 from .localization import *  # noqa: F401,F403
 class App(BU.Tk):
     def __init__(B):
+        """Initialise the Tk window, form state and runtime caches."""
+
         super().__init__()
         B.title(APP_TITLE)
         B.geometry("1200x800")
@@ -78,6 +80,8 @@ class App(BU.Tk):
         set_app(B)
 
     def _build_form(A):
+        """Create comboboxes and entry widgets for the product data form."""
+
         F_ = "<FocusOut>"
         D_ = "<KeyRelease>"
         E_ = "<Return>"
@@ -217,6 +221,8 @@ class App(BU.Tk):
         B_.grid_columnconfigure(4, weight=1)
 
     def _build_slots(B):
+        """Prepare the scrollable grid of drop targets used for images."""
+
         Q_ = "<Button-1>"
         R_ = "#ddd"
         S_ = "<Configure>"
@@ -297,17 +303,23 @@ class App(BU.Tk):
             B.slots_frame.columnconfigure(O_, weight=1)
 
     def _set_icon_status(C, icon, present):
+        """Toggle the coloured indicator showing local/remote file presence."""
+
         if not icon:
             return
         icon.place(relx=1.0, rely=1.0, anchor="se", x=getattr(icon, "offset_x", 0))
         icon.config(bg="green" if present else "red")
 
     def _refresh_combobox_list(B, combobox, all_values, existing_count=0):
+        """Refresh the dropdown values while remembering which entries exist."""
+
         A_ = combobox
         A_[S] = all_values
         A_.existing_count = existing_count
 
     def _on_name_commit(C):
+        """Handle the user confirming or typing a furniture name."""
+
         D_ = C.var_name.get().strip()
         if not D_:
             return
@@ -368,6 +380,8 @@ class App(BU.Tk):
         C._clear_all_slots()
 
     def _on_type_commit(C):
+        """React to type changes by unlocking model/colour comboboxes."""
+
         G_ = C.var_name.get().strip()
         D_ = C.var_type.get().strip()
         if not G_ or not D_:

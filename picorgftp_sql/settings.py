@@ -4,6 +4,8 @@ from .common import *  # noqa: F401,F403 - legacy global names
 
 
 def _resolve_settings_root():
+    """Return the folder that should host ``local_settings.json``."""
+
     if getattr(sys, "frozen", False):
         base_path = A.path.dirname(sys.executable)
         return base_path or A.getcwd()
@@ -23,6 +25,8 @@ BASE_DIR_OVERRIDE_WARNING = I
 
 
 def _load_base_dir_override(settings_path, template, fallback_value):
+    """Read an override value from ``settings_path`` if one is available."""
+
     override_value = fallback_value
     try:
         if A.path.exists(settings_path):
@@ -43,6 +47,8 @@ def _load_base_dir_override(settings_path, template, fallback_value):
 
 
 def _save_base_dir_override(settings_path, template, value):
+    """Persist ``value`` into ``settings_path`` while merging extra keys."""
+
     data = dict(template)
     try:
         if A.path.exists(settings_path):
@@ -61,6 +67,8 @@ def _save_base_dir_override(settings_path, template, value):
 
 
 def _ensure_directory_access(path):
+    """Try to create ``path`` if required and return a success flag."""
+
     try:
         if not A.path.isdir(path):
             A.makedirs(path, exist_ok=J)
@@ -70,6 +78,8 @@ def _ensure_directory_access(path):
 
 
 def _prompt_for_base_dir(settings_path, template, current_value, message):
+    """Interactively ask the user for a working directory location."""
+
     root = F.Tk()
     root.withdraw()
     try:
@@ -116,6 +126,8 @@ def _prompt_for_base_dir(settings_path, template, current_value, message):
 
 
 def _ensure_base_dir_override(settings_path, template, fallback_value):
+    """Resolve a usable base directory, prompting when necessary."""
+
     override_value = _load_base_dir_override(settings_path, template, fallback_value)
     candidate = override_value.strip() if Aq(override_value, str) else B
     if candidate:

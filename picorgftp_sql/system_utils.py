@@ -4,6 +4,8 @@ from .common import *  # noqa: F401,F403
 
 
 def is_admin():
+    """Best-effort check for administrator rights on the current system."""
+
     try:
         if A.name == "nt":
             result = ctypes.windll.shell32.ShellExecuteW(AQ, "runas", "cmd.exe", "/c exit", AQ, 1)
@@ -14,6 +16,8 @@ def is_admin():
 
 
 def get_file_lock_user(path):
+    """Attempt to discover which user has locked ``path`` in Excel."""
+
     encoding_fallback = "latin-1"
     errors_mode = "ignore"
     target = path
@@ -32,6 +36,8 @@ def get_file_lock_user(path):
                 with x(lock_path, "rb") as handle:
                     data = handle.read()
                     if Q(data) >= 2:
+                        # XLSX lock files store the username length in the
+                        # second byte followed by the UTF-16 encoded payload.
                         name_length = data[1]
                         if 2 + name_length <= Q(data):
                             raw_name = data[2 : 2 + name_length]

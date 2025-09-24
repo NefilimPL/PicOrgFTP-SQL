@@ -7,6 +7,8 @@ from picorgftp_sql.localization import LANG_EN, LOC_DL_OK
 
 
 def main():
+    """Start the GUI application and warn about configuration issues."""
+
     app = App()
     if BASE_DIR_OVERRIDE_WARNING:
         O.showwarning(SETTINGS_LABEL, BASE_DIR_OVERRIDE_WARNING)
