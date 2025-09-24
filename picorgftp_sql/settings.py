@@ -161,12 +161,7 @@ BM = A.path.join(AC, "changes_log.txt")
 AN = A.path.join(AC, "temp_backup")
 LC_DEFAULT = A.path.join(A.path.expanduser("~"), "Gui zdjęcia config", "Localization")
 LC = LC_DEFAULT
-LOC_URLS_DEFAULT = [
-    "https://github.com/NefilimPL/test/tree/bf78a63668181c8a9ef9fd765d116190a669472f/test",
-]
-LOC_URLS = LOC_URLS_DEFAULT[:]
 DEFAULT_CONFIG["loc_path"] = LC_DEFAULT
-DEFAULT_CONFIG["loc_urls"] = LOC_URLS_DEFAULT
 EXCEL_SHEETS = {n: n, t: t, s: s, Y: Y, d: d, W: W}
 BW = [
     "ODBC Driver 18 for SQL Server",

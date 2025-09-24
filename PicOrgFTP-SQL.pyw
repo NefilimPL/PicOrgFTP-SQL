@@ -3,7 +3,6 @@
 from picorgftp_sql.app import App
 from picorgftp_sql.common import O, SETTINGS_LABEL
 from picorgftp_sql.settings import BASE_DIR_OVERRIDE_WARNING
-from picorgftp_sql.localization import LANG_EN, LOC_DL_OK
 
 
 def main():
@@ -12,14 +11,6 @@ def main():
     app = App()
     if BASE_DIR_OVERRIDE_WARNING:
         O.showwarning(SETTINGS_LABEL, BASE_DIR_OVERRIDE_WARNING)
-    if not LOC_DL_OK:
-        O.showwarning(
-            SETTINGS_LABEL,
-            LANG_EN.get(
-                "loc_download_failed",
-                "Localization files unavailable. Check repository access.",
-            ),
-        )
     for combo in (
         app.combo_name,
         app.combo_type,
