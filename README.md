@@ -29,7 +29,7 @@ Changing these values before running the script helps tailor the program to your
 
 ### Building an executable
 
-The application can be frozen with tools such as PyInstaller. When doing so, make sure the `Localization` directory is bundled together with the program so that the language switcher keeps working after conversion to `.exe`. One possible command is:
+The application can be frozen with tools such as PyInstaller. When doing so, make sure the `Localization` directory is bundled together with the program so that the language switcher keeps working after conversion to `.exe`. The helper script `Dodatkowe (konwerter)/Konwerter PY oraz PYW na EXE v0.0.3.py` already adds the translation folders automatically. If you build manually, one possible command is:
 
 ```bash
 pyinstaller PicOrgFTP-SQL.pyw \
@@ -68,7 +68,7 @@ Zmiana tych wartości przed uruchomieniem skryptu umożliwia szybkie dostosowani
 
 ### Budowanie pliku wykonywalnego
 
-Aplikację można zamrozić np. za pomocą PyInstaller. Należy przy tym dołączyć katalog `Localization`, aby po konwersji do `.exe` nadal działało przełączanie języka. Przykładowe polecenie:
+Aplikację można zamrozić np. za pomocą PyInstaller. Należy przy tym dołączyć katalog `Localization`, aby po konwersji do `.exe` nadal działało przełączanie języka. Pomocniczy skrypt `Dodatkowe (konwerter)/Konwerter PY oraz PYW na EXE v0.0.3.py` dołącza katalogi tłumaczeń automatycznie. Przy ręcznym budowaniu przykładowe polecenie wygląda następująco:
 
 ```bash
 pyinstaller PicOrgFTP-SQL.pyw \
