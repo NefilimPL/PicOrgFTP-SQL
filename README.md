@@ -27,6 +27,19 @@ The first lines of the file contain a configuration section that makes the scrip
 
 Changing these values before running the script helps tailor the program to your environment.
 
+### Building an executable
+
+The application can be frozen with tools such as PyInstaller. When doing so, make sure the `Localization` directory is bundled together with the program so that the language switcher keeps working after conversion to `.exe`. One possible command is:
+
+```bash
+pyinstaller PicOrgFTP-SQL.pyw \
+  --name PicOrgFTP-SQL \
+  --noconsole \
+  --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization"
+```
+
+The runtime automatically searches for translation files next to the executable, in the PyInstaller temporary directory and inside the installed package. This means you can also ship an updated `Localization` folder next to the generated `PicOrgFTP-SQL.exe` without rebuilding the binary. The `local_settings.json` file will still be created next to the executable and stores both the working directory and the chosen language.
+
 ## Polski
 
 ### Działanie
@@ -52,4 +65,17 @@ Pierwsze linie pliku zawierają sekcję konfiguracyjną ułatwiającą dostosowa
 - `DEFAULT_CONFIG` – początkowe dane logowania FTP/SQL/MySQL oraz zapytanie SQL wykorzystywane przy aktualizacji ścieżek. Wszystkie pola tekstowe używają surowych łańcuchów `r""`, dzięki czemu nie trzeba uciekać znaków specjalnych. Sekcje `ftp`, `sql` i `mysql` zawierają odpowiednio pola `host`/`server`, `port`, `user`, `pass` (oraz `path` dla FTP). Pozostałe klucze to `db_type`, `sql_query`, `enable_ftp_update` i `enable_sql_update`.
 
 Zmiana tych wartości przed uruchomieniem skryptu umożliwia szybkie dostosowanie działania programu do własnego środowiska.
+
+### Budowanie pliku wykonywalnego
+
+Aplikację można zamrozić np. za pomocą PyInstaller. Należy przy tym dołączyć katalog `Localization`, aby po konwersji do `.exe` nadal działało przełączanie języka. Przykładowe polecenie:
+
+```bash
+pyinstaller PicOrgFTP-SQL.pyw \
+  --name PicOrgFTP-SQL \
+  --noconsole \
+  --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization"
+```
+
+Podczas działania program wyszukuje pliki tłumaczeń obok pliku wykonywalnego, w katalogu tymczasowym PyInstaller oraz w zainstalowanym pakiecie. Dzięki temu można także dołączyć lub zaktualizować katalog `Localization` bez ponownego budowania `PicOrgFTP-SQL.exe`. Plik `local_settings.json` jest nadal tworzony obok programu i przechowuje zarówno katalog roboczy, jak i wybrany język.
 

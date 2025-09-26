@@ -86,15 +86,18 @@ def load_localization(language=I):
     mapping = {"pl": "pl.json", "ua": "ua.json", "en": "eng.json"}
     filename = mapping.get(lang_code.lower(), "eng.json")
     module_dir = A.path.dirname(A.path.abspath(__file__))
-    paths = [
-        A.path.join(LC, filename),
-        A.path.join(module_dir, "Localization", filename),
-        A.path.join(A.path.dirname(module_dir), "Localization", filename),
-    ]
-    for path in paths:
-        if A.path.exists(path):
+    search_roots = []
+    for root in [LC] + settings.get_localization_search_paths():
+        if root and root not in search_roots:
+            search_roots.append(root)
+    fallback_root = A.path.join(module_dir, "Localization")
+    if fallback_root not in search_roots:
+        search_roots.append(fallback_root)
+    for root in search_roots:
+        candidate = A.path.join(root, filename)
+        if A.path.exists(candidate):
             try:
-                with x(path, "r", encoding=k) as handle:
+                with x(candidate, "r", encoding=k) as handle:
                     return Ar.load(handle)
             except E:
                 pass
