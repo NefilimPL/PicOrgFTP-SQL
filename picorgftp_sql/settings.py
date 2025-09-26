@@ -20,6 +20,32 @@ def _resolve_settings_root():
     return base_path or A.getcwd()
 
 
+def _iter_localization_roots():
+    """Yield candidate directories that may contain localization files."""
+
+    module_dir = A.path.dirname(A.path.abspath(__file__))
+    project_root = A.path.abspath(A.path.join(module_dir, A.pardir))
+    meipass = getattr(sys, "_MEIPASS", B)
+    if getattr(sys, "frozen", False):
+        exe_dir = A.path.dirname(sys.executable) or A.getcwd()
+        yield A.path.join(exe_dir, "Localization")
+        if meipass:
+            yield A.path.join(meipass, "Localization")
+            yield A.path.join(meipass, "picorgftp_sql", "Localization")
+    yield A.path.join(module_dir, "Localization")
+    yield A.path.join(project_root, "Localization")
+
+
+def _resolve_localization_root():
+    """Return the first existing localization directory from candidates."""
+
+    for candidate in _iter_localization_roots():
+        if candidate and A.path.isdir(candidate):
+            return candidate
+    module_dir = A.path.dirname(A.path.abspath(__file__))
+    return A.path.join(module_dir, "Localization")
+
+
 BASE_DIR_SETTINGS_PATH = A.path.join(_resolve_settings_root(), BASE_DIR_SETTINGS_FILE)
 BASE_DIR_OVERRIDE_WARNING = I
 
@@ -152,6 +178,17 @@ BASE_DIR_OVERRIDE, BASE_DIR_OVERRIDE_WARNING = _ensure_base_dir_override(
     BASE_DIR_OVERRIDE,
 )
 
+
+def get_localization_search_paths():
+    """Return a list of unique directories that may host translation files."""
+
+    seen = []
+    for candidate in _iter_localization_roots():
+        if candidate and candidate not in seen:
+            seen.append(candidate)
+    return seen
+
+
 AC = BASE_DIR_OVERRIDE
 l = A.path.join(AC, "_ZDJECIA PRZEROBIONE_")
 LISTS_WORKBOOK_PATH = A.path.join(AC, "lists.xlsx")
@@ -160,7 +197,7 @@ AM = A.path.join(AC, "error_log.txt")
 BM = A.path.join(AC, "changes_log.txt")
 AN = A.path.join(AC, "temp_backup")
 MODULE_DIR = A.path.dirname(A.path.abspath(__file__))
-LC_DEFAULT = A.path.join(MODULE_DIR, "Localization")
+LC_DEFAULT = _resolve_localization_root()
 LC = LC_DEFAULT
 EXCEL_SHEETS = {n: n, t: t, s: s, Y: Y, d: d, W: W}
 BW = [

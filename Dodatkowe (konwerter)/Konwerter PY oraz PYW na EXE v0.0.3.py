@@ -19,6 +19,21 @@ def ask_for_file(prompt, extensions):
 def resource_sep():
     return ';' if os.name == 'nt' else ':'
 
+def find_localization_dirs(script_path):
+    """Return (source, destination) pairs for localization folders."""
+
+    results = []
+    base_dir = os.path.dirname(os.path.abspath(script_path))
+    candidates = [
+        (os.path.join(base_dir, "picorgftp_sql", "Localization"),
+         "picorgftp_sql/Localization"),
+        (os.path.join(base_dir, "Localization"), "Localization"),
+    ]
+    for src, dest in candidates:
+        if os.path.isdir(src):
+            results.append((src, dest))
+    return results
+
 def convert_to_ico(path):
     try:
         from PIL import Image as PILImage
@@ -80,6 +95,16 @@ def main():
     if onefile: cmd.append("--onefile")
     if windowed: cmd.append("--windowed")
     if icon: cmd.append(f"--icon={icon}")
+
+    # dołącz tłumaczenia, aby zmiana języka działała w pliku EXE
+    localization_dirs = find_localization_dirs(script)
+    if localization_dirs:
+        print("🔹 Dodawanie katalogów tłumaczeń:")
+        for src, dest in localization_dirs:
+            cmd.append(f"--add-data={src}{resource_sep()}{dest}")
+            print(f"   ↳ {src} ➜ {dest}")
+    else:
+        print('⚠️ Nie znaleziono katalogu "Localization" do spakowania.')
 
     # === CRUCIAL: mysql-connector + locales ===
     cmd += [
