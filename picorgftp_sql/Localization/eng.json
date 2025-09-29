@@ -48,6 +48,7 @@
   "ftp_send_failed": "Local data saved but uploading files to FTP failed.\nReason: {reason}",
   "ftp_skipped_no_ean": "Local data saved but images were not uploaded to FTP due to missing valid EAN-13 code.",
   "sql_update_failed": "Local data and FTP updated, but database update failed.\nReason: {reason}",
+  "sql_presence_table_parse_failed": "Unable to read table name from SQL update template. SQL presence check skipped.",
   "saved": "Saved",
   "update_success": "Updated data for EAN {ean}.",
   "no_ean": "No EAN",

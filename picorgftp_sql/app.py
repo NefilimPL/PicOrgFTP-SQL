@@ -1,5 +1,7 @@
 """Main Tkinter application class."""
 
+import re
+
 from .common import *  # noqa: F401,F403
 from .excel_utils import (
     SLOT_LABELS,
@@ -362,6 +364,38 @@ class App(BU.Tk):
             return bool(user and password)
         return J
 
+    def _build_sql_presence_query(A, columns, ean):
+        """Construct a SELECT statement mirroring the configured UPDATE template."""
+
+        if not columns or not ean:
+            return I
+        template = config.CONFIG.get(w, SQL_UPDATE_TEMPLATE) or SQL_UPDATE_TEMPLATE
+        update_match = re.search(r"(?is)update\s+([^\s]+)\s+set", template)
+        if not update_match:
+            log_error_loc("sql_presence_table_parse_failed")
+            return I
+        table = update_match.group(1).strip().rstrip(";")
+        where_match = re.search(r"(?is)\bwhere\b(.+)", template)
+        if where_match:
+            where_template = " WHERE" + where_match.group(1)
+        else:
+            where_template = " WHERE EAN = '{ean}' OR Towar_powiazany_z_SKU = '{ean}'"
+        where_clause = where_template.replace("{ean}", ean).strip()
+        if where_clause and not where_clause.startswith(" "):
+            where_clause = " " + where_clause
+        where_clause = where_clause.rstrip(";\n\r\t ")
+        column_names = ", ".join(label for _, label in columns)
+        if not column_names:
+            return I
+        db_type = config.CONFIG.get(p, K).lower()
+        if db_type == K:
+            base_query = f"SELECT {column_names} FROM {table}{where_clause}"
+            if " limit " not in base_query.lower():
+                base_query = f"{base_query.rstrip('; ')} LIMIT 1"
+            return base_query
+        base_query = f"SELECT TOP 1 {column_names} FROM {table}{where_clause}"
+        return base_query.rstrip(";\n\r\t ")
+
     def _refresh_combobox_list(B, combobox, all_values, existing_count=0):
         """Refresh the dropdown values while remembering which entries exist."""
 
@@ -623,76 +657,50 @@ class App(BU.Tk):
                     C.logged_counts = J
                 if C._should_check_sql_presence():
                     columns = [(slot[Aa], slot["label"]) for slot in C.slots]
-                    if columns:
+                    query = C._build_sql_presence_query(columns, K_)
+                    if query:
                         try:
-                            template = D.get(w, SQL_UPDATE_TEMPLATE)
-                            import re
-
-                            table = I
-                            where_clause = I
-                            match = re.search(r"(?i)update\s+([0-9A-Za-z_\.]+)\s+set", template)
-                            if match:
-                                table = match.group(1)
-                            where_index = template.lower().find(" where")
-                            if where_index != -1:
-                                where_template = template[where_index:]
-                            else:
-                                where_template = (
-                                    " WHERE EAN = '{ean}' OR Towar_powiazany_z_SKU = '{ean}'"
-                                )
-                            if table:
-                                where_clause = where_template.replace("{ean}", K_)
-                                db_type = D.get(p, K).lower()
-                                column_names = ", ".join(label for _, label in columns)
-                                if db_type == K:
-                                    query = (
-                                        f"SELECT {column_names} FROM {table}{where_clause} LIMIT 1"
-                                    )
-                                else:
-                                    query = (
-                                        f"SELECT TOP 1 {column_names} FROM {table}{where_clause}"
-                                    )
-                                conn = I
-                                cur = I
-                                try:
-                                    conn = connect_db()
-                                    cur = conn.cursor()
-                                    cur.execute(query)
-                                    row = cur.fetchone()
-                                    sql_presence = {
-                                        prefix: h for prefix, _ in columns
-                                    }
-                                    if row:
-                                        try:
-                                            values = list(row)
-                                        except E:
-                                            values = row
-                                        for idx, (prefix, _) in A0(columns):
-                                            value = values[idx] if idx < Q(values) else I
-                                            if isinstance(value, memoryview):
-                                                value = bytes(value)
-                                            if isinstance(value, (bytes, bytearray)):
-                                                try:
-                                                    value = value.decode("utf-8")
-                                                except E:
-                                                    value = value.decode(
-                                                        "latin-1", errors="ignore"
-                                                    )
-                                            present = h
-                                            if value is not I:
-                                                present = bool(G(value).strip())
-                                            sql_presence[prefix] = present
-                                finally:
-                                    if cur is not I:
-                                        try:
-                                            cur.close()
-                                        except E:
-                                            pass
-                                    if conn is not I:
-                                        try:
-                                            conn.close()
-                                        except E:
-                                            pass
+                            conn = I
+                            cur = I
+                            try:
+                                conn = connect_db()
+                                cur = conn.cursor()
+                                cur.execute(query)
+                                row = cur.fetchone()
+                                sql_presence = {
+                                    prefix: h for prefix, _ in columns
+                                }
+                                if row:
+                                    try:
+                                        values = list(row)
+                                    except E:
+                                        values = row
+                                    for idx, (prefix, _) in A0(columns):
+                                        value = values[idx] if idx < Q(values) else I
+                                        if isinstance(value, memoryview):
+                                            value = bytes(value)
+                                        if isinstance(value, (bytes, bytearray)):
+                                            try:
+                                                value = value.decode("utf-8")
+                                            except E:
+                                                value = value.decode(
+                                                    "latin-1", errors="ignore"
+                                                )
+                                        present = h
+                                        if value is not I:
+                                            present = bool(G(value).strip())
+                                        sql_presence[prefix] = present
+                            finally:
+                                if cur is not I:
+                                    try:
+                                        cur.close()
+                                    except E:
+                                        pass
+                                if conn is not I:
+                                    try:
+                                        conn.close()
+                                    except E:
+                                        pass
                         except E as T:
                             sql_presence = I
                             log_error(f"SQL check error for EAN {K_}: {T}")
