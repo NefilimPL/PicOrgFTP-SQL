@@ -364,10 +364,10 @@ class App(BU.Tk):
             return bool(user and password)
         return J
 
-    def _build_sql_presence_query(A, columns, ean):
-        """Construct a SELECT statement mirroring the configured UPDATE template."""
+    def _extract_sql_presence_context(A, ean):
+        """Return the table name and WHERE clause used for SQL presence checks."""
 
-        if not columns or not ean:
+        if not ean:
             return I
         template = config.CONFIG.get(w, SQL_UPDATE_TEMPLATE) or SQL_UPDATE_TEMPLATE
         update_match = re.search(r"(?is)update\s+([^\s]+)\s+set", template)
@@ -380,21 +380,24 @@ class App(BU.Tk):
             where_template = " WHERE" + where_match.group(1)
         else:
             where_template = " WHERE EAN = '{ean}' OR Towar_powiazany_z_SKU = '{ean}'"
-        where_clause = where_template.replace("{ean}", ean).strip()
+        where_clause = where_template.replace("{ean}", ean)
+        where_clause = where_clause.replace("{EAN}", ean)
+        where_clause = where_clause.rstrip(";\n\r\t ")
         if where_clause and not where_clause.startswith(" "):
             where_clause = " " + where_clause
-        where_clause = where_clause.rstrip(";\n\r\t ")
-        column_names = ", ".join(label for _, label in columns)
-        if not column_names:
+        return table, where_clause
+
+    def _build_sql_presence_query(A, table, where_clause, column, db_type):
+        """Compose a per-column SELECT used to check for SQL data availability."""
+
+        if not (table and column):
             return I
-        db_type = config.CONFIG.get(p, K).lower()
         if db_type == K:
-            base_query = f"SELECT {column_names} FROM {table}{where_clause}"
+            base_query = f"SELECT {column} FROM {table}{where_clause}"
             if " limit " not in base_query.lower():
                 base_query = f"{base_query.rstrip('; ')} LIMIT 1"
             return base_query
-        base_query = f"SELECT TOP 1 {column_names} FROM {table}{where_clause}"
-        return base_query.rstrip(";\n\r\t ")
+        return f"SELECT TOP 1 {column} FROM {table}{where_clause}".rstrip(";\n\r\t ")
 
     def _refresh_combobox_list(B, combobox, all_values, existing_count=0):
         """Refresh the dropdown values while remembering which entries exist."""
@@ -657,39 +660,59 @@ class App(BU.Tk):
                     C.logged_counts = J
                 if C._should_check_sql_presence():
                     columns = [(slot[Aa], slot["label"]) for slot in C.slots]
-                    query = C._build_sql_presence_query(columns, K_)
-                    if query:
+                    context = C._extract_sql_presence_context(K_)
+                    if context:
+                        table, where_clause = context
+                        db_type = config.CONFIG.get(p, K).lower()
                         try:
                             conn = I
                             cur = I
                             try:
                                 conn = connect_db()
                                 cur = conn.cursor()
-                                cur.execute(query)
-                                row = cur.fetchone()
-                                sql_presence = {
-                                    prefix: h for prefix, _ in columns
-                                }
-                                if row:
+                                presence_map = {prefix: I for prefix, _ in columns}
+                                for prefix, column_name in columns:
+                                    query = C._build_sql_presence_query(
+                                        table, where_clause, column_name, db_type
+                                    )
+                                    if not query:
+                                        continue
                                     try:
-                                        values = list(row)
+                                        cur.execute(query)
+                                        row = cur.fetchone()
+                                    except E as column_error:
+                                        presence_map[prefix] = I
+                                        log_error(
+                                            f"SQL presence query failed for column {column_name}: {column_error}"
+                                        )
+                                        continue
+                                    if not row:
+                                        presence_map[prefix] = h
+                                        continue
+                                    value = I
+                                    try:
+                                        value = row[0]
                                     except E:
-                                        values = row
-                                    for idx, (prefix, _) in A0(columns):
-                                        value = values[idx] if idx < Q(values) else I
-                                        if isinstance(value, memoryview):
-                                            value = bytes(value)
-                                        if isinstance(value, (bytes, bytearray)):
-                                            try:
-                                                value = value.decode("utf-8")
-                                            except E:
-                                                value = value.decode(
-                                                    "latin-1", errors="ignore"
-                                                )
-                                        present = h
-                                        if value is not I:
-                                            present = bool(G(value).strip())
-                                        sql_presence[prefix] = present
+                                        try:
+                                            values = list(row)
+                                        except E:
+                                            values = row
+                                        if values:
+                                            value = values[0]
+                                    if isinstance(value, memoryview):
+                                        value = bytes(value)
+                                    if isinstance(value, (bytes, bytearray)):
+                                        try:
+                                            value = value.decode("utf-8")
+                                        except E:
+                                            value = value.decode(
+                                                "latin-1", errors="ignore"
+                                            )
+                                    if isinstance(value, str):
+                                        presence_map[prefix] = bool(value.strip())
+                                    else:
+                                        presence_map[prefix] = value is not I
+                                sql_presence = presence_map
                             finally:
                                 if cur is not I:
                                     try:
