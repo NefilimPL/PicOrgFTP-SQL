@@ -305,6 +305,7 @@ class App(BU.Tk):
             sql_icon.offset_x = 0
             sql_icon.place(relx=1.0, rely=1.0, anchor="se", x=sql_icon.offset_x)
             sql_icon.place_forget()
+            sql_icon.show_when_unknown = J
             D_.drag_source_register(1, BJ)
             D_.dnd_bind("<<DragInitCmd>>", lambda e, i=G_: B._on_drag_init(e, i))
             D_.dnd_bind("<<DragEndCmd>>", lambda e: B._on_drag_end(e))
@@ -331,7 +332,16 @@ class App(BU.Tk):
         if not icon:
             return
         if present is I:
-            icon.place_forget()
+            if getattr(icon, "show_when_unknown", h):
+                icon.place(
+                    relx=1.0,
+                    rely=1.0,
+                    anchor="se",
+                    x=getattr(icon, "offset_x", 0),
+                )
+                icon.config(bg="#555555")
+            else:
+                icon.place_forget()
             return
         icon.place(relx=1.0, rely=1.0, anchor="se", x=getattr(icon, "offset_x", 0))
         icon.config(bg="green" if present else "red")
