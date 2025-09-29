@@ -336,6 +336,22 @@ class App(BU.Tk):
         icon.place(relx=1.0, rely=1.0, anchor="se", x=getattr(icon, "offset_x", 0))
         icon.config(bg="green" if present else "red")
 
+    def _should_check_sql_presence(A):
+        """Return True when database credentials are configured for lookups."""
+
+        db_type = config.CONFIG.get(p, K).lower()
+        if db_type == K:
+            mysql_cfg = config.CONFIG.get(K, {})
+            return all(mysql_cfg.get(key) for key in (c, b, N))
+        sql_cfg = config.CONFIG.get(P, {})
+        if not (sql_cfg.get(c) and sql_cfg.get(b)):
+            return h
+        user = sql_cfg.get(N)
+        password = sql_cfg.get(M)
+        if user or password:
+            return bool(user and password)
+        return J
+
     def _refresh_combobox_list(B, combobox, all_values, existing_count=0):
         """Refresh the dropdown values while remembering which entries exist."""
 
@@ -595,7 +611,7 @@ class App(BU.Tk):
                         ftp=Q(remote_files),
                     )
                     C.logged_counts = J
-                if D.get(u, J):
+                if C._should_check_sql_presence():
                     columns = [(slot[Aa], slot["label"]) for slot in C.slots]
                     if columns:
                         try:
