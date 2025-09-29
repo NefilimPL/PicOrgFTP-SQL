@@ -54,6 +54,7 @@ class App(BU.Tk):
         B.ftp_remote_only = {}
         B.ftp_presence = {}
         B.ftp_downloaded_final = set()
+        B.sql_presence = I
         B.opt_resize = F.BooleanVar(value=J)
         B.opt_compress = F.BooleanVar(value=h)
         B.opt_maxsize = F.BooleanVar(value=h)
@@ -277,7 +278,7 @@ class App(BU.Tk):
                 relief="solid",
             )
             local_icon.create_text(15, 10, text="LOCAL", font=("Arial", 7), fill="white")
-            local_icon.offset_x = -30
+            local_icon.offset_x = -60
             local_icon.place(relx=1.0, rely=1.0, anchor="se", x=local_icon.offset_x)
             local_icon.place_forget()
             ftp_icon = F.Canvas(
@@ -289,13 +290,38 @@ class App(BU.Tk):
                 relief="solid",
             )
             ftp_icon.create_text(15, 10, text="FTP", font=("Arial", 7), fill="white")
-            ftp_icon.offset_x = 0
+            ftp_icon.offset_x = -30
             ftp_icon.place(relx=1.0, rely=1.0, anchor="se", x=ftp_icon.offset_x)
             ftp_icon.place_forget()
+            sql_icon = F.Canvas(
+                E_,
+                width=30,
+                height=20,
+                highlightthickness=0,
+                bd=1,
+                relief="solid",
+            )
+            sql_icon.create_text(15, 10, text="SQL", font=("Arial", 7), fill="white")
+            sql_icon.offset_x = 0
+            sql_icon.place(relx=1.0, rely=1.0, anchor="se", x=sql_icon.offset_x)
+            sql_icon.place_forget()
             D_.drag_source_register(1, BJ)
             D_.dnd_bind("<<DragInitCmd>>", lambda e, i=G_: B._on_drag_init(e, i))
             D_.dnd_bind("<<DragEndCmd>>", lambda e: B._on_drag_end(e))
-            B.slots.append({Aa: V_, "label": W_, y: D_, A7: K_, "local_icon": local_icon, "ftp_icon": ftp_icon, f: I, AS: H_, B0: I})
+            B.slots.append(
+                {
+                    Aa: V_,
+                    "label": W_,
+                    y: D_,
+                    A7: K_,
+                    "local_icon": local_icon,
+                    "ftp_icon": ftp_icon,
+                    "sql_icon": sql_icon,
+                    f: I,
+                    AS: H_,
+                    B0: I,
+                }
+            )
         for O_ in Ax(U):
             B.slots_frame.columnconfigure(O_, weight=1)
 
@@ -303,6 +329,9 @@ class App(BU.Tk):
         """Toggle the coloured indicator showing local/remote file presence."""
 
         if not icon:
+            return
+        if present is I:
+            icon.place_forget()
             return
         icon.place(relx=1.0, rely=1.0, anchor="se", x=getattr(icon, "offset_x", 0))
         icon.config(bg="green" if present else "red")
@@ -513,6 +542,7 @@ class App(BU.Tk):
                 original_files[norm_label] = W_
                 slot_paths[norm_label] = d_
             ftp_presence = {}
+            sql_presence = I
             K_ = C.var_ean.get().strip()
             if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
                 remote_files = {}
@@ -565,14 +595,96 @@ class App(BU.Tk):
                         ftp=Q(remote_files),
                     )
                     C.logged_counts = J
+                if D.get(u, J):
+                    columns = [(slot[Aa], slot["label"]) for slot in C.slots]
+                    if columns:
+                        try:
+                            template = D.get(w, SQL_UPDATE_TEMPLATE)
+                            import re
+
+                            table = I
+                            where_clause = I
+                            match = re.search(r"(?i)update\s+([0-9A-Za-z_\.]+)\s+set", template)
+                            if match:
+                                table = match.group(1)
+                            where_index = template.lower().find(" where")
+                            if where_index != -1:
+                                where_template = template[where_index:]
+                            else:
+                                where_template = (
+                                    " WHERE EAN = '{ean}' OR Towar_powiazany_z_SKU = '{ean}'"
+                                )
+                            if table:
+                                where_clause = where_template.replace("{ean}", K_)
+                                db_type = D.get(p, K).lower()
+                                column_names = ", ".join(label for _, label in columns)
+                                if db_type == K:
+                                    query = (
+                                        f"SELECT {column_names} FROM {table}{where_clause} LIMIT 1"
+                                    )
+                                else:
+                                    query = (
+                                        f"SELECT TOP 1 {column_names} FROM {table}{where_clause}"
+                                    )
+                                conn = I
+                                cur = I
+                                try:
+                                    conn = connect_db()
+                                    cur = conn.cursor()
+                                    cur.execute(query)
+                                    row = cur.fetchone()
+                                    sql_presence = {
+                                        prefix: h for prefix, _ in columns
+                                    }
+                                    if row:
+                                        try:
+                                            values = list(row)
+                                        except E:
+                                            values = row
+                                        for idx, (prefix, _) in A0(columns):
+                                            value = values[idx] if idx < Q(values) else I
+                                            if isinstance(value, memoryview):
+                                                value = bytes(value)
+                                            if isinstance(value, (bytes, bytearray)):
+                                                try:
+                                                    value = value.decode("utf-8")
+                                                except E:
+                                                    value = value.decode(
+                                                        "latin-1", errors="ignore"
+                                                    )
+                                            present = h
+                                            if value is not I:
+                                                present = bool(G(value).strip())
+                                            sql_presence[prefix] = present
+                                finally:
+                                    if cur is not I:
+                                        try:
+                                            cur.close()
+                                        except E:
+                                            pass
+                                    if conn is not I:
+                                        try:
+                                            conn.close()
+                                        except E:
+                                            pass
+                        except E as T:
+                            sql_presence = I
+                            log_error(f"SQL check error for EAN {K_}: {T}")
             C.after(
                 0,
                 lambda: finalize(
-                    original_files, slot_paths, ftp_presence, remote_info, ean_guess
+                    original_files,
+                    slot_paths,
+                    ftp_presence,
+                    remote_info,
+                    ean_guess,
+                    sql_presence,
                 ),
             )
 
-        def finalize(original_files, slot_paths, ftp_presence, remote_info, ean_guess):
+        def finalize(
+            original_files, slot_paths, ftp_presence, remote_info, ean_guess, sql_presence
+        ):
             if ean_guess and C.var_ean.get().strip() == B:
                 C.suppress_next_lookup = J
                 C.var_ean.set(ean_guess)
@@ -581,6 +693,7 @@ class App(BU.Tk):
             C.ftp_remote_only = remote_info
             C.ftp_presence = ftp_presence
             C.ftp_downloaded_final = set()
+            C.sql_presence = sql_presence
             for X_, G_ in A0(C.slots):
                 R_ = G_[Aa]
                 if R_ in slot_paths:
@@ -591,6 +704,10 @@ class App(BU.Tk):
                     G_[f] = I
                 C._set_icon_status(G_["local_icon"], R_ in original_files)
                 C._set_icon_status(G_["ftp_icon"], R_ in ftp_presence)
+                if isinstance(sql_presence, dict):
+                    C._set_icon_status(G_["sql_icon"], sql_presence.get(R_, h))
+                else:
+                    C._set_icon_status(G_["sql_icon"], I)
 
         threading.Thread(target=worker, daemon=J).start()
 
@@ -1040,6 +1157,8 @@ class App(BU.Tk):
         B.slots[C_][A7].place(x=0, y=0)
         B._mark_slot(C_, AR)
         B._set_icon_status(B.slots[C_]["local_icon"], J)
+        if "sql_icon" in B.slots[C_]:
+            B._set_icon_status(B.slots[C_]["sql_icon"], I)
 
     def _update_slot_ui(J, idx):
         D_ = J.slots[idx]
@@ -1092,6 +1211,8 @@ class App(BU.Tk):
             E_[y].image = I
             E_[A7].place_forget()
             C._set_icon_status(E_["local_icon"], h)
+            if "sql_icon" in E_:
+                C._set_icon_status(E_["sql_icon"], I)
             if G_:
                 C._mark_slot(D_, I)
             else:
@@ -1102,6 +1223,7 @@ class App(BU.Tk):
         C.pending_additions.clear()
         C.pending_deletions.clear()
         C.pending_ftp_deletions.clear()
+        C.sql_presence = I
         for A_ in C.slots:
             A_[f] = I
             A_[y].configure(image=B, text=NO_FILE_LABEL)
@@ -1111,6 +1233,9 @@ class App(BU.Tk):
             A_["local_icon"].delete("slash")
             A_["ftp_icon"].place_forget()
             A_["ftp_icon"].delete("slash")
+            if "sql_icon" in A_:
+                A_["sql_icon"].place_forget()
+                A_["sql_icon"].delete("slash")
             if AS in A_:
                 A_[AS].configure(
                     highlightthickness=0, highlightbackground=A8, highlightcolor=A8
