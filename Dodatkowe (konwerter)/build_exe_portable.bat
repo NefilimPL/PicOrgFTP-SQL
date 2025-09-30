@@ -124,14 +124,22 @@ set "PY_VERSION=3.11.8"
 set "INSTALLER=%TOOLSDIR%\python-%PY_VERSION%-amd64.exe"
 set "PY_URL=https://www.python.org/ftp/python/%PY_VERSION%/python-%PY_VERSION%-amd64.exe"
 if not exist "%INSTALLER%" (
-    powershell -NoLogo -NoProfile -Command "$ProgressPreference='SilentlyContinue'; $u='%PY_URL%'; $p='%INSTALLER%'; if (-not (Test-Path $p)) { Invoke-WebRequest -Uri $u -OutFile $p -UseBasicParsing }" || exit /b 1
+    set "PS_DL=Set-StrictMode -Off; $ProgressPreference='SilentlyContinue'; $u='%PY_URL%'; $p='%INSTALLER%'; if (-not (Test-Path -LiteralPath $p)) { Invoke-WebRequest -Uri $u -OutFile $p -UseBasicParsing }"
+    powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "!PS_DL!" || exit /b 1
 )
 
 echo Installing portable Python...
 if exist "%PORTABLE_DIR%" rmdir /s /q "%PORTABLE_DIR%"
 mkdir "%PORTABLE_DIR%"
-set "INSTALL_ARGS=/quiet InstallAllUsers=0 PrependPath=0 Include_launcher=1 Include_test=0 Include_doc=0 Include_tcltk=1 Include_pip=1 Include_symbols=0 Shortcuts=0 SimpleInstall=0 TargetDir=""%PORTABLE_DIR%"" DefaultJustForMeTargetDir=""%PORTABLE_DIR%"" DefaultAllUsersTargetDir=""%PORTABLE_DIR%"" InstallLauncherAllUsers=0"
-"%INSTALLER%" %INSTALL_ARGS% || exit /b 1
+set "INSTALL_ARGS=/quiet InstallAllUsers=0 PrependPath=0"
+set "INSTALL_ARGS=!INSTALL_ARGS! Include_launcher=1 Include_test=0 Include_doc=0"
+set "INSTALL_ARGS=!INSTALL_ARGS! Include_tcltk=1 Include_pip=1 Include_symbols=0"
+set "INSTALL_ARGS=!INSTALL_ARGS! Shortcuts=0 SimpleInstall=0"
+set "INSTALL_ARGS=!INSTALL_ARGS! TargetDir=""%PORTABLE_DIR%"""
+set "INSTALL_ARGS=!INSTALL_ARGS! DefaultJustForMeTargetDir=""%PORTABLE_DIR%"""
+set "INSTALL_ARGS=!INSTALL_ARGS! DefaultAllUsersTargetDir=""%PORTABLE_DIR%"""
+set "INSTALL_ARGS=!INSTALL_ARGS! InstallLauncherAllUsers=0"
+"%INSTALLER%" !INSTALL_ARGS! || exit /b 1
 if not exist "%PORTABLE_PY%" (
     echo [ERROR] The installer did not create %PORTABLE_PY%.
     exit /b 1
