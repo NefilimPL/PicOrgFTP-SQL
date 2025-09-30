@@ -59,7 +59,7 @@ powershell -NoLogo -NoProfile -Command "Set-Variable -Name ProgressPreference -V
 
 "%PYTHON%" "%TOOLSDIR%\get-pip.py" --no-warn-script-location || exit /b 1
 "%PYTHON%" -m pip install --upgrade pip || exit /b 1
-"%PYTHON%" -m pip install pyinstaller pillow mysql-connector-python certifi || exit /b 1
+"%PYTHON%" -m pip install pyinstaller pillow mysql-connector-python certifi tkinterdnd2 openpyxl pyodbc || exit /b 1
 
 del "%TOOLSDIR%\get-pip.py" >nul 2>nul
 del "%TOOLSDIR%\%PYSETUP%" >nul 2>nul

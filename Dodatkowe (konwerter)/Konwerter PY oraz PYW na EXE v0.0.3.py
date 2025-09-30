@@ -169,6 +169,8 @@ def main():
         "--collect-data=mysql.connector",
         "--collect-data=mysql.connector.locales",
         "--hidden-import=mysql.connector.locales.eng.client_error",
+        "--hidden-import=tkinterdnd2",
+        "--collect-submodules=tkinterdnd2",
     ]
     # opcjonalnie inne języki:
     for lang in ("fra","ita","jpn","por","rus","spa","zho"):

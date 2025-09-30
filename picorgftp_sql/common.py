@@ -221,7 +221,11 @@ def ensure_package(pkg_name, import_name=I):
     """Ensure that a dependency is installed."""
     try:
         __import__(import_name or pkg_name)
-    except ImportError:
+    except ImportError as exc:
+        if getattr(sys, "frozen", False):
+            raise RuntimeError(
+                f"Wymagany pakiet '{pkg_name}' nie został dołączony do aplikacji."
+            ) from exc
         BH.check_call([sys.executable, "-m", "pip", "install", pkg_name])
 
 
