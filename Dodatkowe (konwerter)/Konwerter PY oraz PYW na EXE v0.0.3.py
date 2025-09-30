@@ -1,5 +1,5 @@
 # Pomocniczy skrypt PyInstaller do tworzenia plików EXE z obsługą mysql-connector
-import subprocess, os, sys, tempfile
+import subprocess, os, sys, tempfile, shutil
 from PIL import Image
 
 def ask_yes_no(prompt, default=True):
@@ -96,6 +96,26 @@ def convert_to_ico(path):
     except Exception as e:
         print("❌ Błąd ikony:", e); return ""
 
+
+def safe_remove(path):
+    try:
+        if os.path.isfile(path) or os.path.islink(path):
+            os.remove(path)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        print(f"⚠️ Nie udało się usunąć pliku {path}: {exc}")
+
+
+def safe_rmtree(path):
+    if not os.path.isdir(path):
+        return
+    try:
+        shutil.rmtree(path)
+    except Exception as exc:
+        print(f"⚠️ Nie udało się usunąć katalogu {path}: {exc}")
+
+
 def make_runtime_hook():
     code = """
 # runtime-hook: upewnij się, że locale ENG jest załadowane
@@ -141,10 +161,18 @@ def main():
     onefile  = ask_yes_no("🔹 Zbudować 1 plik (onefile)?", True)
     add_icon = ask_yes_no("🔹 Dodać ikonę (.ico/.png/.jpg)?", False)
 
+    cleanup_files = []
+    cleanup_dirs = []
+
     icon = ""
     if add_icon:
         icon_in = choose_icon((".ico",".png",".jpg",".jpeg"))
-        icon = icon_in if icon_in.lower().endswith(".ico") else convert_to_ico(icon_in)
+        if icon_in.lower().endswith(".ico"):
+            icon = icon_in
+        else:
+            icon = convert_to_ico(icon_in)
+            if icon:
+                cleanup_files.append(icon)
 
     cmd = [sys.executable, "-m", "PyInstaller", script, f"--distpath={dstdir}"]
     if onefile: cmd.append("--onefile")
@@ -178,6 +206,7 @@ def main():
 
     # runtime hook z wymuszeniem ENG
     hook = make_runtime_hook()
+    cleanup_files.append(hook)
     cmd.append(f"--runtime-hook={hook}")
 
     # spróbuj dorzucić CA z certifi (opcjonalny fallback do TLS)
@@ -190,14 +219,29 @@ def main():
         pass
 
     print("\n🚀 Komenda:\n ", " ".join(cmd), "\n")
+    build_root = None
     try:
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as e:
-        print("❌ Błąd PyInstaller:", e); return
+        print("❌ Błąd PyInstaller:", e)
+    else:
+        exe = (os.path.join(dstdir, base+exe_ext) if onefile
+               else os.path.join(dstdir, base, base+exe_ext))
+        print("\n✅ Gotowe!\n📁", exe)
 
-    exe = (os.path.join(dstdir, base+exe_ext) if onefile
-           else os.path.join(dstdir, base, base+exe_ext))
-    print("\n✅ Gotowe!\n📁", exe)
+        spec_path = os.path.join(os.getcwd(), f"{base}.spec")
+        build_root = os.path.join(os.getcwd(), "build")
+        build_target = os.path.join(build_root, base)
+
+        cleanup_files.append(spec_path)
+        cleanup_dirs.append(build_target)
+    finally:
+        for item in cleanup_files:
+            safe_remove(item)
+        for directory in cleanup_dirs:
+            safe_rmtree(directory)
+        if build_root and os.path.isdir(build_root) and not os.listdir(build_root):
+            safe_rmtree(build_root)
 
 if __name__ == "__main__":
     main()
