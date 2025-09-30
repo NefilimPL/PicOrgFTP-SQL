@@ -106,7 +106,7 @@ if not exist "%INSTALLER%" (
 echo Installing portable Python...
 if exist "%PORTABLE_DIR%" rmdir /s /q "%PORTABLE_DIR%"
 mkdir "%PORTABLE_DIR%"
-set "INSTALL_ARGS=/quiet InstallAllUsers=0 PrependPath=0 Include_launcher=0 Include_test=0 Include_doc=0 Include_tcltk=1 Include_pip=1 Include_symbols=0 Shortcuts=0 SimpleInstall=0 TargetDir=\"%PORTABLE_DIR%\" DefaultJustForMeTargetDir=\"%PORTABLE_DIR%\" InstallLauncherAllUsers=0"
+set "INSTALL_ARGS=/quiet InstallAllUsers=0 PrependPath=0 Include_launcher=1 Include_test=0 Include_doc=0 Include_tcltk=1 Include_pip=1 Include_symbols=0 Shortcuts=0 SimpleInstall=0 TargetDir=\"%PORTABLE_DIR%\" DefaultJustForMeTargetDir=\"%PORTABLE_DIR%\" InstallLauncherAllUsers=0"
 "%INSTALLER%" %INSTALL_ARGS% || exit /b 1
 if not exist "%PORTABLE_PY%" (
     echo [ERROR] The installer did not create %PORTABLE_PY%.
