@@ -7,6 +7,26 @@ from . import localization
 AG = None
 
 
+def _summarize_for_ui(message):
+    """Return a compact, human friendly summary suitable for the GUI log."""
+
+    if not message:
+        return message
+
+    summary = str(message).splitlines()[0].strip()
+    separators = (":", " - ", " — ", " -> ", " | ", "; ")
+    for sep in separators:
+        if sep in summary:
+            head = summary.split(sep, 1)[0].strip()
+            if head:
+                summary = head if head.endswith("…") else f"{head}…"
+                break
+    max_length = 140
+    if len(summary) > max_length:
+        summary = summary[: max_length - 1].rstrip() + "…"
+    return summary
+
+
 def set_app(app):
     """Register the Tk ``app`` instance so log messages can reach the GUI."""
 
@@ -52,10 +72,12 @@ def log_error(message, ui_message=None):
         pass
     try:
         if AG:
-            if threading.current_thread() != threading.main_thread():
-                AG.after(0, lambda msg=(ui_message or message): AG._ui_log(f"❗ {msg}"))
-            else:
-                AG._ui_log(f"❗ {ui_message or message}")
+            ui_text = ui_message if ui_message is not None else _summarize_for_ui(message)
+            if ui_text:
+                if threading.current_thread() != threading.main_thread():
+                    AG.after(0, lambda msg=ui_text: AG._ui_log(f"❗ {msg}"))
+                else:
+                    AG._ui_log(f"❗ {ui_text}")
     except E:
         pass
 
@@ -72,10 +94,12 @@ def log_info(message, ui_message=None):
         pass
     try:
         if AG:
-            if threading.current_thread() != threading.main_thread():
-                AG.after(0, lambda msg=(ui_message or message): AG._ui_log(f"• {msg}"))
-            else:
-                AG._ui_log(f"• {ui_message or message}")
+            ui_text = ui_message if ui_message is not None else _summarize_for_ui(message)
+            if ui_text:
+                if threading.current_thread() != threading.main_thread():
+                    AG.after(0, lambda msg=ui_text: AG._ui_log(f"• {msg}"))
+                else:
+                    AG._ui_log(f"• {ui_text}")
     except E:
         pass
 
