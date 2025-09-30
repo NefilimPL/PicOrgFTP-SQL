@@ -13,16 +13,17 @@ if not exist "%TARGET%" (
 
 pushd "%REPO_ROOT%" >nul
 
+set "PYTHON="
 where python >nul 2>nul
 if %errorlevel%==0 (
     for /f "delims=" %%i in ('where python ^| findstr /i "python.exe"') do (
-        set "PYTHON=%%i"
-        goto :HAVE_PYTHON
+        call :CHECK_TK_INTERPRETER "%%i"
+        if defined PYTHON goto :HAVE_PYTHON
     )
 )
 
 set "TOOLSDIR=%REPO_ROOT%build-tools"
-set "PORTABLE_DIR=%TOOLSDIR%\python-embed"
+set "PORTABLE_DIR=%TOOLSDIR%\python-portable"
 set "PYTHON=%PORTABLE_DIR%\python.exe"
 if not exist "%PYTHON%" (
     call :SETUP_PORTABLE || goto :ERROR
@@ -40,15 +41,18 @@ popd >nul
 exit /b 0
 
 :SETUP_PORTABLE
-echo Python not found in PATH. Downloading portable runtime...
+echo Python not found in PATH or missing tkinter. Downloading portable runtime...
 if not exist "%TOOLSDIR%" mkdir "%TOOLSDIR%"
 set VERSION=3.11.8
-set PYZIP=python-!VERSION!-embed-amd64.zip
-set PYURL=https://www.python.org/ftp/python/!VERSION!/%PYZIP%
+set PYSETUP=python-!VERSION!-amd64.exe
+set PYURL=https://www.python.org/ftp/python/!VERSION!/%PYSETUP%
 
-powershell -NoLogo -NoProfile -Command "Set-Variable -Name ProgressPreference -Value 'SilentlyContinue'; $out = '%TOOLSDIR%\%PYZIP%'; Invoke-WebRequest -Uri '%PYURL%' -OutFile $out; if (-not (Test-Path $out)) { exit 1 }" || exit /b 1
+powershell -NoLogo -NoProfile -Command "Set-Variable -Name ProgressPreference -Value 'SilentlyContinue'; $out = '%TOOLSDIR%\%PYSETUP%'; Invoke-WebRequest -Uri '%PYURL%' -OutFile $out; if (-not (Test-Path $out)) { exit 1 }" || exit /b 1
 
-powershell -NoLogo -NoProfile -Command "Set-Variable -Name ErrorActionPreference -Value 'Stop'; $zip = '%TOOLSDIR%\%PYZIP%'; $dest = '%PORTABLE_DIR%'; if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }; Expand-Archive -Path $zip -DestinationPath $dest; $pth = Join-Path $dest 'python311._pth'; (Get-Content $pth) -replace '#import site','import site' | Set-Content $pth; Remove-Item $zip" || exit /b 1
+if exist "%PORTABLE_DIR%" (
+    rmdir /s /q "%PORTABLE_DIR%"
+)
+"%TOOLSDIR%\%PYSETUP%" /quiet InstallAllUsers=0 PrependPath=0 Include_launcher=0 Include_test=0 Include_doc=0 Include_tcltk=1 Include_pip=1 Include_symbols=0 Shortcuts=0 TargetDir="%PORTABLE_DIR%" || exit /b 1
 
 echo Installing pip and build dependencies...
 powershell -NoLogo -NoProfile -Command "Set-Variable -Name ProgressPreference -Value 'SilentlyContinue'; Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile '%TOOLSDIR%\get-pip.py'" || exit /b 1
@@ -58,6 +62,21 @@ powershell -NoLogo -NoProfile -Command "Set-Variable -Name ProgressPreference -V
 "%PYTHON%" -m pip install pyinstaller pillow mysql-connector-python certifi || exit /b 1
 
 del "%TOOLSDIR%\get-pip.py" >nul 2>nul
+del "%TOOLSDIR%\%PYSETUP%" >nul 2>nul
+
+"%PYTHON%" -c "import tkinter" >nul 2>nul || exit /b 1
+set "PYTHON=%PORTABLE_DIR%\python.exe"
+exit /b 0
+
+:CHECK_TK_INTERPRETER
+set "TMP_PY=%~1"
+"%TMP_PY%" -c "import tkinter" >nul 2>nul
+if errorlevel 1 (
+    echo Detected Python at %TMP_PY% but tkinter module is missing.
+    set "PYTHON="
+) else (
+    set "PYTHON=%TMP_PY%"
+)
 exit /b 0
 
 :ERROR
