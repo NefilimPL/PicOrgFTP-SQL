@@ -52,7 +52,9 @@ powershell -NoLogo -NoProfile -Command "Set-Variable -Name ProgressPreference -V
 if exist "%PORTABLE_DIR%" (
     rmdir /s /q "%PORTABLE_DIR%"
 )
-"%TOOLSDIR%\%PYSETUP%" /quiet InstallAllUsers=0 PrependPath=0 Include_launcher=0 Include_test=0 Include_doc=0 Include_tcltk=1 Include_pip=1 Include_symbols=0 Shortcuts=0 TargetDir="%PORTABLE_DIR%" || exit /b 1
+set "INSTALLER_OPTS=/quiet InstallAllUsers=0 PrependPath=0 Include_launcher=0 Include_test=0 Include_doc=0 Include_tcltk=1 Include_pip=1 Include_symbols=0 Shortcuts=0 SimpleInstall=0"
+set "INSTALLER_OPTS=%INSTALLER_OPTS% TargetDir=\"%PORTABLE_DIR%\" DefaultJustForMeTargetDir=\"%PORTABLE_DIR%\" InstallLauncherAllUsers=0"
+"%TOOLSDIR%\%PYSETUP%" %INSTALLER_OPTS% || exit /b 1
 
 if not exist "%PYTHON%" (
     set "PYTHON="
@@ -60,9 +62,23 @@ if not exist "%PYTHON%" (
         set "PYTHON=%%~fp"
         goto :FOUND_PYTHON
     )
-    echo Unable to locate python.exe inside %PORTABLE_DIR%.
-    echo Make sure the installer can write to that directory and try again.
-    exit /b 1
+    if not defined PYTHON (
+        for /f "delims=" %%p in ('dir /b /s "%PORTABLE_DIR%\python*.exe" 2^>nul ^| findstr /i "python.exe"') do (
+            set "PYTHON=%%~fp"
+            goto :FOUND_PYTHON
+        )
+    )
+    if not defined PYTHON if defined LOCALAPPDATA (
+        for /f "delims=" %%p in ('dir /b /s "%LOCALAPPDATA%\Programs\Python\python*.exe" 2^>nul ^| findstr /i "python.exe"') do (
+            set "PYTHON=%%~fp"
+            goto :FOUND_PYTHON
+        )
+    )
+    if not defined PYTHON (
+        echo Unable to locate python.exe inside %PORTABLE_DIR%.
+        echo Make sure the installer can write to that directory and try again.
+        exit /b 1
+    )
 )
 
 :FOUND_PYTHON
