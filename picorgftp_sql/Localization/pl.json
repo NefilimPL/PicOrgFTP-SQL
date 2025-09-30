@@ -48,6 +48,7 @@
   "ftp_send_failed": "Dane lokalne zostały zapisane, jednak wysyłanie plików na serwer FTP nie powiodło się.\nPowód: {reason}",
   "ftp_skipped_no_ean": "Dane lokalne zostały zapisane, jednak nie wysłano zdjęć na FTP z powodu braku prawidłowego kodu EAN-13.",
   "sql_update_failed": "Dane lokalne oraz FTP zostały zaktualizowane, jednak wystąpił błąd podczas aktualizacji bazy danych.\nPowód: {reason}",
+  "sql_presence_table_parse_failed": "Nie udało się odczytać nazwy tabeli z szablonu zapytania SQL. Pominięto sprawdzanie obecności w bazie.",
   "saved": "Zapisano",
   "update_success": "Zaktualizowano dane dla EAN {ean}.",
   "no_ean": "Brak EAN",

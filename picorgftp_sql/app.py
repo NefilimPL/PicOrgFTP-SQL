@@ -1,5 +1,7 @@
 """Main Tkinter application class."""
 
+import re
+
 from .common import *  # noqa: F401,F403
 from .excel_utils import (
     SLOT_LABELS,
@@ -54,6 +56,7 @@ class App(BU.Tk):
         B.ftp_remote_only = {}
         B.ftp_presence = {}
         B.ftp_downloaded_final = set()
+        B.sql_presence = I
         B.opt_resize = F.BooleanVar(value=J)
         B.opt_compress = F.BooleanVar(value=h)
         B.opt_maxsize = F.BooleanVar(value=h)
@@ -277,7 +280,7 @@ class App(BU.Tk):
                 relief="solid",
             )
             local_icon.create_text(15, 10, text="LOCAL", font=("Arial", 7), fill="white")
-            local_icon.offset_x = -30
+            local_icon.offset_x = -60
             local_icon.place(relx=1.0, rely=1.0, anchor="se", x=local_icon.offset_x)
             local_icon.place_forget()
             ftp_icon = F.Canvas(
@@ -289,13 +292,39 @@ class App(BU.Tk):
                 relief="solid",
             )
             ftp_icon.create_text(15, 10, text="FTP", font=("Arial", 7), fill="white")
-            ftp_icon.offset_x = 0
+            ftp_icon.offset_x = -30
             ftp_icon.place(relx=1.0, rely=1.0, anchor="se", x=ftp_icon.offset_x)
             ftp_icon.place_forget()
+            sql_icon = F.Canvas(
+                E_,
+                width=30,
+                height=20,
+                highlightthickness=0,
+                bd=1,
+                relief="solid",
+            )
+            sql_icon.create_text(15, 10, text="SQL", font=("Arial", 7), fill="white")
+            sql_icon.offset_x = 0
+            sql_icon.place(relx=1.0, rely=1.0, anchor="se", x=sql_icon.offset_x)
+            sql_icon.place_forget()
+            sql_icon.show_when_unknown = J
             D_.drag_source_register(1, BJ)
             D_.dnd_bind("<<DragInitCmd>>", lambda e, i=G_: B._on_drag_init(e, i))
             D_.dnd_bind("<<DragEndCmd>>", lambda e: B._on_drag_end(e))
-            B.slots.append({Aa: V_, "label": W_, y: D_, A7: K_, "local_icon": local_icon, "ftp_icon": ftp_icon, f: I, AS: H_, B0: I})
+            B.slots.append(
+                {
+                    Aa: V_,
+                    "label": W_,
+                    y: D_,
+                    A7: K_,
+                    "local_icon": local_icon,
+                    "ftp_icon": ftp_icon,
+                    "sql_icon": sql_icon,
+                    f: I,
+                    AS: H_,
+                    B0: I,
+                }
+            )
         for O_ in Ax(U):
             B.slots_frame.columnconfigure(O_, weight=1)
 
@@ -304,8 +333,71 @@ class App(BU.Tk):
 
         if not icon:
             return
+        if present is I:
+            if getattr(icon, "show_when_unknown", h):
+                icon.place(
+                    relx=1.0,
+                    rely=1.0,
+                    anchor="se",
+                    x=getattr(icon, "offset_x", 0),
+                )
+                icon.config(bg="#555555")
+            else:
+                icon.place_forget()
+            return
         icon.place(relx=1.0, rely=1.0, anchor="se", x=getattr(icon, "offset_x", 0))
         icon.config(bg="green" if present else "red")
+
+    def _should_check_sql_presence(A):
+        """Return True when database credentials are configured for lookups."""
+
+        db_type = config.CONFIG.get(p, K).lower()
+        if db_type == K:
+            mysql_cfg = config.CONFIG.get(K, {})
+            return all(mysql_cfg.get(key) for key in (c, b, N))
+        sql_cfg = config.CONFIG.get(P, {})
+        if not (sql_cfg.get(c) and sql_cfg.get(b)):
+            return h
+        user = sql_cfg.get(N)
+        password = sql_cfg.get(M)
+        if user or password:
+            return bool(user and password)
+        return J
+
+    def _extract_sql_presence_context(A, ean):
+        """Return the table name and WHERE clause used for SQL presence checks."""
+
+        if not ean:
+            return I
+        template = config.CONFIG.get(w, SQL_UPDATE_TEMPLATE) or SQL_UPDATE_TEMPLATE
+        update_match = re.search(r"(?is)update\s+([^\s]+)\s+set", template)
+        if not update_match:
+            log_error_loc("sql_presence_table_parse_failed")
+            return I
+        table = update_match.group(1).strip().rstrip(";")
+        where_match = re.search(r"(?is)\bwhere\b(.+)", template)
+        if where_match:
+            where_template = " WHERE" + where_match.group(1)
+        else:
+            where_template = " WHERE EAN = '{ean}' OR Towar_powiazany_z_SKU = '{ean}'"
+        where_clause = where_template.replace("{ean}", ean)
+        where_clause = where_clause.replace("{EAN}", ean)
+        where_clause = where_clause.rstrip(";\n\r\t ")
+        if where_clause and not where_clause.startswith(" "):
+            where_clause = " " + where_clause
+        return table, where_clause
+
+    def _build_sql_presence_query(A, table, where_clause, column, db_type):
+        """Compose a per-column SELECT used to check for SQL data availability."""
+
+        if not (table and column):
+            return I
+        if db_type == K:
+            base_query = f"SELECT {column} FROM {table}{where_clause}"
+            if " limit " not in base_query.lower():
+                base_query = f"{base_query.rstrip('; ')} LIMIT 1"
+            return base_query
+        return f"SELECT TOP 1 {column} FROM {table}{where_clause}".rstrip(";\n\r\t ")
 
     def _refresh_combobox_list(B, combobox, all_values, existing_count=0):
         """Refresh the dropdown values while remembering which entries exist."""
@@ -513,6 +605,7 @@ class App(BU.Tk):
                 original_files[norm_label] = W_
                 slot_paths[norm_label] = d_
             ftp_presence = {}
+            sql_presence = I
             K_ = C.var_ean.get().strip()
             if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
                 remote_files = {}
@@ -565,14 +658,90 @@ class App(BU.Tk):
                         ftp=Q(remote_files),
                     )
                     C.logged_counts = J
+                if C._should_check_sql_presence():
+                    columns = [(slot[Aa], slot["label"]) for slot in C.slots]
+                    context = C._extract_sql_presence_context(K_)
+                    if context:
+                        table, where_clause = context
+                        db_type = config.CONFIG.get(p, K).lower()
+                        try:
+                            conn = I
+                            cur = I
+                            try:
+                                conn = connect_db()
+                                cur = conn.cursor()
+                                presence_map = {prefix: I for prefix, _ in columns}
+                                for prefix, column_name in columns:
+                                    query = C._build_sql_presence_query(
+                                        table, where_clause, column_name, db_type
+                                    )
+                                    if not query:
+                                        continue
+                                    try:
+                                        cur.execute(query)
+                                        row = cur.fetchone()
+                                    except E as column_error:
+                                        presence_map[prefix] = I
+                                        log_error(
+                                            f"SQL presence query failed for column {column_name}: {column_error}"
+                                        )
+                                        continue
+                                    if not row:
+                                        presence_map[prefix] = h
+                                        continue
+                                    value = I
+                                    try:
+                                        value = row[0]
+                                    except E:
+                                        try:
+                                            values = list(row)
+                                        except E:
+                                            values = row
+                                        if values:
+                                            value = values[0]
+                                    if isinstance(value, memoryview):
+                                        value = bytes(value)
+                                    if isinstance(value, (bytes, bytearray)):
+                                        try:
+                                            value = value.decode("utf-8")
+                                        except E:
+                                            value = value.decode(
+                                                "latin-1", errors="ignore"
+                                            )
+                                    if isinstance(value, str):
+                                        presence_map[prefix] = bool(value.strip())
+                                    else:
+                                        presence_map[prefix] = value is not I
+                                sql_presence = presence_map
+                            finally:
+                                if cur is not I:
+                                    try:
+                                        cur.close()
+                                    except E:
+                                        pass
+                                if conn is not I:
+                                    try:
+                                        conn.close()
+                                    except E:
+                                        pass
+                        except E as T:
+                            sql_presence = I
+                            log_error(f"SQL check error for EAN {K_}: {T}")
             C.after(
                 0,
                 lambda: finalize(
-                    original_files, slot_paths, ftp_presence, remote_info, ean_guess
+                    original_files,
+                    slot_paths,
+                    ftp_presence,
+                    remote_info,
+                    ean_guess,
+                    sql_presence,
                 ),
             )
 
-        def finalize(original_files, slot_paths, ftp_presence, remote_info, ean_guess):
+        def finalize(
+            original_files, slot_paths, ftp_presence, remote_info, ean_guess, sql_presence
+        ):
             if ean_guess and C.var_ean.get().strip() == B:
                 C.suppress_next_lookup = J
                 C.var_ean.set(ean_guess)
@@ -581,6 +750,7 @@ class App(BU.Tk):
             C.ftp_remote_only = remote_info
             C.ftp_presence = ftp_presence
             C.ftp_downloaded_final = set()
+            C.sql_presence = sql_presence
             for X_, G_ in A0(C.slots):
                 R_ = G_[Aa]
                 if R_ in slot_paths:
@@ -591,6 +761,10 @@ class App(BU.Tk):
                     G_[f] = I
                 C._set_icon_status(G_["local_icon"], R_ in original_files)
                 C._set_icon_status(G_["ftp_icon"], R_ in ftp_presence)
+                if isinstance(sql_presence, dict):
+                    C._set_icon_status(G_["sql_icon"], sql_presence.get(R_, h))
+                else:
+                    C._set_icon_status(G_["sql_icon"], I)
 
         threading.Thread(target=worker, daemon=J).start()
 
@@ -1040,6 +1214,8 @@ class App(BU.Tk):
         B.slots[C_][A7].place(x=0, y=0)
         B._mark_slot(C_, AR)
         B._set_icon_status(B.slots[C_]["local_icon"], J)
+        if "sql_icon" in B.slots[C_]:
+            B._set_icon_status(B.slots[C_]["sql_icon"], I)
 
     def _update_slot_ui(J, idx):
         D_ = J.slots[idx]
@@ -1092,6 +1268,8 @@ class App(BU.Tk):
             E_[y].image = I
             E_[A7].place_forget()
             C._set_icon_status(E_["local_icon"], h)
+            if "sql_icon" in E_:
+                C._set_icon_status(E_["sql_icon"], I)
             if G_:
                 C._mark_slot(D_, I)
             else:
@@ -1102,6 +1280,7 @@ class App(BU.Tk):
         C.pending_additions.clear()
         C.pending_deletions.clear()
         C.pending_ftp_deletions.clear()
+        C.sql_presence = I
         for A_ in C.slots:
             A_[f] = I
             A_[y].configure(image=B, text=NO_FILE_LABEL)
@@ -1111,6 +1290,9 @@ class App(BU.Tk):
             A_["local_icon"].delete("slash")
             A_["ftp_icon"].place_forget()
             A_["ftp_icon"].delete("slash")
+            if "sql_icon" in A_:
+                A_["sql_icon"].place_forget()
+                A_["sql_icon"].delete("slash")
             if AS in A_:
                 A_[AS].configure(
                     highlightthickness=0, highlightbackground=A8, highlightcolor=A8
