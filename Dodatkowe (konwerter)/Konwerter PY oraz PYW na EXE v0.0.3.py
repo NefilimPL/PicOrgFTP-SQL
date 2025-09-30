@@ -9,17 +9,55 @@ def ask_yes_no(prompt, default=True):
         return default
     return ans.startswith("t")
 
-def ask_for_file(prompt, extensions, default_path=""):
+def ask_for_file(prompt, extensions, default_path="", preview_label="🔹 Wybrany plik:\n> {}"):
     if default_path:
         normalized = os.path.abspath(default_path)
         if os.path.isfile(normalized) and normalized.lower().endswith(extensions):
-            print(f"🔹 Ścieżka do .py/.pyw aplikacji:\n> {normalized}")
+            print(preview_label.format(normalized))
             return normalized
     while True:
         p = input(prompt).strip().strip('"')
         if os.path.isfile(p) and p.lower().endswith(extensions):
-            return p
+            return os.path.abspath(p)
         print(f"❌ Zły plik. Wymagane: {', '.join(extensions)}")
+
+def choose_icon(extensions):
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = []
+    try:
+        for name in os.listdir(base_dir):
+            if name.lower().endswith(extensions):
+                candidates.append(os.path.join(base_dir, name))
+    except FileNotFoundError:
+        candidates = []
+
+    candidates.sort(key=lambda p: os.path.basename(p).lower())
+    if candidates:
+        print("   ↳ Wykryte pliki graficzne w folderze konwertera:")
+        for idx, path in enumerate(candidates, 1):
+            print(f"     [{idx}] {os.path.basename(path)}")
+        print("     [0] Wskaż inny plik...")
+
+        while True:
+            choice = input("   ↳ Wybierz numer (Enter=1) lub wklej ścieżkę:\n> ").strip()
+            if not choice:
+                choice = "1"
+            if choice.isdigit():
+                idx = int(choice)
+                if idx == 0:
+                    break
+                if 1 <= idx <= len(candidates):
+                    selected = candidates[idx - 1]
+                    print(f"   ✓ Wybrano: {selected}")
+                    return selected
+                print(f"❌ Nieprawidłowy numer (0-{len(candidates)}).")
+            else:
+                candidate = choice.strip('"')
+                if os.path.isfile(candidate) and candidate.lower().endswith(extensions):
+                    return candidate
+                print(f"❌ Zły plik. Wymagane: {', '.join(extensions)}")
+
+    return ask_for_file("   ↳ Podaj ikonę:\n> ", extensions, preview_label="   ✓ Wybrano: {}")
 
 def resource_sep():
     return ';' if os.name == 'nt' else ':'
@@ -89,7 +127,12 @@ def main():
             print(f"⚠️ Podany plik nie istnieje: {default_script}")
             default_script = ""
 
-    script = ask_for_file("🔹 Ścieżka do .py/.pyw aplikacji:\n> ", (".py",".pyw"), default_script)
+    script = ask_for_file(
+        "🔹 Ścieżka do .py/.pyw aplikacji:\n> ",
+        (".py", ".pyw"),
+        default_script,
+        "🔹 Ścieżka do .py/.pyw aplikacji:\n> {}"
+    )
     dstdir = os.path.dirname(script)
     base = os.path.splitext(os.path.basename(script))[0]
     exe_ext = ".exe" if os.name=="nt" else ""
@@ -100,7 +143,7 @@ def main():
 
     icon = ""
     if add_icon:
-        icon_in = ask_for_file("   ↳ Podaj ikonę:\n> ", (".ico",".png",".jpg",".jpeg"))
+        icon_in = choose_icon((".ico",".png",".jpg",".jpeg"))
         icon = icon_in if icon_in.lower().endswith(".ico") else convert_to_ico(icon_in)
 
     cmd = [sys.executable, "-m", "PyInstaller", script, f"--distpath={dstdir}"]
