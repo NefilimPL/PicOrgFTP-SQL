@@ -18,6 +18,8 @@ from .config import save_config
 from . import config, localization
 from .settings import EXCEL_SHEETS, AN, l
 
+IGNORED_SYSTEM_FILES = {"thumbs.db", ".ds_store"}
+
 D = config.CONFIG
 LANG_PREF = localization.LANG_PREF
 
@@ -564,7 +566,10 @@ class App(BU.Tk):
         def worker():
             try:
                 V_ = [
-                    B for B in A.listdir(F) if A.path.isfile(A.path.join(F, B))
+                    B
+                    for B in A.listdir(F)
+                    if A.path.isfile(A.path.join(F, B))
+                    and B.lower() not in IGNORED_SYSTEM_FILES
                 ]
             except E:
                 V_ = []
@@ -1800,6 +1805,8 @@ class App(BU.Tk):
                         A.path.basename(B) for B in C.pending_deletions.values()
                     }
                     for X_ in file_list:
+                        if X_.lower() in IGNORED_SYSTEM_FILES:
+                            continue
                         path = A.path.join(i_, X_)
                         if not A.path.isfile(path):
                             continue
