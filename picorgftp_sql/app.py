@@ -2183,9 +2183,8 @@ class App(BU.Tk):
                     FTP_SKIPPED_NO_EAN_MSG,
                 )
             elif result_data[P]:
-                O.showerror(
-                    SQL_ERROR_LABEL,
-                    SQL_UPDATE_FAILED_MSG.format(reason=result_data[P]),
+                log_error_loc(
+                    "sql_error", error=result_data[P], time=result_data.get(S, 0)
                 )
             else:
                 O.showinfo(SAVED_LABEL, UPDATE_SUCCESS_MSG.format(ean=K_val))
@@ -2198,18 +2197,13 @@ class App(BU.Tk):
                     time=result_data[c],
                     status=status,
                 )
-            if D.get(u, J):
-                if result_data[P]:
-                    log_info_loc(
-                        "sql_error", error=result_data[P], time=result_data[S]
-                    )
-                else:
-                    log_info_loc(
-                        "sql_summary",
-                        queries=result_data[d],
-                        rows=result_data[j],
-                        time=result_data[S],
-                    )
+            if D.get(u, J) and not result_data[P]:
+                log_info_loc(
+                    "sql_summary",
+                    queries=result_data[d],
+                    rows=result_data[j],
+                    time=result_data[S],
+                )
             if result_data.get(A2, Ay):
                 log_info_loc(
                     "entry_updated_log",
