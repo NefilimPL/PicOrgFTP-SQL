@@ -29,7 +29,7 @@ Changing these values before running the script helps tailor the program to your
 
 ### Building an executable
 
-The application can be frozen with tools such as PyInstaller. When doing so, make sure the `Localization` directory is bundled together with the program so that the language switcher keeps working after conversion to `.exe`. The helper script `Dodatkowe (konwerter)/Konwerter PY oraz PYW na EXE v0.0.3.py` already adds the translation folders automatically and forces PyInstaller to bundle the `mysql.connector` package together with all locale data used for error messages, so the resulting EXE contains every runtime dependency required by the GUI. If you build manually, one possible command is:
+If you have Python installed locally you can run the helper script `Dodatkowe (konwerter)/Konwerter PY oraz PYW na EXE v0.0.3.py` to launch an interactive PyInstaller builder that automatically bundles the localisation files and the `mysql.connector` locales required by the GUI. When building manually, remember to include the `Localization` directory so that the language switcher keeps working after conversion to `.exe`. One possible command is:
 
 ```bash
 pyinstaller PicOrgFTP-SQL.pyw \
@@ -39,6 +39,8 @@ pyinstaller PicOrgFTP-SQL.pyw \
 ```
 
 The runtime automatically searches for translation files next to the executable, in the PyInstaller temporary directory and inside the installed package. This means you can also ship an updated `Localization` folder next to the generated `PicOrgFTP-SQL.exe` without rebuilding the binary. The `local_settings.json` file will still be created next to the executable and stores both the working directory and the chosen language.
+
+Users who do not have Python installed can run the `build_exe_portable.bat` script located in the repository root. The batch file downloads a portable Python runtime together with PyInstaller (only on first run), runs the helper converter script mentioned above and leaves the temporary toolchain in the `build-tools` directory for reuse.
 
 ## Polski
 
@@ -68,7 +70,7 @@ Zmiana tych wartości przed uruchomieniem skryptu umożliwia szybkie dostosowani
 
 ### Budowanie pliku wykonywalnego
 
-Aplikację można zamrozić np. za pomocą PyInstaller. Należy przy tym dołączyć katalog `Localization`, aby po konwersji do `.exe` nadal działało przełączanie języka. Pomocniczy skrypt `Dodatkowe (konwerter)/Konwerter PY oraz PYW na EXE v0.0.3.py` automatycznie dołącza katalogi tłumaczeń oraz wymusza spakowanie pakietu `mysql.connector` wraz z danymi lokalizacyjnymi komunikatów błędów, dzięki czemu powstały plik EXE zawiera wszystkie zależności wymagane przez interfejs GUI. Przy ręcznym budowaniu przykładowe polecenie wygląda następująco:
+Jeżeli na komputerze jest zainstalowany Python, najwygodniej uruchomić pomocniczy skrypt `Dodatkowe (konwerter)/Konwerter PY oraz PYW na EXE v0.0.3.py`, który startuje interaktywny kreator PyInstaller i automatycznie dołącza katalogi tłumaczeń oraz lokalizacje `mysql.connector` wymagane przez interfejs GUI. Przy ręcznym budowaniu należy pamiętać o dołączeniu katalogu `Localization`, aby po konwersji do `.exe` nadal działało przełączanie języka. Przykładowe polecenie:
 
 ```bash
 pyinstaller PicOrgFTP-SQL.pyw \
@@ -78,4 +80,6 @@ pyinstaller PicOrgFTP-SQL.pyw \
 ```
 
 Podczas działania program wyszukuje pliki tłumaczeń obok pliku wykonywalnego, w katalogu tymczasowym PyInstaller oraz w zainstalowanym pakiecie. Dzięki temu można także dołączyć lub zaktualizować katalog `Localization` bez ponownego budowania `PicOrgFTP-SQL.exe`. Plik `local_settings.json` jest nadal tworzony obok programu i przechowuje zarówno katalog roboczy, jak i wybrany język.
+
+Osoby, które nie mają zainstalowanego Pythona, mogą użyć skryptu wsadowego `build_exe_portable.bat` z katalogu głównego repozytorium. Plik BAT przy pierwszym uruchomieniu pobiera przenośne środowisko Python wraz z PyInstallerem, uruchamia opisany wyżej konwerter i pozostawia przygotowane narzędzia w katalogu `build-tools`, aby można było ponownie z nich skorzystać w kolejnych kompilacjach.
 
