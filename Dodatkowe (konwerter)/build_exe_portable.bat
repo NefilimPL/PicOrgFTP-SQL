@@ -55,7 +55,7 @@ if exist "%PORTABLE_DIR%" (
     rmdir /s /q "%PORTABLE_DIR%"
 )
 set "INSTALLER_OPTS=/quiet InstallAllUsers=0 PrependPath=0 Include_launcher=0 Include_test=0 Include_doc=0 Include_tcltk=1 Include_pip=1 Include_symbols=0 Shortcuts=0 SimpleInstall=0"
-set "INSTALLER_OPTS=%INSTALLER_OPTS% TargetDir=\"%PORTABLE_DIR%\" DefaultJustForMeTargetDir=\"%PORTABLE_DIR%\" InstallLauncherAllUsers=0"
+set "INSTALLER_OPTS=%INSTALLER_OPTS% TargetDir=""%PORTABLE_DIR%"" DefaultJustForMeTargetDir=""%PORTABLE_DIR%"" InstallLauncherAllUsers=0"
 "%TOOLSDIR%\%PYSETUP%" %INSTALLER_OPTS% || exit /b 1
 
 if not exist "%PYTHON%" (
