@@ -163,6 +163,7 @@ def main():
 
     cleanup_files = []
     cleanup_dirs = []
+    build_success = False
 
     icon = ""
     if add_icon:
@@ -225,6 +226,7 @@ def main():
     except subprocess.CalledProcessError as e:
         print("❌ Błąd PyInstaller:", e)
     else:
+        build_success = True
         exe = (os.path.join(dstdir, base+exe_ext) if onefile
                else os.path.join(dstdir, base, base+exe_ext))
         print("\n✅ Gotowe!\n📁", exe)
@@ -236,12 +238,13 @@ def main():
         cleanup_files.append(spec_path)
         cleanup_dirs.append(build_target)
     finally:
-        for item in cleanup_files:
-            safe_remove(item)
-        for directory in cleanup_dirs:
-            safe_rmtree(directory)
-        if build_root and os.path.isdir(build_root) and not os.listdir(build_root):
-            safe_rmtree(build_root)
+        if build_success:
+            for item in cleanup_files:
+                safe_remove(item)
+            for directory in cleanup_dirs:
+                safe_rmtree(directory)
+            if build_root and os.path.isdir(build_root) and not os.listdir(build_root):
+                safe_rmtree(build_root)
 
 if __name__ == "__main__":
     main()
