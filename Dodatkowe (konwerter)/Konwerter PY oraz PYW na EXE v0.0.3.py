@@ -1,5 +1,5 @@
 # Pomocniczy skrypt PyInstaller do tworzenia plików EXE z obsługą mysql-connector
-import subprocess, os, sys, tempfile, shutil
+import subprocess, os, sys, tempfile
 from PIL import Image
 
 def ask_yes_no(prompt, default=True):
@@ -9,55 +9,12 @@ def ask_yes_no(prompt, default=True):
         return default
     return ans.startswith("t")
 
-def ask_for_file(prompt, extensions, default_path="", preview_label="🔹 Wybrany plik:\n> {}"):
-    if default_path:
-        normalized = os.path.abspath(default_path)
-        if os.path.isfile(normalized) and normalized.lower().endswith(extensions):
-            print(preview_label.format(normalized))
-            return normalized
+def ask_for_file(prompt, extensions):
     while True:
         p = input(prompt).strip().strip('"')
         if os.path.isfile(p) and p.lower().endswith(extensions):
-            return os.path.abspath(p)
+            return p
         print(f"❌ Zły plik. Wymagane: {', '.join(extensions)}")
-
-def choose_icon(extensions):
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = []
-    try:
-        for name in os.listdir(base_dir):
-            if name.lower().endswith(extensions):
-                candidates.append(os.path.join(base_dir, name))
-    except FileNotFoundError:
-        candidates = []
-
-    candidates.sort(key=lambda p: os.path.basename(p).lower())
-    if candidates:
-        print("   ↳ Wykryte pliki graficzne w folderze konwertera:")
-        for idx, path in enumerate(candidates, 1):
-            print(f"     [{idx}] {os.path.basename(path)}")
-        print("     [0] Wskaż inny plik...")
-
-        while True:
-            choice = input("   ↳ Wybierz numer (Enter=1) lub wklej ścieżkę:\n> ").strip()
-            if not choice:
-                choice = "1"
-            if choice.isdigit():
-                idx = int(choice)
-                if idx == 0:
-                    break
-                if 1 <= idx <= len(candidates):
-                    selected = candidates[idx - 1]
-                    print(f"   ✓ Wybrano: {selected}")
-                    return selected
-                print(f"❌ Nieprawidłowy numer (0-{len(candidates)}).")
-            else:
-                candidate = choice.strip('"')
-                if os.path.isfile(candidate) and candidate.lower().endswith(extensions):
-                    return candidate
-                print(f"❌ Zły plik. Wymagane: {', '.join(extensions)}")
-
-    return ask_for_file("   ↳ Podaj ikonę:\n> ", extensions, preview_label="   ✓ Wybrano: {}")
 
 def resource_sep():
     return ';' if os.name == 'nt' else ':'
@@ -96,26 +53,6 @@ def convert_to_ico(path):
     except Exception as e:
         print("❌ Błąd ikony:", e); return ""
 
-
-def safe_remove(path):
-    try:
-        if os.path.isfile(path) or os.path.islink(path):
-            os.remove(path)
-    except FileNotFoundError:
-        pass
-    except Exception as exc:
-        print(f"⚠️ Nie udało się usunąć pliku {path}: {exc}")
-
-
-def safe_rmtree(path):
-    if not os.path.isdir(path):
-        return
-    try:
-        shutil.rmtree(path)
-    except Exception as exc:
-        print(f"⚠️ Nie udało się usunąć katalogu {path}: {exc}")
-
-
 def make_runtime_hook():
     code = """
 # runtime-hook: upewnij się, że locale ENG jest załadowane
@@ -140,19 +77,7 @@ except Exception:
 
 def main():
     print("== PyInstaller Builder (MySQL) ==")
-    default_script = ""
-    if len(sys.argv) > 1:
-        default_script = sys.argv[1]
-        if not os.path.isfile(default_script):
-            print(f"⚠️ Podany plik nie istnieje: {default_script}")
-            default_script = ""
-
-    script = ask_for_file(
-        "🔹 Ścieżka do .py/.pyw aplikacji:\n> ",
-        (".py", ".pyw"),
-        default_script,
-        "🔹 Ścieżka do .py/.pyw aplikacji:\n> {}"
-    )
+    script = ask_for_file("🔹 Ścieżka do .py/.pyw aplikacji:\n> ", (".py",".pyw"))
     dstdir = os.path.dirname(script)
     base = os.path.splitext(os.path.basename(script))[0]
     exe_ext = ".exe" if os.name=="nt" else ""
@@ -161,19 +86,10 @@ def main():
     onefile  = ask_yes_no("🔹 Zbudować 1 plik (onefile)?", True)
     add_icon = ask_yes_no("🔹 Dodać ikonę (.ico/.png/.jpg)?", False)
 
-    cleanup_files = []
-    cleanup_dirs = []
-    build_success = False
-
     icon = ""
     if add_icon:
-        icon_in = choose_icon((".ico",".png",".jpg",".jpeg"))
-        if icon_in.lower().endswith(".ico"):
-            icon = icon_in
-        else:
-            icon = convert_to_ico(icon_in)
-            if icon:
-                cleanup_files.append(icon)
+        icon_in = ask_for_file("   ↳ Podaj ikonę:\n> ", (".ico",".png",".jpg",".jpeg"))
+        icon = icon_in if icon_in.lower().endswith(".ico") else convert_to_ico(icon_in)
 
     cmd = [sys.executable, "-m", "PyInstaller", script, f"--distpath={dstdir}"]
     if onefile: cmd.append("--onefile")
@@ -198,8 +114,6 @@ def main():
         "--collect-data=mysql.connector",
         "--collect-data=mysql.connector.locales",
         "--hidden-import=mysql.connector.locales.eng.client_error",
-        "--hidden-import=tkinterdnd2",
-        "--collect-submodules=tkinterdnd2",
     ]
     # opcjonalnie inne języki:
     for lang in ("fra","ita","jpn","por","rus","spa","zho"):
@@ -207,7 +121,6 @@ def main():
 
     # runtime hook z wymuszeniem ENG
     hook = make_runtime_hook()
-    cleanup_files.append(hook)
     cmd.append(f"--runtime-hook={hook}")
 
     # spróbuj dorzucić CA z certifi (opcjonalny fallback do TLS)
@@ -220,31 +133,14 @@ def main():
         pass
 
     print("\n🚀 Komenda:\n ", " ".join(cmd), "\n")
-    build_root = None
     try:
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as e:
-        print("❌ Błąd PyInstaller:", e)
-    else:
-        build_success = True
-        exe = (os.path.join(dstdir, base+exe_ext) if onefile
-               else os.path.join(dstdir, base, base+exe_ext))
-        print("\n✅ Gotowe!\n📁", exe)
+        print("❌ Błąd PyInstaller:", e); return
 
-        spec_path = os.path.join(os.getcwd(), f"{base}.spec")
-        build_root = os.path.join(os.getcwd(), "build")
-        build_target = os.path.join(build_root, base)
-
-        cleanup_files.append(spec_path)
-        cleanup_dirs.append(build_target)
-    finally:
-        if build_success:
-            for item in cleanup_files:
-                safe_remove(item)
-            for directory in cleanup_dirs:
-                safe_rmtree(directory)
-            if build_root and os.path.isdir(build_root) and not os.listdir(build_root):
-                safe_rmtree(build_root)
+    exe = (os.path.join(dstdir, base+exe_ext) if onefile
+           else os.path.join(dstdir, base, base+exe_ext))
+    print("\n✅ Gotowe!\n📁", exe)
 
 if __name__ == "__main__":
     main()

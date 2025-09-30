@@ -29,7 +29,7 @@ Changing these values before running the script helps tailor the program to your
 
 ### Building an executable
 
-If you have Python installed locally you can run the helper script `Dodatkowe (konwerter)/Konwerter PY oraz PYW na EXE v0.0.3.py` to launch an interactive PyInstaller builder that automatically bundles the localisation files and the `mysql.connector` locales required by the GUI. When building manually, remember to include the `Localization` directory so that the language switcher keeps working after conversion to `.exe`. One possible command is:
+The application can be frozen with tools such as PyInstaller. When doing so, make sure the `Localization` directory is bundled together with the program so that the language switcher keeps working after conversion to `.exe`. The helper script `Dodatkowe (konwerter)/Konwerter PY oraz PYW na EXE v0.0.3.py` already adds the translation folders automatically and forces PyInstaller to bundle the `mysql.connector` package together with all locale data used for error messages, so the resulting EXE contains every runtime dependency required by the GUI. If you build manually, one possible command is:
 
 ```bash
 pyinstaller PicOrgFTP-SQL.pyw \
@@ -39,8 +39,6 @@ pyinstaller PicOrgFTP-SQL.pyw \
 ```
 
 The runtime automatically searches for translation files next to the executable, in the PyInstaller temporary directory and inside the installed package. This means you can also ship an updated `Localization` folder next to the generated `PicOrgFTP-SQL.exe` without rebuilding the binary. The `local_settings.json` file will still be created next to the executable and stores both the working directory and the chosen language.
-
-Users who do not have Python installed can run the `Dodatkowe (konwerter)/build_exe_portable.bat` script. The batch file downloads a portable Python runtime together with Tkinter support, PyInstaller and all runtime libraries used by the app (including `tkinterdnd2`, Pillow, database drivers and spreadsheet helpers) — only on first run. It now creates the `build-tools\python-portable` directory tree before checking for `python.exe`, so the installer always has a valid destination and the located interpreter is reused on subsequent launches (it will also reuse the interpreter if Windows places it in the default `%LocalAppData%\Programs\Python` path). You can optionally pass a different `.py`/`.pyw` path as the first argument if you want to bundle another entry point. Any `.ico`, `.png`, `.jpg` or `.jpeg` files placed next to the batch script are automatically offered as icon choices during the build, and the helper removes temporary PyInstaller artefacts (the generated `.spec` file, the `build/` tree and the runtime hook) after the executable is produced.
 
 ## Polski
 
@@ -70,7 +68,7 @@ Zmiana tych wartości przed uruchomieniem skryptu umożliwia szybkie dostosowani
 
 ### Budowanie pliku wykonywalnego
 
-Jeżeli na komputerze jest zainstalowany Python, najwygodniej uruchomić pomocniczy skrypt `Dodatkowe (konwerter)/Konwerter PY oraz PYW na EXE v0.0.3.py`, który startuje interaktywny kreator PyInstaller i automatycznie dołącza katalogi tłumaczeń oraz lokalizacje `mysql.connector` wymagane przez interfejs GUI. Przy ręcznym budowaniu należy pamiętać o dołączeniu katalogu `Localization`, aby po konwersji do `.exe` nadal działało przełączanie języka. Przykładowe polecenie:
+Aplikację można zamrozić np. za pomocą PyInstaller. Należy przy tym dołączyć katalog `Localization`, aby po konwersji do `.exe` nadal działało przełączanie języka. Pomocniczy skrypt `Dodatkowe (konwerter)/Konwerter PY oraz PYW na EXE v0.0.3.py` automatycznie dołącza katalogi tłumaczeń oraz wymusza spakowanie pakietu `mysql.connector` wraz z danymi lokalizacyjnymi komunikatów błędów, dzięki czemu powstały plik EXE zawiera wszystkie zależności wymagane przez interfejs GUI. Przy ręcznym budowaniu przykładowe polecenie wygląda następująco:
 
 ```bash
 pyinstaller PicOrgFTP-SQL.pyw \
@@ -80,6 +78,4 @@ pyinstaller PicOrgFTP-SQL.pyw \
 ```
 
 Podczas działania program wyszukuje pliki tłumaczeń obok pliku wykonywalnego, w katalogu tymczasowym PyInstaller oraz w zainstalowanym pakiecie. Dzięki temu można także dołączyć lub zaktualizować katalog `Localization` bez ponownego budowania `PicOrgFTP-SQL.exe`. Plik `local_settings.json` jest nadal tworzony obok programu i przechowuje zarówno katalog roboczy, jak i wybrany język.
-
-Osoby, które nie mają zainstalowanego Pythona, mogą użyć skryptu wsadowego `Dodatkowe (konwerter)/build_exe_portable.bat`. Plik BAT przy pierwszym uruchomieniu pobiera przenośne środowisko Python z obsługą Tkintera, PyInstallerem oraz wszystkimi bibliotekami wymaganymi przez aplikację (w tym `tkinterdnd2`, Pillow, sterowniki baz danych i obsługę arkuszy). Skrypt przed weryfikacją interpreterów zakłada katalog `build-tools\python-portable`, aby instalator zawsze miał poprawną lokalizację docelową, a wykryte środowisko jest wykorzystywane ponownie przy kolejnych uruchomieniach (również wtedy, gdy Windows umieści je w domyślnym `%LocalAppData%\Programs\Python`). W razie potrzeby można przekazać inną ścieżkę do pliku `.py`/`.pyw` jako pierwszy argument, aby zbudować inny punkt wejścia. Dodatkowo wszystkie pliki `.ico`, `.png`, `.jpg` lub `.jpeg` znajdujące się obok tego BAT-a są automatycznie proponowane jako ikony podczas budowania, a kreator czyści pliki tymczasowe PyInstallera (np. plik `.spec`, katalog `build/` i wygenerowany hook) dopiero po zakończeniu pakowania.
 
