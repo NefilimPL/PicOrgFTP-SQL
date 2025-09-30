@@ -1,38 +1,37 @@
 @echo off
 setlocal enabledelayedexpansion
 
-set SCRIPT=%~1
-if "%SCRIPT%"=="" (
-    echo Usage: %~nx0 path\to\app.pyw
-    exit /b 1
-)
-if not exist "%SCRIPT%" (
-    echo File not found: %SCRIPT%
+for %%i in ("%~dp0") do set "ROOT=%%~fi\"
+for %%i in ("%ROOT%..") do set "REPO_ROOT=%%~fi\"
+
+set "TARGET=%~1"
+if not defined TARGET set "TARGET=%REPO_ROOT%PicOrgFTP-SQL.pyw"
+if not exist "%TARGET%" (
+    echo File not found: %TARGET%
     exit /b 1
 )
 
-set ROOT=%~dp0
-pushd "%ROOT%" >nul
+pushd "%REPO_ROOT%" >nul
 
 where python >nul 2>nul
 if %errorlevel%==0 (
     for /f "delims=" %%i in ('where python ^| findstr /i "python.exe"') do (
-        set PYTHON=%%i
+        set "PYTHON=%%i"
         goto :HAVE_PYTHON
     )
 )
 
-set TOOLSDIR=%ROOT%build-tools
-set PORTABLE_DIR=%TOOLSDIR%\python-embed
-set PYTHON=%PORTABLE_DIR%\python.exe
+set "TOOLSDIR=%REPO_ROOT%build-tools"
+set "PORTABLE_DIR=%TOOLSDIR%\python-embed"
+set "PYTHON=%PORTABLE_DIR%\python.exe"
 if not exist "%PYTHON%" (
     call :SETUP_PORTABLE || goto :ERROR
 )
 
 :HAVE_PYTHON
 
-set BUILDER=%ROOT%Dodatkowe (konwerter)\Konwerter PY oraz PYW na EXE v0.0.3.py
-"%PYTHON%" "%BUILDER%"
+set "BUILDER=%ROOT%Konwerter PY oraz PYW na EXE v0.0.3.py"
+"%PYTHON%" "%BUILDER%" "%TARGET%"
 if errorlevel 1 goto :ERROR
 
 echo.

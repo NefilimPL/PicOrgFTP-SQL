@@ -40,7 +40,7 @@ pyinstaller PicOrgFTP-SQL.pyw \
 
 The runtime automatically searches for translation files next to the executable, in the PyInstaller temporary directory and inside the installed package. This means you can also ship an updated `Localization` folder next to the generated `PicOrgFTP-SQL.exe` without rebuilding the binary. The `local_settings.json` file will still be created next to the executable and stores both the working directory and the chosen language.
 
-Users who do not have Python installed can run the `build_exe_portable.bat` script located in the repository root. The batch file downloads a portable Python runtime together with PyInstaller (only on first run), runs the helper converter script mentioned above and leaves the temporary toolchain in the `build-tools` directory for reuse.
+Users who do not have Python installed can run the `Dodatkowe (konwerter)/build_exe_portable.bat` script. The batch file downloads a portable Python runtime together with PyInstaller (only on first run), automatically points the helper converter script to `PicOrgFTP-SQL.pyw` and leaves the temporary toolchain in the `build-tools` directory for reuse. You can optionally pass a different `.py`/`.pyw` path as the first argument if you want to bundle another entry point.
 
 ## Polski
 
@@ -81,5 +81,5 @@ pyinstaller PicOrgFTP-SQL.pyw \
 
 Podczas działania program wyszukuje pliki tłumaczeń obok pliku wykonywalnego, w katalogu tymczasowym PyInstaller oraz w zainstalowanym pakiecie. Dzięki temu można także dołączyć lub zaktualizować katalog `Localization` bez ponownego budowania `PicOrgFTP-SQL.exe`. Plik `local_settings.json` jest nadal tworzony obok programu i przechowuje zarówno katalog roboczy, jak i wybrany język.
 
-Osoby, które nie mają zainstalowanego Pythona, mogą użyć skryptu wsadowego `build_exe_portable.bat` z katalogu głównego repozytorium. Plik BAT przy pierwszym uruchomieniu pobiera przenośne środowisko Python wraz z PyInstallerem, uruchamia opisany wyżej konwerter i pozostawia przygotowane narzędzia w katalogu `build-tools`, aby można było ponownie z nich skorzystać w kolejnych kompilacjach.
+Osoby, które nie mają zainstalowanego Pythona, mogą użyć skryptu wsadowego `Dodatkowe (konwerter)/build_exe_portable.bat`. Plik BAT przy pierwszym uruchomieniu pobiera przenośne środowisko Python wraz z PyInstallerem, automatycznie wskazuje konwerterowi plik `PicOrgFTP-SQL.pyw` i pozostawia przygotowane narzędzia w katalogu `build-tools`, aby można było ponownie z nich skorzystać w kolejnych kompilacjach. W razie potrzeby można przekazać inną ścieżkę do pliku `.py`/`.pyw` jako pierwszy argument, aby zbudować inny punkt wejścia.
 

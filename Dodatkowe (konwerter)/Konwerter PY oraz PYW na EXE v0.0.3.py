@@ -9,7 +9,12 @@ def ask_yes_no(prompt, default=True):
         return default
     return ans.startswith("t")
 
-def ask_for_file(prompt, extensions):
+def ask_for_file(prompt, extensions, default_path=""):
+    if default_path:
+        normalized = os.path.abspath(default_path)
+        if os.path.isfile(normalized) and normalized.lower().endswith(extensions):
+            print(f"🔹 Ścieżka do .py/.pyw aplikacji:\n> {normalized}")
+            return normalized
     while True:
         p = input(prompt).strip().strip('"')
         if os.path.isfile(p) and p.lower().endswith(extensions):
@@ -77,7 +82,14 @@ except Exception:
 
 def main():
     print("== PyInstaller Builder (MySQL) ==")
-    script = ask_for_file("🔹 Ścieżka do .py/.pyw aplikacji:\n> ", (".py",".pyw"))
+    default_script = ""
+    if len(sys.argv) > 1:
+        default_script = sys.argv[1]
+        if not os.path.isfile(default_script):
+            print(f"⚠️ Podany plik nie istnieje: {default_script}")
+            default_script = ""
+
+    script = ask_for_file("🔹 Ścieżka do .py/.pyw aplikacji:\n> ", (".py",".pyw"), default_script)
     dstdir = os.path.dirname(script)
     base = os.path.splitext(os.path.basename(script))[0]
     exe_ext = ".exe" if os.name=="nt" else ""
