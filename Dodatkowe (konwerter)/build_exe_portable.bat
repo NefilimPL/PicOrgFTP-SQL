@@ -54,6 +54,19 @@ if exist "%PORTABLE_DIR%" (
 )
 "%TOOLSDIR%\%PYSETUP%" /quiet InstallAllUsers=0 PrependPath=0 Include_launcher=0 Include_test=0 Include_doc=0 Include_tcltk=1 Include_pip=1 Include_symbols=0 Shortcuts=0 TargetDir="%PORTABLE_DIR%" || exit /b 1
 
+if not exist "%PYTHON%" (
+    set "PYTHON="
+    for /f "delims=" %%p in ('dir /b /s "%PORTABLE_DIR%\python.exe" 2^>nul') do (
+        set "PYTHON=%%~fp"
+        goto :FOUND_PYTHON
+    )
+    echo Unable to locate python.exe inside %PORTABLE_DIR%.
+    echo Make sure the installer can write to that directory and try again.
+    exit /b 1
+)
+
+:FOUND_PYTHON
+
 echo Installing pip and build dependencies...
 powershell -NoLogo -NoProfile -Command "Set-Variable -Name ProgressPreference -Value 'SilentlyContinue'; Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile '%TOOLSDIR%\get-pip.py'" || exit /b 1
 
@@ -65,7 +78,6 @@ del "%TOOLSDIR%\get-pip.py" >nul 2>nul
 del "%TOOLSDIR%\%PYSETUP%" >nul 2>nul
 
 "%PYTHON%" -c "import tkinter" >nul 2>nul || exit /b 1
-set "PYTHON=%PORTABLE_DIR%\python.exe"
 exit /b 0
 
 :CHECK_TK_INTERPRETER
