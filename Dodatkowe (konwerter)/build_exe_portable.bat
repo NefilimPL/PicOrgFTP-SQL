@@ -24,6 +24,8 @@ if %errorlevel%==0 (
 
 set "TOOLSDIR=%REPO_ROOT%build-tools"
 set "PORTABLE_DIR=%TOOLSDIR%\python-portable"
+set "PORTABLE_CANON=%PORTABLE_DIR%"
+if "!PORTABLE_CANON:~-1!"=="\" set "PORTABLE_CANON=!PORTABLE_CANON:~0,-1!"
 set "PYTHON=%PORTABLE_DIR%\python.exe"
 if not exist "%PYTHON%" (
     call :SETUP_PORTABLE || goto :ERROR
@@ -58,22 +60,11 @@ set "INSTALLER_OPTS=%INSTALLER_OPTS% TargetDir=\"%PORTABLE_DIR%\" DefaultJustFor
 
 if not exist "%PYTHON%" (
     set "PYTHON="
-    for /f "delims=" %%p in ('dir /b /s "%PORTABLE_DIR%\python.exe" 2^>nul') do (
-        set "PYTHON=%%~fp"
-        goto :FOUND_PYTHON
-    )
+    call :FIND_PYTHON "%PORTABLE_DIR%"  || goto :FALLBACK_ERROR
     if not defined PYTHON (
-        for /f "delims=" %%p in ('dir /b /s "%PORTABLE_DIR%\python*.exe" 2^>nul ^| findstr /i "python.exe"') do (
-            set "PYTHON=%%~fp"
-            goto :FOUND_PYTHON
-        )
+        if exist "%PORTABLE_DIR%\Scripts" call :FIND_PYTHON "%PORTABLE_DIR%\Scripts"  || goto :FALLBACK_ERROR
     )
-    if not defined PYTHON if defined LOCALAPPDATA (
-        for /f "delims=" %%p in ('dir /b /s "%LOCALAPPDATA%\Programs\Python\python*.exe" 2^>nul ^| findstr /i "python.exe"') do (
-            set "PYTHON=%%~fp"
-            goto :FOUND_PYTHON
-        )
-    )
+    if not defined PYTHON if defined LOCALAPPDATA call :FIND_PYTHON "%LOCALAPPDATA%\Programs\Python"  || goto :FALLBACK_ERROR
     if not defined PYTHON (
         echo Unable to locate python.exe inside %PORTABLE_DIR%.
         echo Make sure the installer can write to that directory and try again.
@@ -82,6 +73,15 @@ if not exist "%PYTHON%" (
 )
 
 :FOUND_PYTHON
+
+for %%d in ("%PYTHON%") do set "_FOUND_DIR=%%~dpd"
+set "_FOUND_CANON=!_FOUND_DIR!"
+if "!_FOUND_CANON:~-1!"=="\" set "_FOUND_CANON=!_FOUND_CANON:~0,-1!"
+if /i not "!_FOUND_CANON!"=="!PORTABLE_CANON!" (
+    echo Detected Python at !_FOUND_CANON!; copying files into %PORTABLE_DIR%...
+    call :COPY_INTERPRETER "!_FOUND_CANON!" || goto :FALLBACK_ERROR
+    set "PYTHON=%PORTABLE_DIR%\python.exe"
+)
 
 echo Installing pip and build dependencies...
 powershell -NoLogo -NoProfile -Command "Set-Variable -Name ProgressPreference -Value 'SilentlyContinue'; Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile '%TOOLSDIR%\get-pip.py'" || exit /b 1
@@ -96,6 +96,10 @@ del "%TOOLSDIR%\%PYSETUP%" >nul 2>nul
 "%PYTHON%" -c "import tkinter" >nul 2>nul || exit /b 1
 exit /b 0
 
+:FALLBACK_ERROR
+echo Unable to configure the portable interpreter.
+exit /b 1
+
 :CHECK_TK_INTERPRETER
 set "TMP_PY=%~1"
 "%TMP_PY%" -c "import tkinter" >nul 2>nul
@@ -105,6 +109,28 @@ if errorlevel 1 (
 ) else (
     set "PYTHON=%TMP_PY%"
 )
+exit /b 0
+
+:FIND_PYTHON
+set "_SEARCH_ROOT=%~1"
+if not defined _SEARCH_ROOT exit /b 0
+if not exist "%_SEARCH_ROOT%" exit /b 0
+for /f "delims=" %%p in ('where /r "%_SEARCH_ROOT%" python.exe 2^>nul') do (
+    call :CHECK_TK_INTERPRETER "%%p"
+    if defined PYTHON exit /b 0
+)
+exit /b 0
+
+:COPY_INTERPRETER
+set "_SRC=%~1"
+if not defined _SRC exit /b 1
+if /i "!_SRC!"=="!PORTABLE_CANON!" exit /b 0
+if exist "%PORTABLE_DIR%" rmdir /s /q "%PORTABLE_DIR%"
+mkdir "%PORTABLE_DIR%" >nul 2>nul
+robocopy "%_SRC%" "%PORTABLE_DIR%" /mir >nul
+set "RC=%errorlevel%"
+if %RC% GEQ 8 exit /b 1
+if not exist "%PORTABLE_DIR%\python.exe" exit /b 1
 exit /b 0
 
 :ERROR
