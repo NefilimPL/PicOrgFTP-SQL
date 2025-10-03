@@ -296,36 +296,83 @@ if not defined PYTHON_EXE (
 )
 
 set "VERIFY_ATTEMPT=0"
+set "REPAIR_REASON="
 
 :EnsurePythonReadyLoop
 set /a VERIFY_ATTEMPT+=1
 
+echo [INFO] Weryfikacja środowiska - próba %VERIFY_ATTEMPT%.
+echo [INFO]  * Interpreter Python...
 call :ValidatePython
-if errorlevel 1 goto :RepairPythonEnv
+if errorlevel 1 (
+    set "REPAIR_REASON=python"
+    goto :RepairPythonEnv
+)
 
-"%PYTHON_EXE%" -m pip --version >nul 2>&1 || goto :RepairPythonEnv
+echo [INFO]  * Narzędzie pip...
+"%PYTHON_EXE%" -m pip --version >nul 2>&1
+if errorlevel 1 (
+    set "REPAIR_REASON=pip"
+    goto :RepairPythonEnv
+)
 
+echo [INFO]  * Wymagane moduły Pythona...
 call :CheckPythonImports
-if errorlevel 1 goto :RepairPythonEnv
+if errorlevel 1 (
+    set "REPAIR_REASON=modules"
+    goto :RepairPythonEnv
+)
 
-"%PYTHON_EXE%" -m PyInstaller --version >nul 2>&1 || goto :RepairPythonEnv
+echo [INFO]  * PyInstaller...
+"%PYTHON_EXE%" -m PyInstaller --version >nul 2>&1
+if errorlevel 1 (
+    set "REPAIR_REASON=pyinstaller"
+    goto :RepairPythonEnv
+)
 
 set "VERIFY_ATTEMPT="
+set "REPAIR_REASON="
+echo [INFO] Środowisko Python jest kompletne.
 exit /b 0
 
 :RepairPythonEnv
 if %VERIFY_ATTEMPT% geq 2 (
-    echo [BŁĄD] Nie udało się przygotować kompletnego środowiska Python.
+    if defined REPAIR_REASON (
+        echo [BŁĄD] Nie udało się przygotować kompletnego środowiska Python (powód: !REPAIR_REASON!).
+    ) else (
+        echo [BŁĄD] Nie udało się przygotować kompletnego środowiska Python.
+    )
     set "VERIFY_ATTEMPT="
+    set "REPAIR_REASON="
     exit /b 1
 )
 
-echo [OSTRZEŻENIE] Wykryto niekompletne środowisko - trwa ponowna instalacja Pythona i pakietów.
-call :InstallPython
-if errorlevel 1 exit /b 1
+if not defined REPAIR_REASON set "REPAIR_REASON=nieokreślony"
+
+if /i "%REPAIR_REASON%"=="python" (
+    echo [OSTRZEŻENIE] Interpreter Python wymaga naprawy - trwa ponowna instalacja.
+    call :InstallPython
+    if errorlevel 1 exit /b 1
+    goto :AfterRepairPython
+)
+
+if /i "%REPAIR_REASON%"=="pip" (
+    echo [OSTRZEŻENIE] Wykryto problem z pip - nastąpi ponowna instalacja pakietów.
+) else if /i "%REPAIR_REASON%"=="pyinstaller" (
+    echo [OSTRZEŻENIE] PyInstaller zgłosił błąd - nastąpi ponowna instalacja pakietów.
+) else if /i "%REPAIR_REASON%"=="modules" (
+    echo [OSTRZEŻENIE] Brakuje wymaganych modułów - nastąpi ponowna instalacja pakietów.
+) else (
+    echo [OSTRZEŻENIE] Wykryto problem ze środowiskiem (%REPAIR_REASON%) - nastąpi ponowna instalacja pakietów.
+)
+
+:AfterRepairPython
 
 call :ValidatePython
-if errorlevel 1 exit /b 1
+if errorlevel 1 (
+    set "REPAIR_REASON=python"
+    goto :RepairPythonEnv
+)
 
 "%PYTHON_EXE%" -m ensurepip --upgrade >nul 2>&1
 "%PYTHON_EXE%" -m pip install --upgrade pip || exit /b 1
@@ -333,6 +380,7 @@ if errorlevel 1 exit /b 1
 call :InstallRequiredPackages
 if errorlevel 1 exit /b 1
 
+set "REPAIR_REASON="
 goto :EnsurePythonReadyLoop
 
 :CheckPythonImports
