@@ -49,7 +49,26 @@ echo [INFO] Instalowanie wymaganych pakietów...
 
 set "HOOK_FILE=%TEMP%\picorgftp_sql_mysql_hook.py"
 echo [INFO] Przygotowywanie pliku runtime hook...
-"%PYTHON_EXE%" -c "from pathlib import Path; Path(r'%HOOK_FILE%').write_text('# Runtime hook for PicOrgFTP-SQL\ntry:\n    import importlib, mysql.connector.errors as _err\n    _ce = importlib.import_module(\"mysql.connector.locales.eng.client_error\")\n    _DICT = getattr(_ce, \"client_error\", None)\n    if isinstance(_DICT, dict) and hasattr(_err, \"get_client_error\"):\n        def _get_client_error_fixed(ec):\n            try:\n                return _DICT.get(ec)\n            except Exception:\n                return None\n        _err.get_client_error = _get_client_error_fixed\nexcept Exception:\n    pass\n', encoding='utf-8')" || exit /b 1
+>"%HOOK_FILE%" (
+    echo # Runtime hook for PicOrgFTP-SQL
+    echo try:
+    echo     import importlib, mysql.connector.errors as _err
+    echo     _ce = importlib.import_module("mysql.connector.locales.eng.client_error")
+    echo     _DICT = getattr(_ce, "client_error", None)
+    echo     if isinstance(_DICT, dict) and hasattr(_err, "get_client_error"):
+    echo         def _get_client_error_fixed(ec):
+    echo             try:
+    echo                 return _DICT.get(ec)
+    echo             except Exception:
+    echo                 return None
+    echo         _err.get_client_error = _get_client_error_fixed
+    echo except Exception:
+    echo     pass
+)
+if not exist "%HOOK_FILE%" (
+    echo [BŁĄD] Nie udało się zapisać pliku runtime hook.
+    exit /b 1
+)
 
 echo [INFO] Czyszczenie poprzednich buildów...
 if exist "%PROJECT_DIR%\build" rd /s /q "%PROJECT_DIR%\build"
@@ -127,10 +146,36 @@ if %BUILD_STATUS% neq 0 (
     exit /b %BUILD_STATUS%
 )
 
+set "DIST_EXE=%PROJECT_DIR%\dist\PicOrgFTP-SQL.exe"
+set "FINAL_EXE=%PROJECT_DIR%\PicOrgFTP-SQL.exe"
+
+if not exist "%DIST_EXE%" (
+    echo [BŁĄD] PyInstaller zakończył działanie, ale nie odnaleziono pliku "%DIST_EXE%".
+    exit /b 1
+)
+
+if exist "%FINAL_EXE%" del /q "%FINAL_EXE%" >nul 2>&1
+move /y "%DIST_EXE%" "%FINAL_EXE%" >nul
+if errorlevel 1 (
+    echo [BŁĄD] Nie udało się przenieść pliku EXE do katalogu projektu.
+    exit /b 1
+)
+
+if not exist "%FINAL_EXE%" (
+    echo [BŁĄD] Wystąpił problem podczas kopiowania pliku wykonywalnego do katalogu projektu.
+    exit /b 1
+)
+
+if exist "%PROJECT_DIR%\build" rd /s /q "%PROJECT_DIR%\build"
+if exist "%PROJECT_DIR%\dist" rd /s /q "%PROJECT_DIR%\dist"
+if exist "%PROJECT_DIR%\PicOrgFTP-SQL.spec" del /q "%PROJECT_DIR%\PicOrgFTP-SQL.spec"
+if exist "%HOOK_FILE%" del /q "%HOOK_FILE%" >nul 2>&1
+
 echo.
 echo ================================================
-echo   Gotowe! Plik EXE znajduje się w folderze dist
+echo   Gotowe! PicOrgFTP-SQL.exe zapisano w katalogu projektu
 echo ================================================
+echo Ścieżka: %FINAL_EXE%
 exit /b 0
 
 :EnsurePython
