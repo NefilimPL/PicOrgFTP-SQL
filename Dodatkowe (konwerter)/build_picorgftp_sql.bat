@@ -9,6 +9,7 @@ echo.
 set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..") do set "PROJECT_DIR=%%~fI"
 set "SCRIPT_PATH=%PROJECT_DIR%\PicOrgFTP-SQL.pyw"
+set "LOCAL_SETTINGS_PATH=%PROJECT_DIR%\local_settings.json"
 
 if not exist "%SCRIPT_PATH%" (
     echo [BŁĄD] Nie znaleziono pliku "%SCRIPT_PATH%".
@@ -24,6 +25,10 @@ call :EnsurePython
 if errorlevel 1 exit /b 1
 
 call :ResolvePythonExe
+if errorlevel 1 exit /b 1
+
+echo [INFO] Konfigurowanie plików ustawień...
+call :PrepareConfiguration
 if errorlevel 1 exit /b 1
 
 echo [INFO] Sprawdzanie pip...
@@ -197,6 +202,73 @@ goto :eof
 :PythonFound
 call :NormalizePythonExe
 goto :eof
+
+:PrepareConfiguration
+if not exist "%PROJECT_DIR%" (
+    echo [BŁĄD] Nieprawidłowa ścieżka projektu: %PROJECT_DIR%
+    exit /b 1
+)
+if not defined PYTHON_EXE (
+    echo [BŁĄD] Nie odnaleziono interpretera Python do przygotowania konfiguracji.
+    exit /b 1
+)
+set "PROJECT_DIR_ESC=%PROJECT_DIR:\=\\%"
+set "LOCAL_SETTINGS_ESC=%LOCAL_SETTINGS_PATH:\=\\%"
+set "HELPER_SCRIPT=%TEMP%\picorgftp_prepare_config.py"
+>"%HELPER_SCRIPT%" echo import json
+>>"%HELPER_SCRIPT%" echo import sys
+>>"%HELPER_SCRIPT%" echo from pathlib import Path
+>>"%HELPER_SCRIPT%" echo
+>>"%HELPER_SCRIPT%" echo PROJECT_DIR = Path(r"%PROJECT_DIR_ESC%")
+>>"%HELPER_SCRIPT%" echo LOCAL_SETTINGS = Path(r"%LOCAL_SETTINGS_ESC%")
+>>"%HELPER_SCRIPT%" echo LOCAL_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+>>"%HELPER_SCRIPT%" echo data = {"base_dir_override": str(PROJECT_DIR), "language": "auto"}
+set "__LINE=if LOCAL_SETTINGS.exists():"
+>>"%HELPER_SCRIPT%" echo(!__LINE!
+set "__LINE=    try:"
+>>"%HELPER_SCRIPT%" echo(!__LINE!
+set "__LINE=        existing = json.loads(LOCAL_SETTINGS.read_text(encoding=\"utf-8\"))"
+>>"%HELPER_SCRIPT%" echo(!__LINE!
+set "__LINE=    except Exception:"
+>>"%HELPER_SCRIPT%" echo(!__LINE!
+set "__LINE=        existing = {}"
+>>"%HELPER_SCRIPT%" echo(!__LINE!
+set "__LINE=    if isinstance(existing, dict):"
+>>"%HELPER_SCRIPT%" echo(!__LINE!
+set "__LINE=        existing[\"base_dir_override\"] = str(PROJECT_DIR)"
+>>"%HELPER_SCRIPT%" echo(!__LINE!
+set "__LINE=        existing.setdefault(\"language\", \"auto\")"
+>>"%HELPER_SCRIPT%" echo(!__LINE!
+set "__LINE=        data = existing"
+>>"%HELPER_SCRIPT%" echo(!__LINE!
+>>"%HELPER_SCRIPT%" echo LOCAL_SETTINGS.write_text(json.dumps(data, indent=4), encoding="utf-8")
+>>"%HELPER_SCRIPT%" echo sys.path.insert(0, str(PROJECT_DIR))
+set "__LINE=try:"
+>>"%HELPER_SCRIPT%" echo(!__LINE!
+set "__LINE=    from picorgftp_sql.config import load_config, save_config"
+>>"%HELPER_SCRIPT%" echo(!__LINE!
+set "__LINE=except Exception:"
+>>"%HELPER_SCRIPT%" echo(!__LINE!
+set "__LINE=    sys.exit(0)"
+>>"%HELPER_SCRIPT%" echo(!__LINE!
+>>"%HELPER_SCRIPT%" echo config = load_config()
+set "__LINE=try:"
+>>"%HELPER_SCRIPT%" echo(!__LINE!
+set "__LINE=    save_config(config)"
+>>"%HELPER_SCRIPT%" echo(!__LINE!
+set "__LINE=except Exception:"
+>>"%HELPER_SCRIPT%" echo(!__LINE!
+set "__LINE=    pass"
+>>"%HELPER_SCRIPT%" echo(!__LINE!
+set "__LINE="
+"%PYTHON_EXE%" "%HELPER_SCRIPT%" >nul 2>&1
+set "PREP_ERROR=%ERRORLEVEL%"
+del /f /q "%HELPER_SCRIPT%" >nul 2>&1
+if not %PREP_ERROR%==0 (
+    echo [BŁĄD] Nie udało się przygotować plików ustawień (kod %PREP_ERROR%).
+    exit /b %PREP_ERROR%
+)
+exit /b 0
 
 :ResolvePythonExe
 if not defined PYTHON_EXE (
