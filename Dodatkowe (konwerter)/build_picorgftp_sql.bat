@@ -15,53 +15,16 @@ if not exist "%SCRIPT_PATH%" (
     exit /b 1
 )
 
-set "PYTHON_CMD="
-for %%C in ("py -3" "py" "python" "python3") do (
-    call :TestPython %%~C
-    if defined PYTHON_CMD goto :PythonFound
-)
-
-echo [INFO] Nie znaleziono Pythona - rozpoczynam instalację...
 set "PYTHON_VERSION=3.11.9"
 set "PYTHON_INSTALLER=python-%PYTHON_VERSION%-amd64.exe"
 set "PYTHON_URL=https://www.python.org/ftp/python/%PYTHON_VERSION%/%PYTHON_INSTALLER%"
 set "PYTHON_INSTALLER_PATH=%TEMP%\%PYTHON_INSTALLER%"
 
-if not exist "%PYTHON_INSTALLER_PATH%" (
-    echo [INFO] Pobieranie instalatora Pythona %PYTHON_VERSION%...
-    powershell -NoLogo -NoProfile -Command "try { Invoke-WebRequest -Uri '%PYTHON_URL%' -OutFile '%PYTHON_INSTALLER_PATH%' -UseBasicParsing -ErrorAction Stop } catch { exit 1 }"
-    if errorlevel 1 (
-        echo [BŁĄD] Nie udało się pobrać instalatora Pythona.
-        exit /b 1
-    )
-)
+call :EnsurePython
+if errorlevel 1 exit /b 1
 
-for /f "tokens=1-3 delims=." %%A in ("%PYTHON_VERSION%") do (
-    set "PYTHON_MAJOR=%%A"
-    set "PYTHON_MINOR=%%B"
-)
-set "PYTHON_MM=%PYTHON_MAJOR%%PYTHON_MINOR%"
-set "PYTHON_TARGET=%LocalAppData%\Programs\Python\Python%PYTHON_MM%"
-
-echo [INFO] Instalacja Pythona do "%PYTHON_TARGET%"...
-"%PYTHON_INSTALLER_PATH%" /quiet InstallAllUsers=0 Include_launcher=0 Include_test=0 Include_pip=1 Include_tcltk=1 PrependPath=1 TargetDir="%PYTHON_TARGET%"
-if errorlevel 1 (
-    echo [BŁĄD] Instalator Pythona zakończył się błędem.
-    exit /b 1
-)
-
-if exist "%PYTHON_TARGET%\python.exe" (
-    set "PYTHON_CMD=\"%PYTHON_TARGET%\python.exe\""
-    goto :PythonFound
-)
-
-echo [BŁĄD] Po instalacji nadal nie znaleziono interpretera Python.
-exit /b 1
-
-:PythonFound
-for /f "delims=" %%P in ('%PYTHON_CMD% -c "import sys; print(sys.executable)"') do set "PYTHON_EXE=%%P"
-echo [INFO] Używany interpreter: %PYTHON_EXE%
-echo.
+call :ResolvePythonExe
+if errorlevel 1 exit /b 1
 
 echo [INFO] Sprawdzanie pip...
 "%PYTHON_EXE%" -m ensurepip --upgrade >nul 2>&1
@@ -165,7 +128,89 @@ echo   Gotowe! Plik EXE znajduje się w folderze dist
 echo ================================================
 exit /b 0
 
+:EnsurePython
+set "PYTHON_EXE="
+for %%C in ("py -3" "py" "python" "python3") do (
+    call :TestPython %%~C
+    if defined PYTHON_EXE goto :eof
+)
+
+echo [INFO] Nie znaleziono interpretera Python - rozpoczynam instalację.
+for /f "tokens=1-3 delims=." %%A in ("%PYTHON_VERSION%") do (
+    set "PYTHON_MAJOR=%%A"
+    set "PYTHON_MINOR=%%B"
+)
+set "PYTHON_MM=%PYTHON_MAJOR%%PYTHON_MINOR%"
+set "PYTHON_TARGET=%LocalAppData%\Programs\Python\Python%PYTHON_MM%"
+
+if not exist "%PYTHON_INSTALLER_PATH%" (
+    echo [INFO] Pobieranie instalatora Python %PYTHON_VERSION%...
+    call :DownloadFile "%PYTHON_URL%" "%PYTHON_INSTALLER_PATH%"
+    if errorlevel 1 (
+        echo [BŁĄD] Nie udało się pobrać instalatora Pythona.
+        exit /b 1
+    )
+)
+
+echo [INFO] Instalowanie Python %PYTHON_VERSION%...
+"%PYTHON_INSTALLER_PATH%" /quiet InstallAllUsers=0 Include_launcher=0 Include_test=0 Include_pip=1 Include_tcltk=1 PrependPath=1 TargetDir="%PYTHON_TARGET%"
+if errorlevel 1 (
+    echo [BŁĄD] Instalator Pythona zakończył się błędem.
+    exit /b 1
+)
+
+if not exist "%PYTHON_TARGET%\python.exe" (
+    echo [BŁĄD] Po instalacji nadal nie znaleziono interpretera Python.
+    exit /b 1
+)
+
+set "PYTHON_EXE=%PYTHON_TARGET%\python.exe"
+set "PATH=%PYTHON_TARGET%;%PYTHON_TARGET%\Scripts;%PATH%"
+goto :eof
+
+:ResolvePythonExe
+if not defined PYTHON_EXE (
+    echo [BŁĄD] Nie udało się ustalić ścieżki do Pythona.
+    exit /b 1
+)
+
+for /f "delims=" %%P in ('"%PYTHON_EXE%" -c "import sys; print(sys.executable)"') do set "PYTHON_EXE=%%P"
+if not exist "%PYTHON_EXE%" (
+    echo [BŁĄD] Zweryfikowany interpreter Python nie istnieje: %PYTHON_EXE%
+    exit /b 1
+)
+
+echo [INFO] Używany interpreter: %PYTHON_EXE%
+exit /b 0
+
+:DownloadFile
+set "__URL=%~1"
+set "__DEST=%~2"
+
+where powershell >nul 2>&1
+if %ERRORLEVEL%==0 (
+    powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri '%__URL%' -OutFile '%__DEST%' -UseBasicParsing -ErrorAction Stop } catch { exit 1 }"
+    if %ERRORLEVEL%==0 goto :DownloadOk
+)
+
+where curl >nul 2>&1
+if %ERRORLEVEL%==0 (
+    curl -f -L -o "%__DEST%" "%__URL%"
+    if %ERRORLEVEL%==0 goto :DownloadOk
+)
+
+where bitsadmin >nul 2>&1
+if %ERRORLEVEL%==0 (
+    bitsadmin /transfer PicOrgBuild /download /priority HIGH "%__URL%" "%__DEST%" >nul
+    if %ERRORLEVEL%==0 goto :DownloadOk
+)
+
+exit /b 1
+
+:DownloadOk
+exit /b 0
+
 :TestPython
 %* --version >nul 2>&1
-if %ERRORLEVEL%==0 set "PYTHON_CMD=%*"
-exit /b
+if %ERRORLEVEL%==0 set "PYTHON_EXE=%*"
+exit /b 0
