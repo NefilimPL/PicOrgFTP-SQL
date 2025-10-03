@@ -21,7 +21,41 @@ for %%C in ("py -3" "py" "python" "python3") do (
     if defined PYTHON_CMD goto :PythonFound
 )
 
-echo [BŁĄD] Nie znaleziono interpretera Python w zmiennej PATH.
+echo [INFO] Nie znaleziono Pythona - rozpoczynam instalację...
+set "PYTHON_VERSION=3.11.9"
+set "PYTHON_INSTALLER=python-%PYTHON_VERSION%-amd64.exe"
+set "PYTHON_URL=https://www.python.org/ftp/python/%PYTHON_VERSION%/%PYTHON_INSTALLER%"
+set "PYTHON_INSTALLER_PATH=%TEMP%\%PYTHON_INSTALLER%"
+
+if not exist "%PYTHON_INSTALLER_PATH%" (
+    echo [INFO] Pobieranie instalatora Pythona %PYTHON_VERSION%...
+    powershell -NoLogo -NoProfile -Command "try { Invoke-WebRequest -Uri '%PYTHON_URL%' -OutFile '%PYTHON_INSTALLER_PATH%' -UseBasicParsing -ErrorAction Stop } catch { exit 1 }"
+    if errorlevel 1 (
+        echo [BŁĄD] Nie udało się pobrać instalatora Pythona.
+        exit /b 1
+    )
+)
+
+for /f "tokens=1-3 delims=." %%A in ("%PYTHON_VERSION%") do (
+    set "PYTHON_MAJOR=%%A"
+    set "PYTHON_MINOR=%%B"
+)
+set "PYTHON_MM=%PYTHON_MAJOR%%PYTHON_MINOR%"
+set "PYTHON_TARGET=%LocalAppData%\Programs\Python\Python%PYTHON_MM%"
+
+echo [INFO] Instalacja Pythona do "%PYTHON_TARGET%"...
+"%PYTHON_INSTALLER_PATH%" /quiet InstallAllUsers=0 Include_launcher=0 Include_test=0 Include_pip=1 Include_tcltk=1 PrependPath=1 TargetDir="%PYTHON_TARGET%"
+if errorlevel 1 (
+    echo [BŁĄD] Instalator Pythona zakończył się błędem.
+    exit /b 1
+)
+
+if exist "%PYTHON_TARGET%\python.exe" (
+    set "PYTHON_CMD=\"%PYTHON_TARGET%\python.exe\""
+    goto :PythonFound
+)
+
+echo [BŁĄD] Po instalacji nadal nie znaleziono interpretera Python.
 exit /b 1
 
 :PythonFound
