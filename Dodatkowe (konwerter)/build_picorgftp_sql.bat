@@ -404,7 +404,7 @@ set "VERIFY_LOG=%TEMP%\picorgftp_verify_imports.log"
     echo missing = []
     echo for name in modules:
     echo ^    try:
-    echo ^        importlib.import_module(name)
+    echo ^        importlib.import_module(name^)
     echo ^    except Exception as exc:
     echo ^        missing.append(f"{name}: {exc}")
     echo if missing:
