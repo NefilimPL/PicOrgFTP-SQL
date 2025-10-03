@@ -386,7 +386,9 @@ goto :EnsurePythonReadyLoop
 :CheckPythonImports
 if not defined PYTHON_EXE exit /b 1
 set "VERIFY_SCRIPT=%TEMP%\picorgftp_verify_imports.py"
->"%VERIFY_SCRIPT%" (
+set "VERIFY_LOG=%TEMP%\picorgftp_verify_imports.log"
+
+(
     echo import importlib
     echo import sys
     echo modules = [
@@ -408,12 +410,25 @@ set "VERIFY_SCRIPT=%TEMP%\picorgftp_verify_imports.py"
     echo if missing:
     echo ^    sys.stderr.write("\n".join(missing))
     echo ^    sys.exit(1)
-)
-"%PYTHON_EXE%" "%VERIFY_SCRIPT%" >nul 2>&1
+) >"%VERIFY_SCRIPT%"
+
+if exist "%VERIFY_LOG%" del /f /q "%VERIFY_LOG%" >nul 2>&1
+"%PYTHON_EXE%" "%VERIFY_SCRIPT%" 1>nul 2>"%VERIFY_LOG%"
 set "VERIFY_ERROR=%ERRORLEVEL%"
-del /f /q "%VERIFY_SCRIPT%" >nul 2>&1
-if not "%VERIFY_ERROR%"=="0" exit /b %VERIFY_ERROR%
-exit /b 0
+
+if not "%VERIFY_ERROR%"=="0" (
+    if exist "%VERIFY_LOG%" (
+        echo [BŁĄD] Nie udało się zaimportować wymaganych modułów Pythona:
+        type "%VERIFY_LOG%"
+    ) else (
+        echo [BŁĄD] Nie udało się zaimportować wymaganych modułów Pythona (kod %VERIFY_ERROR%).
+    )
+)
+
+if exist "%VERIFY_SCRIPT%" del /f /q "%VERIFY_SCRIPT%" >nul 2>&1
+if exist "%VERIFY_LOG%" del /f /q "%VERIFY_LOG%" >nul 2>&1
+
+exit /b %VERIFY_ERROR%
 
 :PrepareConfiguration
 if not exist "%PROJECT_DIR%" (
