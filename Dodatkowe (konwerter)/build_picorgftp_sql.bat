@@ -130,10 +130,34 @@ exit /b 0
 
 :EnsurePython
 set "PYTHON_EXE="
-for %%C in ("py -3" "py" "python" "python3") do (
-    call :TestPython %%~C
-    if defined PYTHON_EXE goto :eof
+
+rem Najpierw spróbuj skorzystać z "py -3"
+py -3 --version >nul 2>&1
+if %ERRORLEVEL%==0 (
+    for /f "delims=" %%P in ('py -3 -c "import sys; print(sys.executable)" 2^>nul') do set "PYTHON_EXE=%%P"
 )
+if defined PYTHON_EXE goto :PythonFound
+
+rem Następnie spróbuj zwykłego "py"
+py --version >nul 2>&1
+if %ERRORLEVEL%==0 (
+    for /f "delims=" %%P in ('py -c "import sys; print(sys.executable)" 2^>nul') do set "PYTHON_EXE=%%P"
+)
+if defined PYTHON_EXE goto :PythonFound
+
+rem Spróbuj "python"
+python --version >nul 2>&1
+if %ERRORLEVEL%==0 (
+    for /f "delims=" %%P in ('python -c "import sys; print(sys.executable)" 2^>nul') do set "PYTHON_EXE=%%P"
+)
+if defined PYTHON_EXE goto :PythonFound
+
+rem Ostatni fallback do "python3"
+python3 --version >nul 2>&1
+if %ERRORLEVEL%==0 (
+    for /f "delims=" %%P in ('python3 -c "import sys; print(sys.executable)" 2^>nul') do set "PYTHON_EXE=%%P"
+)
+if defined PYTHON_EXE goto :PythonFound
 
 echo [INFO] Nie znaleziono interpretera Python - rozpoczynam instalację.
 for /f "tokens=1-3 delims=." %%A in ("%PYTHON_VERSION%") do (
@@ -153,7 +177,8 @@ if not exist "%PYTHON_INSTALLER_PATH%" (
 )
 
 echo [INFO] Instalowanie Python %PYTHON_VERSION%...
-"%PYTHON_INSTALLER_PATH%" /quiet InstallAllUsers=0 Include_launcher=0 Include_test=0 Include_pip=1 Include_tcltk=1 PrependPath=1 TargetDir="%PYTHON_TARGET%"
+"%PYTHON_INSTALLER_PATH%" /quiet InstallAllUsers=0 Include_launcher=0 Include_test=0 Include_pip=1 Include_tcltk=1 PrependPath=1 ^
+    TargetDir="%PYTHON_TARGET%"
 if errorlevel 1 (
     echo [BŁĄD] Instalator Pythona zakończył się błędem.
     exit /b 1
@@ -165,7 +190,12 @@ if not exist "%PYTHON_TARGET%\python.exe" (
 )
 
 set "PYTHON_EXE=%PYTHON_TARGET%\python.exe"
+call :NormalizePythonExe
 set "PATH=%PYTHON_TARGET%;%PYTHON_TARGET%\Scripts;%PATH%"
+goto :eof
+
+:PythonFound
+call :NormalizePythonExe
 goto :eof
 
 :ResolvePythonExe
@@ -175,6 +205,7 @@ if not defined PYTHON_EXE (
 )
 
 for /f "delims=" %%P in ('"%PYTHON_EXE%" -c "import sys; print(sys.executable)"') do set "PYTHON_EXE=%%P"
+call :NormalizePythonExe
 if not exist "%PYTHON_EXE%" (
     echo [BŁĄD] Zweryfikowany interpreter Python nie istnieje: %PYTHON_EXE%
     exit /b 1
@@ -210,7 +241,9 @@ exit /b 1
 :DownloadOk
 exit /b 0
 
-:TestPython
-%* --version >nul 2>&1
-if %ERRORLEVEL%==0 set "PYTHON_EXE=%*"
+:NormalizePythonExe
+if not defined PYTHON_EXE exit /b 0
+set "PYTHON_EXE=%PYTHON_EXE:\"=%"
+set "PYTHON_EXE=%PYTHON_EXE:"=%"
+for %%P in ("%PYTHON_EXE%") do set "PYTHON_EXE=%%~fP"
 exit /b 0
