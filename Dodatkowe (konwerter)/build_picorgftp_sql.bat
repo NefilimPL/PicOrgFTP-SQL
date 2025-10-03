@@ -268,44 +268,26 @@ set "HELPER_SCRIPT=%TEMP%\picorgftp_prepare_config.py"
 >>"%HELPER_SCRIPT%" echo LOCAL_SETTINGS = Path(r"%LOCAL_SETTINGS_ESC%")
 >>"%HELPER_SCRIPT%" echo LOCAL_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
 >>"%HELPER_SCRIPT%" echo data = {"base_dir_override": str(PROJECT_DIR), "language": "auto"}
-set "__LINE=if LOCAL_SETTINGS.exists():"
->>"%HELPER_SCRIPT%" echo(!__LINE!
-set "__LINE=    try:"
->>"%HELPER_SCRIPT%" echo(!__LINE!
-set "__LINE=        existing = json.loads(LOCAL_SETTINGS.read_text(encoding=\"utf-8\"))"
->>"%HELPER_SCRIPT%" echo(!__LINE!
-set "__LINE=    except Exception:"
->>"%HELPER_SCRIPT%" echo(!__LINE!
-set "__LINE=        existing = {}"
->>"%HELPER_SCRIPT%" echo(!__LINE!
-set "__LINE=    if isinstance(existing, dict):"
->>"%HELPER_SCRIPT%" echo(!__LINE!
-set "__LINE=        existing[\"base_dir_override\"] = str(PROJECT_DIR)"
->>"%HELPER_SCRIPT%" echo(!__LINE!
-set "__LINE=        existing.setdefault(\"language\", \"auto\")"
->>"%HELPER_SCRIPT%" echo(!__LINE!
-set "__LINE=        data = existing"
->>"%HELPER_SCRIPT%" echo(!__LINE!
+>>"%HELPER_SCRIPT%" echo if LOCAL_SETTINGS.exists():
+>>"%HELPER_SCRIPT%" echo ^    try:
+>>"%HELPER_SCRIPT%" echo ^        existing = json.loads(LOCAL_SETTINGS.read_text(encoding="utf-8"))
+>>"%HELPER_SCRIPT%" echo ^    except Exception:
+>>"%HELPER_SCRIPT%" echo ^        existing = {}
+>>"%HELPER_SCRIPT%" echo ^    if isinstance(existing, dict):
+>>"%HELPER_SCRIPT%" echo ^        existing["base_dir_override"] = str(PROJECT_DIR)
+>>"%HELPER_SCRIPT%" echo ^        existing.setdefault("language", "auto")
+>>"%HELPER_SCRIPT%" echo ^        data = existing
 >>"%HELPER_SCRIPT%" echo LOCAL_SETTINGS.write_text(json.dumps(data, indent=4), encoding="utf-8")
 >>"%HELPER_SCRIPT%" echo sys.path.insert(0, str(PROJECT_DIR))
-set "__LINE=try:"
->>"%HELPER_SCRIPT%" echo(!__LINE!
-set "__LINE=    from picorgftp_sql.config import load_config, save_config"
->>"%HELPER_SCRIPT%" echo(!__LINE!
-set "__LINE=except Exception:"
->>"%HELPER_SCRIPT%" echo(!__LINE!
-set "__LINE=    sys.exit(0)"
->>"%HELPER_SCRIPT%" echo(!__LINE!
+>>"%HELPER_SCRIPT%" echo try:
+>>"%HELPER_SCRIPT%" echo ^    from picorgftp_sql.config import load_config, save_config
+>>"%HELPER_SCRIPT%" echo except Exception:
+>>"%HELPER_SCRIPT%" echo ^    sys.exit(0)
 >>"%HELPER_SCRIPT%" echo config = load_config()
-set "__LINE=try:"
->>"%HELPER_SCRIPT%" echo(!__LINE!
-set "__LINE=    save_config(config)"
->>"%HELPER_SCRIPT%" echo(!__LINE!
-set "__LINE=except Exception:"
->>"%HELPER_SCRIPT%" echo(!__LINE!
-set "__LINE=    pass"
->>"%HELPER_SCRIPT%" echo(!__LINE!
-set "__LINE="
+>>"%HELPER_SCRIPT%" echo try:
+>>"%HELPER_SCRIPT%" echo ^    save_config(config)
+>>"%HELPER_SCRIPT%" echo except Exception:
+>>"%HELPER_SCRIPT%" echo ^    pass
 "%PYTHON_EXE%" "%HELPER_SCRIPT%" >nul 2>&1
 set "PREP_ERROR=%ERRORLEVEL%"
 del /f /q "%HELPER_SCRIPT%" >nul 2>&1
@@ -365,7 +347,10 @@ exit /b 0
 
 :NormalizePythonExe
 if not defined PYTHON_EXE exit /b 0
-set "PYTHON_EXE=%PYTHON_EXE:\"=%"
+set "PYTHON_EXE=%PYTHON_EXE:'=%"
 set "PYTHON_EXE=%PYTHON_EXE:"=%"
+if defined PYTHON_EXE if "%PYTHON_EXE:~0,1%"=="\\" if "%PYTHON_EXE:~2,1%"==":" set "PYTHON_EXE=%PYTHON_EXE:~1%"
+if defined PYTHON_EXE if "%PYTHON_EXE:~-1%"=="\\" set "PYTHON_EXE=%PYTHON_EXE:~0,-1%"
 for %%P in ("%PYTHON_EXE%") do set "PYTHON_EXE=%%~fP"
+for /f "tokens=*" %%P in ("%PYTHON_EXE%") do set "PYTHON_EXE=%%P"
 exit /b 0
