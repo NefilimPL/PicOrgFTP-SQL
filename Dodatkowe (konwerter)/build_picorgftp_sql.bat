@@ -181,54 +181,71 @@ exit /b 0
 :EnsurePython
 set "PYTHON_EXE="
 
-rem Najpierw spróbuj skorzystać z "py -3"
+call :FindExistingPython
+if defined PYTHON_EXE (
+    call :NormalizePythonExe
+    call :ValidatePython
+    if not errorlevel 1 goto :eof
+    echo [OSTRZEŻENIE] Wykryty Python jest uszkodzony lub niekompletny - nastąpi ponowna instalacja.
+    set "PYTHON_EXE="
+)
+
+echo [INFO] Nie znaleziono kompletnego środowiska Python - rozpoczynam instalację.
+call :InstallPython
+if errorlevel 1 exit /b 1
+
+call :ValidatePython
+if errorlevel 1 (
+    echo [BŁĄD] Zainstalowany interpreter Python nadal nie przechodzi testów weryfikacyjnych.
+    exit /b 1
+)
+exit /b 0
+
+:FindExistingPython
+set "PYTHON_EXE="
+
 py -3 --version >nul 2>&1
 if %ERRORLEVEL%==0 (
     for /f "delims=" %%P in ('py -3 -c "import sys; print(sys.executable)" 2^>nul') do set "PYTHON_EXE=%%P"
 )
-if defined PYTHON_EXE goto :PythonFound
+if defined PYTHON_EXE goto :eof
 
-rem Następnie spróbuj zwykłego "py"
 py --version >nul 2>&1
 if %ERRORLEVEL%==0 (
     for /f "delims=" %%P in ('py -c "import sys; print(sys.executable)" 2^>nul') do set "PYTHON_EXE=%%P"
 )
-if defined PYTHON_EXE goto :PythonFound
+if defined PYTHON_EXE goto :eof
 
-rem Spróbuj "python"
 python --version >nul 2>&1
 if %ERRORLEVEL%==0 (
     for /f "delims=" %%P in ('python -c "import sys; print(sys.executable)" 2^>nul') do set "PYTHON_EXE=%%P"
 )
-if defined PYTHON_EXE goto :PythonFound
+if defined PYTHON_EXE goto :eof
 
-rem Ostatni fallback do "python3"
 python3 --version >nul 2>&1
 if %ERRORLEVEL%==0 (
     for /f "delims=" %%P in ('python3 -c "import sys; print(sys.executable)" 2^>nul') do set "PYTHON_EXE=%%P"
 )
-if defined PYTHON_EXE goto :PythonFound
+goto :eof
 
-echo [INFO] Nie znaleziono interpretera Python - rozpoczynam instalację.
+:InstallPython
 for /f "tokens=1-3 delims=." %%A in ("%PYTHON_VERSION%") do (
     set "PYTHON_MAJOR=%%A"
     set "PYTHON_MINOR=%%B"
 )
 set "PYTHON_MM=%PYTHON_MAJOR%%PYTHON_MINOR%"
 set "PYTHON_TARGET=%LocalAppData%\Programs\Python\Python%PYTHON_MM%"
+if exist "%PYTHON_INSTALLER_PATH%" del /q "%PYTHON_INSTALLER_PATH%" >nul 2>&1
 
-if not exist "%PYTHON_INSTALLER_PATH%" (
-    echo [INFO] Pobieranie instalatora Python %PYTHON_VERSION%...
-    call :DownloadFile "%PYTHON_URL%" "%PYTHON_INSTALLER_PATH%"
-    if errorlevel 1 (
-        echo [BŁĄD] Nie udało się pobrać instalatora Pythona.
-        exit /b 1
-    )
+echo [INFO] Pobieranie instalatora Python %PYTHON_VERSION%...
+call :DownloadFile "%PYTHON_URL%" "%PYTHON_INSTALLER_PATH%"
+if errorlevel 1 (
+    echo [BŁĄD] Nie udało się pobrać instalatora Pythona.
+    exit /b 1
 )
 
 echo [INFO] Instalowanie Python %PYTHON_VERSION%...
-"%PYTHON_INSTALLER_PATH%" /quiet InstallAllUsers=0 Include_launcher=0 Include_test=0 Include_pip=1 Include_tcltk=1 PrependPath=1 ^
-    TargetDir="%PYTHON_TARGET%"
+"%PYTHON_INSTALLER_PATH%" /quiet InstallAllUsers=0 Include_launcher=0 Include_test=0 Include_pip=1 Include_tcltk=1 PrependPath=1 TargetDir="%PYTHON_TARGET%"
 if errorlevel 1 (
     echo [BŁĄD] Instalator Pythona zakończył się błędem.
     exit /b 1
@@ -242,11 +259,19 @@ if not exist "%PYTHON_TARGET%\python.exe" (
 set "PYTHON_EXE=%PYTHON_TARGET%\python.exe"
 call :NormalizePythonExe
 set "PATH=%PYTHON_TARGET%;%PYTHON_TARGET%\Scripts;%PATH%"
-goto :eof
+exit /b 0
 
-:PythonFound
+:ValidatePython
+if not defined PYTHON_EXE exit /b 1
 call :NormalizePythonExe
-goto :eof
+if not exist "%PYTHON_EXE%" exit /b 1
+"%PYTHON_EXE%" -c "import sys" >nul 2>&1
+if errorlevel 1 exit /b 1
+"%PYTHON_EXE%" -c "import tkinter" >nul 2>&1
+if errorlevel 1 exit /b 1
+"%PYTHON_EXE%" -c "import ensurepip" >nul 2>&1
+if errorlevel 1 exit /b 1
+exit /b 0
 
 :PrepareConfiguration
 if not exist "%PROJECT_DIR%" (
