@@ -309,7 +309,7 @@ set "__LINE="
 "%PYTHON_EXE%" "%HELPER_SCRIPT%" >nul 2>&1
 set "PREP_ERROR=%ERRORLEVEL%"
 del /f /q "%HELPER_SCRIPT%" >nul 2>&1
-if not %PREP_ERROR%==0 (
+if not "%PREP_ERROR%"=="0" (
     echo [BŁĄD] Nie udało się przygotować plików ustawień (kod %PREP_ERROR%).
     exit /b %PREP_ERROR%
 )
@@ -320,11 +320,16 @@ if not defined PYTHON_EXE (
     echo [BŁĄD] Nie udało się ustalić ścieżki do Pythona.
     exit /b 1
 )
-
-for /f "delims=" %%P in ('"%PYTHON_EXE%" -c "import sys; print(sys.executable)"') do set "PYTHON_EXE=%%P"
 call :NormalizePythonExe
+
 if not exist "%PYTHON_EXE%" (
     echo [BŁĄD] Zweryfikowany interpreter Python nie istnieje: %PYTHON_EXE%
+    exit /b 1
+)
+
+"%PYTHON_EXE%" -c "import sys" >nul 2>&1
+if errorlevel 1 (
+    echo [BŁĄD] Interpreter Python jest uszkodzony lub nieprawidłowy: %PYTHON_EXE%
     exit /b 1
 )
 
