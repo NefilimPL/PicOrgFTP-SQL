@@ -27,25 +27,21 @@ if errorlevel 1 exit /b 1
 call :ResolvePythonExe
 if errorlevel 1 exit /b 1
 
-echo [INFO] Konfigurowanie plików ustawień...
-call :PrepareConfiguration
-if errorlevel 1 exit /b 1
-
 echo [INFO] Sprawdzanie pip...
 "%PYTHON_EXE%" -m ensurepip --upgrade >nul 2>&1
 
 echo [INFO] Aktualizacja pip do najnowszej wersji...
 "%PYTHON_EXE%" -m pip install --upgrade pip || exit /b 1
 
-echo [INFO] Instalowanie wymaganych pakietów...
-"%PYTHON_EXE%" -m pip install --upgrade ^
-    pyinstaller ^
-    pillow ^
-    mysql-connector-python ^
-    openpyxl ^
-    pyodbc ^
-    tkinterdnd2 ^
-    certifi || exit /b 1
+call :InstallRequiredPackages
+if errorlevel 1 exit /b 1
+
+call :EnsurePythonReadyForBuild
+if errorlevel 1 exit /b 1
+
+echo [INFO] Konfigurowanie plików ustawień...
+call :PrepareConfiguration
+if errorlevel 1 exit /b 1
 
 set "HOOK_FILE=%TEMP%\picorgftp_sql_mysql_hook.py"
 echo [INFO] Przygotowywanie pliku runtime hook...
@@ -271,6 +267,104 @@ if errorlevel 1 exit /b 1
 if errorlevel 1 exit /b 1
 "%PYTHON_EXE%" -c "import ensurepip" >nul 2>&1
 if errorlevel 1 exit /b 1
+exit /b 0
+
+:InstallRequiredPackages
+if not defined PYTHON_EXE (
+    echo [BŁĄD] Nie można zainstalować pakietów - brak interpretera Python.
+    exit /b 1
+)
+
+echo [INFO] Instalowanie wymaganych pakietów...
+"%PYTHON_EXE%" -m pip install --upgrade ^
+    pyinstaller ^
+    pillow ^
+    mysql-connector-python ^
+    openpyxl ^
+    pyodbc ^
+    tkinterdnd2 ^
+    certifi || (
+        echo [BŁĄD] Nie udało się zainstalować wymaganych pakietów Pythona.
+        exit /b 1
+    )
+exit /b 0
+
+:EnsurePythonReadyForBuild
+if not defined PYTHON_EXE (
+    echo [BŁĄD] Nie można zweryfikować środowiska - brak interpretera Python.
+    exit /b 1
+)
+
+set "VERIFY_ATTEMPT=0"
+
+:EnsurePythonReadyLoop
+set /a VERIFY_ATTEMPT+=1
+
+call :ValidatePython
+if errorlevel 1 goto :RepairPythonEnv
+
+"%PYTHON_EXE%" -m pip --version >nul 2>&1 || goto :RepairPythonEnv
+
+call :CheckPythonImports
+if errorlevel 1 goto :RepairPythonEnv
+
+"%PYTHON_EXE%" -m PyInstaller --version >nul 2>&1 || goto :RepairPythonEnv
+
+set "VERIFY_ATTEMPT="
+exit /b 0
+
+:RepairPythonEnv
+if %VERIFY_ATTEMPT% geq 2 (
+    echo [BŁĄD] Nie udało się przygotować kompletnego środowiska Python.
+    set "VERIFY_ATTEMPT="
+    exit /b 1
+)
+
+echo [OSTRZEŻENIE] Wykryto niekompletne środowisko - trwa ponowna instalacja Pythona i pakietów.
+call :InstallPython
+if errorlevel 1 exit /b 1
+
+call :ValidatePython
+if errorlevel 1 exit /b 1
+
+"%PYTHON_EXE%" -m ensurepip --upgrade >nul 2>&1
+"%PYTHON_EXE%" -m pip install --upgrade pip || exit /b 1
+
+call :InstallRequiredPackages
+if errorlevel 1 exit /b 1
+
+goto :EnsurePythonReadyLoop
+
+:CheckPythonImports
+if not defined PYTHON_EXE exit /b 1
+set "VERIFY_SCRIPT=%TEMP%\picorgftp_verify_imports.py"
+>"%VERIFY_SCRIPT%" (
+    echo import importlib
+    echo import sys
+    echo modules = [
+    echo     "tkinter",
+    echo     "PyInstaller",
+    echo     "PIL",
+    echo     "mysql.connector",
+    echo     "openpyxl",
+    echo     "pyodbc",
+    echo     "tkinterdnd2",
+    echo     "certifi",
+    echo ]
+    echo missing = []
+    echo for name in modules:
+    echo ^    try:
+    echo ^        importlib.import_module(name)
+    echo ^    except Exception as exc:
+    echo ^        missing.append(f"{name}: {exc}")
+    echo if missing:
+    echo ^    sys.stderr.write("\n".join(missing))
+    echo ^    sys.exit(1)
+)
+"%PYTHON_EXE%" "%VERIFY_SCRIPT%" >nul 2>&1
+set "VERIFY_ERROR=%ERRORLEVEL%"
+del /f /q "%VERIFY_SCRIPT%" >nul 2>&1
+if not "%VERIFY_ERROR%"=="0" exit /b %VERIFY_ERROR%
 exit /b 0
 
 :PrepareConfiguration
