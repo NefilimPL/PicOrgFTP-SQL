@@ -268,6 +268,29 @@ def _update_row(row, name, furniture_type, model, color1, color2, color3, extra_
     row[7].value = extra_value
 
 
+def remove_ean_entry(ean: str) -> bool:
+    """Remove an existing entry row for ``ean`` if present."""
+
+    trimmed = str(ean or EMPTY).strip()
+    if not trimmed:
+        return True
+    workbook = _load_workbook()
+    sheet = workbook[EXCEL_SHEETS[ENTRY_SHEET]]
+    removed = False
+    for row in list(sheet.iter_rows(min_row=2)):
+        value = str(row[0].value or EMPTY).strip()
+        if value.upper() == trimmed.upper():
+            sheet.delete_rows(row[0].row)
+            removed = True
+            break
+    if not removed:
+        return True
+    if _save_workbook(workbook, "excel_entry_delete_failed", ean=trimmed):
+        log_info_loc("excel_entry_deleted", ean=trimmed)
+        return True
+    return False
+
+
 def save_ean_entry(
     ean: str,
     name: str,

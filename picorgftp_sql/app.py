@@ -9,6 +9,7 @@ from .excel_utils import (
     label_category,
     prepare_excel_lists,
     remove_from_list,
+    remove_ean_entry,
     save_ean_entry,
 )
 from .logging_utils import log_error, log_error_loc, log_info, log_info_loc, set_app
@@ -16,7 +17,7 @@ from .system_utils import get_file_lock_user, is_admin
 from .database import connect_db
 from .config import save_config
 from . import config, localization
-from .settings import EXCEL_SHEETS, AN, l
+from .settings import EXCEL_SHEETS, AN, l, MAX_UNDO_HISTORY, UNDO_HISTORY_ROOT
 
 D = config.CONFIG
 LANG_PREF = localization.LANG_PREF
@@ -73,8 +74,13 @@ class App(BU.Tk):
         B.is_processing = h
         B.logged_counts = h
         B.suppress_next_lookup = h
+        B.edit_snapshot = I
+        B.is_editing = h
+        B.undo_stack = []
+        B.undo_root = UNDO_HISTORY_ROOT
         B._build_form()
         B._build_slots()
+        B._ensure_undo_setup()
         H_ = Q(E_)
         B.combo_name.existing_count = H_
         set_app(B)
@@ -211,13 +217,17 @@ class App(BU.Tk):
         Q_ = C.Button(B_, text=SETTINGS_LABEL, command=A._open_settings)
         Q_.grid(row=0, column=3, padx=5)
         A.btn_submit = C.Button(B_, text=UPDATE_LABEL, command=A._on_submit)
-        A.btn_submit.grid(row=8, column=0, columnspan=2, pady=10)
+        A.btn_submit.grid(row=8, column=0, padx=5, pady=10, sticky="ew")
+        A.btn_edit = C.Button(B_, text=EDIT_LABEL, command=A._on_edit_button)
+        A.btn_edit.grid(row=8, column=1, padx=5, pady=10, sticky="ew")
         A.btn_open = C.Button(B_, text=OPEN_FOLDER_LABEL, command=A._open_current_folder)
-        A.btn_open.grid(row=8, column=2, padx=5, pady=10)
+        A.btn_open.grid(row=8, column=2, padx=5, pady=10, sticky="ew")
+        A.btn_undo = C.Button(B_, text=UNDO_LABEL, command=A._on_undo, state=Ak)
+        A.btn_undo.grid(row=8, column=3, padx=5, pady=10, sticky="ew")
         A.ui_log = BS.ScrolledText(B_, width=48, height=8, state=Ak, wrap="word")
-        A.ui_log.grid(row=0, column=4, rowspan=9, padx=10, sticky="nsew")
+        A.ui_log.grid(row=0, column=4, rowspan=10, padx=10, sticky="nsew")
         S_ = C.Button(B_, text=CLEAR_LOG_LABEL, command=lambda: A._ui_log(clear=Al))
-        S_.grid(row=8, column=3, padx=5, pady=10, sticky="e")
+        S_.grid(row=9, column=3, padx=5, pady=5, sticky="e")
         B_.grid_columnconfigure(4, weight=1)
 
     def _build_slots(B):
@@ -327,6 +337,629 @@ class App(BU.Tk):
             )
         for O_ in Ax(U):
             B.slots_frame.columnconfigure(O_, weight=1)
+
+    def _ensure_undo_setup(C):
+        """Initialise the undo history directory and metadata cache."""
+
+        C.undo_stack = []
+        if not C.undo_root:
+            return
+        try:
+            A.makedirs(C.undo_root, exist_ok=J)
+        except E as exc:
+            log_error(f"Failed to prepare undo directory: {exc}")
+            C.undo_root = I
+            return
+        candidates = []
+        try:
+            entries = sorted(A.listdir(C.undo_root))
+        except E:
+            entries = []
+        for entry in entries:
+            path = A.path.join(C.undo_root, entry)
+            if not A.path.isdir(path):
+                continue
+            meta_path = A.path.join(path, "metadata.json")
+            if not A.path.isfile(meta_path):
+                continue
+            try:
+                with x(meta_path, "r", encoding=k) as handle:
+                    meta = Ar.load(handle)
+                if not Aq(meta, dict):
+                    continue
+                meta.setdefault("timestamp", entry)
+                candidates.append({"path": path, "meta": meta})
+            except E as exc:
+                log_error(f"Failed to read undo metadata {meta_path}: {exc}")
+        candidates.sort(key=lambda item: item["meta"].get("timestamp", B), reverse=J)
+        C.undo_stack = candidates[:MAX_UNDO_HISTORY]
+        for extra in candidates[MAX_UNDO_HISTORY:]:
+            try:
+                Af.rmtree(extra["path"])
+            except E as exc:
+                log_error(f"Failed to prune undo backup {extra['path']}: {exc}")
+        C._update_undo_button()
+
+    def _update_undo_button(C):
+        """Enable or disable the undo button based on history availability."""
+
+        if not hasattr(C, "btn_undo"):
+            return
+        if C.undo_stack:
+            C.btn_undo.configure(state=X)
+        else:
+            C.btn_undo.configure(state=Ak)
+
+    def _normalize_extra_value(C, value):
+        """Return a normalised representation of the extra field."""
+
+        raw = G(value or B).strip()
+        if not raw or raw.upper() in {L, L}:
+            return L
+        return raw.replace(a, g).upper()
+
+    def _compute_entry_dir(C, name, furniture_type, model, color1, color2, color3, extra):
+        """Construct the directory path for the provided furniture data."""
+
+        if not (name and furniture_type and model and color1):
+            return I
+        base = A.path.join(l, name.upper(), furniture_type.upper(), model.upper())
+        colors = [color1.upper()]
+        if color2:
+            colors.append(color2.upper())
+        if color3:
+            colors.append(color3.upper())
+        colour_part = g.join([C_ for C_ in colors if C_])
+        base = A.path.join(base, colour_part)
+        extra_norm = extra or L
+        extra_norm = extra_norm.replace(a, g)
+        if not extra_norm:
+            extra_norm = L
+        return A.path.join(base, extra_norm.upper())
+
+    def _capture_current_state(C, include_sql=Ay):
+        """Collect the current entry data for editing or backups."""
+
+        name = C.var_name.get().strip()
+        furniture_type = C.var_type.get().strip()
+        model = C.var_model.get().strip()
+        color1 = C.var_color1.get().strip()
+        color2 = C.var_color2.get().strip()
+        color3 = C.var_color3.get().strip()
+        extra_raw = C.var_extra.get().strip()
+        extra = C._normalize_extra_value(extra_raw)
+        ean_value = C.var_ean.get().strip().upper() or q
+        base_dir = C._compute_entry_dir(
+            name, furniture_type, model, color1, color2, color3, extra
+        )
+        local_files = {}
+        for idx, slot in A0(C.slots):
+            path = slot.get(f)
+            if path and A.path.isfile(path):
+                local_files[idx] = path
+        ftp_files = {}
+        ftp_sources = {}
+        for idx, slot in A0(C.slots):
+            prefix = slot[Aa]
+            if prefix in C.ftp_presence:
+                fname = C.ftp_presence[prefix]
+                ftp_files[prefix] = fname
+                local_path = slot.get(f)
+                if local_path and A.path.isfile(local_path):
+                    ftp_sources[fname] = local_path
+        for prefix, info in C.ftp_remote_only.items():
+            fname = info.get("filename") if Aq(info, dict) else I
+            if not fname:
+                continue
+            ftp_files[prefix] = fname
+            temp_path = info.get("temp_path") if Aq(info, dict) else I
+            if temp_path and A.path.isfile(temp_path):
+                ftp_sources[fname] = temp_path
+        excel_entry = I
+        try:
+            excel_entry = C.entries.get(ean_value, I)
+        except E:
+            excel_entry = I
+        sql_values = {}
+        if include_sql:
+            sql_values = C._fetch_sql_state(ean_value)
+        has_data = bool(
+            local_files
+            or ftp_files
+            or ftp_sources
+            or excel_entry
+            or (sql_values if include_sql else {})
+        )
+        return {
+            "ean": ean_value,
+            "fields": {
+                "name": name.upper(),
+                "type": furniture_type.upper(),
+                "model": model.upper(),
+                "color1": color1.upper(),
+                "color2": color2.upper(),
+                "color3": color3.upper(),
+                "extra": extra,
+            },
+            "base_dir": base_dir,
+            "local_files": local_files,
+            "ftp_files": ftp_files,
+            "ftp_sources": ftp_sources,
+            "excel_entry": excel_entry,
+            "sql_values": sql_values,
+            "has_data": has_data,
+        }
+
+    def _on_edit_button(C):
+        """Toggle edit mode for existing entries."""
+
+        if C.is_processing:
+            O.showwarning(OPERATION_TITLE, PROCESSING_MSG)
+            return
+        if C.is_editing:
+            C._clear_edit_state()
+            return
+        snapshot = C._capture_current_state(include_sql=J)
+        if not snapshot.get("has_data"):
+            O.showwarning(NO_DATA_MSG, EDIT_REQUIRES_DATA_MSG)
+            return
+        C.edit_snapshot = snapshot
+        C.is_editing = J
+        if hasattr(C, "btn_edit"):
+            C.btn_edit.configure(text=CANCEL_EDIT_LABEL)
+
+    def _clear_edit_state(C):
+        """Reset edit mode and restore default button label."""
+
+        C.is_editing = h
+        C.edit_snapshot = I
+        if hasattr(C, "btn_edit"):
+            C.btn_edit.configure(text=EDIT_LABEL)
+
+    def _paths_equal(C, left, right):
+        """Return True when two filesystem paths reference the same file."""
+
+        if not left or not right:
+            return h
+        try:
+            return A.path.samefile(left, right)
+        except E:
+            return A.path.normcase(A.path.abspath(left)) == A.path.normcase(
+                A.path.abspath(right)
+            )
+
+    def _prepare_edit_changes(C, snapshot, new_fields):
+        """Mark pending operations required when editing an existing entry."""
+
+        if not snapshot:
+            return
+        local_files = snapshot.get("local_files", {})
+        for idx, old_path in local_files.items():
+            slot = C.slots[idx]
+            current_path = slot.get(f)
+            if current_path and C._paths_equal(current_path, old_path):
+                C.pending_additions.setdefault(idx, old_path)
+                if idx not in C.pending_deletions:
+                    C.pending_deletions[idx] = old_path
+        ftp_files = snapshot.get("ftp_files", {})
+        new_ean = new_fields.get("ean", snapshot.get("ean", q))
+        old_ean = snapshot.get("ean", q)
+        if ftp_files and new_ean != old_ean:
+            for prefix, remote_name in ftp_files.items():
+                for idx, slot in A0(C.slots):
+                    if slot[Aa] == prefix:
+                        C.pending_ftp_deletions[idx] = remote_name
+                        break
+
+    def _copy_directory(C, src, dst):
+        """Copy a directory tree without relying on ``dirs_exist_ok``."""
+
+        if not A.path.isdir(src):
+            return
+        A.makedirs(dst, exist_ok=J)
+        for root_dir, dirs, files in A.walk(src):
+            rel = A.path.relpath(root_dir, src)
+            target_root = dst if rel == "." else A.path.join(dst, rel)
+            A.makedirs(target_root, exist_ok=J)
+            for file_name in files:
+                source_path = A.path.join(root_dir, file_name)
+                target_path = A.path.join(target_root, file_name)
+                try:
+                    Af.copy2(source_path, target_path)
+                except E as exc:
+                    log_error(f"Failed to copy {source_path} to {target_path}: {exc}")
+
+    def _ftp_connect(C):
+        """Create an FTP connection based on the current configuration."""
+
+        ftp_cfg = D.get(H, {})
+        host = ftp_cfg.get(v)
+        port = ftp_cfg.get(r, 21)
+        user = ftp_cfg.get(N)
+        password = ftp_cfg.get(M)
+        ftp_path = ftp_cfg.get(m, B)
+        if not (host and user and password):
+            return I
+        ftp = AB.FTP()
+        ftp.connect(host, port, timeout=10)
+        ftp.login(user, password)
+        ftp.set_pasv(J)
+        if ftp_path:
+            ftp.cwd(ftp_path)
+        return ftp
+
+    def _download_ftp_snapshot(C, sources, target_dir, ftp_sources):
+        """Download remote FTP files required for a backup."""
+
+        if not sources:
+            return
+        A.makedirs(target_dir, exist_ok=J)
+        remaining = [item for item in sources if item not in ftp_sources]
+        for fname, local_path in ftp_sources.items():
+            try:
+                Af.copy2(local_path, A.path.join(target_dir, fname))
+            except E as exc:
+                log_error(f"Failed to copy cached FTP file {local_path}: {exc}")
+        if not remaining:
+            return
+        try:
+            ftp = C._ftp_connect()
+        except E as exc:
+            log_error(f"Failed to connect to FTP for backup: {exc}")
+            return
+        if not ftp:
+            return
+        try:
+            for fname in remaining:
+                target_path = A.path.join(target_dir, fname)
+                try:
+                    with x(target_path, "wb") as handle:
+                        ftp.retrbinary(f"RETR {fname}", handle.write)
+                except E as exc:
+                    log_error(f"Failed to download FTP file {fname}: {exc}")
+        finally:
+            try:
+                ftp.quit()
+            except E:
+                pass
+
+    def _create_backup_state(C, snapshot, current_fields):
+        """Persist a snapshot of the current data for undo support."""
+
+        if not snapshot or not C.undo_root:
+            return
+        timestamp = A9.now().strftime("%Y%m%d%H%M%S")
+        identifier = f"{timestamp}_{snapshot.get('ean', q)}_{uuid.uuid4().hex[:6]}"
+        backup_dir = A.path.join(C.undo_root, identifier)
+        try:
+            A.makedirs(backup_dir, exist_ok=J)
+        except E as exc:
+            O.showerror(AK, BACKUP_CREATE_FAILED_MSG.format(reason=exc))
+            log_error(f"Failed to create backup directory {backup_dir}: {exc}")
+            return
+        meta = {
+            "timestamp": timestamp,
+            "ean": snapshot.get("ean", q),
+            "current_ean": current_fields.get("ean", snapshot.get("ean", q)),
+            "fields": snapshot.get("fields", {}),
+            "current_fields": current_fields,
+            "base_dir": snapshot.get("base_dir"),
+            "ftp_files": snapshot.get("ftp_files", {}),
+            "excel_entry": snapshot.get("excel_entry", {}),
+            "sql_values": snapshot.get("sql_values", {}),
+        }
+        local_src = snapshot.get("base_dir")
+        if local_src and A.path.isdir(local_src):
+            C._copy_directory(local_src, A.path.join(backup_dir, "local"))
+        ftp_files = list({fname for fname in snapshot.get("ftp_files", {}).values() if fname})
+        ftp_sources = snapshot.get("ftp_sources", {})
+        if ftp_files:
+            C._download_ftp_snapshot(ftp_files, A.path.join(backup_dir, "ftp"), ftp_sources)
+        meta_path = A.path.join(backup_dir, "metadata.json")
+        try:
+            with x(meta_path, "w", encoding=k) as handle:
+                Ar.dump(meta, handle, indent=2, ensure_ascii=Ay)
+        except E as exc:
+            log_error(f"Failed to write undo metadata {meta_path}: {exc}")
+        C.undo_stack.insert(0, {"path": backup_dir, "meta": meta})
+        while Q(C.undo_stack) > MAX_UNDO_HISTORY:
+            extra = C.undo_stack.pop()
+            try:
+                Af.rmtree(extra["path"])
+            except E as exc:
+                log_error(f"Failed to remove old backup {extra['path']}: {exc}")
+        C._update_undo_button()
+
+    def _fetch_sql_state(C, ean_value):
+        """Fetch current SQL values for configured image columns."""
+
+        if not (ean_value and ean_value != q and D.get(u, J)):
+            return {}
+        context = C._extract_sql_presence_context(ean_value)
+        if not context:
+            return {}
+        table, where_clause = context
+        columns = [slot.get("label") for slot in C.slots if slot.get("label")]
+        if not columns:
+            return {}
+        column_expr = ", ".join(columns)
+        db_type = config.CONFIG.get(p, K).lower()
+        if db_type == K:
+            query = f"SELECT {column_expr} FROM {table}{where_clause}"
+            if " limit " not in query.lower():
+                query = f"{query} LIMIT 1"
+        else:
+            query = f"SELECT TOP 1 {column_expr} FROM {table}{where_clause}"
+        values = {}
+        try:
+            conn = connect_db()
+            cur = conn.cursor()
+            cur.execute(query)
+            row = cur.fetchone()
+            if row:
+                for idx, column in enumerate(columns):
+                    try:
+                        values[column] = row[idx]
+                    except E:
+                        values[column] = I
+        except E as exc:
+            log_error(f"Failed to fetch SQL state for undo: {exc}")
+        finally:
+            try:
+                cur.close()
+            except E:
+                pass
+            try:
+                conn.close()
+            except E:
+                pass
+        return values
+
+    def _restore_sql_values(C, ean_value, values):
+        """Restore SQL values for ``ean_value`` using the configured template."""
+
+        if not (ean_value and values and D.get(u, J)):
+            return
+        try:
+            conn = connect_db()
+            cur = conn.cursor()
+            template = D.get(w, SQL_UPDATE_TEMPLATE)
+            for column, value in values.items():
+                filename = G(value or B)
+                try:
+                    statement = template.format(
+                        col=column,
+                        filename=filename,
+                        ean=ean_value,
+                    )
+                    cur.execute(statement)
+                except E as exc:
+                    log_error(f"Failed to execute SQL restore for {column}: {exc}")
+            conn.commit()
+        except E as exc:
+            log_error(f"Failed to restore SQL values: {exc}")
+        finally:
+            try:
+                cur.close()
+            except E:
+                pass
+            try:
+                conn.close()
+            except E:
+                pass
+
+    def _clear_sql_values(C, ean_value):
+        """Blank SQL columns for ``ean_value`` if configured."""
+
+        if not (ean_value and D.get(u, J)):
+            return
+        context = C._extract_sql_presence_context(ean_value)
+        if not context:
+            return
+        table, where_clause = context
+        columns = [slot.get("label") for slot in C.slots if slot.get("label")]
+        if not columns:
+            return
+        assignments = ", ".join([f"{column} = ''" for column in columns])
+        query = f"UPDATE {table} SET {assignments}{where_clause}"
+        try:
+            conn = connect_db()
+            cur = conn.cursor()
+            cur.execute(query)
+            conn.commit()
+        except E as exc:
+            log_error(f"Failed to clear SQL values for undo: {exc}")
+        finally:
+            try:
+                cur.close()
+            except E:
+                pass
+            try:
+                conn.close()
+            except E:
+                pass
+
+    def _delete_ftp_for_ean(C, ftp, ean_value):
+        """Remove remote FTP files belonging to ``ean_value``."""
+
+        if not ftp or not ean_value or ean_value == q:
+            return
+        try:
+            names = ftp.nlst()
+        except E:
+            names = []
+        for name in names:
+            if name.startswith(f"{ean_value}_"):
+                try:
+                    ftp.delete(name)
+                except E as exc:
+                    log_error(f"Failed to delete FTP file {name}: {exc}")
+
+    def _upload_ftp_directory(C, ftp, source_dir):
+        """Upload files from ``source_dir`` to FTP using stored filenames."""
+
+        if not ftp or not A.path.isdir(source_dir):
+            return
+        for file_name in A.listdir(source_dir):
+            path = A.path.join(source_dir, file_name)
+            if not A.path.isfile(path):
+                continue
+            try:
+                with x(path, "rb") as handle:
+                    ftp.storbinary(f"STOR {file_name}", handle)
+            except E as exc:
+                log_error(f"Failed to upload FTP file {file_name}: {exc}")
+
+    def _cleanup_empty_dirs(C, path):
+        """Remove ``path`` and empty parent directories under the base folder."""
+
+        if not path:
+            return
+        try:
+            current = path
+            base = l
+            while current.startswith(base) and current != base:
+                if A.path.isdir(current) and not A.listdir(current):
+                    A.rmdir(current)
+                    current = A.path.dirname(current)
+                else:
+                    break
+        except E:
+            pass
+
+    def _restore_from_backup(C, entry):
+        """Restore application data from a single undo entry."""
+
+        meta = entry.get("meta", {})
+        path = entry.get("path")
+        old_ean = meta.get("ean", q)
+        current_ean = meta.get("current_ean", old_ean)
+        fields = meta.get("fields", {})
+        current_fields = meta.get("current_fields", {})
+        base_dir = meta.get("base_dir")
+        errors = []
+        try:
+            if current_ean and current_ean != old_ean:
+                remove_ean_entry(current_ean)
+        except E as exc:
+            errors.append(f"Excel: {exc}")
+        try:
+            if fields:
+                save_ean_entry(
+                    old_ean,
+                    fields.get("name", B),
+                    fields.get("type", B),
+                    fields.get("model", B),
+                    fields.get("color1", B),
+                    fields.get("color2", B),
+                    fields.get("color3", B),
+                    fields.get("extra", L),
+                )
+        except E as exc:
+            errors.append(f"Excel: {exc}")
+        local_dir = A.path.join(path, "local")
+        if A.path.isdir(local_dir) and base_dir:
+            try:
+                if current_fields:
+                    new_dir = C._compute_entry_dir(
+                        current_fields.get("name", B),
+                        current_fields.get("type", B),
+                        current_fields.get("model", B),
+                        current_fields.get("color1", B),
+                        current_fields.get("color2", B),
+                        current_fields.get("color3", B),
+                        current_fields.get("extra", L),
+                    )
+                    if new_dir and new_dir != base_dir and A.path.isdir(new_dir):
+                        Af.rmtree(new_dir)
+                if A.path.isdir(base_dir):
+                    Af.rmtree(base_dir)
+                C._copy_directory(local_dir, base_dir)
+            except E as exc:
+                errors.append(f"Lokalnie: {exc}")
+        ftp_dir = A.path.join(path, "ftp")
+        try:
+            ftp = C._ftp_connect()
+        except E as exc:
+            ftp = I
+            errors.append(f"FTP: {exc}")
+        if ftp:
+            try:
+                if current_ean and current_ean != old_ean:
+                    C._delete_ftp_for_ean(ftp, current_ean)
+                C._delete_ftp_for_ean(ftp, old_ean)
+                C._upload_ftp_directory(ftp, ftp_dir)
+            except E as exc:
+                errors.append(f"FTP: {exc}")
+            finally:
+                try:
+                    ftp.quit()
+                except E:
+                    pass
+        sql_values = meta.get("sql_values", {})
+        if sql_values:
+            try:
+                C._restore_sql_values(old_ean, sql_values)
+            except E as exc:
+                errors.append(f"SQL: {exc}")
+        if current_ean and current_ean != old_ean:
+            try:
+                C._clear_sql_values(current_ean)
+            except E as exc:
+                errors.append(f"SQL: {exc}")
+        if errors:
+            reason = "; ".join(errors)
+            return Ay, reason
+        return J, B
+
+    def _on_undo(C):
+        """Restore the most recent backup snapshot."""
+
+        if C.is_processing:
+            O.showwarning(OPERATION_TITLE, PROCESSING_MSG)
+            return
+        if not C.undo_stack:
+            O.showinfo(SAVED_LABEL, UNDO_UNAVAILABLE_MSG)
+            return
+        entry = C.undo_stack.pop(0)
+        backup_path = entry.get("path")
+        success, reason = C._restore_from_backup(entry)
+        if backup_path and A.path.isdir(backup_path):
+            try:
+                Af.rmtree(backup_path)
+            except E as exc:
+                log_error(f"Failed to remove consumed backup {backup_path}: {exc}")
+        C._update_undo_button()
+        if success:
+            O.showinfo(SAVED_LABEL, UNDO_SUCCESS_MSG.format(ean=entry["meta"].get("ean", q)))
+            try:
+                BC_ = prepare_excel_lists()
+                entries_map = BC_.get(W, {})
+                if W in BC_:
+                    BC_.pop(W)
+                C.entries = entries_map
+                C.lists = BC_
+            except E as exc:
+                log_error(f"Failed to reload entries after undo: {exc}")
+            fields = entry["meta"].get("fields", {})
+            C.var_name.set(fields.get("name", B))
+            C.var_type.set(fields.get("type", B))
+            C.var_model.set(fields.get("model", B))
+            C.var_color1.set(fields.get("color1", B))
+            C.var_color2.set(fields.get("color2", B))
+            C.var_color3.set(fields.get("color3", B))
+            extra_value = fields.get("extra", L)
+            C.var_extra.set(B if extra_value == L else extra_value)
+            C.var_ean.set(entry["meta"].get("ean", q))
+            C._on_name_commit()
+            C._on_type_commit()
+            C._on_model_commit()
+            C._on_color_commit()
+            C._on_extra_commit()
+            C._clear_edit_state()
+            C._load_existing_files()
+        else:
+            O.showerror(AK, UNDO_FAILED_MSG.format(reason=reason))
 
     def _set_icon_status(C, icon, present):
         """Toggle the coloured indicator showing local/remote file presence."""
@@ -1472,6 +2105,29 @@ class App(BU.Tk):
                     C.entries = BC_[W]
             except E as R:
                 log_error(f"Failed to reload entries after saving: {R}")
+        current_fields = {
+            "name": AE_.upper(),
+            "type": AF_.upper(),
+            "model": AG_.upper(),
+            "color1": AH_.upper(),
+            "color2": p_.upper() if p_ else B,
+            "color3": s_.upper() if s_ else B,
+            "extra": b_ if b_ != B else L,
+            "ean": K_.upper() if K_ else q,
+        }
+        backup_source = I
+        if C.is_editing and C.edit_snapshot:
+            backup_source = C.edit_snapshot
+            C._prepare_edit_changes(C.edit_snapshot, current_fields)
+        else:
+            snapshot = C._capture_current_state(include_sql=J)
+            if snapshot.get("has_data"):
+                backup_source = snapshot
+        if backup_source:
+            C._create_backup_state(backup_source, current_fields)
+        new_base_dir = C._compute_entry_dir(
+            AE_, AF_, AG_, AH_, p_, s_, b_ if b_ != B else L
+        )
         C.is_processing = J
         C.btn_submit.configure(state=V)
         C.btn_open.configure(state=V)
@@ -1493,6 +2149,10 @@ class App(BU.Tk):
         C.ui_log.insert(F.END, PROCESSING_UI_MSG + "\n")
         C.ui_log.configure(state=Ak)
         result_data = {}
+        result_data["old_base_dir"] = (
+            backup_source.get("base_dir") if backup_source else I
+        )
+        result_data["new_base_dir"] = new_base_dir
 
         def heavy_work():
             A3 = "rowcount"
@@ -2167,6 +2827,11 @@ class App(BU.Tk):
             K_val = result_data.get("ean", K_)
             if not err_set and not A__ and not Y_ and not AW_msg:
                 C._load_existing_files()
+                old_dir = result_data.get("old_base_dir")
+                new_dir = result_data.get("new_base_dir")
+                if old_dir and new_dir and old_dir != new_dir:
+                    C._cleanup_empty_dirs(old_dir)
+                C._clear_edit_state()
             if err_set:
                 O.showwarning(
                     A,

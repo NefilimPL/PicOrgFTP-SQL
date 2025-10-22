@@ -276,6 +276,25 @@ OPEN_FOLDER_LABEL = LANG.get(
 )
 CLEAR_LOG_LABEL = LANG.get("clear_log", LANG_EN.get("clear_log", "Clear log"))
 UPDATE_LABEL = LANG.get("update_label", "Aktualizuj")
+EDIT_LABEL = LANG.get("edit_label", "Edytuj")
+CANCEL_EDIT_LABEL = LANG.get("cancel_edit_label", "Anuluj edycję")
+EDIT_REQUIRES_DATA_MSG = LANG.get(
+    "edit_requires_data",
+    "Wczytaj istniejący wpis przed rozpoczęciem edycji.",
+)
+UNDO_LABEL = LANG.get("undo_label", "Cofnij")
+UNDO_SUCCESS_MSG = LANG.get(
+    "undo_success", "Przywrócono poprzedni stan danych dla EAN {ean}."
+)
+UNDO_FAILED_MSG = LANG.get(
+    "undo_failed", "Nie udało się przywrócić danych: {reason}"
+)
+UNDO_UNAVAILABLE_MSG = LANG.get(
+    "undo_unavailable", "Brak zmian do cofnięcia."
+)
+BACKUP_CREATE_FAILED_MSG = LANG.get(
+    "backup_create_failed", "Nie udało się utworzyć kopii zapasowej: {reason}"
+)
 CHOOSE_LABEL = LANG.get("choose_label", "Wybierz")
 NEW_COMBINATION_LABEL = LANG.get("new_combination_label", "Nowa kombinacja")
 FTP_ERROR_LABEL = LANG.get("ftp_error", "Błąd FTP")
