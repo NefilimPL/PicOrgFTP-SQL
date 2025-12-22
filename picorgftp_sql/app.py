@@ -2491,9 +2491,9 @@ class App(BU.Tk):
             textvariable=format_info_var,
             wraplength=440,
             justify="left",
-            anchor="w",
+            anchor="nw",
         )
-        format_info_label.place(relx=0, rely=0, relwidth=1, relheight=1)
+        format_info_label.grid(row=0, column=0, sticky="nw", padx=4, pady=2)
         C.Label(U, text=LANGUAGE_LABEL).grid(row=0, column=0, sticky=R, padx=5, pady=2)
         lang_var = F.StringVar(value=LANG_PREF)
         lang_combo = C.Combobox(
