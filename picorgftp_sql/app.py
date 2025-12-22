@@ -2483,18 +2483,17 @@ class App(BU.Tk):
         format_info_var = F.StringVar(
             value=_format_info_text(A.tif_target_format.get())
         )
+        format_info_frame = C.Frame(L, width=460, height=60)
+        format_info_frame.grid(row=5, column=2, columnspan=2, sticky=T, padx=5, pady=2)
+        format_info_frame.grid_propagate(h)
         format_info_label = C.Label(
-            L,
+            format_info_frame,
             textvariable=format_info_var,
-            wraplength=450,
+            wraplength=440,
             justify="left",
             anchor="w",
-            width=60,
-            height=3,
         )
-        format_info_label.grid(
-            row=5, column=2, columnspan=2, sticky=T, padx=5, pady=2
-        )
+        format_info_label.place(relx=0, rely=0, relwidth=1, relheight=1)
         C.Label(U, text=LANGUAGE_LABEL).grid(row=0, column=0, sticky=R, padx=5, pady=2)
         lang_var = F.StringVar(value=LANG_PREF)
         lang_combo = C.Combobox(
