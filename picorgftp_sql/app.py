@@ -120,10 +120,11 @@ def _format_info_text(fmt):
     info = FORMAT_INFO_TEXTS.get(fmt_upper)
     if info:
         return info
-    return LANG.get(
+    generic = LANG.get(
         "format_info_generic",
         "Brak opisu dla tego formatu. Rozmiar zależy od treści obrazu.",
     )
+    return f"{fmt_upper}: {generic}"
 class App(BU.Tk):
     def __init__(B):
         """Initialise the Tk window, form state and runtime caches."""
@@ -2487,6 +2488,9 @@ class App(BU.Tk):
             textvariable=format_info_var,
             wraplength=450,
             justify="left",
+            anchor=Am,
+            width=60,
+            height=3,
         )
         format_info_label.grid(
             row=5, column=2, columnspan=2, sticky=T, padx=5, pady=2
