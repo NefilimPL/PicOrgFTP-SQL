@@ -2450,13 +2450,13 @@ class App(BU.Tk):
         Ah.grid(row=1, column=0, padx=5, sticky=T)
         C.Label(L, text=RESIZE_LABEL).grid(row=1, column=1, sticky=T)
         l_ = C.Entry(L, textvariable=A.resize_max_dim, width=5)
-        l_.grid(row=1, column=2)
+        l_.grid(row=1, column=2, sticky="w")
         C.Label(L, text=PX_MAX_LABEL).grid(row=1, column=3, sticky=T)
         Ai = C.Checkbutton(L, text=B, variable=A.opt_compress)
         Ai.grid(row=2, column=0, padx=5, sticky=T)
         C.Label(L, text=COMPRESS_LABEL).grid(row=2, column=1, sticky=T)
         n = C.Spinbox(L, from_=10, to=100, textvariable=A.compress_quality, width=5)
-        n.grid(row=2, column=2, sticky=T)
+        n.grid(row=2, column=2, sticky="w")
         C.Label(L, text="%").grid(row=2, column=3, sticky=T)
         Aj = C.Checkbutton(L, text=B, variable=A.opt_maxsize)
         Aj.grid(row=3, column=0, padx=5, sticky=T)
@@ -2464,7 +2464,7 @@ class App(BU.Tk):
         o = C.Spinbox(
             L, from_=100, to=10000, increment=100, textvariable=A.max_file_kb, width=6
         )
-        o.grid(row=3, column=2, sticky=T)
+        o.grid(row=3, column=2, sticky="w")
         C.Label(L, text="KB").grid(row=3, column=3, sticky=T)
         Ak = C.Checkbutton(L, text=B, variable=A.opt_convert_tif)
         Ak.grid(row=4, column=0, padx=5, sticky=T)
@@ -2476,15 +2476,17 @@ class App(BU.Tk):
             state=d_,
             width=10,
         )
-        q.grid(row=4, column=2, sticky=T)
+        q.grid(row=4, column=2, sticky="w")
         C.Label(L, text=LANG.get("format_info_label", "Informacje o formacie:")).grid(
-            row=5, column=1, sticky=T, padx=5
+            row=5, column=1, sticky="nw", padx=5, pady=2
         )
         format_info_var = F.StringVar(
             value=_format_info_text(A.tif_target_format.get())
         )
         format_info_frame = C.Frame(L, width=460, height=60)
-        format_info_frame.grid(row=5, column=2, columnspan=2, sticky=T, padx=5, pady=2)
+        format_info_frame.grid(
+            row=5, column=2, columnspan=2, sticky="nw", padx=5, pady=2
+        )
         format_info_frame.grid_propagate(h)
         format_info_label = C.Label(
             format_info_frame,
@@ -2531,33 +2533,33 @@ class App(BU.Tk):
         C.Label(Q, text=FTP_SERVER_LABEL).grid(row=0, column=0, sticky=R, padx=5, pady=2)
         s = F.StringVar(value=D[H][v])
         AD_ = C.Entry(Q, textvariable=s, width=30)
-        AD_.grid(row=0, column=1, padx=5, pady=2)
+        AD_.grid(row=0, column=1, padx=5, pady=2, sticky="w")
         C.Label(Q, text=PORT_LABEL).grid(row=1, column=0, sticky=R, padx=5, pady=2)
         t = F.IntVar(value=D[H][r])
         AE_ = C.Entry(Q, textvariable=t, width=6)
-        AE_.grid(row=1, column=1, sticky=T, padx=5, pady=2)
+        AE_.grid(row=1, column=1, sticky="w", padx=5, pady=2)
         C.Label(Q, text=k_).grid(row=2, column=0, sticky=R, padx=5, pady=2)
         x_ = F.StringVar(value=D[H][N])
         AF_ = C.Entry(Q, textvariable=x_, width=30)
-        AF_.grid(row=2, column=1, padx=5, pady=2)
+        AF_.grid(row=2, column=1, padx=5, pady=2, sticky="w")
         C.Label(Q, text=j_).grid(row=3, column=0, sticky=R, padx=5, pady=2)
         y_ = F.StringVar(value=D[H][M])
         AG_ = C.Entry(Q, textvariable=y_, show=Y, width=30)
-        AG_.grid(row=3, column=1, padx=5, pady=2)
+        AG_.grid(row=3, column=1, padx=5, pady=2, sticky="w")
         C.Label(Q, text=FTP_PATH_LABEL).grid(
             row=4, column=0, sticky=R, padx=5, pady=2
         )
         g_ = F.StringVar(value=D[H][m])
         AH_ = C.Entry(Q, textvariable=g_, width=30)
-        AH_.grid(row=4, column=1, padx=5, pady=2)
+        AH_.grid(row=4, column=1, padx=5, pady=2, sticky="w")
         AI_ = C.Button(Q, text=a)
-        AI_.grid(row=5, column=0, sticky=R, padx=5, pady=5)
+        AI_.grid(row=5, column=0, columnspan=2, sticky="w", padx=5, pady=5)
         C.Label(Q, text=FTP_TEST_LABEL).grid(
             row=6, column=0, sticky=R, padx=5, pady=5
         )
         AJ_ = F.StringVar(value=B)
         sql_query_entry = C.Entry(Q, textvariable=AJ_, width=50, state=d_)
-        sql_query_entry.grid(row=6, column=1, padx=5, pady=5, sticky=T)
+        sql_query_entry.grid(row=6, column=1, padx=5, pady=5, sticky="w")
 
         def Ax():
             A_ = B
