@@ -79,6 +79,51 @@ def _build_convert_format_choices():
 
 
 CONVERT_TARGET_FORMATS = _build_convert_format_choices()
+
+FORMAT_INFO_TEXTS = {
+    "JPEG": LANG.get(
+        "format_info_jpeg",
+        "JPEG/JPG: stratny format, zwykle najmniejszy rozmiar; brak przezroczystości.",
+    ),
+    "PNG": LANG.get(
+        "format_info_png",
+        "PNG: bezstratny, wspiera przezroczystość; zwykle większy rozmiar.",
+    ),
+    "WEBP": LANG.get(
+        "format_info_webp",
+        "WEBP: może być stratny lub bezstratny; zwykle mniejszy niż PNG/JPEG.",
+    ),
+    "BMP": LANG.get(
+        "format_info_bmp",
+        "BMP: bez kompresji; bardzo duży rozmiar.",
+    ),
+    "GIF": LANG.get(
+        "format_info_gif",
+        "GIF: ograniczona paleta kolorów, dobra do prostych grafik; mniejszy niż PNG.",
+    ),
+    "TIFF": LANG.get(
+        "format_info_tiff",
+        "TIFF: często bezstratny, duży rozmiar; używany w skanach.",
+    ),
+}
+
+
+def _format_info_text(fmt):
+    if not fmt:
+        return LANG.get(
+            "format_info_placeholder",
+            "Wybierz format, aby zobaczyć opis. Rozmiar zależy od treści obrazu.",
+        )
+    fmt_upper = fmt.upper()
+    if fmt_upper == "JPG":
+        fmt_upper = "JPEG"
+    info = FORMAT_INFO_TEXTS.get(fmt_upper)
+    if info:
+        return info
+    return LANG.get(
+        "format_info_generic",
+        "Brak opisu dla tego formatu. Rozmiar zależy od treści obrazu.",
+    )
 class App(BU.Tk):
     def __init__(B):
         """Initialise the Tk window, form state and runtime caches."""
@@ -2431,6 +2476,21 @@ class App(BU.Tk):
             width=10,
         )
         q.grid(row=4, column=2, sticky=T)
+        C.Label(L, text=LANG.get("format_info_label", "Informacje o formacie:")).grid(
+            row=5, column=1, sticky=T, padx=5
+        )
+        format_info_var = F.StringVar(
+            value=_format_info_text(A.tif_target_format.get())
+        )
+        format_info_label = C.Label(
+            L,
+            textvariable=format_info_var,
+            wraplength=450,
+            justify=Am,
+        )
+        format_info_label.grid(
+            row=5, column=2, columnspan=2, sticky=T, padx=5, pady=2
+        )
         C.Label(U, text=LANGUAGE_LABEL).grid(row=0, column=0, sticky=R, padx=5, pady=2)
         lang_var = F.StringVar(value=LANG_PREF)
         lang_combo = C.Combobox(
@@ -2457,6 +2517,9 @@ class App(BU.Tk):
         Ar = A.opt_maxsize.trace_add(Y_, lambda *B: Ao())
         get_file_lock_user = A.opt_convert_tif.trace_add(
             Y_, lambda *B: q.configure(state=d_ if A.opt_convert_tif.get() else V)
+        )
+        A.tif_target_format.trace_add(
+            Y_, lambda *B: format_info_var.set(_format_info_text(A.tif_target_format.get()))
         )
         l_.configure(state=X if A.opt_resize.get() else V)
         n.configure(state=X if A.opt_compress.get() else V)
