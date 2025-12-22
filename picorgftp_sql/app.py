@@ -22,6 +22,109 @@ D = config.CONFIG
 LANG_PREF = localization.LANG_PREF
 
 from .localization import *  # noqa: F401,F403
+
+EXCLUDED_CONVERT_FORMATS = {"PDF", "EPS", "PS", "XPS"}
+
+
+def _build_image_extension_map():
+    extensions = {}
+    try:
+        for ext, fmt in AA.registered_extensions().items():
+            if not ext:
+                continue
+            fmt_upper = fmt.upper()
+            if fmt_upper in EXCLUDED_CONVERT_FORMATS:
+                continue
+            extensions[ext.lower()] = fmt_upper
+    except Exception:
+        pass
+    return extensions
+
+
+IMAGE_EXTENSION_FORMATS = _build_image_extension_map()
+
+
+def _build_format_extension_map():
+    format_map = {}
+    try:
+        for ext, fmt in AA.registered_extensions().items():
+            if not ext:
+                continue
+            fmt_upper = fmt.upper()
+            if fmt_upper in EXCLUDED_CONVERT_FORMATS or fmt_upper not in AA.SAVE:
+                continue
+            ext_lower = ext.lower()
+            if fmt_upper == "JPEG":
+                if ext_lower == ".jpg":
+                    format_map[fmt_upper] = ext_lower
+                    continue
+                if fmt_upper in format_map:
+                    continue
+            format_map.setdefault(fmt_upper, ext_lower)
+    except Exception:
+        pass
+    return format_map
+
+
+FORMAT_TO_EXTENSION = _build_format_extension_map()
+
+
+def _build_convert_format_choices():
+    formats = sorted(set(FORMAT_TO_EXTENSION))
+    if "JPEG" in formats and "JPG" not in formats:
+        formats.insert(0, "JPG")
+    if not formats:
+        formats = [At, "JPG", "BMP", "GIF"]
+    return formats
+
+
+CONVERT_TARGET_FORMATS = _build_convert_format_choices()
+
+FORMAT_INFO_TEXTS = {
+    "JPEG": LANG.get(
+        "format_info_jpeg",
+        "JPEG/JPG: stratny format, zwykle najmniejszy rozmiar; brak przezroczystości.",
+    ),
+    "PNG": LANG.get(
+        "format_info_png",
+        "PNG: bezstratny, wspiera przezroczystość; zwykle większy rozmiar.",
+    ),
+    "WEBP": LANG.get(
+        "format_info_webp",
+        "WEBP: może być stratny lub bezstratny; zwykle mniejszy niż PNG/JPEG.",
+    ),
+    "BMP": LANG.get(
+        "format_info_bmp",
+        "BMP: bez kompresji; bardzo duży rozmiar.",
+    ),
+    "GIF": LANG.get(
+        "format_info_gif",
+        "GIF: ograniczona paleta kolorów, dobra do prostych grafik; mniejszy niż PNG.",
+    ),
+    "TIFF": LANG.get(
+        "format_info_tiff",
+        "TIFF: często bezstratny, duży rozmiar; używany w skanach.",
+    ),
+}
+
+
+def _format_info_text(fmt):
+    if not fmt:
+        return LANG.get(
+            "format_info_placeholder",
+            "Wybierz format, aby zobaczyć opis. Rozmiar zależy od treści obrazu.",
+        )
+    fmt_upper = fmt.upper()
+    if fmt_upper == "JPG":
+        fmt_upper = "JPEG"
+    info = FORMAT_INFO_TEXTS.get(fmt_upper)
+    if info:
+        return info
+    generic = LANG.get(
+        "format_info_generic",
+        "Brak opisu dla tego formatu. Rozmiar zależy od treści obrazu.",
+    )
+    return f"{fmt_upper}: {generic}"
 class App(BU.Tk):
     def __init__(B):
         """Initialise the Tk window, form state and runtime caches."""
@@ -1677,7 +1780,65 @@ class App(BU.Tk):
                                     error=z,
                                 )
                         ext_lower = BH_.lower()
-                        if ext_lower in [F, O, V, ".bmp", ".gif"]:
+                        is_image = ext_lower in IMAGE_EXTENSION_FORMATS
+                        if is_image and C.opt_convert_tif.get():
+                            target_fmt_raw = C.tif_target_format.get().strip().upper()
+                            if not target_fmt_raw:
+                                target_fmt_raw = At
+                            target_fmt = "JPEG" if target_fmt_raw == "JPG" else target_fmt_raw
+                            t_ext = FORMAT_TO_EXTENSION.get(
+                                target_fmt, "." + target_fmt_raw.lower()
+                            )
+                            c_ = a.join(P_) + t_ext
+                            S_ = A.path.join(i_, c_)
+                            if A.path.exists(S_):
+                                try:
+                                    A.remove(S_)
+                                except E as z:
+                                    log_error_loc(
+                                        "remove_file_before_overwrite_failed",
+                                        file=A.path.basename(S_),
+                                        error=z,
+                                    )
+                            A1 = AA.open(src_path)
+                            if target_fmt == "JPEG" and A1.mode in ("RGBA", "LA", "P"):
+                                A1 = A1.convert("RGB")
+                            if C.opt_resize.get():
+                                max_dim = C.resize_max_dim.get() or 2000
+                                A1.thumbnail((max_dim, max_dim), AA.LANCZOS)
+                            save_params = {}
+                            if t_ext in [F, O]:
+                                quality = 95
+                                if C.opt_compress.get():
+                                    quality = max(
+                                        1, min(100, C.compress_quality.get() or 85)
+                                    )
+                                save_params[W] = quality
+                                save_params[X] = J
+                            if t_ext == V:
+                                save_params[X] = J
+                            A1.save(S_, format=target_fmt, **save_params)
+                            if C.opt_maxsize.get():
+                                max_bytes = (C.max_file_kb.get() or 0) * 1024
+                                if max_bytes > 0 and t_ext in [F, O]:
+                                    try:
+                                        quality = save_params.get(W, 95)
+                                        while quality > 10 and A.path.getsize(S_) > max_bytes:
+                                            quality -= 5
+                                            A1.save(
+                                                S_,
+                                                format=target_fmt,
+                                                quality=quality,
+                                                optimize=J,
+                                            )
+                                    except E as R:
+                                        log_error_loc(
+                                            "file_resize_error",
+                                            file=c_,
+                                            error=R,
+                                        )
+                            log_info_loc("image_added_modified", file=c_)
+                        elif ext_lower in [F, O, V, ".bmp", ".gif"]:
                             A1 = AA.open(src_path)
                             if C.opt_resize.get():
                                 max_dim = C.resize_max_dim.get() or 2000
@@ -1717,66 +1878,11 @@ class App(BU.Tk):
                                             )
                             log_info_loc("image_added_modified", file=c_)
                         elif ext_lower in [".tif", ".tiff"]:
-                            if C.opt_convert_tif.get():
-                                target_fmt = C.tif_target_format.get().upper()
-                                if target_fmt in ["JPG", "JPEG"]:
-                                    t_ext = F
-                                elif target_fmt == "PNG":
-                                    t_ext = V
-                                elif target_fmt == "BMP":
-                                    t_ext = ".bmp"
-                                elif target_fmt == "GIF":
-                                    t_ext = ".gif"
-                                else:
-                                    t_ext = "." + target_fmt.lower()
-                                c_ = a.join(P_) + t_ext
-                                S_ = A.path.join(i_, c_)
-                                if A.path.exists(S_):
-                                    try:
-                                        A.remove(S_)
-                                    except E as z:
-                                        log_error_loc(
-                                            "remove_file_before_overwrite_failed",
-                                            file=A.path.basename(S_),
-                                            error=z,
-                                        )
-                                A1 = AA.open(src_path)
-                                if C.opt_resize.get():
-                                    max_dim = C.resize_max_dim.get() or 2000
-                                    A1.thumbnail((max_dim, max_dim), AA.LANCZOS)
-                                save_params = {}
-                                if t_ext in [F, O]:
-                                    quality = 95
-                                    if C.opt_compress.get():
-                                        quality = max(
-                                            1, min(100, C.compress_quality.get() or 85)
-                                        )
-                                    save_params[W] = quality
-                                    save_params[X] = J
-                                if t_ext == V:
-                                    save_params[X] = J
-                                A1.save(S_, **save_params)
-                                if C.opt_maxsize.get():
-                                    max_bytes = (C.max_file_kb.get() or 0) * 1024
-                                    if max_bytes > 0 and t_ext in [F, O]:
-                                        try:
-                                            quality = save_params.get(W, 95)
-                                            while (
-                                                quality > 10
-                                                and A.path.getsize(S_) > max_bytes
-                                            ):
-                                                quality -= 5
-                                                A1.save(S_, quality=quality, optimize=J)
-                                        except E as R:
-                                            log_error_loc(
-                                                "file_resize_error",
-                                                file=c_,
-                                                error=R,
-                                            )
-                                log_info_loc("image_added_modified", file=c_)
-                            else:
-                                Af.copy2(src_path, S_)
-                                log_info_loc("file_added_modified", file=c_)
+                            Af.copy2(src_path, S_)
+                            log_info_loc("file_added_modified", file=c_)
+                        elif is_image:
+                            Af.copy2(src_path, S_)
+                            log_info_loc("file_added_modified", file=c_)
                         else:
                             Af.copy2(src_path, S_)
                             log_info_loc("file_added_modified", file=c_)
@@ -2343,34 +2449,70 @@ class App(BU.Tk):
         Ah = C.Checkbutton(L, text=B, variable=A.opt_resize)
         Ah.grid(row=1, column=0, padx=5, sticky=T)
         C.Label(L, text=RESIZE_LABEL).grid(row=1, column=1, sticky=T)
-        l_ = C.Entry(L, textvariable=A.resize_max_dim, width=5)
-        l_.grid(row=1, column=2)
-        C.Label(L, text=PX_MAX_LABEL).grid(row=1, column=3, sticky=T)
+        resize_frame = C.Frame(L)
+        resize_frame.grid(row=1, column=2, sticky="w")
+        l_ = C.Entry(resize_frame, textvariable=A.resize_max_dim, width=5)
+        l_.grid(row=0, column=0, sticky="w")
+        C.Label(resize_frame, text=PX_MAX_LABEL).grid(
+            row=0, column=1, sticky="w", padx=4
+        )
         Ai = C.Checkbutton(L, text=B, variable=A.opt_compress)
         Ai.grid(row=2, column=0, padx=5, sticky=T)
         C.Label(L, text=COMPRESS_LABEL).grid(row=2, column=1, sticky=T)
-        n = C.Spinbox(L, from_=10, to=100, textvariable=A.compress_quality, width=5)
-        n.grid(row=2, column=2, sticky=T)
-        C.Label(L, text="%").grid(row=2, column=3, sticky=T)
+        compress_frame = C.Frame(L)
+        compress_frame.grid(row=2, column=2, sticky="w")
+        n = C.Spinbox(
+            compress_frame, from_=10, to=100, textvariable=A.compress_quality, width=5
+        )
+        n.grid(row=0, column=0, sticky="w")
+        C.Label(compress_frame, text="%").grid(row=0, column=1, sticky="w", padx=4)
         Aj = C.Checkbutton(L, text=B, variable=A.opt_maxsize)
         Aj.grid(row=3, column=0, padx=5, sticky=T)
         C.Label(L, text=LIMIT_SIZE_LABEL).grid(row=3, column=1, sticky=T)
+        maxsize_frame = C.Frame(L)
+        maxsize_frame.grid(row=3, column=2, sticky="w")
         o = C.Spinbox(
-            L, from_=100, to=10000, increment=100, textvariable=A.max_file_kb, width=6
+            maxsize_frame,
+            from_=100,
+            to=10000,
+            increment=100,
+            textvariable=A.max_file_kb,
+            width=6,
         )
-        o.grid(row=3, column=2, sticky=T)
-        C.Label(L, text="KB").grid(row=3, column=3, sticky=T)
+        o.grid(row=0, column=0, sticky="w")
+        C.Label(maxsize_frame, text="KB").grid(
+            row=0, column=1, sticky="w", padx=4
+        )
         Ak = C.Checkbutton(L, text=B, variable=A.opt_convert_tif)
         Ak.grid(row=4, column=0, padx=5, sticky=T)
         C.Label(L, text=CONVERT_TIF_LABEL).grid(row=4, column=1, sticky=T)
         q = C.Combobox(
             L,
             textvariable=A.tif_target_format,
-            values=[At, "JPG", "BMP", "GIF"],
+            values=CONVERT_TARGET_FORMATS,
             state=d_,
-            width=5,
+            width=10,
         )
-        q.grid(row=4, column=2, sticky=T)
+        q.grid(row=4, column=2, sticky="w")
+        C.Label(L, text=LANG.get("format_info_label", "Informacje o formacie:")).grid(
+            row=5, column=1, sticky="nw", padx=5, pady=2
+        )
+        format_info_var = F.StringVar(
+            value=_format_info_text(A.tif_target_format.get())
+        )
+        format_info_frame = C.Frame(L, width=460, height=60)
+        format_info_frame.grid(
+            row=5, column=2, columnspan=2, sticky="nw", padx=5, pady=2
+        )
+        format_info_frame.grid_propagate(h)
+        format_info_label = C.Label(
+            format_info_frame,
+            textvariable=format_info_var,
+            wraplength=440,
+            justify="left",
+            anchor="nw",
+        )
+        format_info_label.grid(row=0, column=0, sticky="nw", padx=4, pady=2)
         C.Label(U, text=LANGUAGE_LABEL).grid(row=0, column=0, sticky=R, padx=5, pady=2)
         lang_var = F.StringVar(value=LANG_PREF)
         lang_combo = C.Combobox(
@@ -2398,6 +2540,9 @@ class App(BU.Tk):
         get_file_lock_user = A.opt_convert_tif.trace_add(
             Y_, lambda *B: q.configure(state=d_ if A.opt_convert_tif.get() else V)
         )
+        A.tif_target_format.trace_add(
+            Y_, lambda *B: format_info_var.set(_format_info_text(A.tif_target_format.get()))
+        )
         l_.configure(state=X if A.opt_resize.get() else V)
         n.configure(state=X if A.opt_compress.get() else V)
         o.configure(state=X if A.opt_maxsize.get() else V)
@@ -2405,33 +2550,33 @@ class App(BU.Tk):
         C.Label(Q, text=FTP_SERVER_LABEL).grid(row=0, column=0, sticky=R, padx=5, pady=2)
         s = F.StringVar(value=D[H][v])
         AD_ = C.Entry(Q, textvariable=s, width=30)
-        AD_.grid(row=0, column=1, padx=5, pady=2)
+        AD_.grid(row=0, column=1, padx=5, pady=2, sticky="w")
         C.Label(Q, text=PORT_LABEL).grid(row=1, column=0, sticky=R, padx=5, pady=2)
         t = F.IntVar(value=D[H][r])
         AE_ = C.Entry(Q, textvariable=t, width=6)
-        AE_.grid(row=1, column=1, sticky=T, padx=5, pady=2)
+        AE_.grid(row=1, column=1, sticky="w", padx=5, pady=2)
         C.Label(Q, text=k_).grid(row=2, column=0, sticky=R, padx=5, pady=2)
         x_ = F.StringVar(value=D[H][N])
         AF_ = C.Entry(Q, textvariable=x_, width=30)
-        AF_.grid(row=2, column=1, padx=5, pady=2)
+        AF_.grid(row=2, column=1, padx=5, pady=2, sticky="w")
         C.Label(Q, text=j_).grid(row=3, column=0, sticky=R, padx=5, pady=2)
         y_ = F.StringVar(value=D[H][M])
         AG_ = C.Entry(Q, textvariable=y_, show=Y, width=30)
-        AG_.grid(row=3, column=1, padx=5, pady=2)
+        AG_.grid(row=3, column=1, padx=5, pady=2, sticky="w")
         C.Label(Q, text=FTP_PATH_LABEL).grid(
             row=4, column=0, sticky=R, padx=5, pady=2
         )
         g_ = F.StringVar(value=D[H][m])
         AH_ = C.Entry(Q, textvariable=g_, width=30)
-        AH_.grid(row=4, column=1, padx=5, pady=2)
+        AH_.grid(row=4, column=1, padx=5, pady=2, sticky="w")
         AI_ = C.Button(Q, text=a)
-        AI_.grid(row=5, column=0, sticky=R, padx=5, pady=5)
+        AI_.grid(row=5, column=0, columnspan=2, sticky="w", padx=5, pady=5)
         C.Label(Q, text=FTP_TEST_LABEL).grid(
             row=6, column=0, sticky=R, padx=5, pady=5
         )
         AJ_ = F.StringVar(value=B)
         sql_query_entry = C.Entry(Q, textvariable=AJ_, width=50, state=d_)
-        sql_query_entry.grid(row=6, column=1, padx=5, pady=5, sticky=T)
+        sql_query_entry.grid(row=6, column=1, padx=5, pady=5, sticky="w")
 
         def Ax():
             A_ = B
@@ -2767,5 +2912,3 @@ class App(BU.Tk):
             A.ui_log.configure(state=Ak)
         except E:
             pass
-
-
