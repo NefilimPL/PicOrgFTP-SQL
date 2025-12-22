@@ -2488,7 +2488,7 @@ class App(BU.Tk):
             textvariable=format_info_var,
             wraplength=450,
             justify="left",
-            anchor=Am,
+            anchor="w",
             width=60,
             height=3,
         )
