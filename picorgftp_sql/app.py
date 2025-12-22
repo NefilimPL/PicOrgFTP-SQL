@@ -2449,23 +2449,40 @@ class App(BU.Tk):
         Ah = C.Checkbutton(L, text=B, variable=A.opt_resize)
         Ah.grid(row=1, column=0, padx=5, sticky=T)
         C.Label(L, text=RESIZE_LABEL).grid(row=1, column=1, sticky=T)
-        l_ = C.Entry(L, textvariable=A.resize_max_dim, width=5)
-        l_.grid(row=1, column=2, sticky="w")
-        C.Label(L, text=PX_MAX_LABEL).grid(row=1, column=3, sticky="w", padx=2)
+        resize_frame = C.Frame(L)
+        resize_frame.grid(row=1, column=2, sticky="w")
+        l_ = C.Entry(resize_frame, textvariable=A.resize_max_dim, width=5)
+        l_.grid(row=0, column=0, sticky="w")
+        C.Label(resize_frame, text=PX_MAX_LABEL).grid(
+            row=0, column=1, sticky="w", padx=4
+        )
         Ai = C.Checkbutton(L, text=B, variable=A.opt_compress)
         Ai.grid(row=2, column=0, padx=5, sticky=T)
         C.Label(L, text=COMPRESS_LABEL).grid(row=2, column=1, sticky=T)
-        n = C.Spinbox(L, from_=10, to=100, textvariable=A.compress_quality, width=5)
-        n.grid(row=2, column=2, sticky="w")
-        C.Label(L, text="%").grid(row=2, column=3, sticky="w", padx=2)
+        compress_frame = C.Frame(L)
+        compress_frame.grid(row=2, column=2, sticky="w")
+        n = C.Spinbox(
+            compress_frame, from_=10, to=100, textvariable=A.compress_quality, width=5
+        )
+        n.grid(row=0, column=0, sticky="w")
+        C.Label(compress_frame, text="%").grid(row=0, column=1, sticky="w", padx=4)
         Aj = C.Checkbutton(L, text=B, variable=A.opt_maxsize)
         Aj.grid(row=3, column=0, padx=5, sticky=T)
         C.Label(L, text=LIMIT_SIZE_LABEL).grid(row=3, column=1, sticky=T)
+        maxsize_frame = C.Frame(L)
+        maxsize_frame.grid(row=3, column=2, sticky="w")
         o = C.Spinbox(
-            L, from_=100, to=10000, increment=100, textvariable=A.max_file_kb, width=6
+            maxsize_frame,
+            from_=100,
+            to=10000,
+            increment=100,
+            textvariable=A.max_file_kb,
+            width=6,
         )
-        o.grid(row=3, column=2, sticky="w")
-        C.Label(L, text="KB").grid(row=3, column=3, sticky="w", padx=2)
+        o.grid(row=0, column=0, sticky="w")
+        C.Label(maxsize_frame, text="KB").grid(
+            row=0, column=1, sticky="w", padx=4
+        )
         Ak = C.Checkbutton(L, text=B, variable=A.opt_convert_tif)
         Ak.grid(row=4, column=0, padx=5, sticky=T)
         C.Label(L, text=CONVERT_TIF_LABEL).grid(row=4, column=1, sticky=T)
