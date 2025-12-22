@@ -2443,6 +2443,11 @@ class App(BU.Tk):
         Z.add(Q, text=FTP_TAB_LABEL)
         Z.add(S, text=SQL_TAB_LABEL)
         Z.add(U, text=LANGUAGE_TAB_LABEL)
+        for frame in (L, Q, S, U):
+            frame.grid_columnconfigure(0, minsize=150)
+            frame.grid_columnconfigure(1, weight=1)
+            frame.grid_columnconfigure(2, weight=0)
+            frame.grid_columnconfigure(3, weight=0)
         C.Label(L, text=IMAGE_SETTINGS_LABEL).grid(
             row=0, column=0, columnspan=4, padx=5, pady=5, sticky=T
         )
@@ -2604,6 +2609,9 @@ class App(BU.Tk):
         A1.grid(row=0, column=1, padx=5, pady=2, sticky=T)
         U = C.Frame(S)
         W = C.Frame(S)
+        for frame in (U, W):
+            frame.grid_columnconfigure(0, minsize=150)
+            frame.grid_columnconfigure(1, weight=1)
         C.Label(U, text=A8_).grid(row=0, column=0, sticky=R, padx=5, pady=2)
         AK = F.StringVar(value=D[P][c])
         ensure_package = C.Entry(U, textvariable=AK, width=30)
