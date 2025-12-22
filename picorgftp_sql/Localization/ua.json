@@ -74,7 +74,7 @@
   "px_max_label": "px (макс. розмір)",
   "compress_label": "Стискати JPEG (якість)",
   "limit_size_label": "Обмежити розмір файлу до",
-  "convert_tif_label": "Конвертувати .tif у",
+  "convert_tif_label": "Конвертувати всі графічні файли у",
   "ftp_server_label": "FTP сервер:",
   "port_label": "Порт:",
   "ftp_path_label": "Шлях на сервері:",

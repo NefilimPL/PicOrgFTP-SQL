@@ -74,7 +74,7 @@
   "px_max_label": "px (max wymiar)",
   "compress_label": "Kompresuj JPEG (jakość)",
   "limit_size_label": "Ogranicz rozmiar pliku do",
-  "convert_tif_label": "Konwertuj .tif na",
+  "convert_tif_label": "Konwertuj wszystkie pliki graficzne na",
   "ftp_server_label": "Serwer FTP:",
   "port_label": "Port:",
   "ftp_path_label": "Ścieżka (katalog) na serwerze:",
