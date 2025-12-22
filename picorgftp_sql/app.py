@@ -2486,7 +2486,7 @@ class App(BU.Tk):
             L,
             textvariable=format_info_var,
             wraplength=450,
-            justify=Am,
+            justify="left",
         )
         format_info_label.grid(
             row=5, column=2, columnspan=2, sticky=T, padx=5, pady=2
