@@ -171,5 +171,18 @@
   "settings_sql_unlocked": "Unlocked SQL settings editing (administrator).",
   "settings_saved": "Settings saved (images/FTP/SQL).",
   "excel_file_open": "Cannot save list. Excel file is open {reason}. Close the file and try again.",
-  "excel_data_file_open": "Cannot save data. Excel file is open {reason}. Close the file and try again."
+  "excel_data_file_open": "Cannot save data. Excel file is open {reason}. Close the file and try again.",
+  "diagnostics_tab": "Diagnostics",
+  "error_test_label": "Error tests",
+  "error_test_zero_div": "Divide by zero",
+  "error_test_file_missing": "Missing file",
+  "error_test_value_error": "ValueError",
+  "error_test_thread_error": "Thread error",
+  "error_test_button": "Trigger error",
+  "error_test_hint": "Selected tests intentionally raise an exception to verify error handling.",
+  "critical_error_title": "Application error",
+  "critical_error_message": "A critical application error occurred.\n\n{error}\n\nDetails were saved to the logs.",
+  "error_test_value_message": "Test ValueError.",
+  "error_test_thread_message": "Test thread error.",
+  "error_test_generic_message": "Test runtime error."
 }
