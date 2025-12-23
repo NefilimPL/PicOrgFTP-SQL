@@ -17,8 +17,9 @@ python -m pip install "pyinstaller>=6.6,<7"
 python -m pip install -r requirements-build.txt
 
 # build
-pyinstaller --noconfirm --clean --log-level=WARN `
+pyinstaller --noconfirm --clean --log-level=DEBUG `
   --name PicOrgFTP-SQL `
+  --debug=imports `
   --noconsole `
   --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" `
   --collect-submodules mysql.connector `
@@ -26,3 +27,4 @@ pyinstaller --noconfirm --clean --log-level=WARN `
   PicOrgFTP-SQL.pyw
 
 Write-Host "OK. Wynik: dist\PicOrgFTP-SQL\"
+
