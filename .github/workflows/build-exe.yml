@@ -36,7 +36,6 @@ jobs:
             --name PicOrgFTP-SQL `
             --noconsole `
             --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" `
-            --no-binaries :all: `
             --collect-binaries mysql.connector `
             --collect-binaries pyodbc `
             --collect-binaries PIL `
