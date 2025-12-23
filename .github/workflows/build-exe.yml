@@ -1,0 +1,10 @@
+ - name: Build EXE
+        shell: bash
+        run: |
+          pyinstaller --noconfirm --clean --log-level=WARN \
+            --name PicOrgFTP-SQL \
+            --noconsole \
+            --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" \
+            --collect-submodules mysql.connector \
+            --collect-data mysql.connector \
+            PicOrgFTP-SQL.pyw
