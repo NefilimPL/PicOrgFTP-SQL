@@ -1,4 +1,4 @@
-pyinstaller>=6.3.0
+pyinstaller>=6.17
 pillow
 tkinterdnd2
 openpyxl
