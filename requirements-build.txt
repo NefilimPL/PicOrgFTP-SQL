@@ -1,0 +1,6 @@
+pyinstaller>=6.3.0
+pillow
+tkinterdnd2
+openpyxl
+mysql-connector-python
+pyodbc
