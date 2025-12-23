@@ -171,5 +171,18 @@
   "settings_sql_unlocked": "Odblokowano edycję ustawień SQL (administrator).",
   "settings_saved": "Zapisano ustawienia (obrazy/FTP/SQL).",
   "excel_file_open": "Nie można zapisać listy. Plik Excel jest otwarty {reason}. Zamknij plik i spróbuj ponownie.",
-  "excel_data_file_open": "Nie można zapisać danych. Plik Excel jest otwarty {reason}. Zamknij plik i spróbuj ponownie."
+  "excel_data_file_open": "Nie można zapisać danych. Plik Excel jest otwarty {reason}. Zamknij plik i spróbuj ponownie.",
+  "diagnostics_tab": "Diagnostyka",
+  "error_test_label": "Testy błędów",
+  "error_test_zero_div": "Podział przez zero",
+  "error_test_file_missing": "Brakujący plik",
+  "error_test_value_error": "Błąd ValueError",
+  "error_test_thread_error": "Błąd w wątku",
+  "error_test_button": "Wywołaj błąd",
+  "error_test_hint": "Wybrane testy celowo wywołują wyjątek w celu sprawdzenia obsługi błędów.",
+  "critical_error_title": "Błąd aplikacji",
+  "critical_error_message": "Wystąpił krytyczny błąd aplikacji.\n\n{error}\n\nSzczegóły zapisano w logach.",
+  "error_test_value_message": "Testowy błąd ValueError.",
+  "error_test_thread_message": "Testowy błąd w wątku.",
+  "error_test_generic_message": "Testowy błąd runtime."
 }

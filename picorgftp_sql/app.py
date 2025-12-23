@@ -1,6 +1,7 @@
 """Main Tkinter application class."""
 
 import re
+import traceback
 
 from .common import *  # noqa: F401,F403
 from .excel_utils import (
@@ -181,6 +182,71 @@ class App(BU.Tk):
         H_ = Q(E_)
         B.combo_name.existing_count = H_
         set_app(B)
+        B._install_exception_handlers()
+
+    def report_callback_exception(A, exc, val, tb):
+        A._handle_exception(exc, val, tb, context="Tk callback")
+
+    def _install_exception_handlers(A):
+        def _sys_excepthook(exc_type, exc, tb):
+            A._handle_exception(exc_type, exc, tb, context="Unhandled exception")
+
+        sys.excepthook = _sys_excepthook
+
+        if hasattr(threading, "excepthook"):
+            def _thread_excepthook(args):
+                context = f"Thread: {getattr(args.thread, 'name', 'unknown')}"
+                A._handle_exception(
+                    args.exc_type,
+                    args.exc_value,
+                    args.exc_traceback,
+                    context=context,
+                )
+
+            threading.excepthook = _thread_excepthook
+
+    def _handle_exception(A, exc_type, exc, tb, context=B):
+        trace = "".join(traceback.format_exception(exc_type, exc, tb))
+        message = f"{context}\n{trace}" if context else trace
+        log_error(message)
+        title = LANG.get("critical_error_title", "Błąd aplikacji")
+        body = LANG.get(
+            "critical_error_message",
+            "Wystąpił krytyczny błąd aplikacji.\n\n{error}\n\nSzczegóły zapisano w logach.",
+        )
+        payload = body.format(error=exc)
+
+        def _show_error():
+            try:
+                O.showerror(title, payload)
+            except E:
+                pass
+
+        if threading.current_thread() != threading.main_thread():
+            try:
+                A.after(0, _show_error)
+            except E:
+                pass
+        else:
+            _show_error()
+
+    def _trigger_test_error(A, key):
+        if key == "zero_div":
+            1 / 0
+        elif key == "file_missing":
+            with x("__missing_file__.tmp", "r", encoding=k):
+                pass
+        elif key == "value_error":
+            raise ValueError(LANG.get("error_test_value_message", "Testowy błąd ValueError."))
+        elif key == "thread_error":
+            def _worker():
+                raise RuntimeError(
+                    LANG.get("error_test_thread_message", "Testowy błąd w wątku.")
+                )
+
+            threading.Thread(target=_worker, name="TestErrorThread").start()
+        else:
+            raise RuntimeError(LANG.get("error_test_generic_message", "Testowy błąd runtime."))
 
     def _build_form(A):
         """Create comboboxes and entry widgets for the product data form."""
@@ -2439,10 +2505,12 @@ class App(BU.Tk):
         Q = C.Frame(Z)
         S = C.Frame(Z)
         U = C.Frame(Z)
+        V_ = C.Frame(Z)
         Z.add(L, text=IMAGES_TAB_LABEL)
         Z.add(Q, text=FTP_TAB_LABEL)
         Z.add(S, text=SQL_TAB_LABEL)
         Z.add(U, text=LANGUAGE_TAB_LABEL)
+        Z.add(V_, text=LANG.get("diagnostics_tab", "Diagnostyka"))
         C.Label(L, text=IMAGE_SETTINGS_LABEL).grid(
             row=0, column=0, columnspan=4, padx=5, pady=5, sticky=T
         )
@@ -2524,6 +2592,51 @@ class App(BU.Tk):
         )
         lang_combo.grid(row=0, column=1, padx=5, pady=2, sticky=T)
         lang_combo.configure(postcommand=lambda c=lang_combo: A._style_combobox_list(c))
+        C.Label(V_, text=LANG.get("error_test_label", "Testy błędów")).grid(
+            row=0, column=0, columnspan=2, padx=5, pady=5, sticky=T
+        )
+        error_options = [
+            LANG.get("error_test_zero_div", "Podział przez zero"),
+            LANG.get("error_test_file_missing", "Brakujący plik"),
+            LANG.get("error_test_value_error", "Błąd ValueError"),
+            LANG.get("error_test_thread_error", "Błąd w wątku"),
+        ]
+        error_map = {
+            error_options[0]: "zero_div",
+            error_options[1]: "file_missing",
+            error_options[2]: "value_error",
+            error_options[3]: "thread_error",
+        }
+        error_var = F.StringVar(value=error_options[0] if error_options else B)
+        error_combo = C.Combobox(
+            V_,
+            textvariable=error_var,
+            values=error_options,
+            state="readonly",
+            width=30,
+        )
+        error_combo.grid(row=1, column=0, padx=5, pady=5, sticky=T)
+        error_combo.configure(postcommand=lambda c=error_combo: A._style_combobox_list(c))
+
+        def _trigger_error():
+            selection = error_var.get()
+            test_key = error_map.get(selection, "value_error")
+            A._trigger_test_error(test_key)
+
+        C.Button(
+            V_,
+            text=LANG.get("error_test_button", "Wywołaj błąd"),
+            command=_trigger_error,
+        ).grid(row=1, column=1, padx=5, pady=5, sticky="w")
+        C.Label(
+            V_,
+            text=LANG.get(
+                "error_test_hint",
+                "Wybrane testy celowo wywołują wyjątek w celu sprawdzenia obsługi błędów.",
+            ),
+            wraplength=400,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky="w")
 
         def Am(*B):
             l_.configure(state=X if A.opt_resize.get() else V)

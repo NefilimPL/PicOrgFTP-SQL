@@ -171,5 +171,18 @@
   "settings_sql_unlocked": "Розблоковано редагування налаштувань SQL (адміністратор).",
   "settings_saved": "Налаштування збережено (зображення/FTP/SQL).",
   "excel_file_open": "Неможливо зберегти список. Файл Excel відкритий {reason}. Закрийте файл і спробуйте ще раз.",
-  "excel_data_file_open": "Неможливо зберегти дані. Файл Excel відкритий {reason}. Закрийте файл і спробуйте ще раз."
+  "excel_data_file_open": "Неможливо зберегти дані. Файл Excel відкритий {reason}. Закрийте файл і спробуйте ще раз.",
+  "diagnostics_tab": "Діагностика",
+  "error_test_label": "Тести помилок",
+  "error_test_zero_div": "Ділення на нуль",
+  "error_test_file_missing": "Відсутній файл",
+  "error_test_value_error": "Помилка ValueError",
+  "error_test_thread_error": "Помилка у потоці",
+  "error_test_button": "Викликати помилку",
+  "error_test_hint": "Обрані тести навмисно спричиняють виняток для перевірки обробки помилок.",
+  "critical_error_title": "Помилка застосунку",
+  "critical_error_message": "Сталася критична помилка застосунку.\n\n{error}\n\nДеталі збережено у логах.",
+  "error_test_value_message": "Тестова помилка ValueError.",
+  "error_test_thread_message": "Тестова помилка у потоці.",
+  "error_test_generic_message": "Тестова помилка runtime."
 }
