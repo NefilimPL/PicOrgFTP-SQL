@@ -100,3 +100,5 @@ W repozytorium znajduje się workflow `.github/workflows/build-exe.yml`, który 
 4. Po zakończeniu joba pobierz artefakt **PicOrgFTP-SQL-windows** z podsumowania workflow.
 
 Jeśli chcesz zmienić zależności do budowania, edytuj `requirements-build.txt`. Workflow domyślnie używa Pythona 3.11.
+
+[![Build Windows EXE](https://github.com/NefilimPL/PicOrgFTP-SQL/actions/workflows/build-exe.yml/badge.svg?branch=main)](https://github.com/NefilimPL/PicOrgFTP-SQL/actions/workflows/build-exe.yml)
