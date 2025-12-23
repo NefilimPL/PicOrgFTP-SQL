@@ -53,6 +53,19 @@ def _show_boot_error(message):
         pass
 
 
+def _build_boot_hint(exc):
+    if isinstance(exc, ModuleNotFoundError):
+        missing = getattr(exc, "name", "") or ""
+        if missing.startswith("picorgftp_sql."):
+            module_hint = missing.split(".", 1)[1] if "." in missing else missing
+            return (
+                "Wskazówka: brakuje modułu aplikacji. Sprawdź, czy plik "
+                f"\"{module_hint}.py\" istnieje w folderze picorgftp_sql oraz czy nie "
+                "został zmieniony jego nazwą."
+            )
+    return ""
+
+
 def main():
     """Start the GUI application and warn about configuration issues."""
 
@@ -60,14 +73,16 @@ def main():
         from picorgftp_sql.app import App
         from picorgftp_sql.common import O, SETTINGS_LABEL
         from picorgftp_sql.settings import BASE_DIR_OVERRIDE_WARNING
-    except Exception:
+    except Exception as exc:
         trace = traceback.format_exc()
+        hint = _build_boot_hint(exc)
         boot_message = (
             "Krytyczny błąd podczas uruchamiania aplikacji.\n\n"
             f"{trace}\n\nSzczegóły zapisano w error_log_boot.txt."
         )
-        log_path = _write_boot_log(trace)
-        _show_boot_error(f"{boot_message}\n\nPlik: {log_path}")
+        log_path = _write_boot_log(f"{trace}\n{hint}".strip())
+        hint_block = f"\n\n{hint}" if hint else ""
+        _show_boot_error(f"{boot_message}{hint_block}\n\nPlik: {log_path}")
         raise
 
     try:
@@ -85,14 +100,16 @@ def main():
         ):
             combo.configure(postcommand=lambda c=combo: app._style_combobox_list(c))
         app.mainloop()
-    except Exception:
+    except Exception as exc:
         trace = traceback.format_exc()
+        hint = _build_boot_hint(exc)
         boot_message = (
             "Krytyczny błąd podczas uruchamiania aplikacji.\n\n"
             f"{trace}\n\nSzczegóły zapisano w error_log_boot.txt."
         )
-        log_path = _write_boot_log(trace)
-        _show_boot_error(f"{boot_message}\n\nPlik: {log_path}")
+        log_path = _write_boot_log(f"{trace}\n{hint}".strip())
+        hint_block = f"\n\n{hint}" if hint else ""
+        _show_boot_error(f"{boot_message}{hint_block}\n\nPlik: {log_path}")
         raise
 
 
