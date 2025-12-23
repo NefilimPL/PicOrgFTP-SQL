@@ -31,8 +31,9 @@ jobs:
           pyinstaller PicOrgFTP-SQL.pyw \
             --name PicOrgFTP-SQL \
             --noconsole \
+            --log-level=DEBUG
             --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" \
-            --collect-all mysql.connector
+            --collect-data mysql.connector
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
