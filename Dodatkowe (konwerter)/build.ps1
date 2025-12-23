@@ -26,6 +26,8 @@ pyinstaller --noconfirm --clean --log-level=DEBUG `
   --debug=imports `
   --noconsole `
   --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" `
+  --exclude-module mysql.connector `
+  --exclude-module pyodbc `
   PicOrgFTP-SQL.pyw
 
 
