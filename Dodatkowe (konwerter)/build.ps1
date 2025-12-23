@@ -1,6 +1,7 @@
 ﻿# build.ps1
 $ErrorActionPreference = "Stop"
-Set-Location $PSScriptRoot
+$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+Set-Location $RepoRoot
 
 # venv
 if (!(Test-Path ".\.venv")) {
