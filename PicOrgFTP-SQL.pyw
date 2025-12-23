@@ -63,7 +63,44 @@ def _build_boot_hint(exc):
                 f"\"{module_hint}.py\" istnieje w folderze picorgftp_sql oraz czy nie "
                 "został zmieniony jego nazwą."
             )
-    return ""
+        return (
+            "Wskazówka: brakujący moduł Pythona. Sprawdź, czy zależność jest "
+            "zainstalowana oraz czy uruchamiasz aplikację z właściwego środowiska."
+        )
+    if isinstance(exc, ImportError):
+        return (
+            "Wskazówka: błąd importu. Upewnij się, że wszystkie wymagane biblioteki są "
+            "zainstalowane i wersje są zgodne."
+        )
+    if isinstance(exc, FileNotFoundError):
+        return (
+            "Wskazówka: brakujący plik. Sprawdź, czy wymagane pliki konfiguracyjne lub "
+            "zasoby są na miejscu."
+        )
+    if isinstance(exc, PermissionError):
+        return (
+            "Wskazówka: brak uprawnień do pliku lub folderu. Sprawdź prawa dostępu "
+            "lub uruchom aplikację z odpowiednimi uprawnieniami."
+        )
+    if isinstance(exc, json.JSONDecodeError):
+        return (
+            "Wskazówka: uszkodzony plik JSON. Sprawdź składnię w local_settings.json "
+            "lub innych plikach konfiguracyjnych."
+        )
+    if isinstance(exc, OSError):
+        return (
+            "Wskazówka: błąd systemowy (OSError). Sprawdź dostęp do dysku, ścieżki i "
+            "stan systemu plików."
+        )
+    if isinstance(exc, RuntimeError):
+        return (
+            "Wskazówka: błąd wykonania. Sprawdź ostatnie zmiany w kodzie i logi "
+            "startowe, aby ustalić źródło problemu."
+        )
+    return (
+        "Wskazówka: sprawdź treść wyjątku i pełny traceback w logu startowym, aby "
+        "ustalić źródło błędu."
+    )
 
 
 def main():
