@@ -15,7 +15,6 @@ if (!(Test-Path ".\.venv")) {
 python -m pip install --upgrade pip
 python -m pip install "pyinstaller>=6.6,<7"
 python -m pip install -r requirements-build.txt
-
 # build
 # --collect-data mysql.connector  # włącz pojedynczo, aby ustalić blokującą flagę
 # --collect-submodules mysql.connector  # włącz pojedynczo po --collect-data
