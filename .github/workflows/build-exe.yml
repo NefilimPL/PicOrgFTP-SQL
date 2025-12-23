@@ -30,13 +30,22 @@ jobs:
       - name: Build EXE with PyInstaller (recommended onedir + minimal collection)
         shell: bash
         run: |
-          pyinstaller --noconfirm --clean --log-level=WARN \
+          pyinstaller --noconfirm --clean --log-level=INFO -v \
             --name PicOrgFTP-SQL \
             --noconsole \
             --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" \
             --collect-submodules mysql.connector \
             --collect-data mysql.connector \
             PicOrgFTP-SQL.pyw
+
+      - name: Upload build logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: PicOrgFTP-SQL-build-logs
+          path: |
+            build/**/*.log
+            dist/**/*.log
+          if-no-files-found: warn
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
