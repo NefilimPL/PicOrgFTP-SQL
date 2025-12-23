@@ -30,7 +30,8 @@ jobs:
       - name: Build EXE with PyInstaller (recommended onedir + minimal collection)
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --log-level=DEBUG `
+          $env:PATH = "$env:pythonLocation;$env:pythonLocation\\Scripts;C:\\Windows\\System32;C:\\Windows"
+          pyinstaller --noconfirm --clean --log-level=INFO `
             --name PicOrgFTP-SQL `
             --noconsole `
             --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" `
@@ -43,7 +44,7 @@ jobs:
         with:
           name: PicOrgFTP-SQL-build-logs
           path: |
-            build/**/*.log
+            build/**/*
             dist/**/*.log
           if-no-files-found: warn
 
