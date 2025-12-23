@@ -26,6 +26,7 @@ jobs:
           python -m pip install -r requirements-build.txt
 
       - name: Build EXE with PyInstaller
+        shell: bash
         run: |
           pyinstaller PicOrgFTP-SQL.pyw \
             --name PicOrgFTP-SQL \
