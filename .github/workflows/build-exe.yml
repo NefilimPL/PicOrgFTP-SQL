@@ -30,7 +30,7 @@ jobs:
       - name: Build EXE with PyInstaller (recommended onedir + minimal collection)
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --log-level=DEBUG -v `
+          pyinstaller --noconfirm --clean --log-level=DEBUG `
             --name PicOrgFTP-SQL `
             --noconsole `
             --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" `
