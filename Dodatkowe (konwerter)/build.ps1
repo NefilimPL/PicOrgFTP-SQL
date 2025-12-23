@@ -20,6 +20,7 @@ python -m pip install -r requirements-build.txt
 # --collect-data mysql.connector  # włącz pojedynczo, aby ustalić blokującą flagę
 # --collect-submodules mysql.connector  # włącz pojedynczo po --collect-data
 # --exclude-module pyodbc  # tymczasowo, jeśli build nadal się blokuje
+$Env:Path = "$Env:VIRTUAL_ENV\Scripts;C:\Windows\System32;C:\Windows"
 pyinstaller --noconfirm --clean --log-level=DEBUG `
   --name PicOrgFTP-SQL `
   --debug=imports `
