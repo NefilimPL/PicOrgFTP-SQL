@@ -11,6 +11,7 @@ if (!(Test-Path ".\.venv")) {
 # activate venv
 .\.venv\Scripts\Activate.ps1
 
+
 # deps
 python -m pip install --upgrade pip
 python -m pip install "pyinstaller>=6.6,<7"
