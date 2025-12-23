@@ -40,6 +40,17 @@ pyinstaller PicOrgFTP-SQL.pyw \
 
 The runtime automatically searches for translation files next to the executable, in the PyInstaller temporary directory and inside the installed package. This means you can also ship an updated `Localization` folder next to the generated `PicOrgFTP-SQL.exe` without rebuilding the binary. The `local_settings.json` file will still be created next to the executable and stores both the working directory and the chosen language.
 
+### GitHub Actions (Windows EXE)
+
+This repository includes a Windows build workflow in `.github/workflows/build-exe.yml`. It builds the EXE with PyInstaller and uploads it as a workflow artifact.
+
+1. Push the workflow file to your GitHub repository.
+2. Go to **Settings → Actions → General** and make sure Actions are enabled for the repository.
+3. Go to the **Actions** tab, open **Build Windows EXE**, and click **Run workflow** to build on demand (or push to `main`/`master` to run automatically).
+4. After the job finishes, download the artifact named **PicOrgFTP-SQL-windows** from the workflow summary.
+
+If you need to tweak build dependencies, edit `requirements-build.txt`. The workflow uses Python 3.11 by default.
+
 ## Polski
 
 ### Działanie
@@ -79,3 +90,13 @@ pyinstaller PicOrgFTP-SQL.pyw \
 
 Podczas działania program wyszukuje pliki tłumaczeń obok pliku wykonywalnego, w katalogu tymczasowym PyInstaller oraz w zainstalowanym pakiecie. Dzięki temu można także dołączyć lub zaktualizować katalog `Localization` bez ponownego budowania `PicOrgFTP-SQL.exe`. Plik `local_settings.json` jest nadal tworzony obok programu i przechowuje zarówno katalog roboczy, jak i wybrany język.
 
+### GitHub Actions (budowanie EXE na Windows)
+
+W repozytorium znajduje się workflow `.github/workflows/build-exe.yml`, który buduje EXE przez PyInstaller i publikuje je jako artefakt.
+
+1. Wypchnij pliki workflow do swojego repozytorium na GitHub.
+2. Wejdź w **Settings → Actions → General** i upewnij się, że Actions są włączone.
+3. Otwórz kartę **Actions**, wybierz **Build Windows EXE** i kliknij **Run workflow** (lub wypchnij zmiany na `main`/`master`, aby uruchomić automatycznie).
+4. Po zakończeniu joba pobierz artefakt **PicOrgFTP-SQL-windows** z podsumowania workflow.
+
+Jeśli chcesz zmienić zależności do budowania, edytuj `requirements-build.txt`. Workflow domyślnie używa Pythona 3.11.
