@@ -3,6 +3,7 @@
 import json
 import os
 import traceback
+from datetime import datetime
 
 
 def _resolve_boot_log_dir():
@@ -25,12 +26,18 @@ def _write_boot_log(message):
         os.makedirs(log_dir, exist_ok=True)
     except Exception:
         log_dir = os.getcwd()
-    log_path = os.path.join(log_dir, "error_log_boot.txt")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_filename = f"error_log_boot_{timestamp}.txt"
+    log_path = os.path.join(log_dir, log_filename)
     try:
         with open(log_path, "a", encoding="utf-8") as handle:
+            handle.write("=" * 80 + "\n")
+            handle.write(f"BOOT ERROR {timestamp}\n")
+            handle.write("=" * 80 + "\n")
             handle.write(message + "\n")
     except Exception:
         pass
+    return log_path
 
 
 def _show_boot_error(message):
@@ -59,8 +66,8 @@ def main():
             "Krytyczny błąd podczas uruchamiania aplikacji.\n\n"
             f"{trace}\n\nSzczegóły zapisano w error_log_boot.txt."
         )
-        _write_boot_log(trace)
-        _show_boot_error(boot_message)
+        log_path = _write_boot_log(trace)
+        _show_boot_error(f"{boot_message}\n\nPlik: {log_path}")
         raise
 
     try:
@@ -84,8 +91,8 @@ def main():
             "Krytyczny błąd podczas uruchamiania aplikacji.\n\n"
             f"{trace}\n\nSzczegóły zapisano w error_log_boot.txt."
         )
-        _write_boot_log(trace)
-        _show_boot_error(boot_message)
+        log_path = _write_boot_log(trace)
+        _show_boot_error(f"{boot_message}\n\nPlik: {log_path}")
         raise
 
 
