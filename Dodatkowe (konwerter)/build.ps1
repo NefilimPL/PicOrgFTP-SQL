@@ -22,8 +22,9 @@ pyinstaller --noconfirm --clean --log-level=DEBUG `
   --debug=imports `
   --noconsole `
   --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" `
-  --collect-submodules mysql.connector `
-  --collect-data mysql.connector `
+  # --collect-data mysql.connector ` # włącz pojedynczo, aby ustalić blokującą flagę
+  # --collect-submodules mysql.connector ` # włącz pojedynczo po --collect-data
+  # --exclude-module pyodbc ` # tymczasowo, jeśli build nadal się blokuje
   PicOrgFTP-SQL.pyw
 
 Write-Host "OK. Wynik: dist\PicOrgFTP-SQL\"
