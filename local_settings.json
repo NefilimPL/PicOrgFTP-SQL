@@ -1,3 +1,4 @@
 {
-    "base_dir_override": ""
+    "base_dir_override": "",
+    "language": "auto"
 }
