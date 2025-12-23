@@ -26,12 +26,13 @@ jobs:
           python -m pip install -r requirements-build.txt
 
       - name: Build EXE with PyInstaller
-        run: >
-          pyinstaller PicOrgFTP-SQL.pyw
-          --name PicOrgFTP-SQL
-          --noconsole
-          --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization"
-          --collect-all mysql.connector
+        shell: bash
+        run: |
+          pyinstaller PicOrgFTP-SQL.pyw \
+            --name PicOrgFTP-SQL \
+            --noconsole \
+            --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" \
+            --collect-all mysql.connector
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
