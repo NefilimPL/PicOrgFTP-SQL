@@ -1,4 +1,33 @@
- - name: Build EXE
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (pinned packager)
+        run: |
+          python -m pip install --upgrade pip
+          # Pin PyInstaller to avoid known Windows CI weirdness and keep builds reproducible
+          python -m pip install "pyinstaller>=6.6,<7"
+          python -m pip install -r requirements-build.txt
+
+      - name: Build EXE with PyInstaller (recommended onedir + minimal collection)
         shell: bash
         run: |
           pyinstaller --noconfirm --clean --log-level=WARN \
@@ -8,3 +37,9 @@
             --collect-submodules mysql.connector \
             --collect-data mysql.connector \
             PicOrgFTP-SQL.pyw
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PicOrgFTP-SQL-windows
+          path: dist/PicOrgFTP-SQL
