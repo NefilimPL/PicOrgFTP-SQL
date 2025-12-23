@@ -23,20 +23,12 @@ jobs:
       - name: Install dependencies (pinned packager)
         run: |
           python -m pip install --upgrade pip
-          # Pin PyInstaller to avoid known Windows CI weirdness and keep builds reproducible
-          python -m pip install "pyinstaller>=6.6,<7"
-          python -m pip install -r requirements-build.txt
+          # build.ps1 installs the rest (including PyInstaller + requirements-build.txt)
 
-      - name: Build EXE with PyInstaller (recommended onedir + minimal collection)
-        shell: bash
+      - name: Build EXE with build.ps1
+        shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --log-level=WARN \
-            --name PicOrgFTP-SQL \
-            --noconsole \
-            --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" \
-            --collect-submodules mysql.connector \
-            --collect-data mysql.connector \
-            PicOrgFTP-SQL.pyw
+          & "Dodatkowe (konwerter)/build.ps1"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
