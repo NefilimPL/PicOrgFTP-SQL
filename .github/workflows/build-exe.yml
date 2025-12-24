@@ -79,7 +79,7 @@ jobs:
 
       - name: Build EXE with Nuitka (standalone onefile)
         run: |
-          python -m nuitka PicOrgFTP-SQL.pyw --standalone --onefile --windows-console-mode=disable --include-data-dir=picorgftp_sql/Localization=picorgftp_sql/Localization
+          python -m nuitka PicOrgFTP-SQL.pyw --standalone --onefile --windows-console-mode=disable --enable-plugin=tk-inter --assume-yes-for-downloads --include-data-dir=picorgftp_sql/Localization=picorgftp_sql/Localization
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
