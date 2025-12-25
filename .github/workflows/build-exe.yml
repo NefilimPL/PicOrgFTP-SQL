@@ -9,7 +9,7 @@ on:
 
 jobs:
   build-windows:
-    runs-on: windows-2022
+    runs-on: self-hosted
 
     steps:
       - name: Checkout
@@ -20,6 +20,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install system dependencies (PyInstaller)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils tcl tk unixodbc
+
       - name: Install dependencies (pinned packager)
         run: |
           python -m pip install --upgrade pip
@@ -28,20 +33,18 @@ jobs:
           python -m pip install -r requirements-build.txt
 
       - name: Build EXE with PyInstaller (recommended onedir + minimal collection)
-        shell: pwsh
         run: |
-          $env:PATH = "$env:pythonLocation;$env:pythonLocation\\Scripts;C:\\Windows\\System32;C:\\Windows"
-          $env:PYTHONNOUSERSITE = "1"
-          pyinstaller --noconfirm --clean --log-level=INFO `
-            --name PicOrgFTP-SQL `
-            --noconsole `
-            --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" `
-            --collect-binaries mysql.connector `
-            --collect-binaries pyodbc `
-            --collect-binaries PIL `
-            --collect-binaries tkinterdnd2 `
-            --hidden-import mysql.connector `
-            --collect-data mysql.connector `
+          export PYTHONNOUSERSITE=1
+          pyinstaller --noconfirm --clean --log-level=INFO \
+            --name PicOrgFTP-SQL \
+            --noconsole \
+            --add-data "picorgftp_sql/Localization:picorgftp_sql/Localization" \
+            --collect-binaries mysql.connector \
+            --collect-binaries pyodbc \
+            --collect-binaries PIL \
+            --collect-binaries tkinterdnd2 \
+            --hidden-import mysql.connector \
+            --collect-data mysql.connector \
             PicOrgFTP-SQL.pyw
 
       - name: Upload build logs
@@ -56,5 +59,38 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PicOrgFTP-SQL-windows
+          name: PicOrgFTP-SQL-${{ runner.os }}
+          path: dist/PicOrgFTP-SQL
+
+  build-windows-nuitka:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies (Nuitka)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential patchelf python3-tk
+
+      - name: Install dependencies (Nuitka build)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install nuitka
+          python -m pip install -r requirements-build.txt
+
+      - name: Build EXE with Nuitka (standalone onefile)
+        run: |
+          python -m nuitka PicOrgFTP-SQL.pyw --standalone --onefile --output-dir=dist --output-filename=PicOrgFTP-SQL --windows-console-mode=disable --enable-plugin=tk-inter --assume-yes-for-downloads --include-data-dir=picorgftp_sql/Localization=picorgftp_sql/Localization
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PicOrgFTP-SQL-${{ runner.os }}-nuitka
           path: dist/PicOrgFTP-SQL
