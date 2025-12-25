@@ -62,7 +62,7 @@ jobs:
           name: PicOrgFTP-SQL-${{ runner.os }}
           path: dist/PicOrgFTP-SQL
 
-  build-windows-nuitka:
+  build-nuitka:
     runs-on: self-hosted
 
     steps:
