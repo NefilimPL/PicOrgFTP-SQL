@@ -58,3 +58,31 @@ jobs:
         with:
           name: PicOrgFTP-SQL-windows
           path: dist/PicOrgFTP-SQL
+
+  build-windows-nuitka:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (Nuitka build)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install nuitka
+          python -m pip install -r requirements-build.txt
+
+      - name: Build EXE with Nuitka (standalone onefile)
+        run: |
+          python -m nuitka PicOrgFTP-SQL.pyw --standalone --onefile --output-dir=dist --windows-console-mode=disable --enable-plugin=tk-inter --assume-yes-for-downloads --include-data-dir=picorgftp_sql/Localization=picorgftp_sql/Localization
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PicOrgFTP-SQL-windows-nuitka
+          path: dist/PicOrgFTP-SQL.exe
