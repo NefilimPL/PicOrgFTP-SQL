@@ -23,13 +23,37 @@ jobs:
 
       - name: Install system dependencies (Nuitka)
         run: |
-          if [ "$EUID" -ne 0 ]; then
-            sudo -n apt-get update
-            sudo -n apt-get install -y build-essential mingw-w64 patchelf python3-tk
-          else
-            apt-get update
-            apt-get install -y build-essential mingw-w64 patchelf python3-tk
+          missing=()
+          command -v gcc >/dev/null 2>&1 || missing+=(build-essential)
+          command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 || missing+=(mingw-w64)
+          command -v patchelf >/dev/null 2>&1 || missing+=(patchelf)
+          python - <<'PY'
+          import tkinter  # noqa: F401
+          PY
+          if [ $? -ne 0 ]; then
+            missing+=(python3-tk)
           fi
+
+          if [ ${#missing[@]} -eq 0 ]; then
+            echo "System dependencies already installed."
+            exit 0
+          fi
+
+          if [ "$EUID" -eq 0 ]; then
+            apt-get update
+            apt-get install -y "${missing[@]}"
+            exit 0
+          fi
+
+          if sudo -n true 2>/dev/null; then
+            sudo -n apt-get update
+            sudo -n apt-get install -y "${missing[@]}"
+            exit 0
+          fi
+
+          echo "Missing system packages: ${missing[*]}"
+          echo "Install them on the self-hosted runner (passwordless sudo or preinstall) to avoid prompts."
+          exit 1
 
       - name: Install dependencies (Nuitka build)
         run: |
