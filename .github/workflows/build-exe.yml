@@ -10,6 +10,7 @@ on:
 jobs:
   build-windows-exe:
     runs-on: self-hosted
+    container: ubuntu:22.04
 
     steps:
       - name: Checkout
