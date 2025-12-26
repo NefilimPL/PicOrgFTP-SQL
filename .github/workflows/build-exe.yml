@@ -8,9 +8,8 @@ on:
       - master
 
 jobs:
-  build-windows-exe:
+  build-windows:
     runs-on: self-hosted
-    container: ubuntu:22.04
 
     steps:
       - name: Checkout
@@ -21,52 +20,26 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install system dependencies (Nuitka)
-        run: |
-          missing=()
-          command -v gcc >/dev/null 2>&1 || missing+=(build-essential)
-          command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 || missing+=(mingw-w64)
-          command -v patchelf >/dev/null 2>&1 || missing+=(patchelf)
-          python - <<'PY'
-          import tkinter  # noqa: F401
-          PY
-          if [ $? -ne 0 ]; then
-            missing+=(python3-tk)
-          fi
-
-          if [ ${#missing[@]} -eq 0 ]; then
-            echo "System dependencies already installed."
-            exit 0
-          fi
-
-          if [ "$EUID" -eq 0 ]; then
-            apt-get update
-            apt-get install -y "${missing[@]}"
-            exit 0
-          fi
-
-          if sudo -n true 2>/dev/null; then
-            sudo -n apt-get update
-            sudo -n apt-get install -y "${missing[@]}"
-            exit 0
-          fi
-
-          echo "Missing system packages: ${missing[*]}"
-          echo "Install them on the self-hosted runner (passwordless sudo or preinstall) to avoid prompts."
-          exit 1
-
-      - name: Install dependencies (Nuitka build)
+      - name: Install dependencies (pinned packager)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install nuitka
+          # Pin PyInstaller to avoid known Windows CI weirdness and keep builds reproducible
+          python -m pip install "pyinstaller>=6.6,<7"
           python -m pip install -r requirements-build.txt
 
-      - name: Build EXE with Nuitka (standalone onefile)
+      - name: Build EXE with PyInstaller (recommended onedir + minimal collection)
+        shell: bash
         run: |
-          python -m nuitka PicOrgFTP-SQL.pyw --standalone --onefile --output-dir=dist --output-filename=PicOrgFTP-SQL --windows-console-mode=disable --enable-plugin=tk-inter --assume-yes-for-downloads --include-data-dir=picorgftp_sql/Localization=picorgftp_sql/Localization --mingw64 --windows-target
+          pyinstaller --noconfirm --clean --log-level=WARN \
+            --name PicOrgFTP-SQL \
+            --noconsole \
+            --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" \
+            --collect-submodules mysql.connector \
+            --collect-data mysql.connector \
+            PicOrgFTP-SQL.pyw
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: PicOrgFTP-SQL-windows
-          path: dist/PicOrgFTP-SQL.exe
+          path: dist/PicOrgFTP-SQL
