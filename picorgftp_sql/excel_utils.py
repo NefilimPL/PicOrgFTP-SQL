@@ -103,6 +103,18 @@ def label_category(label: str) -> str:
     return base.replace(UNDERSCORE, HYPHEN).upper()
 
 
+def _normalize_cell(value: object) -> str:
+    """Normalize a worksheet cell value into a stripped string."""
+
+    if value is None:
+        return EMPTY
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return str(value).strip()
+
+
 def _ensure_workbook_exists() -> None:
     """Create the workbook on disk if it is missing."""
 
@@ -141,16 +153,16 @@ def prepare_excel_lists() -> Dict[str, Dict[str, dict] | list]:
         if sheet_name == ENTRY_SHEET:
             entries: Dict[str, dict] = {}
             for row in sheet.iter_rows(min_row=2, values_only=True):
-                ean = (row[0] or EMPTY).strip()
+                ean = _normalize_cell(row[0])
                 if not ean:
                     continue
-                name = (row[1] or EMPTY).strip().upper()
-                furniture_type = (row[2] or EMPTY).strip().upper()
-                model = (row[3] or EMPTY).strip().upper()
-                color1 = (row[4] or EMPTY).strip().upper()
-                color2 = (row[5] or EMPTY).strip().upper()
-                color3 = (row[6] or EMPTY).strip().upper()
-                extra = (row[7] or EMPTY).strip().replace(UNDERSCORE, HYPHEN).upper()
+                name = _normalize_cell(row[1]).upper()
+                furniture_type = _normalize_cell(row[2]).upper()
+                model = _normalize_cell(row[3]).upper()
+                color1 = _normalize_cell(row[4]).upper()
+                color2 = _normalize_cell(row[5]).upper()
+                color3 = _normalize_cell(row[6]).upper()
+                extra = _normalize_cell(row[7]).replace(UNDERSCORE, HYPHEN).upper()
                 entries[ean.strip()] = {
                     NAME_HEADER: name,
                     TYPE_HEADER: furniture_type,
