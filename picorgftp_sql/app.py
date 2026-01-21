@@ -82,6 +82,15 @@ def _build_convert_format_choices():
 
 CONVERT_TARGET_FORMATS = _build_convert_format_choices()
 
+
+def _pick_lanczos_filter():
+    if hasattr(AA, "Resampling"):
+        return AA.Resampling.LANCZOS
+    return getattr(AA, "LANCZOS", getattr(AA, "BICUBIC", 3))
+
+
+LANCZOS_FILTER = _pick_lanczos_filter()
+
 FORMAT_INFO_TEXTS = {
     "JPEG": LANG.get(
         "format_info_jpeg",
@@ -147,10 +156,17 @@ class App(BU.Tk):
             "processing": LANG.get("slot_status_processing", "Przetwarzanie"),
         }
         D_ = prepare_excel_lists()
+        if not isinstance(D_, dict):
+            D_ = {}
         B.entries = D_.get(W, {})
+        if not isinstance(B.entries, dict):
+            B.entries = {}
         if W in D_:
             D_.pop(W)
         B.lists = D_
+        for key in (n, t, s, Y, d):
+            if not isinstance(B.lists.get(key), list):
+                B.lists[key] = []
         if not A.path.isdir(l):
             A.makedirs(l, exist_ok=J)
         E_ = [B_.upper() for B_ in A.listdir(l) if A.path.isdir(A.path.join(l, B_))]
@@ -523,8 +539,9 @@ class App(BU.Tk):
             E_.pack(fill=z, expand=J, padx=6, pady=6)
             D_ = F.Label(E_, text=NO_FILE_LABEL, bg=R_, fg=B._ui_colors["muted"])
             D_.pack(fill=z, expand=J)
-            D_.drop_target_register(DND_ALL)
-            D_.dnd_bind("<<Drop>>", lambda e, i=G_: B._on_drop(e, i))
+            if hasattr(D_, "drop_target_register") and hasattr(D_, "dnd_bind"):
+                D_.drop_target_register(DND_ALL)
+                D_.dnd_bind("<<Drop>>", lambda e, i=G_: B._on_drop(e, i))
             K_ = F.Label(E_, text="✕", fg=AT, bg=Ab)
             K_.bind(Q_, lambda e, i=G_: B._remove_file(i))
             K_.place(relx=0, rely=0, anchor="nw")
@@ -587,9 +604,10 @@ class App(BU.Tk):
             sql_icon.place(relx=1.0, rely=1.0, anchor="se", x=sql_icon.offset_x)
             sql_icon.place_forget()
             sql_icon.show_when_unknown = J
-            D_.drag_source_register(1, BJ)
-            D_.dnd_bind("<<DragInitCmd>>", lambda e, i=G_: B._on_drag_init(e, i))
-            D_.dnd_bind("<<DragEndCmd>>", lambda e: B._on_drag_end(e))
+            if hasattr(D_, "drag_source_register") and hasattr(D_, "dnd_bind"):
+                D_.drag_source_register(1, BJ)
+                D_.dnd_bind("<<DragInitCmd>>", lambda e, i=G_: B._on_drag_init(e, i))
+                D_.dnd_bind("<<DragEndCmd>>", lambda e: B._on_drag_end(e))
             footer = C.Frame(H_, style="SlotFooter.TFrame")
             footer.pack(fill="x", padx=6, pady=(0, 6))
             status_label = C.Label(
@@ -654,7 +672,7 @@ class App(BU.Tk):
             thumb = I
             try:
                 with AA.open(path) as img:
-                    img.thumbnail((100, 100), AA.LANCZOS)
+                    img.thumbnail((100, 100), LANCZOS_FILTER)
                     thumb = img.copy()
             except E:
                 thumb = I
@@ -2031,6 +2049,9 @@ class App(BU.Tk):
                     if F_ not in C.pending_deletions and C.slots[F_].get(B0) != AR:
                         C.pending_additions.pop(F_, I)
                         continue
+                    if not src_path:
+                        C.pending_additions.pop(F_, I)
+                        continue
                     if not A.path.isfile(src_path):
                         C.pending_additions.pop(F_, I)
                         continue
@@ -2061,36 +2082,39 @@ class App(BU.Tk):
                     try:
                         if F_ in C.pending_deletions:
                             old_path = C.pending_deletions.get(F_)
-                            try:
-                                same_target = A.path.samefile(old_path, S_)
-                            except E:
-                                same_target = A.path.normcase(
-                                    A.path.normpath(old_path)
-                                ) == A.path.normcase(A.path.normpath(S_))
-                            if same_target:
+                            if not old_path:
                                 C.pending_deletions.pop(F_, I)
+                            else:
                                 try:
-                                    if A.path.exists(old_path):
-                                        A.remove(old_path)
-                                        log_info_loc(
-                                            "deleted_file_before_add",
+                                    same_target = A.path.samefile(old_path, S_)
+                                except E:
+                                    same_target = A.path.normcase(
+                                        A.path.normpath(old_path)
+                                    ) == A.path.normcase(A.path.normpath(S_))
+                                if same_target:
+                                    C.pending_deletions.pop(F_, I)
+                                    try:
+                                        if A.path.exists(old_path):
+                                            A.remove(old_path)
+                                            log_info_loc(
+                                                "deleted_file_before_add",
+                                                file=A.path.basename(old_path),
+                                            )
+                                    except E as z:
+                                        log_error_loc(
+                                            "remove_old_file_failed",
                                             file=A.path.basename(old_path),
+                                            error=z,
                                         )
-                                except E as z:
-                                    log_error_loc(
-                                        "remove_old_file_failed",
-                                        file=A.path.basename(old_path),
-                                        error=z,
-                                    )
-                            elif A.path.exists(S_):
-                                try:
-                                    A.remove(S_)
-                                except E as z:
-                                    log_error_loc(
-                                        "remove_file_before_overwrite_failed",
-                                        file=A.path.basename(S_),
-                                        error=z,
-                                    )
+                                elif A.path.exists(S_):
+                                    try:
+                                        A.remove(S_)
+                                    except E as z:
+                                        log_error_loc(
+                                            "remove_file_before_overwrite_failed",
+                                            file=A.path.basename(S_),
+                                            error=z,
+                                        )
                         elif A.path.exists(S_):
                             try:
                                 A.remove(S_)
@@ -2121,68 +2145,27 @@ class App(BU.Tk):
                                         file=A.path.basename(S_),
                                         error=z,
                                     )
-                            A1 = AA.open(src_path)
-                            if target_fmt == "JPEG" and A1.mode in ("RGBA", "LA", "P"):
-                                A1 = A1.convert("RGB")
-                            if C.opt_resize.get():
-                                max_dim = C.resize_max_dim.get() or 2000
-                                A1.thumbnail((max_dim, max_dim), AA.LANCZOS)
-                            save_params = {}
-                            if t_ext in [F, O]:
-                                quality = 95
-                                if C.opt_compress.get():
-                                    quality = max(
-                                        1, min(100, C.compress_quality.get() or 85)
-                                    )
-                                save_params[W] = quality
-                                save_params[X] = J
-                            if t_ext == V:
-                                save_params[X] = J
-                            A1.save(S_, format=target_fmt, **save_params)
-                            if C.opt_maxsize.get():
-                                max_bytes = (C.max_file_kb.get() or 0) * 1024
-                                if max_bytes > 0 and t_ext in [F, O]:
-                                    try:
-                                        quality = save_params.get(W, 95)
-                                        while quality > 10 and A.path.getsize(S_) > max_bytes:
-                                            quality -= 5
-                                            A1.save(
-                                                S_,
-                                                format=target_fmt,
-                                                quality=quality,
-                                                optimize=J,
-                                            )
-                                    except E as R:
-                                        log_error_loc(
-                                            "file_resize_error",
-                                            file=c_,
-                                            error=R,
+                            with AA.open(src_path) as A1:
+                                if target_fmt == "JPEG" and A1.mode in ("RGBA", "LA", "P"):
+                                    A1 = A1.convert("RGB")
+                                if C.opt_resize.get():
+                                    max_dim = C.resize_max_dim.get() or 2000
+                                    A1.thumbnail((max_dim, max_dim), LANCZOS_FILTER)
+                                save_params = {}
+                                if t_ext in [F, O]:
+                                    quality = 95
+                                    if C.opt_compress.get():
+                                        quality = max(
+                                            1, min(100, C.compress_quality.get() or 85)
                                         )
-                            log_info_loc("image_added_modified", file=c_)
-                        elif ext_lower in [F, O, V, ".bmp", ".gif"]:
-                            A1 = AA.open(src_path)
-                            if C.opt_resize.get():
-                                max_dim = C.resize_max_dim.get() or 2000
-                                A1.thumbnail((max_dim, max_dim), AA.LANCZOS)
-                            save_params = {}
-                            if ext_lower in [F, O]:
-                                quality = 95
-                                if C.opt_compress.get():
-                                    quality = max(
-                                        1, min(100, C.compress_quality.get() or 85)
-                                    )
-                                save_params[W] = quality
-                                save_params[X] = J
-                            if ext_lower == V:
-                                save_params[X] = J
-                            A1.save(S_, **save_params)
-                            if C.opt_maxsize.get():
-                                max_bytes = (C.max_file_kb.get() or 0) * 1024
-                                if max_bytes > 0:
-                                    if A.path.getsize(S_) > max_bytes and ext_lower in [
-                                        F,
-                                        O,
-                                    ]:
+                                    save_params[W] = quality
+                                    save_params[X] = J
+                                if t_ext == V:
+                                    save_params[X] = J
+                                A1.save(S_, format=target_fmt, **save_params)
+                                if C.opt_maxsize.get():
+                                    max_bytes = (C.max_file_kb.get() or 0) * 1024
+                                    if max_bytes > 0 and t_ext in [F, O]:
                                         try:
                                             quality = save_params.get(W, 95)
                                             while (
@@ -2190,13 +2173,57 @@ class App(BU.Tk):
                                                 and A.path.getsize(S_) > max_bytes
                                             ):
                                                 quality -= 5
-                                                A1.save(S_, quality=quality, optimize=J)
+                                                A1.save(
+                                                    S_,
+                                                    format=target_fmt,
+                                                    quality=quality,
+                                                    optimize=J,
+                                                )
                                         except E as R:
                                             log_error_loc(
                                                 "file_resize_error",
                                                 file=c_,
                                                 error=R,
                                             )
+                            log_info_loc("image_added_modified", file=c_)
+                        elif ext_lower in [F, O, V, ".bmp", ".gif"]:
+                            with AA.open(src_path) as A1:
+                                if C.opt_resize.get():
+                                    max_dim = C.resize_max_dim.get() or 2000
+                                    A1.thumbnail((max_dim, max_dim), LANCZOS_FILTER)
+                                save_params = {}
+                                if ext_lower in [F, O]:
+                                    quality = 95
+                                    if C.opt_compress.get():
+                                        quality = max(
+                                            1, min(100, C.compress_quality.get() or 85)
+                                        )
+                                    save_params[W] = quality
+                                    save_params[X] = J
+                                if ext_lower == V:
+                                    save_params[X] = J
+                                A1.save(S_, **save_params)
+                                if C.opt_maxsize.get():
+                                    max_bytes = (C.max_file_kb.get() or 0) * 1024
+                                    if max_bytes > 0:
+                                        if A.path.getsize(S_) > max_bytes and ext_lower in [
+                                            F,
+                                            O,
+                                        ]:
+                                            try:
+                                                quality = save_params.get(W, 95)
+                                                while (
+                                                    quality > 10
+                                                    and A.path.getsize(S_) > max_bytes
+                                                ):
+                                                    quality -= 5
+                                                    A1.save(S_, quality=quality, optimize=J)
+                                            except E as R:
+                                                log_error_loc(
+                                                    "file_resize_error",
+                                                    file=c_,
+                                                    error=R,
+                                                )
                             log_info_loc("image_added_modified", file=c_)
                         elif ext_lower in [".tif", ".tiff"]:
                             Af.copy2(src_path, S_)
@@ -2466,6 +2493,8 @@ class App(BU.Tk):
                             if d_[f]:
                                 if Az_ in C.ftp_presence:
                                     remote_fname = C.ftp_presence.get(Az_)
+                                    if not isinstance(remote_fname, str) or not remote_fname:
+                                        continue
                                     parts = remote_fname.split(a)
                                     if Q(parts) >= 2:
                                         remote_label = parts[1].split(".")[0]
