@@ -1,5 +1,6 @@
 """Main Tkinter application class."""
 
+import queue
 import re
 import traceback
 
@@ -170,6 +171,10 @@ class App(BU.Tk):
         B.ftp_presence = {}
         B.ftp_downloaded_final = set()
         B.sql_presence = I
+        B._thumb_queue = queue.Queue()
+        B._thumb_tokens = {}
+        B._scrolling = h
+        B._scroll_idle_job = I
         B.opt_resize = F.BooleanVar(value=J)
         B.opt_compress = F.BooleanVar(value=h)
         B.opt_maxsize = F.BooleanVar(value=h)
@@ -188,6 +193,8 @@ class App(BU.Tk):
         B.suppress_next_lookup = h
         B._build_form()
         B._build_slots()
+        B._thumb_worker = threading.Thread(target=B._thumbnail_worker, daemon=J)
+        B._thumb_worker.start()
         B._slot_index_by_prefix = {
             prefix: idx for idx, (prefix, _) in A0(SLOT_LABELS)
         }
@@ -454,7 +461,11 @@ class App(BU.Tk):
         M_ = C.Frame(B, style="App.TFrame")
         M_.pack(fill=z, expand=J, padx=12, pady=(6, 12))
         A_ = F.Canvas(M_, bg=B._ui_colors["bg"], highlightthickness=0, bd=0)
-        T = C.Scrollbar(M_, orient=An, command=A_.yview)
+        def _on_scroll(*args):
+            A_.yview(*args)
+            B._note_slots_scroll()
+
+        T = C.Scrollbar(M_, orient=An, command=_on_scroll)
         N_ = C.Frame(A_, style="App.TFrame")
         N_.bind(S_, lambda e: A_.configure(scrollregion=A_.bbox("all")))
         Y = A_.create_window((0, 0), window=N_, anchor="nw")
@@ -462,11 +473,21 @@ class App(BU.Tk):
         A_.configure(yscrollcommand=T.set)
         A_.pack(side=Am, fill=z, expand=J)
         T.pack(side=AV, fill="y")
-        A_.bind_all(
-            "<MouseWheel>", lambda e: A_.yview_scroll(int(-1 * (e.delta / 120)), L_)
-        )
-        A_.bind_all("<Button-4>", lambda e: A_.yview_scroll(-1, L_))
-        A_.bind_all("<Button-5>", lambda e: A_.yview_scroll(1, L_))
+        def _on_mousewheel(e):
+            A_.yview_scroll(int(-1 * (e.delta / 120)), L_)
+            B._note_slots_scroll()
+
+        def _on_button4(e):
+            A_.yview_scroll(-1, L_)
+            B._note_slots_scroll()
+
+        def _on_button5(e):
+            A_.yview_scroll(1, L_)
+            B._note_slots_scroll()
+
+        A_.bind_all("<MouseWheel>", _on_mousewheel)
+        A_.bind_all("<Button-4>", _on_button4)
+        A_.bind_all("<Button-5>", _on_button5)
         B.slots_frame = N_
         B.slots = []
         U = 5
@@ -583,6 +604,73 @@ class App(BU.Tk):
             )
         for O_ in Ax(U):
             B.slots_frame.columnconfigure(O_, weight=1)
+
+    def _note_slots_scroll(B):
+        B._scrolling = J
+        if B._scroll_idle_job is not I:
+            try:
+                B.after_cancel(B._scroll_idle_job)
+            except E:
+                pass
+        B._scroll_idle_job = B.after(150, B._clear_slots_scroll)
+
+    def _clear_slots_scroll(B):
+        B._scrolling = h
+        B._scroll_idle_job = I
+
+    def _queue_thumbnail(B, idx, path):
+        if not path:
+            return
+        token = uuid.uuid4().hex
+        B._thumb_tokens[idx] = token
+        B._thumb_queue.put((idx, path, token))
+
+    def _thumbnail_worker(B):
+        while J:
+            idx, path, token = B._thumb_queue.get()
+            if token != B._thumb_tokens.get(idx):
+                continue
+            thumb = I
+            try:
+                with AA.open(path) as img:
+                    img.thumbnail((100, 100), AA.LANCZOS)
+                    thumb = img.copy()
+            except E:
+                thumb = I
+            B.after(
+                0,
+                lambda i=idx, p=path, t=token, th=thumb: B._apply_thumbnail(
+                    i, p, t, th
+                ),
+            )
+
+    def _apply_thumbnail(B, idx, path, token, thumb):
+        if token != B._thumb_tokens.get(idx):
+            return
+        if idx < 0 or idx >= Q(B.slots):
+            return
+        slot = B.slots[idx]
+        if slot.get(f) != path:
+            return
+        if B._scrolling:
+            B.after(
+                80,
+                lambda i=idx, p=path, t=token, th=thumb: B._apply_thumbnail(
+                    i, p, t, th
+                ),
+            )
+            return
+        label = slot[y]
+        remove_label = slot[A7]
+        if thumb is I:
+            label.configure(text=A.path.basename(path), image=B)
+            label.image = I
+        else:
+            photo = ImageTk.PhotoImage(thumb)
+            label.configure(image=photo, text=B)
+            label.image = photo
+        remove_label.place(x=0, y=0)
+        B._update_slot_activity(idx, active=h)
 
     def _set_icon_status(C, icon, present):
         """Toggle the coloured indicator showing local/remote file presence."""
@@ -1070,7 +1158,8 @@ class App(BU.Tk):
                         )
                     else:
                         C._set_icon_status(G_["sql_icon"], I)
-                    C._update_slot_activity(X_, active=h)
+                    if R_ not in slot_paths:
+                        C._update_slot_activity(X_, active=h)
                 if end_index < Q(slots):
                     C.after(1, lambda: process_batch(end_index))
 
@@ -1530,21 +1619,11 @@ class App(BU.Tk):
     def _update_slot_ui(J, idx):
         D_ = J.slots[idx]
         F_ = D_[f]
-        C_ = D_[y]
-        K_ = D_[A7]
         if not F_:
             return
-        try:
-            G_ = AA.open(F_)
-            G_.thumbnail((100, 100), AA.LANCZOS)
-            H_ = ImageTk.PhotoImage(G_)
-            C_.configure(image=H_, text=B)
-            C_.image = H_
-        except E:
-            C_.configure(text=A.path.basename(F_), image=B)
-            C_.image = I
-        K_.place(x=0, y=0)
-        J._update_slot_activity(idx, active=h)
+        J._update_slot_activity(idx, active=Al, status=J._slot_status["loading"])
+        D_[A7].place(x=0, y=0)
+        J._queue_thumbnail(idx, F_)
 
     def _remove_file(C, idx):
         if C.is_processing:
@@ -1578,6 +1657,7 @@ class App(BU.Tk):
             E_[y].configure(image=B, text=NO_FILE_LABEL)
             E_[y].image = I
             E_[A7].place_forget()
+            C._thumb_tokens.pop(D_, I)
             C._set_icon_status(E_["local_icon"], h)
             if "sql_icon" in E_:
                 C._set_icon_status(E_["sql_icon"], I)
@@ -1592,6 +1672,7 @@ class App(BU.Tk):
         C.pending_additions.clear()
         C.pending_deletions.clear()
         C.pending_ftp_deletions.clear()
+        C._thumb_tokens.clear()
         C.sql_presence = I
         for A_ in C.slots:
             A_[f] = I
