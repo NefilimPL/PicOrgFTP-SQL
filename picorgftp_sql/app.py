@@ -280,6 +280,9 @@ class App(BU.Tk):
         A.style.configure("TEntry", font=("Segoe UI", 9))
         A.style.configure("Slot.TProgressbar", troughcolor=A._ui_colors["progress_trough"])
         A.style.configure("Slot.TProgressbar", background=A._ui_colors["accent"])
+        base_layout = A.style.layout("Horizontal.TProgressbar")
+        if base_layout:
+            A.style.layout("Horizontal.Slot.TProgressbar", base_layout)
 
     def _trigger_test_error(A, key):
         if key == "zero_div":
