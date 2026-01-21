@@ -663,11 +663,11 @@ class App(BU.Tk):
         label = slot[y]
         remove_label = slot[A7]
         if thumb is I:
-            label.configure(text=A.path.basename(path), image=B)
+            label.configure(text=A.path.basename(path), image="")
             label.image = I
         else:
             photo = ImageTk.PhotoImage(thumb)
-            label.configure(image=photo, text=B)
+            label.configure(image=photo, text="")
             label.image = photo
         remove_label.place(x=0, y=0)
         B._update_slot_activity(idx, active=h)
