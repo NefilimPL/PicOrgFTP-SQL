@@ -9,6 +9,7 @@ from .common import (
     Ar,
     B,
     BT,
+    CONFIG_DIR_PROMPT_TITLE,
     DEFAULT_CONFIG,
     E,
     H,
@@ -47,7 +48,7 @@ def load_config():
     config_path = CONFIG_PATH
     if not A.path.exists(config_path):
         if not BASE_DIR_OVERRIDE:
-            chosen_dir = BT.askdirectory(title="Wskaż folder z plikiem konfiguracyjnym")
+            chosen_dir = BT.askdirectory(title=CONFIG_DIR_PROMPT_TITLE)
             if chosen_dir:
                 config_path = A.path.join(chosen_dir, "config.json")
         if not A.path.exists(config_path):
