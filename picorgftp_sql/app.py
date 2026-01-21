@@ -1049,21 +1049,32 @@ class App(BU.Tk):
             C.ftp_presence = ftp_presence
             C.ftp_downloaded_final = set()
             C.sql_presence = sql_presence
-            for X_, G_ in A0(C.slots):
-                R_ = G_[Aa]
-                if R_ in slot_paths:
-                    G_[f] = slot_paths[R_]
-                    C._update_slot_ui(X_)
-                    C._mark_slot(X_, A4)
-                else:
-                    G_[f] = I
-                C._set_icon_status(G_["local_icon"], R_ in original_files)
-                C._set_icon_status(G_["ftp_icon"], R_ in ftp_presence)
-                if isinstance(sql_presence, dict):
-                    C._set_icon_status(G_["sql_icon"], sql_presence.get(R_, h))
-                else:
-                    C._set_icon_status(G_["sql_icon"], I)
-                C._update_slot_activity(X_, active=h)
+            slots = list(A0(C.slots))
+            batch_size = 2
+
+            def process_batch(start_index=0):
+                end_index = min(start_index + batch_size, Q(slots))
+                for X_, G_ in slots[start_index:end_index]:
+                    R_ = G_[Aa]
+                    if R_ in slot_paths:
+                        G_[f] = slot_paths[R_]
+                        C._update_slot_ui(X_)
+                        C._mark_slot(X_, A4)
+                    else:
+                        G_[f] = I
+                    C._set_icon_status(G_["local_icon"], R_ in original_files)
+                    C._set_icon_status(G_["ftp_icon"], R_ in ftp_presence)
+                    if isinstance(sql_presence, dict):
+                        C._set_icon_status(
+                            G_["sql_icon"], sql_presence.get(R_, h)
+                        )
+                    else:
+                        C._set_icon_status(G_["sql_icon"], I)
+                    C._update_slot_activity(X_, active=h)
+                if end_index < Q(slots):
+                    C.after(1, lambda: process_batch(end_index))
+
+            process_batch()
 
         threading.Thread(target=worker, daemon=J).start()
 
