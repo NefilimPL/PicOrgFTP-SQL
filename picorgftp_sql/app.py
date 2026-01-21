@@ -136,6 +136,15 @@ class App(BU.Tk):
         B.style = C.Style()
         B.style.theme_use("clam")
         B.style.configure(Z, fieldbackground=LIGHT_GREEN)
+        B._configure_styles()
+        B._slot_status = {
+            "empty": NO_FILE_LABEL,
+            "ready": LANG.get("slot_status_ready", "Gotowe"),
+            "loading": LANG.get("slot_status_loading", "Wczytywanie"),
+            "downloading": LANG.get("slot_status_downloading", "Pobieranie"),
+            "uploading": LANG.get("slot_status_uploading", "Wysylanie"),
+            "processing": LANG.get("slot_status_processing", "Przetwarzanie"),
+        }
         D_ = prepare_excel_lists()
         B.entries = D_.get(W, {})
         if W in D_:
@@ -179,6 +188,9 @@ class App(BU.Tk):
         B.suppress_next_lookup = h
         B._build_form()
         B._build_slots()
+        B._slot_index_by_prefix = {
+            prefix: idx for idx, (prefix, _) in A0(SLOT_LABELS)
+        }
         H_ = Q(E_)
         B.combo_name.existing_count = H_
         set_app(B)
@@ -230,6 +242,48 @@ class App(BU.Tk):
         else:
             _show_error()
 
+    def _configure_styles(A):
+        A._ui_colors = {
+            "bg": "#f6f4f0",
+            "card": "#ffffff",
+            "slot_bg": "#f1efeb",
+            "slot_border": "#d2cdc5",
+            "muted": "#6f6b65",
+            "accent": "#2f6f60",
+            "progress_trough": "#e7e2da",
+        }
+        A.configure(bg=A._ui_colors["bg"])
+        A.style.configure("App.TFrame", background=A._ui_colors["bg"])
+        A.style.configure("Card.TFrame", background=A._ui_colors["card"])
+        A.style.configure(
+            "Form.TLabel",
+            background=A._ui_colors["card"],
+            font=("Segoe UI", 9),
+        )
+        A.style.configure(
+            "SlotTitle.TLabel",
+            background=A._ui_colors["card"],
+            font=("Segoe UI Semibold", 9),
+        )
+        A.style.configure(
+            "SlotStatus.TLabel",
+            background=A._ui_colors["card"],
+            foreground=A._ui_colors["muted"],
+            font=("Segoe UI", 8),
+        )
+        A.style.configure(
+            "SlotFooter.TFrame",
+            background=A._ui_colors["card"],
+        )
+        A.style.configure("TButton", padding=(10, 4), font=("Segoe UI Semibold", 9))
+        A.style.configure("TCombobox", padding=(6, 3), font=("Segoe UI", 9))
+        A.style.configure("TEntry", font=("Segoe UI", 9))
+        A.style.configure("Slot.TProgressbar", troughcolor=A._ui_colors["progress_trough"])
+        A.style.configure("Slot.TProgressbar", background=A._ui_colors["accent"])
+        base_layout = A.style.layout("Horizontal.TProgressbar")
+        if base_layout:
+            A.style.layout("Horizontal.Slot.TProgressbar", base_layout)
+
     def _trigger_test_error(A, key):
         if key == "zero_div":
             1 / 0
@@ -254,9 +308,9 @@ class App(BU.Tk):
         F_ = "<FocusOut>"
         D_ = "<KeyRelease>"
         E_ = "<Return>"
-        B_ = C.Frame(A)
-        B_.pack(side="top", fill="x", padx=10, pady=10)
-        G_ = C.Label(B_, text=NAME_LABEL)
+        B_ = C.Frame(A, style="Card.TFrame", padding=10)
+        B_.pack(side="top", fill="x", padx=12, pady=(12, 6))
+        G_ = C.Label(B_, text=NAME_LABEL, style="Form.TLabel")
         G_.grid(row=0, column=0, sticky=R)
         A._add_tooltip(
             G_,
@@ -273,7 +327,7 @@ class App(BU.Tk):
         A.combo_name.bind(A2, lambda e: A._on_name_commit())
         A.combo_name.bind(F_, lambda e: A._on_name_commit())
         A.combo_name.bind(D_, A._on_key_release)
-        H_ = C.Label(B_, text=TYPE_LABEL)
+        H_ = C.Label(B_, text=TYPE_LABEL, style="Form.TLabel")
         H_.grid(row=1, column=0, sticky=R)
         A._add_tooltip(
             H_,
@@ -290,7 +344,7 @@ class App(BU.Tk):
         A.combo_type.bind(A2, lambda e: A._on_type_commit())
         A.combo_type.bind(F_, lambda e: A._on_type_commit())
         A.combo_type.bind(D_, A._on_key_release)
-        I_ = C.Label(B_, text=MODEL_LABEL)
+        I_ = C.Label(B_, text=MODEL_LABEL, style="Form.TLabel")
         I_.grid(row=2, column=0, sticky=R)
         A._add_tooltip(
             I_,
@@ -306,7 +360,7 @@ class App(BU.Tk):
         A.combo_model.bind(E_, lambda e: A._on_model_commit())
         A.combo_model.bind(A2, lambda e: A._on_model_commit())
         A.combo_model.bind(D_, A._on_key_release)
-        J_ = C.Label(B_, text=COLOR1_LABEL)
+        J_ = C.Label(B_, text=COLOR1_LABEL, style="Form.TLabel")
         J_.grid(row=3, column=0, sticky=R)
         A._add_tooltip(
             J_, LANG.get("color1_tooltip", "Główny kolor mebla (wymagany).")
@@ -319,7 +373,7 @@ class App(BU.Tk):
         A.combo_color1.bind(A2, lambda e: A._on_color_commit())
         A.combo_color1.bind(F_, lambda e: A._on_color_commit())
         A.combo_color1.bind(D_, A._on_key_release)
-        K_ = C.Label(B_, text=COLOR2_LABEL)
+        K_ = C.Label(B_, text=COLOR2_LABEL, style="Form.TLabel")
         K_.grid(row=4, column=0, sticky=R)
         A._add_tooltip(
             K_, LANG.get("color2_tooltip", "Drugi kolor mebla (opcjonalnie).")
@@ -332,7 +386,7 @@ class App(BU.Tk):
         A.combo_color2.bind(A2, lambda e: A._on_color_commit())
         A.combo_color2.bind(F_, lambda e: A._on_color_commit())
         A.combo_color2.bind(D_, A._on_key_release)
-        L_ = C.Label(B_, text=COLOR3_LABEL)
+        L_ = C.Label(B_, text=COLOR3_LABEL, style="Form.TLabel")
         L_.grid(row=5, column=0, sticky=R)
         A._add_tooltip(
             L_, LANG.get("color3_tooltip", "Trzeci kolor mebla (opcjonalnie).")
@@ -345,7 +399,7 @@ class App(BU.Tk):
         A.combo_color3.bind(A2, lambda e: A._on_color_commit())
         A.combo_color3.bind(F_, lambda e: A._on_color_commit())
         A.combo_color3.bind(D_, A._on_key_release)
-        M_ = C.Label(B_, text=EXTRA_LABEL)
+        M_ = C.Label(B_, text=EXTRA_LABEL, style="Form.TLabel")
         M_.grid(row=6, column=0, sticky=R)
         A._add_tooltip(
             M_,
@@ -362,7 +416,7 @@ class App(BU.Tk):
         A.combo_extra.bind(A2, lambda e: A._on_extra_commit())
         A.combo_extra.bind(F_, lambda e: A._on_extra_commit())
         A.combo_extra.bind(D_, A._on_key_release)
-        N_ = C.Label(B_, text=EAN_OPTIONAL_LABEL)
+        N_ = C.Label(B_, text=EAN_OPTIONAL_LABEL, style="Form.TLabel")
         N_.grid(row=7, column=0, sticky=R)
         A._add_tooltip(
             N_,
@@ -393,14 +447,15 @@ class App(BU.Tk):
         """Prepare the scrollable grid of drop targets used for images."""
 
         Q_ = "<Button-1>"
-        R_ = "#ddd"
+        R_ = B._ui_colors["slot_bg"]
+        T_ = B._ui_colors["slot_border"]
         S_ = "<Configure>"
         L_ = "units"
-        M_ = C.Frame(B)
-        M_.pack(fill=z, expand=J, padx=10, pady=10)
-        A_ = F.Canvas(M_)
+        M_ = C.Frame(B, style="App.TFrame")
+        M_.pack(fill=z, expand=J, padx=12, pady=(6, 12))
+        A_ = F.Canvas(M_, bg=B._ui_colors["bg"], highlightthickness=0, bd=0)
         T = C.Scrollbar(M_, orient=An, command=A_.yview)
-        N_ = C.Frame(A_)
+        N_ = C.Frame(A_, style="App.TFrame")
         N_.bind(S_, lambda e: A_.configure(scrollregion=A_.bbox("all")))
         Y = A_.create_window((0, 0), window=N_, anchor="nw")
         A_.bind(S_, lambda e, cw=Y: A_.itemconfig(cw, width=e.width))
@@ -422,14 +477,27 @@ class App(BU.Tk):
                 highlightthickness=0,
                 highlightbackground=A8,
                 highlightcolor=A8,
+                bg=B._ui_colors["card"],
                 bd=0,
             )
-            H_.grid(row=Z_, column=O_, padx=5, pady=5, sticky="nsew")
-            C.Label(H_, text=f"{V_} {W_}").pack()
-            E_ = F.Frame(H_, height=100, bg=R_)
+            H_.grid(row=Z_, column=O_, padx=6, pady=6, sticky="nsew")
+            C.Label(
+                H_,
+                text=f"{V_} {W_}",
+                style="SlotTitle.TLabel",
+                anchor="w",
+            ).pack(fill="x", padx=6, pady=(6, 0))
+            E_ = F.Frame(
+                H_,
+                height=110,
+                bg=R_,
+                highlightthickness=1,
+                highlightbackground=T_,
+                bd=0,
+            )
             E_.pack_propagate(h)
-            E_.pack(fill=z, expand=J, padx=5, pady=5)
-            D_ = F.Label(E_, text=NO_FILE_LABEL, bg=R_)
+            E_.pack(fill=z, expand=J, padx=6, pady=6)
+            D_ = F.Label(E_, text=NO_FILE_LABEL, bg=R_, fg=B._ui_colors["muted"])
             D_.pack(fill=z, expand=J)
             D_.drop_target_register(DND_ALL)
             D_.dnd_bind("<<Drop>>", lambda e, i=G_: B._on_drop(e, i))
@@ -448,7 +516,7 @@ class App(BU.Tk):
                 bd=1,
                 relief="solid",
             )
-            local_icon.create_text(15, 10, text="LOCAL", font=("Arial", 7), fill="white")
+            local_icon.create_text(15, 10, text="LOCAL", font=("Segoe UI", 7), fill="white")
             local_icon.offset_x = -60
             local_icon.place(relx=1.0, rely=1.0, anchor="se", x=local_icon.offset_x)
             local_icon.place_forget()
@@ -460,7 +528,7 @@ class App(BU.Tk):
                 bd=1,
                 relief="solid",
             )
-            ftp_icon.create_text(15, 10, text="FTP", font=("Arial", 7), fill="white")
+            ftp_icon.create_text(15, 10, text="FTP", font=("Segoe UI", 7), fill="white")
             ftp_icon.offset_x = -30
             ftp_icon.place(relx=1.0, rely=1.0, anchor="se", x=ftp_icon.offset_x)
             ftp_icon.place_forget()
@@ -472,7 +540,7 @@ class App(BU.Tk):
                 bd=1,
                 relief="solid",
             )
-            sql_icon.create_text(15, 10, text="SQL", font=("Arial", 7), fill="white")
+            sql_icon.create_text(15, 10, text="SQL", font=("Segoe UI", 7), fill="white")
             sql_icon.offset_x = 0
             sql_icon.place(relx=1.0, rely=1.0, anchor="se", x=sql_icon.offset_x)
             sql_icon.place_forget()
@@ -480,6 +548,23 @@ class App(BU.Tk):
             D_.drag_source_register(1, BJ)
             D_.dnd_bind("<<DragInitCmd>>", lambda e, i=G_: B._on_drag_init(e, i))
             D_.dnd_bind("<<DragEndCmd>>", lambda e: B._on_drag_end(e))
+            footer = C.Frame(H_, style="SlotFooter.TFrame")
+            footer.pack(fill="x", padx=6, pady=(0, 6))
+            status_label = C.Label(
+                footer,
+                text=B._slot_status["empty"],
+                style="SlotStatus.TLabel",
+                anchor="w",
+            )
+            status_label.pack(fill="x")
+            progress = C.Progressbar(
+                footer,
+                mode="determinate",
+                maximum=100,
+                value=0,
+                style="Slot.TProgressbar",
+            )
+            progress.pack(fill="x", pady=(2, 0))
             B.slots.append(
                 {
                     Aa: V_,
@@ -489,6 +574,8 @@ class App(BU.Tk):
                     "local_icon": local_icon,
                     "ftp_icon": ftp_icon,
                     "sql_icon": sql_icon,
+                    "status_label": status_label,
+                    "progress": progress,
                     f: I,
                     AS: H_,
                     B0: I,
@@ -516,6 +603,40 @@ class App(BU.Tk):
             return
         icon.place(relx=1.0, rely=1.0, anchor="se", x=getattr(icon, "offset_x", 0))
         icon.config(bg="green" if present else "red")
+
+    def _get_slot_idle_status(B, idx):
+        slot = B.slots[idx]
+        if slot.get(f):
+            return B._slot_status["ready"]
+        return B._slot_status["empty"]
+
+    def _update_slot_activity(B, idx, active=h, status=I):
+        def _apply(status_text=status, active_state=active):
+            if idx is I or idx < 0 or idx >= Q(B.slots):
+                return
+            slot = B.slots[idx]
+            if status_text is I:
+                status_text = B._get_slot_idle_status(idx)
+            label = slot.get("status_label")
+            progress = slot.get("progress")
+            if label:
+                label.configure(text=status_text)
+            if progress:
+                if active_state:
+                    progress.configure(mode="indeterminate")
+                    progress.start(12)
+                else:
+                    progress.stop()
+                    progress.configure(mode="determinate", value=0)
+
+        try:
+            B.after(0, _apply)
+        except E:
+            _apply()
+
+    def _update_all_slot_activity(B, active=h, status=I):
+        for idx in Ax(Q(B.slots)):
+            B._update_slot_activity(idx, active=active, status=status)
 
     def _should_check_sql_presence(A):
         """Return True when database credentials are configured for lookups."""
@@ -730,6 +851,7 @@ class App(BU.Tk):
         C.original_files = {}
         if not A.path.isdir(F):
             return
+        C._update_all_slot_activity(active=J, status=C._slot_status["loading"])
         def worker():
             try:
                 V_ = [
@@ -801,6 +923,13 @@ class App(BU.Tk):
                             temp_dir = tempfile.gettempdir()
                             temp_path_raw = A.path.join(temp_dir, fname)
                             try:
+                                idx = C._slot_index_by_prefix.get(label)
+                                if idx is not I:
+                                    C._update_slot_activity(
+                                        idx,
+                                        active=J,
+                                        status=C._slot_status["downloading"],
+                                    )
                                 with x(temp_path_raw, "wb") as fh:
                                     O_.retrbinary(f"RETR {fname}", fh.write)
                                 ext = A.path.splitext(fname)[1]
@@ -934,6 +1063,7 @@ class App(BU.Tk):
                     C._set_icon_status(G_["sql_icon"], sql_presence.get(R_, h))
                 else:
                     C._set_icon_status(G_["sql_icon"], I)
+                C._update_slot_activity(X_, active=h)
 
         threading.Thread(target=worker, daemon=J).start()
 
@@ -1403,6 +1533,7 @@ class App(BU.Tk):
             C_.configure(text=A.path.basename(F_), image=B)
             C_.image = I
         K_.place(x=0, y=0)
+        J._update_slot_activity(idx, active=h)
 
     def _remove_file(C, idx):
         if C.is_processing:
@@ -1443,6 +1574,7 @@ class App(BU.Tk):
                 C._mark_slot(D_, I)
             else:
                 C._mark_slot(D_, AR)
+            C._update_slot_activity(D_, active=h)
             C.focus_force()
 
     def _clear_all_slots(C):
@@ -1462,6 +1594,11 @@ class App(BU.Tk):
             if "sql_icon" in A_:
                 A_["sql_icon"].place_forget()
                 A_["sql_icon"].delete("slash")
+            if "status_label" in A_:
+                A_["status_label"].configure(text=C._slot_status["empty"])
+            if "progress" in A_:
+                A_["progress"].stop()
+                A_["progress"].configure(mode="determinate", value=0)
             if AS in A_:
                 A_[AS].configure(
                     highlightthickness=0, highlightbackground=A8, highlightcolor=A8
@@ -1782,6 +1919,9 @@ class App(BU.Tk):
                     if not A.path.isfile(src_path):
                         C.pending_additions.pop(F_, I)
                         continue
+                    C._update_slot_activity(
+                        F_, active=J, status=C._slot_status["processing"]
+                    )
                     Az_ = SLOT_LABELS[F_][0]
                     Be_ = label_category(SLOT_LABELS[F_][1])
                     P_ = [
@@ -2104,6 +2244,12 @@ class App(BU.Tk):
                                     for B in files_to_upload
                                     if A.path.isfile(A.path.join(i_, B))
                                 ]
+                                slot_index_by_filename = {}
+                                for idx, slot in A0(C.slots):
+                                    if slot.get(f):
+                                        slot_index_by_filename[
+                                            A.path.basename(slot[f])
+                                        ] = idx
                                 ftp_error = h
                                 for X_ in files_local:
                                     if X_ in C.ftp_downloaded_final:
@@ -2119,6 +2265,13 @@ class App(BU.Tk):
                                     Bm = A.path.splitext(X_)[1]
                                     BT = f"{Ao_}_{Bl}{Bm}"
                                     Bn = A.path.join(i_, X_)
+                                    idx = slot_index_by_filename.get(X_)
+                                    if idx is not I:
+                                        C._update_slot_activity(
+                                            idx,
+                                            active=J,
+                                            status=C._slot_status["uploading"],
+                                        )
                                     try:
                                         with x(Bn, "rb") as Bo:
                                             ftp.storbinary(f"STOR {BT}", Bo)
@@ -2126,6 +2279,8 @@ class App(BU.Tk):
                                             log_info_loc(
                                                 "ftp_file_uploaded", file=X_, target=BT
                                             )
+                                        if idx is not I:
+                                            C._update_slot_activity(idx, active=h)
                                     except E as AU:
                                         Y_ = f"Błąd wysyłania pliku {X_}: {AU}"
                                         log_error_loc(
@@ -2331,6 +2486,7 @@ class App(BU.Tk):
                     C._mark_slot(F_, A4)
                 else:
                     C._mark_slot(F_, I)
+            C._update_all_slot_activity(active=h)
             C.pending_additions = result_data.get(n, {})
             C.pending_deletions = result_data.get(o, {})
             Y_ = result_data.get(Y, B)
