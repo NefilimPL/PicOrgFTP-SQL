@@ -39,10 +39,11 @@ NO_LED_VALUE = "NO-LED"
 EMPTY = ""
 UNDERSCORE = "_"
 HYPHEN = "-"
-LOCKED_TITLE = "Plik zablokowany"
-LOCKED_REASON_OTHER_PROCESS = "przez inny proces"
-ERROR_TITLE = "Błąd"
-WRITE_ERROR_TITLE = "Błąd zapisu"
+LOCKED_TITLE = localization.EXCEL_LOCKED_TITLE
+LOCKED_REASON_OTHER_PROCESS = localization.EXCEL_LOCK_OTHER_PROCESS
+LOCKED_BY_USER_TEMPLATE = localization.EXCEL_LOCKED_BY_USER
+ERROR_TITLE = localization.AK
+WRITE_ERROR_TITLE = localization.Ac
 
 # Order used by the GUI when building slot labels.
 SLOT_LABELS = [
@@ -222,7 +223,11 @@ def add_to_list(sheet_name: str, value: str) -> None:
         normalized = normalized.replace(UNDERSCORE, HYPHEN)
     locked_by = get_file_lock_user(LISTS_WORKBOOK_PATH)
     if locked_by:
-        reason = f"przez użytkownika '{locked_by}'" if isinstance(locked_by, str) else LOCKED_REASON_OTHER_PROCESS
+        reason = (
+            LOCKED_BY_USER_TEMPLATE.format(user=locked_by)
+            if isinstance(locked_by, str)
+            else LOCKED_REASON_OTHER_PROCESS
+        )
         _show_locked_dialog(reason)
         log_error_loc("excel_add_locked", value=normalized, list=sheet_name, reason=reason)
         return
@@ -246,7 +251,11 @@ def remove_from_list(sheet_name: str, value: str) -> None:
 
     locked_by = get_file_lock_user(LISTS_WORKBOOK_PATH)
     if locked_by:
-        reason = f"przez użytkownika '{locked_by}'" if isinstance(locked_by, str) else LOCKED_REASON_OTHER_PROCESS
+        reason = (
+            LOCKED_BY_USER_TEMPLATE.format(user=locked_by)
+            if isinstance(locked_by, str)
+            else LOCKED_REASON_OTHER_PROCESS
+        )
         _show_locked_dialog(reason)
         log_error_loc("excel_remove_locked", value=value, list=sheet_name, reason=reason)
         return
@@ -294,7 +303,11 @@ def save_ean_entry(
 
     locked_by = get_file_lock_user(LISTS_WORKBOOK_PATH)
     if locked_by:
-        reason = f"przez użytkownika '{locked_by}'" if isinstance(locked_by, str) else LOCKED_REASON_OTHER_PROCESS
+        reason = (
+            LOCKED_BY_USER_TEMPLATE.format(user=locked_by)
+            if isinstance(locked_by, str)
+            else LOCKED_REASON_OTHER_PROCESS
+        )
         messagebox = localization.O if hasattr(localization, "O") else None
         if messagebox:
             messagebox.showerror(
@@ -394,8 +407,10 @@ def save_ean_entry(
             )
 
     if _save_workbook(workbook, "excel_entry_save_failed", ean=ean):
-        action = "updated" if updated else "added"
-        log_info_loc("excel_entry_saved", ean=ean, action=action)
+        action_key = (
+            "excel_entry_saved_updated" if updated else "excel_entry_saved_added"
+        )
+        log_info_loc(action_key, ean=ean)
         return True
     return False
 

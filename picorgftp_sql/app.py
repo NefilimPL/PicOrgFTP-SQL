@@ -502,9 +502,12 @@ class App(BU.Tk):
                 bd=0,
             )
             H_.grid(row=Z_, column=O_, padx=6, pady=6, sticky="nsew")
+            slot_title = SLOT_TITLE_FORMAT.format(
+                index=V_, label=get_slot_label(W_)
+            )
             C.Label(
                 H_,
-                text=f"{V_} {W_}",
+                text=slot_title,
                 style="SlotTitle.TLabel",
                 anchor="w",
             ).pack(fill="x", padx=6, pady=(6, 0))
@@ -537,7 +540,13 @@ class App(BU.Tk):
                 bd=1,
                 relief="solid",
             )
-            local_icon.create_text(15, 10, text="LOCAL", font=("Segoe UI", 7), fill="white")
+            local_icon.create_text(
+                15,
+                10,
+                text=LOCAL_ICON_LABEL,
+                font=("Segoe UI", 7),
+                fill="white",
+            )
             local_icon.offset_x = -60
             local_icon.place(relx=1.0, rely=1.0, anchor="se", x=local_icon.offset_x)
             local_icon.place_forget()
@@ -549,7 +558,13 @@ class App(BU.Tk):
                 bd=1,
                 relief="solid",
             )
-            ftp_icon.create_text(15, 10, text="FTP", font=("Segoe UI", 7), fill="white")
+            ftp_icon.create_text(
+                15,
+                10,
+                text=FTP_ICON_LABEL,
+                font=("Segoe UI", 7),
+                fill="white",
+            )
             ftp_icon.offset_x = -30
             ftp_icon.place(relx=1.0, rely=1.0, anchor="se", x=ftp_icon.offset_x)
             ftp_icon.place_forget()
@@ -561,7 +576,13 @@ class App(BU.Tk):
                 bd=1,
                 relief="solid",
             )
-            sql_icon.create_text(15, 10, text="SQL", font=("Segoe UI", 7), fill="white")
+            sql_icon.create_text(
+                15,
+                10,
+                text=SQL_ICON_LABEL,
+                font=("Segoe UI", 7),
+                fill="white",
+            )
             sql_icon.offset_x = 0
             sql_icon.place(relx=1.0, rely=1.0, anchor="se", x=sql_icon.offset_x)
             sql_icon.place_forget()
@@ -792,7 +813,7 @@ class App(BU.Tk):
             return
         if D_.upper() not in C.lists[n]:
             if O.askyesno(
-                AJ, f"Nazwa '{D_}' nie istnieje na liście. Czy dodać ją do listy?"
+                AJ, NAME_NOT_IN_LIST_QUESTION.format(value=D_)
             ):
                 H = C._open_list_editor(n)
                 C.wait_window(H)
@@ -855,7 +876,7 @@ class App(BU.Tk):
             return
         if D_.upper() not in C.lists[t]:
             if O.askyesno(
-                AJ, f"Typ '{D_}' nie istnieje na liście. Czy dodać go do listy?"
+                AJ, TYPE_NOT_IN_LIST_QUESTION.format(value=D_)
             ):
                 H = C._open_list_editor(t)
                 C.wait_window(H)
@@ -932,9 +953,7 @@ class App(BU.Tk):
                 try:
                     A.rename(c_, F)
                 except E as T:
-                    log_error(
-                        f"Rename folder NO-LED to NO-LED failed in load_existing_files: {T}"
-                    )
+                    log_error_loc("rename_no_led_failed", error=T)
         C._clear_all_slots()
         C.original_files = {}
         if not A.path.isdir(F):
@@ -1031,12 +1050,14 @@ class App(BU.Tk):
                                 ftp_presence[label] = fname
                                 remote_info[label] = {"filename": fname, "temp_path": temp_path}
                             except E as T:
-                                log_error(f"FTP download error for {fname}: {T}")
+                                log_error_loc(
+                                    "ftp_download_error", file=fname, error=T
+                                )
                         else:
                             ftp_presence[label] = fname
                     O_.quit()
                 except E as T:
-                    log_error(f"FTP check error for EAN {K_}: {T}")
+                    log_error_loc("ftp_check_error", ean=K_, error=T)
                 if not C.logged_counts:
                     log_info_loc(
                         "found_images_counts",
@@ -1068,8 +1089,10 @@ class App(BU.Tk):
                                         row = cur.fetchone()
                                     except E as column_error:
                                         presence_map[prefix] = I
-                                        log_error(
-                                            f"SQL presence query failed for column {column_name}: {column_error}"
+                                        log_error_loc(
+                                            "sql_presence_query_error",
+                                            column=column_name,
+                                            error=column_error,
                                         )
                                         continue
                                     if not row:
@@ -1112,7 +1135,7 @@ class App(BU.Tk):
                                         pass
                         except E as T:
                             sql_presence = I
-                            log_error(f"SQL check error for EAN {K_}: {T}")
+                            log_error_loc("sql_check_error", ean=K_, error=T)
             C.after(
                 0,
                 lambda: finalize(
@@ -1177,7 +1200,7 @@ class App(BU.Tk):
         if e_.upper() not in D.lists[s]:
             if O.askyesno(
                 AJ,
-                f"Model '{e_}' nie istnieje na liście. Czy chcesz dodać go do listy?",
+                MODEL_NOT_IN_LIST_QUESTION.format(value=e_),
             ):
                 A6_ = D._open_list_editor(s)
                 D.wait_window(A6_)
@@ -1337,7 +1360,7 @@ class App(BU.Tk):
                         try:
                             A.rename(A.path.join(c_, L), A.path.join(c_, L))
                         except E as AL_:
-                            log_error(f"Rename folder NO-LED to NO-LED failed: {AL_}")
+                            log_error_loc("rename_no_led_failed", error=AL_)
                         H_ = [
                             B for B in A.listdir(c_) if A.path.isdir(A.path.join(c_, B))
                         ]
@@ -1417,9 +1440,9 @@ class App(BU.Tk):
         if J_:
             P_ = AI.join(J_)
             R_ = (
-                f"Kolor '{J_[0]}' nie istnieje na liście. Czy dodać nowy wpis?"
+                COLOR_NOT_IN_LIST_SINGLE_QUESTION.format(value=J_[0])
                 if Q(J_) == 1
-                else f"Kolory '{P_}' nie istnieją na liście. Czy dodać nowe wpisy?"
+                else COLOR_NOT_IN_LIST_PLURAL_QUESTION.format(values=P_)
             )
             if O.askyesno(AJ, R_):
                 T = C._open_list_editor(Y)
@@ -1465,7 +1488,7 @@ class App(BU.Tk):
                 try:
                     A.rename(A.path.join(I_, L), A.path.join(I_, L))
                 except E as a_:
-                    log_error(f"Rename folder NO-LED to NO-LED failed: {a_}")
+                    log_error_loc("rename_no_led_failed", error=a_)
                 D_ = [B for B in A.listdir(I_) if A.path.isdir(A.path.join(I_, B))]
             if L in D_:
                 D_[D_.index(L)] = L
@@ -1551,8 +1574,8 @@ class App(BU.Tk):
             O.showwarning(INCOMPLETE_DATA_MSG, MISSING_FIELDS_MSG)
             return
         C_ = [
-            ("Obrazy/PDF/DOC", "*.jpg *.jpeg *.png *.pdf *.doc *.docx"),
-            ("Wszystkie pliki", "*.*"),
+            (FILETYPE_IMAGES_LABEL, "*.jpg *.jpeg *.png *.pdf *.doc *.docx"),
+            (FILETYPE_ALL_LABEL, "*.*"),
         ]
         B_ = BT.askopenfilename(title=SELECT_FILE_TITLE, filetypes=C_)
         if B_:
@@ -1869,7 +1892,7 @@ class App(BU.Tk):
                 if W in BC_:
                     C.entries = BC_[W]
             except E as R:
-                log_error(f"Failed to reload entries after saving: {R}")
+                log_error_loc("reload_entries_failed", error=R)
         C.is_processing = J
         C.btn_submit.configure(state=V)
         C.btn_open.configure(state=V)
@@ -2319,7 +2342,7 @@ class App(BU.Tk):
                             elif As in AT or NO_SUCH_FILE_MSG in AT:
                                 Y_ = PATH_NOT_FOUND_MSG
                             else:
-                                Y_ = f"Błąd FTP: {AT}"
+                                Y_ = FTP_GENERIC_ERROR_MSG.format(error=AT)
                         except (
                             BK.gaierror,
                             CONNECTION_REFUSED_ERROR,
@@ -2328,7 +2351,7 @@ class App(BU.Tk):
                         ) as R:
                             Y_ = NETWORK_ERROR_MSG
                         except E as R:
-                            Y_ = f"Inny błąd: {R}"
+                            Y_ = OTHER_ERROR_MSG.format(error=R)
                         else:
                             try:
                                 files_local = [
@@ -2374,7 +2397,9 @@ class App(BU.Tk):
                                         if idx is not I:
                                             C._update_slot_activity(idx, active=h)
                                     except E as AU:
-                                        Y_ = f"Błąd wysyłania pliku {X_}: {AU}"
+                                        Y_ = FTP_UPLOAD_ERROR_MSG.format(
+                                            file=X_, error=AU
+                                        )
                                         log_error_loc(
                                             "ftp_upload_error_file",
                                             file=X_,
@@ -2406,10 +2431,15 @@ class App(BU.Tk):
                                                     error=AU,
                                                 )
                                     if Ap:
+                                        files_joined = AI.join(Ap)
                                         if not Y_:
-                                            Y_ = f"Nie udało się usunąć niektórych plików na FTP: {AI.join(Ap)}"
+                                            Y_ = FTP_DELETE_FAILED_MSG.format(
+                                                files=files_joined
+                                            )
                                         else:
-                                            Y_ += f". Nie udało się usunąć plików: {AI.join(Ap)}"
+                                            Y_ += FTP_DELETE_FAILED_APPEND_MSG.format(
+                                                files=files_joined
+                                            )
                             finally:
                                 try:
                                     ftp.quit()
@@ -2450,7 +2480,9 @@ class App(BU.Tk):
                                         col=B3_, filename=short_name, ean=K_
                                     )
                                 except E as R:
-                                    raise E(f"Błąd formatowania zapytania SQL: {R}")
+                                    raise E(
+                                        SQL_FORMAT_ERROR_MSG.format(error=R)
+                                    )
                                 cur.execute(AC_)
                                 Aq_ += 1
                                 if Aj(cur, A3, -1) >= 0:
@@ -2509,7 +2541,7 @@ class App(BU.Tk):
                                 conn.close()
                             except:
                                 pass
-                        log_error(f"SQL update error for EAN {K_}: {R}")
+                        log_error_loc("sql_update_error_log", ean=K_, error=R)
                     INCOMPLETE_DATA_MSG = int((Ag.perf_counter() - Br) * 1000)
                 result_data[P] = AW_
                 result_data[d] = Aq_
@@ -2781,7 +2813,9 @@ class App(BU.Tk):
             compress_frame, from_=10, to=100, textvariable=A.compress_quality, width=5
         )
         n.grid(row=0, column=0, sticky="w")
-        C.Label(compress_frame, text="%").grid(row=0, column=1, sticky="w", padx=4)
+        C.Label(compress_frame, text=UNIT_PERCENT_LABEL).grid(
+            row=0, column=1, sticky="w", padx=4
+        )
         Aj = C.Checkbutton(L, text=B, variable=A.opt_maxsize)
         Aj.grid(row=3, column=0, padx=5, sticky=T)
         C.Label(L, text=LIMIT_SIZE_LABEL).grid(row=3, column=1, sticky=T)
@@ -2796,7 +2830,7 @@ class App(BU.Tk):
             width=6,
         )
         o.grid(row=0, column=0, sticky="w")
-        C.Label(maxsize_frame, text="KB").grid(
+        C.Label(maxsize_frame, text=UNIT_KB_LABEL).grid(
             row=0, column=1, sticky="w", padx=4
         )
         Ak = C.Checkbutton(L, text=B, variable=A.opt_convert_tif)
@@ -3072,7 +3106,7 @@ class App(BU.Tk):
                         pass
                 A3_.set(AC_)
             except E as C_:
-                A3_.set(f"Błąd: {C_}")
+                A3_.set(SQL_TEST_ERROR_MSG.format(error=C_))
 
         EDIT_LISTS_LABEL = C.Button(S, text=AA_, command=INCOMPLETE_DATA_MSG)
         EDIT_LISTS_LABEL.grid(row=4, column=1, padx=5, pady=5, sticky=R)

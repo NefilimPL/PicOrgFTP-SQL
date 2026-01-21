@@ -94,6 +94,15 @@ BASE_DIR_PROMPT_REASON_MSG = (
     "ścieżka jest niedostępna. Wskaż folder, w którym mają być zapisywane i "
     "odczytywane dane."
 )
+BASE_DIR_OVERRIDE_INVALID_MSG = (
+    "Nie można uzyskać dostępu do katalogu wskazanego w pliku \"local_settings.json\":\n"
+    "{path}\n\n"
+    "{reason}"
+)
+CONFIG_DIR_PROMPT_TITLE = "Wskaż folder z plikiem konfiguracyjnym"
+EXCEL_LOCKED_TITLE = "Plik zablokowany"
+EXCEL_LOCK_OTHER_PROCESS = "przez inny proces"
+EXCEL_LOCKED_BY_USER = "przez użytkownika '{user}'"
 
 # Oznaczenia interfejsu
 CANCEL_LABEL = "Anuluj"

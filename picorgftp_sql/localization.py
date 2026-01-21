@@ -114,6 +114,22 @@ settings.LC = LC
 NO_FILE_LABEL = LANG.get("no_file", NO_FILE_FALLBACK)
 LANGUAGE_TAB_LABEL = LANG.get("language_tab", "Język")
 LANGUAGE_LABEL = LANG.get("language_label", "Język:")
+BASE_DIR_PROMPT_TITLE = LANG.get("base_dir_prompt_title", BASE_DIR_PROMPT_TITLE)
+BASE_DIR_PROMPT_REQUIRED_MSG = LANG.get(
+    "base_dir_prompt_required", BASE_DIR_PROMPT_REQUIRED_MSG
+)
+BASE_DIR_INVALID_SELECTION_MSG = LANG.get(
+    "base_dir_invalid_selection", BASE_DIR_INVALID_SELECTION_MSG
+)
+BASE_DIR_PROMPT_REASON_MSG = LANG.get(
+    "base_dir_prompt_reason", BASE_DIR_PROMPT_REASON_MSG
+)
+BASE_DIR_OVERRIDE_INVALID_MSG = LANG.get(
+    "base_dir_override_invalid", BASE_DIR_OVERRIDE_INVALID_MSG
+)
+CONFIG_DIR_PROMPT_TITLE = LANG.get(
+    "config_dir_prompt_title", CONFIG_DIR_PROMPT_TITLE
+)
 PROCESSING_MSG = LANG.get("processing", PROCESSING_MSG)
 PROCESSING_UI_MSG = LANG.get(
     "processing_ui", ">>> Processing, please wait..."
@@ -139,6 +155,37 @@ LIST_ADD_DIALOG_TITLE = LANG.get("list_add_title", LIST_ADD_DIALOG_TITLE)
 LIST_REMOVE_DIALOG_TITLE = LANG.get("list_remove_title", LIST_REMOVE_DIALOG_TITLE)
 LIST_ADD_PROMPT_MSG = LANG.get("list_add_prompt", LIST_ADD_PROMPT_MSG)
 LIST_REMOVE_PROMPT_MSG = LANG.get("list_remove_prompt", LIST_REMOVE_PROMPT_MSG)
+VALUE_NOT_EXISTS_QUESTION = LANG.get(
+    "value_not_exists_add_question",
+    "Wartość '{value}' nie istnieje na liście dodatków. Dodać do listy?",
+)
+NAME_NOT_IN_LIST_QUESTION = LANG.get(
+    "name_not_in_list_add_question",
+    "Nazwa '{value}' nie istnieje na liście. Czy dodać ją do listy?",
+)
+TYPE_NOT_IN_LIST_QUESTION = LANG.get(
+    "type_not_in_list_add_question",
+    "Typ '{value}' nie istnieje na liście. Czy dodać go do listy?",
+)
+MODEL_NOT_IN_LIST_QUESTION = LANG.get(
+    "model_not_in_list_add_question",
+    "Model '{value}' nie istnieje na liście. Czy chcesz dodać go do listy?",
+)
+COLOR_NOT_IN_LIST_SINGLE_QUESTION = LANG.get(
+    "color_not_in_list_single_question",
+    "Kolor '{value}' nie istnieje na liście. Czy dodać nowy wpis?",
+)
+COLOR_NOT_IN_LIST_PLURAL_QUESTION = LANG.get(
+    "color_not_in_list_plural_question",
+    "Kolory '{values}' nie istnieją na liście. Czy dodać nowe wpisy?",
+)
+EXCEL_LOCKED_TITLE = LANG.get("excel_locked_title", EXCEL_LOCKED_TITLE)
+EXCEL_LOCK_OTHER_PROCESS = LANG.get(
+    "excel_lock_other_process", EXCEL_LOCK_OTHER_PROCESS
+)
+EXCEL_LOCKED_BY_USER = LANG.get(
+    "excel_locked_by_user", EXCEL_LOCKED_BY_USER
+)
 LIST_EDITOR_TAB_LABELS = {
     n: LIST_TAB_NAMES_LABEL,
     t: LIST_TAB_TYPES_LABEL,
@@ -154,6 +201,15 @@ LANGUAGE_PROMPT = LANG.get("language_prompt", "Kod języka (pl, ua, eng):")
 RESTART_TO_APPLY_LABEL = LANG.get(
     "restart_to_apply", "Uruchom ponownie aplikację, aby zastosować zmiany"
 )
+SLOT_TITLE_FORMAT = LANG.get("slot_title_format", "{index} {label}")
+LOCAL_ICON_LABEL = LANG.get("slot_icon_local", "LOCAL")
+FTP_ICON_LABEL = LANG.get("slot_icon_ftp", "FTP")
+SQL_ICON_LABEL = LANG.get("slot_icon_sql", "SQL")
+UNIT_PERCENT_LABEL = LANG.get("unit_percent", "%")
+UNIT_KB_LABEL = LANG.get("unit_kb", "KB")
+FILETYPE_IMAGES_LABEL = LANG.get("filetype_images", "Obrazy/PDF/DOC")
+FILETYPE_ALL_LABEL = LANG.get("filetype_all", "Wszystkie pliki")
+SQL_TEST_ERROR_MSG = LANG.get("sql_test_error", "Błąd: {error}")
 CONFIG_SAVE_FAILED_MSG = LANG.get(
     "config_save_failed",
     config.CONFIG_SAVE_FAILED_MSG,
@@ -293,6 +349,22 @@ SELECT_COMBINATION_PROMPT = LANG.get(
 )
 SELECT_FILE_TITLE = LANG.get("select_file_title", "Wybierz plik")
 OTHER_ERROR_MSG = LANG.get("other_error", "Inny błąd: {error}")
+FTP_UPLOAD_ERROR_MSG = LANG.get(
+    "ftp_upload_error_summary",
+    "Błąd wysyłania pliku {file}: {error}",
+)
+FTP_DELETE_FAILED_MSG = LANG.get(
+    "ftp_delete_failed_list",
+    "Nie udało się usunąć niektórych plików na FTP: {files}",
+)
+FTP_DELETE_FAILED_APPEND_MSG = LANG.get(
+    "ftp_delete_failed_append",
+    ". Nie udało się usunąć plików: {files}",
+)
+SQL_FORMAT_ERROR_MSG = LANG.get(
+    "sql_format_error",
+    "Błąd formatowania zapytania SQL: {error}",
+)
 FTP_GENERIC_ERROR_MSG = LANG.get("ftp_generic_error", "Błąd FTP: {error}")
 FILL_REQUIRED_BEFORE_SUBMIT_MSG = LANG.get(
     "fill_required_before_submit",
@@ -304,3 +376,12 @@ EAN_MISSING_PROMPT = LANG.get(
     "Nie podano EAN.\nWprowadź kod EAN (13 cyfr) lub pozostaw puste aby użyć 'BRAK-EAN':",
 )
 APP_TITLE = LANG.get("app_title", "Katalogowanie zdjęć mebli")
+
+
+def get_slot_label(label):
+    """Return a localized slot label name when available."""
+
+    if not label:
+        return label
+    key = f"slot_label_{label.lower()}"
+    return LANG.get(key, label)

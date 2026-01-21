@@ -160,10 +160,9 @@ def _ensure_base_dir_override(settings_path, template, fallback_value):
         ok, error = _ensure_directory_access(candidate)
         if ok:
             return candidate, I
-        message = (
-            "Nie można uzyskać dostępu do katalogu wskazanego w pliku \"local_settings.json\":\n"
-            f"{candidate}\n\n"
-            f"{BASE_DIR_PROMPT_REASON_MSG}"
+        message = BASE_DIR_OVERRIDE_INVALID_MSG.format(
+            path=candidate,
+            reason=BASE_DIR_PROMPT_REASON_MSG,
         )
         if error:
             message = f"{message}\n\n{error}"
