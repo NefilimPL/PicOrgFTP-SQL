@@ -3102,18 +3102,18 @@ class App(BU.Tk):
             justify="left",
         ).grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky="w")
 
-        def Am(*B):
+        def _toggle_resize(*_args):
             l_.configure(state=X if A.opt_resize.get() else V)
 
-        def An(*B):
+        def _toggle_compress(*_args):
             n.configure(state=X if A.opt_compress.get() else V)
 
-        def Ao(*B):
+        def _toggle_maxsize(*_args):
             o.configure(state=X if A.opt_maxsize.get() else V)
 
-        Ap = A.opt_resize.trace_add(Y_, lambda *A_: Am())
-        Aq = A.opt_compress.trace_add(Y_, lambda *A_: An())
-        Ar = A.opt_maxsize.trace_add(Y_, lambda *B: Ao())
+        Ap = A.opt_resize.trace_add(Y_, lambda *_args: _toggle_resize())
+        Aq = A.opt_compress.trace_add(Y_, lambda *_args: _toggle_compress())
+        Ar = A.opt_maxsize.trace_add(Y_, lambda *_args: _toggle_maxsize())
         get_file_lock_user = A.opt_convert_tif.trace_add(
             Y_, lambda *B: q.configure(state=d_ if A.opt_convert_tif.get() else V)
         )
@@ -3155,7 +3155,7 @@ class App(BU.Tk):
         sql_query_entry = C.Entry(Q, textvariable=AJ_, width=50, state=d_)
         sql_query_entry.grid(row=6, column=1, padx=5, pady=5, sticky="w")
 
-        def Ax():
+        def _test_ftp_connection():
             A_ = B
             try:
                 C_ = AB.FTP()
@@ -3184,7 +3184,7 @@ class App(BU.Tk):
                     pass
             AJ_.set(A_)
 
-        Ay = C.Button(Q, text=AA_, command=Ax)
+        Ay = C.Button(Q, text=AA_, command=_test_ftp_connection)
         Ay.grid(row=6, column=1, padx=5, pady=5, sticky=R)
         C.Label(Q, text=FTP_UPDATE_LABEL).grid(
             row=7, column=0, sticky=R, padx=5, pady=2
@@ -3195,8 +3195,14 @@ class App(BU.Tk):
         C.Label(S, text=DB_TYPE_LABEL).grid(
             row=0, column=0, sticky=R, padx=5, pady=2
         )
-        A0 = F.StringVar(value=f_ if D.get(p, K).lower() == K else A9_)
-        A1 = C.Combobox(S, textvariable=A0, values=[A9_, f_], state=d_, width=20)
+        db_type_var = F.StringVar(value=f_ if D.get(p, K).lower() == K else A9_)
+        A1 = C.Combobox(
+            S,
+            textvariable=db_type_var,
+            values=[A9_, f_],
+            state=d_,
+            width=20,
+        )
         A1.grid(row=0, column=1, padx=5, pady=2, sticky=T)
         U = C.Frame(S)
         W = C.Frame(S)
@@ -3240,7 +3246,7 @@ class App(BU.Tk):
             W.grid_remove()
 
         def Az(event=I):
-            if A0.get() == f_:
+            if db_type_var.get() == f_:
                 U.grid_remove()
                 W.grid()
             else:
@@ -3293,15 +3299,15 @@ class App(BU.Tk):
         EDIT_LISTS_LABEL = C.Button(S, text=AA_, command=INCOMPLETE_DATA_MSG)
         EDIT_LISTS_LABEL.grid(row=4, column=1, padx=5, pady=5, sticky=R)
 
-        available_columns = []
-        sql_mapping_vars = {}
-        sql_mapping_entry_widgets = []
+        available_columns = list(D.get(SQL_AVAILABLE_COLUMNS_KEY, []))
         sql_mapping_controls = []
         sql_edit_state = V
+        fields_controls = []
+        fields_state = V
         detect_status_var = F.StringVar(value=B)
         columns_listbox = I
         detect_btn = I
-        mapping_fields_frame = I
+        field_button_widgets = {}
 
         def _dnd_first_item(payload):
             if not payload:
@@ -3314,14 +3320,38 @@ class App(BU.Tk):
                 return B
             return G(items[0]).strip()
 
+        def _field_button_text(slot):
+            title = SLOT_TITLE_FORMAT.format(
+                index=slot["prefix"], label=get_slot_label(slot["label"])
+            )
+            column = G(sql_column_map.get(slot["prefix"], B) or B).strip()
+            if column:
+                column_text = f"SQL: {column}"
+            else:
+                column_text = SQL_MAPPING_EMPTY_LABEL
+            return f"{title}\n{column_text}"
+
+        def _find_slot(prefix):
+            for slot in slot_defs:
+                if slot.get("prefix") == prefix:
+                    return slot
+            return I
+
         def _apply_sql_mapping(prefix, value):
             column = G(value or B).strip()
             sql_column_map[prefix] = column
-            var = sql_mapping_vars.get(prefix)
-            if var:
-                var.set(column)
+            slot = _find_slot(prefix)
+            if slot:
+                btn = field_button_widgets.get(prefix)
+                if btn:
+                    btn.configure(text=_field_button_text(slot))
 
         def _on_column_drop(event, prefix):
+            column = _dnd_first_item(event.data)
+            if column:
+                _apply_sql_mapping(prefix, column)
+
+        def _on_field_drop(event, prefix):
             column = _dnd_first_item(event.data)
             if column:
                 _apply_sql_mapping(prefix, column)
@@ -3342,22 +3372,22 @@ class App(BU.Tk):
                 columns_listbox.delete(0, F.END)
                 for col in available_columns:
                     columns_listbox.insert(F.END, col)
-            for widget in sql_mapping_entry_widgets:
-                try:
-                    widget.configure(values=available_columns)
-                except E:
-                    pass
             if table_name:
                 detect_status_var.set(
                     SQL_COLUMNS_DETECTED_MSG.format(
-                        count=Q(available_columns), table=table_name
+                        count=len(available_columns), table=table_name
                     )
                 )
 
         def _parse_table_name(template):
             if not template:
                 return B
-            match = re.search(r"(?is)update\\s+([^\\s]+)\\s+set", template)
+            pattern = (
+                r"update\s+(?:top\s+\(?\d+\)?\s+)?"
+                r"(?:(?:low_priority|high_priority|ignore)\s+)*"
+                r"([^\s]+)\s+set"
+            )
+            match = re.search(pattern, template, flags=re.I | re.S)
             if not match:
                 return B
             return match.group(1).strip().rstrip(";")
@@ -3375,7 +3405,7 @@ class App(BU.Tk):
             if not parts:
                 return B, B
             table_name = parts[-1]
-            schema = parts[-2] if Q(parts) > 1 else B
+            schema = parts[-2] if len(parts) > 1 else B
             return table_name, schema
 
         def _detect_sql_columns():
@@ -3390,7 +3420,7 @@ class App(BU.Tk):
                 detect_status_var.set(SQL_COLUMNS_PARSE_FAILED_MSG)
                 log_error_loc("sql_columns_parse_failed")
                 return
-            db_is_mysql = A0.get() == f_
+            db_is_mysql = db_type_var.get() == f_
             conn = I
             cur = I
             try:
@@ -3467,84 +3497,16 @@ class App(BU.Tk):
                     except E:
                         pass
             _set_available_columns(columns, table_ref)
-            if columns:
-                columns_lower = {col.lower(): col for col in columns}
-                for slot in slot_defs:
-                    prefix = slot["prefix"]
-                    if sql_column_map.get(prefix):
-                        continue
-                    match = columns_lower.get(slot["label"].lower())
-                    if match:
-                        _apply_sql_mapping(prefix, match)
+            D[SQL_AVAILABLE_COLUMNS_KEY] = list(available_columns)
+            save_config(D)
             log_info_loc(
                 "sql_columns_detected",
                 table=table_ref,
-                count=Q(columns),
+                count=len(columns),
             )
 
-        def _refresh_sql_mapping_ui():
-            if mapping_fields_frame is I:
-                return
-            for child in mapping_fields_frame.winfo_children():
-                child.destroy()
-            sql_mapping_vars.clear()
-            sql_mapping_entry_widgets.clear()
-            C.Label(mapping_fields_frame, text=SQL_MAPPING_FIELD_LABEL).grid(
-                row=0, column=0, sticky="w", padx=4, pady=(0, 4)
-            )
-            C.Label(mapping_fields_frame, text=SQL_MAPPING_COLUMN_LABEL).grid(
-                row=0, column=1, sticky="w", padx=4, pady=(0, 4)
-            )
-            for row_idx, slot in A0(slot_defs, 1):
-                prefix = slot["prefix"]
-                label = slot["label"]
-                field_title = SLOT_TITLE_FORMAT.format(
-                    index=prefix, label=get_slot_label(label)
-                )
-                C.Label(mapping_fields_frame, text=field_title).grid(
-                    row=row_idx, column=0, sticky="w", padx=4, pady=2
-                )
-                var = F.StringVar(value=sql_column_map.get(prefix, B))
-                sql_mapping_vars[prefix] = var
-
-                def _sync_var(*_args, p=prefix, v=var):
-                    sql_column_map[p] = G(v.get() or B).strip()
-
-                var.trace_add(Y_, _sync_var)
-                entry = C.Combobox(
-                    mapping_fields_frame,
-                    textvariable=var,
-                    values=available_columns,
-                    state=sql_edit_state,
-                    width=30,
-                )
-                entry.grid(row=row_idx, column=1, sticky="w", padx=4, pady=2)
-                sql_mapping_entry_widgets.append(entry)
-                if hasattr(entry, "drop_target_register") and hasattr(entry, "dnd_bind"):
-                    entry.drop_target_register(DND_TEXT)
-                    entry.dnd_bind(
-                        "<<Drop>>", lambda e, p=prefix: _on_column_drop(e, p)
-                    )
-            mapping_fields_frame.columnconfigure(1, weight=1)
-            sql_mapping_controls[:] = [
-                widget
-                for widget in [detect_btn, columns_listbox]
-                if widget is not I
-            ] + sql_mapping_entry_widgets
-
-        sql_mapping_frame = C.Frame(S)
-        sql_mapping_frame.grid(
-            row=6, column=0, columnspan=2, sticky="nsew", padx=5, pady=(10, 5)
-        )
-        S.grid_rowconfigure(6, weight=1)
-        S.grid_columnconfigure(1, weight=1)
-        sql_mapping_frame.columnconfigure(1, weight=1)
-        sql_mapping_frame.rowconfigure(2, weight=1)
-        C.Label(sql_mapping_frame, text=SQL_MAPPING_LABEL).grid(
-            row=0, column=0, columnspan=2, sticky="w", padx=2, pady=(0, 4)
-        )
-        detect_row = C.Frame(sql_mapping_frame)
-        detect_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        detect_row = C.Frame(S)
+        detect_row.grid(row=6, column=0, columnspan=2, sticky="w", padx=5, pady=(10, 5))
         detect_btn = C.Button(
             detect_row, text=SQL_DETECT_COLUMNS_LABEL, command=_detect_sql_columns
         )
@@ -3552,17 +3514,25 @@ class App(BU.Tk):
         C.Label(detect_row, textvariable=detect_status_var).grid(
             row=0, column=1, sticky="w"
         )
-        columns_frame = C.Frame(sql_mapping_frame)
-        columns_frame.grid(row=2, column=0, sticky="nsew", padx=(0, 10))
-        columns_frame.columnconfigure(0, weight=1)
-        columns_frame.rowconfigure(1, weight=1)
-        C.Label(columns_frame, text=SQL_COLUMNS_LABEL).grid(
+        sql_mapping_controls[:] = [detect_btn]
+
+        fields_tab.columnconfigure(0, weight=1)
+        fields_tab.columnconfigure(1, weight=2)
+        fields_tab.rowconfigure(1, weight=1)
+        C.Label(fields_tab, text=FIELDS_MANAGE_LABEL).grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=5, pady=5
+        )
+        columns_panel = C.Frame(fields_tab)
+        columns_panel.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        columns_panel.columnconfigure(0, weight=1)
+        columns_panel.rowconfigure(1, weight=1)
+        C.Label(columns_panel, text=SQL_COLUMNS_LABEL).grid(
             row=0, column=0, sticky="w", padx=2, pady=(0, 4)
         )
-        columns_listbox = F.Listbox(columns_frame, height=10, exportselection=0)
+        columns_listbox = F.Listbox(columns_panel, height=12, exportselection=0)
         columns_listbox.grid(row=1, column=0, sticky="nsew")
         columns_scroll = C.Scrollbar(
-            columns_frame, orient=An, command=columns_listbox.yview
+            columns_panel, orient=An, command=columns_listbox.yview
         )
         columns_scroll.grid(row=1, column=1, sticky="ns")
         columns_listbox.configure(yscrollcommand=columns_scroll.set)
@@ -3571,50 +3541,66 @@ class App(BU.Tk):
         ):
             columns_listbox.drag_source_register(1, DND_TEXT)
             columns_listbox.dnd_bind("<<DragInitCmd>>", _on_column_drag_init)
-        mapping_frame = C.Frame(sql_mapping_frame)
-        mapping_frame.grid(row=2, column=1, sticky="nsew")
-        mapping_frame.columnconfigure(0, weight=1)
-        mapping_fields_frame = C.Frame(mapping_frame)
-        mapping_fields_frame.grid(row=0, column=0, sticky="nsew")
-        C.Label(sql_mapping_frame, text=SQL_MAPPING_HINT).grid(
-            row=3, column=0, columnspan=2, sticky="w", padx=2
-        )
-        _refresh_sql_mapping_ui()
-
-        fields_tab.columnconfigure(0, weight=1)
-        fields_tab.rowconfigure(1, weight=1)
-        C.Label(fields_tab, text=FIELDS_MANAGE_LABEL).grid(
-            row=0, column=0, sticky="w", padx=5, pady=5
-        )
+        fields_controls.append(columns_listbox)
+        try:
+            columns_listbox.configure(state=fields_state)
+        except E:
+            pass
+        if available_columns:
+            _set_available_columns(available_columns)
         fields_grid = C.Frame(fields_tab)
-        fields_grid.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        fields_grid.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
+
+        def _configure_tile_text(widget):
+            try:
+                if "wraplength" in widget.keys():
+                    widget.configure(wraplength=160)
+                if "justify" in widget.keys():
+                    widget.configure(justify="center")
+            except E:
+                pass
 
         def _refresh_fields_grid():
             for child in fields_grid.winfo_children():
                 child.destroy()
+            fields_controls[:] = []
+            field_button_widgets.clear()
+            if columns_listbox is not I:
+                fields_controls.append(columns_listbox)
             columns = 5
-            total = Q(slot_defs) + 1
+            total = len(slot_defs) + 1
             for idx in Ax(total):
                 row_idx, col_idx = divmod(idx, columns)
-                if idx < Q(slot_defs):
+                if idx < len(slot_defs):
                     slot = slot_defs[idx]
-                    title = SLOT_TITLE_FORMAT.format(
-                        index=slot["prefix"],
-                        label=get_slot_label(slot["label"]),
-                    )
+                    title = _field_button_text(slot)
                     btn = C.Button(
                         fields_grid,
                         text=title,
                         command=lambda s=slot: _edit_field(s),
                         width=20,
+                        state=fields_state,
                     )
+                    _configure_tile_text(btn)
+                    field_button_widgets[slot["prefix"]] = btn
+                    if hasattr(btn, "drop_target_register") and hasattr(
+                        btn, "dnd_bind"
+                    ):
+                        btn.drop_target_register(DND_TEXT)
+                        btn.dnd_bind(
+                            "<<Drop>>",
+                            lambda e, p=slot["prefix"]: _on_field_drop(e, p),
+                        )
                 else:
                     btn = C.Button(
                         fields_grid,
                         text=FIELD_ADD_LABEL,
                         command=_add_field,
                         width=20,
+                        state=fields_state,
                     )
+                    _configure_tile_text(btn)
+                fields_controls.append(btn)
                 btn.grid(
                     row=row_idx,
                     column=col_idx,
@@ -3641,13 +3627,7 @@ class App(BU.Tk):
             prefix = next_slot_prefix(slot_defs)
             slot_defs.append({"prefix": prefix, "label": label})
             sql_column_map.setdefault(prefix, B)
-            if available_columns:
-                lower_map = {col.lower(): col for col in available_columns}
-                match = lower_map.get(label.lower())
-                if match:
-                    _apply_sql_mapping(prefix, match)
             _refresh_fields_grid()
-            _refresh_sql_mapping_ui()
 
         def _edit_field(slot):
             editor = F.Toplevel(a_)
@@ -3660,8 +3640,31 @@ class App(BU.Tk):
             name_entry = C.Entry(editor, textvariable=name_var, width=30)
             name_entry.grid(row=0, column=1, padx=5, pady=5, sticky="w")
             name_entry.focus_set()
+            C.Label(editor, text=SQL_MAPPING_COLUMN_LABEL).grid(
+                row=1, column=0, padx=5, pady=5, sticky=R
+            )
+            column_var = F.StringVar(value=sql_column_map.get(slot["prefix"], B))
+            column_entry = C.Combobox(
+                editor,
+                textvariable=column_var,
+                values=available_columns,
+                state=X,
+                width=30,
+            )
+            column_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+            if hasattr(column_entry, "drop_target_register") and hasattr(
+                column_entry, "dnd_bind"
+            ):
+                column_entry.drop_target_register(DND_TEXT)
+
+                def _drop_to_column(event):
+                    column = _dnd_first_item(event.data)
+                    if column:
+                        column_var.set(column)
+
+                column_entry.dnd_bind("<<Drop>>", _drop_to_column)
             button_row = C.Frame(editor)
-            button_row.grid(row=1, column=0, columnspan=2, pady=5)
+            button_row.grid(row=2, column=0, columnspan=2, pady=5)
 
             def _save_field():
                 new_label = name_var.get().strip()
@@ -3679,8 +3682,8 @@ class App(BU.Tk):
                     )
                     return
                 slot["label"] = new_label
+                sql_column_map[slot["prefix"]] = G(column_var.get() or B).strip()
                 _refresh_fields_grid()
-                _refresh_sql_mapping_ui()
                 editor.destroy()
 
             def _delete_field():
@@ -3692,7 +3695,6 @@ class App(BU.Tk):
                 slot_defs.remove(slot)
                 sql_column_map.pop(slot["prefix"], I)
                 _refresh_fields_grid()
-                _refresh_sql_mapping_ui()
                 editor.destroy()
 
             C.Button(button_row, text=SAVE_LABEL, command=_save_field).grid(
@@ -3709,34 +3711,45 @@ class App(BU.Tk):
         _refresh_fields_grid()
 
         def Ad(state):
-            A_ = state
-            AD_.configure(state=A_)
-            AE_.configure(state=A_)
-            AF_.configure(state=A_)
-            AG_.configure(state=A_)
-            AH_.configure(state=A_)
+            entry_state = X if state == X else V
+            AD_.configure(state=entry_state)
+            AE_.configure(state=entry_state)
+            AF_.configure(state=entry_state)
+            AG_.configure(state=entry_state)
+            AH_.configure(state=entry_state)
+            ftp_update_cb.configure(state=entry_state)
 
         def Ae(state_text, editor=Al):
-            nonlocal sql_edit_state
+            nonlocal sql_edit_state, fields_state
             B_ = state_text
-            A__ = B_
             C_ = X if B_ == X else V
+            entry_state = C_
             if D.get(p, K).lower() == K:
-                AU.configure(state=A__)
-                AW.configure(state=A__)
-                AY.configure(state=A__)
-                Aa.configure(state=A__)
+                AU.configure(state=entry_state)
+                AW.configure(state=entry_state)
+                AY.configure(state=entry_state)
+                Aa.configure(state=entry_state)
             else:
-                ensure_package.configure(state=A__)
-                AN.configure(state=A__)
-                AQ.configure(state=A__)
-                AS.configure(state=A__)
-            A1.configure(state=i_ if editor else A__)
+                ensure_package.configure(state=entry_state)
+                AN.configure(state=entry_state)
+                AQ.configure(state=entry_state)
+                AS.configure(state=entry_state)
+            if B_ == X:
+                combo_state = i_ if editor else X
+            else:
+                combo_state = V
+            A1.configure(state=combo_state)
             h_.configure(state=C_)
-            Ac.configure(state=X)
+            Ac.configure(state=C_)
             mapping_state = X if B_ == X else V
             sql_edit_state = mapping_state
             for widget in sql_mapping_controls:
+                try:
+                    widget.configure(state=mapping_state)
+                except E:
+                    pass
+            fields_state = mapping_state
+            for widget in fields_controls:
                 try:
                     widget.configure(state=mapping_state)
                 except E:
@@ -3784,9 +3797,10 @@ class App(BU.Tk):
             D[K][b] = AV.get().strip()
             D[K][N] = AX.get().strip()
             D[K][M] = AZ.get()
-            D[p] = K if A0.get() == f_ else "mssql"
+            D[p] = K if db_type_var.get() == f_ else "mssql"
             D[w] = h_.get(A_, "end").strip()
             D[u] = bool(Ab.get())
+            D[SQL_AVAILABLE_COLUMNS_KEY] = list(available_columns)
             updated_slot_defs, slot_issues = normalize_slot_definitions(slot_defs)
             updated_sql_map, map_issues = normalize_sql_column_map(
                 sql_column_map, updated_slot_defs

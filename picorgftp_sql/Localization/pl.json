@@ -288,5 +288,6 @@
   "sql_columns_detected": "Wykryto {count} kolumn SQL w tabeli {table}.",
   "sql_columns_detect_failed": "Nie udało się wykryć kolumn SQL: {error}",
   "sql_columns_parse_failed": "Nie udało się odczytać nazwy tabeli z zapytania SQL.",
-  "slot_defs_apply_restart": "Zmiany pól zdjęć będą widoczne po ponownym uruchomieniu."
+  "slot_defs_apply_restart": "Zmiany pól zdjęć będą widoczne po ponownym uruchomieniu.",
+  "sql_mapping_empty_label": "SQL: (brak)"
 }

@@ -288,5 +288,6 @@
   "sql_columns_detected": "Detected {count} SQL columns in table {table}.",
   "sql_columns_detect_failed": "Failed to detect SQL columns: {error}",
   "sql_columns_parse_failed": "Unable to read the table name from the SQL query.",
-  "slot_defs_apply_restart": "Photo field changes will be visible after restart."
+  "slot_defs_apply_restart": "Photo field changes will be visible after restart.",
+  "sql_mapping_empty_label": "SQL: (none)"
 }

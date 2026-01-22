@@ -337,6 +337,9 @@ SQL_MAPPING_HINT = LANG.get(
     "sql_mapping_hint",
     "Przeciągnij kolumnę na pole lub wpisz nazwę ręcznie.",
 )
+SQL_MAPPING_EMPTY_LABEL = LANG.get(
+    "sql_mapping_empty_label", "SQL: (brak)"
+)
 NAME_LABEL = LANG.get("name_label", "Nazwa mebla*:")
 TYPE_LABEL = LANG.get("type_label", "Typ mebla*:")
 MODEL_LABEL = LANG.get("model_label", "Model mebla*:")

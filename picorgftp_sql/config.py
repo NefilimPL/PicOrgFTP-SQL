@@ -20,6 +20,7 @@ from .common import (
     P,
     SQL_UPDATE_TEMPLATE,
     SQL_COLUMN_MAP_KEY,
+    SQL_AVAILABLE_COLUMNS_KEY,
     AK,
     SLOT_DEFS_KEY,
     b,
@@ -39,6 +40,20 @@ from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
 
 CONFIG_PATH = A.path.join(AC, "config.json")
 CONFIG_SAVE_FAILED_MSG = "Nie udało się zapisać pliku konfiguracyjnego:\n{error}"
+
+
+def _normalize_sql_columns(raw_columns):
+    if not isinstance(raw_columns, list):
+        return []
+    cleaned = []
+    seen = set()
+    for entry in raw_columns:
+        text = str(entry).strip()
+        if not text or text in seen:
+            continue
+        cleaned.append(text)
+        seen.add(text)
+    return cleaned
 
 
 def load_config():
@@ -83,6 +98,7 @@ def load_config():
                 u: config_copy[u],
                 SLOT_DEFS_KEY: config_copy.get(SLOT_DEFS_KEY),
                 SQL_COLUMN_MAP_KEY: config_copy.get(SQL_COLUMN_MAP_KEY),
+                SQL_AVAILABLE_COLUMNS_KEY: config_copy.get(SQL_AVAILABLE_COLUMNS_KEY),
             }
             try:
                 # Ensure the configuration directory exists before writing.
@@ -125,6 +141,10 @@ def load_config():
         raw_sql_map = raw_config.get(SQL_COLUMN_MAP_KEY, config_copy.get(SQL_COLUMN_MAP_KEY))
         sql_map, _ = normalize_sql_column_map(raw_sql_map, slot_defs)
         config_copy[SQL_COLUMN_MAP_KEY] = sql_map
+        raw_columns = raw_config.get(
+            SQL_AVAILABLE_COLUMNS_KEY, config_copy.get(SQL_AVAILABLE_COLUMNS_KEY)
+        )
+        config_copy[SQL_AVAILABLE_COLUMNS_KEY] = _normalize_sql_columns(raw_columns)
         try:
             # Saving back the normalised structure keeps missing keys aligned
             # with future versions of the configuration schema.
@@ -173,6 +193,9 @@ def save_config(config):
         u: config.get(u, True),
         SLOT_DEFS_KEY: config.get(SLOT_DEFS_KEY),
         SQL_COLUMN_MAP_KEY: config.get(SQL_COLUMN_MAP_KEY),
+        SQL_AVAILABLE_COLUMNS_KEY: _normalize_sql_columns(
+            config.get(SQL_AVAILABLE_COLUMNS_KEY, [])
+        ),
     }
     try:
         with open(CONFIG_PATH, "w", encoding=k) as handle:

@@ -197,6 +197,7 @@ v = "host"
 w = "sql_query"
 SLOT_DEFS_KEY = "slot_definitions"
 SQL_COLUMN_MAP_KEY = "sql_column_map"
+SQL_AVAILABLE_COLUMNS_KEY = "sql_available_columns"
 p = "db_type"
 q = "BRAK-EAN"
 r = "port"
@@ -240,6 +241,7 @@ DEFAULT_CONFIG.setdefault(
     SQL_COLUMN_MAP_KEY,
     {slot["prefix"]: slot["label"] for slot in DEFAULT_SLOT_DEFS},
 )
+DEFAULT_CONFIG.setdefault(SQL_AVAILABLE_COLUMNS_KEY, [])
 
 import sys
 import os as A

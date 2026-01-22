@@ -288,5 +288,6 @@
   "sql_columns_detected": "Виявлено {count} стовпців SQL у таблиці {table}.",
   "sql_columns_detect_failed": "Не вдалося виявити стовпці SQL: {error}",
   "sql_columns_parse_failed": "Не вдалося зчитати назву таблиці з SQL-запиту.",
-  "slot_defs_apply_restart": "Зміни полів фото будуть видимі після перезапуску."
+  "slot_defs_apply_restart": "Зміни полів фото будуть видимі після перезапуску.",
+  "sql_mapping_empty_label": "SQL: (немає)"
 }
