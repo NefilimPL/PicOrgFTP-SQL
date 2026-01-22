@@ -316,6 +316,27 @@ SQL_UPDATE_LABEL = LANG.get(
 )
 SQL_QUERY_LABEL = LANG.get("sql_query_label", "Zapytanie SQL:")
 SQL_TEST_LABEL = LANG.get("sql_test_label", "Test połączenia SQL:")
+SQL_MAPPING_LABEL = LANG.get("sql_mapping_label", "Przypisanie kolumn SQL")
+SQL_DETECT_COLUMNS_LABEL = LANG.get("sql_detect_columns", "Wykryj kolumny")
+SQL_COLUMNS_LABEL = LANG.get("sql_columns_label", "Dostępne kolumny")
+SQL_COLUMNS_DETECTED_MSG = LANG.get(
+    "sql_columns_detected_msg",
+    "Wykryto {count} kolumn w tabeli {table}.",
+)
+SQL_COLUMNS_DETECT_FAILED_MSG = LANG.get(
+    "sql_columns_detect_failed_msg",
+    "Nie udało się wykryć kolumn: {error}",
+)
+SQL_COLUMNS_PARSE_FAILED_MSG = LANG.get(
+    "sql_columns_parse_failed_msg",
+    "Nie udało się odczytać nazwy tabeli z zapytania SQL.",
+)
+SQL_MAPPING_FIELD_LABEL = LANG.get("sql_mapping_field_label", "Pole")
+SQL_MAPPING_COLUMN_LABEL = LANG.get("sql_mapping_column_label", "Kolumna SQL")
+SQL_MAPPING_HINT = LANG.get(
+    "sql_mapping_hint",
+    "Przeciągnij kolumnę na pole lub wpisz nazwę ręcznie.",
+)
 NAME_LABEL = LANG.get("name_label", "Nazwa mebla*:")
 TYPE_LABEL = LANG.get("type_label", "Typ mebla*:")
 MODEL_LABEL = LANG.get("model_label", "Model mebla*:")
@@ -339,6 +360,31 @@ SQL_ERROR_LABEL = LANG.get("sql_error", "Błąd SQL")
 IMAGES_TAB_LABEL = LANG.get("images_tab", "Obrazy")
 FTP_TAB_LABEL = LANG.get("ftp_tab", "FTP")
 SQL_TAB_LABEL = LANG.get("sql_tab", "SQL")
+FIELDS_TAB_LABEL = LANG.get("fields_tab", "Pola zdjęć")
+FIELDS_MANAGE_LABEL = LANG.get(
+    "fields_manage_label", "Pola na zdjęcia"
+)
+FIELD_ADD_LABEL = LANG.get("field_add_label", "+ (DODAJ POLE)")
+FIELD_ADD_TITLE = LANG.get("field_add_title", "Dodaj pole")
+FIELD_EDIT_TITLE = LANG.get("field_edit_title", "Edytuj pole")
+FIELD_NAME_LABEL = LANG.get("field_name_label", "Nazwa pola:")
+FIELD_NAME_PROMPT = LANG.get(
+    "field_name_prompt", "Podaj nazwę pola:"
+)
+FIELD_NAME_REQUIRED_MSG = LANG.get(
+    "field_name_required", "Podaj nazwę pola."
+)
+FIELD_NAME_DUPLICATE_MSG = LANG.get(
+    "field_name_duplicate", "Pole '{label}' już istnieje."
+)
+FIELD_DELETE_LABEL = LANG.get("field_delete_label", "Usuń")
+FIELD_DELETE_CONFIRM_MSG = LANG.get(
+    "field_delete_confirm", "Czy usunąć pole '{label}'?"
+)
+SLOT_DEFS_REBUILD_PROMPT = LANG.get(
+    "slot_defs_rebuild_prompt",
+    "Zmiana pól zdjęć wyczyści bieżące dane w oknach. Kontynuować?",
+)
 WARNING_LABEL = LANG.get("warning", "Uwaga")
 SELECT_COMBINATION_TITLE = LANG.get(
     "select_combination_title", "Wybierz istniejącą kombinację"

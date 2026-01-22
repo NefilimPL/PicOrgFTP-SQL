@@ -8,7 +8,7 @@ from typing import Dict
 from openpyxl import Workbook, load_workbook
 from tkinter import messagebox
 
-from .common import ELEMENT_PIC, NON_PIC, OPEN_FURNITURE
+from .common import DEFAULT_SLOT_DEFS, ELEMENT_PIC, NON_PIC, OPEN_FURNITURE
 from .logging_utils import log_error_loc, log_info_loc
 from .system_utils import get_file_lock_user
 from . import localization
@@ -46,34 +46,7 @@ ERROR_TITLE = localization.AK
 WRITE_ERROR_TITLE = localization.Ac
 
 # Order used by the GUI when building slot labels.
-SLOT_LABELS = [
-    ("01", "Assembly_instruction"),
-    ("02", "Assembly_instruction1"),
-    ("03", "DETAIL_pic"),
-    ("04", "DETAIL_pic1"),
-    ("05", "element_pic1"),
-    ("06", ELEMENT_PIC),
-    ("07", "LED_Assembly_instruction"),
-    ("08", "MOOD_pic"),
-    ("09", "MOOD_pic1"),
-    ("10", "MOOD_pic2"),
-    ("11", "MOOD_pic3"),
-    ("12", "MOOD_pic4"),
-    ("13", "MOOD_pic5"),
-    ("14", NON_PIC),
-    ("15", OPEN_FURNITURE),
-    ("16", "open_furniture1"),
-    ("17", "open_furniture2"),
-    ("18", "NO_EAN"),
-    ("19", "Technical_drawing"),
-    ("20", "Technical_drawing1"),
-    ("21", "Technical_drawing2"),
-    ("22", "WB_pic"),
-    ("23", "WB_pic1"),
-    ("24", "WB_pic2"),
-    ("25", "WB_pic3"),
-    ("26", "WB_pic4"),
-]
+SLOT_LABELS = [(slot["prefix"], slot["label"]) for slot in DEFAULT_SLOT_DEFS]
 
 
 def label_category(label: str) -> str:
