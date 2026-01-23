@@ -20,6 +20,9 @@ BASE_DIR_SETTINGS_TEMPLATE = {
 
 # Klucz używany do prostego szyfrowania danych konfiguracyjnych.
 APP_SECRET = "secret_v1"
+# Klucz ustawień przechowujący sekret aplikacji.
+APP_SECRET_KEY = "app_secret"
+BASE_DIR_SETTINGS_TEMPLATE[APP_SECRET_KEY] = APP_SECRET
 
 # Domyślny port serwera FTP.
 PORT = 21
@@ -306,5 +309,102 @@ import mysql.connector
 import ctypes
 import json as Ar
 import base64 as BL
+
+APP_SECRET_PREFIX = "enc:"
+
+
+def _xor_text(value, key):
+    """Return XOR-obfuscated text using ``key``."""
+
+    if not value:
+        return B
+    key_len = len(key)
+    if not key_len:
+        return value
+    return B.join(chr(ord(ch) ^ ord(key[i % key_len])) for (i, ch) in A0(value))
+
+
+def _encode_local_secret(value):
+    """Encode a secret for storage inside local_settings.json."""
+
+    if not value or not Aq(value, str):
+        return B
+    stripped = value.strip()
+    if not stripped:
+        return B
+    if stripped.startswith(APP_SECRET_PREFIX):
+        return stripped
+    raw = _xor_text(stripped, OLD_HOST_KEY)
+    return f"{APP_SECRET_PREFIX}{BL.b64encode(raw.encode(k)).decode(k)}"
+
+
+def _decode_local_secret(value, fallback):
+    """Decode a secret stored in local_settings.json."""
+
+    if not value or not Aq(value, str):
+        return fallback
+    stripped = value.strip()
+    if not stripped:
+        return fallback
+    if not stripped.startswith(APP_SECRET_PREFIX):
+        return stripped
+    payload = stripped[len(APP_SECRET_PREFIX) :]
+    try:
+        raw = BL.b64decode(payload.encode(k)).decode(k)
+    except E:
+        return fallback
+    decoded = _xor_text(raw, OLD_HOST_KEY)
+    return decoded or fallback
+
+def _resolve_settings_root_for_common():
+    """Return the folder that should host ``local_settings.json``."""
+
+    if getattr(sys, "frozen", False):
+        base_path = A.path.dirname(sys.executable)
+        return base_path or A.getcwd()
+    module_dir = A.path.dirname(A.path.abspath(__file__))
+    project_root = A.path.abspath(A.path.join(module_dir, A.pardir))
+    root_settings = A.path.join(project_root, BASE_DIR_SETTINGS_FILE)
+    root_marker = A.path.join(project_root, "PicOrgFTP-SQL.pyw")
+    if A.path.exists(root_settings) or A.path.exists(root_marker):
+        base_path = project_root
+    else:
+        base_path = module_dir
+    return base_path or A.getcwd()
+
+
+def _load_app_secret(fallback):
+    """Return an override secret from local_settings.json when available."""
+
+    settings_path = A.path.join(
+        _resolve_settings_root_for_common(), BASE_DIR_SETTINGS_FILE
+    )
+    try:
+        if A.path.exists(settings_path):
+            with x(settings_path, "r", encoding=k) as settings_file:
+                data = Ar.load(settings_file)
+            if Aq(data, dict):
+                value = data.get(APP_SECRET_KEY, fallback)
+                decoded = _decode_local_secret(value, fallback)
+                if Aq(value, str):
+                    raw_value = value.strip()
+                    if raw_value and not raw_value.startswith(APP_SECRET_PREFIX):
+                        encoded = _encode_local_secret(raw_value)
+                        if encoded and encoded != raw_value:
+                            try:
+                                data[APP_SECRET_KEY] = encoded
+                                with x(settings_path, T, encoding=k) as settings_file:
+                                    Ar.dump(data, settings_file, indent=4)
+                            except E:
+                                pass
+                if decoded:
+                    return decoded
+    except E:
+        pass
+    return fallback
+
+
+APP_SECRET = _load_app_secret(APP_SECRET)
+BASE_DIR_SETTINGS_TEMPLATE[APP_SECRET_KEY] = _encode_local_secret(APP_SECRET)
 
 Ai = OLD_HOST_KEY

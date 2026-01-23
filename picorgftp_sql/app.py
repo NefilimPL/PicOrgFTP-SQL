@@ -18,7 +18,7 @@ from .logging_utils import log_error, log_error_loc, log_info, log_info_loc, set
 from .system_utils import get_file_lock_user, is_admin
 from .database import connect_db
 from .config import save_config
-from . import config, localization
+from . import config, localization, settings, common, encryption
 from .settings import BW, EXCEL_SHEETS, AN, l
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map, next_slot_prefix
 
@@ -287,6 +287,38 @@ class App(BU.Tk):
         A.configure(bg=A._ui_colors["bg"])
         A.style.configure("App.TFrame", background=A._ui_colors["bg"])
         A.style.configure("Card.TFrame", background=A._ui_colors["card"])
+        A.style.configure("Settings.TFrame", background=A._ui_colors["card"])
+        A.style.configure(
+            "Settings.TLabel",
+            background=A._ui_colors["card"],
+            font=("Segoe UI", 9),
+        )
+        A.style.configure(
+            "SettingsHeader.TLabel",
+            background=A._ui_colors["card"],
+            font=("Segoe UI Semibold", 9),
+        )
+        A.style.configure(
+            "SettingsHint.TLabel",
+            background=A._ui_colors["card"],
+            foreground=A._ui_colors["muted"],
+            font=("Segoe UI", 8),
+        )
+        A.style.configure(
+            "Settings.TNotebook",
+            background=A._ui_colors["bg"],
+            borderwidth=0,
+        )
+        A.style.configure(
+            "Settings.TNotebook.Tab",
+            padding=(12, 6),
+            font=("Segoe UI Semibold", 9),
+        )
+        A.style.map(
+            "Settings.TNotebook.Tab",
+            background=[("selected", A._ui_colors["card"])],
+            foreground=[("selected", "black")],
+        )
         A.style.configure(
             "Form.TLabel",
             background=A._ui_colors["card"],
@@ -3746,6 +3778,7 @@ class App(BU.Tk):
         d_ = i_
         a_ = F.Toplevel(A)
         a_.title(SETTINGS_LABEL)
+        a_.configure(bg=A._ui_colors["bg"])
         a_.grab_set()
         slot_defs, _ = normalize_slot_definitions(D.get(SLOT_DEFS_KEY))
         sql_column_map, _ = normalize_sql_column_map(
@@ -3773,49 +3806,56 @@ class App(BU.Tk):
                 M: D.get(K, {}).get(M, B),
             },
         }
-        Z = C.Notebook(a_)
-        Z.pack(expand=J, fill=z, padx=5, pady=5)
-        L = C.Frame(Z)
-        Q = C.Frame(Z)
-        S = C.Frame(Z)
-        fields_tab = C.Frame(Z)
-        U = C.Frame(Z)
-        V_ = C.Frame(Z)
+        Z = C.Notebook(a_, style="Settings.TNotebook")
+        Z.pack(expand=J, fill=z, padx=12, pady=12)
+        tab_padding = (12, 10)
+        L = C.Frame(Z, style="Settings.TFrame", padding=tab_padding)
+        ftp_tab = C.Frame(Z, style="Settings.TFrame", padding=tab_padding)
+        S = C.Frame(Z, style="Settings.TFrame", padding=tab_padding)
+        fields_tab = C.Frame(Z, style="Settings.TFrame", padding=tab_padding)
+        U = C.Frame(Z, style="Settings.TFrame", padding=tab_padding)
+        system_tab = C.Frame(Z, style="Settings.TFrame", padding=tab_padding)
+        V_ = C.Frame(Z, style="Settings.TFrame", padding=tab_padding)
         Z.add(L, text=IMAGES_TAB_LABEL)
-        Z.add(Q, text=FTP_TAB_LABEL)
+        Z.add(ftp_tab, text=FTP_TAB_LABEL)
         Z.add(S, text=SQL_TAB_LABEL)
         Z.add(fields_tab, text=FIELDS_TAB_LABEL)
         Z.add(U, text=LANGUAGE_TAB_LABEL)
+        Z.add(system_tab, text=APP_TAB_LABEL)
         Z.add(V_, text=LANG.get("diagnostics_tab", "Diagnostyka"))
-        C.Label(L, text=IMAGE_SETTINGS_LABEL).grid(
+
+        def _slabel(parent, *args, **kwargs):
+            kwargs.setdefault("style", "Settings.TLabel")
+            return C.Label(parent, *args, **kwargs)
+        _slabel(L, text=IMAGE_SETTINGS_LABEL, style="SettingsHeader.TLabel").grid(
             row=0, column=0, columnspan=4, padx=5, pady=5, sticky=T
         )
         Ah = C.Checkbutton(L, text=B, variable=A.opt_resize)
         Ah.grid(row=1, column=0, padx=5, sticky=T)
-        C.Label(L, text=RESIZE_LABEL).grid(row=1, column=1, sticky=T)
-        resize_frame = C.Frame(L)
+        _slabel(L, text=RESIZE_LABEL).grid(row=1, column=1, sticky=T)
+        resize_frame = C.Frame(L, style="Settings.TFrame")
         resize_frame.grid(row=1, column=2, sticky="w")
         l_ = C.Entry(resize_frame, textvariable=A.resize_max_dim, width=5)
         l_.grid(row=0, column=0, sticky="w")
-        C.Label(resize_frame, text=PX_MAX_LABEL).grid(
+        _slabel(resize_frame, text=PX_MAX_LABEL).grid(
             row=0, column=1, sticky="w", padx=4
         )
         Ai = C.Checkbutton(L, text=B, variable=A.opt_compress)
         Ai.grid(row=2, column=0, padx=5, sticky=T)
-        C.Label(L, text=COMPRESS_LABEL).grid(row=2, column=1, sticky=T)
-        compress_frame = C.Frame(L)
+        _slabel(L, text=COMPRESS_LABEL).grid(row=2, column=1, sticky=T)
+        compress_frame = C.Frame(L, style="Settings.TFrame")
         compress_frame.grid(row=2, column=2, sticky="w")
         n = C.Spinbox(
             compress_frame, from_=10, to=100, textvariable=A.compress_quality, width=5
         )
         n.grid(row=0, column=0, sticky="w")
-        C.Label(compress_frame, text=UNIT_PERCENT_LABEL).grid(
+        _slabel(compress_frame, text=UNIT_PERCENT_LABEL).grid(
             row=0, column=1, sticky="w", padx=4
         )
         Aj = C.Checkbutton(L, text=B, variable=A.opt_maxsize)
         Aj.grid(row=3, column=0, padx=5, sticky=T)
-        C.Label(L, text=LIMIT_SIZE_LABEL).grid(row=3, column=1, sticky=T)
-        maxsize_frame = C.Frame(L)
+        _slabel(L, text=LIMIT_SIZE_LABEL).grid(row=3, column=1, sticky=T)
+        maxsize_frame = C.Frame(L, style="Settings.TFrame")
         maxsize_frame.grid(row=3, column=2, sticky="w")
         o = C.Spinbox(
             maxsize_frame,
@@ -3826,12 +3866,12 @@ class App(BU.Tk):
             width=6,
         )
         o.grid(row=0, column=0, sticky="w")
-        C.Label(maxsize_frame, text=UNIT_KB_LABEL).grid(
+        _slabel(maxsize_frame, text=UNIT_KB_LABEL).grid(
             row=0, column=1, sticky="w", padx=4
         )
         Ak = C.Checkbutton(L, text=B, variable=A.opt_convert_tif)
         Ak.grid(row=4, column=0, padx=5, sticky=T)
-        C.Label(L, text=CONVERT_TIF_LABEL).grid(row=4, column=1, sticky=T)
+        _slabel(L, text=CONVERT_TIF_LABEL).grid(row=4, column=1, sticky=T)
         q = C.Combobox(
             L,
             textvariable=A.tif_target_format,
@@ -3840,18 +3880,21 @@ class App(BU.Tk):
             width=10,
         )
         q.grid(row=4, column=2, sticky="w")
-        C.Label(L, text=LANG.get("format_info_label", "Informacje o formacie:")).grid(
-            row=5, column=1, sticky="nw", padx=5, pady=2
-        )
+        _slabel(
+            L,
+            text=LANG.get("format_info_label", "Informacje o formacie:"),
+        ).grid(row=5, column=1, sticky="nw", padx=5, pady=2)
         format_info_var = F.StringVar(
             value=_format_info_text(A.tif_target_format.get())
         )
-        format_info_frame = C.Frame(L, width=460, height=60)
+        format_info_frame = C.Frame(
+            L, width=460, height=60, style="Settings.TFrame"
+        )
         format_info_frame.grid(
             row=5, column=2, columnspan=2, sticky="nw", padx=5, pady=2
         )
         format_info_frame.grid_propagate(h)
-        format_info_label = C.Label(
+        format_info_label = _slabel(
             format_info_frame,
             textvariable=format_info_var,
             wraplength=440,
@@ -3859,7 +3902,9 @@ class App(BU.Tk):
             anchor="nw",
         )
         format_info_label.grid(row=0, column=0, sticky="nw", padx=4, pady=2)
-        C.Label(U, text=LANGUAGE_LABEL).grid(row=0, column=0, sticky=R, padx=5, pady=2)
+        _slabel(U, text=LANGUAGE_LABEL).grid(
+            row=0, column=0, sticky=R, padx=5, pady=2
+        )
         lang_var = F.StringVar(value=LANG_PREF)
         lang_combo = C.Combobox(
             U,
@@ -3893,10 +3938,10 @@ class App(BU.Tk):
         translation_api_url_var = F.StringVar(
             value=translation_settings.get(TRANSLATION_API_URL, B)
         )
-        C.Label(U, text=TRANSLATION_SECTION_LABEL).grid(
+        _slabel(U, text=TRANSLATION_SECTION_LABEL, style="SettingsHeader.TLabel").grid(
             row=1, column=0, columnspan=2, sticky="w", padx=5, pady=(10, 4)
         )
-        C.Label(U, text=TRANSLATION_PROVIDER_LABEL).grid(
+        _slabel(U, text=TRANSLATION_PROVIDER_LABEL).grid(
             row=2, column=0, sticky=R, padx=5, pady=2
         )
         translation_provider_combo = C.Combobox(
@@ -3912,7 +3957,7 @@ class App(BU.Tk):
         translation_provider_combo.configure(
             postcommand=lambda c=translation_provider_combo: A._style_combobox_list(c)
         )
-        C.Label(U, text=TRANSLATION_API_KEY_LABEL).grid(
+        _slabel(U, text=TRANSLATION_API_KEY_LABEL).grid(
             row=3, column=0, sticky=R, padx=5, pady=2
         )
         translation_api_key_entry = C.Entry(
@@ -3921,7 +3966,7 @@ class App(BU.Tk):
         translation_api_key_entry.grid(
             row=3, column=1, padx=5, pady=2, sticky="w"
         )
-        C.Label(U, text=TRANSLATION_API_URL_LABEL).grid(
+        _slabel(U, text=TRANSLATION_API_URL_LABEL).grid(
             row=4, column=0, sticky=R, padx=5, pady=2
         )
         translation_api_url_entry = C.Entry(
@@ -3941,9 +3986,125 @@ class App(BU.Tk):
 
         translation_provider_combo.bind(A2, _sync_translation_state)
         _sync_translation_state()
-        C.Label(V_, text=LANG.get("error_test_label", "Testy błędów")).grid(
-            row=0, column=0, columnspan=2, padx=5, pady=5, sticky=T
+
+        def _load_local_settings_data():
+            data = dict(BASE_DIR_SETTINGS_TEMPLATE)
+            try:
+                with x(settings.BASE_DIR_SETTINGS_PATH, "r", encoding=k) as handle:
+                    existing = Ar.load(handle)
+                if Aq(existing, dict):
+                    data.update(existing)
+            except E:
+                pass
+            return data
+
+        def _save_local_settings_data(data):
+            payload = dict(BASE_DIR_SETTINGS_TEMPLATE)
+            if Aq(data, dict):
+                payload.update(data)
+            raw_secret = payload.get(APP_SECRET_KEY, B)
+            if raw_secret:
+                payload[APP_SECRET_KEY] = common._encode_local_secret(raw_secret)
+            try:
+                A.makedirs(A.path.dirname(settings.BASE_DIR_SETTINGS_PATH) or ".", exist_ok=J)
+            except E:
+                pass
+            with x(settings.BASE_DIR_SETTINGS_PATH, T, encoding=k) as handle:
+                Ar.dump(payload, handle, indent=4)
+
+        local_settings_data = _load_local_settings_data()
+        base_dir_value = local_settings_data.get(
+            "base_dir_override", settings.BASE_DIR_OVERRIDE
         )
+        if not Aq(base_dir_value, str):
+            base_dir_value = settings.BASE_DIR_OVERRIDE or B
+        base_dir_value = base_dir_value.strip()
+        app_secret_value = local_settings_data.get(
+            APP_SECRET_KEY, common.APP_SECRET
+        )
+        app_secret_value = common._decode_local_secret(
+            app_secret_value, common.APP_SECRET
+        )
+        if not Aq(app_secret_value, str):
+            app_secret_value = common.APP_SECRET
+        app_secret_value = app_secret_value.strip() or common.APP_SECRET
+        app_secret_mask = "*" * max(8, Q(app_secret_value))
+        app_secret_var = F.StringVar(value=app_secret_mask)
+        base_dir_var = F.StringVar(value=base_dir_value)
+        system_unlocked = Ay
+
+        def _choose_base_dir():
+            initial_dir = base_dir_var.get().strip() or A.path.expanduser("~")
+            selected = BT.askdirectory(
+                parent=a_, title=BASE_DIR_PROMPT_TITLE, initialdir=initial_dir
+            )
+            if selected:
+                base_dir_var.set(selected.strip())
+
+        def _set_system_state(state):
+            nonlocal system_unlocked
+            system_unlocked = state
+            if state:
+                app_secret_var.set(app_secret_value)
+                app_secret_entry.configure(state=X, show=B)
+                base_dir_entry.configure(state=X)
+                base_dir_btn.configure(state=X)
+            else:
+                app_secret_var.set(app_secret_mask)
+                app_secret_entry.configure(state=i_, show=Y)
+                base_dir_entry.configure(state=i_)
+                base_dir_btn.configure(state=V)
+
+        def _unlock_system_settings():
+            if is_admin():
+                _set_system_state(J)
+                log_info_loc("settings_app_unlocked")
+            else:
+                O.showwarning(A6_, A5_)
+
+        _slabel(
+            system_tab,
+            text=APP_SETTINGS_LABEL,
+            style="SettingsHeader.TLabel",
+        ).grid(row=0, column=0, columnspan=3, padx=5, pady=(0, 6), sticky="w")
+        _slabel(system_tab, text=APP_SECRET_LABEL).grid(
+            row=1, column=0, padx=5, pady=4, sticky=R
+        )
+        app_secret_entry = C.Entry(
+            system_tab, textvariable=app_secret_var, show=Y, width=30, state=i_
+        )
+        app_secret_entry.grid(row=1, column=1, padx=5, pady=4, sticky="ew")
+        _slabel(system_tab, text=BASE_DIR_OVERRIDE_LABEL).grid(
+            row=2, column=0, padx=5, pady=4, sticky=R
+        )
+        base_dir_entry = C.Entry(
+            system_tab, textvariable=base_dir_var, width=50, state=i_
+        )
+        base_dir_entry.grid(row=2, column=1, padx=5, pady=4, sticky="ew")
+        base_dir_btn = C.Button(
+            system_tab, text=CHOOSE_LABEL, command=_choose_base_dir, state=V
+        )
+        base_dir_btn.grid(row=2, column=2, padx=5, pady=4, sticky="w")
+        _slabel(
+            system_tab,
+            text=APP_SETTINGS_HINT,
+            style="SettingsHint.TLabel",
+            wraplength=520,
+            justify="left",
+        ).grid(row=3, column=0, columnspan=3, padx=5, pady=(6, 4), sticky="w")
+        system_admin_btn = C.Button(
+            system_tab, text=Ag_, command=_unlock_system_settings
+        )
+        system_admin_btn.grid(
+            row=4, column=0, columnspan=3, padx=5, pady=(4, 0), sticky="e"
+        )
+        system_tab.columnconfigure(1, weight=1)
+        _set_system_state(Ay)
+        _slabel(
+            V_,
+            text=LANG.get("error_test_label", "Testy błędów"),
+            style="SettingsHeader.TLabel",
+        ).grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky=T)
         error_options = [
             LANG.get("error_test_zero_div", "Podział przez zero"),
             LANG.get("error_test_file_missing", "Brakujący plik"),
@@ -3977,7 +4138,7 @@ class App(BU.Tk):
             text=LANG.get("error_test_button", "Wywołaj błąd"),
             command=_trigger_error,
         ).grid(row=1, column=1, padx=5, pady=5, sticky="w")
-        C.Label(
+        _slabel(
             V_,
             text=LANG.get(
                 "error_test_hint",
@@ -3985,10 +4146,12 @@ class App(BU.Tk):
             ),
             wraplength=400,
             justify="left",
+            style="SettingsHint.TLabel",
         ).grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky="w")
-        C.Label(
+        _slabel(
             V_,
             text=LANG.get("code_check_label", "Szybka diagnostyka kodu"),
+            style="SettingsHeader.TLabel",
         ).grid(row=3, column=0, columnspan=2, padx=5, pady=(10, 4), sticky=T)
         code_check_status_var = F.StringVar(value=B)
 
@@ -4003,13 +4166,13 @@ class App(BU.Tk):
             command=_run_code_check,
         )
         code_check_btn.grid(row=4, column=0, padx=5, pady=5, sticky=T)
-        C.Label(
+        _slabel(
             V_,
             textvariable=code_check_status_var,
             wraplength=400,
             justify="left",
         ).grid(row=4, column=1, padx=5, pady=5, sticky="w")
-        C.Label(
+        _slabel(
             V_,
             text=LANG.get(
                 "code_check_hint",
@@ -4017,10 +4180,12 @@ class App(BU.Tk):
             ),
             wraplength=400,
             justify="left",
+            style="SettingsHint.TLabel",
         ).grid(row=5, column=0, columnspan=2, padx=5, pady=5, sticky="w")
-        C.Label(
+        _slabel(
             V_,
             text=LANG.get("ui_check_label", "Testy interfejsu"),
+            style="SettingsHeader.TLabel",
         ).grid(row=6, column=0, columnspan=2, padx=5, pady=(8, 4), sticky=T)
         ui_check_status_var = F.StringVar(value=B)
 
@@ -4035,13 +4200,13 @@ class App(BU.Tk):
             command=_run_ui_check,
         )
         ui_check_btn.grid(row=7, column=0, padx=5, pady=5, sticky=T)
-        C.Label(
+        _slabel(
             V_,
             textvariable=ui_check_status_var,
             wraplength=400,
             justify="left",
         ).grid(row=7, column=1, padx=5, pady=5, sticky="w")
-        C.Label(
+        _slabel(
             V_,
             text=LANG.get(
                 "ui_check_hint",
@@ -4049,10 +4214,12 @@ class App(BU.Tk):
             ),
             wraplength=400,
             justify="left",
+            style="SettingsHint.TLabel",
         ).grid(row=8, column=0, columnspan=2, padx=5, pady=5, sticky="w")
-        C.Label(
+        _slabel(
             V_,
             text=LANG.get("code_check_report_label", "Raport diagnostyczny"),
+            style="SettingsHeader.TLabel",
         ).grid(row=9, column=0, columnspan=2, padx=5, pady=(8, 4), sticky=T)
         code_report = BS.ScrolledText(
             V_, width=90, height=18, state=V, wrap="word"
@@ -4073,10 +4240,12 @@ class App(BU.Tk):
         def _toggle_maxsize(*_args):
             o.configure(state=X if A.opt_maxsize.get() else V)
 
-        Ap = A.opt_resize.trace_add(Y_, lambda *_args: _toggle_resize())
-        Aq = A.opt_compress.trace_add(Y_, lambda *_args: _toggle_compress())
-        Ar = A.opt_maxsize.trace_add(Y_, lambda *_args: _toggle_maxsize())
-        get_file_lock_user = A.opt_convert_tif.trace_add(
+        resize_trace = A.opt_resize.trace_add(Y_, lambda *_args: _toggle_resize())
+        compress_trace = A.opt_compress.trace_add(
+            Y_, lambda *_args: _toggle_compress()
+        )
+        maxsize_trace = A.opt_maxsize.trace_add(Y_, lambda *_args: _toggle_maxsize())
+        convert_tif_trace = A.opt_convert_tif.trace_add(
             Y_, lambda *B: q.configure(state=d_ if A.opt_convert_tif.get() else V)
         )
         A.tif_target_format.trace_add(
@@ -4086,35 +4255,39 @@ class App(BU.Tk):
         n.configure(state=X if A.opt_compress.get() else V)
         o.configure(state=X if A.opt_maxsize.get() else V)
         q.configure(state=d_ if A.opt_convert_tif.get() else V)
-        C.Label(Q, text=FTP_SERVER_LABEL).grid(row=0, column=0, sticky=R, padx=5, pady=2)
+        _slabel(ftp_tab, text=FTP_SERVER_LABEL).grid(
+            row=0, column=0, sticky=R, padx=5, pady=2
+        )
         s = F.StringVar(value=D[H][v])
-        AD_ = C.Entry(Q, textvariable=s, width=30)
+        AD_ = C.Entry(ftp_tab, textvariable=s, width=30)
         AD_.grid(row=0, column=1, padx=5, pady=2, sticky="w")
-        C.Label(Q, text=PORT_LABEL).grid(row=1, column=0, sticky=R, padx=5, pady=2)
+        _slabel(ftp_tab, text=PORT_LABEL).grid(
+            row=1, column=0, sticky=R, padx=5, pady=2
+        )
         t = F.IntVar(value=D[H][r])
-        AE_ = C.Entry(Q, textvariable=t, width=6)
+        AE_ = C.Entry(ftp_tab, textvariable=t, width=6)
         AE_.grid(row=1, column=1, sticky="w", padx=5, pady=2)
-        C.Label(Q, text=k_).grid(row=2, column=0, sticky=R, padx=5, pady=2)
+        _slabel(ftp_tab, text=k_).grid(row=2, column=0, sticky=R, padx=5, pady=2)
         x_ = F.StringVar(value=D[H][N])
-        AF_ = C.Entry(Q, textvariable=x_, width=30)
+        AF_ = C.Entry(ftp_tab, textvariable=x_, width=30)
         AF_.grid(row=2, column=1, padx=5, pady=2, sticky="w")
-        C.Label(Q, text=j_).grid(row=3, column=0, sticky=R, padx=5, pady=2)
+        _slabel(ftp_tab, text=j_).grid(row=3, column=0, sticky=R, padx=5, pady=2)
         y_ = F.StringVar(value=D[H][M])
-        AG_ = C.Entry(Q, textvariable=y_, show=Y, width=30)
+        AG_ = C.Entry(ftp_tab, textvariable=y_, show=Y, width=30)
         AG_.grid(row=3, column=1, padx=5, pady=2, sticky="w")
-        C.Label(Q, text=FTP_PATH_LABEL).grid(
+        _slabel(ftp_tab, text=FTP_PATH_LABEL).grid(
             row=4, column=0, sticky=R, padx=5, pady=2
         )
         g_ = F.StringVar(value=D[H][m])
-        AH_ = C.Entry(Q, textvariable=g_, width=30)
+        AH_ = C.Entry(ftp_tab, textvariable=g_, width=30)
         AH_.grid(row=4, column=1, padx=5, pady=2, sticky="w")
-        AI_ = C.Button(Q, text=a)
+        AI_ = C.Button(ftp_tab, text=a)
         AI_.grid(row=5, column=0, columnspan=2, sticky="w", padx=5, pady=5)
-        C.Label(Q, text=FTP_TEST_LABEL).grid(
+        _slabel(ftp_tab, text=FTP_TEST_LABEL).grid(
             row=6, column=0, sticky=R, padx=5, pady=5
         )
         AJ_ = F.StringVar(value=B)
-        sql_query_entry = C.Entry(Q, textvariable=AJ_, width=50, state=d_)
+        sql_query_entry = C.Entry(ftp_tab, textvariable=AJ_, width=50, state=d_)
         sql_query_entry.grid(row=6, column=1, padx=5, pady=5, sticky="w")
 
         def _test_ftp_connection():
@@ -4146,15 +4319,15 @@ class App(BU.Tk):
                     pass
             AJ_.set(A_)
 
-        Ay = C.Button(Q, text=AA_, command=_test_ftp_connection)
-        Ay.grid(row=6, column=1, padx=5, pady=5, sticky=R)
-        C.Label(Q, text=FTP_UPDATE_LABEL).grid(
+        ftp_test_btn = C.Button(ftp_tab, text=AA_, command=_test_ftp_connection)
+        ftp_test_btn.grid(row=6, column=1, padx=5, pady=5, sticky=R)
+        _slabel(ftp_tab, text=FTP_UPDATE_LABEL).grid(
             row=7, column=0, sticky=R, padx=5, pady=2
         )
         ftp_update_var = F.BooleanVar(value=D.get(ft, J))
-        ftp_update_cb = C.Checkbutton(Q, variable=ftp_update_var)
+        ftp_update_cb = C.Checkbutton(ftp_tab, variable=ftp_update_var)
         ftp_update_cb.grid(row=7, column=1, sticky=T, padx=5, pady=2)
-        C.Label(S, text=DB_TYPE_LABEL).grid(
+        _slabel(S, text=DB_TYPE_LABEL).grid(
             row=0, column=0, sticky=R, padx=5, pady=2
         )
         db_type_var = F.StringVar(value=f_ if D.get(p, K).lower() == K else A9_)
@@ -4166,38 +4339,38 @@ class App(BU.Tk):
             width=20,
         )
         A1.grid(row=0, column=1, padx=5, pady=2, sticky=T)
-        U = C.Frame(S)
-        W = C.Frame(S)
-        C.Label(U, text=A8_).grid(row=0, column=0, sticky=R, padx=5, pady=2)
+        U = C.Frame(S, style="Settings.TFrame")
+        W = C.Frame(S, style="Settings.TFrame")
+        _slabel(U, text=A8_).grid(row=0, column=0, sticky=R, padx=5, pady=2)
         AK = F.StringVar(value=D[P][c])
         ensure_package = C.Entry(U, textvariable=AK, width=30)
         ensure_package.grid(row=0, column=1, padx=5, pady=2)
-        C.Label(U, text=A7_).grid(row=1, column=0, sticky=R, padx=5, pady=2)
+        _slabel(U, text=A7_).grid(row=1, column=0, sticky=R, padx=5, pady=2)
         AM = F.StringVar(value=D[P][b])
         AN = C.Entry(U, textvariable=AM, width=30)
         AN.grid(row=1, column=1, padx=5, pady=2)
-        C.Label(U, text=k_).grid(row=2, column=0, sticky=R, padx=5, pady=2)
+        _slabel(U, text=k_).grid(row=2, column=0, sticky=R, padx=5, pady=2)
         AO = F.StringVar(value=D[P][N])
         AQ = C.Entry(U, textvariable=AO, width=30)
         AQ.grid(row=2, column=1, padx=5, pady=2)
-        C.Label(U, text=j_).grid(row=3, column=0, sticky=R, padx=5, pady=2)
+        _slabel(U, text=j_).grid(row=3, column=0, sticky=R, padx=5, pady=2)
         AR = F.StringVar(value=D[P][M])
         AS = C.Entry(U, textvariable=AR, show=Y, width=30)
         AS.grid(row=3, column=1, padx=5, pady=2)
         U.grid(row=1, column=0, columnspan=2, sticky=T, padx=5, pady=2)
-        C.Label(W, text=A8_).grid(row=0, column=0, sticky=R, padx=5, pady=2)
+        _slabel(W, text=A8_).grid(row=0, column=0, sticky=R, padx=5, pady=2)
         AT = F.StringVar(value=D[K][c])
         AU = C.Entry(W, textvariable=AT, width=30)
         AU.grid(row=0, column=1, padx=5, pady=2)
-        C.Label(W, text=A7_).grid(row=1, column=0, sticky=R, padx=5, pady=2)
+        _slabel(W, text=A7_).grid(row=1, column=0, sticky=R, padx=5, pady=2)
         AV = F.StringVar(value=D[K][b])
         AW = C.Entry(W, textvariable=AV, width=30)
         AW.grid(row=1, column=1, padx=5, pady=2)
-        C.Label(W, text=k_).grid(row=2, column=0, sticky=R, padx=5, pady=2)
+        _slabel(W, text=k_).grid(row=2, column=0, sticky=R, padx=5, pady=2)
         AX = F.StringVar(value=D[K][N])
         AY = C.Entry(W, textvariable=AX, width=30)
         AY.grid(row=2, column=1, padx=5, pady=2)
-        C.Label(W, text=j_).grid(row=3, column=0, sticky=R, padx=5, pady=2)
+        _slabel(W, text=j_).grid(row=3, column=0, sticky=R, padx=5, pady=2)
         AZ = F.StringVar(value=D[K][M])
         Aa = C.Entry(W, textvariable=AZ, show=Y, width=30)
         Aa.grid(row=3, column=1, padx=5, pady=2)
@@ -4216,19 +4389,19 @@ class App(BU.Tk):
                 U.grid()
 
         A1.bind(A2, Az)
-        C.Label(S, text=SQL_UPDATE_LABEL).grid(
+        _slabel(S, text=SQL_UPDATE_LABEL).grid(
             row=2, column=0, sticky=R, padx=5, pady=2
         )
         Ab = F.BooleanVar(value=D.get(u, J))
         Ac = C.Checkbutton(S, variable=Ab)
         Ac.grid(row=2, column=1, sticky=T, padx=5, pady=2)
-        C.Label(S, text=SQL_QUERY_LABEL).grid(
+        _slabel(S, text=SQL_QUERY_LABEL).grid(
             row=3, column=0, sticky="ne", padx=5, pady=2
         )
         h_ = F.Text(S, width=80, height=3)
         h_.insert(A_, D.get(w, SQL_UPDATE_TEMPLATE))
         h_.grid(row=3, column=1, padx=5, pady=2, sticky=T)
-        C.Label(S, text=SQL_TEST_LABEL).grid(
+        _slabel(S, text=SQL_TEST_LABEL).grid(
             row=4, column=0, sticky=R, padx=5, pady=5
         )
         A3_ = F.StringVar(value=B)
@@ -4467,13 +4640,13 @@ class App(BU.Tk):
                 count=len(columns),
             )
 
-        detect_row = C.Frame(S)
+        detect_row = C.Frame(S, style="Settings.TFrame")
         detect_row.grid(row=6, column=0, columnspan=2, sticky="w", padx=5, pady=(10, 5))
         detect_btn = C.Button(
             detect_row, text=SQL_DETECT_COLUMNS_LABEL, command=_detect_sql_columns
         )
         detect_btn.grid(row=0, column=0, padx=(0, 6))
-        C.Label(detect_row, textvariable=detect_status_var).grid(
+        _slabel(detect_row, textvariable=detect_status_var).grid(
             row=0, column=1, sticky="w"
         )
         sql_mapping_controls[:] = [detect_btn]
@@ -4481,14 +4654,16 @@ class App(BU.Tk):
         fields_tab.columnconfigure(0, weight=1)
         fields_tab.columnconfigure(1, weight=2)
         fields_tab.rowconfigure(1, weight=1)
-        C.Label(fields_tab, text=FIELDS_MANAGE_LABEL).grid(
+        _slabel(
+            fields_tab, text=FIELDS_MANAGE_LABEL, style="SettingsHeader.TLabel"
+        ).grid(
             row=0, column=0, sticky="w", padx=5, pady=5
         )
-        columns_panel = C.Frame(fields_tab)
+        columns_panel = C.Frame(fields_tab, style="Settings.TFrame")
         columns_panel.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         columns_panel.columnconfigure(0, weight=1)
         columns_panel.rowconfigure(1, weight=1)
-        C.Label(columns_panel, text=SQL_COLUMNS_LABEL).grid(
+        _slabel(columns_panel, text=SQL_COLUMNS_LABEL).grid(
             row=0, column=0, sticky="w", padx=2, pady=(0, 4)
         )
         columns_listbox = F.Listbox(columns_panel, height=12, exportselection=0)
@@ -4510,7 +4685,7 @@ class App(BU.Tk):
             pass
         if available_columns:
             _set_available_columns(available_columns)
-        fields_grid = C.Frame(fields_tab)
+        fields_grid = C.Frame(fields_tab, style="Settings.TFrame")
         fields_grid.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
 
         def _configure_tile_text(widget):
@@ -5035,7 +5210,7 @@ class App(BU.Tk):
         BC_.grid(row=5, column=1, sticky=T, padx=5, pady=5)
         fields_admin_btn = C.Button(fields_tab, text=Ag_, command=NO_DATA_MSG)
         fields_admin_btn.grid(row=0, column=1, sticky="e", padx=5, pady=5)
-        A4 = C.Frame(a_)
+        A4 = C.Frame(a_, style="Settings.TFrame")
         A4.pack(pady=5)
 
         def BD_():
@@ -5176,7 +5351,42 @@ class App(BU.Tk):
                 TRANSLATION_API_KEY: translation_api_key_var.get().strip(),
                 TRANSLATION_API_URL: translation_api_url_var.get().strip(),
             }
+            restart_needed = Ay
+            if system_unlocked:
+                new_app_secret = app_secret_var.get().strip()
+                if not new_app_secret:
+                    O.showwarning(WARNING_LABEL, APP_SECRET_REQUIRED_MSG)
+                    return
+                new_base_dir = base_dir_var.get().strip()
+                if new_base_dir:
+                    ok, error = settings._ensure_directory_access(new_base_dir)
+                    if not ok:
+                        details = f"\n\n{error}" if error else B
+                        O.showerror(
+                            SETTINGS_LABEL,
+                            f"{BASE_DIR_INVALID_SELECTION_MSG}{details}",
+                        )
+                        return
+                local_payload = _load_local_settings_data()
+                local_payload["base_dir_override"] = new_base_dir
+                local_payload[APP_SECRET_KEY] = new_app_secret
+                try:
+                    _save_local_settings_data(local_payload)
+                except E as exc:
+                    O.showerror(
+                        AK,
+                        LOCAL_SETTINGS_SAVE_FAILED_MSG.format(error=exc),
+                    )
+                    return
+                if new_app_secret != app_secret_value:
+                    common.APP_SECRET = new_app_secret
+                    common.BASE_DIR_SETTINGS_TEMPLATE[APP_SECRET_KEY] = new_app_secret
+                    encryption.APP_SECRET = new_app_secret
+                if new_base_dir != base_dir_value:
+                    restart_needed = J
             save_config(D)
+            if restart_needed:
+                O.showinfo(SETTINGS_LABEL, APP_SETTINGS_RESTART_MSG)
             A.sql_column_map = updated_sql_map
             before_prefixes = [slot["prefix"] for slot in current_slot_defs]
             after_prefixes = [slot["prefix"] for slot in updated_slot_defs]
@@ -5201,10 +5411,10 @@ class App(BU.Tk):
         C.Button(A4, text=SAVE_LABEL, command=BD_).grid(row=0, column=0, padx=5)
 
         def Af():
-            A.opt_resize.trace_remove(Y_, Ap)
-            A.opt_compress.trace_remove(Y_, Aq)
-            A.opt_maxsize.trace_remove(Y_, Ar)
-            A.opt_convert_tif.trace_remove(Y_, get_file_lock_user)
+            A.opt_resize.trace_remove(Y_, resize_trace)
+            A.opt_compress.trace_remove(Y_, compress_trace)
+            A.opt_maxsize.trace_remove(Y_, maxsize_trace)
+            A.opt_convert_tif.trace_remove(Y_, convert_tif_trace)
             a_.destroy()
 
         C.Button(A4, text=CANCEL_LABEL, command=Af).grid(row=0, column=1, padx=5)
