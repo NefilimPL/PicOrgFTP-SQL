@@ -304,6 +304,28 @@ RUN_AS_ADMIN_MSG = LANG.get(
     "run_as_admin",
     "Uruchom operację z uprawnieniami administratora, aby edytować te ustawienia.",
 )
+APP_SETTINGS_LABEL = LANG.get(
+    "app_settings_label", "Ustawienia aplikacji"
+)
+APP_SECRET_LABEL = LANG.get("app_secret_label", "APP_SECRET:")
+BASE_DIR_OVERRIDE_LABEL = LANG.get(
+    "base_dir_override_label", "Katalog bazowy:"
+)
+APP_SETTINGS_HINT = LANG.get(
+    "app_settings_hint",
+    "Zmiana katalogu bazowego wymaga ponownego uruchomienia aplikacji.",
+)
+APP_SECRET_REQUIRED_MSG = LANG.get(
+    "app_secret_required", "APP_SECRET nie może być pusty."
+)
+APP_SETTINGS_RESTART_MSG = LANG.get(
+    "app_settings_restart",
+    "Zmiana katalogu bazowego zostanie zastosowana po ponownym uruchomieniu aplikacji.",
+)
+LOCAL_SETTINGS_SAVE_FAILED_MSG = LANG.get(
+    "local_settings_save_failed",
+    "Nie udało się zapisać local_settings.json:\n{error}",
+)
 IMAGE_SETTINGS_LABEL = LANG.get(
     "image_settings", "Ustawienia przetwarzania obrazów:"
 )
@@ -385,6 +407,7 @@ IMAGES_TAB_LABEL = LANG.get("images_tab", "Obrazy")
 FTP_TAB_LABEL = LANG.get("ftp_tab", "FTP")
 SQL_TAB_LABEL = LANG.get("sql_tab", "SQL")
 FIELDS_TAB_LABEL = LANG.get("fields_tab", "Pola zdjęć")
+APP_TAB_LABEL = LANG.get("app_tab", "Aplikacja")
 FIELDS_MANAGE_LABEL = LANG.get(
     "fields_manage_label", "Pola na zdjęcia"
 )
