@@ -176,6 +176,8 @@ LIST_ADD_DIALOG_TITLE = LANG.get("list_add_title", LIST_ADD_DIALOG_TITLE)
 LIST_REMOVE_DIALOG_TITLE = LANG.get("list_remove_title", LIST_REMOVE_DIALOG_TITLE)
 LIST_ADD_PROMPT_MSG = LANG.get("list_add_prompt", LIST_ADD_PROMPT_MSG)
 LIST_REMOVE_PROMPT_MSG = LANG.get("list_remove_prompt", LIST_REMOVE_PROMPT_MSG)
+LIST_VALUE_EXISTS_MSG = LANG.get("list_value_exists", LIST_VALUE_EXISTS_MSG)
+LIST_VALUE_EMPTY_MSG = LANG.get("list_value_empty", LIST_VALUE_EMPTY_MSG)
 VALUE_NOT_EXISTS_QUESTION = LANG.get(
     "value_not_exists_add_question",
     "Wartość '{value}' nie istnieje na liście dodatków. Dodać do listy?",

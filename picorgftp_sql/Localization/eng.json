@@ -21,6 +21,8 @@
   "list_add_prompt": "New value for {list}:",
   "list_remove_title": "Remove",
   "list_remove_prompt": "Remove '{value}' from {list}?",
+  "list_value_exists": "Value '{value}' already exists in {list}.",
+  "list_value_empty": "Value cannot be empty.",
   "save_error": "Save error",
   "not_in_list": "Not in list",
   "error": "Error",

@@ -186,11 +186,11 @@ def _save_workbook(workbook: Workbook, error_event: str, **context) -> bool:
         return False
 
 
-def add_to_list(sheet_name: str, value: str) -> None:
+def add_to_list(sheet_name: str, value: str) -> bool:
     """Append a new normalised value to the given list sheet."""
 
     if not value:
-        return
+        return False
     normalized = value.strip().upper()
     if sheet_name == EXCEL_SHEETS[EXTRAS_SHEET]:
         normalized = normalized.replace(UNDERSCORE, HYPHEN)
@@ -203,12 +203,12 @@ def add_to_list(sheet_name: str, value: str) -> None:
         )
         _show_locked_dialog(reason)
         log_error_loc("excel_add_locked", value=normalized, list=sheet_name, reason=reason)
-        return
+        return False
     workbook = _load_workbook()
     sheet = workbook[sheet_name]
     existing = {str(cell.value).strip().upper() for cell in sheet["A"] if cell.value}
     if normalized in existing:
-        return
+        return True
     sheet.append([normalized])
     if _save_workbook(
         workbook,
@@ -217,6 +217,8 @@ def add_to_list(sheet_name: str, value: str) -> None:
         list=sheet_name,
     ):
         log_info_loc("list_value_added", value=normalized, list=sheet_name)
+        return True
+    return False
 
 
 def remove_from_list(sheet_name: str, value: str) -> None:
