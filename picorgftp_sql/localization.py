@@ -114,6 +114,27 @@ settings.LC = LC
 NO_FILE_LABEL = LANG.get("no_file", NO_FILE_FALLBACK)
 LANGUAGE_TAB_LABEL = LANG.get("language_tab", "Język")
 LANGUAGE_LABEL = LANG.get("language_label", "Język:")
+TRANSLATION_SECTION_LABEL = LANG.get(
+    "translation_section_label", "Tłumaczenia pól"
+)
+TRANSLATION_PROVIDER_LABEL = LANG.get(
+    "translation_provider_label", "Dostawca tłumaczeń:"
+)
+TRANSLATION_PROVIDER_GOOGLE_LABEL = LANG.get(
+    "translation_provider_google", "Google (bez API)"
+)
+TRANSLATION_PROVIDER_MYMEMORY_LABEL = LANG.get(
+    "translation_provider_mymemory", "MyMemory (bez API)"
+)
+TRANSLATION_PROVIDER_DEEPL_LABEL = LANG.get(
+    "translation_provider_deepl", "DeepL (API)"
+)
+TRANSLATION_API_KEY_LABEL = LANG.get(
+    "translation_api_key_label", "Klucz API:"
+)
+TRANSLATION_API_URL_LABEL = LANG.get(
+    "translation_api_url_label", "URL API (opcjonalnie):"
+)
 BASE_DIR_PROMPT_TITLE = LANG.get("base_dir_prompt_title", BASE_DIR_PROMPT_TITLE)
 BASE_DIR_PROMPT_REQUIRED_MSG = LANG.get(
     "base_dir_prompt_required", BASE_DIR_PROMPT_REQUIRED_MSG
@@ -383,6 +404,36 @@ FIELD_NAME_DUPLICATE_MSG = LANG.get(
 FIELD_DELETE_LABEL = LANG.get("field_delete_label", "Usuń")
 FIELD_DELETE_CONFIRM_MSG = LANG.get(
     "field_delete_confirm", "Czy usunąć pole '{label}'?"
+)
+FIELD_TRANSLATE_LABEL = LANG.get(
+    "field_translate_label", "Propozycje tłumaczeń"
+)
+FIELD_TRANSLATE_TITLE = LANG.get(
+    "field_translate_title", "Propozycje tłumaczeń"
+)
+FIELD_TRANSLATE_NO_FILES_MSG = LANG.get(
+    "field_translate_no_files",
+    "Brak dostępnych plików lokalizacji.",
+)
+FIELD_TRANSLATE_SAVE_FAILED_MSG = LANG.get(
+    "field_translate_save_failed",
+    "Nie udało się zapisać tłumaczeń: {error}",
+)
+FIELD_TRANSLATE_FETCH_FAILED_MSG = LANG.get(
+    "field_translate_fetch_failed",
+    "Nie udało się pobrać tłumaczeń. Sprawdź połączenie z internetem.",
+)
+FIELD_TRANSLATE_FETCH_FAILED_DETAIL_MSG = LANG.get(
+    "field_translate_fetch_failed_detail",
+    "Nie udało się pobrać tłumaczeń ({provider}): {error}",
+)
+FIELD_TRANSLATE_ENTRY_ERROR_MSG = LANG.get(
+    "field_translate_entry_error",
+    "Błąd tłumaczenia ({provider}): {error}",
+)
+FIELD_TRANSLATE_MISSING_API_KEY_MSG = LANG.get(
+    "field_translate_missing_api_key",
+    "Brak klucza API tłumaczeń. Uzupełnij go w ustawieniach.",
 )
 SLOT_DEFS_REBUILD_PROMPT = LANG.get(
     "slot_defs_rebuild_prompt",

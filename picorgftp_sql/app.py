@@ -3056,6 +3056,77 @@ class App(BU.Tk):
         )
         lang_combo.grid(row=0, column=1, padx=5, pady=2, sticky=T)
         lang_combo.configure(postcommand=lambda c=lang_combo: A._style_combobox_list(c))
+        translation_settings = D.get(TRANSLATION_SETTINGS_KEY, {})
+        translation_provider_map = {
+            TRANSLATION_PROVIDER_GOOGLE_LABEL: TRANSLATION_PROVIDER_GOOGLE,
+            TRANSLATION_PROVIDER_MYMEMORY_LABEL: TRANSLATION_PROVIDER_MYMEMORY,
+            TRANSLATION_PROVIDER_DEEPL_LABEL: TRANSLATION_PROVIDER_DEEPL,
+        }
+        translation_provider_reverse = {
+            value: label for label, value in translation_provider_map.items()
+        }
+        translation_provider_value = translation_settings.get(
+            TRANSLATION_PROVIDER_KEY, TRANSLATION_PROVIDER_DEFAULT
+        )
+        translation_provider_var = F.StringVar(
+            value=translation_provider_reverse.get(
+                translation_provider_value, TRANSLATION_PROVIDER_GOOGLE_LABEL
+            )
+        )
+        translation_api_key_var = F.StringVar(
+            value=translation_settings.get(TRANSLATION_API_KEY, B)
+        )
+        translation_api_url_var = F.StringVar(
+            value=translation_settings.get(TRANSLATION_API_URL, B)
+        )
+        C.Label(U, text=TRANSLATION_SECTION_LABEL).grid(
+            row=1, column=0, columnspan=2, sticky="w", padx=5, pady=(10, 4)
+        )
+        C.Label(U, text=TRANSLATION_PROVIDER_LABEL).grid(
+            row=2, column=0, sticky=R, padx=5, pady=2
+        )
+        translation_provider_combo = C.Combobox(
+            U,
+            textvariable=translation_provider_var,
+            values=list(translation_provider_map),
+            state="readonly",
+            width=22,
+        )
+        translation_provider_combo.grid(
+            row=2, column=1, padx=5, pady=2, sticky=T
+        )
+        translation_provider_combo.configure(
+            postcommand=lambda c=translation_provider_combo: A._style_combobox_list(c)
+        )
+        C.Label(U, text=TRANSLATION_API_KEY_LABEL).grid(
+            row=3, column=0, sticky=R, padx=5, pady=2
+        )
+        translation_api_key_entry = C.Entry(
+            U, textvariable=translation_api_key_var, show=Y, width=30
+        )
+        translation_api_key_entry.grid(
+            row=3, column=1, padx=5, pady=2, sticky="w"
+        )
+        C.Label(U, text=TRANSLATION_API_URL_LABEL).grid(
+            row=4, column=0, sticky=R, padx=5, pady=2
+        )
+        translation_api_url_entry = C.Entry(
+            U, textvariable=translation_api_url_var, width=40
+        )
+        translation_api_url_entry.grid(
+            row=4, column=1, padx=5, pady=2, sticky="w"
+        )
+
+        def _sync_translation_state(*_args):
+            provider_value = translation_provider_map.get(
+                translation_provider_var.get(), TRANSLATION_PROVIDER_DEFAULT
+            )
+            entry_state = X if provider_value == TRANSLATION_PROVIDER_DEEPL else V
+            translation_api_key_entry.configure(state=entry_state)
+            translation_api_url_entry.configure(state=entry_state)
+
+        translation_provider_combo.bind(A2, _sync_translation_state)
+        _sync_translation_state()
         C.Label(V_, text=LANG.get("error_test_label", "Testy błędów")).grid(
             row=0, column=0, columnspan=2, padx=5, pady=5, sticky=T
         )
@@ -3520,7 +3591,7 @@ class App(BU.Tk):
         fields_tab.columnconfigure(1, weight=2)
         fields_tab.rowconfigure(1, weight=1)
         C.Label(fields_tab, text=FIELDS_MANAGE_LABEL).grid(
-            row=0, column=0, columnspan=2, sticky="w", padx=5, pady=5
+            row=0, column=0, sticky="w", padx=5, pady=5
         )
         columns_panel = C.Frame(fields_tab)
         columns_panel.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
@@ -3663,9 +3734,6 @@ class App(BU.Tk):
                         column_var.set(column)
 
                 column_entry.dnd_bind("<<Drop>>", _drop_to_column)
-            button_row = C.Frame(editor)
-            button_row.grid(row=2, column=0, columnspan=2, pady=5)
-
             def _save_field():
                 new_label = name_var.get().strip()
                 if not new_label:
@@ -3696,6 +3764,305 @@ class App(BU.Tk):
                 sql_column_map.pop(slot["prefix"], I)
                 _refresh_fields_grid()
                 editor.destroy()
+
+            def _lang_code_from_filename(filename):
+                name = localization.settings.A.path.splitext(G(filename))[0].lower()
+                if name == "eng":
+                    return "en"
+                return name
+
+            def _discover_localization_files():
+                lang_files = {}
+                for root in localization.settings.get_localization_search_paths():
+                    if not root:
+                        continue
+                    if not localization.settings.A.path.isdir(root):
+                        continue
+                    try:
+                        entries = localization.settings.A.listdir(root)
+                    except E:
+                        continue
+                    for entry in entries:
+                        entry_lower = G(entry).lower()
+                        if not entry_lower.endswith(".json"):
+                            continue
+                        code = _lang_code_from_filename(entry_lower)
+                        if not code:
+                            continue
+                        if code not in lang_files:
+                            lang_files[code] = localization.settings.A.path.join(
+                                root, entry
+                            )
+                return lang_files
+
+            def _read_translation_value(path, key):
+                try:
+                    with x(path, "r", encoding=k) as handle:
+                        data = localization.Ar.load(handle)
+                    if isinstance(data, dict):
+                        value = data.get(key, B)
+                        if isinstance(value, str):
+                            return value
+                except E:
+                    pass
+                return B
+
+            def _translate_label_google(text, lang_code):
+                if not text or not lang_code:
+                    return I, B
+                code = G(lang_code).lower()
+                target = {"ua": "uk", "en": "en", "pl": "pl"}.get(code, code)
+                try:
+                    query = BP.quote_plus(text)
+                    url = (
+                        "https://translate.googleapis.com/translate_a/single"
+                        f"?client=gtx&sl=auto&tl={target}&dt=t&q={query}"
+                    )
+                    request = BN.Request(
+                        url, headers={"User-Agent": "Mozilla/5.0"}
+                    )
+                    with BN.urlopen(request, timeout=5) as response:
+                        payload = response.read().decode(k)
+                    data = localization.Ar.loads(payload)
+                    if isinstance(data, list) and data:
+                        parts = []
+                        for item in data[0] or []:
+                            if isinstance(item, list) and item:
+                                part = item[0]
+                                if part:
+                                    parts.append(part)
+                        if parts:
+                            return B.join(parts), B
+                    return I, "empty response"
+                except E as exc:
+                    return I, G(exc)
+
+            def _pick_source_lang(text):
+                if not text:
+                    return "en"
+                lower = G(text).lower()
+                if re.search(r"[а-яіїєґ]", lower):
+                    return "uk"
+                if re.search(r"[ąćęłńóśźż]", lower):
+                    return "pl"
+                return "en"
+
+            def _translate_label_mymemory(text, lang_code, source_lang):
+                if not text or not lang_code or not source_lang:
+                    return I, B
+                code = G(lang_code).lower()
+                source = G(source_lang).lower()
+                source = {"ua": "uk"}.get(source, source)
+                if source == "auto":
+                    return I, "invalid source language"
+                target = {"ua": "uk", "en": "en", "pl": "pl"}.get(code, code)
+                try:
+                    query = BP.quote_plus(text)
+                    url = (
+                        "https://api.mymemory.translated.net/get"
+                        f"?q={query}&langpair={source}|{target}"
+                    )
+                    request = BN.Request(
+                        url, headers={"User-Agent": "Mozilla/5.0"}
+                    )
+                    with BN.urlopen(request, timeout=5) as response:
+                        payload = response.read().decode(k)
+                    data = localization.Ar.loads(payload)
+                    if isinstance(data, dict):
+                        status = data.get("responseStatus")
+                        if status != 200:
+                            details = data.get("responseDetails") or "HTTP error"
+                            return I, G(details)
+                        response_data = data.get("responseData", {})
+                        if isinstance(response_data, dict):
+                            translated = response_data.get("translatedText", B)
+                            if isinstance(translated, str) and translated:
+                                return translated, B
+                    return I, "empty response"
+                except E as exc:
+                    return I, G(exc)
+
+            def _translate_label_deepl(text, lang_code, api_key, api_url):
+                if not text or not lang_code or not api_key:
+                    return I, B
+                code = G(lang_code).lower()
+                target = {"ua": "UK", "en": "EN", "pl": "PL"}.get(
+                    code, code.upper()
+                )
+                endpoint = G(api_url or B).strip()
+                if not endpoint:
+                    if api_key.strip().endswith(":fx"):
+                        endpoint = "https://api-free.deepl.com/v2/translate"
+                    else:
+                        endpoint = "https://api.deepl.com/v2/translate"
+                try:
+                    payload = BP.urlencode(
+                        {"auth_key": api_key, "text": text, "target_lang": target}
+                    ).encode(k)
+                    request = BN.Request(
+                        endpoint,
+                        data=payload,
+                        headers={"User-Agent": "Mozilla/5.0"},
+                    )
+                    with BN.urlopen(request, timeout=5) as response:
+                        body = response.read().decode(k)
+                    data = localization.Ar.loads(body)
+                    if isinstance(data, dict):
+                        translations = data.get("translations")
+                        if isinstance(translations, list) and translations:
+                            value = translations[0].get("text", B)
+                            if isinstance(value, str) and value:
+                                return value, B
+                        if "message" in data:
+                            return I, G(data.get("message") or "API error")
+                except E as exc:
+                    return I, G(exc)
+                return I, "empty response"
+
+            def _open_translation_dialog():
+                label = name_var.get().strip()
+                if not label:
+                    O.showwarning(WARNING_LABEL, FIELD_NAME_REQUIRED_MSG)
+                    return
+                lang_files = _discover_localization_files()
+                current_lang = LANG_PREF
+                if (
+                    isinstance(current_lang, str)
+                    and current_lang
+                    and current_lang != "auto"
+                ):
+                    lang_files = {
+                        code: path
+                        for code, path in lang_files.items()
+                        if code != current_lang
+                    }
+                if not lang_files:
+                    O.showwarning(WARNING_LABEL, FIELD_TRANSLATE_NO_FILES_MSG)
+                    return
+                provider_label = translation_provider_var.get()
+                provider_value = translation_provider_map.get(
+                    provider_label, TRANSLATION_PROVIDER_DEFAULT
+                )
+                source_lang = _pick_source_lang(label)
+                api_key = translation_api_key_var.get().strip()
+                api_url = translation_api_url_var.get().strip()
+                if provider_value == TRANSLATION_PROVIDER_DEEPL and not api_key:
+                    O.showwarning(
+                        WARNING_LABEL, FIELD_TRANSLATE_MISSING_API_KEY_MSG
+                    )
+                key = f"slot_label_{label.lower()}"
+                dialog = F.Toplevel(editor)
+                dialog.title(FIELD_TRANSLATE_TITLE)
+                dialog.grab_set()
+                row = 0
+                vars_by_lang = {}
+                error_placeholders = {}
+                translate_attempted = Ay
+                translate_failed = Ay
+                translate_success = Ay
+                last_error = B
+                for code, path in sorted(lang_files.items()):
+                    display = f"{code} ({localization.settings.A.path.basename(path)})"
+                    existing = _read_translation_value(path, key)
+                    suggestion = existing
+                    if not suggestion:
+                        translated = I
+                        error_msg = B
+                        if provider_value == TRANSLATION_PROVIDER_DEEPL:
+                            if api_key:
+                                translate_attempted = J
+                                translated, error_msg = _translate_label_deepl(
+                                    label, code, api_key, api_url
+                                )
+                            else:
+                                error_msg = "missing api key"
+                        elif provider_value == TRANSLATION_PROVIDER_MYMEMORY:
+                            translate_attempted = J
+                            translated, error_msg = _translate_label_mymemory(
+                                label, code, source_lang
+                            )
+                        else:
+                            translate_attempted = J
+                            translated, error_msg = _translate_label_google(label, code)
+                        if translated is I:
+                            if translate_attempted:
+                                translate_failed = J
+                                if error_msg and not last_error:
+                                    last_error = error_msg
+                            if not error_msg:
+                                error_msg = "unknown error"
+                            suggestion = FIELD_TRANSLATE_ENTRY_ERROR_MSG.format(
+                                provider=provider_label, error=error_msg
+                            )
+                            error_placeholders[code] = suggestion
+                        else:
+                            translate_success = J
+                            suggestion = translated
+                    var = F.StringVar(value=suggestion)
+                    vars_by_lang[code] = var
+                    C.Label(dialog, text=display).grid(
+                        row=row, column=0, padx=5, pady=3, sticky=R
+                    )
+                    entry = C.Entry(dialog, textvariable=var, width=40)
+                    entry.grid(row=row, column=1, padx=5, pady=3, sticky="w")
+                    row += 1
+
+                def _save_translations():
+                    for code, path in lang_files.items():
+                        value = vars_by_lang[code].get().strip()
+                        if not value:
+                            continue
+                        placeholder = error_placeholders.get(code)
+                        if placeholder and value == placeholder:
+                            continue
+                        try:
+                            with x(path, "r", encoding=k) as handle:
+                                data = localization.Ar.load(handle)
+                            if not isinstance(data, dict):
+                                data = {}
+                            data[key] = value
+                            with x(path, T, encoding=k) as handle:
+                                localization.Ar.dump(
+                                    data, handle, indent=2, ensure_ascii=False
+                                )
+                                handle.write("\n")
+                        except E as exc:
+                            O.showerror(
+                                localization.AK,
+                                FIELD_TRANSLATE_SAVE_FAILED_MSG.format(error=exc),
+                            )
+                            return
+                    dialog.destroy()
+
+                button_row = C.Frame(dialog)
+                button_row.grid(row=row, column=0, columnspan=2, pady=5)
+                C.Button(
+                    button_row, text=SAVE_LABEL, command=_save_translations
+                ).grid(row=0, column=0, padx=5)
+                C.Button(
+                    button_row, text=CANCEL_LABEL, command=dialog.destroy
+                ).grid(row=0, column=1, padx=5)
+                dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+                if translate_attempted and translate_failed and not translate_success:
+                    if last_error:
+                        O.showwarning(
+                            WARNING_LABEL,
+                            FIELD_TRANSLATE_FETCH_FAILED_DETAIL_MSG.format(
+                                provider=provider_label, error=last_error
+                            ),
+                        )
+                    else:
+                        O.showwarning(WARNING_LABEL, FIELD_TRANSLATE_FETCH_FAILED_MSG)
+
+            translate_row = C.Frame(editor)
+            translate_row.grid(row=2, column=0, columnspan=2, pady=(0, 5))
+            C.Button(
+                translate_row,
+                text=FIELD_TRANSLATE_LABEL,
+                command=_open_translation_dialog,
+            ).grid(row=0, column=0, padx=5)
+            button_row = C.Frame(editor)
+            button_row.grid(row=3, column=0, columnspan=2, pady=5)
 
             C.Button(button_row, text=SAVE_LABEL, command=_save_field).grid(
                 row=0, column=0, padx=5
@@ -3775,6 +4142,8 @@ class App(BU.Tk):
         AI_.configure(command=LIGHT_GREEN)
         BC_ = C.Button(S, text=Ag_, command=NO_DATA_MSG)
         BC_.grid(row=5, column=1, sticky=T, padx=5, pady=5)
+        fields_admin_btn = C.Button(fields_tab, text=Ag_, command=NO_DATA_MSG)
+        fields_admin_btn.grid(row=0, column=1, sticky="e", padx=5, pady=5)
         A4 = C.Frame(a_)
         A4.pack(pady=5)
 
@@ -3909,6 +4278,13 @@ class App(BU.Tk):
             save_language_pref(new_lang_pref)
             LANG_PREF = new_lang_pref
             localization.LANG_PREF = LANG_PREF
+            D[TRANSLATION_SETTINGS_KEY] = {
+                TRANSLATION_PROVIDER_KEY: translation_provider_map.get(
+                    translation_provider_var.get(), TRANSLATION_PROVIDER_DEFAULT
+                ),
+                TRANSLATION_API_KEY: translation_api_key_var.get().strip(),
+                TRANSLATION_API_URL: translation_api_url_var.get().strip(),
+            }
             save_config(D)
             A.sql_column_map = updated_sql_map
             before_prefixes = [slot["prefix"] for slot in current_slot_defs]

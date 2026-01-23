@@ -23,6 +23,11 @@ from .common import (
     SQL_AVAILABLE_COLUMNS_KEY,
     AK,
     SLOT_DEFS_KEY,
+    TRANSLATION_API_KEY,
+    TRANSLATION_API_URL,
+    TRANSLATION_PROVIDER_DEFAULT,
+    TRANSLATION_PROVIDER_KEY,
+    TRANSLATION_SETTINGS_KEY,
     b,
     c,
     ft,
@@ -72,6 +77,7 @@ def load_config():
         if not A.path.exists(config_path):
             # Persist an initial configuration with encrypted secrets so the
             # application can be used immediately after installation.
+            translation_defaults = config_copy.get(TRANSLATION_SETTINGS_KEY, {})
             initial = {
                 H: {
                     v: config_copy[H][v],
@@ -99,6 +105,17 @@ def load_config():
                 SLOT_DEFS_KEY: config_copy.get(SLOT_DEFS_KEY),
                 SQL_COLUMN_MAP_KEY: config_copy.get(SQL_COLUMN_MAP_KEY),
                 SQL_AVAILABLE_COLUMNS_KEY: config_copy.get(SQL_AVAILABLE_COLUMNS_KEY),
+                TRANSLATION_SETTINGS_KEY: {
+                    TRANSLATION_PROVIDER_KEY: translation_defaults.get(
+                        TRANSLATION_PROVIDER_KEY, TRANSLATION_PROVIDER_DEFAULT
+                    ),
+                    TRANSLATION_API_KEY: encrypt(
+                        translation_defaults.get(TRANSLATION_API_KEY, B)
+                    ),
+                    TRANSLATION_API_URL: translation_defaults.get(
+                        TRANSLATION_API_URL, B
+                    ),
+                },
             }
             try:
                 # Ensure the configuration directory exists before writing.
@@ -145,6 +162,28 @@ def load_config():
             SQL_AVAILABLE_COLUMNS_KEY, config_copy.get(SQL_AVAILABLE_COLUMNS_KEY)
         )
         config_copy[SQL_AVAILABLE_COLUMNS_KEY] = _normalize_sql_columns(raw_columns)
+        raw_translation = raw_config.get(
+            TRANSLATION_SETTINGS_KEY, config_copy.get(TRANSLATION_SETTINGS_KEY, {})
+        )
+        translation_defaults = config_copy.get(TRANSLATION_SETTINGS_KEY, {})
+        config_copy[TRANSLATION_SETTINGS_KEY] = {
+            TRANSLATION_PROVIDER_KEY: raw_translation.get(
+                TRANSLATION_PROVIDER_KEY,
+                translation_defaults.get(
+                    TRANSLATION_PROVIDER_KEY, TRANSLATION_PROVIDER_DEFAULT
+                ),
+            ),
+            TRANSLATION_API_KEY: decrypt(
+                raw_translation.get(
+                    TRANSLATION_API_KEY,
+                    encrypt(translation_defaults.get(TRANSLATION_API_KEY, B)),
+                )
+            ),
+            TRANSLATION_API_URL: raw_translation.get(
+                TRANSLATION_API_URL,
+                translation_defaults.get(TRANSLATION_API_URL, B),
+            ),
+        }
         try:
             # Saving back the normalised structure keeps missing keys aligned
             # with future versions of the configuration schema.
@@ -167,6 +206,7 @@ def save_config(config):
     """Serialise the provided configuration dictionary to disk."""
 
     # Persist secrets in encrypted form to avoid storing clear text credentials.
+    translation_settings = config.get(TRANSLATION_SETTINGS_KEY, {})
     payload = {
         H: {
             v: config[H][v],
@@ -196,6 +236,15 @@ def save_config(config):
         SQL_AVAILABLE_COLUMNS_KEY: _normalize_sql_columns(
             config.get(SQL_AVAILABLE_COLUMNS_KEY, [])
         ),
+        TRANSLATION_SETTINGS_KEY: {
+            TRANSLATION_PROVIDER_KEY: translation_settings.get(
+                TRANSLATION_PROVIDER_KEY, TRANSLATION_PROVIDER_DEFAULT
+            ),
+            TRANSLATION_API_KEY: encrypt(
+                translation_settings.get(TRANSLATION_API_KEY, B)
+            ),
+            TRANSLATION_API_URL: translation_settings.get(TRANSLATION_API_URL, B),
+        },
     }
     try:
         with open(CONFIG_PATH, "w", encoding=k) as handle:

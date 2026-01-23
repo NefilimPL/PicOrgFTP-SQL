@@ -198,6 +198,14 @@ w = "sql_query"
 SLOT_DEFS_KEY = "slot_definitions"
 SQL_COLUMN_MAP_KEY = "sql_column_map"
 SQL_AVAILABLE_COLUMNS_KEY = "sql_available_columns"
+TRANSLATION_SETTINGS_KEY = "translation"
+TRANSLATION_PROVIDER_KEY = "provider"
+TRANSLATION_API_KEY = "api_key"
+TRANSLATION_API_URL = "api_url"
+TRANSLATION_PROVIDER_GOOGLE = "google"
+TRANSLATION_PROVIDER_MYMEMORY = "mymemory"
+TRANSLATION_PROVIDER_DEEPL = "deepl"
+TRANSLATION_PROVIDER_DEFAULT = TRANSLATION_PROVIDER_GOOGLE
 p = "db_type"
 q = "BRAK-EAN"
 r = "port"
@@ -242,6 +250,14 @@ DEFAULT_CONFIG.setdefault(
     {slot["prefix"]: slot["label"] for slot in DEFAULT_SLOT_DEFS},
 )
 DEFAULT_CONFIG.setdefault(SQL_AVAILABLE_COLUMNS_KEY, [])
+DEFAULT_CONFIG.setdefault(
+    TRANSLATION_SETTINGS_KEY,
+    {
+        TRANSLATION_PROVIDER_KEY: TRANSLATION_PROVIDER_DEFAULT,
+        TRANSLATION_API_KEY: "",
+        TRANSLATION_API_URL: "",
+    },
+)
 
 import sys
 import os as A
