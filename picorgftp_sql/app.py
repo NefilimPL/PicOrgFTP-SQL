@@ -1,12 +1,12 @@
 """Main Tkinter application class."""
 
+import copy
 import queue
 import re
 import traceback
 
 from .common import *  # noqa: F401,F403
 from .excel_utils import (
-    SLOT_LABELS,
     add_to_list,
     label_category,
     prepare_excel_lists,
@@ -18,7 +18,8 @@ from .system_utils import get_file_lock_user, is_admin
 from .database import connect_db
 from .config import save_config
 from . import config, localization
-from .settings import EXCEL_SHEETS, AN, l
+from .settings import BW, EXCEL_SHEETS, AN, l
+from .slot_utils import normalize_slot_definitions, normalize_sql_column_map, next_slot_prefix
 
 D = config.CONFIG
 LANG_PREF = localization.LANG_PREF
@@ -207,12 +208,15 @@ class App(BU.Tk):
         B.is_processing = h
         B.logged_counts = h
         B.suppress_next_lookup = h
+        B.slot_definitions = []
+        B.sql_column_map = {}
+        B._load_slot_config()
         B._build_form()
         B._build_slots()
         B._thumb_worker = threading.Thread(target=B._thumbnail_worker, daemon=J)
         B._thumb_worker.start()
         B._slot_index_by_prefix = {
-            prefix: idx for idx, (prefix, _) in A0(SLOT_LABELS)
+            slot["prefix"]: idx for idx, slot in A0(B.slot_definitions)
         }
         H_ = Q(E_)
         B.combo_name.existing_count = H_
@@ -474,8 +478,15 @@ class App(BU.Tk):
         T_ = B._ui_colors["slot_border"]
         S_ = "<Configure>"
         L_ = "units"
+        try:
+            B.unbind_all("<MouseWheel>")
+            B.unbind_all("<Button-4>")
+            B.unbind_all("<Button-5>")
+        except E:
+            pass
         M_ = C.Frame(B, style="App.TFrame")
         M_.pack(fill=z, expand=J, padx=12, pady=(6, 12))
+        B._slots_container = M_
         A_ = F.Canvas(M_, bg=B._ui_colors["bg"], highlightthickness=0, bd=0)
         def _on_scroll(*args):
             A_.yview(*args)
@@ -507,7 +518,9 @@ class App(BU.Tk):
         B.slots_frame = N_
         B.slots = []
         U = 5
-        for G_, (V_, W_) in A0(SLOT_LABELS):
+        for G_, slot_def in A0(B.slot_definitions):
+            V_ = slot_def["prefix"]
+            W_ = slot_def["label"]
             Z_, O_ = divmod(G_, U)
             H_ = F.Frame(
                 B.slots_frame,
@@ -521,12 +534,13 @@ class App(BU.Tk):
             slot_title = SLOT_TITLE_FORMAT.format(
                 index=V_, label=get_slot_label(W_)
             )
-            C.Label(
+            title_label = C.Label(
                 H_,
                 text=slot_title,
                 style="SlotTitle.TLabel",
                 anchor="w",
-            ).pack(fill="x", padx=6, pady=(6, 0))
+            )
+            title_label.pack(fill="x", padx=6, pady=(6, 0))
             E_ = F.Frame(
                 H_,
                 height=110,
@@ -629,6 +643,7 @@ class App(BU.Tk):
                 {
                     Aa: V_,
                     "label": W_,
+                    "title_label": title_label,
                     y: D_,
                     A7: K_,
                     "local_icon": local_icon,
@@ -656,6 +671,102 @@ class App(BU.Tk):
     def _clear_slots_scroll(B):
         B._scrolling = h
         B._scroll_idle_job = I
+
+    def _load_slot_config(B, log_issues=J):
+        slot_defs, slot_issues = normalize_slot_definitions(
+            config.CONFIG.get(SLOT_DEFS_KEY)
+        )
+        sql_map, map_issues = normalize_sql_column_map(
+            config.CONFIG.get(SQL_COLUMN_MAP_KEY), slot_defs
+        )
+        changed = h
+        if slot_defs != config.CONFIG.get(SLOT_DEFS_KEY):
+            config.CONFIG[SLOT_DEFS_KEY] = slot_defs
+            changed = J
+        if sql_map != config.CONFIG.get(SQL_COLUMN_MAP_KEY):
+            config.CONFIG[SQL_COLUMN_MAP_KEY] = sql_map
+            changed = J
+        if log_issues:
+            for issue in slot_issues + map_issues:
+                B._log_slot_issue(issue)
+        if changed:
+            save_config(config.CONFIG)
+        B.slot_definitions = slot_defs
+        B.sql_column_map = sql_map
+
+    def _log_slot_issue(A, issue):
+        issue_type = issue.get("type")
+        if issue_type == "slot_def_duplicate":
+            log_error_loc(
+                "slot_def_duplicate_prefix", prefix=issue.get("prefix", B)
+            )
+        elif issue_type == "slot_def_invalid":
+            log_error_loc(
+                "slot_def_invalid_entry", entry=issue.get("entry", B)
+            )
+        elif issue_type == "slot_def_fallback":
+            log_error_loc("slot_def_fallback")
+        elif issue_type == "sql_map_extra":
+            log_error_loc(
+                "sql_map_extra_entry", prefix=issue.get("prefix", B)
+            )
+
+    def _resolve_sql_column(B, prefix, label, log_missing=Ay):
+        mapping = B.sql_column_map if isinstance(B.sql_column_map, dict) else {}
+        if prefix in mapping:
+            column = G(mapping.get(prefix) or B).strip()
+            if not column:
+                if log_missing:
+                    log_error_loc(
+                        "sql_column_unassigned", prefix=prefix, label=label
+                    )
+                return I
+            return column
+        if label:
+            return label
+        if log_missing:
+            log_error_loc("sql_column_unassigned", prefix=prefix, label=label)
+        return I
+
+    def _apply_slot_definitions(B, slot_defs):
+        B.pending_additions = {}
+        B.pending_deletions = {}
+        B.pending_ftp_deletions = {}
+        B.ftp_remote_only = {}
+        B.ftp_presence = {}
+        B.ftp_downloaded_final = set()
+        B.sql_presence = I
+        B.original_files = {}
+        B.dragging_idx = I
+        B.loading_by_ean = h
+        B.suppress_scan = h
+        try:
+            if getattr(B, "_slots_container", I):
+                B._slots_container.destroy()
+        except E:
+            pass
+        B._slots_container = I
+        B.slot_definitions = slot_defs
+        B._build_slots()
+        B._slot_index_by_prefix = {
+            slot["prefix"]: idx for idx, slot in A0(B.slot_definitions)
+        }
+
+    def _update_slot_titles(B, slot_defs):
+        label_map = {slot["prefix"]: slot["label"] for slot in slot_defs}
+        for slot in B.slots:
+            prefix = slot.get(Aa)
+            new_label = label_map.get(prefix)
+            if not new_label:
+                continue
+            slot["label"] = new_label
+            title_label = slot.get("title_label")
+            if title_label:
+                title_label.configure(
+                    text=SLOT_TITLE_FORMAT.format(
+                        index=prefix, label=get_slot_label(new_label)
+                    )
+                )
 
     def _queue_thumbnail(B, idx, path):
         if not path:
@@ -1084,7 +1195,14 @@ class App(BU.Tk):
                     )
                     C.logged_counts = J
                 if C._should_check_sql_presence():
-                    columns = [(slot[Aa], slot["label"]) for slot in C.slots]
+                    columns = []
+                    for slot in C.slots:
+                        prefix = slot[Aa]
+                        label = slot["label"]
+                        column_name = C._resolve_sql_column(
+                            prefix, label, log_missing=J
+                        )
+                        columns.append((prefix, column_name, label))
                     context = C._extract_sql_presence_context(K_)
                     if context:
                         table, where_clause = context
@@ -1095,8 +1213,12 @@ class App(BU.Tk):
                             try:
                                 conn = connect_db()
                                 cur = conn.cursor()
-                                presence_map = {prefix: I for prefix, _ in columns}
-                                for prefix, column_name in columns:
+                                presence_map = {
+                                    prefix: I for prefix, _, _ in columns
+                                }
+                                for prefix, column_name, _ in columns:
+                                    if not column_name:
+                                        continue
                                     query = C._build_sql_presence_query(
                                         table, where_clause, column_name, db_type
                                     )
@@ -1988,8 +2110,8 @@ class App(BU.Tk):
                     for label, info in C.ftp_remote_only.items():
                         for idx, slot in A0(C.slots):
                             if slot[Aa] == label:
-                                Az_ = SLOT_LABELS[idx][0]
-                                Be_ = label_category(SLOT_LABELS[idx][1])
+                                Az_ = slot[Aa]
+                                Be_ = label_category(slot["label"])
                                 P_ = [
                                     K_ if K_ else q,
                                     Az_,
@@ -2058,8 +2180,9 @@ class App(BU.Tk):
                     C._update_slot_activity(
                         F_, active=J, status=C._slot_status["processing"]
                     )
-                    Az_ = SLOT_LABELS[F_][0]
-                    Be_ = label_category(SLOT_LABELS[F_][1])
+                    slot = C.slots[F_]
+                    Az_ = slot[Aa]
+                    Be_ = label_category(slot["label"])
                     P_ = [
                         K_ if K_ else q,
                         Az_,
@@ -2489,7 +2612,9 @@ class App(BU.Tk):
                         cur = conn.cursor()
                         for d_ in C.slots:
                             Az_ = d_[Aa]
-                            B3_ = d_["label"]
+                            B3_ = C._resolve_sql_column(Az_, d_["label"], log_missing=J)
+                            if not B3_:
+                                continue
                             if d_[f]:
                                 if Az_ in C.ftp_presence:
                                     remote_fname = C.ftp_presence.get(Az_)
@@ -2808,16 +2933,44 @@ class App(BU.Tk):
         a_ = F.Toplevel(A)
         a_.title(SETTINGS_LABEL)
         a_.grab_set()
+        slot_defs, _ = normalize_slot_definitions(D.get(SLOT_DEFS_KEY))
+        sql_column_map, _ = normalize_sql_column_map(
+            D.get(SQL_COLUMN_MAP_KEY), slot_defs
+        )
+        slot_defs = [dict(item) for item in slot_defs]
+        sql_column_map = dict(sql_column_map)
+        original_slot_defs = copy.deepcopy(slot_defs)
+        original_sql_map = dict(sql_column_map)
+        current_slot_defs = copy.deepcopy(A.slot_definitions)
+        original_sql_settings = {
+            "db_type": D.get(p, K),
+            "sql_query": D.get(w, B),
+            "enable_sql_update": D.get(u, J),
+            "mssql": {
+                c: D.get(P, {}).get(c, B),
+                b: D.get(P, {}).get(b, B),
+                N: D.get(P, {}).get(N, B),
+                M: D.get(P, {}).get(M, B),
+            },
+            "mysql": {
+                c: D.get(K, {}).get(c, B),
+                b: D.get(K, {}).get(b, B),
+                N: D.get(K, {}).get(N, B),
+                M: D.get(K, {}).get(M, B),
+            },
+        }
         Z = C.Notebook(a_)
         Z.pack(expand=J, fill=z, padx=5, pady=5)
         L = C.Frame(Z)
         Q = C.Frame(Z)
         S = C.Frame(Z)
+        fields_tab = C.Frame(Z)
         U = C.Frame(Z)
         V_ = C.Frame(Z)
         Z.add(L, text=IMAGES_TAB_LABEL)
         Z.add(Q, text=FTP_TAB_LABEL)
         Z.add(S, text=SQL_TAB_LABEL)
+        Z.add(fields_tab, text=FIELDS_TAB_LABEL)
         Z.add(U, text=LANGUAGE_TAB_LABEL)
         Z.add(V_, text=LANG.get("diagnostics_tab", "Diagnostyka"))
         C.Label(L, text=IMAGE_SETTINGS_LABEL).grid(
@@ -2903,6 +3056,77 @@ class App(BU.Tk):
         )
         lang_combo.grid(row=0, column=1, padx=5, pady=2, sticky=T)
         lang_combo.configure(postcommand=lambda c=lang_combo: A._style_combobox_list(c))
+        translation_settings = D.get(TRANSLATION_SETTINGS_KEY, {})
+        translation_provider_map = {
+            TRANSLATION_PROVIDER_GOOGLE_LABEL: TRANSLATION_PROVIDER_GOOGLE,
+            TRANSLATION_PROVIDER_MYMEMORY_LABEL: TRANSLATION_PROVIDER_MYMEMORY,
+            TRANSLATION_PROVIDER_DEEPL_LABEL: TRANSLATION_PROVIDER_DEEPL,
+        }
+        translation_provider_reverse = {
+            value: label for label, value in translation_provider_map.items()
+        }
+        translation_provider_value = translation_settings.get(
+            TRANSLATION_PROVIDER_KEY, TRANSLATION_PROVIDER_DEFAULT
+        )
+        translation_provider_var = F.StringVar(
+            value=translation_provider_reverse.get(
+                translation_provider_value, TRANSLATION_PROVIDER_GOOGLE_LABEL
+            )
+        )
+        translation_api_key_var = F.StringVar(
+            value=translation_settings.get(TRANSLATION_API_KEY, B)
+        )
+        translation_api_url_var = F.StringVar(
+            value=translation_settings.get(TRANSLATION_API_URL, B)
+        )
+        C.Label(U, text=TRANSLATION_SECTION_LABEL).grid(
+            row=1, column=0, columnspan=2, sticky="w", padx=5, pady=(10, 4)
+        )
+        C.Label(U, text=TRANSLATION_PROVIDER_LABEL).grid(
+            row=2, column=0, sticky=R, padx=5, pady=2
+        )
+        translation_provider_combo = C.Combobox(
+            U,
+            textvariable=translation_provider_var,
+            values=list(translation_provider_map),
+            state="readonly",
+            width=22,
+        )
+        translation_provider_combo.grid(
+            row=2, column=1, padx=5, pady=2, sticky=T
+        )
+        translation_provider_combo.configure(
+            postcommand=lambda c=translation_provider_combo: A._style_combobox_list(c)
+        )
+        C.Label(U, text=TRANSLATION_API_KEY_LABEL).grid(
+            row=3, column=0, sticky=R, padx=5, pady=2
+        )
+        translation_api_key_entry = C.Entry(
+            U, textvariable=translation_api_key_var, show=Y, width=30
+        )
+        translation_api_key_entry.grid(
+            row=3, column=1, padx=5, pady=2, sticky="w"
+        )
+        C.Label(U, text=TRANSLATION_API_URL_LABEL).grid(
+            row=4, column=0, sticky=R, padx=5, pady=2
+        )
+        translation_api_url_entry = C.Entry(
+            U, textvariable=translation_api_url_var, width=40
+        )
+        translation_api_url_entry.grid(
+            row=4, column=1, padx=5, pady=2, sticky="w"
+        )
+
+        def _sync_translation_state(*_args):
+            provider_value = translation_provider_map.get(
+                translation_provider_var.get(), TRANSLATION_PROVIDER_DEFAULT
+            )
+            entry_state = X if provider_value == TRANSLATION_PROVIDER_DEEPL else V
+            translation_api_key_entry.configure(state=entry_state)
+            translation_api_url_entry.configure(state=entry_state)
+
+        translation_provider_combo.bind(A2, _sync_translation_state)
+        _sync_translation_state()
         C.Label(V_, text=LANG.get("error_test_label", "Testy błędów")).grid(
             row=0, column=0, columnspan=2, padx=5, pady=5, sticky=T
         )
@@ -2949,18 +3173,18 @@ class App(BU.Tk):
             justify="left",
         ).grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky="w")
 
-        def Am(*B):
+        def _toggle_resize(*_args):
             l_.configure(state=X if A.opt_resize.get() else V)
 
-        def An(*B):
+        def _toggle_compress(*_args):
             n.configure(state=X if A.opt_compress.get() else V)
 
-        def Ao(*B):
+        def _toggle_maxsize(*_args):
             o.configure(state=X if A.opt_maxsize.get() else V)
 
-        Ap = A.opt_resize.trace_add(Y_, lambda *A_: Am())
-        Aq = A.opt_compress.trace_add(Y_, lambda *A_: An())
-        Ar = A.opt_maxsize.trace_add(Y_, lambda *B: Ao())
+        Ap = A.opt_resize.trace_add(Y_, lambda *_args: _toggle_resize())
+        Aq = A.opt_compress.trace_add(Y_, lambda *_args: _toggle_compress())
+        Ar = A.opt_maxsize.trace_add(Y_, lambda *_args: _toggle_maxsize())
         get_file_lock_user = A.opt_convert_tif.trace_add(
             Y_, lambda *B: q.configure(state=d_ if A.opt_convert_tif.get() else V)
         )
@@ -3002,7 +3226,7 @@ class App(BU.Tk):
         sql_query_entry = C.Entry(Q, textvariable=AJ_, width=50, state=d_)
         sql_query_entry.grid(row=6, column=1, padx=5, pady=5, sticky="w")
 
-        def Ax():
+        def _test_ftp_connection():
             A_ = B
             try:
                 C_ = AB.FTP()
@@ -3031,7 +3255,7 @@ class App(BU.Tk):
                     pass
             AJ_.set(A_)
 
-        Ay = C.Button(Q, text=AA_, command=Ax)
+        Ay = C.Button(Q, text=AA_, command=_test_ftp_connection)
         Ay.grid(row=6, column=1, padx=5, pady=5, sticky=R)
         C.Label(Q, text=FTP_UPDATE_LABEL).grid(
             row=7, column=0, sticky=R, padx=5, pady=2
@@ -3042,8 +3266,14 @@ class App(BU.Tk):
         C.Label(S, text=DB_TYPE_LABEL).grid(
             row=0, column=0, sticky=R, padx=5, pady=2
         )
-        A0 = F.StringVar(value=f_ if D.get(p, K).lower() == K else A9_)
-        A1 = C.Combobox(S, textvariable=A0, values=[A9_, f_], state=d_, width=20)
+        db_type_var = F.StringVar(value=f_ if D.get(p, K).lower() == K else A9_)
+        A1 = C.Combobox(
+            S,
+            textvariable=db_type_var,
+            values=[A9_, f_],
+            state=d_,
+            width=20,
+        )
         A1.grid(row=0, column=1, padx=5, pady=2, sticky=T)
         U = C.Frame(S)
         W = C.Frame(S)
@@ -3087,7 +3317,7 @@ class App(BU.Tk):
             W.grid_remove()
 
         def Az(event=I):
-            if A0.get() == f_:
+            if db_type_var.get() == f_:
                 U.grid_remove()
                 W.grid()
             else:
@@ -3140,31 +3370,757 @@ class App(BU.Tk):
         EDIT_LISTS_LABEL = C.Button(S, text=AA_, command=INCOMPLETE_DATA_MSG)
         EDIT_LISTS_LABEL.grid(row=4, column=1, padx=5, pady=5, sticky=R)
 
+        available_columns = list(D.get(SQL_AVAILABLE_COLUMNS_KEY, []))
+        sql_mapping_controls = []
+        sql_edit_state = V
+        fields_controls = []
+        fields_state = V
+        detect_status_var = F.StringVar(value=B)
+        columns_listbox = I
+        detect_btn = I
+        field_button_widgets = {}
+
+        def _dnd_first_item(payload):
+            if not payload:
+                return B
+            try:
+                items = a_.tk.splitlist(payload)
+            except E:
+                items = [payload]
+            if not items:
+                return B
+            return G(items[0]).strip()
+
+        def _field_button_text(slot):
+            title = SLOT_TITLE_FORMAT.format(
+                index=slot["prefix"], label=get_slot_label(slot["label"])
+            )
+            column = G(sql_column_map.get(slot["prefix"], B) or B).strip()
+            if column:
+                column_text = f"SQL: {column}"
+            else:
+                column_text = SQL_MAPPING_EMPTY_LABEL
+            return f"{title}\n{column_text}"
+
+        def _find_slot(prefix):
+            for slot in slot_defs:
+                if slot.get("prefix") == prefix:
+                    return slot
+            return I
+
+        def _apply_sql_mapping(prefix, value):
+            column = G(value or B).strip()
+            sql_column_map[prefix] = column
+            slot = _find_slot(prefix)
+            if slot:
+                btn = field_button_widgets.get(prefix)
+                if btn:
+                    btn.configure(text=_field_button_text(slot))
+
+        def _on_column_drop(event, prefix):
+            column = _dnd_first_item(event.data)
+            if column:
+                _apply_sql_mapping(prefix, column)
+
+        def _on_field_drop(event, prefix):
+            column = _dnd_first_item(event.data)
+            if column:
+                _apply_sql_mapping(prefix, column)
+
+        def _on_column_drag_init(event):
+            if columns_listbox is I:
+                return
+            selection = columns_listbox.curselection()
+            if not selection:
+                return
+            value = columns_listbox.get(selection[0])
+            return "copy", DND_TEXT, value
+
+        def _set_available_columns(columns, table_name=B):
+            nonlocal available_columns
+            available_columns = list(columns or [])
+            if columns_listbox:
+                columns_listbox.delete(0, F.END)
+                for col in available_columns:
+                    columns_listbox.insert(F.END, col)
+            if table_name:
+                detect_status_var.set(
+                    SQL_COLUMNS_DETECTED_MSG.format(
+                        count=len(available_columns), table=table_name
+                    )
+                )
+
+        def _parse_table_name(template):
+            if not template:
+                return B
+            pattern = (
+                r"update\s+(?:top\s+\(?\d+\)?\s+)?"
+                r"(?:(?:low_priority|high_priority|ignore)\s+)*"
+                r"([^\s]+)\s+set"
+            )
+            match = re.search(pattern, template, flags=re.I | re.S)
+            if not match:
+                return B
+            return match.group(1).strip().rstrip(";")
+
+        def _split_table_ref(table_ref):
+            if not table_ref:
+                return B, B
+            cleaned = (
+                table_ref.replace("[", B)
+                .replace("]", B)
+                .replace("`", B)
+                .replace('"', B)
+            )
+            parts = [p for p in cleaned.split(".") if p]
+            if not parts:
+                return B, B
+            table_name = parts[-1]
+            schema = parts[-2] if len(parts) > 1 else B
+            return table_name, schema
+
+        def _detect_sql_columns():
+            template = h_.get(A_, "end").strip()
+            table_ref = _parse_table_name(template)
+            if not table_ref:
+                detect_status_var.set(SQL_COLUMNS_PARSE_FAILED_MSG)
+                log_error_loc("sql_columns_parse_failed")
+                return
+            table_name, schema = _split_table_ref(table_ref)
+            if not table_name:
+                detect_status_var.set(SQL_COLUMNS_PARSE_FAILED_MSG)
+                log_error_loc("sql_columns_parse_failed")
+                return
+            db_is_mysql = db_type_var.get() == f_
+            conn = I
+            cur = I
+            try:
+                if db_is_mysql:
+                    conn = mysql.connector.connect(
+                        host=AT.get().strip(),
+                        user=AX.get().strip(),
+                        password=AZ.get(),
+                        database=AV.get().strip(),
+                        connection_timeout=5,
+                        use_pure=True,
+                    )
+                    if schema:
+                        query = (
+                            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                            "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s "
+                            "ORDER BY ORDINAL_POSITION"
+                        )
+                        params = (schema, table_name)
+                    else:
+                        query = (
+                            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s "
+                            "ORDER BY ORDINAL_POSITION"
+                        )
+                        params = (table_name,)
+                else:
+                    last_exc = I
+                    extra = "Encrypt=yes;TrustServerCertificate=yes;Connection Timeout=5"
+                    for driver in BW:
+                        try:
+                            conn_str = (
+                                f"DRIVER={{{driver}}};SERVER={AK.get().strip()};"
+                                f"DATABASE={AM.get().strip()};UID={AO.get().strip()};"
+                                f"PWD={AR.get()};{extra}"
+                            )
+                            conn = pyodbc.connect(conn_str)
+                            break
+                        except E as exc:
+                            last_exc = exc
+                    if conn is I:
+                        raise E(last_exc or "Connection failed")
+                    if schema:
+                        query = (
+                            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                            "WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? "
+                            "ORDER BY ORDINAL_POSITION"
+                        )
+                        params = (schema, table_name)
+                    else:
+                        query = (
+                            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                            "WHERE TABLE_NAME = ? ORDER BY ORDINAL_POSITION"
+                        )
+                        params = (table_name,)
+                cur = conn.cursor()
+                cur.execute(query, params)
+                columns = [G(row[0]) for row in cur.fetchall() if row and row[0]]
+            except E as exc:
+                detect_status_var.set(
+                    SQL_COLUMNS_DETECT_FAILED_MSG.format(error=exc)
+                )
+                log_error_loc("sql_columns_detect_failed", error=exc)
+                return
+            finally:
+                if cur is not I:
+                    try:
+                        cur.close()
+                    except E:
+                        pass
+                if conn is not I:
+                    try:
+                        conn.close()
+                    except E:
+                        pass
+            _set_available_columns(columns, table_ref)
+            D[SQL_AVAILABLE_COLUMNS_KEY] = list(available_columns)
+            save_config(D)
+            log_info_loc(
+                "sql_columns_detected",
+                table=table_ref,
+                count=len(columns),
+            )
+
+        detect_row = C.Frame(S)
+        detect_row.grid(row=6, column=0, columnspan=2, sticky="w", padx=5, pady=(10, 5))
+        detect_btn = C.Button(
+            detect_row, text=SQL_DETECT_COLUMNS_LABEL, command=_detect_sql_columns
+        )
+        detect_btn.grid(row=0, column=0, padx=(0, 6))
+        C.Label(detect_row, textvariable=detect_status_var).grid(
+            row=0, column=1, sticky="w"
+        )
+        sql_mapping_controls[:] = [detect_btn]
+
+        fields_tab.columnconfigure(0, weight=1)
+        fields_tab.columnconfigure(1, weight=2)
+        fields_tab.rowconfigure(1, weight=1)
+        C.Label(fields_tab, text=FIELDS_MANAGE_LABEL).grid(
+            row=0, column=0, sticky="w", padx=5, pady=5
+        )
+        columns_panel = C.Frame(fields_tab)
+        columns_panel.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        columns_panel.columnconfigure(0, weight=1)
+        columns_panel.rowconfigure(1, weight=1)
+        C.Label(columns_panel, text=SQL_COLUMNS_LABEL).grid(
+            row=0, column=0, sticky="w", padx=2, pady=(0, 4)
+        )
+        columns_listbox = F.Listbox(columns_panel, height=12, exportselection=0)
+        columns_listbox.grid(row=1, column=0, sticky="nsew")
+        columns_scroll = C.Scrollbar(
+            columns_panel, orient=An, command=columns_listbox.yview
+        )
+        columns_scroll.grid(row=1, column=1, sticky="ns")
+        columns_listbox.configure(yscrollcommand=columns_scroll.set)
+        if hasattr(columns_listbox, "drag_source_register") and hasattr(
+            columns_listbox, "dnd_bind"
+        ):
+            columns_listbox.drag_source_register(1, DND_TEXT)
+            columns_listbox.dnd_bind("<<DragInitCmd>>", _on_column_drag_init)
+        fields_controls.append(columns_listbox)
+        try:
+            columns_listbox.configure(state=fields_state)
+        except E:
+            pass
+        if available_columns:
+            _set_available_columns(available_columns)
+        fields_grid = C.Frame(fields_tab)
+        fields_grid.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
+
+        def _configure_tile_text(widget):
+            try:
+                if "wraplength" in widget.keys():
+                    widget.configure(wraplength=160)
+                if "justify" in widget.keys():
+                    widget.configure(justify="center")
+            except E:
+                pass
+
+        def _refresh_fields_grid():
+            for child in fields_grid.winfo_children():
+                child.destroy()
+            fields_controls[:] = []
+            field_button_widgets.clear()
+            if columns_listbox is not I:
+                fields_controls.append(columns_listbox)
+            columns = 5
+            total = len(slot_defs) + 1
+            for idx in Ax(total):
+                row_idx, col_idx = divmod(idx, columns)
+                if idx < len(slot_defs):
+                    slot = slot_defs[idx]
+                    title = _field_button_text(slot)
+                    btn = C.Button(
+                        fields_grid,
+                        text=title,
+                        command=lambda s=slot: _edit_field(s),
+                        width=20,
+                        state=fields_state,
+                    )
+                    _configure_tile_text(btn)
+                    field_button_widgets[slot["prefix"]] = btn
+                    if hasattr(btn, "drop_target_register") and hasattr(
+                        btn, "dnd_bind"
+                    ):
+                        btn.drop_target_register(DND_TEXT)
+                        btn.dnd_bind(
+                            "<<Drop>>",
+                            lambda e, p=slot["prefix"]: _on_field_drop(e, p),
+                        )
+                else:
+                    btn = C.Button(
+                        fields_grid,
+                        text=FIELD_ADD_LABEL,
+                        command=_add_field,
+                        width=20,
+                        state=fields_state,
+                    )
+                    _configure_tile_text(btn)
+                fields_controls.append(btn)
+                btn.grid(
+                    row=row_idx,
+                    column=col_idx,
+                    padx=6,
+                    pady=6,
+                    sticky="nsew",
+                )
+            for col in Ax(columns):
+                fields_grid.columnconfigure(col, weight=1)
+
+        def _add_field():
+            label = BI.askstring(FIELD_ADD_TITLE, FIELD_NAME_PROMPT)
+            if label is I:
+                return
+            label = label.strip()
+            if not label:
+                O.showwarning(WARNING_LABEL, FIELD_NAME_REQUIRED_MSG)
+                return
+            if any(
+                s["label"].strip().lower() == label.lower() for s in slot_defs
+            ):
+                O.showwarning(WARNING_LABEL, FIELD_NAME_DUPLICATE_MSG.format(label=label))
+                return
+            prefix = next_slot_prefix(slot_defs)
+            slot_defs.append({"prefix": prefix, "label": label})
+            sql_column_map.setdefault(prefix, B)
+            _refresh_fields_grid()
+
+        def _edit_field(slot):
+            editor = F.Toplevel(a_)
+            editor.title(FIELD_EDIT_TITLE)
+            editor.grab_set()
+            C.Label(editor, text=FIELD_NAME_LABEL).grid(
+                row=0, column=0, padx=5, pady=5, sticky=R
+            )
+            name_var = F.StringVar(value=slot["label"])
+            name_entry = C.Entry(editor, textvariable=name_var, width=30)
+            name_entry.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+            name_entry.focus_set()
+            C.Label(editor, text=SQL_MAPPING_COLUMN_LABEL).grid(
+                row=1, column=0, padx=5, pady=5, sticky=R
+            )
+            column_var = F.StringVar(value=sql_column_map.get(slot["prefix"], B))
+            column_entry = C.Combobox(
+                editor,
+                textvariable=column_var,
+                values=available_columns,
+                state=X,
+                width=30,
+            )
+            column_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+            if hasattr(column_entry, "drop_target_register") and hasattr(
+                column_entry, "dnd_bind"
+            ):
+                column_entry.drop_target_register(DND_TEXT)
+
+                def _drop_to_column(event):
+                    column = _dnd_first_item(event.data)
+                    if column:
+                        column_var.set(column)
+
+                column_entry.dnd_bind("<<Drop>>", _drop_to_column)
+            def _save_field():
+                new_label = name_var.get().strip()
+                if not new_label:
+                    O.showwarning(WARNING_LABEL, FIELD_NAME_REQUIRED_MSG)
+                    return
+                if any(
+                    s is not slot
+                    and s["label"].strip().lower() == new_label.lower()
+                    for s in slot_defs
+                ):
+                    O.showwarning(
+                        WARNING_LABEL,
+                        FIELD_NAME_DUPLICATE_MSG.format(label=new_label),
+                    )
+                    return
+                slot["label"] = new_label
+                sql_column_map[slot["prefix"]] = G(column_var.get() or B).strip()
+                _refresh_fields_grid()
+                editor.destroy()
+
+            def _delete_field():
+                if not O.askyesno(
+                    WARNING_LABEL,
+                    FIELD_DELETE_CONFIRM_MSG.format(label=slot["label"]),
+                ):
+                    return
+                slot_defs.remove(slot)
+                sql_column_map.pop(slot["prefix"], I)
+                _refresh_fields_grid()
+                editor.destroy()
+
+            def _lang_code_from_filename(filename):
+                name = localization.settings.A.path.splitext(G(filename))[0].lower()
+                if name == "eng":
+                    return "en"
+                return name
+
+            def _discover_localization_files():
+                lang_files = {}
+                for root in localization.settings.get_localization_search_paths():
+                    if not root:
+                        continue
+                    if not localization.settings.A.path.isdir(root):
+                        continue
+                    try:
+                        entries = localization.settings.A.listdir(root)
+                    except E:
+                        continue
+                    for entry in entries:
+                        entry_lower = G(entry).lower()
+                        if not entry_lower.endswith(".json"):
+                            continue
+                        code = _lang_code_from_filename(entry_lower)
+                        if not code:
+                            continue
+                        if code not in lang_files:
+                            lang_files[code] = localization.settings.A.path.join(
+                                root, entry
+                            )
+                return lang_files
+
+            def _read_translation_value(path, key):
+                try:
+                    with x(path, "r", encoding=k) as handle:
+                        data = localization.Ar.load(handle)
+                    if isinstance(data, dict):
+                        value = data.get(key, B)
+                        if isinstance(value, str):
+                            return value
+                except E:
+                    pass
+                return B
+
+            def _translate_label_google(text, lang_code):
+                if not text or not lang_code:
+                    return I, B
+                code = G(lang_code).lower()
+                target = {"ua": "uk", "en": "en", "pl": "pl"}.get(code, code)
+                try:
+                    query = BP.quote_plus(text)
+                    url = (
+                        "https://translate.googleapis.com/translate_a/single"
+                        f"?client=gtx&sl=auto&tl={target}&dt=t&q={query}"
+                    )
+                    request = BN.Request(
+                        url, headers={"User-Agent": "Mozilla/5.0"}
+                    )
+                    with BN.urlopen(request, timeout=5) as response:
+                        payload = response.read().decode(k)
+                    data = localization.Ar.loads(payload)
+                    if isinstance(data, list) and data:
+                        parts = []
+                        for item in data[0] or []:
+                            if isinstance(item, list) and item:
+                                part = item[0]
+                                if part:
+                                    parts.append(part)
+                        if parts:
+                            return B.join(parts), B
+                    return I, "empty response"
+                except E as exc:
+                    return I, G(exc)
+
+            def _pick_source_lang(text):
+                if not text:
+                    return "en"
+                lower = G(text).lower()
+                if re.search(r"[а-яіїєґ]", lower):
+                    return "uk"
+                if re.search(r"[ąćęłńóśźż]", lower):
+                    return "pl"
+                return "en"
+
+            def _translate_label_mymemory(text, lang_code, source_lang):
+                if not text or not lang_code or not source_lang:
+                    return I, B
+                code = G(lang_code).lower()
+                source = G(source_lang).lower()
+                source = {"ua": "uk"}.get(source, source)
+                if source == "auto":
+                    return I, "invalid source language"
+                target = {"ua": "uk", "en": "en", "pl": "pl"}.get(code, code)
+                try:
+                    query = BP.quote_plus(text)
+                    url = (
+                        "https://api.mymemory.translated.net/get"
+                        f"?q={query}&langpair={source}|{target}"
+                    )
+                    request = BN.Request(
+                        url, headers={"User-Agent": "Mozilla/5.0"}
+                    )
+                    with BN.urlopen(request, timeout=5) as response:
+                        payload = response.read().decode(k)
+                    data = localization.Ar.loads(payload)
+                    if isinstance(data, dict):
+                        status = data.get("responseStatus")
+                        if status != 200:
+                            details = data.get("responseDetails") or "HTTP error"
+                            return I, G(details)
+                        response_data = data.get("responseData", {})
+                        if isinstance(response_data, dict):
+                            translated = response_data.get("translatedText", B)
+                            if isinstance(translated, str) and translated:
+                                return translated, B
+                    return I, "empty response"
+                except E as exc:
+                    return I, G(exc)
+
+            def _translate_label_deepl(text, lang_code, api_key, api_url):
+                if not text or not lang_code or not api_key:
+                    return I, B
+                code = G(lang_code).lower()
+                target = {"ua": "UK", "en": "EN", "pl": "PL"}.get(
+                    code, code.upper()
+                )
+                endpoint = G(api_url or B).strip()
+                if not endpoint:
+                    if api_key.strip().endswith(":fx"):
+                        endpoint = "https://api-free.deepl.com/v2/translate"
+                    else:
+                        endpoint = "https://api.deepl.com/v2/translate"
+                try:
+                    payload = BP.urlencode(
+                        {"auth_key": api_key, "text": text, "target_lang": target}
+                    ).encode(k)
+                    request = BN.Request(
+                        endpoint,
+                        data=payload,
+                        headers={"User-Agent": "Mozilla/5.0"},
+                    )
+                    with BN.urlopen(request, timeout=5) as response:
+                        body = response.read().decode(k)
+                    data = localization.Ar.loads(body)
+                    if isinstance(data, dict):
+                        translations = data.get("translations")
+                        if isinstance(translations, list) and translations:
+                            value = translations[0].get("text", B)
+                            if isinstance(value, str) and value:
+                                return value, B
+                        if "message" in data:
+                            return I, G(data.get("message") or "API error")
+                except E as exc:
+                    return I, G(exc)
+                return I, "empty response"
+
+            def _open_translation_dialog():
+                label = name_var.get().strip()
+                if not label:
+                    O.showwarning(WARNING_LABEL, FIELD_NAME_REQUIRED_MSG)
+                    return
+                lang_files = _discover_localization_files()
+                current_lang = LANG_PREF
+                if (
+                    isinstance(current_lang, str)
+                    and current_lang
+                    and current_lang != "auto"
+                ):
+                    lang_files = {
+                        code: path
+                        for code, path in lang_files.items()
+                        if code != current_lang
+                    }
+                if not lang_files:
+                    O.showwarning(WARNING_LABEL, FIELD_TRANSLATE_NO_FILES_MSG)
+                    return
+                provider_label = translation_provider_var.get()
+                provider_value = translation_provider_map.get(
+                    provider_label, TRANSLATION_PROVIDER_DEFAULT
+                )
+                source_lang = _pick_source_lang(label)
+                api_key = translation_api_key_var.get().strip()
+                api_url = translation_api_url_var.get().strip()
+                if provider_value == TRANSLATION_PROVIDER_DEEPL and not api_key:
+                    O.showwarning(
+                        WARNING_LABEL, FIELD_TRANSLATE_MISSING_API_KEY_MSG
+                    )
+                key = f"slot_label_{label.lower()}"
+                dialog = F.Toplevel(editor)
+                dialog.title(FIELD_TRANSLATE_TITLE)
+                dialog.grab_set()
+                row = 0
+                vars_by_lang = {}
+                error_placeholders = {}
+                translate_attempted = Ay
+                translate_failed = Ay
+                translate_success = Ay
+                last_error = B
+                for code, path in sorted(lang_files.items()):
+                    display = f"{code} ({localization.settings.A.path.basename(path)})"
+                    existing = _read_translation_value(path, key)
+                    suggestion = existing
+                    if not suggestion:
+                        translated = I
+                        error_msg = B
+                        if provider_value == TRANSLATION_PROVIDER_DEEPL:
+                            if api_key:
+                                translate_attempted = J
+                                translated, error_msg = _translate_label_deepl(
+                                    label, code, api_key, api_url
+                                )
+                            else:
+                                error_msg = "missing api key"
+                        elif provider_value == TRANSLATION_PROVIDER_MYMEMORY:
+                            translate_attempted = J
+                            translated, error_msg = _translate_label_mymemory(
+                                label, code, source_lang
+                            )
+                        else:
+                            translate_attempted = J
+                            translated, error_msg = _translate_label_google(label, code)
+                        if translated is I:
+                            if translate_attempted:
+                                translate_failed = J
+                                if error_msg and not last_error:
+                                    last_error = error_msg
+                            if not error_msg:
+                                error_msg = "unknown error"
+                            suggestion = FIELD_TRANSLATE_ENTRY_ERROR_MSG.format(
+                                provider=provider_label, error=error_msg
+                            )
+                            error_placeholders[code] = suggestion
+                        else:
+                            translate_success = J
+                            suggestion = translated
+                    var = F.StringVar(value=suggestion)
+                    vars_by_lang[code] = var
+                    C.Label(dialog, text=display).grid(
+                        row=row, column=0, padx=5, pady=3, sticky=R
+                    )
+                    entry = C.Entry(dialog, textvariable=var, width=40)
+                    entry.grid(row=row, column=1, padx=5, pady=3, sticky="w")
+                    row += 1
+
+                def _save_translations():
+                    for code, path in lang_files.items():
+                        value = vars_by_lang[code].get().strip()
+                        if not value:
+                            continue
+                        placeholder = error_placeholders.get(code)
+                        if placeholder and value == placeholder:
+                            continue
+                        try:
+                            with x(path, "r", encoding=k) as handle:
+                                data = localization.Ar.load(handle)
+                            if not isinstance(data, dict):
+                                data = {}
+                            data[key] = value
+                            with x(path, T, encoding=k) as handle:
+                                localization.Ar.dump(
+                                    data, handle, indent=2, ensure_ascii=False
+                                )
+                                handle.write("\n")
+                        except E as exc:
+                            O.showerror(
+                                localization.AK,
+                                FIELD_TRANSLATE_SAVE_FAILED_MSG.format(error=exc),
+                            )
+                            return
+                    dialog.destroy()
+
+                button_row = C.Frame(dialog)
+                button_row.grid(row=row, column=0, columnspan=2, pady=5)
+                C.Button(
+                    button_row, text=SAVE_LABEL, command=_save_translations
+                ).grid(row=0, column=0, padx=5)
+                C.Button(
+                    button_row, text=CANCEL_LABEL, command=dialog.destroy
+                ).grid(row=0, column=1, padx=5)
+                dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+                if translate_attempted and translate_failed and not translate_success:
+                    if last_error:
+                        O.showwarning(
+                            WARNING_LABEL,
+                            FIELD_TRANSLATE_FETCH_FAILED_DETAIL_MSG.format(
+                                provider=provider_label, error=last_error
+                            ),
+                        )
+                    else:
+                        O.showwarning(WARNING_LABEL, FIELD_TRANSLATE_FETCH_FAILED_MSG)
+
+            translate_row = C.Frame(editor)
+            translate_row.grid(row=2, column=0, columnspan=2, pady=(0, 5))
+            C.Button(
+                translate_row,
+                text=FIELD_TRANSLATE_LABEL,
+                command=_open_translation_dialog,
+            ).grid(row=0, column=0, padx=5)
+            button_row = C.Frame(editor)
+            button_row.grid(row=3, column=0, columnspan=2, pady=5)
+
+            C.Button(button_row, text=SAVE_LABEL, command=_save_field).grid(
+                row=0, column=0, padx=5
+            )
+            C.Button(button_row, text=FIELD_DELETE_LABEL, command=_delete_field).grid(
+                row=0, column=1, padx=5
+            )
+            C.Button(button_row, text=CANCEL_LABEL, command=editor.destroy).grid(
+                row=0, column=2, padx=5
+            )
+            editor.protocol("WM_DELETE_WINDOW", editor.destroy)
+
+        _refresh_fields_grid()
+
         def Ad(state):
-            A_ = state
-            AD_.configure(state=A_)
-            AE_.configure(state=A_)
-            AF_.configure(state=A_)
-            AG_.configure(state=A_)
-            AH_.configure(state=A_)
+            entry_state = X if state == X else V
+            AD_.configure(state=entry_state)
+            AE_.configure(state=entry_state)
+            AF_.configure(state=entry_state)
+            AG_.configure(state=entry_state)
+            AH_.configure(state=entry_state)
+            ftp_update_cb.configure(state=entry_state)
 
         def Ae(state_text, editor=Al):
+            nonlocal sql_edit_state, fields_state
             B_ = state_text
-            A__ = B_
             C_ = X if B_ == X else V
+            entry_state = C_
             if D.get(p, K).lower() == K:
-                AU.configure(state=A__)
-                AW.configure(state=A__)
-                AY.configure(state=A__)
-                Aa.configure(state=A__)
+                AU.configure(state=entry_state)
+                AW.configure(state=entry_state)
+                AY.configure(state=entry_state)
+                Aa.configure(state=entry_state)
             else:
-                ensure_package.configure(state=A__)
-                AN.configure(state=A__)
-                AQ.configure(state=A__)
-                AS.configure(state=A__)
-            A1.configure(state=i_ if editor else A__)
+                ensure_package.configure(state=entry_state)
+                AN.configure(state=entry_state)
+                AQ.configure(state=entry_state)
+                AS.configure(state=entry_state)
+            if B_ == X:
+                combo_state = i_ if editor else X
+            else:
+                combo_state = V
+            A1.configure(state=combo_state)
             h_.configure(state=C_)
-            Ac.configure(state=X)
+            Ac.configure(state=C_)
+            mapping_state = X if B_ == X else V
+            sql_edit_state = mapping_state
+            for widget in sql_mapping_controls:
+                try:
+                    widget.configure(state=mapping_state)
+                except E:
+                    pass
+            fields_state = mapping_state
+            for widget in fields_controls:
+                try:
+                    widget.configure(state=mapping_state)
+                except E:
+                    pass
 
         Ad(i_)
         Ae(i_)
@@ -3186,6 +4142,8 @@ class App(BU.Tk):
         AI_.configure(command=LIGHT_GREEN)
         BC_ = C.Button(S, text=Ag_, command=NO_DATA_MSG)
         BC_.grid(row=5, column=1, sticky=T, padx=5, pady=5)
+        fields_admin_btn = C.Button(fields_tab, text=Ag_, command=NO_DATA_MSG)
+        fields_admin_btn.grid(row=0, column=1, sticky="e", padx=5, pady=5)
         A4 = C.Frame(a_)
         A4.pack(pady=5)
 
@@ -3208,14 +4166,144 @@ class App(BU.Tk):
             D[K][b] = AV.get().strip()
             D[K][N] = AX.get().strip()
             D[K][M] = AZ.get()
-            D[p] = K if A0.get() == f_ else "mssql"
+            D[p] = K if db_type_var.get() == f_ else "mssql"
             D[w] = h_.get(A_, "end").strip()
             D[u] = bool(Ab.get())
+            D[SQL_AVAILABLE_COLUMNS_KEY] = list(available_columns)
+            updated_slot_defs, slot_issues = normalize_slot_definitions(slot_defs)
+            updated_sql_map, map_issues = normalize_sql_column_map(
+                sql_column_map, updated_slot_defs
+            )
+            slot_defs[:] = updated_slot_defs
+            sql_column_map.clear()
+            sql_column_map.update(updated_sql_map)
+            D[SLOT_DEFS_KEY] = updated_slot_defs
+            D[SQL_COLUMN_MAP_KEY] = updated_sql_map
+            for issue in slot_issues + map_issues:
+                A._log_slot_issue(issue)
+            old_slots = {s["prefix"]: s["label"] for s in original_slot_defs}
+            new_slots = {s["prefix"]: s["label"] for s in updated_slot_defs}
+            for prefix, label in old_slots.items():
+                if prefix not in new_slots:
+                    log_info_loc(
+                        "slot_field_removed", prefix=prefix, label=label
+                    )
+            for prefix, label in new_slots.items():
+                if prefix not in old_slots:
+                    log_info_loc(
+                        "slot_field_added", prefix=prefix, label=label
+                    )
+                else:
+                    old_label = old_slots[prefix]
+                    if old_label != label:
+                        log_info_loc(
+                            "slot_field_renamed",
+                            prefix=prefix,
+                            old=old_label,
+                            new=label,
+                        )
+            for prefix, new_val in updated_sql_map.items():
+                old_val = original_sql_map.get(prefix, B)
+                if G(old_val or B).strip() != G(new_val or B).strip():
+                    log_info_loc(
+                        "sql_column_map_changed",
+                        prefix=prefix,
+                        old=(old_val or "-"),
+                        new=(new_val or "-"),
+                    )
+            if original_sql_settings["db_type"] != D[p]:
+                log_info_loc("settings_sql_changed", field=DB_TYPE_LABEL)
+            if original_sql_settings["sql_query"] != D[w]:
+                log_info_loc("settings_sql_changed", field=SQL_QUERY_LABEL)
+            if original_sql_settings["enable_sql_update"] != D[u]:
+                log_info_loc("settings_sql_changed", field=SQL_UPDATE_LABEL)
+            if original_sql_settings["mssql"].get(c) != D[P][c]:
+                log_info_loc(
+                    "settings_sql_changed",
+                    field=f"{MSSQL_SERVER_LABEL} {SERVER_LABEL}",
+                )
+            if original_sql_settings["mssql"].get(b) != D[P][b]:
+                log_info_loc(
+                    "settings_sql_changed",
+                    field=f"{MSSQL_SERVER_LABEL} {DATABASE_LABEL}",
+                )
+            if original_sql_settings["mssql"].get(N) != D[P][N]:
+                log_info_loc(
+                    "settings_sql_changed",
+                    field=f"{MSSQL_SERVER_LABEL} {USER_LABEL}",
+                )
+            if original_sql_settings["mssql"].get(M) != D[P][M]:
+                log_info_loc(
+                    "settings_sql_changed",
+                    field=f"{MSSQL_SERVER_LABEL} {PASSWORD_LABEL}",
+                )
+            if original_sql_settings["mysql"].get(c) != D[K][c]:
+                log_info_loc(
+                    "settings_sql_changed",
+                    field=f"{MYSQL_LABEL} {SERVER_LABEL}",
+                )
+            if original_sql_settings["mysql"].get(b) != D[K][b]:
+                log_info_loc(
+                    "settings_sql_changed",
+                    field=f"{MYSQL_LABEL} {DATABASE_LABEL}",
+                )
+            if original_sql_settings["mysql"].get(N) != D[K][N]:
+                log_info_loc(
+                    "settings_sql_changed",
+                    field=f"{MYSQL_LABEL} {USER_LABEL}",
+                )
+            if original_sql_settings["mysql"].get(M) != D[K][M]:
+                log_info_loc(
+                    "settings_sql_changed",
+                    field=f"{MYSQL_LABEL} {PASSWORD_LABEL}",
+                )
+            if D.get(u, J):
+                available_lower = {col.lower() for col in available_columns}
+                for slot in updated_slot_defs:
+                    prefix = slot["prefix"]
+                    column = G(updated_sql_map.get(prefix, B) or B).strip()
+                    if not column:
+                        log_error_loc(
+                            "sql_column_unassigned",
+                            prefix=prefix,
+                            label=slot["label"],
+                        )
+                    elif available_columns and column.lower() not in available_lower:
+                        log_error_loc(
+                            "sql_column_not_found",
+                            prefix=prefix,
+                            column=column,
+                        )
             new_lang_pref = lang_var.get().strip()
             save_language_pref(new_lang_pref)
             LANG_PREF = new_lang_pref
             localization.LANG_PREF = LANG_PREF
+            D[TRANSLATION_SETTINGS_KEY] = {
+                TRANSLATION_PROVIDER_KEY: translation_provider_map.get(
+                    translation_provider_var.get(), TRANSLATION_PROVIDER_DEFAULT
+                ),
+                TRANSLATION_API_KEY: translation_api_key_var.get().strip(),
+                TRANSLATION_API_URL: translation_api_url_var.get().strip(),
+            }
             save_config(D)
+            A.sql_column_map = updated_sql_map
+            before_prefixes = [slot["prefix"] for slot in current_slot_defs]
+            after_prefixes = [slot["prefix"] for slot in updated_slot_defs]
+            if before_prefixes == after_prefixes:
+                A.slot_definitions = updated_slot_defs
+                A._slot_index_by_prefix = {
+                    slot["prefix"]: idx
+                    for idx, slot in A0(updated_slot_defs)
+                }
+                A._update_slot_titles(updated_slot_defs)
+            else:
+                if not A.is_processing and O.askyesno(
+                    WARNING_LABEL, SLOT_DEFS_REBUILD_PROMPT
+                ):
+                    A.sql_column_map = updated_sql_map
+                    A._apply_slot_definitions(updated_slot_defs)
+                else:
+                    log_info_loc("slot_defs_apply_restart")
             log_info_loc("settings_saved")
             Af()
 

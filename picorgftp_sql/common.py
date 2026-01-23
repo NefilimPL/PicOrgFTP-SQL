@@ -123,6 +123,34 @@ LIGHT_GREEN = "lightgreen"
 OPEN_FURNITURE = "open_furniture"
 NON_PIC = "non_pic"
 ELEMENT_PIC = "element_pic"
+DEFAULT_SLOT_DEFS = [
+    {"prefix": "01", "label": "Assembly_instruction"},
+    {"prefix": "02", "label": "Assembly_instruction1"},
+    {"prefix": "03", "label": "DETAIL_pic"},
+    {"prefix": "04", "label": "DETAIL_pic1"},
+    {"prefix": "05", "label": "element_pic1"},
+    {"prefix": "06", "label": ELEMENT_PIC},
+    {"prefix": "07", "label": "LED_Assembly_instruction"},
+    {"prefix": "08", "label": "MOOD_pic"},
+    {"prefix": "09", "label": "MOOD_pic1"},
+    {"prefix": "10", "label": "MOOD_pic2"},
+    {"prefix": "11", "label": "MOOD_pic3"},
+    {"prefix": "12", "label": "MOOD_pic4"},
+    {"prefix": "13", "label": "MOOD_pic5"},
+    {"prefix": "14", "label": NON_PIC},
+    {"prefix": "15", "label": OPEN_FURNITURE},
+    {"prefix": "16", "label": "open_furniture1"},
+    {"prefix": "17", "label": "open_furniture2"},
+    {"prefix": "18", "label": "NO_EAN"},
+    {"prefix": "19", "label": "Technical_drawing"},
+    {"prefix": "20", "label": "Technical_drawing1"},
+    {"prefix": "21", "label": "Technical_drawing2"},
+    {"prefix": "22", "label": "WB_pic"},
+    {"prefix": "23", "label": "WB_pic1"},
+    {"prefix": "24", "label": "WB_pic2"},
+    {"prefix": "25", "label": "WB_pic3"},
+    {"prefix": "26", "label": "WB_pic4"},
+]
 
 # Klasy wyjątków
 timeout_error = TimeoutError
@@ -167,6 +195,17 @@ ft = "enable_ftp_update"
 u = "enable_sql_update"
 v = "host"
 w = "sql_query"
+SLOT_DEFS_KEY = "slot_definitions"
+SQL_COLUMN_MAP_KEY = "sql_column_map"
+SQL_AVAILABLE_COLUMNS_KEY = "sql_available_columns"
+TRANSLATION_SETTINGS_KEY = "translation"
+TRANSLATION_PROVIDER_KEY = "provider"
+TRANSLATION_API_KEY = "api_key"
+TRANSLATION_API_URL = "api_url"
+TRANSLATION_PROVIDER_GOOGLE = "google"
+TRANSLATION_PROVIDER_MYMEMORY = "mymemory"
+TRANSLATION_PROVIDER_DEEPL = "deepl"
+TRANSLATION_PROVIDER_DEFAULT = TRANSLATION_PROVIDER_GOOGLE
 p = "db_type"
 q = "BRAK-EAN"
 r = "port"
@@ -205,6 +244,21 @@ E = Exception
 G = str
 B = ""
 
+DEFAULT_CONFIG.setdefault(SLOT_DEFS_KEY, DEFAULT_SLOT_DEFS)
+DEFAULT_CONFIG.setdefault(
+    SQL_COLUMN_MAP_KEY,
+    {slot["prefix"]: slot["label"] for slot in DEFAULT_SLOT_DEFS},
+)
+DEFAULT_CONFIG.setdefault(SQL_AVAILABLE_COLUMNS_KEY, [])
+DEFAULT_CONFIG.setdefault(
+    TRANSLATION_SETTINGS_KEY,
+    {
+        TRANSLATION_PROVIDER_KEY: TRANSLATION_PROVIDER_DEFAULT,
+        TRANSLATION_API_KEY: "",
+        TRANSLATION_API_URL: "",
+    },
+)
+
 import sys
 import os as A
 import subprocess as BH
@@ -242,7 +296,7 @@ ensure_package("mysql-connector-python", "mysql.connector")
 
 import tkinter as F
 from tkinter import ttk as C, filedialog as BT, messagebox as O, simpledialog as BI
-from tkinterdnd2 import TkinterDnD as BU, DND_ALL, DND_FILES as BJ
+from tkinterdnd2 import TkinterDnD as BU, DND_ALL, DND_FILES as BJ, DND_TEXT
 from PIL import Image as AA, ImageTk
 from openpyxl import Workbook as BV, load_workbook as Ah
 import ftplib as AB
