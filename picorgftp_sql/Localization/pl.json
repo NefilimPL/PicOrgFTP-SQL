@@ -21,6 +21,8 @@
   "list_add_prompt": "Nowa wartość do listy {list}:",
   "list_remove_title": "Usuń",
   "list_remove_prompt": "Czy usunąć '{value}' z listy {list}?",
+  "list_value_exists": "Wartość '{value}' już istnieje na liście {list}.",
+  "list_value_empty": "Wartość nie może być pusta.",
   "save_error": "Błąd zapisu",
   "not_in_list": "Brak na liście",
   "error": "Błąd",

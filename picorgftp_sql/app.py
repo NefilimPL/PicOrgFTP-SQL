@@ -204,6 +204,11 @@ class App(BU.Tk):
         B.loading_by_ean = h
         B.suppress_scan = h
         B.model_select_win_open = h
+        B._list_editor_window = I
+        B._list_editor_notebook = I
+        B._list_editor_tabs = {}
+        B._active_list_prompts = set()
+        B._last_focus_widget = I
         B.dragging_idx = I
         B.original_files = {}
         B.is_processing = h
@@ -1197,6 +1202,7 @@ class App(BU.Tk):
         A.combo_name.bind(A2, lambda e: A._on_name_commit())
         A.combo_name.bind(F_, lambda e: A._on_name_commit())
         A.combo_name.bind(D_, A._on_key_release)
+        A.combo_name.bind("<FocusIn>", A._remember_focus)
         H_ = C.Label(B_, text=TYPE_LABEL, style="Form.TLabel")
         H_.grid(row=1, column=0, sticky=R)
         A._add_tooltip(
@@ -1214,6 +1220,7 @@ class App(BU.Tk):
         A.combo_type.bind(A2, lambda e: A._on_type_commit())
         A.combo_type.bind(F_, lambda e: A._on_type_commit())
         A.combo_type.bind(D_, A._on_key_release)
+        A.combo_type.bind("<FocusIn>", A._remember_focus)
         I_ = C.Label(B_, text=MODEL_LABEL, style="Form.TLabel")
         I_.grid(row=2, column=0, sticky=R)
         A._add_tooltip(
@@ -1230,6 +1237,7 @@ class App(BU.Tk):
         A.combo_model.bind(E_, lambda e: A._on_model_commit())
         A.combo_model.bind(A2, lambda e: A._on_model_commit())
         A.combo_model.bind(D_, A._on_key_release)
+        A.combo_model.bind("<FocusIn>", A._remember_focus)
         J_ = C.Label(B_, text=COLOR1_LABEL, style="Form.TLabel")
         J_.grid(row=3, column=0, sticky=R)
         A._add_tooltip(
@@ -1243,6 +1251,7 @@ class App(BU.Tk):
         A.combo_color1.bind(A2, lambda e: A._on_color_commit())
         A.combo_color1.bind(F_, lambda e: A._on_color_commit())
         A.combo_color1.bind(D_, A._on_key_release)
+        A.combo_color1.bind("<FocusIn>", A._remember_focus)
         K_ = C.Label(B_, text=COLOR2_LABEL, style="Form.TLabel")
         K_.grid(row=4, column=0, sticky=R)
         A._add_tooltip(
@@ -1256,6 +1265,7 @@ class App(BU.Tk):
         A.combo_color2.bind(A2, lambda e: A._on_color_commit())
         A.combo_color2.bind(F_, lambda e: A._on_color_commit())
         A.combo_color2.bind(D_, A._on_key_release)
+        A.combo_color2.bind("<FocusIn>", A._remember_focus)
         L_ = C.Label(B_, text=COLOR3_LABEL, style="Form.TLabel")
         L_.grid(row=5, column=0, sticky=R)
         A._add_tooltip(
@@ -1269,6 +1279,7 @@ class App(BU.Tk):
         A.combo_color3.bind(A2, lambda e: A._on_color_commit())
         A.combo_color3.bind(F_, lambda e: A._on_color_commit())
         A.combo_color3.bind(D_, A._on_key_release)
+        A.combo_color3.bind("<FocusIn>", A._remember_focus)
         M_ = C.Label(B_, text=EXTRA_LABEL, style="Form.TLabel")
         M_.grid(row=6, column=0, sticky=R)
         A._add_tooltip(
@@ -1286,6 +1297,7 @@ class App(BU.Tk):
         A.combo_extra.bind(A2, lambda e: A._on_extra_commit())
         A.combo_extra.bind(F_, lambda e: A._on_extra_commit())
         A.combo_extra.bind(D_, A._on_key_release)
+        A.combo_extra.bind("<FocusIn>", A._remember_focus)
         N_ = C.Label(B_, text=EAN_OPTIONAL_LABEL, style="Form.TLabel")
         N_.grid(row=7, column=0, sticky=R)
         A._add_tooltip(
@@ -1297,6 +1309,7 @@ class App(BU.Tk):
         )
         A.entry_ean = C.Entry(B_, textvariable=A.var_ean, state=X)
         A.entry_ean.grid(row=7, column=1, padx=5, pady=2)
+        A.entry_ean.bind("<FocusIn>", A._remember_focus)
         O_ = C.Button(B_, text=LOAD_LABEL, command=A._load_by_ean)
         O_.grid(row=7, column=2, padx=5, pady=2)
         A.btn_edit_lists = C.Button(B_, text=EDIT_LISTS_LABEL, command=A._open_list_editor)
@@ -1779,26 +1792,123 @@ class App(BU.Tk):
         A_[S] = all_values
         A_.existing_count = existing_count
 
+    def _normalize_list_value(A, list_key, value):
+        """Return a normalized list entry for comparisons and saves."""
+
+        if value is I:
+            return B
+        cleaned = G(value).strip()
+        if not cleaned:
+            return B
+        if list_key == d:
+            cleaned = cleaned.replace(a, g)
+        return cleaned.upper()
+
+    def _list_has_value(A, list_key, value):
+        normalized = A._normalize_list_value(list_key, value)
+        if not normalized:
+            return h
+        values = A.lists.get(list_key, [])
+        return normalized in [G(A_).strip().upper() for A_ in values if A_]
+
+    def _sync_list_comboboxes(A, list_key):
+        values = A.lists.get(list_key, [])
+        if list_key == n and Aj(A, "combo_name", I):
+            A.combo_name[S] = values
+        elif list_key == t and Aj(A, "combo_type", I):
+            A.combo_type[S] = values
+        elif list_key == s and Aj(A, "combo_model", I):
+            A.combo_model[S] = values
+        elif list_key == Y:
+            if Aj(A, "combo_color1", I):
+                A.combo_color1[S] = values
+            if Aj(A, "combo_color2", I):
+                A.combo_color2[S] = values
+            if Aj(A, "combo_color3", I):
+                A.combo_color3[S] = values
+        elif list_key == d and Aj(A, "combo_extra", I):
+            A.combo_extra[S] = values
+
+    def _remember_focus(A, event):
+        A._last_focus_widget = Aj(event, "widget", I)
+
+    def _focus_widget(A, widget):
+        try:
+            if widget and widget.winfo_exists():
+                widget.focus_set()
+                return
+        except E:
+            pass
+        try:
+            A.focus_force()
+        except E:
+            pass
+
+    def _restore_focus(A):
+        A._focus_widget(A._last_focus_widget)
+
+    def _prompt_add_list_value(A, list_key, value, prompt_msg, widget=I):
+        normalized = A._normalize_list_value(list_key, value)
+        if not normalized:
+            return h
+        if A._list_has_value(list_key, normalized):
+            return J
+        if list_key in A._active_list_prompts:
+            return I
+        A._active_list_prompts.add(list_key)
+        try:
+            if O.askyesno(AJ, prompt_msg):
+                return A._add_list_value(list_key, normalized)
+            return h
+        finally:
+            A._active_list_prompts.discard(list_key)
+            if widget is not I:
+                A._focus_widget(widget)
+
+    def _add_list_value(A, list_key, value, listbox=I, show_exists=h):
+        normalized = A._normalize_list_value(list_key, value)
+        if not normalized:
+            O.showwarning(WARNING_LABEL, LIST_VALUE_EMPTY_MSG)
+            return h
+        if A._list_has_value(list_key, normalized):
+            if show_exists:
+                list_label = LIST_EDITOR_TAB_LABELS.get(list_key, list_key)
+                O.showinfo(
+                    WARNING_LABEL,
+                    LIST_VALUE_EXISTS_MSG.format(value=normalized, list=list_label),
+                )
+            return J
+        if not add_to_list(EXCEL_SHEETS[list_key], normalized):
+            return h
+        if not isinstance(A.lists.get(list_key), list):
+            A.lists[list_key] = []
+        A.lists[list_key].append(normalized)
+        if listbox is not I:
+            try:
+                existing = listbox.get(0, F.END)
+            except E:
+                existing = ()
+            if normalized not in existing:
+                listbox.insert(F.END, normalized)
+        A._sync_list_comboboxes(list_key)
+        return J
+
     def _on_name_commit(C):
         """Handle the user confirming or typing a furniture name."""
 
         D_ = C.var_name.get().strip()
         if not D_:
             return
-        if D_.upper() not in C.lists[n]:
-            if O.askyesno(
-                AJ, NAME_NOT_IN_LIST_QUESTION.format(value=D_)
-            ):
-                H = C._open_list_editor(n)
-                C.wait_window(H)
-                C.lists = prepare_excel_lists()
-                C.entries = C.lists.get(W, {})
-                if W in C.lists:
-                    C.lists.pop(W)
-                C.combo_name[S] = C.lists[n]
-                if D_.upper() not in [A.upper() for A in C.lists[n]]:
-                    C.var_name.set(B)
-                    return
+        if not C._list_has_value(n, D_):
+            result = C._prompt_add_list_value(
+                n, D_, NAME_NOT_IN_LIST_QUESTION.format(value=D_), C.combo_name
+            )
+            if result is None:
+                return
+            if result:
+                D_ = C._normalize_list_value(n, D_)
+                if D_:
+                    C.var_name.set(D_)
             else:
                 C.var_name.set(B)
                 return
@@ -1848,20 +1958,16 @@ class App(BU.Tk):
         D_ = C.var_type.get().strip()
         if not G_ or not D_:
             return
-        if D_.upper() not in C.lists[t]:
-            if O.askyesno(
-                AJ, TYPE_NOT_IN_LIST_QUESTION.format(value=D_)
-            ):
-                H = C._open_list_editor(t)
-                C.wait_window(H)
-                C.lists = prepare_excel_lists()
-                C.entries = C.lists.get(W, {})
-                if W in C.lists:
-                    C.lists.pop(W)
-                C.combo_type[S] = C.lists[t]
-                if D_.upper() not in [A.upper() for A in C.lists[t]]:
-                    C.var_type.set(B)
-                    return
+        if not C._list_has_value(t, D_):
+            result = C._prompt_add_list_value(
+                t, D_, TYPE_NOT_IN_LIST_QUESTION.format(value=D_), C.combo_type
+            )
+            if result is None:
+                return
+            if result:
+                D_ = C._normalize_list_value(t, D_)
+                if D_:
+                    C.var_type.set(D_)
             else:
                 C.var_type.set(B)
                 return
@@ -2182,21 +2288,19 @@ class App(BU.Tk):
         e_ = D.var_model.get().strip()
         if not o or not p or not e_:
             return
-        if e_.upper() not in D.lists[s]:
-            if O.askyesno(
-                AJ,
+        if not D._list_has_value(s, e_):
+            result = D._prompt_add_list_value(
+                s,
+                e_,
                 MODEL_NOT_IN_LIST_QUESTION.format(value=e_),
-            ):
-                A6_ = D._open_list_editor(s)
-                D.wait_window(A6_)
-                D.lists = prepare_excel_lists()
-                D.entries = D.lists.get(W, {})
-                if W in D.lists:
-                    D.lists.pop(W)
-                D.combo_model[S] = D.lists[s]
-                if e_.upper() not in [A.upper() for A in D.lists[s]]:
-                    D.var_model.set(B)
-                    return
+                D.combo_model,
+            )
+            if result is None:
+                return
+            if result:
+                e_ = D._normalize_list_value(s, e_)
+                if e_:
+                    D.var_model.set(e_)
             else:
                 D.var_model.set(B)
                 return
@@ -2421,39 +2525,41 @@ class App(BU.Tk):
             C.var_ean.set(B)
         if not M_ or not N_ or not H_:
             return
-        J_ = [A for A in (H_, F_, G_) if A and A.upper() not in C.lists[Y]]
+        J_ = [A for A in (H_, F_, G_) if A and not C._list_has_value(Y, A)]
         if J_:
-            P_ = AI.join(J_)
-            R_ = (
-                COLOR_NOT_IN_LIST_SINGLE_QUESTION.format(value=J_[0])
-                if Q(J_) == 1
-                else COLOR_NOT_IN_LIST_PLURAL_QUESTION.format(values=P_)
-            )
-            if O.askyesno(AJ, R_):
-                T = C._open_list_editor(Y)
-                C.wait_window(T)
-                C.lists = prepare_excel_lists()
-                C.entries = C.lists.get(W, {})
-                if W in C.lists:
-                    C.lists.pop(W)
-                C.combo_color1[S] = C.lists[Y]
-                C.combo_color2[S] = C.lists[Y]
-                C.combo_color3[S] = C.lists[Y]
-                if H_.upper() not in [A.upper() for A in C.lists[Y]]:
-                    C.var_color1.set(B)
-                    return
-                if F_ and F_.upper() not in [A.upper() for A in C.lists[Y]]:
-                    C.var_color2.set(B)
-                if G_ and G_.upper() not in [A.upper() for A in C.lists[Y]]:
-                    C.var_color3.set(B)
-            else:
-                if H_.upper() not in [A.upper() for A in C.lists[Y]]:
-                    C.var_color1.set(B)
-                    return
-                if F_ and F_.upper() not in [A.upper() for A in C.lists[Y]]:
-                    C.var_color2.set(B)
-                if G_ and G_.upper() not in [A.upper() for A in C.lists[Y]]:
-                    C.var_color3.set(B)
+            if Y in C._active_list_prompts:
+                return
+            C._active_list_prompts.add(Y)
+            try:
+                P_ = AI.join(J_)
+                R_ = (
+                    COLOR_NOT_IN_LIST_SINGLE_QUESTION.format(value=J_[0])
+                    if Q(J_) == 1
+                    else COLOR_NOT_IN_LIST_PLURAL_QUESTION.format(values=P_)
+                )
+                if O.askyesno(AJ, R_):
+                    K_ = []
+                    for T in J_:
+                        if not C._add_list_value(Y, T):
+                            K_.append(T)
+                    if H_ in K_:
+                        C.var_color1.set(B)
+                        return
+                    if F_ and F_ in K_:
+                        C.var_color2.set(B)
+                    if G_ and G_ in K_:
+                        C.var_color3.set(B)
+                else:
+                    if H_ in J_:
+                        C.var_color1.set(B)
+                        return
+                    if F_ and F_ in J_:
+                        C.var_color2.set(B)
+                    if G_ and G_ in J_:
+                        C.var_color3.set(B)
+            finally:
+                C._active_list_prompts.discard(Y)
+                C._focus_widget(C.combo_color1)
         H_ = C.var_color1.get().strip()
         if not H_:
             return
@@ -2510,21 +2616,19 @@ class App(BU.Tk):
         if D_ == B:
             C.combo_extra.configure(style=j)
         else:
-            if D_.upper() not in [A.upper() for A in C.lists[d]]:
-                if O.askyesno(
-                    AJ,
+            if not C._list_has_value(d, D_):
+                result = C._prompt_add_list_value(
+                    d,
+                    D_,
                     VALUE_NOT_EXISTS_QUESTION.format(value=D_),
-                ):
-                    M_ = C._open_list_editor(d)
-                    C.wait_window(M_)
-                    C.lists = prepare_excel_lists()
-                    C.entries = C.lists.get(W, {})
-                    if W in C.lists:
-                        C.lists.pop(W)
-                    C.combo_extra[S] = C.lists[d]
-                    if D_.upper() not in [A.upper() for A in C.lists[d]]:
-                        C.var_extra.set(B)
-                        D_ = B
+                    C.combo_extra,
+                )
+                if result is None:
+                    return
+                if result:
+                    D_ = C._normalize_list_value(d, D_)
+                    if D_:
+                        C.var_extra.set(D_)
                 else:
                     C.var_extra.set(B)
                     D_ = B
@@ -2704,13 +2808,69 @@ class App(BU.Tk):
                     highlightthickness=0, highlightbackground=A8, highlightcolor=A8
                 )
 
+    def _reset_form_fields(A, keep_ean=h):
+        A.var_name.set(B)
+        A.var_type.set(B)
+        A.var_model.set(B)
+        A.var_color1.set(B)
+        A.var_color2.set(B)
+        A.var_color3.set(B)
+        A.var_extra.set(B)
+        if not keep_ean:
+            A.var_ean.set(B)
+        if Aj(A, "combo_name", I):
+            A.combo_name.configure(state=X, style=j)
+            A.combo_name[S] = A.lists.get(n, [])
+        if Aj(A, "combo_type", I):
+            A.combo_type.configure(state=V, style=j)
+            A.combo_type[S] = A.lists.get(t, [])
+        if Aj(A, "combo_model", I):
+            A.combo_model.configure(state=V, style=j)
+            A.combo_model[S] = A.lists.get(s, [])
+        if Aj(A, "combo_color1", I):
+            A.combo_color1.configure(state=V, style=j)
+            A.combo_color1[S] = A.lists.get(Y, [])
+        if Aj(A, "combo_color2", I):
+            A.combo_color2.configure(state=V, style=j)
+            A.combo_color2[S] = A.lists.get(Y, [])
+        if Aj(A, "combo_color3", I):
+            A.combo_color3.configure(state=V, style=j)
+            A.combo_color3[S] = A.lists.get(Y, [])
+        if Aj(A, "combo_extra", I):
+            A.combo_extra.configure(state=V, style=j)
+            A.combo_extra[S] = A.lists.get(d, [])
+        if Aj(A, "entry_ean", I):
+            A.entry_ean.configure(state=X)
+        if Aj(A, "btn_submit", I):
+            A.btn_submit.configure(state=V)
+        if Aj(A, "btn_open", I):
+            A.btn_open.configure(state=V)
+        A._clear_all_slots()
+
     def _open_list_editor(E, focus_sheet=I):
+        existing = Aj(E, "_list_editor_window", I)
+        if existing and existing.winfo_exists():
+            try:
+                if focus_sheet and Aj(E, "_list_editor_notebook", I):
+                    idx = Aj(E, "_list_editor_tabs", {}).get(focus_sheet)
+                    if idx is not I:
+                        E._list_editor_notebook.select(idx)
+                existing.deiconify()
+                existing.lift()
+                existing.grab_set()
+                existing.focus_force()
+            except E:
+                pass
+            return existing
+        E._last_focus_widget = E.focus_get()
         H_ = F.Toplevel(E)
         H_.title(EDIT_LISTS_LABEL)
         H_.grab_set()
-        H_._close_window = H_.destroy
         I_ = C.Notebook(H_)
         I_.pack(expand=J, fill=z, padx=5, pady=5)
+        E._list_editor_window = H_
+        E._list_editor_notebook = I_
+        E._list_editor_tabs = {}
         M_ = {}
         Aq_ = (n, t, s, Y, d)
         P_ = [
@@ -2722,6 +2882,7 @@ class App(BU.Tk):
             B_ = C.Frame(I_)
             I_.add(B_, text=S_)
             M_[A_] = B_
+            E._list_editor_tabs[A_] = R_
             if focus_sheet == A_:
                 N_ = R_
         I_.select(N_)
@@ -2752,6 +2913,18 @@ class App(BU.Tk):
                 text=LIST_REMOVE_BUTTON_LABEL,
                 command=lambda k=A_, l=D_: E._remove_list_item(k, l),
             ).pack(fill="x", pady=2)
+        def _close():
+            if Aj(E, "_list_editor_window", I) is H_:
+                E._list_editor_window = I
+                E._list_editor_notebook = I
+                E._list_editor_tabs = {}
+            try:
+                H_.destroy()
+            finally:
+                E._restore_focus()
+
+        H_._close_window = _close
+        H_.protocol("WM_DELETE_WINDOW", _close)
         return H_
 
     def _add_list_item(C, key, listbox):
@@ -2762,27 +2935,7 @@ class App(BU.Tk):
             LIST_ADD_PROMPT_MSG.format(list=E_),
         )
         if D_:
-            add_to_list(EXCEL_SHEETS[B_], D_)
-            if D_.strip().upper() not in [A.upper() for A in C.lists[B_]]:
-                C.lists[B_] = C.lists[B_] + [
-                    D_.strip().upper() if B_ != d else D_.strip().replace(a, g).upper()
-                ]
-            listbox.insert(
-                F.END,
-                D_.strip().upper() if B_ != d else D_.strip().replace(a, g).upper(),
-            )
-            if B_ == n:
-                C.combo_name[S] = C.lists[B_]
-            elif B_ == t:
-                C.combo_type[S] = C.lists[B_]
-            elif B_ == s:
-                C.combo_model[S] = C.lists[B_]
-            elif B_ == Y:
-                C.combo_color1[S] = C.lists[B_]
-                C.combo_color2[S] = C.lists[B_]
-                C.combo_color3[S] = C.lists[B_]
-            elif B_ == d:
-                C.combo_extra[S] = C.lists[B_]
+            C._add_list_value(B_, D_, listbox=listbox, show_exists=J)
 
     def _remove_list_item(A, key, listbox):
         D_ = listbox
@@ -3690,6 +3843,8 @@ class App(BU.Tk):
         if D_.upper() == q:
             O.showwarning(E_, CANNOT_SEARCH_NO_EAN_MSG)
             return
+        A._reset_form_fields(keep_ean=J)
+        A.var_ean.set(D_)
         if D_ in A.entries:
             C_ = A.entries[D_]
             G_ = C_.get(Ae, B) or B
@@ -3723,7 +3878,6 @@ class App(BU.Tk):
                 A.suppress_scan = h
             A._load_existing_files()
         else:
-            A._load_existing_files()
             O.showinfo(NOT_FOUND_LABEL, NO_SAVED_DATA_FOR_EAN_MSG.format(ean=D_))
 
     def _open_current_folder(B):

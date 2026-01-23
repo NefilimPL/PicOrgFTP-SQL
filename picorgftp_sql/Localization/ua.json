@@ -21,6 +21,8 @@
   "list_add_prompt": "Нове значення для списку {list}:",
   "list_remove_title": "Видалити",
   "list_remove_prompt": "Видалити '{value}' зі списку {list}?",
+  "list_value_exists": "Значення '{value}' вже існує у списку {list}.",
+  "list_value_empty": "Значення не може бути порожнім.",
   "save_error": "Помилка збереження",
   "not_in_list": "Немає у списку",
   "error": "Помилка",
