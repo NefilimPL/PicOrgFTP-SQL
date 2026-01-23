@@ -4,6 +4,7 @@ import copy
 import queue
 import re
 import traceback
+import tokenize
 
 from .common import *  # noqa: F401,F403
 from .excel_utils import (
@@ -206,6 +207,10 @@ class App(BU.Tk):
         B.dragging_idx = I
         B.original_files = {}
         B.is_processing = h
+        B._code_check_running = h
+        B._code_check_last_report = ""
+        B._ui_check_running = h
+        B._ui_check_last_report = ""
         B.logged_counts = h
         B.suppress_next_lookup = h
         B.slot_definitions = []
@@ -328,6 +333,812 @@ class App(BU.Tk):
             threading.Thread(target=_worker, name="TestErrorThread").start()
         else:
             raise RuntimeError(LANG.get("error_test_generic_message", "Testowy błąd runtime."))
+
+    def _collect_code_diagnostics(B):
+        module_dir = A.path.dirname(A.path.abspath(__file__))
+        project_root = A.path.abspath(A.path.join(module_dir, A.pardir))
+        root = project_root
+        if not A.path.isdir(A.path.join(project_root, "picorgftp_sql")):
+            root = module_dir
+        files = []
+        skip_dirs = {".git", "__pycache__", "venv", ".venv", "dist", "build"}
+        if A.path.isdir(root):
+            for dirpath, dirnames, filenames in A.walk(root):
+                dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+                for filename in filenames:
+                    if filename.lower().endswith((".py", ".pyw")):
+                        files.append(A.path.join(dirpath, filename))
+        files.sort()
+        errors = []
+        for path in files:
+            lines = []
+            try:
+                with tokenize.open(path) as handle:
+                    source = handle.read()
+                lines = source.splitlines()
+                compile(source, path, "exec")
+            except (SyntaxError, IndentationError) as exc:
+                line_no = Aj(exc, "lineno", I) or 0
+                col_no = Aj(exc, "offset", I) or 0
+                message = Aj(exc, "msg", G(exc))
+                kind = type(exc).__name__
+                if message:
+                    if not message.startswith(kind):
+                        message = f"{kind}: {message}"
+                else:
+                    message = kind
+                line_text = Aj(exc, "text", I)
+                if line_text is I and line_no and line_no <= Q(lines):
+                    line_text = lines[line_no - 1]
+                if line_text is not I:
+                    line_text = G(line_text).rstrip("\n")
+                errors.append(
+                    {
+                        "path": path,
+                        "line": line_no,
+                        "col": col_no,
+                        "message": message,
+                        "text": line_text or B,
+                    }
+                )
+            except E as exc:
+                errors.append(
+                    {
+                        "path": path,
+                        "line": 0,
+                        "col": 0,
+                        "message": f"{type(exc).__name__}: {exc}",
+                        "text": B,
+                    }
+                )
+        return {"root": root, "files": files, "errors": errors}
+
+    def _format_code_check_report(A, result):
+        timestamp = A9.now().strftime(A6)
+        root = result.get("root") or B
+        files = result.get("files") or []
+        errors = result.get("errors") or []
+        lines = [
+            LANG.get("code_check_report_title", "Raport diagnostyki kodu"),
+            LANG.get("code_check_report_time", "Czas: {time}").format(time=timestamp),
+        ]
+        if root:
+            lines.append(
+                LANG.get("code_check_report_root", "Katalog: {path}").format(
+                    path=root
+                )
+            )
+        lines.append(
+            LANG.get("code_check_report_files", "Pliki: {count}").format(
+                count=Q(files)
+            )
+        )
+        lines.append(
+            LANG.get("code_check_report_errors", "Błędy: {count}").format(
+                count=Q(errors)
+            )
+        )
+        lines.append(B)
+        if errors:
+            lines.append(
+                LANG.get("code_check_report_errors_header", "Lista błędów:")
+            )
+            for idx, err in A0(errors, 1):
+                line_no = err.get("line", 0) or 0
+                col_no = err.get("col", 0) or 0
+                lines.append(
+                    LANG.get(
+                        "code_check_report_error_item",
+                        "{idx}. {file} ({line}:{col})",
+                    ).format(
+                        idx=idx,
+                        file=err.get("path", B),
+                        line=line_no,
+                        col=col_no,
+                    )
+                )
+                message = err.get("message", B)
+                if message:
+                    lines.append(f"  {message}")
+                line_text = err.get("text", B)
+                if line_text:
+                    lines.append(f"  {line_text}")
+                    if col_no:
+                        caret = " " * max(col_no - 1, 0) + "^"
+                        lines.append(f"  {caret}")
+                lines.append(B)
+        else:
+            lines.append(
+                LANG.get(
+                    "code_check_report_no_errors", "Brak błędów składni."
+                )
+            )
+        if files:
+            lines.append(B)
+            lines.append(
+                LANG.get("code_check_report_files_header", "Sprawdzone pliki:")
+            )
+            for path in files:
+                lines.append(f"- {path}")
+        return "\n".join(lines)
+
+    def _run_code_diagnostics(A, status_var=I, button=I, report_widget=I):
+        if Aj(A, "_code_check_running", h):
+            return
+        A._code_check_running = J
+        if status_var:
+            status_var.set(
+                LANG.get("code_check_running", "Sprawdzanie kodu...")
+            )
+        if button:
+            try:
+                button.configure(state=V)
+            except E:
+                pass
+        if report_widget:
+            try:
+                report_widget.configure(state=Az)
+                report_widget.delete(A_, F.END)
+                report_widget.configure(state=Ak)
+            except E:
+                pass
+
+        def finalize(result):
+            A._code_check_running = h
+            if button:
+                try:
+                    button.configure(state=X)
+                except E:
+                    pass
+            files = result.get("files") or []
+            errors = result.get("errors") or []
+            report_text = A._format_code_check_report(result)
+            A._code_check_last_report = report_text
+            if report_widget:
+                try:
+                    report_widget.configure(state=Az)
+                    report_widget.delete(A_, F.END)
+                    if report_text:
+                        report_widget.insert(F.END, report_text)
+                    report_widget.configure(state=Ak)
+                except E:
+                    pass
+            if not files:
+                msg = LANG.get(
+                    "code_check_no_sources",
+                    "Nie znaleziono plików źródłowych do sprawdzenia.",
+                )
+                if status_var:
+                    status_var.set(msg)
+                log_info_loc("code_check_no_sources")
+                return
+            total = Q(files)
+            if not errors:
+                msg = LANG.get(
+                    "code_check_ok",
+                    "Sprawdzono {count} plików. Nie wykryto błędów składni.",
+                ).format(count=total)
+                if status_var:
+                    status_var.set(msg)
+                log_info_loc("code_check_ok", count=total)
+                return
+            error_count = Q(errors)
+            msg = LANG.get(
+                "code_check_error_summary",
+                "Wykryto {errors} błędów składni w {count} plikach. Szczegóły w logu.",
+            ).format(errors=error_count, count=total)
+            status_lines = [msg]
+            preview_lines = []
+            preview_header = LANG.get("code_check_error_preview", B)
+            log_error_loc(
+                "code_check_error_summary", errors=error_count, count=total
+            )
+            file_template = localization.LANG_EN.get(
+                "code_check_error_detail",
+                "Syntax error in {file} ({line}:{col}): {error}",
+            )
+            ui_template = LANG.get(
+                "code_check_error_detail",
+                "Błąd składni w {file} ({line}:{col}): {error}",
+            )
+            item_template = LANG.get(
+                "code_check_error_item",
+                "- {file} ({line}:{col}): {error}",
+            )
+            shown = 3
+            max_ui = 5
+            for idx, err in A0(errors):
+                file_msg = file_template.format(
+                    file=err.get("path", B),
+                    line=err.get("line", 0),
+                    col=err.get("col", 0),
+                    error=err.get("message", B),
+                )
+                ui_msg = ui_template.format(
+                    file=err.get("path", B),
+                    line=err.get("line", 0),
+                    col=err.get("col", 0),
+                    error=err.get("message", B),
+                )
+                if idx < shown:
+                    preview_lines.append(
+                        item_template.format(
+                            file=err.get("path", B),
+                            line=err.get("line", 0),
+                            col=err.get("col", 0),
+                            error=err.get("message", B),
+                        )
+                    )
+                if idx < max_ui:
+                    log_error(file_msg, ui_message=ui_msg)
+                else:
+                    log_error(file_msg, ui_message=B)
+            if error_count > shown:
+                preview_lines.append(
+                    LANG.get(
+                        "code_check_error_more",
+                        "... i {count} więcej",
+                    ).format(count=error_count - shown)
+                )
+            if preview_lines:
+                if preview_header:
+                    status_lines.append(preview_header)
+                status_lines.extend(preview_lines)
+            if status_var:
+                status_var.set("\n".join(status_lines))
+
+        def worker():
+            result = A._collect_code_diagnostics()
+            A.after(0, lambda: finalize(result))
+
+        threading.Thread(target=worker, daemon=J).start()
+
+    def _scan_button_commands(A, root_widget=I):
+        target = root_widget or A
+        missing = []
+
+        def _walk(widget):
+            try:
+                children = widget.winfo_children()
+            except E:
+                return
+            for child in children:
+                try:
+                    cls = child.winfo_class()
+                except E:
+                    cls = B
+                if cls in ("TButton", "Button"):
+                    try:
+                        cmd = child.cget("command")
+                    except E:
+                        cmd = B
+                    try:
+                        state = child.cget("state")
+                    except E:
+                        state = B
+                    disabled = h
+                    if state:
+                        disabled = "disabled" in G(state)
+                    if not cmd and not disabled:
+                        text = B
+                        try:
+                            text = child.cget("text")
+                        except E:
+                            pass
+                        missing.append(
+                            {"path": G(child), "text": text, "state": state or B}
+                        )
+                _walk(child)
+
+        _walk(target)
+        return missing
+
+    def _collect_toplevels(A):
+        tops = []
+        try:
+            children = A.winfo_children()
+        except E:
+            return tops
+        for child in children:
+            try:
+                if child.winfo_class() == "Toplevel":
+                    tops.append(child)
+            except E:
+                pass
+        return tops
+
+    def _close_toplevel(A, win):
+        if not win:
+            return
+        close_cb = Aj(win, "_close_window", I)
+        if callable(close_cb):
+            try:
+                close_cb()
+                return
+            except E:
+                pass
+        try:
+            if Aj(win, "grab_current", I) == win:
+                win.grab_release()
+        except E:
+            pass
+        try:
+            win.destroy()
+        except E:
+            pass
+
+    def _ui_test_after(A):
+        flag = F.StringVar(value="pending")
+
+        def _mark(value):
+            if flag.get() == "pending":
+                flag.set(value)
+
+        A.after(10, lambda: _mark("ok"))
+        A.after(200, lambda: _mark("timeout"))
+        A.wait_variable(flag)
+        if flag.get() == "ok":
+            return J, B
+        return h, LANG.get(
+            "ui_check_detail_timeout", "Timeout waiting for after()."
+        )
+
+    def _ui_test_button_invoke(A, parent):
+        hit = {"ok": h}
+
+        def _mark():
+            hit["ok"] = J
+
+        btn = C.Button(parent, text="__ui_test__", command=_mark)
+        detail = B
+        try:
+            btn.invoke()
+            ok = hit["ok"]
+            if not ok:
+                detail = LANG.get(
+                    "ui_check_detail_invoke",
+                    "invoke() did not trigger.",
+                )
+        except E as exc:
+            ok = h
+            detail = G(exc)
+        try:
+            btn.destroy()
+        except E:
+            pass
+        return ok, detail
+
+    def _ui_test_event_binding(A, parent):
+        hit = {"ok": h}
+
+        def _mark(event=I):
+            hit["ok"] = J
+
+        btn = C.Button(parent, text="__ui_test__")
+        detail = B
+        try:
+            btn.bind("<Button-1>", _mark)
+            btn.event_generate("<Button-1>")
+            try:
+                A.update()
+            except E:
+                pass
+            ok = hit["ok"]
+            if not ok:
+                detail = LANG.get(
+                    "ui_check_detail_event",
+                    "Click event was not handled.",
+                )
+        except E as exc:
+            ok = h
+            detail = G(exc)
+        try:
+            btn.destroy()
+        except E:
+            pass
+        return ok, detail
+
+    def _ui_test_open_list_editor(A):
+        win = I
+        detail = B
+        ok = h
+        try:
+            win = A._open_list_editor()
+            if win and Aj(win, "winfo_exists", I):
+                ok = bool(win.winfo_exists())
+            if not ok:
+                detail = LANG.get(
+                    "ui_check_detail_list_editor",
+                    "List editor window failed to open.",
+                )
+        except E as exc:
+            ok = h
+            detail = G(exc)
+        A._close_toplevel(win)
+        return ok, detail
+
+    def _ui_test_open_settings(A):
+        win = I
+        detail = B
+        ok = h
+        try:
+            win = A._open_settings()
+            if win and Aj(win, "winfo_exists", I):
+                ok = bool(win.winfo_exists())
+            if not ok:
+                detail = LANG.get(
+                    "ui_check_detail_settings",
+                    "Settings window failed to open.",
+                )
+        except E as exc:
+            ok = h
+            detail = G(exc)
+        A._close_toplevel(win)
+        return ok, detail
+
+    def _ui_test_safe_button_clicks(A):
+        results = []
+        buttons = [
+            ("ui_check_button_settings", Aj(A, "btn_settings", I)),
+            ("ui_check_button_edit_lists", Aj(A, "btn_edit_lists", I)),
+            ("ui_check_button_clear_log", Aj(A, "btn_clear_log", I)),
+        ]
+        for label_key, btn in buttons:
+            name = LANG.get(label_key, label_key)
+            if not btn:
+                results.append(
+                    {
+                        "name": name,
+                        "ok": h,
+                        "detail": LANG.get(
+                            "ui_check_detail_button_missing",
+                            "Button not found.",
+                        ),
+                    }
+                )
+                continue
+            try:
+                state = btn.cget("state")
+            except E:
+                state = B
+            if state and "disabled" in G(state):
+                results.append(
+                    {
+                        "name": name,
+                        "ok": J,
+                        "detail": LANG.get(
+                            "ui_check_detail_button_disabled",
+                            "Skipped (disabled).",
+                        ),
+                    }
+                )
+                continue
+            before = {G(w) for w in A._collect_toplevels()}
+            detail = B
+            ok = J
+            try:
+                btn.invoke()
+                try:
+                    A.update_idletasks()
+                except E:
+                    pass
+            except E as exc:
+                ok = h
+                detail = LANG.get(
+                    "ui_check_detail_button_invoke_error",
+                    "Invoke error: {error}",
+                ).format(error=exc)
+            after = A._collect_toplevels()
+            for win in after:
+                if G(win) not in before:
+                    A._close_toplevel(win)
+            results.append({"name": name, "ok": ok, "detail": detail})
+        return results
+
+    def _ui_test_toplevel(A):
+        top = F.Toplevel(A)
+        detail = B
+        ok = h
+        try:
+            top.title(LANG.get("ui_check_temp_window", "Test window"))
+            top.geometry("240x120+60+60")
+            top.update_idletasks()
+            ok = bool(top.winfo_exists())
+            if not ok:
+                detail = LANG.get(
+                    "ui_check_detail_toplevel", "Window creation failed."
+                )
+        except E as exc:
+            ok = h
+            detail = G(exc)
+        try:
+            top.destroy()
+        except E:
+            pass
+        return ok, detail
+
+    def _ui_test_modal(A):
+        top = F.Toplevel(A)
+        detail = B
+        ok = h
+        try:
+            top.grab_set()
+            current = top.grab_current()
+            ok = current == top
+            if not ok:
+                detail = LANG.get(
+                    "ui_check_detail_modal", "Modal grab failed."
+                )
+        except E as exc:
+            ok = h
+            detail = G(exc)
+        try:
+            top.grab_release()
+        except E:
+            pass
+        try:
+            top.destroy()
+        except E:
+            pass
+        return ok, detail
+
+    def _ui_test_scrolledtext(A, parent):
+        frame = C.Frame(parent)
+        detail = B
+        ok = h
+        try:
+            st = BS.ScrolledText(frame, width=20, height=2, wrap="word")
+            st.insert(F.END, "test")
+            text = st.get(A_, F.END).strip()
+            st.configure(state=Ak)
+            ok = text == "test"
+            if not ok:
+                detail = LANG.get(
+                    "ui_check_detail_scrolledtext",
+                    "ScrolledText read/write failed.",
+                )
+        except E as exc:
+            ok = h
+            detail = G(exc)
+        try:
+            frame.destroy()
+        except E:
+            pass
+        return ok, detail
+
+    def _ui_test_combobox(A, parent):
+        frame = C.Frame(parent)
+        detail = B
+        ok = h
+        try:
+            combo = C.Combobox(frame, values=["A", "B"], state="readonly")
+            combo.set("B")
+            ok = combo.get() == "B"
+            if not ok:
+                detail = LANG.get(
+                    "ui_check_detail_combobox", "Combobox set/get failed."
+                )
+        except E as exc:
+            ok = h
+            detail = G(exc)
+        try:
+            frame.destroy()
+        except E:
+            pass
+        return ok, detail
+
+    def _format_ui_check_report(A, results, missing_buttons):
+        timestamp = A9.now().strftime(A6)
+        failures = Q([r for r in results if not r.get("ok")])
+        lines = [
+            LANG.get("ui_check_report_title", "UI diagnostics report"),
+            LANG.get("ui_check_report_time", "Time: {time}").format(time=timestamp),
+            LANG.get("ui_check_report_tests", "Tests: {count}").format(
+                count=Q(results)
+            ),
+            LANG.get("ui_check_report_failures", "Failures: {count}").format(
+                count=failures
+            ),
+            B,
+            LANG.get("ui_check_report_results_header", "Test results:"),
+        ]
+        status_ok = LANG.get("ui_check_status_ok", "OK")
+        status_fail = LANG.get("ui_check_status_fail", "FAIL")
+        for result in results:
+            status = status_ok if result.get("ok") else status_fail
+            detail = result.get("detail", B)
+            if detail:
+                detail = f" - {detail}"
+            lines.append(
+                LANG.get(
+                    "ui_check_report_result_item",
+                    "{status} {name}{detail}",
+                ).format(
+                    status=status,
+                    name=result.get("name", B),
+                    detail=detail,
+                )
+            )
+        lines.append(B)
+        if missing_buttons:
+            lines.append(
+                LANG.get(
+                    "ui_check_report_buttons_header",
+                    "Buttons without command:",
+                )
+            )
+            for item in missing_buttons:
+                lines.append(
+                    LANG.get(
+                        "ui_check_report_buttons_item",
+                        "- {path} ({text}) state={state}",
+                    ).format(
+                        path=item.get("path", B),
+                        text=item.get("text", B),
+                        state=item.get("state", B),
+                    )
+                )
+        else:
+            lines.append(
+                LANG.get(
+                    "ui_check_report_buttons_ok",
+                    "All buttons have assigned actions.",
+                )
+            )
+        return "\n".join(lines)
+
+    def _run_ui_diagnostics(
+        A, status_var=I, button=I, report_widget=I, root_widget=I
+    ):
+        if Aj(A, "_ui_check_running", h):
+            return
+        A._ui_check_running = J
+        if status_var:
+            status_var.set(
+                LANG.get("ui_check_running", "UI tests running...")
+            )
+        if button:
+            try:
+                button.configure(state=V)
+            except E:
+                pass
+        if report_widget:
+            try:
+                report_widget.configure(state=Az)
+                report_widget.delete(A_, F.END)
+                report_widget.configure(state=Ak)
+            except E:
+                pass
+        parent = root_widget or A
+        test_parent = C.Frame(parent)
+        results = []
+        missing_buttons = []
+
+        def _record(name, ok, detail=B):
+            results.append({"name": name, "ok": ok, "detail": detail})
+
+        try:
+            ok, detail = A._ui_test_after()
+            _record(
+                LANG.get("ui_check_test_after", "after() callback"),
+                ok,
+                detail,
+            )
+            ok, detail = A._ui_test_button_invoke(test_parent)
+            _record(
+                LANG.get("ui_check_test_button_invoke", "Button invoke"),
+                ok,
+                detail,
+            )
+            ok, detail = A._ui_test_event_binding(test_parent)
+            _record(
+                LANG.get("ui_check_test_event", "Click event binding"),
+                ok,
+                detail,
+            )
+            ok, detail = A._ui_test_toplevel()
+            _record(
+                LANG.get("ui_check_test_toplevel", "Window open/close"),
+                ok,
+                detail,
+            )
+            ok, detail = A._ui_test_modal()
+            _record(
+                LANG.get("ui_check_test_modal", "Modal window"),
+                ok,
+                detail,
+            )
+            ok, detail = A._ui_test_scrolledtext(test_parent)
+            _record(
+                LANG.get(
+                    "ui_check_test_scrolledtext", "ScrolledText widget"
+                ),
+                ok,
+                detail,
+            )
+            ok, detail = A._ui_test_combobox(test_parent)
+            _record(
+                LANG.get("ui_check_test_combobox", "Combobox widget"),
+                ok,
+                detail,
+            )
+            ok, detail = A._ui_test_open_list_editor()
+            _record(
+                LANG.get(
+                    "ui_check_test_open_list_editor", "Open list editor"
+                ),
+                ok,
+                detail,
+            )
+            ok, detail = A._ui_test_open_settings()
+            _record(
+                LANG.get("ui_check_test_open_settings", "Open settings"),
+                ok,
+                detail,
+            )
+            for result in A._ui_test_safe_button_clicks():
+                results.append(result)
+        except E as exc:
+            _record(
+                LANG.get("ui_check_test_unhandled", "Unhandled error"),
+                h,
+                G(exc),
+            )
+        try:
+            missing_buttons = A._scan_button_commands(A)
+        except E:
+            missing_buttons = []
+        try:
+            test_parent.destroy()
+        except E:
+            pass
+
+        report_text = A._format_ui_check_report(results, missing_buttons)
+        A._ui_check_last_report = report_text
+        if report_widget:
+            try:
+                report_widget.configure(state=Az)
+                report_widget.delete(A_, F.END)
+                if report_text:
+                    report_widget.insert(F.END, report_text)
+                report_widget.configure(state=Ak)
+            except E:
+                pass
+
+        failures = Q([r for r in results if not r.get("ok")])
+        button_issues = Q(missing_buttons)
+        issues = failures + button_issues
+        if issues == 0:
+            msg = LANG.get(
+                "ui_check_ok",
+                "UI tests completed. No issues found.",
+            )
+            if status_var:
+                status_var.set(msg)
+            log_info_loc("ui_check_ok")
+        else:
+            msg = LANG.get(
+                "ui_check_issue_summary",
+                "UI tests found {issues} issues (failures: {failures}, buttons: {buttons}).",
+            ).format(
+                issues=issues,
+                failures=failures,
+                buttons=button_issues,
+            )
+            if status_var:
+                status_var.set(msg)
+            log_error_loc(
+                "ui_check_issue_summary",
+                issues=issues,
+                failures=failures,
+                buttons=button_issues,
+            )
+        A._ui_check_running = h
+        if button:
+            try:
+                button.configure(state=X)
+            except E:
+                pass
 
     def _build_form(A):
         """Create comboboxes and entry widgets for the product data form."""
@@ -456,18 +1267,20 @@ class App(BU.Tk):
         A.entry_ean.grid(row=7, column=1, padx=5, pady=2)
         O_ = C.Button(B_, text=LOAD_LABEL, command=A._load_by_ean)
         O_.grid(row=7, column=2, padx=5, pady=2)
-        P_ = C.Button(B_, text=EDIT_LISTS_LABEL, command=A._open_list_editor)
-        P_.grid(row=0, column=2, padx=20)
-        Q_ = C.Button(B_, text=SETTINGS_LABEL, command=A._open_settings)
-        Q_.grid(row=0, column=3, padx=5)
+        A.btn_edit_lists = C.Button(B_, text=EDIT_LISTS_LABEL, command=A._open_list_editor)
+        A.btn_edit_lists.grid(row=0, column=2, padx=20)
+        A.btn_settings = C.Button(B_, text=SETTINGS_LABEL, command=A._open_settings)
+        A.btn_settings.grid(row=0, column=3, padx=5)
         A.btn_submit = C.Button(B_, text=UPDATE_LABEL, command=A._on_submit)
         A.btn_submit.grid(row=8, column=0, columnspan=2, pady=10)
         A.btn_open = C.Button(B_, text=OPEN_FOLDER_LABEL, command=A._open_current_folder)
         A.btn_open.grid(row=8, column=2, padx=5, pady=10)
         A.ui_log = BS.ScrolledText(B_, width=48, height=8, state=Ak, wrap="word")
         A.ui_log.grid(row=0, column=4, rowspan=9, padx=10, sticky="nsew")
-        S_ = C.Button(B_, text=CLEAR_LOG_LABEL, command=lambda: A._ui_log(clear=Al))
-        S_.grid(row=8, column=3, padx=5, pady=10, sticky="e")
+        A.btn_clear_log = C.Button(
+            B_, text=CLEAR_LOG_LABEL, command=lambda: A._ui_log(clear=Al)
+        )
+        A.btn_clear_log.grid(row=8, column=3, padx=5, pady=10, sticky="e")
         B_.grid_columnconfigure(4, weight=1)
 
     def _build_slots(B):
@@ -1863,6 +2676,7 @@ class App(BU.Tk):
         H_ = F.Toplevel(E)
         H_.title(EDIT_LISTS_LABEL)
         H_.grab_set()
+        H_._close_window = H_.destroy
         I_ = C.Notebook(H_)
         I_.pack(expand=J, fill=z, padx=5, pady=5)
         M_ = {}
@@ -3172,6 +3986,83 @@ class App(BU.Tk):
             wraplength=400,
             justify="left",
         ).grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky="w")
+        C.Label(
+            V_,
+            text=LANG.get("code_check_label", "Szybka diagnostyka kodu"),
+        ).grid(row=3, column=0, columnspan=2, padx=5, pady=(10, 4), sticky=T)
+        code_check_status_var = F.StringVar(value=B)
+
+        def _run_code_check():
+            A._run_code_diagnostics(
+                code_check_status_var, code_check_btn, code_report
+            )
+
+        code_check_btn = C.Button(
+            V_,
+            text=LANG.get("code_check_button", "Sprawdź kod"),
+            command=_run_code_check,
+        )
+        code_check_btn.grid(row=4, column=0, padx=5, pady=5, sticky=T)
+        C.Label(
+            V_,
+            textvariable=code_check_status_var,
+            wraplength=400,
+            justify="left",
+        ).grid(row=4, column=1, padx=5, pady=5, sticky="w")
+        C.Label(
+            V_,
+            text=LANG.get(
+                "code_check_hint",
+                "Sprawdza składnię plików .py/.pyw; nie uruchamia całej logiki aplikacji.",
+            ),
+            wraplength=400,
+            justify="left",
+        ).grid(row=5, column=0, columnspan=2, padx=5, pady=5, sticky="w")
+        C.Label(
+            V_,
+            text=LANG.get("ui_check_label", "Testy interfejsu"),
+        ).grid(row=6, column=0, columnspan=2, padx=5, pady=(8, 4), sticky=T)
+        ui_check_status_var = F.StringVar(value=B)
+
+        def _run_ui_check():
+            A._run_ui_diagnostics(
+                ui_check_status_var, ui_check_btn, code_report, a_
+            )
+
+        ui_check_btn = C.Button(
+            V_,
+            text=LANG.get("ui_check_button", "Test UI"),
+            command=_run_ui_check,
+        )
+        ui_check_btn.grid(row=7, column=0, padx=5, pady=5, sticky=T)
+        C.Label(
+            V_,
+            textvariable=ui_check_status_var,
+            wraplength=400,
+            justify="left",
+        ).grid(row=7, column=1, padx=5, pady=5, sticky="w")
+        C.Label(
+            V_,
+            text=LANG.get(
+                "ui_check_hint",
+                "Sprawdza podstawowe elementy UI (przyciski, okna, zdarzenia).",
+            ),
+            wraplength=400,
+            justify="left",
+        ).grid(row=8, column=0, columnspan=2, padx=5, pady=5, sticky="w")
+        C.Label(
+            V_,
+            text=LANG.get("code_check_report_label", "Raport diagnostyczny"),
+        ).grid(row=9, column=0, columnspan=2, padx=5, pady=(8, 4), sticky=T)
+        code_report = BS.ScrolledText(
+            V_, width=90, height=18, state=V, wrap="word"
+        )
+        code_report.grid(
+            row=10, column=0, columnspan=2, padx=5, pady=(0, 8), sticky="nsew"
+        )
+        V_.columnconfigure(0, weight=1)
+        V_.columnconfigure(1, weight=1)
+        V_.rowconfigure(10, weight=1)
 
         def _toggle_resize(*_args):
             l_.configure(state=X if A.opt_resize.get() else V)
@@ -4319,6 +5210,9 @@ class App(BU.Tk):
         C.Button(A4, text=CANCEL_LABEL, command=Af).grid(row=0, column=1, padx=5)
         a_.protocol("WM_DELETE_WINDOW", Af)
         Z.select(0)
+        a_._close_settings = Af
+        a_._close_window = Af
+        return a_
 
     def _change_language(A):
         B = BI.askstring(SETTINGS_LABEL, LANGUAGE_PROMPT)
