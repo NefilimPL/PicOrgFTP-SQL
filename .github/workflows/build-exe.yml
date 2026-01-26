@@ -30,10 +30,15 @@ jobs:
       - name: Build EXE with PyInstaller (recommended onedir + minimal collection)
         shell: bash
         run: |
+          DATA_SEP="$(python - <<'PY'
+          import os
+          print(os.pathsep)
+          PY
+          )"
           pyinstaller --noconfirm --clean --log-level=WARN \
             --name PicOrgFTP-SQL \
             --noconsole \
-            --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" \
+            --add-data="picorgftp_sql/Localization${DATA_SEP}picorgftp_sql/Localization" \
             --collect-submodules mysql.connector \
             --collect-data mysql.connector \
             PicOrgFTP-SQL.pyw
