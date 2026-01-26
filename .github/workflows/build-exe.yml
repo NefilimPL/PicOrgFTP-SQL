@@ -9,7 +9,7 @@ on:
 
 jobs:
   build-windows:
-    runs-on: self-hosted
+    runs-on: windows-latest
 
     steps:
       - name: Checkout
@@ -28,19 +28,14 @@ jobs:
           python -m pip install -r requirements-build.txt
 
       - name: Build EXE with PyInstaller (recommended onedir + minimal collection)
-        shell: bash
+        shell: pwsh
         run: |
-          DATA_SEP="$(python - <<'PY'
-          import os
-          print(os.pathsep)
-          PY
-          )"
-          pyinstaller --noconfirm --clean --log-level=WARN \
-            --name PicOrgFTP-SQL \
-            --noconsole \
-            --add-data="picorgftp_sql/Localization${DATA_SEP}picorgftp_sql/Localization" \
-            --collect-submodules mysql.connector \
-            --collect-data mysql.connector \
+          pyinstaller --noconfirm --clean --log-level=WARN `
+            --name PicOrgFTP-SQL `
+            --noconsole `
+            --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" `
+            --collect-submodules mysql.connector `
+            --collect-data mysql.connector `
             PicOrgFTP-SQL.pyw
 
       - name: Upload artifact
