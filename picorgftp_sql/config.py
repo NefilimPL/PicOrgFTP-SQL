@@ -6,6 +6,7 @@ from .common import (
     A9,
     AO,
     AF,
+    Aq,
     Ar,
     B,
     BT,
@@ -187,7 +188,17 @@ def load_config():
         try:
             # Saving back the normalised structure keeps missing keys aligned
             # with future versions of the configuration schema.
-            save_config(config_copy)
+            preserve_secrets = {
+                H: {N, M},
+                P: {N, M},
+                K: {N, M},
+                TRANSLATION_SETTINGS_KEY: {TRANSLATION_API_KEY},
+            }
+            save_config(
+                config_copy,
+                raw_config=raw_config,
+                preserve_secrets=preserve_secrets,
+            )
         except E:
             pass
     except E as exc:
@@ -202,30 +213,67 @@ def load_config():
     return config_copy
 
 
-def save_config(config):
+def _load_raw_config():
+    """Return the raw configuration dict without decryption."""
+
+    try:
+        if A.path.exists(CONFIG_PATH):
+            with open(CONFIG_PATH, "r", encoding=k) as handle:
+                raw_config = Ar.load(handle)
+            if Aq(raw_config, dict):
+                return raw_config
+    except E:
+        pass
+    return {}
+
+
+def save_config(config, raw_config=None, preserve_secrets=None):
     """Serialise the provided configuration dictionary to disk."""
 
     # Persist secrets in encrypted form to avoid storing clear text credentials.
+    if preserve_secrets is None:
+        preserve_secrets = {}
+    if raw_config is None and preserve_secrets:
+        raw_config = _load_raw_config()
+    if not Aq(raw_config, dict):
+        raw_config = {}
+    if not Aq(preserve_secrets, dict):
+        preserve_secrets = {}
+    else:
+        preserve_secrets = {
+            section: set(keys) for section, keys in preserve_secrets.items()
+        }
     translation_settings = config.get(TRANSLATION_SETTINGS_KEY, {})
+
+    def _pick_secret(section_key, item_key, value):
+        preserve_keys = preserve_secrets.get(section_key, set())
+        if preserve_keys and item_key in preserve_keys:
+            raw_section = raw_config.get(section_key, {})
+            if Aq(raw_section, dict) and item_key in raw_section:
+                raw_value = raw_section.get(item_key)
+                if raw_value is not None:
+                    return raw_value
+        return encrypt(value)
+
     payload = {
         H: {
             v: config[H][v],
             r: config[H][r],
-            N: encrypt(config[H][N]),
-            M: encrypt(config[H][M]),
+            N: _pick_secret(H, N, config[H][N]),
+            M: _pick_secret(H, M, config[H][M]),
             m: config[H][m],
         },
         P: {
             c: config[P][c],
             b: config[P][b],
-            N: encrypt(config[P][N]),
-            M: encrypt(config[P][M]),
+            N: _pick_secret(P, N, config[P][N]),
+            M: _pick_secret(P, M, config[P][M]),
         },
         K: {
             c: config[K][c],
             b: config[K][b],
-            N: encrypt(config[K][N]),
-            M: encrypt(config[K][M]),
+            N: _pick_secret(K, N, config[K][N]),
+            M: _pick_secret(K, M, config[K][M]),
         },
         p: config.get(p, K),
         w: config.get(w, SQL_UPDATE_TEMPLATE),
@@ -240,8 +288,10 @@ def save_config(config):
             TRANSLATION_PROVIDER_KEY: translation_settings.get(
                 TRANSLATION_PROVIDER_KEY, TRANSLATION_PROVIDER_DEFAULT
             ),
-            TRANSLATION_API_KEY: encrypt(
-                translation_settings.get(TRANSLATION_API_KEY, B)
+            TRANSLATION_API_KEY: _pick_secret(
+                TRANSLATION_SETTINGS_KEY,
+                TRANSLATION_API_KEY,
+                translation_settings.get(TRANSLATION_API_KEY, B),
             ),
             TRANSLATION_API_URL: translation_settings.get(TRANSLATION_API_URL, B),
         },

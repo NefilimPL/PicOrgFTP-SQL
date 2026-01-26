@@ -1548,7 +1548,15 @@ class App(BU.Tk):
             for issue in slot_issues + map_issues:
                 B._log_slot_issue(issue)
         if changed:
-            save_config(config.CONFIG)
+            save_config(
+                config.CONFIG,
+                preserve_secrets={
+                    H: {N, M},
+                    P: {N, M},
+                    K: {N, M},
+                    TRANSLATION_SETTINGS_KEY: {TRANSLATION_API_KEY},
+                },
+            )
         B.slot_definitions = slot_defs
         B.sql_column_map = sql_map
 
@@ -3960,6 +3968,15 @@ class App(BU.Tk):
                 M: D.get(K, {}).get(M, B),
             },
         }
+        original_ftp_settings = {
+            N: D.get(H, {}).get(N, B),
+            M: D.get(H, {}).get(M, B),
+        }
+        original_translation_settings = {
+            TRANSLATION_API_KEY: D.get(TRANSLATION_SETTINGS_KEY, {}).get(
+                TRANSLATION_API_KEY, B
+            ),
+        }
         Z = C.Notebook(a_, style="Settings.TNotebook")
         Z.pack(expand=J, fill=z, padx=12, pady=12)
         tab_padding = (12, 10)
@@ -4787,7 +4804,15 @@ class App(BU.Tk):
                         pass
             _set_available_columns(columns, table_ref)
             D[SQL_AVAILABLE_COLUMNS_KEY] = list(available_columns)
-            save_config(D)
+            save_config(
+                D,
+                preserve_secrets={
+                    H: {N, M},
+                    P: {N, M},
+                    K: {N, M},
+                    TRANSLATION_SETTINGS_KEY: {TRANSLATION_API_KEY},
+                },
+            )
             log_info_loc(
                 "sql_columns_detected",
                 table=table_ref,
@@ -5505,6 +5530,7 @@ class App(BU.Tk):
                 TRANSLATION_API_KEY: translation_api_key_var.get().strip(),
                 TRANSLATION_API_URL: translation_api_url_var.get().strip(),
             }
+            app_secret_changed = Ay
             restart_needed = Ay
             if system_unlocked:
                 new_app_secret = app_secret_var.get().strip()
@@ -5533,12 +5559,47 @@ class App(BU.Tk):
                     )
                     return
                 if new_app_secret != app_secret_value:
+                    app_secret_changed = J
                     common.APP_SECRET = new_app_secret
                     common.BASE_DIR_SETTINGS_TEMPLATE[APP_SECRET_KEY] = new_app_secret
                     encryption.APP_SECRET = new_app_secret
                 if new_base_dir != base_dir_value:
                     restart_needed = J
-            save_config(D)
+            preserve_secrets = {}
+            ftp_preserve = set()
+            if original_ftp_settings.get(N) == D[H][N]:
+                ftp_preserve.add(N)
+            if original_ftp_settings.get(M) == D[H][M]:
+                ftp_preserve.add(M)
+            if ftp_preserve:
+                preserve_secrets[H] = ftp_preserve
+            mssql_preserve = set()
+            if original_sql_settings["mssql"].get(N) == D[P][N]:
+                mssql_preserve.add(N)
+            if original_sql_settings["mssql"].get(M) == D[P][M]:
+                mssql_preserve.add(M)
+            if mssql_preserve:
+                preserve_secrets[P] = mssql_preserve
+            mysql_preserve = set()
+            if original_sql_settings["mysql"].get(N) == D[K][N]:
+                mysql_preserve.add(N)
+            if original_sql_settings["mysql"].get(M) == D[K][M]:
+                mysql_preserve.add(M)
+            if mysql_preserve:
+                preserve_secrets[K] = mysql_preserve
+            translation_preserve = set()
+            if (
+                original_translation_settings.get(TRANSLATION_API_KEY)
+                == D[TRANSLATION_SETTINGS_KEY].get(TRANSLATION_API_KEY, B)
+            ):
+                translation_preserve.add(TRANSLATION_API_KEY)
+            if translation_preserve:
+                preserve_secrets[TRANSLATION_SETTINGS_KEY] = translation_preserve
+            save_config(D, preserve_secrets=preserve_secrets)
+            if app_secret_changed and not restart_needed:
+                updated_config = config.load_config()
+                config.CONFIG.clear()
+                config.CONFIG.update(updated_config)
             if restart_needed:
                 O.showinfo(SETTINGS_LABEL, APP_SETTINGS_RESTART_MSG)
             A.sql_column_map = updated_sql_map
