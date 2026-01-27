@@ -27,7 +27,7 @@ jobs:
           python -m pip install "pyinstaller>=6.6,<7"
           python -m pip install -r requirements-build.txt
 
-      - name: Build EXE with PyInstaller (recommended onedir + minimal collection)
+      - name: Build EXE with PyInstaller (onefile + external Localization)
         shell: pwsh
         env:
           PICORGFTP_SQL_HEADLESS: "1"
@@ -36,11 +36,12 @@ jobs:
           pyinstaller --noconfirm --clean --log-level=WARN `
             --name PicOrgFTP-SQL `
             --noconsole `
-            --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" `
+            --onefile `
             --collect-submodules mysql.connector `
             --collect-data mysql.connector `
             --collect-data certifi `
             PicOrgFTP-SQL.pyw
+          Copy-Item -Path "picorgftp_sql/Localization" -Destination "dist/Localization" -Recurse -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
