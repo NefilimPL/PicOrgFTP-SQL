@@ -46,6 +46,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: PicOrgFTP-SQL-windows
-          path: |
-            dist/PicOrgFTP-SQL.exe
-            dist/Localization
+          path: dist/PicOrgFTP-SQL
