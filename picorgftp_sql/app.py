@@ -5148,7 +5148,9 @@ class App(BU.Tk):
                     request = BN.Request(
                         url, headers={"User-Agent": "Mozilla/5.0"}
                     )
-                    with BN.urlopen(request, timeout=5) as response:
+                    with BN.urlopen(
+                        request, timeout=5, context=SSL_CONTEXT
+                    ) as response:
                         payload = response.read().decode(k)
                     data = localization.Ar.loads(payload)
                     if isinstance(data, list) and data:
@@ -5192,7 +5194,9 @@ class App(BU.Tk):
                     request = BN.Request(
                         url, headers={"User-Agent": "Mozilla/5.0"}
                     )
-                    with BN.urlopen(request, timeout=5) as response:
+                    with BN.urlopen(
+                        request, timeout=5, context=SSL_CONTEXT
+                    ) as response:
                         payload = response.read().decode(k)
                     data = localization.Ar.loads(payload)
                     if isinstance(data, dict):
@@ -5231,7 +5235,9 @@ class App(BU.Tk):
                         data=payload,
                         headers={"User-Agent": "Mozilla/5.0"},
                     )
-                    with BN.urlopen(request, timeout=5) as response:
+                    with BN.urlopen(
+                        request, timeout=5, context=SSL_CONTEXT
+                    ) as response:
                         body = response.read().decode(k)
                     data = localization.Ar.loads(body)
                     if isinstance(data, dict):

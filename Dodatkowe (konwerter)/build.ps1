@@ -22,6 +22,7 @@ pyinstaller --noconfirm --clean --log-level=WARN `
   --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" `
   --collect-submodules mysql.connector `
   --collect-data mysql.connector `
+  --collect-data certifi `
   PicOrgFTP-SQL.pyw
 
 Write-Host "OK. Wynik: dist\PicOrgFTP-SQL\"

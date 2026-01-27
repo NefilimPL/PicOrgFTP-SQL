@@ -298,6 +298,7 @@ ensure_package("Pillow", "PIL")
 ensure_package("openpyxl")
 ensure_package("pyodbc")
 ensure_package("mysql-connector-python", "mysql.connector")
+ensure_package("certifi")
 
 import tkinter as F
 from tkinter import ttk as C, filedialog as BT, messagebox as O, simpledialog as BI
@@ -311,8 +312,27 @@ import mysql.connector
 import ctypes
 import json as Ar
 import base64 as BL
+import ssl as _ssl
+import certifi as _certifi
 
 APP_SECRET_PREFIX = "enc:"
+
+
+def _build_ssl_context():
+    """Return an SSL context with bundled CA certificates when available."""
+    try:
+        cafile = _certifi.where()
+    except Exception:
+        cafile = None
+    try:
+        if cafile:
+            return _ssl.create_default_context(cafile=cafile)
+        return _ssl.create_default_context()
+    except Exception:
+        return None
+
+
+SSL_CONTEXT = _build_ssl_context()
 
 
 def _xor_text(value, key):

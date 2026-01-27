@@ -39,6 +39,7 @@ jobs:
             --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" `
             --collect-submodules mysql.connector `
             --collect-data mysql.connector `
+            --collect-data certifi `
             PicOrgFTP-SQL.pyw
 
       - name: Upload artifact
