@@ -4,3 +4,4 @@ tkinterdnd2
 openpyxl
 mysql-connector-python
 pyodbc
+certifi
