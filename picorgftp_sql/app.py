@@ -3977,8 +3977,10 @@ class App(BU.Tk):
                 TRANSLATION_API_KEY, B
             ),
         }
+        a_.columnconfigure(0, weight=1)
+        a_.rowconfigure(0, weight=1)
         Z = C.Notebook(a_, style="Settings.TNotebook")
-        Z.pack(expand=J, fill=z, padx=12, pady=12)
+        Z.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
         tab_padding = (12, 10)
         L = C.Frame(Z, style="Settings.TFrame", padding=tab_padding)
         ftp_tab = C.Frame(Z, style="Settings.TFrame", padding=tab_padding)
@@ -5390,7 +5392,7 @@ class App(BU.Tk):
         fields_admin_btn = C.Button(fields_tab, text=Ag_, command=NO_DATA_MSG)
         fields_admin_btn.grid(row=0, column=1, sticky="e", padx=5, pady=5)
         A4 = C.Frame(a_, style="Settings.TFrame")
-        A4.pack(pady=5)
+        A4.grid(row=1, column=0, pady=5)
 
         def BD_():
             global LANG_PREF
