@@ -207,6 +207,7 @@ class App(BU.Tk):
         B._list_editor_window = I
         B._list_editor_notebook = I
         B._list_editor_tabs = {}
+        B._settings_window = I
         B._active_list_prompts = set()
         B._last_focus_widget = I
         B.dragging_idx = I
@@ -798,6 +799,13 @@ class App(BU.Tk):
         win = I
         detail = B
         ok = h
+        existing = getattr(A, "_settings_window", I)
+        had_existing = h
+        if existing and Aj(existing, "winfo_exists", I):
+            try:
+                had_existing = bool(existing.winfo_exists())
+            except E:
+                had_existing = h
         try:
             win = A._open_settings()
             if win and Aj(win, "winfo_exists", I):
@@ -810,7 +818,8 @@ class App(BU.Tk):
         except E as exc:
             ok = h
             detail = G(exc)
-        A._close_toplevel(win)
+        if not had_existing:
+            A._close_toplevel(win)
         return ok, detail
 
     def _ui_test_safe_button_clicks(A):
@@ -3922,6 +3931,24 @@ class App(BU.Tk):
             log_error_loc("folder_open_error", path=C_, error=P_)
 
     def _open_settings(A):
+        existing = getattr(A, "_settings_window", I)
+        if existing:
+            try:
+                if existing.winfo_exists():
+                    try:
+                        existing.deiconify()
+                        existing.lift()
+                        current_grab = existing.grab_current()
+                        if current_grab in (I, existing):
+                            existing.grab_set()
+                        existing.focus_force()
+                    except E:
+                        pass
+                    return existing
+            except E:
+                pass
+            A._settings_window = I
+        A._last_focus_widget = A.focus_get()
         a = CHANGE_DATA_ADMIN_LABEL
         Y = "*"
         i_ = "readonly"
@@ -3939,9 +3966,41 @@ class App(BU.Tk):
         Y_ = "write"
         d_ = i_
         a_ = F.Toplevel(A)
+        A._settings_window = a_
         a_.title(SETTINGS_LABEL)
         a_.configure(bg=A._ui_colors["bg"])
+        try:
+            a_.transient(A)
+        except E:
+            pass
         a_.grab_set()
+
+        def _raise_settings():
+            try:
+                if not a_.winfo_exists():
+                    return
+            except E:
+                return
+            try:
+                a_.deiconify()
+                a_.lift()
+            except E:
+                pass
+            try:
+                a_.focus_force()
+            except E:
+                pass
+            try:
+                current = a_.grab_current()
+            except E:
+                current = I
+            try:
+                if current in (I, a_):
+                    a_.grab_set()
+            except E:
+                pass
+
+        _raise_settings()
         slot_defs, _ = normalize_slot_definitions(D.get(SLOT_DEFS_KEY))
         sql_column_map, _ = normalize_sql_column_map(
             D.get(SQL_COLUMN_MAP_KEY), slot_defs
@@ -4930,17 +4989,24 @@ class App(BU.Tk):
                 fields_grid.columnconfigure(col, weight=1)
 
         def _add_field():
-            label = BI.askstring(FIELD_ADD_TITLE, FIELD_NAME_PROMPT)
+            label = BI.askstring(
+                FIELD_ADD_TITLE, FIELD_NAME_PROMPT, parent=a_
+            )
+            _raise_settings()
             if label is I:
                 return
             label = label.strip()
             if not label:
-                O.showwarning(WARNING_LABEL, FIELD_NAME_REQUIRED_MSG)
+                O.showwarning(WARNING_LABEL, FIELD_NAME_REQUIRED_MSG, parent=a_)
                 return
             if any(
                 s["label"].strip().lower() == label.lower() for s in slot_defs
             ):
-                O.showwarning(WARNING_LABEL, FIELD_NAME_DUPLICATE_MSG.format(label=label))
+                O.showwarning(
+                    WARNING_LABEL,
+                    FIELD_NAME_DUPLICATE_MSG.format(label=label),
+                    parent=a_,
+                )
                 return
             prefix = next_slot_prefix(slot_defs)
             slot_defs.append({"prefix": prefix, "label": label})
@@ -4950,6 +5016,10 @@ class App(BU.Tk):
         def _edit_field(slot):
             editor = F.Toplevel(a_)
             editor.title(FIELD_EDIT_TITLE)
+            try:
+                editor.transient(a_)
+            except E:
+                pass
             editor.grab_set()
             C.Label(editor, text=FIELD_NAME_LABEL).grid(
                 row=0, column=0, padx=5, pady=5, sticky=R
@@ -4981,10 +5051,18 @@ class App(BU.Tk):
                         column_var.set(column)
 
                 column_entry.dnd_bind("<<Drop>>", _drop_to_column)
+            def _close_editor():
+                try:
+                    editor.destroy()
+                finally:
+                    _raise_settings()
+
             def _save_field():
                 new_label = name_var.get().strip()
                 if not new_label:
-                    O.showwarning(WARNING_LABEL, FIELD_NAME_REQUIRED_MSG)
+                    O.showwarning(
+                        WARNING_LABEL, FIELD_NAME_REQUIRED_MSG, parent=editor
+                    )
                     return
                 if any(
                     s is not slot
@@ -4994,23 +5072,25 @@ class App(BU.Tk):
                     O.showwarning(
                         WARNING_LABEL,
                         FIELD_NAME_DUPLICATE_MSG.format(label=new_label),
+                        parent=editor,
                     )
                     return
                 slot["label"] = new_label
                 sql_column_map[slot["prefix"]] = G(column_var.get() or B).strip()
                 _refresh_fields_grid()
-                editor.destroy()
+                _close_editor()
 
             def _delete_field():
                 if not O.askyesno(
                     WARNING_LABEL,
                     FIELD_DELETE_CONFIRM_MSG.format(label=slot["label"]),
+                    parent=editor,
                 ):
                     return
                 slot_defs.remove(slot)
                 sql_column_map.pop(slot["prefix"], I)
                 _refresh_fields_grid()
-                editor.destroy()
+                _close_editor()
 
             def _lang_code_from_filename(filename):
                 name = localization.settings.A.path.splitext(G(filename))[0].lower()
@@ -5169,7 +5249,9 @@ class App(BU.Tk):
             def _open_translation_dialog():
                 label = name_var.get().strip()
                 if not label:
-                    O.showwarning(WARNING_LABEL, FIELD_NAME_REQUIRED_MSG)
+                    O.showwarning(
+                        WARNING_LABEL, FIELD_NAME_REQUIRED_MSG, parent=editor
+                    )
                     return
                 lang_files = _discover_localization_files()
                 current_lang = LANG_PREF
@@ -5184,7 +5266,9 @@ class App(BU.Tk):
                         if code != current_lang
                     }
                 if not lang_files:
-                    O.showwarning(WARNING_LABEL, FIELD_TRANSLATE_NO_FILES_MSG)
+                    O.showwarning(
+                        WARNING_LABEL, FIELD_TRANSLATE_NO_FILES_MSG, parent=editor
+                    )
                     return
                 provider_label = translation_provider_var.get()
                 provider_value = translation_provider_map.get(
@@ -5195,11 +5279,17 @@ class App(BU.Tk):
                 api_url = translation_api_url_var.get().strip()
                 if provider_value == TRANSLATION_PROVIDER_DEEPL and not api_key:
                     O.showwarning(
-                        WARNING_LABEL, FIELD_TRANSLATE_MISSING_API_KEY_MSG
+                        WARNING_LABEL,
+                        FIELD_TRANSLATE_MISSING_API_KEY_MSG,
+                        parent=editor,
                     )
                 key = f"slot_label_{label.lower()}"
                 dialog = F.Toplevel(editor)
                 dialog.title(FIELD_TRANSLATE_TITLE)
+                try:
+                    dialog.transient(editor)
+                except E:
+                    pass
                 dialog.grab_set()
                 row = 0
                 vars_by_lang = {}
@@ -5277,6 +5367,7 @@ class App(BU.Tk):
                             O.showerror(
                                 localization.AK,
                                 FIELD_TRANSLATE_SAVE_FAILED_MSG.format(error=exc),
+                                parent=dialog,
                             )
                             return
                     dialog.destroy()
@@ -5297,9 +5388,14 @@ class App(BU.Tk):
                             FIELD_TRANSLATE_FETCH_FAILED_DETAIL_MSG.format(
                                 provider=provider_label, error=last_error
                             ),
+                            parent=dialog,
                         )
                     else:
-                        O.showwarning(WARNING_LABEL, FIELD_TRANSLATE_FETCH_FAILED_MSG)
+                        O.showwarning(
+                            WARNING_LABEL,
+                            FIELD_TRANSLATE_FETCH_FAILED_MSG,
+                            parent=dialog,
+                        )
 
             translate_row = C.Frame(editor)
             translate_row.grid(row=2, column=0, columnspan=2, pady=(0, 5))
@@ -5317,10 +5413,10 @@ class App(BU.Tk):
             C.Button(button_row, text=FIELD_DELETE_LABEL, command=_delete_field).grid(
                 row=0, column=1, padx=5
             )
-            C.Button(button_row, text=CANCEL_LABEL, command=editor.destroy).grid(
+            C.Button(button_row, text=CANCEL_LABEL, command=_close_editor).grid(
                 row=0, column=2, padx=5
             )
-            editor.protocol("WM_DELETE_WINDOW", editor.destroy)
+            editor.protocol("WM_DELETE_WINDOW", _close_editor)
 
         _refresh_fields_grid()
 
@@ -5632,7 +5728,12 @@ class App(BU.Tk):
             A.opt_compress.trace_remove(Y_, compress_trace)
             A.opt_maxsize.trace_remove(Y_, maxsize_trace)
             A.opt_convert_tif.trace_remove(Y_, convert_tif_trace)
-            a_.destroy()
+            if getattr(A, "_settings_window", I) is a_:
+                A._settings_window = I
+            try:
+                a_.destroy()
+            finally:
+                A._restore_focus()
 
         C.Button(A4, text=CANCEL_LABEL, command=Af).grid(row=0, column=1, padx=5)
         a_.protocol("WM_DELETE_WINDOW", Af)
