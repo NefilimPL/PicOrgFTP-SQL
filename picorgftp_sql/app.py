@@ -799,7 +799,7 @@ class App(BU.Tk):
         win = I
         detail = B
         ok = h
-        existing = Aj(A, "_settings_window", I)
+        existing = getattr(A, "_settings_window", I)
         had_existing = h
         if existing and Aj(existing, "winfo_exists", I):
             try:
@@ -3931,7 +3931,7 @@ class App(BU.Tk):
             log_error_loc("folder_open_error", path=C_, error=P_)
 
     def _open_settings(A):
-        existing = Aj(A, "_settings_window", I)
+        existing = getattr(A, "_settings_window", I)
         if existing:
             try:
                 if existing.winfo_exists():
@@ -5728,7 +5728,7 @@ class App(BU.Tk):
             A.opt_compress.trace_remove(Y_, compress_trace)
             A.opt_maxsize.trace_remove(Y_, maxsize_trace)
             A.opt_convert_tif.trace_remove(Y_, convert_tif_trace)
-            if Aj(A, "_settings_window", I) is a_:
+            if getattr(A, "_settings_window", I) is a_:
                 A._settings_window = I
             try:
                 a_.destroy()
