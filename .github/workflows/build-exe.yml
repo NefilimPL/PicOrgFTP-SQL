@@ -29,6 +29,9 @@ jobs:
 
       - name: Build EXE with PyInstaller (recommended onedir + minimal collection)
         shell: pwsh
+        env:
+          PICORGFTP_SQL_HEADLESS: "1"
+          PYINSTALLER_BUILD: "1"
         run: |
           pyinstaller --noconfirm --clean --log-level=WARN `
             --name PicOrgFTP-SQL `

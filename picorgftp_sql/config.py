@@ -41,7 +41,7 @@ from .common import (
     w,
 )
 from .encryption import decrypt, encrypt
-from .settings import AC, AM, BASE_DIR_OVERRIDE
+from .settings import AC, AM, BASE_DIR_OVERRIDE, HEADLESS_ENV
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
 
 CONFIG_PATH = A.path.join(AC, "config.json")
@@ -71,7 +71,7 @@ def load_config():
     config_copy = Ar.loads(Ar.dumps(DEFAULT_CONFIG))
     config_path = CONFIG_PATH
     if not A.path.exists(config_path):
-        if not BASE_DIR_OVERRIDE:
+        if not BASE_DIR_OVERRIDE and not HEADLESS_ENV:
             chosen_dir = BT.askdirectory(title=CONFIG_DIR_PROMPT_TITLE)
             if chosen_dir:
                 config_path = A.path.join(chosen_dir, "config.json")
