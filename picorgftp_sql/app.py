@@ -5492,6 +5492,7 @@ class App(BU.Tk):
 
         def BD_():
             global LANG_PREF
+            old_lang_pref = LANG_PREF
             D[H][v] = s.get().strip()
             try:
                 D[H][r] = int(t.get())
@@ -5618,7 +5619,13 @@ class App(BU.Tk):
                             column=column,
                         )
             new_lang_pref = lang_var.get().strip()
+            if not new_lang_pref:
+                new_lang_pref = LANGUAGE_PREF_DEFAULT
             save_language_pref(new_lang_pref)
+            language_changed = (
+                G(new_lang_pref).strip().lower()
+                != G(old_lang_pref or LANGUAGE_PREF_DEFAULT).strip().lower()
+            )
             LANG_PREF = new_lang_pref
             localization.LANG_PREF = LANG_PREF
             D[TRANSLATION_SETTINGS_KEY] = {
@@ -5698,7 +5705,7 @@ class App(BU.Tk):
                 updated_config = config.load_config()
                 config.CONFIG.clear()
                 config.CONFIG.update(updated_config)
-            if restart_needed:
+            if restart_needed and not language_changed:
                 O.showinfo(SETTINGS_LABEL, APP_SETTINGS_RESTART_MSG)
             A.sql_column_map = updated_sql_map
             before_prefixes = [slot["prefix"] for slot in current_slot_defs]
@@ -5720,6 +5727,14 @@ class App(BU.Tk):
                     log_info_loc("slot_defs_apply_restart")
             log_info_loc("settings_saved")
             Af()
+            if language_changed:
+                if A.is_processing:
+                    O.showinfo(SETTINGS_LABEL, RESTART_TO_APPLY_LABEL)
+                else:
+                    try:
+                        A.after(150, A._restart_application)
+                    except E:
+                        A._restart_application()
 
         C.Button(A4, text=SAVE_LABEL, command=BD_).grid(row=0, column=0, padx=5)
 
@@ -5741,6 +5756,29 @@ class App(BU.Tk):
         a_._close_settings = Af
         a_._close_window = Af
         return a_
+
+    def _restart_application(B):
+        args = I
+        try:
+            if getattr(sys, "frozen", h):
+                args = [sys.executable] + sys.argv[1:]
+            else:
+                args = [sys.executable] + sys.argv
+        except E:
+            args = I
+        if not args:
+            return
+        try:
+            A.execv(args[0], args)
+        except E:
+            try:
+                BH.Popen(args)
+            except E:
+                return
+            try:
+                B.destroy()
+            except E:
+                pass
 
     def _change_language(A):
         B = BI.askstring(SETTINGS_LABEL, LANGUAGE_PROMPT)
