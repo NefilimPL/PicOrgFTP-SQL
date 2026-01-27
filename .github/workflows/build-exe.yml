@@ -37,16 +37,16 @@ jobs:
             --name PicOrgFTP-SQL `
             --noconsole `
             --onefile `
+            --distpath "dist/output" `
+            --workpath "build/output" `
             --collect-submodules mysql.connector `
             --collect-data mysql.connector `
             --collect-data certifi `
             PicOrgFTP-SQL.pyw
-          Copy-Item -Path "picorgftp_sql/Localization" -Destination "dist/Localization" -Recurse -Force
+          Copy-Item -Path "picorgftp_sql/Localization" -Destination "dist/output/Localization" -Recurse -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: PicOrgFTP-SQL-windows
-          path: |
-            dist/PicOrgFTP-SQL.exe
-            dist/Localization
+          path: dist/output
