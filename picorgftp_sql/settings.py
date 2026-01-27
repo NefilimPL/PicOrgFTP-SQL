@@ -46,8 +46,20 @@ def _resolve_localization_root():
     return A.path.join(module_dir, "Localization")
 
 
+def _is_headless_env():
+    """Return True when running without interactive UI (CI/build)."""
+
+    truthy = {"1", "true", "yes", "on"}
+    for key in ("PICORGFTP_SQL_HEADLESS", "PYINSTALLER_BUILD", "CI", "GITHUB_ACTIONS"):
+        value = A.environ.get(key)
+        if value and value.strip().lower() in truthy:
+            return J
+    return h
+
+
 BASE_DIR_SETTINGS_PATH = A.path.join(_resolve_settings_root(), BASE_DIR_SETTINGS_FILE)
 BASE_DIR_OVERRIDE_WARNING = I
+HEADLESS_ENV = _is_headless_env()
 
 
 def _load_base_dir_override(settings_path, template, fallback_value):
@@ -151,11 +163,28 @@ def _prompt_for_base_dir(settings_path, template, current_value, message):
             pass
 
 
+def _resolve_headless_base_dir(settings_path, template, candidate):
+    """Resolve a base directory without prompting for input."""
+
+    if candidate:
+        ok, _ = _ensure_directory_access(candidate)
+        if ok:
+            return candidate, I
+    fallback = A.path.dirname(settings_path) or A.getcwd()
+    ok, _ = _ensure_directory_access(fallback)
+    if ok:
+        _save_base_dir_override(settings_path, template, fallback)
+        return fallback, I
+    return A.getcwd(), I
+
+
 def _ensure_base_dir_override(settings_path, template, fallback_value):
     """Resolve a usable base directory, prompting when necessary."""
 
     override_value = _load_base_dir_override(settings_path, template, fallback_value)
     candidate = override_value.strip() if Aq(override_value, str) else B
+    if HEADLESS_ENV:
+        return _resolve_headless_base_dir(settings_path, template, candidate)
     if candidate:
         ok, error = _ensure_directory_access(candidate)
         if ok:
