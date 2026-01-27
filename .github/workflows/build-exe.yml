@@ -27,7 +27,7 @@ jobs:
           python -m pip install "pyinstaller>=6.6,<7"
           python -m pip install -r requirements-build.txt
 
-      - name: Build EXE with PyInstaller (onefile + external Localization)
+      - name: Build EXE with PyInstaller (recommended onedir + minimal collection)
         shell: pwsh
         env:
           PICORGFTP_SQL_HEADLESS: "1"
