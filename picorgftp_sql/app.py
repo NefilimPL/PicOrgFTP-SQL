@@ -5771,8 +5771,16 @@ class App(BU.Tk):
                 args = [sys.executable] + sys.argv[1:]
                 try:
                     env = A.environ.copy()
-                    env.pop("_MEIPASS2", I)
-                    env.pop("PYINSTALLER_PARENT_PID", I)
+                    for key in (
+                        "_MEIPASS2",
+                        "PYINSTALLER_PARENT_PID",
+                        "PYINSTALLER_ARCHIVE_FILE",
+                        "TCL_LIBRARY",
+                        "TK_LIBRARY",
+                        "PYTHONHOME",
+                        "PYTHONPATH",
+                    ):
+                        env.pop(key, I)
                 except E:
                     env = I
             else:
