@@ -7,11 +7,23 @@ Python picture organiser with ability to send to FTP and SQL
 The script provides a graphical interface where you enter the product name, type, model and colours. You can drag and drop images into the form. After filling the required fields and confirming:
 
 1. Files are copied to the `_ZDJECIA PRZEROBIONE_` directory and arranged using the structure `NAME/TYPE/MODEL/COLOR1_COLOR2_COLOR3/ADDITION`.
-2. Images are optimised, converted to JPEG/PNG and receive the name `EAN_slot.ext`.
+2. Images are optimised, optionally resized/compressed/converted (JPEG/PNG/etc.), and receive a structured name starting with `EAN_slot...`.
 3. If `enable_ftp_update` is enabled, new files are uploaded to the FTP server and old versions with the same EAN can be removed.
 4. If `enable_sql_update` is enabled, an SQL query is executed to update image paths in the `sql` or `mysql` database.
 
 Program actions are logged to `changes_log.txt` and errors to `error_log.txt`. On first run a `config.json` file with connection settings is created.
+
+### Features
+- Product form with auto-complete lists (name/type/model/colors/extras) backed by an Excel workbook; prompts to add missing values and includes a list editor.
+- Optional EAN (13-digit) with `BRAK-EAN` fallback; quick "Load" to fetch existing entries and images; "Open folder" shortcut.
+- Drag-and-drop image slots with thumbnails; move images between slots; per-slot status plus LOCAL/FTP/SQL presence badges; clear/reset actions.
+- Automated file organization into `_ZDJECIA PRZEROBIONE_` with a structured folder tree and normalized filenames based on EAN, slot, and product data.
+- Image processing options: resize to max dimension, compression quality, max file size limit (quality downscale), and optional TIFF conversion to a chosen format.
+- FTP integration: connection test, upload new images, delete old versions for the same EAN, check remote presence, and download remote-only files.
+- SQL integration (MS SQL via ODBC or MySQL): connection test, parameterized update query, optional presence check per slot, column detection, and drag-and-drop column mapping.
+- Customizable photo fields (add/rename/remove slot definitions) with SQL mapping and translation suggestions (Google/MyMemory/DeepL) saved to localization files.
+- Settings & localization: base directory in `local_settings.json`, language switch (auto/pl/ua/eng), encrypted secrets via `APP_SECRET`, admin-unlocked settings where required.
+- Diagnostics & logs: error test buttons, code/UI diagnostics reports, `changes_log.txt`/`error_log.txt` plus the in-app log with a clear button.
 
 ### Configuration
 The application stores its working files in the directory defined in the `local_settings.json` file located next to `PicOrgFTP-SQL.pyw`. The file is created automatically on first launch; if it does not contain a path, the script asks for a folder and saves the selected location back to `local_settings.json`. You can use forward slashes in the path (e.g. `C:/TEST/GUI_ZDJ`) to avoid escaping backslashes on Windows. If the configured folder later becomes unavailable, the application asks you to point to a new location.
@@ -57,11 +69,23 @@ If you need to tweak build dependencies, edit `requirements-build.txt`. The work
 Skrypt udostępnia graficzny interfejs, w którym wprowadza się nazwę, typ, model i kolory produktu. Do formularza można przeciągać zdjęcia metodą drag-and-drop. Po uzupełnieniu wymaganych pól i zatwierdzeniu:
 
 1. Pliki są kopiowane do katalogu `_ZDJECIA PRZEROBIONE_` i układane według struktury `NAZWA/TYP/MODEL/KOLOR1_KOLOR2_KOLOR3/DODATEK`.
-2. Zdjęcia są optymalizowane, konwertowane do JPEG/PNG i otrzymują nazwę `EAN_slot.ext`.
+2. Zdjęcia są optymalizowane, opcjonalnie skalowane/kompresowane/konwertowane (JPEG/PNG/etc.) i otrzymują ustrukturyzowaną nazwę zaczynającą się od `EAN_slot...`.
 3. Jeżeli włączono `enable_ftp_update`, nowe pliki są wysyłane na serwer FTP, a stare wersje o tym samym EAN mogą zostać usunięte.
 4. Jeżeli włączono `enable_sql_update`, wykonywane jest zapytanie SQL, które aktualizuje ścieżki obrazów w bazie `sql` lub `mysql`.
 
 Działania programu są zapisywane w `changes_log.txt`, a ewentualne błędy w `error_log.txt`. Przy pierwszym uruchomieniu tworzony jest plik `config.json` z ustawieniami połączeń.
+
+### Funkcje
+- Formularz danych produktu z listami podpowiedzi (nazwa/typ/model/kolory/dodatki) opartymi o plik Excel; pytania o dodanie nowych pozycji i edytor list.
+- Opcjonalny EAN (13 cyfr) z zamiennikiem `BRAK-EAN`; szybkie wczytywanie danych po EAN i skrót do otwarcia katalogu produktu.
+- Sloty zdjęć z drag-and-drop i miniaturami; przenoszenie zdjęć między slotami; statusy oraz oznaczenia LOCAL/FTP/SQL; czyszczenie/reset.
+- Automatyczna organizacja plików w `_ZDJECIA PRZEROBIONE_` z drzewem katalogów i ustandaryzowaną nazwą opartą o EAN, slot i dane produktu.
+- Ustawienia obróbki: skalowanie do maks. wymiaru, kompresja jakości, limit maks. rozmiaru pliku (obniżanie jakości) oraz opcjonalna konwersja TIFF do wybranego formatu.
+- FTP: test połączenia, wysyłka nowych zdjęć, usuwanie starych dla tego samego EAN, sprawdzanie obecności na FTP i pobieranie brakujących.
+- SQL (MS SQL przez ODBC lub MySQL): test połączenia, zapytanie aktualizujące, opcjonalne sprawdzanie obecności dla slotów, wykrywanie kolumn i mapowanie przez drag-and-drop.
+- Konfigurowalne pola zdjęć (dodawanie/zmiana/usuwanie slotów) wraz z mapowaniem SQL i podpowiedziami tłumaczeń (Google/MyMemory/DeepL) zapisywanymi do plików lokalizacji.
+- Ustawienia i język: katalog roboczy w `local_settings.json`, przełączanie języka (auto/pl/ua/eng), szyfrowanie sekretów przez `APP_SECRET`, blokada edycji wrażliwych ustawień bez uprawnień administratora.
+- Diagnostyka i logi: testy błędów, raporty diagnostyki kodu/UI, `changes_log.txt` i `error_log.txt` plus log w aplikacji z przyciskiem czyszczenia.
 
 ### Konfiguracja
 Aplikacja zapisuje pliki robocze w katalogu zdefiniowanym w pliku `local_settings.json`, znajdującym się obok `PicOrgFTP-SQL.pyw`. Plik tworzy się automatycznie przy pierwszym uruchomieniu; jeżeli nie zawiera ścieżki, skrypt poprosi o wskazanie folderu i zapisze wybór do `local_settings.json`. W ścieżce możesz użyć ukośników (np. `C:/TEST/GUI_ZDJ`), aby uniknąć konieczności podwójnego wpisywania ukośników odwrotnych w systemie Windows. Jeżeli zapisany katalog stanie się niedostępny, aplikacja poprosi o wybranie nowej lokalizacji.
