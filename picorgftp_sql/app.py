@@ -5767,6 +5767,21 @@ class App(BU.Tk):
         args = I
         env = I
         try:
+            meipass = getattr(sys, "_MEIPASS", B)
+        except E:
+            meipass = B
+        if getattr(sys, "frozen", h) and meipass:
+            try:
+                base_name = A.path.basename(meipass)
+            except E:
+                base_name = B
+            if base_name.startswith("_MEI"):
+                try:
+                    O.showinfo(SETTINGS_LABEL, RESTART_TO_APPLY_LABEL)
+                except E:
+                    pass
+                return
+        try:
             if getattr(sys, "frozen", h):
                 args = [sys.executable] + sys.argv[1:]
                 try:
