@@ -5765,9 +5765,16 @@ class App(BU.Tk):
 
     def _restart_application(B):
         args = I
+        env = I
         try:
             if getattr(sys, "frozen", h):
                 args = [sys.executable] + sys.argv[1:]
+                try:
+                    env = A.environ.copy()
+                    env.pop("_MEIPASS2", I)
+                    env.pop("PYINSTALLER_PARENT_PID", I)
+                except E:
+                    env = I
             else:
                 args = [sys.executable] + sys.argv
         except E:
@@ -5775,16 +5782,13 @@ class App(BU.Tk):
         if not args:
             return
         try:
-            A.execv(args[0], args)
+            BH.Popen(args, env=env)
         except E:
-            try:
-                BH.Popen(args)
-            except E:
-                return
-            try:
-                B.destroy()
-            except E:
-                pass
+            return
+        try:
+            B.destroy()
+        except E:
+            pass
 
     def _change_language(A):
         B = BI.askstring(SETTINGS_LABEL, LANGUAGE_PROMPT)
