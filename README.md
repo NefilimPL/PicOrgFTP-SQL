@@ -2,6 +2,7 @@
 Python picture organiser with ability to send to FTP and SQL
 
 [![Build Windows EXE](https://github.com/NefilimPL/PicOrgFTP-SQL/actions/workflows/build-exe.yml/badge.svg?branch=main)](https://github.com/NefilimPL/PicOrgFTP-SQL/actions/workflows/build-exe.yml)
+<img width="1920" height="1040" alt="image" src="https://github.com/user-attachments/assets/3f86df9f-61cb-475d-a110-4ce0dda69c0c" />
 
 ## English
 
