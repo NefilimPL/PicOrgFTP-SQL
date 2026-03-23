@@ -3570,6 +3570,21 @@ class App(BU.Tk):
             seeded += 1
         return seeded
 
+    def _get_slot_existing_remote_filename(A, slot_prefix):
+        """Return the current short remote name for a slot when it can be inferred."""
+
+        current_remote_name = G(A.ftp_presence.get(slot_prefix) or B).strip()
+        if current_remote_name:
+            return current_remote_name
+        original_name = G(A.original_files.get(slot_prefix) or B).strip()
+        if not original_name:
+            return B
+        original_ext = A.path.splitext(original_name)[1].lower()
+        parsed = parse_slot_filename(original_name)
+        if not parsed or not parsed.ean:
+            return B
+        return f"{parsed.ean}_{slot_prefix}{original_ext}"
+
     def _load_slot_thumbnail(B, path):
         cache_key, thumb = B._get_cached_thumbnail(path)
         if thumb is not I:
@@ -5204,6 +5219,17 @@ class App(BU.Tk):
                 A.makedirs(i_, exist_ok=J)
                 BM_ = []
                 files_to_upload = []
+                ftp_delete_candidates = {
+                    G(remote_name).strip()
+                    for remote_name in C.pending_ftp_deletions.values()
+                    if G(remote_name).strip()
+                }
+                sql_update_prefixes = set()
+                sql_clear_prefixes = {
+                    C.slots[idx][Aa]
+                    for idx in C.pending_ftp_deletions
+                    if 0 <= idx < Q(C.slots)
+                }
                 try:
                     if A.path.exists(AN):
                         Af.rmtree(AN)
@@ -5376,19 +5402,47 @@ class App(BU.Tk):
                         C.pending_additions.pop(F_, I)
                         continue
                     S_ = A.path.join(i_, c_)
-                    current_remote_name = G(C.ftp_presence.get(C.slots[F_][Aa]) or B).strip()
+                    slot = C.slots[F_]
+                    Az_ = slot[Aa]
+                    actual_remote_name = G(C.ftp_presence.get(Az_) or B).strip()
+                    current_remote_name = C._get_slot_existing_remote_filename(Az_)
+                    expected_remote_name = C._build_expected_remote_filename(
+                        F_,
+                        K_,
+                        src_path,
+                        convert_tif_enabled=convert_tif_enabled,
+                        target_ext=target_ext,
+                    )
                     try:
                         same_source_target = A.path.samefile(src_path, S_)
                     except E:
                         same_source_target = A.path.normcase(
                             A.path.normpath(src_path)
                         ) == A.path.normcase(A.path.normpath(S_))
-                    metadata_migration = (not same_source_target) or (
-                        current_remote_name and current_remote_name != c_
+                    remote_missing = Az_ not in C.ftp_presence
+                    remote_name_changed = bool(
+                        expected_remote_name
+                        and current_remote_name
+                        and current_remote_name != expected_remote_name
                     )
+                    remote_sync_needed = bool(
+                        slot.get(B0) == AR or remote_missing or remote_name_changed
+                    )
+                    sql_known_missing = Aq(C.sql_presence, dict) and not C.sql_presence.get(
+                        Az_, h
+                    )
+                    sql_update_needed = bool(
+                        expected_remote_name
+                        and (
+                            remote_name_changed
+                            or sql_known_missing
+                            or (slot.get(B0) == AR and not current_remote_name)
+                        )
+                    )
+                    metadata_migration = (not same_source_target) or remote_name_changed
                     if (
                         F_ not in C.pending_deletions
-                        and C.slots[F_].get(B0) != AR
+                        and slot.get(B0) != AR
                         and not metadata_migration
                     ):
                         C.pending_additions.pop(F_, I)
@@ -5396,11 +5450,7 @@ class App(BU.Tk):
                     C._update_slot_activity(
                         F_, active=J, status=C._slot_status["processing"]
                     )
-                    slot = C.slots[F_]
                     BH_ = A.path.splitext(src_path)[1]
-                    Az_ = slot[Aa]
-                    if F_ in C.pending_ftp_deletions and C.pending_ftp_deletions[F_] == c_:
-                        C.pending_ftp_deletions.pop(F_, I)
                     temp_output_path = B
                     try:
                         if F_ in C.pending_deletions:
@@ -5573,7 +5623,19 @@ class App(BU.Tk):
                             if not same_source_target:
                                 Af.copy2(src_path, S_)
                             log_info_loc("file_added_modified", file=c_)
-                        files_to_upload.append(c_)
+                        if remote_name_changed and actual_remote_name:
+                            ftp_delete_candidates.add(actual_remote_name)
+                        if sql_update_needed:
+                            sql_update_prefixes.add(Az_)
+                        if (
+                            F_ in C.pending_ftp_deletions
+                            and expected_remote_name
+                            and C.pending_ftp_deletions[F_] == expected_remote_name
+                        ):
+                            C.pending_ftp_deletions.pop(F_, I)
+                            ftp_delete_candidates.discard(expected_remote_name)
+                        if remote_sync_needed and c_ not in files_to_upload:
+                            files_to_upload.append(c_)
                         C.slots[F_][f] = S_
                     except E as y:
                         log_error_loc(
@@ -5641,6 +5703,7 @@ class App(BU.Tk):
                         fname = A.path.basename(path)
                         if fname not in files_to_upload:
                             files_to_upload.append(fname)
+                        sql_update_prefixes.add(slot[Aa])
                         C.pending_additions.setdefault(idx, path)
                 Am_ = {}
                 for F_, T in list(C.pending_deletions.items()):
@@ -5661,14 +5724,13 @@ class App(BU.Tk):
                             log_info_loc(
                                 "file_deleted", file=A.path.basename(T)
                             )
-                            BO_ = A.path.basename(T)
-                            P_ = BO_.split(a)
-                            if Q(P_) >= 2:
-                                An_ = P_[0]
-                                Bi = P_[1]
-                                Bj = A.path.splitext(BO_)[1]
-                                if An_ and Q(An_) == 13 and An_.isdigit():
-                                    BM_.append(f"{An_}_{Bi}{Bj}")
+                            if F_ not in C.pending_additions:
+                                current_remote_name = G(
+                                    C.ftp_presence.get(C.slots[F_][Aa]) or B
+                                ).strip()
+                                if current_remote_name:
+                                    ftp_delete_candidates.add(current_remote_name)
+                                sql_clear_prefixes.add(C.slots[F_][Aa])
                     except E as y:
                         log_error_loc(
                             "file_delete_failed",
@@ -5677,9 +5739,7 @@ class App(BU.Tk):
                         )
                         result_data[K].add(F_)
                         Am_[F_] = T
-                for Cz_ in C.pending_ftp_deletions.values():
-                    if Cz_:
-                        BM_.append(Cz_)
+                BM_ = sorted(ftp_delete_candidates)
                 result_data[n] = BE_
                 result_data[o] = Am_
                 add_set = set(C.pending_additions.keys())
@@ -5836,16 +5896,7 @@ class App(BU.Tk):
                             B3_ = C._resolve_sql_column(Az_, d_["label"], log_missing=J)
                             if not B3_:
                                 continue
-                            if d_[f]:
-                                if Az_ in C.ftp_presence:
-                                    remote_fname = C.ftp_presence.get(Az_)
-                                    if not isinstance(remote_fname, str) or not remote_fname:
-                                        continue
-                                    parts = remote_fname.split(a)
-                                    if Q(parts) >= 2:
-                                        remote_label = parts[1].split(".")[0]
-                                        if remote_label != Az_:
-                                            continue
+                            if Az_ in sql_update_prefixes and d_[f]:
                                 Bs = A.path.basename(d_[f])
                                 ext = A.path.splitext(Bs)[1].lower()
                                 short_name = f"{K_}_{Az_}{ext}"
@@ -5862,7 +5913,7 @@ class App(BU.Tk):
                                 Aq_ += 1
                                 if Aj(cur, A3, -1) >= 0:
                                     CANCEL_LABEL += cur.rowcount
-                            elif Az_ in C.original_files:
+                            elif Az_ in sql_clear_prefixes:
                                 AX_ = D.get(w, SQL_UPDATE_TEMPLATE)
                                 AY_ = I
                                 AZ_ = I
@@ -6001,7 +6052,10 @@ class App(BU.Tk):
             K_val = result_data.get("ean", K_)
             saved_entry_record = result_data.get("saved_entry")
             if not err_set and not A__ and not Y_ and not AW_msg:
-                C._load_existing_files()
+                if saved_entry_record:
+                    C._load_entry_record(saved_entry_record)
+                else:
+                    C._load_existing_files()
             elif saved_entry_record:
                 C._set_loaded_entry_context(saved_entry_record)
             if err_set:
