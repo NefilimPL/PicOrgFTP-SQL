@@ -1,6 +1,8 @@
 """Main Tkinter application class."""
 
+import ast
 import copy
+from collections import OrderedDict, deque
 import queue
 import re
 import traceback
@@ -8,6 +10,16 @@ import tokenize
 
 from .common import *  # noqa: F401,F403
 from .excel_utils import (
+    COLOR1_HEADER,
+    COLOR2_HEADER,
+    COLOR3_HEADER,
+    EAN_HEADER,
+    ENTRY_RECORDS_KEY,
+    EXTRA_HEADER,
+    MODEL_HEADER,
+    NAME_HEADER,
+    PRODUCT_ID_HEADER,
+    TYPE_HEADER,
     add_to_list,
     label_category,
     prepare_excel_lists,
@@ -21,6 +33,17 @@ from .config import save_config
 from . import config, localization, settings, common, encryption
 from .settings import BW, EXCEL_SHEETS, AN, l
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map, next_slot_prefix
+from .workflow_utils import (
+    build_product_directory,
+    build_remote_slot_filename,
+    build_slot_filename,
+    build_sql_presence_query,
+    has_presence_value,
+    normalize_extra_segment,
+    parse_slot_filename,
+    select_remote_files_for_ean,
+    unique_columns,
+)
 
 D = config.CONFIG
 LANG_PREF = localization.LANG_PREF
@@ -92,6 +115,32 @@ def _pick_lanczos_filter():
 
 
 LANCZOS_FILTER = _pick_lanczos_filter()
+SLOT_GRID_COLUMNS = 5
+SLOT_PREVIEW_SIZE = (240, 176)
+THUMBNAIL_RESULT_BATCH = 6
+THUMBNAIL_POLL_MS = 28
+PERF_MONITOR_MS = 16
+PERF_SAMPLE_WINDOW = 90
+FORM_TRACKED_FIELDS = (
+    "name",
+    "type",
+    "model",
+    "color1",
+    "color2",
+    "color3",
+    "extra",
+    "ean",
+)
+FORM_TRACKED_VAR_ATTRS = {
+    "name": "var_name",
+    "type": "var_type",
+    "model": "var_model",
+    "color1": "var_color1",
+    "color2": "var_color2",
+    "color3": "var_color3",
+    "extra": "var_extra",
+    "ean": "var_ean",
+}
 
 FORMAT_INFO_TEXTS = {
     "JPEG": LANG.get(
@@ -144,7 +193,8 @@ class App(BU.Tk):
 
         super().__init__()
         B.title(APP_TITLE)
-        B.geometry("1200x800")
+        B.geometry("1360x900")
+        B.minsize(1180, 780)
         B.style = C.Style()
         B.style.theme_use("clam")
         B.style.configure(Z, fieldbackground=LIGHT_GREEN)
@@ -160,11 +210,10 @@ class App(BU.Tk):
         D_ = prepare_excel_lists()
         if not isinstance(D_, dict):
             D_ = {}
-        B.entries = D_.get(W, {})
-        if not isinstance(B.entries, dict):
-            B.entries = {}
-        if W in D_:
-            D_.pop(W)
+        B.entries = {}
+        B.entry_records = []
+        B.entries_by_id = {}
+        B._reload_entry_cache(D_)
         B.lists = D_
         for key in (n, t, s, Y, d):
             if not isinstance(B.lists.get(key), list):
@@ -182,6 +231,7 @@ class App(BU.Tk):
         B.var_color3 = F.StringVar()
         B.var_extra = F.StringVar()
         B.var_ean = F.StringVar()
+        B.var_product_id = F.StringVar()
         B.pending_additions = {}
         B.pending_deletions = {}
         B.pending_ftp_deletions = {}
@@ -189,10 +239,36 @@ class App(BU.Tk):
         B.ftp_presence = {}
         B.ftp_downloaded_final = set()
         B.sql_presence = I
-        B._thumb_queue = queue.Queue()
         B._thumb_tokens = {}
-        B._scrolling = h
-        B._scroll_idle_job = I
+        B._thumb_cache = OrderedDict()
+        B._thumb_cache_limit = 192
+        B._thumb_cache_lock = threading.Lock()
+        B._thumb_request_queue = queue.Queue()
+        B._thumb_result_queue = queue.Queue()
+        B._thumb_request_seq = 0
+        B._thumb_poll_job = I
+        B._load_existing_after_id = I
+        B._load_existing_request_id = 0
+        B._last_lookup_signature = I
+        B._dashboard_refresh_job = I
+        B._slot_grid_columns = 0
+        B._slots_refresh_job = I
+        B._perf_monitor_job = I
+        B._perf_samples = deque(maxlen=PERF_SAMPLE_WINDOW)
+        B._perf_last_tick = Ag.perf_counter()
+        B._perf_status_var = F.StringVar()
+        B._perf_detail_var = F.StringVar()
+        B._busy_status_var = F.StringVar(
+            value=LANG.get("busy_state_idle", "Stan: gotowe")
+        )
+        B._busy_counter = 0
+        B._current_busy_label = ""
+        B._last_lookup_duration_ms = 0
+        B._commit_snapshot = {}
+        B._record_loaded = h
+        B._field_change_refresh_job = I
+        B._loaded_field_values = {}
+        B._form_field_meta = {}
         B.opt_resize = F.BooleanVar(value=J)
         B.opt_compress = F.BooleanVar(value=h)
         B.opt_maxsize = F.BooleanVar(value=h)
@@ -217,20 +293,59 @@ class App(BU.Tk):
         B._code_check_last_report = ""
         B._ui_check_running = h
         B._ui_check_last_report = ""
+        B._perf_check_running = h
+        B._perf_check_last_report = ""
         B.logged_counts = h
         B.suppress_next_lookup = h
         B.slot_definitions = []
         B.sql_column_map = {}
+        B._hero_status_var = F.StringVar()
+        B._hero_context_var = F.StringVar()
+        B._hero_storage_var = F.StringVar()
+        B._hero_slots_var = F.StringVar()
+        B._hero_remote_var = F.StringVar()
+        B._slot_placeholder_text = LANG.get(
+            "slot_drop_hint",
+            "Przeciągnij plik tutaj\nlub kliknij Wybierz",
+        )
+        B._slot_select_label = LANG.get("slot_select_action", "Wybierz")
+        B._slot_remove_label = LANG.get("slot_remove_action", "Usun")
+        B.bind_class("SlotScroll", "<MouseWheel>", B._on_slots_mousewheel)
+        B.bind_class("SlotScroll", "<Button-4>", B._on_slots_scroll_up)
+        B.bind_class("SlotScroll", "<Button-5>", B._on_slots_scroll_down)
+        B._thumb_worker = threading.Thread(
+            target=B._thumbnail_worker_loop,
+            name="ThumbnailLoader",
+            daemon=J,
+        )
+        B._thumb_worker.start()
+        for var in (
+            B.var_name,
+            B.var_type,
+            B.var_model,
+            B.var_color1,
+            B.var_color2,
+            B.var_color3,
+            B.var_extra,
+            B.var_ean,
+        ):
+            var.trace_add("write", B._queue_dashboard_refresh)
+        for field_key in FORM_TRACKED_FIELDS:
+            tracked_var = getattr(B, FORM_TRACKED_VAR_ATTRS[field_key], I)
+            if tracked_var is not I:
+                tracked_var.trace_add("write", B._queue_form_change_refresh)
         B._load_slot_config()
         B._build_form()
         B._build_slots()
-        B._thumb_worker = threading.Thread(target=B._thumbnail_worker, daemon=J)
-        B._thumb_worker.start()
         B._slot_index_by_prefix = {
             slot["prefix"]: idx for idx, slot in A0(B.slot_definitions)
         }
         H_ = Q(E_)
         B.combo_name.existing_count = H_
+        B._refresh_commit_snapshot()
+        B._update_dashboard_summary()
+        B._thumb_poll_job = B.after(THUMBNAIL_POLL_MS, B._poll_thumbnail_results)
+        B._perf_monitor_job = B.after(PERF_MONITOR_MS, B._perf_monitor_tick)
         set_app(B)
         B._install_exception_handlers()
 
@@ -282,27 +397,96 @@ class App(BU.Tk):
 
     def _configure_styles(A):
         A._ui_colors = {
-            "bg": "#f6f4f0",
-            "card": "#ffffff",
-            "slot_bg": "#f1efeb",
-            "slot_border": "#d2cdc5",
-            "muted": "#6f6b65",
-            "accent": "#2f6f60",
-            "progress_trough": "#e7e2da",
+            "bg": "#eef2ef",
+            "card": "#fbfaf7",
+            "card_alt": "#f3f1ea",
+            "hero": "#163640",
+            "hero_text": "#f5fbfa",
+            "text": "#18242c",
+            "slot_bg": "#edf2ef",
+            "slot_border": "#c7d2cf",
+            "muted": "#61717b",
+            "accent": "#2c7a63",
+            "accent_dark": "#1f5d4b",
+            "accent_soft": "#d8ebe4",
+            "progress_trough": "#dbe5e0",
+            "border": "#d6ddda",
+            "danger": "#bc5a5d",
+            "warning": "#b58336",
+            "log_bg": "#10242d",
+            "log_fg": "#d6ece9",
         }
         A.configure(bg=A._ui_colors["bg"])
+        A.option_add("*Font", "{Segoe UI} 10")
+        A.option_add("*Listbox.font", "{Segoe UI} 10")
+        A.option_add("*Text.Font", "Consolas 9")
         A.style.configure("App.TFrame", background=A._ui_colors["bg"])
-        A.style.configure("Card.TFrame", background=A._ui_colors["card"])
+        A.style.configure("Card.TFrame", background=A._ui_colors["card"], relief="flat")
+        A.style.configure(
+            "ChangedField.TFrame",
+            background="#fff1d9",
+            relief="flat",
+        )
+        A.style.configure("Hero.TFrame", background=A._ui_colors["hero"], relief="flat")
+        A.style.configure(
+            "SidebarCard.TFrame",
+            background=A._ui_colors["card_alt"],
+            relief="flat",
+        )
         A.style.configure("Settings.TFrame", background=A._ui_colors["card"])
+        A.style.configure(
+            "HeroTitle.TLabel",
+            background=A._ui_colors["hero"],
+            foreground=A._ui_colors["hero_text"],
+            font=("Segoe UI Semibold", 16),
+        )
+        A.style.configure(
+            "HeroSubtitle.TLabel",
+            background=A._ui_colors["hero"],
+            foreground="#d1e4e0",
+            font=("Segoe UI", 9),
+        )
+        A.style.configure(
+            "HeroMeta.TLabel",
+            background=A._ui_colors["hero"],
+            foreground=A._ui_colors["hero_text"],
+            font=("Segoe UI Semibold", 9),
+        )
+        A.style.configure(
+            "HeroContext.TLabel",
+            background=A._ui_colors["hero"],
+            foreground="#dbeae7",
+            font=("Segoe UI", 9),
+        )
+        A.style.configure(
+            "HeroPath.TLabel",
+            background=A._ui_colors["hero"],
+            foreground="#b6cbc6",
+            font=("Consolas", 8),
+        )
+        A.style.configure(
+            "SectionTitle.TLabel",
+            background=A._ui_colors["card"],
+            foreground=A._ui_colors["text"],
+            font=("Segoe UI Semibold", 12),
+        )
+        A.style.configure(
+            "SectionHint.TLabel",
+            background=A._ui_colors["card"],
+            foreground=A._ui_colors["muted"],
+            font=("Segoe UI", 9),
+        )
         A.style.configure(
             "Settings.TLabel",
             background=A._ui_colors["card"],
+            foreground=A._ui_colors["text"],
             font=("Segoe UI", 9),
         )
         A.style.configure(
             "SettingsHeader.TLabel",
             background=A._ui_colors["card"],
-            font=("Segoe UI Semibold", 9),
+            foreground=A._ui_colors["text"],
+            font=("Segoe UI Semibold", 10),
         )
         A.style.configure(
             "SettingsHint.TLabel",
@@ -314,45 +498,1028 @@ class App(BU.Tk):
             "Settings.TNotebook",
             background=A._ui_colors["bg"],
             borderwidth=0,
+            tabmargins=(0, 0, 0, 0),
         )
         A.style.configure(
             "Settings.TNotebook.Tab",
-            padding=(12, 6),
+            background=A._ui_colors["card_alt"],
+            foreground=A._ui_colors["muted"],
+            padding=(16, 8),
             font=("Segoe UI Semibold", 9),
         )
         A.style.map(
             "Settings.TNotebook.Tab",
-            background=[("selected", A._ui_colors["card"])],
-            foreground=[("selected", "black")],
+            background=[
+                ("selected", A._ui_colors["card"]),
+                ("active", A._ui_colors["accent_soft"]),
+            ],
+            foreground=[
+                ("selected", A._ui_colors["text"]),
+                ("active", A._ui_colors["text"]),
+            ],
         )
         A.style.configure(
             "Form.TLabel",
             background=A._ui_colors["card"],
+            foreground=A._ui_colors["muted"],
+            font=("Segoe UI Semibold", 10),
+        )
+        A.style.configure(
+            "ChangedForm.TLabel",
+            background="#fff1d9",
+            foreground="#8f641f",
+            font=("Segoe UI Semibold", 10),
+        )
+        A.style.configure(
+            "FormSection.TLabel",
+            background=A._ui_colors["card"],
+            foreground=A._ui_colors["text"],
+            font=("Segoe UI Semibold", 12),
+        )
+        A.style.configure(
+            "FormHint.TLabel",
+            background=A._ui_colors["card"],
+            foreground=A._ui_colors["muted"],
             font=("Segoe UI", 9),
         )
         A.style.configure(
             "SlotTitle.TLabel",
             background=A._ui_colors["card"],
-            font=("Segoe UI Semibold", 9),
+            foreground=A._ui_colors["text"],
+            font=("Segoe UI Semibold", 11),
         )
         A.style.configure(
             "SlotStatus.TLabel",
             background=A._ui_colors["card"],
             foreground=A._ui_colors["muted"],
-            font=("Segoe UI", 8),
+            font=("Segoe UI", 9),
         )
         A.style.configure(
             "SlotFooter.TFrame",
             background=A._ui_colors["card"],
         )
-        A.style.configure("TButton", padding=(10, 4), font=("Segoe UI Semibold", 9))
-        A.style.configure("TCombobox", padding=(6, 3), font=("Segoe UI", 9))
-        A.style.configure("TEntry", font=("Segoe UI", 9))
+        A.style.configure(
+            "TButton",
+            padding=(12, 7),
+            background=A._ui_colors["card_alt"],
+            foreground=A._ui_colors["text"],
+            borderwidth=0,
+            font=("Segoe UI Semibold", 9),
+        )
+        A.style.map(
+            "TButton",
+            background=[
+                ("pressed", "#d9e3df"),
+                ("active", "#e4ece9"),
+                ("disabled", "#ebe9e5"),
+            ],
+            foreground=[("disabled", "#9da8a5")],
+        )
+        A.style.configure(
+            "Accent.TButton",
+            background=A._ui_colors["accent"],
+            foreground=A._ui_colors["hero_text"],
+            borderwidth=0,
+        )
+        A.style.map(
+            "Accent.TButton",
+            background=[
+                ("pressed", A._ui_colors["accent_dark"]),
+                ("active", A._ui_colors["accent_dark"]),
+                ("disabled", "#93b6aa"),
+            ],
+            foreground=[("disabled", "#eef7f4")],
+        )
+        A.style.configure(
+            "Ghost.TButton",
+            background=A._ui_colors["hero"],
+            foreground=A._ui_colors["hero_text"],
+            borderwidth=0,
+        )
+        A.style.map(
+            "Ghost.TButton",
+            background=[
+                ("pressed", "#214754"),
+                ("active", "#214754"),
+                ("disabled", "#526871"),
+            ]
+        )
+        A.style.configure(
+            "Outline.TButton",
+            background=A._ui_colors["card"],
+            foreground=A._ui_colors["text"],
+            borderwidth=1,
+            relief="solid",
+        )
+        A.style.map(
+            "Outline.TButton",
+            background=[("pressed", "#eef3f0"), ("active", "#f5f8f6")],
+        )
+        A.style.configure(
+            "MiniOutline.TButton",
+            background=A._ui_colors["card"],
+            foreground=A._ui_colors["muted"],
+            borderwidth=1,
+            relief="solid",
+            padding=(7, 2),
+            font=("Segoe UI Semibold", 8),
+        )
+        A.style.map(
+            "MiniOutline.TButton",
+            background=[("pressed", "#eef3f0"), ("active", "#f5f8f6")],
+            foreground=[("disabled", "#a9b1ad")],
+        )
+        A.style.configure(
+            "MiniWarn.TButton",
+            background="#fff1d9",
+            foreground="#8f641f",
+            borderwidth=1,
+            relief="solid",
+            padding=(7, 2),
+            font=("Segoe UI Semibold", 8),
+        )
+        A.style.map(
+            "MiniWarn.TButton",
+            background=[("pressed", "#ffe9c3"), ("active", "#fff5e4")],
+            foreground=[("disabled", "#a9b1ad")],
+        )
+        A.style.configure(
+            "TCombobox",
+            padding=(10, 5),
+            fieldbackground="#ffffff",
+            background="#ffffff",
+            bordercolor=A._ui_colors["border"],
+            arrowsize=14,
+            font=("Segoe UI", 11),
+        )
+        A.style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", "#ffffff")],
+            selectbackground=[("readonly", "#ffffff")],
+            selectforeground=[("readonly", A._ui_colors["text"])],
+        )
+        A.style.configure(
+            "TEntry",
+            fieldbackground="#ffffff",
+            bordercolor=A._ui_colors["border"],
+            foreground=A._ui_colors["text"],
+            padding=(10, 6),
+            font=("Segoe UI", 11),
+        )
+        A.style.configure(
+            "TSpinbox",
+            fieldbackground="#ffffff",
+            bordercolor=A._ui_colors["border"],
+            foreground=A._ui_colors["text"],
+            padding=(6, 4),
+            font=("Segoe UI", 10),
+        )
+        A.style.configure(
+            "TCheckbutton",
+            background=A._ui_colors["card"],
+            foreground=A._ui_colors["text"],
+            font=("Segoe UI", 9),
+        )
         A.style.configure("Slot.TProgressbar", troughcolor=A._ui_colors["progress_trough"])
         A.style.configure("Slot.TProgressbar", background=A._ui_colors["accent"])
         base_layout = A.style.layout("Horizontal.TProgressbar")
         if base_layout:
             A.style.layout("Horizontal.Slot.TProgressbar", base_layout)
+
+    def _queue_dashboard_refresh(A, *_args):
+        if A._dashboard_refresh_job is not I:
+            try:
+                A.after_cancel(A._dashboard_refresh_job)
+            except E:
+                pass
+        A._dashboard_refresh_job = A.after(50, A._update_dashboard_summary)
+
+    def _update_dashboard_summary(A):
+        A._dashboard_refresh_job = I
+        name_value = A.var_name.get().strip()
+        type_value = A.var_type.get().strip()
+        model_value = A.var_model.get().strip()
+        color_values = [
+            value.strip()
+            for value in (
+                A.var_color1.get(),
+                A.var_color2.get(),
+                A.var_color3.get(),
+            )
+            if value and value.strip()
+        ]
+        extra_value = normalize_extra_segment(A.var_extra.get(), default=L)
+        ean_value = A.var_ean.get().strip() or q
+        product_id_value = A.var_product_id.get().strip() or "BRAK-ID"
+        ready_slots = Q([slot for slot in Aj(A, "slots", []) if slot.get(f)])
+        total_slots = Q(Aj(A, "slots", [])) or Q(A.slot_definitions)
+        ftp_count = Q(A.ftp_presence)
+        sql_count = 0
+        if Aq(A.sql_presence, dict):
+            sql_count = Q([value for value in A.sql_presence.values() if value])
+        title_parts = [part for part in (name_value, type_value, model_value) if part]
+        status_text = LANG.get("dashboard_status_idle", "Gotowe do pracy")
+        if A.is_processing:
+            status_text = LANG.get("dashboard_status_processing", "Trwa przetwarzanie")
+        A._hero_status_var.set(status_text)
+        if title_parts:
+            A._hero_context_var.set(" / ".join(title_parts))
+        else:
+            A._hero_context_var.set(
+                LANG.get(
+                    "dashboard_context_empty",
+                    "Uzupelnij dane produktu, aby przygotowac nowy zestaw zdjec.",
+                )
+            )
+        if name_value and type_value and model_value and A.var_color1.get().strip():
+            storage_text = build_product_directory(
+                l,
+                name_value,
+                type_value,
+                model_value,
+                color_values,
+                extra_value,
+            )
+            if Q(storage_text) > 72:
+                storage_text = "..." + storage_text[-69:]
+            A._hero_storage_var.set(storage_text)
+        else:
+            A._hero_storage_var.set(
+                LANG.get(
+                    "dashboard_path_placeholder",
+                    "Sciezka produktu pojawi sie po uzupelnieniu wymaganych pol.",
+                )
+            )
+        A._hero_slots_var.set(
+            LANG.get(
+                "dashboard_slots_value",
+                "Sloty {ready}/{total}  |  +{additions}  -{deletions}",
+            ).format(
+                ready=ready_slots,
+                total=total_slots,
+                additions=Q(A.pending_additions),
+                deletions=Q(A.pending_deletions) + Q(A.pending_ftp_deletions),
+            )
+        )
+        A._hero_remote_var.set(
+            LANG.get(
+                "dashboard_remote_value",
+                "ID {product_id}  |  EAN {ean}  |  FTP {ftp}  |  SQL {sql}  |  Dodatek {extra}",
+            ).format(
+                product_id=product_id_value,
+                ean=ean_value,
+                ftp=ftp_count,
+                sql=sql_count,
+                extra=extra_value,
+            )
+        )
+
+    def _reload_entry_cache(A, excel_data):
+        """Refresh in-memory entry indices from workbook payload data."""
+
+        entries = excel_data.get(W, {})
+        if not isinstance(entries, dict):
+            entries = {}
+        records = excel_data.get(ENTRY_RECORDS_KEY, [])
+        if not isinstance(records, list):
+            records = []
+        A.entries = entries
+        A.entry_records = [record for record in records if isinstance(record, dict)]
+        A.entries_by_id = {
+            G(record.get(PRODUCT_ID_HEADER) or B).strip().upper(): record
+            for record in A.entry_records
+            if G(record.get(PRODUCT_ID_HEADER) or B).strip()
+        }
+        excel_data.pop(W, I)
+        excel_data.pop(ENTRY_RECORDS_KEY, I)
+
+    def _normalize_entry_part(A, value, *, extra=h):
+        """Normalize product form values for exact record matching."""
+
+        if extra:
+            return normalize_extra_segment(value, default=L)
+        return G(value or B).strip().upper()
+
+    def _build_entry_signature(
+        A,
+        name,
+        type_value,
+        model,
+        color1,
+        color2,
+        color3,
+        extra_value,
+    ):
+        """Build the canonical signature used to match a product entry."""
+
+        return (
+            A._normalize_entry_part(name),
+            A._normalize_entry_part(type_value),
+            A._normalize_entry_part(model),
+            A._normalize_entry_part(color1),
+            A._normalize_entry_part(color2),
+            A._normalize_entry_part(color3),
+            A._normalize_entry_part(extra_value, extra=J),
+        )
+
+    def _current_entry_signature(A):
+        """Return the signature of the values currently visible in the form."""
+
+        return A._build_entry_signature(
+            A.var_name.get(),
+            A.var_type.get(),
+            A.var_model.get(),
+            A.var_color1.get(),
+            A.var_color2.get(),
+            A.var_color3.get(),
+            A.var_extra.get(),
+        )
+
+    def _current_lookup_signature(A):
+        """Return the lookup key that should invalidate slot refreshes."""
+
+        return A._current_entry_signature() + (
+            A._normalize_entry_part(A.var_ean.get()),
+        )
+
+    def _refresh_commit_snapshot(A):
+        """Store the latest committed form state to avoid accidental reprocessing."""
+
+        A._commit_snapshot = {
+            "name": A._normalize_entry_part(A.var_name.get()),
+            "type": A._normalize_entry_part(A.var_type.get()),
+            "model": A._normalize_entry_part(A.var_model.get()),
+            "colors": (
+                A._normalize_entry_part(A.var_color1.get()),
+                A._normalize_entry_part(A.var_color2.get()),
+                A._normalize_entry_part(A.var_color3.get()),
+            ),
+            "extra": A._normalize_entry_part(A.var_extra.get(), extra=J),
+        }
+
+    def _get_form_field_raw_value(A, field_key):
+        """Return the current user-visible value for a tracked form field."""
+
+        var_attr = FORM_TRACKED_VAR_ATTRS.get(field_key)
+        tracked_var = getattr(A, var_attr, I) if var_attr else I
+        if tracked_var is I:
+            return B
+        value = G(tracked_var.get() or B).strip()
+        if field_key == "ean":
+            return value.upper()
+        return value
+
+    def _normalize_form_field_value(A, field_key, value=I):
+        """Normalize a tracked form field for dirty-state comparisons."""
+
+        raw_value = A._get_form_field_raw_value(field_key) if value is I else G(value or B).strip()
+        if field_key == "ean":
+            return raw_value.upper()
+        return A._normalize_entry_part(raw_value, extra=field_key == "extra")
+
+    def _capture_loaded_field_values(A):
+        """Snapshot the current visible form values as the original loaded state."""
+
+        A._loaded_field_values = {
+            field_key: A._get_form_field_raw_value(field_key)
+            for field_key in FORM_TRACKED_FIELDS
+        }
+        A._queue_form_change_refresh()
+
+    def _queue_form_change_refresh(A, *_args):
+        """Debounce form dirty/highlight refresh to the next Tk idle turn."""
+
+        if A._field_change_refresh_job is not I:
+            return
+        A._field_change_refresh_job = A.after_idle(A._refresh_form_change_markers)
+
+    def _should_lookup_existing_files_for_form_edit(A):
+        """Return True when metadata edits should trigger a file lookup."""
+
+        if A.suppress_scan or A._preserve_loaded_binding():
+            return h
+        return (
+            bool(A.var_name.get().strip())
+            and bool(A.var_type.get().strip())
+            and bool(A.var_model.get().strip())
+            and bool(A.var_color1.get().strip())
+        )
+
+    def _register_form_field(A, field_key, field, label, widget, restore_button):
+        """Remember widgets that belong to a tracked form field."""
+
+        if not field_key:
+            return
+        A._form_field_meta[field_key] = {
+            "frame": field,
+            "label": label,
+            "widget": widget,
+            "restore": restore_button,
+        }
+        A._queue_form_change_refresh()
+
+    def _refresh_form_change_markers(A):
+        """Highlight edited fields and enable per-field restore buttons."""
+
+        A._field_change_refresh_job = I
+        has_loaded_values = bool(A._loaded_field_values)
+        for field_key, meta in Aj(A, "_form_field_meta", {}).items():
+            dirty = h
+            if has_loaded_values and field_key in A._loaded_field_values:
+                dirty = (
+                    A._normalize_form_field_value(field_key)
+                    != A._normalize_form_field_value(
+                        field_key, A._loaded_field_values.get(field_key, B)
+                    )
+                )
+            frame = meta.get("frame")
+            label = meta.get("label")
+            restore_button = meta.get("restore")
+            if frame:
+                try:
+                    frame.configure(
+                        style="ChangedField.TFrame" if dirty else "Card.TFrame"
+                    )
+                except E:
+                    pass
+            if label:
+                try:
+                    label.configure(
+                        style="ChangedForm.TLabel" if dirty else "Form.TLabel"
+                    )
+                except E:
+                    pass
+            if restore_button:
+                try:
+                    restore_button.configure(
+                        state=X if dirty else V,
+                        style="MiniWarn.TButton" if dirty else "MiniOutline.TButton",
+                    )
+                except E:
+                    pass
+
+    def _restore_form_field_value(A, field_key):
+        """Restore a single field to the value from the last loaded entry."""
+
+        if field_key not in A._loaded_field_values:
+            return
+        restored_value = A._loaded_field_values.get(field_key, B)
+        if field_key == "name":
+            A.var_name.set(restored_value)
+            A._on_name_commit()
+            A._on_type_commit()
+            A._on_model_commit()
+            A._on_color_commit()
+            A._on_extra_commit()
+        elif field_key == "type":
+            A.var_type.set(restored_value)
+            A._on_type_commit()
+            A._on_model_commit()
+            A._on_color_commit()
+            A._on_extra_commit()
+        elif field_key == "model":
+            A.var_model.set(restored_value)
+            A._on_model_commit()
+            A._on_color_commit()
+            A._on_extra_commit()
+        elif field_key in {"color1", "color2", "color3"}:
+            getattr(A, FORM_TRACKED_VAR_ATTRS[field_key]).set(restored_value)
+            A._on_color_commit()
+            A._on_extra_commit()
+        elif field_key == "extra":
+            A.var_extra.set(restored_value)
+            A._on_extra_commit()
+        elif field_key == "ean":
+            A.var_ean.set(restored_value)
+            if A._should_lookup_existing_files_for_form_edit():
+                A._schedule_existing_files_lookup()
+        A._queue_form_change_refresh()
+
+    def _commit_matches_snapshot(A, key, value):
+        """Return True when the current commit carries no actual form change."""
+
+        return A._commit_snapshot.get(key) == value
+
+    def _has_loaded_entry_context(A):
+        """Return True when the form still belongs to a loaded product record."""
+
+        product_id = G(A.var_product_id.get() or B).strip()
+        loaded_values = Aj(A, "_loaded_field_values", {})
+        return bool(product_id or loaded_values or A._record_loaded)
+
+    def _preserve_loaded_binding(A):
+        """Return True when edits should stay attached to the loaded record."""
+
+        return A._has_loaded_entry_context()
+
+    def _clear_loaded_entry_context(A, keep_ean=h):
+        """Forget the currently loaded product binding and reset lookup cache."""
+
+        A._record_loaded = h
+        A.var_product_id.set(B)
+        A._loaded_field_values = {}
+        A._last_lookup_signature = I
+        if not keep_ean:
+            A.var_ean.set(B)
+        A._queue_form_change_refresh()
+
+    def _set_loaded_entry_context(A, record):
+        """Attach the form to a specific saved product entry."""
+
+        if not isinstance(record, dict):
+            A._clear_loaded_entry_context()
+            return
+        product_id = G(record.get(PRODUCT_ID_HEADER) or B).strip().upper()
+        ean = G(record.get(EAN_HEADER) or B).strip().upper()
+        A.var_product_id.set(product_id)
+        if ean:
+            A.var_ean.set(ean)
+        A._record_loaded = bool(product_id)
+        A._capture_loaded_field_values()
+        A._last_lookup_signature = I
+
+    def _find_entry_records_by_fields(A, signature):
+        """Return saved entry records matching the exact product signature."""
+
+        return [
+            record
+            for record in A.entry_records
+            if A._build_entry_signature(
+                record.get(NAME_HEADER, B),
+                record.get(TYPE_HEADER, B),
+                record.get(MODEL_HEADER, B),
+                record.get(COLOR1_HEADER, B),
+                record.get(COLOR2_HEADER, B),
+                record.get(COLOR3_HEADER, B),
+                record.get(EXTRA_HEADER, B),
+            )
+            == signature
+        ]
+
+    def _describe_entry_record(A, record):
+        """Build a concise label used in record selection prompts."""
+
+        parts = [
+            G(record.get(NAME_HEADER) or B).strip(),
+            G(record.get(TYPE_HEADER) or B).strip(),
+            G(record.get(MODEL_HEADER) or B).strip(),
+        ]
+        colors = [
+            G(record.get(COLOR1_HEADER) or B).strip(),
+            G(record.get(COLOR2_HEADER) or B).strip(),
+            G(record.get(COLOR3_HEADER) or B).strip(),
+        ]
+        colors = [value for value in colors if value]
+        if colors:
+            parts.append(" / ".join(colors))
+        extra_value = G(record.get(EXTRA_HEADER) or B).strip()
+        if extra_value and extra_value.upper() != L:
+            parts.append(extra_value)
+        title = " | ".join([part for part in parts if part]) or LANG.get(
+            "entry_record_fallback",
+            "Zapisany produkt",
+        )
+        ean = G(record.get(EAN_HEADER) or B).strip() or q
+        product_id = G(record.get(PRODUCT_ID_HEADER) or B).strip() or "BRAK-ID"
+        return f"{title}  |  EAN: {ean}  |  ID: {product_id}"
+
+    def _prompt_select_entry_record(A, records, title, prompt):
+        """Ask the user which matching saved record should be loaded."""
+
+        if not records:
+            return I
+        if Q(records) == 1:
+            return records[0]
+        A._last_focus_widget = A.focus_get()
+        win = F.Toplevel(A)
+        win.title(title)
+        win.transient(A)
+        win.grab_set()
+        C.Label(win, text=prompt).pack(padx=10, pady=(10, 6), anchor="w")
+        body = C.Frame(win)
+        body.pack(fill=z, expand=J, padx=10, pady=(0, 8))
+        listbox = F.Listbox(body, height=min(8, Q(records)), exportselection=0)
+        scroll = C.Scrollbar(body, orient=An, command=listbox.yview)
+        listbox.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=AV, fill="y")
+        listbox.pack(side=Am, fill=z, expand=J)
+        labels = [A._describe_entry_record(record) for record in records]
+        width = max(48, min(max((Q(label) for label in labels), default=48), 120))
+        try:
+            listbox.configure(width=width)
+        except E:
+            pass
+        for label in labels:
+            listbox.insert(F.END, label)
+        listbox.selection_set(0)
+        selected = {"record": I}
+
+        def _choose():
+            selection = listbox.curselection()
+            if not selection:
+                return
+            selected["record"] = records[selection[0]]
+            win.destroy()
+
+        def _cancel():
+            win.destroy()
+
+        buttons = C.Frame(win)
+        buttons.pack(fill="x", padx=10, pady=(0, 10))
+        C.Button(
+            buttons,
+            text=CHOOSE_LABEL,
+            command=_choose,
+        ).pack(side=Am)
+        C.Button(
+            buttons,
+            text=CANCEL_LABEL,
+            command=_cancel,
+        ).pack(side=AV)
+        listbox.bind("<Double-Button-1>", lambda _event: _choose())
+        win.protocol("WM_DELETE_WINDOW", _cancel)
+        A.wait_window(win)
+        A._restore_focus()
+        return selected["record"]
+
+    def _load_entry_record(A, record):
+        """Populate the form from a saved entry record and refresh slot state."""
+
+        if not isinstance(record, dict):
+            return
+        ean = G(record.get(EAN_HEADER) or B).strip().upper()
+        extra_value = G(record.get(EXTRA_HEADER) or B).strip().upper()
+        A._clear_loaded_entry_context(keep_ean=bool(ean))
+        A._reset_form_fields(keep_ean=bool(ean))
+        A.var_product_id.set(G(record.get(PRODUCT_ID_HEADER) or B).strip().upper())
+        if ean:
+            A.var_ean.set(ean)
+        A.suppress_scan = J
+        A.loading_by_ean = J
+        try:
+            A.var_name.set(G(record.get(NAME_HEADER) or B).strip().upper())
+            A._on_name_commit()
+            A.var_type.set(G(record.get(TYPE_HEADER) or B).strip().upper())
+            A._on_type_commit()
+            A.var_model.set(G(record.get(MODEL_HEADER) or B).strip().upper())
+            A._on_model_commit()
+            A.var_color1.set(G(record.get(COLOR1_HEADER) or B).strip().upper())
+            A.var_color2.set(G(record.get(COLOR2_HEADER) or B).strip().upper())
+            A.var_color3.set(G(record.get(COLOR3_HEADER) or B).strip().upper())
+            A._on_color_commit()
+            if extra_value == L:
+                A.var_extra.set(B)
+            else:
+                A.var_extra.set(extra_value)
+            A._on_extra_commit()
+            if ean:
+                A.var_ean.set(ean)
+        finally:
+            A.loading_by_ean = h
+            A.suppress_scan = h
+        A._set_loaded_entry_context(record)
+        A._refresh_commit_snapshot()
+        A._load_existing_files(force=J)
+
+    def _search_current_entry(A):
+        """Load a saved record by Product ID, EAN or the current form values."""
+
+        ean = G(A.var_ean.get() or B).strip().upper()
+        if ean:
+            record = A.entries.get(ean)
+            if record:
+                resolved = dict(record)
+                resolved[EAN_HEADER] = ean
+                A._load_entry_record(resolved)
+                return
+            A._activate_new_entry_mode(keep_values=J)
+            return
+        product_id = G(A.var_product_id.get() or B).strip().upper()
+        if product_id and product_id in A.entries_by_id:
+            A._load_entry_record(A.entries_by_id[product_id])
+            return
+        signature = A._current_entry_signature()
+        if not any(signature) and not ean and not product_id:
+            O.showwarning(
+                NO_DATA_MSG,
+                LANG.get(
+                    "search_requires_any_value",
+                    "Podaj EAN albo dane produktu, aby wyszukac wpis.",
+                ),
+            )
+            return
+        if not all(signature[:4]):
+            A._activate_new_entry_mode(keep_values=J)
+            return
+        matches = A._find_entry_records_by_fields(signature)
+        if not matches:
+            A._activate_new_entry_mode(keep_values=J)
+            return
+        record = A._prompt_select_entry_record(
+            matches,
+            LANG.get("search_select_title", "Wybierz zapisany produkt"),
+            LANG.get(
+                "search_select_prompt",
+                "Znaleziono kilka pasujących wpisów. Wybierz rekord do wczytania:",
+            ),
+        )
+        if record:
+            A._load_entry_record(record)
+
+    def _activate_new_entry_mode(A, keep_values=J):
+        """Drop the current loaded binding and continue as a new entry."""
+
+        if A._load_existing_after_id is not I:
+            try:
+                A.after_cancel(A._load_existing_after_id)
+            except E:
+                pass
+            A._load_existing_after_id = I
+        preserve_ean = keep_values and bool(A.var_ean.get().strip())
+        A.suppress_scan = J
+        try:
+            A._clear_loaded_entry_context(keep_ean=preserve_ean)
+            if keep_values:
+                A.original_files = {}
+                A.ftp_remote_only = {}
+                A.ftp_presence = {}
+                A.ftp_downloaded_final = set()
+                A.sql_presence = I
+                A._clear_all_slots()
+            else:
+                A._reset_form_fields(keep_ean=h)
+        finally:
+            A.suppress_scan = h
+        A._busy_status_var.set(LANG.get("busy_state_idle", "Stan: gotowe"))
+        A._refresh_commit_snapshot()
+        A._queue_form_change_refresh()
+        A._queue_dashboard_refresh()
+        A._update_dashboard_summary()
+        if (
+            keep_values
+            and A.var_name.get().strip()
+            and A.var_type.get().strip()
+            and A.var_model.get().strip()
+            and A.var_color1.get().strip()
+            and not A.suppress_scan
+        ):
+            A._schedule_existing_files_lookup()
+
+    def _start_new_search(A):
+        """Clear the form and switch back to an empty search state."""
+
+        A._activate_new_entry_mode(keep_values=h)
+        A._focus_widget(A.combo_name)
+
+    def _set_busy_state(A, text, active=J):
+        """Show or hide the compact global busy indicator near the log."""
+
+        if active:
+            A._busy_counter += 1
+            A._current_busy_label = G(text or B).strip()
+        else:
+            A._busy_counter = max(0, A._busy_counter - 1)
+            if A._busy_counter == 0:
+                A._current_busy_label = B
+        if A._busy_counter > 0 and A._current_busy_label:
+            A._busy_status_var.set(
+                LANG.get("busy_state_active", "Stan: {state}").format(
+                    state=A._current_busy_label
+                )
+            )
+            progress = Aj(A, "_busy_progress", I)
+            if progress:
+                try:
+                    progress.start(10)
+                except E:
+                    pass
+        else:
+            A._busy_status_var.set(LANG.get("busy_state_idle", "Stan: gotowe"))
+            progress = Aj(A, "_busy_progress", I)
+            if progress:
+                try:
+                    progress.stop()
+                except E:
+                    pass
+
+    def _current_perf_snapshot(B):
+        """Return the latest lightweight UI telemetry values."""
+
+        if B._perf_samples:
+            avg_ms = sum(B._perf_samples) / Q(B._perf_samples)
+        else:
+            avg_ms = PERF_MONITOR_MS
+        lag_ms = max(avg_ms - PERF_MONITOR_MS, 0.0)
+        fps_est = min(60.0, 1000.0 / max(avg_ms, 1.0))
+        try:
+            thumb_q = B._thumb_request_queue.qsize()
+        except E:
+            thumb_q = 0
+        return {
+            "avg_ms": avg_ms,
+            "lag_ms": lag_ms,
+            "fps": fps_est,
+            "thumb_queue": thumb_q,
+            "lookup_ms": int(B._last_lookup_duration_ms or 0),
+        }
+
+    def _perf_monitor_tick(A):
+        """Continuously update lightweight UI latency and throughput telemetry."""
+
+        now = Ag.perf_counter()
+        delta_ms = max((now - A._perf_last_tick) * 1000.0, 0.0)
+        A._perf_last_tick = now
+        A._perf_samples.append(delta_ms)
+        snapshot = A._current_perf_snapshot()
+        A._perf_status_var.set(
+            LANG.get(
+                "perf_status_line",
+                "UI ~{fps:.0f} FPS  |  opóźnienie {lag:.0f} ms",
+            ).format(fps=snapshot["fps"], lag=snapshot["lag_ms"])
+        )
+        A._perf_detail_var.set(
+            LANG.get(
+                "perf_detail_line",
+                "miniatury w kolejce: {thumbs}  |  ostatni lookup: {lookup} ms",
+            ).format(
+                thumbs=snapshot["thumb_queue"],
+                lookup=snapshot["lookup_ms"],
+            )
+        )
+        try:
+            if A.winfo_exists():
+                A._perf_monitor_job = A.after(PERF_MONITOR_MS, A._perf_monitor_tick)
+        except E:
+            A._perf_monitor_job = I
+
+    def _apply_slot_grid(B):
+        if not Aj(B, "slots_frame", I):
+            return
+        columns = SLOT_GRID_COLUMNS
+        if columns == B._slot_grid_columns:
+            return
+        max_columns = max(B._slot_grid_columns, columns)
+        for idx in Ax(max_columns):
+            try:
+                B.slots_frame.columnconfigure(idx, weight=0, uniform="", minsize=0)
+            except E:
+                pass
+        for idx in Ax(columns):
+            B.slots_frame.columnconfigure(
+                idx,
+                weight=1,
+                uniform="slot-grid",
+                minsize=186,
+            )
+        for idx, slot in A0(B.slots):
+            frame = slot.get(AS)
+            if not frame:
+                continue
+            frame.grid(
+                row=idx // columns,
+                column=idx % columns,
+                padx=6,
+                pady=6,
+                sticky="nsew",
+            )
+        B._slot_grid_columns = columns
+        B._schedule_slots_canvas_refresh()
+
+    def _schedule_slots_canvas_refresh(B, *_args):
+        if B._slots_refresh_job is not I:
+            return
+        try:
+            B._slots_refresh_job = B.after_idle(B._refresh_slots_canvas)
+        except E:
+            B._slots_refresh_job = I
+
+    def _refresh_slots_canvas(B):
+        B._slots_refresh_job = I
+        canvas = Aj(B, "_slots_canvas", I)
+        if not canvas:
+            return
+        try:
+            bbox = canvas.bbox("all")
+            if bbox:
+                canvas.configure(scrollregion=bbox)
+        except E:
+            pass
+
+    def _bind_slot_scroll_target(B, widget):
+        if not widget:
+            return
+        try:
+            tags = tuple(widget.bindtags())
+            if "SlotScroll" not in tags:
+                widget.bindtags(("SlotScroll",) + tags)
+        except E:
+            return
+        for child in widget.winfo_children():
+            B._bind_slot_scroll_target(child)
+
+    def _scroll_slots(B, steps):
+        canvas = Aj(B, "_slots_canvas", I)
+        if not canvas:
+            return
+        try:
+            canvas.yview_scroll(steps, "units")
+        except E:
+            return
+        return "break"
+
+    def _on_slots_mousewheel(B, event):
+        delta = getattr(event, "delta", 0)
+        if not delta:
+            return
+        steps = max(1, int(abs(delta) / 120)) or 1
+        if delta > 0:
+            steps *= -1
+        return B._scroll_slots(steps)
+
+    def _on_slots_scroll_up(B, _event):
+        return B._scroll_slots(-1)
+
+    def _on_slots_scroll_down(B, _event):
+        return B._scroll_slots(1)
+
+    def _get_thumbnail_cache_key(B, path):
+        try:
+            stat = A.stat(path)
+            return (A.path.abspath(path), stat.st_mtime_ns, stat.st_size)
+        except E:
+            return (A.path.abspath(path), I, I)
+
+    def _get_cached_thumbnail(B, path):
+        cache_key = B._get_thumbnail_cache_key(path)
+        with B._thumb_cache_lock:
+            thumb = B._thumb_cache.get(cache_key)
+            if thumb is I:
+                return cache_key, I
+            B._thumb_cache.move_to_end(cache_key)
+            return cache_key, thumb
+
+    def _store_cached_thumbnail(B, cache_key, thumb):
+        if cache_key is I or thumb is I:
+            return
+        with B._thumb_cache_lock:
+            B._thumb_cache[cache_key] = thumb
+            B._thumb_cache.move_to_end(cache_key)
+            while Q(B._thumb_cache) > B._thumb_cache_limit:
+                B._thumb_cache.popitem(last=h)
+
+    def _next_thumbnail_token(B):
+        B._thumb_request_seq += 1
+        return B._thumb_request_seq
+
+    def _thumbnail_worker_loop(B):
+        while J:
+            job = B._thumb_request_queue.get()
+            if job is I:
+                return
+            idx, path, token = job
+            thumb = I
+            if path and A.path.isfile(path):
+                thumb = B._load_slot_thumbnail(path)
+            B._thumb_result_queue.put((idx, path, token, thumb))
+
+    def _poll_thumbnail_results(B):
+        B._thumb_poll_job = I
+        processed = 0
+        while processed < THUMBNAIL_RESULT_BATCH:
+            try:
+                idx, path, token, thumb = B._thumb_result_queue.get_nowait()
+            except queue.Empty:
+                break
+            processed += 1
+            if B._thumb_tokens.get(idx) != token:
+                continue
+            if idx < 0 or idx >= Q(B.slots):
+                continue
+            if B.slots[idx].get(f) != path:
+                continue
+            B._set_slot_preview(idx, path, thumb)
+        try:
+            if B.winfo_exists():
+                B._thumb_poll_job = B.after(
+                    THUMBNAIL_POLL_MS,
+                    B._poll_thumbnail_results,
+                )
+        except E:
+            B._thumb_poll_job = I
+
+    def _schedule_existing_files_lookup(B, delay_ms=180):
+        if B.suppress_scan:
+            return
+        if B._load_existing_after_id is not I:
+            try:
+                B.after_cancel(B._load_existing_after_id)
+            except E:
+                pass
+        B._load_existing_after_id = B.after(delay_ms, B._run_scheduled_existing_files_lookup)
+
+    def _run_scheduled_existing_files_lookup(B):
+        B._load_existing_after_id = I
+        B._load_existing_files()
 
     def _trigger_test_error(A, key):
         if key == "zero_div":
@@ -390,6 +1557,7 @@ class App(BU.Tk):
         errors = []
         for path in files:
             lines = []
+            source = B
             try:
                 with tokenize.open(path) as handle:
                     source = handle.read()
@@ -429,7 +1597,61 @@ class App(BU.Tk):
                         "text": B,
                     }
                 )
+                continue
+            errors.extend(B._collect_static_symbol_issues(path, source))
         return {"root": root, "files": files, "errors": errors}
+
+    def _collect_static_symbol_issues(A, path, source):
+        """Return targeted static issues that plain compilation would miss."""
+
+        try:
+            tree = ast.parse(source, filename=path)
+        except SyntaxError:
+            return []
+        source_lines = source.splitlines()
+        defined = set(dir(__builtins__))
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    defined.add(alias.asname or alias.name.split(".")[0])
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    defined.add(alias.asname or alias.name)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                defined.add(node.name)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    for name in ast.walk(target):
+                        if isinstance(name, ast.Name):
+                            defined.add(name.id)
+        issues = []
+        seen = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load):
+                continue
+            name = node.id
+            if not name.endswith("_HEADER") or name in defined:
+                continue
+            issue_key = (name, getattr(node, "lineno", 0))
+            if issue_key in seen:
+                continue
+            seen.add(issue_key)
+            issues.append(
+                {
+                    "path": path,
+                    "line": getattr(node, "lineno", 0),
+                    "col": getattr(node, "col_offset", 0) + 1,
+                    "message": f"Undefined header constant: {name}",
+                    "text": source_lines[getattr(node, "lineno", 1) - 1]
+                    if getattr(node, "lineno", 0)
+                    and getattr(node, "lineno", 0) <= Q(source_lines)
+                    else B,
+                }
+            )
+        return issues
 
     def _format_code_check_report(A, result):
         timestamp = A9.now().strftime(A6)
@@ -630,6 +1852,228 @@ class App(BU.Tk):
             A.after(0, lambda: finalize(result))
 
         threading.Thread(target=worker, daemon=J).start()
+
+    def _sample_thumbnail_paths(A, limit=8):
+        """Collect a small sample of current images for the benchmark."""
+
+        sample_paths = []
+        seen = set()
+        for slot in Aj(A, "slots", []):
+            path = slot.get(f)
+            if not path or path in seen or not common.A.path.isfile(path):
+                continue
+            sample_paths.append(path)
+            seen.add(path)
+            if Q(sample_paths) >= limit:
+                return sample_paths
+        current_dir = build_product_directory(
+            l,
+            A.var_name.get().strip(),
+            A.var_type.get().strip(),
+            A.var_model.get().strip(),
+            [
+                A.var_color1.get().strip(),
+                A.var_color2.get().strip(),
+                A.var_color3.get().strip(),
+            ],
+            A.var_extra.get().strip(),
+        )
+        if common.A.path.isdir(current_dir):
+            try:
+                for entry in common.A.scandir(current_dir):
+                    if not entry.is_file():
+                        continue
+                    ext = common.A.path.splitext(entry.name)[1].lower()
+                    if ext not in IMAGE_EXTENSION_FORMATS:
+                        continue
+                    if entry.path in seen:
+                        continue
+                    sample_paths.append(entry.path)
+                    seen.add(entry.path)
+                    if Q(sample_paths) >= limit:
+                        break
+            except E:
+                pass
+        return sample_paths
+
+    def _benchmark_thumbnail_decode(A, sample_paths):
+        """Measure thumbnail preparation time on a small image sample set."""
+
+        durations = []
+        for path in sample_paths:
+            started = Ag.perf_counter()
+            try:
+                with AA.open(path) as img:
+                    img.thumbnail(SLOT_PREVIEW_SIZE, LANCZOS_FILTER)
+                    img.copy()
+            except E:
+                continue
+            durations.append((Ag.perf_counter() - started) * 1000.0)
+        if not durations:
+            return {"count": 0, "avg_ms": 0.0, "max_ms": 0.0, "total_ms": 0.0}
+        return {
+            "count": Q(durations),
+            "avg_ms": sum(durations) / Q(durations),
+            "max_ms": max(durations),
+            "total_ms": sum(durations),
+        }
+
+    def _format_performance_report(A, result):
+        """Return a readable diagnostics report for the performance benchmark."""
+
+        timestamp = A9.now().strftime(A6)
+        ui = result.get("ui", {})
+        thumbs = result.get("thumbs", {})
+        queue_depth = result.get("thumb_queue", 0)
+        busy = result.get("busy", B) or LANG.get("busy_state_idle", "Stan: gotowe")
+        lines = [
+            LANG.get("perf_report_title", "Raport wydajności interfejsu"),
+            LANG.get("perf_report_time", "Czas: {time}").format(time=timestamp),
+            LANG.get("perf_report_fps", "Szacowane FPS UI: {fps:.0f}").format(
+                fps=ui.get("fps", 0.0)
+            ),
+            LANG.get("perf_report_ui_avg", "Średni krok UI: {value:.1f} ms").format(
+                value=ui.get("avg_ms", 0.0)
+            ),
+            LANG.get("perf_report_ui_p95", "P95 kroku UI: {value:.1f} ms").format(
+                value=ui.get("p95_ms", 0.0)
+            ),
+            LANG.get("perf_report_ui_max", "Maksymalny krok UI: {value:.1f} ms").format(
+                value=ui.get("max_ms", 0.0)
+            ),
+            LANG.get(
+                "perf_report_thumb_queue",
+                "Miniatury oczekujące w kolejce: {count}",
+            ).format(count=queue_depth),
+            LANG.get("perf_report_busy", "Aktualny stan: {state}").format(state=busy),
+            B,
+        ]
+        if thumbs.get("count", 0):
+            lines.extend(
+                [
+                    LANG.get(
+                        "perf_report_thumb_header", "Dekodowanie miniaturek:"
+                    ),
+                    LANG.get(
+                        "perf_report_thumb_count",
+                        "Próbki: {count}",
+                    ).format(count=thumbs.get("count", 0)),
+                    LANG.get(
+                        "perf_report_thumb_avg",
+                        "Średnio: {value:.1f} ms",
+                    ).format(value=thumbs.get("avg_ms", 0.0)),
+                    LANG.get(
+                        "perf_report_thumb_max",
+                        "Maksimum: {value:.1f} ms",
+                    ).format(value=thumbs.get("max_ms", 0.0)),
+                    LANG.get(
+                        "perf_report_thumb_total",
+                        "Łącznie: {value:.1f} ms",
+                    ).format(value=thumbs.get("total_ms", 0.0)),
+                ]
+            )
+        else:
+            lines.append(
+                LANG.get(
+                    "perf_report_thumb_none",
+                    "Brak lokalnych obrazów do testu dekodowania miniaturek.",
+                )
+            )
+        return "\n".join(lines)
+
+    def _run_performance_benchmark(A, status_var=I, button=I, report_widget=I):
+        """Run a lightweight UI and thumbnail performance benchmark."""
+
+        if Aj(A, "_perf_check_running", h):
+            return
+        A._perf_check_running = J
+        if status_var:
+            status_var.set(
+                LANG.get("perf_check_running", "Test wydajności trwa...")
+            )
+        if button:
+            try:
+                button.configure(state=V)
+            except E:
+                pass
+        if report_widget:
+            try:
+                report_widget.configure(state=Az)
+                report_widget.delete(A_, F.END)
+                report_widget.configure(state=Ak)
+            except E:
+                pass
+        A._set_busy_state(
+            LANG.get("busy_perf_test", "Test wydajności interfejsu"),
+            active=J,
+        )
+        sample_paths = A._sample_thumbnail_paths()
+        ui_samples = []
+        target_ms = 16
+        iterations = 32
+        last_tick = {"value": Ag.perf_counter()}
+
+        def finalize(result):
+            A._perf_check_running = h
+            A._set_busy_state(B, active=h)
+            if button:
+                try:
+                    button.configure(state=X)
+                except E:
+                    pass
+            report_text = A._format_performance_report(result)
+            A._perf_check_last_report = report_text
+            if report_widget:
+                try:
+                    report_widget.configure(state=Az)
+                    report_widget.delete(A_, F.END)
+                    report_widget.insert(F.END, report_text)
+                    report_widget.configure(state=Ak)
+                except E:
+                    pass
+            ui_avg = result.get("ui", {}).get("avg_ms", 0.0)
+            thumb_avg = result.get("thumbs", {}).get("avg_ms", 0.0)
+            status = LANG.get(
+                "perf_check_done",
+                "UI ~{fps:.0f} FPS, średni krok {avg:.1f} ms, miniatury {thumb:.1f} ms.",
+            ).format(
+                fps=result.get("ui", {}).get("fps", 0.0),
+                avg=ui_avg,
+                thumb=thumb_avg,
+            )
+            if status_var:
+                status_var.set(status)
+
+        def worker(ui_result):
+            thumb_result = A._benchmark_thumbnail_decode(sample_paths)
+            result = {
+                "ui": ui_result,
+                "thumbs": thumb_result,
+                "thumb_queue": getattr(A._thumb_request_queue, "qsize", lambda: 0)(),
+                "busy": LANG.get("busy_state_idle", "Stan: gotowe"),
+            }
+            A.after(0, lambda: finalize(result))
+
+        def measure(step=0):
+            now = Ag.perf_counter()
+            if step:
+                ui_samples.append((now - last_tick["value"]) * 1000.0)
+            last_tick["value"] = now
+            if step < iterations:
+                A.after(target_ms, lambda s=step + 1: measure(s))
+                return
+            sorted_samples = sorted(ui_samples) if ui_samples else [0.0]
+            avg_ms = sum(sorted_samples) / max(Q(sorted_samples), 1)
+            p95_index = max(0, int((Q(sorted_samples) - 1) * 0.95))
+            ui_result = {
+                "avg_ms": avg_ms,
+                "p95_ms": sorted_samples[p95_index],
+                "max_ms": max(sorted_samples),
+                "fps": min(60.0, 1000.0 / max(avg_ms, 1.0)),
+            }
+            threading.Thread(target=worker, args=(ui_result,), daemon=J).start()
+
+        A.after(target_ms, lambda: measure(1))
 
     def _scan_button_commands(A, root_widget=I):
         target = root_widget or A
@@ -1189,153 +2633,484 @@ class App(BU.Tk):
     def _build_form(A):
         """Create comboboxes and entry widgets for the product data form."""
 
-        F_ = "<FocusOut>"
         D_ = "<KeyRelease>"
         E_ = "<Return>"
-        B_ = C.Frame(A, style="Card.TFrame", padding=10)
-        B_.pack(side="top", fill="x", padx=12, pady=(12, 6))
-        G_ = C.Label(B_, text=NAME_LABEL, style="Form.TLabel")
-        G_.grid(row=0, column=0, sticky=R)
-        A._add_tooltip(
-            G_,
-            LANG.get(
+        A._app_shell = C.Frame(A, style="App.TFrame", padding=(14, 14, 14, 12))
+        A._app_shell.pack(fill=z, expand=J)
+        A._app_shell.columnconfigure(0, weight=1)
+        A._app_shell.rowconfigure(1, weight=1)
+
+        toolbar = C.Frame(A._app_shell, style="App.TFrame")
+        toolbar.grid(row=0, column=0, sticky="ew")
+        toolbar.columnconfigure(0, weight=8)
+        toolbar.columnconfigure(1, weight=3)
+        toolbar.rowconfigure(0, weight=1)
+
+        form_card = C.Frame(toolbar, style="Card.TFrame", padding=(12, 10))
+        form_card.grid(row=0, column=0, sticky="ew")
+        for column_idx in Ax(4):
+            form_card.columnconfigure(column_idx, weight=1, uniform="toolbar-form")
+        form_card.columnconfigure(0, weight=2)
+        form_card.columnconfigure(1, weight=2)
+
+        summary = C.Frame(form_card, style="Card.TFrame")
+        summary.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 6))
+        summary.columnconfigure(0, weight=1)
+        summary.columnconfigure(1, weight=1)
+
+        C.Label(summary, text=APP_TITLE, style="SectionTitle.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        C.Label(
+            summary,
+            textvariable=A._hero_slots_var,
+            style="Form.TLabel",
+            anchor="e",
+            justify="right",
+        ).grid(row=0, column=1, sticky="e")
+        C.Label(
+            summary,
+            textvariable=A._hero_context_var,
+            style="SectionHint.TLabel",
+            wraplength=560,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(2, 0))
+        C.Label(
+            summary,
+            textvariable=A._hero_remote_var,
+            style="Form.TLabel",
+            anchor="e",
+            justify="right",
+            wraplength=360,
+        ).grid(row=1, column=1, sticky="e", pady=(2, 0))
+        C.Label(
+            summary,
+            textvariable=A._hero_storage_var,
+            style="SectionHint.TLabel",
+            wraplength=980,
+            justify="left",
+        ).grid(row=2, column=0, sticky="w", pady=(2, 0))
+        C.Label(
+            summary,
+            textvariable=A._hero_status_var,
+            style="Form.TLabel",
+            anchor="e",
+            justify="right",
+        ).grid(row=2, column=1, sticky="e", pady=(2, 0))
+
+        G_ = A._build_form_combobox(
+            form_card,
+            row=1,
+            column=0,
+            label_text=NAME_LABEL,
+            field_key="name",
+            textvariable=A.var_name,
+            values=A.lists[n],
+            state=X,
+            tooltip_text=LANG.get(
                 "name_tooltip",
-                "Pełna nazwa mebla bez kolorów, typu i modelu, np: 'Maggiore', 'LUNA', 'SLANT'.",
+                "Pelna nazwa mebla bez kolorow, typu i modelu, np: 'Maggiore', 'LUNA', 'SLANT'.",
             ),
+            columnspan=2,
+            width=28,
         )
-        A.combo_name = C.Combobox(
-            B_, textvariable=A.var_name, values=A.lists[n], state=X
-        )
-        A.combo_name.grid(row=0, column=1, padx=5, pady=2)
-        A.combo_name.bind(E_, lambda e: A._on_name_commit())
-        A.combo_name.bind(A2, lambda e: A._on_name_commit())
-        A.combo_name.bind(F_, lambda e: A._on_name_commit())
-        A.combo_name.bind(D_, A._on_key_release)
-        A.combo_name.bind("<FocusIn>", A._remember_focus)
-        H_ = C.Label(B_, text=TYPE_LABEL, style="Form.TLabel")
-        H_.grid(row=1, column=0, sticky=R)
-        A._add_tooltip(
-            H_,
-            LANG.get(
+        A.combo_name = G_
+        G_.bind(E_, lambda e: A._on_name_commit())
+        G_.bind(A2, lambda e: A._on_name_commit())
+        G_.bind(D_, A._on_key_release)
+        G_.bind("<FocusIn>", A._remember_focus)
+
+        H_ = A._build_form_combobox(
+            form_card,
+            row=1,
+            column=2,
+            label_text=TYPE_LABEL,
+            field_key="type",
+            textvariable=A.var_type,
+            values=A.lists[t],
+            state=X,
+            tooltip_text=LANG.get(
                 "type_tooltip",
-                "Typ mebla, np: 'KOMODA', 'RTV', 'STÓŁ' (można dodać długość, np. 'RTV 100', 'SZAFA 80').",
+                "Typ mebla, np: 'KOMODA', 'RTV', 'STOL' (mozna dodac dlugosc, np. 'RTV 100', 'SZAFA 80').",
             ),
+            width=18,
         )
-        A.combo_type = C.Combobox(
-            B_, textvariable=A.var_type, values=A.lists[t], state=V
-        )
-        A.combo_type.grid(row=1, column=1, padx=5, pady=2)
-        A.combo_type.bind(E_, lambda e: A._on_type_commit())
-        A.combo_type.bind(A2, lambda e: A._on_type_commit())
-        A.combo_type.bind(F_, lambda e: A._on_type_commit())
-        A.combo_type.bind(D_, A._on_key_release)
-        A.combo_type.bind("<FocusIn>", A._remember_focus)
-        I_ = C.Label(B_, text=MODEL_LABEL, style="Form.TLabel")
-        I_.grid(row=2, column=0, sticky=R)
-        A._add_tooltip(
-            I_,
-            LANG.get(
+        A.combo_type = H_
+        H_.bind(E_, lambda e: A._on_type_commit())
+        H_.bind(A2, lambda e: A._on_type_commit())
+        H_.bind(D_, A._on_key_release)
+        H_.bind("<FocusIn>", A._remember_focus)
+
+        I_ = A._build_form_combobox(
+            form_card,
+            row=1,
+            column=3,
+            label_text=MODEL_LABEL,
+            field_key="model",
+            textvariable=A.var_model,
+            values=A.lists[s],
+            state=X,
+            tooltip_text=LANG.get(
                 "model_tooltip",
                 "Model lub wersja mebla, np: 'MA03', 'Li01', 'SOL-05'.",
             ),
+            width=18,
         )
-        A.combo_model = C.Combobox(
-            B_, textvariable=A.var_model, values=A.lists[s], state=V
+        A.combo_model = I_
+        I_.bind(E_, lambda e: A._on_model_commit())
+        I_.bind(A2, lambda e: A._on_model_commit())
+        I_.bind(D_, A._on_key_release)
+        I_.bind("<FocusIn>", A._remember_focus)
+
+        J_ = A._build_form_combobox(
+            form_card,
+            row=2,
+            column=0,
+            label_text=COLOR1_LABEL,
+            field_key="color1",
+            textvariable=A.var_color1,
+            values=A.lists[Y],
+            state=X,
+            tooltip_text=LANG.get("color1_tooltip", "Glowny kolor mebla (wymagany)."),
+            width=16,
         )
-        A.combo_model.grid(row=2, column=1, padx=5, pady=2)
-        A.combo_model.bind(E_, lambda e: A._on_model_commit())
-        A.combo_model.bind(A2, lambda e: A._on_model_commit())
-        A.combo_model.bind(D_, A._on_key_release)
-        A.combo_model.bind("<FocusIn>", A._remember_focus)
-        J_ = C.Label(B_, text=COLOR1_LABEL, style="Form.TLabel")
-        J_.grid(row=3, column=0, sticky=R)
-        A._add_tooltip(
-            J_, LANG.get("color1_tooltip", "Główny kolor mebla (wymagany).")
+        A.combo_color1 = J_
+        J_.bind(E_, lambda e: A._on_color_commit())
+        J_.bind(A2, lambda e: A._on_color_commit())
+        J_.bind(D_, A._on_key_release)
+        J_.bind("<FocusIn>", A._remember_focus)
+
+        K_ = A._build_form_combobox(
+            form_card,
+            row=2,
+            column=1,
+            label_text=COLOR2_LABEL,
+            field_key="color2",
+            textvariable=A.var_color2,
+            values=A.lists[Y],
+            state=X,
+            tooltip_text=LANG.get("color2_tooltip", "Drugi kolor mebla (opcjonalnie)."),
+            width=16,
         )
-        A.combo_color1 = C.Combobox(
-            B_, textvariable=A.var_color1, values=A.lists[Y], state=V
+        A.combo_color2 = K_
+        K_.bind(E_, lambda e: A._on_color_commit())
+        K_.bind(A2, lambda e: A._on_color_commit())
+        K_.bind(D_, A._on_key_release)
+        K_.bind("<FocusIn>", A._remember_focus)
+
+        L_ = A._build_form_combobox(
+            form_card,
+            row=2,
+            column=2,
+            label_text=COLOR3_LABEL,
+            field_key="color3",
+            textvariable=A.var_color3,
+            values=A.lists[Y],
+            state=X,
+            tooltip_text=LANG.get("color3_tooltip", "Trzeci kolor mebla (opcjonalnie)."),
+            width=16,
         )
-        A.combo_color1.grid(row=3, column=1, padx=5, pady=2)
-        A.combo_color1.bind(E_, lambda e: A._on_color_commit())
-        A.combo_color1.bind(A2, lambda e: A._on_color_commit())
-        A.combo_color1.bind(F_, lambda e: A._on_color_commit())
-        A.combo_color1.bind(D_, A._on_key_release)
-        A.combo_color1.bind("<FocusIn>", A._remember_focus)
-        K_ = C.Label(B_, text=COLOR2_LABEL, style="Form.TLabel")
-        K_.grid(row=4, column=0, sticky=R)
-        A._add_tooltip(
-            K_, LANG.get("color2_tooltip", "Drugi kolor mebla (opcjonalnie).")
-        )
-        A.combo_color2 = C.Combobox(
-            B_, textvariable=A.var_color2, values=A.lists[Y], state=V
-        )
-        A.combo_color2.grid(row=4, column=1, padx=5, pady=2)
-        A.combo_color2.bind(E_, lambda e: A._on_color_commit())
-        A.combo_color2.bind(A2, lambda e: A._on_color_commit())
-        A.combo_color2.bind(F_, lambda e: A._on_color_commit())
-        A.combo_color2.bind(D_, A._on_key_release)
-        A.combo_color2.bind("<FocusIn>", A._remember_focus)
-        L_ = C.Label(B_, text=COLOR3_LABEL, style="Form.TLabel")
-        L_.grid(row=5, column=0, sticky=R)
-        A._add_tooltip(
-            L_, LANG.get("color3_tooltip", "Trzeci kolor mebla (opcjonalnie).")
-        )
-        A.combo_color3 = C.Combobox(
-            B_, textvariable=A.var_color3, values=A.lists[Y], state=V
-        )
-        A.combo_color3.grid(row=5, column=1, padx=5, pady=2)
-        A.combo_color3.bind(E_, lambda e: A._on_color_commit())
-        A.combo_color3.bind(A2, lambda e: A._on_color_commit())
-        A.combo_color3.bind(F_, lambda e: A._on_color_commit())
-        A.combo_color3.bind(D_, A._on_key_release)
-        A.combo_color3.bind("<FocusIn>", A._remember_focus)
-        M_ = C.Label(B_, text=EXTRA_LABEL, style="Form.TLabel")
-        M_.grid(row=6, column=0, sticky=R)
-        A._add_tooltip(
-            M_,
-            LANG.get(
+        A.combo_color3 = L_
+        L_.bind(E_, lambda e: A._on_color_commit())
+        L_.bind(A2, lambda e: A._on_color_commit())
+        L_.bind(D_, A._on_key_release)
+        L_.bind("<FocusIn>", A._remember_focus)
+
+        M_ = A._build_form_combobox(
+            form_card,
+            row=2,
+            column=3,
+            label_text=EXTRA_LABEL,
+            field_key="extra",
+            textvariable=A.var_extra,
+            values=A.lists[d],
+            state=X,
+            tooltip_text=LANG.get(
                 "extra_tooltip",
-                "Dodatkowe informacje, np. LED, RGB (pozostaw puste, jeśli brak dodatków).",
+                "Dodatkowe informacje, np. LED, RGB (pozostaw puste, jesli brak dodatkow).",
+            ),
+            width=16,
+        )
+        A.combo_extra = M_
+        M_.bind(E_, lambda e: A._on_extra_commit())
+        M_.bind(A2, lambda e: A._on_extra_commit())
+        M_.bind(D_, A._on_key_release)
+        M_.bind("<FocusIn>", A._remember_focus)
+
+        ean_field = C.Frame(form_card, style="Card.TFrame")
+        ean_field.grid(
+            row=3, column=0, columnspan=2, sticky="ew", padx=3, pady=(0, 2)
+        )
+        ean_field.columnconfigure(0, weight=1)
+        ean_field.columnconfigure(1, weight=1)
+        product_id_field = C.Frame(ean_field, style="Card.TFrame")
+        product_id_field.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        product_id_field.columnconfigure(0, weight=1)
+        product_id_label = C.Label(
+            product_id_field,
+            text=LANG.get("product_id_label", "ID produktu"),
+            style="Form.TLabel",
+        )
+        product_id_label.grid(row=0, column=0, sticky="w", pady=(0, 2))
+        A._add_tooltip(
+            product_id_label,
+            LANG.get(
+                "product_id_tooltip",
+                "Stały identyfikator wpisu. Jest generowany automatycznie i nie można go edytować.",
             ),
         )
-        A.combo_extra = C.Combobox(
-            B_, textvariable=A.var_extra, values=A.lists[d], state=V
+        A.entry_product_id = C.Entry(
+            product_id_field,
+            textvariable=A.var_product_id,
+            state="readonly",
+            width=20,
         )
-        A.combo_extra.grid(row=6, column=1, padx=5, pady=2)
-        A.combo_extra.bind(E_, lambda e: A._on_extra_commit())
-        A.combo_extra.bind(A2, lambda e: A._on_extra_commit())
-        A.combo_extra.bind(F_, lambda e: A._on_extra_commit())
-        A.combo_extra.bind(D_, A._on_key_release)
-        A.combo_extra.bind("<FocusIn>", A._remember_focus)
-        N_ = C.Label(B_, text=EAN_OPTIONAL_LABEL, style="Form.TLabel")
-        N_.grid(row=7, column=0, sticky=R)
+        A.entry_product_id.grid(row=1, column=0, sticky="ew")
+        ean_value_field = C.Frame(ean_field, style="Card.TFrame")
+        ean_value_field.grid(row=0, column=1, sticky="ew")
+        ean_value_field.columnconfigure(0, weight=1)
+        ean_value_field.columnconfigure(1, weight=0)
+        N_ = C.Label(ean_value_field, text=EAN_OPTIONAL_LABEL, style="Form.TLabel")
+        N_.grid(row=0, column=0, sticky="w", pady=(0, 2))
         A._add_tooltip(
             N_,
             LANG.get(
                 "ean_tooltip",
-                "13-cyfrowy kod EAN produktu. Jeśli nie podany, zostanie użyte 'BRAK-EAN'.",
+                "13-cyfrowy kod EAN produktu. Jesli nie podany, zostanie uzyte 'BRAK-EAN'.",
             ),
         )
-        A.entry_ean = C.Entry(B_, textvariable=A.var_ean, state=X)
-        A.entry_ean.grid(row=7, column=1, padx=5, pady=2)
-        A.entry_ean.bind("<FocusIn>", A._remember_focus)
-        O_ = C.Button(B_, text=LOAD_LABEL, command=A._load_by_ean)
-        O_.grid(row=7, column=2, padx=5, pady=2)
-        A.btn_edit_lists = C.Button(B_, text=EDIT_LISTS_LABEL, command=A._open_list_editor)
-        A.btn_edit_lists.grid(row=0, column=2, padx=20)
-        A.btn_settings = C.Button(B_, text=SETTINGS_LABEL, command=A._open_settings)
-        A.btn_settings.grid(row=0, column=3, padx=5)
-        A.btn_submit = C.Button(B_, text=UPDATE_LABEL, command=A._on_submit)
-        A.btn_submit.grid(row=8, column=0, columnspan=2, pady=10)
-        A.btn_open = C.Button(B_, text=OPEN_FOLDER_LABEL, command=A._open_current_folder)
-        A.btn_open.grid(row=8, column=2, padx=5, pady=10)
-        A.ui_log = BS.ScrolledText(B_, width=48, height=8, state=Ak, wrap="word")
-        A.ui_log.grid(row=0, column=4, rowspan=9, padx=10, sticky="nsew")
-        A.btn_clear_log = C.Button(
-            B_, text=CLEAR_LOG_LABEL, command=lambda: A._ui_log(clear=Al)
+        ean_restore = C.Button(
+            ean_value_field,
+            text=LANG.get("field_restore_button", "Reset"),
+            style="MiniOutline.TButton",
+            width=6,
+            command=lambda: A._restore_form_field_value("ean"),
+            state=V,
         )
-        A.btn_clear_log.grid(row=8, column=3, padx=5, pady=10, sticky="e")
-        B_.grid_columnconfigure(4, weight=1)
+        ean_restore.grid(row=0, column=1, sticky="e", padx=(6, 0), pady=(0, 2))
+        A._add_tooltip(
+            ean_restore,
+            LANG.get(
+                "field_restore_tooltip",
+                "Przywraca wartosc z ostatnio wczytanego wpisu.",
+            ),
+        )
+        A.entry_ean = C.Entry(
+            ean_value_field, textvariable=A.var_ean, state=X, width=22
+        )
+        A.entry_ean.grid(row=1, column=0, columnspan=2, sticky="ew")
+        A.entry_ean.bind("<FocusIn>", A._remember_focus)
+        A.entry_ean.bind("<Return>", lambda _event: A._search_current_entry())
+        A._register_form_field("ean", ean_value_field, N_, A.entry_ean, ean_restore)
+
+        actions = C.Frame(form_card, style="Card.TFrame")
+        actions.grid(row=3, column=2, columnspan=2, sticky="ew", padx=3, pady=(0, 2))
+        for column_idx in Ax(4):
+            actions.columnconfigure(column_idx, weight=1)
+
+        A.btn_submit = C.Button(
+            actions,
+            text=UPDATE_LABEL,
+            style="Accent.TButton",
+            command=A._on_submit,
+        )
+        A.btn_submit.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 4))
+        A.btn_search_entry = C.Button(
+            actions,
+            text=LANG.get("search_entry_button", "Wyszukaj"),
+            style="Outline.TButton",
+            command=A._search_current_entry,
+        )
+        A.btn_search_entry.grid(row=1, column=0, sticky="ew")
+        A.btn_new_search = C.Button(
+            actions,
+            text=LANG.get("new_entry_button", "Wyczysc pola"),
+            style="Outline.TButton",
+            command=A._start_new_search,
+        )
+        A.btn_new_search.grid(row=1, column=1, sticky="ew", padx=6)
+        A.btn_open = C.Button(
+            actions,
+            text=OPEN_FOLDER_LABEL,
+            style="Outline.TButton",
+            command=A._open_current_folder,
+        )
+        A.btn_open.grid(row=1, column=2, sticky="ew")
+        A.btn_edit_lists = C.Button(
+            actions,
+            text=EDIT_LISTS_LABEL,
+            style="Outline.TButton",
+            command=A._open_list_editor,
+        )
+        A.btn_edit_lists.grid(row=1, column=3, sticky="ew")
+        A.btn_settings = C.Button(
+            actions,
+            text=SETTINGS_LABEL,
+            style="Outline.TButton",
+            command=A._open_settings,
+        )
+        A.btn_settings.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+
+        log_card = C.Frame(toolbar, style="Card.TFrame", padding=(10, 10))
+        log_card.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        log_card.columnconfigure(0, weight=1)
+        C.Label(
+            log_card,
+            text=LANG.get("activity_log_section", "Aktywnosc i log"),
+            style="SectionTitle.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        C.Label(
+            log_card,
+            text=LANG.get(
+                "activity_log_hint_compact",
+                "Postep, komunikaty FTP/SQL i bledy w jednym miejscu.",
+            ),
+            style="SectionHint.TLabel",
+            wraplength=280,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(2, 6))
+        A.btn_clear_log = C.Button(
+            log_card,
+            text=CLEAR_LOG_LABEL,
+            style="Outline.TButton",
+            command=lambda: A._ui_log(clear=Al),
+        )
+        A.btn_clear_log.grid(row=0, column=1, rowspan=2, sticky="ne", padx=(10, 0))
+        C.Label(
+            log_card,
+            textvariable=A._perf_status_var,
+            style="Form.TLabel",
+        ).grid(row=2, column=0, sticky="w")
+        C.Label(
+            log_card,
+            textvariable=A._perf_detail_var,
+            style="SectionHint.TLabel",
+            wraplength=280,
+            justify="left",
+        ).grid(row=3, column=0, sticky="w", pady=(1, 2))
+        C.Label(
+            log_card,
+            textvariable=A._busy_status_var,
+            style="SectionHint.TLabel",
+            wraplength=280,
+            justify="left",
+        ).grid(row=4, column=0, sticky="w", pady=(0, 2))
+        A._busy_progress = C.Progressbar(
+            log_card,
+            mode="indeterminate",
+            style="Slot.TProgressbar",
+        )
+        A._busy_progress.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        A.ui_log = BS.ScrolledText(log_card, width=34, height=3, state=Ak, wrap="word")
+        A.ui_log.grid(row=6, column=0, columnspan=2, sticky="nsew")
+        A._configure_log_widget()
+        log_card.rowconfigure(6, weight=1)
+
+        A._slots_mount = C.Frame(A._app_shell, style="Card.TFrame", padding=(10, 10))
+        A._slots_mount.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        A._slots_mount.columnconfigure(0, weight=1)
+        A._slots_mount.rowconfigure(0, weight=1)
+
+    def _build_form_field(
+        A,
+        parent,
+        *,
+        row,
+        column,
+        label_text,
+        widget=I,
+        widget_factory=I,
+        tooltip_text=I,
+        columnspan=1,
+        field_key=I,
+    ):
+        field = C.Frame(parent, style="Card.TFrame")
+        field.grid(
+            row=row,
+            column=column,
+            columnspan=columnspan,
+            sticky="ew",
+            padx=3,
+            pady=(0, 4),
+        )
+        field.columnconfigure(0, weight=1)
+        field.columnconfigure(1, weight=0)
+        label = C.Label(field, text=label_text, style="Form.TLabel")
+        label.grid(row=0, column=0, sticky="w", pady=(0, 2))
+        if tooltip_text:
+            A._add_tooltip(label, tooltip_text)
+        restore_button = I
+        if field_key:
+            restore_button = C.Button(
+                field,
+                text=LANG.get("field_restore_button", "Reset"),
+                style="MiniOutline.TButton",
+                width=6,
+                command=lambda key=field_key: A._restore_form_field_value(key),
+                state=V,
+            )
+            restore_button.grid(row=0, column=1, sticky="e", padx=(6, 0), pady=(0, 2))
+            A._add_tooltip(
+                restore_button,
+                LANG.get(
+                    "field_restore_tooltip",
+                    "Przywraca wartosc z ostatnio wczytanego wpisu.",
+                ),
+            )
+        if widget_factory is not I:
+            widget = widget_factory(field)
+        if widget is not I:
+            widget.grid(row=1, column=0, columnspan=2, sticky="ew")
+        A._register_form_field(field_key, field, label, widget, restore_button)
+        return field, widget
+
+    def _build_form_combobox(
+        A,
+        parent,
+        *,
+        row,
+        column,
+        label_text,
+        textvariable,
+        values,
+        state=X,
+        tooltip_text=I,
+        columnspan=1,
+        width=18,
+        field_key=I,
+    ):
+        _field, combo = A._build_form_field(
+            parent,
+            row=row,
+            column=column,
+            label_text=label_text,
+            tooltip_text=tooltip_text,
+            columnspan=columnspan,
+            field_key=field_key,
+            widget_factory=lambda field: C.Combobox(
+                field,
+                textvariable=textvariable,
+                values=values,
+                state=state,
+                width=width,
+            ),
+        )
+        return combo
+
+    def _configure_log_widget(A):
+        A.ui_log.configure(
+            background=A._ui_colors["log_bg"],
+            foreground=A._ui_colors["log_fg"],
+            insertbackground=A._ui_colors["hero_text"],
+            padx=12,
+            pady=10,
+            relief="flat",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground="#17323b",
+            selectbackground="#2b5260",
+            selectforeground=A._ui_colors["hero_text"],
+        )
 
     def _build_slots(B):
         """Prepare the scrollable grid of drop targets used for images."""
@@ -1344,60 +3119,57 @@ class App(BU.Tk):
         R_ = B._ui_colors["slot_bg"]
         T_ = B._ui_colors["slot_border"]
         S_ = "<Configure>"
-        L_ = "units"
-        try:
-            B.unbind_all("<MouseWheel>")
-            B.unbind_all("<Button-4>")
-            B.unbind_all("<Button-5>")
-        except E:
-            pass
-        M_ = C.Frame(B, style="App.TFrame")
-        M_.pack(fill=z, expand=J, padx=12, pady=(6, 12))
+        mount = Aj(B, "_slots_mount", I)
+        if not mount:
+            return
+        M_ = C.Frame(mount, style="Card.TFrame")
+        M_.grid(row=0, column=0, sticky="nsew")
+        M_.columnconfigure(0, weight=1)
+        M_.rowconfigure(1, weight=1)
         B._slots_container = M_
-        A_ = F.Canvas(M_, bg=B._ui_colors["bg"], highlightthickness=0, bd=0)
+        header = C.Frame(M_, style="Card.TFrame")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        header.columnconfigure(0, weight=1)
+        C.Label(
+            header,
+            text=LANG.get("slots_section", "Sloty zdjec"),
+            style="SectionTitle.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        body = C.Frame(M_, style="Card.TFrame")
+        body.grid(row=1, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+        A_ = F.Canvas(body, bg=B._ui_colors["card"], highlightthickness=0, bd=0)
+        B._slots_canvas = A_
         def _on_scroll(*args):
             A_.yview(*args)
-            B._note_slots_scroll()
 
-        T = C.Scrollbar(M_, orient=An, command=_on_scroll)
-        N_ = C.Frame(A_, style="App.TFrame")
-        N_.bind(S_, lambda e: A_.configure(scrollregion=A_.bbox("all")))
+        T = C.Scrollbar(body, orient=An, command=_on_scroll)
+        N_ = C.Frame(A_, style="Card.TFrame")
+        N_.bind(S_, B._schedule_slots_canvas_refresh)
         Y = A_.create_window((0, 0), window=N_, anchor="nw")
-        A_.bind(S_, lambda e, cw=Y: A_.itemconfig(cw, width=e.width))
+        def _on_canvas_resize(e, cw=Y):
+            A_.itemconfig(cw, width=e.width)
+            B._schedule_slots_canvas_refresh()
+
+        A_.bind(S_, _on_canvas_resize)
         A_.configure(yscrollcommand=T.set)
         A_.pack(side=Am, fill=z, expand=J)
         T.pack(side=AV, fill="y")
-        def _on_mousewheel(e):
-            A_.yview_scroll(int(-1 * (e.delta / 120)), L_)
-            B._note_slots_scroll()
-
-        def _on_button4(e):
-            A_.yview_scroll(-1, L_)
-            B._note_slots_scroll()
-
-        def _on_button5(e):
-            A_.yview_scroll(1, L_)
-            B._note_slots_scroll()
-
-        A_.bind_all("<MouseWheel>", _on_mousewheel)
-        A_.bind_all("<Button-4>", _on_button4)
-        A_.bind_all("<Button-5>", _on_button5)
         B.slots_frame = N_
+        B._slot_grid_columns = 0
         B.slots = []
-        U = 5
         for G_, slot_def in A0(B.slot_definitions):
             V_ = slot_def["prefix"]
             W_ = slot_def["label"]
-            Z_, O_ = divmod(G_, U)
             H_ = F.Frame(
                 B.slots_frame,
-                highlightthickness=0,
-                highlightbackground=A8,
-                highlightcolor=A8,
+                highlightthickness=1,
+                highlightbackground=T_,
+                highlightcolor=T_,
                 bg=B._ui_colors["card"],
                 bd=0,
             )
-            H_.grid(row=Z_, column=O_, padx=6, pady=6, sticky="nsew")
             slot_title = SLOT_TITLE_FORMAT.format(
                 index=V_, label=get_slot_label(W_)
             )
@@ -1407,79 +3179,83 @@ class App(BU.Tk):
                 style="SlotTitle.TLabel",
                 anchor="w",
             )
-            title_label.pack(fill="x", padx=6, pady=(6, 0))
+            title_label.pack(fill="x", padx=8, pady=(8, 0))
             E_ = F.Frame(
                 H_,
-                height=110,
+                height=SLOT_PREVIEW_SIZE[1],
                 bg=R_,
                 highlightthickness=1,
                 highlightbackground=T_,
                 bd=0,
             )
             E_.pack_propagate(h)
-            E_.pack(fill=z, expand=J, padx=6, pady=6)
-            D_ = F.Label(E_, text=NO_FILE_LABEL, bg=R_, fg=B._ui_colors["muted"])
+            E_.pack(fill=z, expand=J, padx=8, pady=8)
+            D_ = F.Label(
+                E_,
+                text=B._slot_placeholder_text,
+                bg=R_,
+                fg=B._ui_colors["muted"],
+                justify="center",
+                font=("Segoe UI", 9),
+                wraplength=220,
+            )
             D_.pack(fill=z, expand=J)
             if hasattr(D_, "drop_target_register") and hasattr(D_, "dnd_bind"):
                 D_.drop_target_register(DND_ALL)
                 D_.dnd_bind("<<Drop>>", lambda e, i=G_: B._on_drop(e, i))
-            K_ = F.Label(E_, text="✕", fg=AT, bg=Ab)
+            K_ = F.Label(
+                E_,
+                text=B._slot_remove_label,
+                fg=AT,
+                bg=B._ui_colors["danger"],
+                padx=7,
+                font=("Segoe UI Semibold", 8),
+            )
             K_.bind(Q_, lambda e, i=G_: B._remove_file(i))
             K_.place(relx=0, rely=0, anchor="nw")
             K_.place_forget()
-            X_ = F.Label(E_, text="...", fg=AT, bg="black")
+            X_ = F.Label(
+                E_,
+                text=B._slot_select_label,
+                fg=AT,
+                bg=B._ui_colors["hero"],
+                padx=7,
+                font=("Segoe UI Semibold", 8),
+            )
             X_.bind(Q_, lambda e, i=G_: B._select_file(i))
             X_.place(relx=1.0, rely=0, anchor="ne")
-            local_icon = F.Canvas(
+            local_icon = F.Label(
                 E_,
-                width=30,
-                height=20,
-                highlightthickness=0,
-                bd=1,
-                relief="solid",
-            )
-            local_icon.create_text(
-                15,
-                10,
                 text=LOCAL_ICON_LABEL,
-                font=("Segoe UI", 7),
-                fill="white",
+                fg=AT,
+                bg=B._ui_colors["slot_bg"],
+                padx=6,
+                pady=1,
+                font=("Segoe UI Semibold", 7),
             )
-            local_icon.offset_x = -60
+            local_icon.offset_x = -74
             local_icon.place(relx=1.0, rely=1.0, anchor="se", x=local_icon.offset_x)
             local_icon.place_forget()
-            ftp_icon = F.Canvas(
+            ftp_icon = F.Label(
                 E_,
-                width=30,
-                height=20,
-                highlightthickness=0,
-                bd=1,
-                relief="solid",
-            )
-            ftp_icon.create_text(
-                15,
-                10,
                 text=FTP_ICON_LABEL,
-                font=("Segoe UI", 7),
-                fill="white",
+                fg=AT,
+                bg=B._ui_colors["slot_bg"],
+                padx=6,
+                pady=1,
+                font=("Segoe UI Semibold", 7),
             )
-            ftp_icon.offset_x = -30
+            ftp_icon.offset_x = -38
             ftp_icon.place(relx=1.0, rely=1.0, anchor="se", x=ftp_icon.offset_x)
             ftp_icon.place_forget()
-            sql_icon = F.Canvas(
+            sql_icon = F.Label(
                 E_,
-                width=30,
-                height=20,
-                highlightthickness=0,
-                bd=1,
-                relief="solid",
-            )
-            sql_icon.create_text(
-                15,
-                10,
                 text=SQL_ICON_LABEL,
-                font=("Segoe UI", 7),
-                fill="white",
+                fg=AT,
+                bg=B._ui_colors["slot_bg"],
+                padx=6,
+                pady=1,
+                font=("Segoe UI Semibold", 7),
             )
             sql_icon.offset_x = 0
             sql_icon.place(relx=1.0, rely=1.0, anchor="se", x=sql_icon.offset_x)
@@ -1490,7 +3266,7 @@ class App(BU.Tk):
                 D_.dnd_bind("<<DragInitCmd>>", lambda e, i=G_: B._on_drag_init(e, i))
                 D_.dnd_bind("<<DragEndCmd>>", lambda e: B._on_drag_end(e))
             footer = C.Frame(H_, style="SlotFooter.TFrame")
-            footer.pack(fill="x", padx=6, pady=(0, 6))
+            footer.pack(fill="x", padx=8, pady=(0, 8))
             status_label = C.Label(
                 footer,
                 text=B._slot_status["empty"],
@@ -1498,14 +3274,6 @@ class App(BU.Tk):
                 anchor="w",
             )
             status_label.pack(fill="x")
-            progress = C.Progressbar(
-                footer,
-                mode="determinate",
-                maximum=100,
-                value=0,
-                style="Slot.TProgressbar",
-            )
-            progress.pack(fill="x", pady=(2, 0))
             B.slots.append(
                 {
                     Aa: V_,
@@ -1517,27 +3285,17 @@ class App(BU.Tk):
                     "ftp_icon": ftp_icon,
                     "sql_icon": sql_icon,
                     "status_label": status_label,
-                    "progress": progress,
+                    "progress": I,
                     f: I,
                     AS: H_,
                     B0: I,
                 }
             )
-        for O_ in Ax(U):
-            B.slots_frame.columnconfigure(O_, weight=1)
-
-    def _note_slots_scroll(B):
-        B._scrolling = J
-        if B._scroll_idle_job is not I:
-            try:
-                B.after_cancel(B._scroll_idle_job)
-            except E:
-                pass
-        B._scroll_idle_job = B.after(150, B._clear_slots_scroll)
-
-    def _clear_slots_scroll(B):
-        B._scrolling = h
-        B._scroll_idle_job = I
+        B._apply_slot_grid()
+        B._bind_slot_scroll_target(A_)
+        B._bind_slot_scroll_target(N_)
+        B.after_idle(B._schedule_slots_canvas_refresh)
+        B._update_dashboard_summary()
 
     def _load_slot_config(B, log_issues=J):
         slot_defs, slot_issues = normalize_slot_definitions(
@@ -1646,44 +3404,205 @@ class App(BU.Tk):
     def _queue_thumbnail(B, idx, path):
         if not path:
             return
-        token = uuid.uuid4().hex
+        token = B._next_thumbnail_token()
         B._thumb_tokens[idx] = token
-        B._thumb_queue.put((idx, path, token))
-
-    def _thumbnail_worker(B):
-        while J:
-            idx, path, token = B._thumb_queue.get()
-            if token != B._thumb_tokens.get(idx):
-                continue
-            thumb = I
-            try:
-                with AA.open(path) as img:
-                    img.thumbnail((100, 100), LANCZOS_FILTER)
-                    thumb = img.copy()
-            except E:
-                thumb = I
-            B.after(
-                0,
-                lambda i=idx, p=path, t=token, th=thumb: B._apply_thumbnail(
-                    i, p, t, th
-                ),
-            )
-
-    def _apply_thumbnail(B, idx, path, token, thumb):
-        if token != B._thumb_tokens.get(idx):
+        _cache_key, thumb = B._get_cached_thumbnail(path)
+        if thumb is not I:
+            B._set_slot_preview(idx, path, thumb)
             return
+        B._thumb_request_queue.put((idx, path, token))
+
+    def _build_slot_target_filename(
+        B,
+        idx,
+        ean,
+        name,
+        type_value,
+        model,
+        color_values,
+        extra_value,
+        src_path,
+        *,
+        convert_tif_enabled=h,
+        target_ext=B,
+    ):
+        """Return the final output filename for a slot and source file."""
+
+        if idx is I or idx < 0 or idx >= Q(B.slots):
+            return B
+        ext = A.path.splitext(src_path or B)[1]
+        if not ext:
+            return B
+        final_ext = ext
+        if convert_tif_enabled and ext.lower() in IMAGE_EXTENSION_FORMATS and target_ext:
+            final_ext = target_ext
+        slot = B.slots[idx]
+        return build_slot_filename(
+            ean,
+            slot[Aa],
+            label_category(slot["label"]),
+            name,
+            type_value,
+            model,
+            color_values,
+            extra_value,
+            final_ext,
+        )
+
+    def _build_expected_remote_filename(
+        B,
+        idx,
+        ean,
+        src_path,
+        *,
+        convert_tif_enabled=h,
+        target_ext=B,
+    ):
+        """Return the canonical remote FTP name for a slot output."""
+
+        if idx is I or idx < 0 or idx >= Q(B.slots):
+            return B
+        ext = A.path.splitext(src_path or B)[1]
+        if not ext:
+            return B
+        final_ext = ext
+        if convert_tif_enabled and ext.lower() in IMAGE_EXTENSION_FORMATS and target_ext:
+            final_ext = target_ext
+        return build_remote_slot_filename(ean, B.slots[idx][Aa], final_ext)
+
+    def _list_remote_filenames(B, ftp_conn):
+        """Return remote file names using the most compatible FTP listing method."""
+
+        names = []
+        if hasattr(ftp_conn, "mlsd"):
+            try:
+                for entry_name, facts in ftp_conn.mlsd():
+                    if not entry_name or entry_name in (".", ".."):
+                        continue
+                    entry_type = B
+                    if isinstance(facts, dict):
+                        entry_type = G(facts.get("type") or B).strip().lower()
+                    if entry_type and entry_type not in ("file",):
+                        continue
+                    names.append(A.path.basename(entry_name))
+            except (AB.error_perm, E):
+                names = []
+            if names:
+                return names
+        try:
+            return [A.path.basename(name) for name in ftp_conn.nlst()]
+        except AB.error_perm as exc:
+            msg = G(exc).lower()
+            if "no files found" in msg or "file not found" in msg:
+                return []
+            raise
+
+    def _seed_metadata_migration(
+        B,
+        output_dir,
+        ean,
+        name,
+        type_value,
+        model,
+        color_values,
+        extra_value,
+        *,
+        convert_tif_enabled=h,
+        target_ext=B,
+    ):
+        """Prepare loaded files for a metadata correction without manual renaming."""
+
+        if not B._preserve_loaded_binding():
+            return 0
+        seeded = 0
+        for idx, slot in A0(B.slots):
+            if (
+                idx in B.pending_additions
+                or idx in B.pending_deletions
+                or idx in B.pending_ftp_deletions
+            ):
+                continue
+            src_path = slot.get(f)
+            if not src_path or not A.path.isfile(src_path):
+                continue
+            target_name = B._build_slot_target_filename(
+                idx,
+                ean,
+                name,
+                type_value,
+                model,
+                color_values,
+                extra_value,
+                src_path,
+                convert_tif_enabled=convert_tif_enabled,
+                target_ext=target_ext,
+            )
+            if not target_name:
+                continue
+            target_path = A.path.join(output_dir, target_name)
+            current_remote_name = G(B.ftp_presence.get(slot[Aa]) or B).strip()
+            expected_remote_name = B._build_expected_remote_filename(
+                idx,
+                ean,
+                src_path,
+                convert_tif_enabled=convert_tif_enabled,
+                target_ext=target_ext,
+            )
+            old_local_path = src_path if src_path.startswith(l) else I
+            local_matches = h
+            if old_local_path:
+                try:
+                    local_matches = A.path.samefile(old_local_path, target_path)
+                except E:
+                    local_matches = A.path.normcase(A.path.normpath(old_local_path)) == A.path.normcase(
+                        A.path.normpath(target_path)
+                    )
+            remote_matches = (
+                current_remote_name == expected_remote_name
+                if current_remote_name and expected_remote_name
+                else h
+            )
+            if local_matches and remote_matches:
+                continue
+            B.pending_additions[idx] = src_path
+            if old_local_path and not local_matches:
+                B.pending_deletions[idx] = old_local_path
+            seeded += 1
+        return seeded
+
+    def _get_slot_existing_remote_filename(A, slot_prefix):
+        """Return the current short remote name for a slot when it can be inferred."""
+
+        current_remote_name = G(A.ftp_presence.get(slot_prefix) or B).strip()
+        if current_remote_name:
+            return current_remote_name
+        original_name = G(A.original_files.get(slot_prefix) or B).strip()
+        if not original_name:
+            return B
+        original_ext = A.path.splitext(original_name)[1].lower()
+        parsed = parse_slot_filename(original_name)
+        if not parsed or not parsed.ean:
+            return B
+        return f"{parsed.ean}_{slot_prefix}{original_ext}"
+
+    def _load_slot_thumbnail(B, path):
+        cache_key, thumb = B._get_cached_thumbnail(path)
+        if thumb is not I:
+            return thumb
+        try:
+            with AA.open(path) as img:
+                img.thumbnail(SLOT_PREVIEW_SIZE, LANCZOS_FILTER)
+                thumb = img.copy()
+            B._store_cached_thumbnail(cache_key, thumb)
+            return thumb
+        except E:
+            return I
+
+    def _set_slot_preview(B, idx, path, thumb):
         if idx < 0 or idx >= Q(B.slots):
             return
         slot = B.slots[idx]
         if slot.get(f) != path:
-            return
-        if B._scrolling:
-            B.after(
-                80,
-                lambda i=idx, p=path, t=token, th=thumb: B._apply_thumbnail(
-                    i, p, t, th
-                ),
-            )
             return
         label = slot[y]
         remove_label = slot[A7]
@@ -1710,12 +3629,15 @@ class App(BU.Tk):
                     anchor="se",
                     x=getattr(icon, "offset_x", 0),
                 )
-                icon.config(bg="#555555")
+                icon.config(bg=C._ui_colors["warning"] if hasattr(C, "_ui_colors") else "#555555")
             else:
                 icon.place_forget()
             return
         icon.place(relx=1.0, rely=1.0, anchor="se", x=getattr(icon, "offset_x", 0))
-        icon.config(bg="green" if present else "red")
+        if hasattr(C, "_ui_colors"):
+            icon.config(bg=C._ui_colors["accent"] if present else C._ui_colors["danger"])
+        else:
+            icon.config(bg="green" if present else "red")
 
     def _get_slot_idle_status(B, idx):
         slot = B.slots[idx]
@@ -1735,12 +3657,8 @@ class App(BU.Tk):
             if label:
                 label.configure(text=status_text)
             if progress:
-                if active_state:
-                    progress.configure(mode="indeterminate")
-                    progress.start(12)
-                else:
-                    progress.stop()
-                    progress.configure(mode="determinate", value=0)
+                progress.stop()
+                progress.configure(mode="determinate", value=100 if active_state else 0)
 
         try:
             B.after(0, _apply)
@@ -1801,6 +3719,106 @@ class App(BU.Tk):
                 base_query = f"{base_query.rstrip('; ')} LIMIT 1"
             return base_query
         return f"SELECT TOP 1 {column} FROM {table}{where_clause}".rstrip(";\n\r\t ")
+
+    def _query_sql_presence_map(A, columns, table, where_clause, db_type):
+        """Fetch SQL presence for all mapped columns, batching when possible."""
+
+        presence_map = {prefix: I for prefix, _, _ in columns}
+        ordered_columns = unique_columns(
+            [column_name for _, column_name, _ in columns if column_name]
+        )
+        if not ordered_columns:
+            return presence_map
+        conn = I
+        cur = I
+        try:
+            conn = connect_db()
+            cur = conn.cursor()
+            batch_failed = h
+            query = build_sql_presence_query(
+                table,
+                where_clause,
+                ordered_columns,
+                db_type,
+                mysql_key=K,
+            )
+            if query:
+                try:
+                    cur.execute(query)
+                    row = cur.fetchone()
+                except E as batch_error:
+                    batch_failed = J
+                    log_error_loc(
+                        "sql_presence_query_error",
+                        column=AI.join(ordered_columns),
+                        error=batch_error,
+                    )
+                else:
+                    if not row:
+                        for prefix, column_name, _ in columns:
+                            if column_name:
+                                presence_map[prefix] = h
+                        return presence_map
+                    try:
+                        values = list(row)
+                    except E:
+                        values = [row]
+                    value_map = {
+                        column_name: values[idx] if idx < Q(values) else I
+                        for idx, column_name in A0(ordered_columns)
+                    }
+                    for prefix, column_name, _ in columns:
+                        if not column_name:
+                            continue
+                        presence_map[prefix] = has_presence_value(
+                            value_map.get(column_name)
+                        )
+                    return presence_map
+            if not batch_failed:
+                return presence_map
+            for prefix, column_name, _ in columns:
+                if not column_name:
+                    continue
+                query = A._build_sql_presence_query(
+                    table, where_clause, column_name, db_type
+                )
+                if not query:
+                    continue
+                try:
+                    cur.execute(query)
+                    row = cur.fetchone()
+                except E as column_error:
+                    presence_map[prefix] = I
+                    log_error_loc(
+                        "sql_presence_query_error",
+                        column=column_name,
+                        error=column_error,
+                    )
+                    continue
+                if not row:
+                    presence_map[prefix] = h
+                    continue
+                try:
+                    value = row[0]
+                except E:
+                    try:
+                        row_values = list(row)
+                    except E:
+                        row_values = [row]
+                    value = row_values[0] if row_values else I
+                presence_map[prefix] = has_presence_value(value)
+            return presence_map
+        finally:
+            if cur is not I:
+                try:
+                    cur.close()
+                except E:
+                    pass
+            if conn is not I:
+                try:
+                    conn.close()
+                except E:
+                    pass
 
     def _refresh_combobox_list(B, combobox, all_values, existing_count=0):
         """Refresh the dropdown values while remembering which entries exist."""
@@ -1916,6 +3934,15 @@ class App(BU.Tk):
         D_ = C.var_name.get().strip()
         if not D_:
             return
+        if C._commit_matches_snapshot("name", C._normalize_entry_part(D_)):
+            return
+        preserve_loaded = C._preserve_loaded_binding()
+        preserved_type = C.var_type.get()
+        preserved_model = C.var_model.get()
+        preserved_color1 = C.var_color1.get()
+        preserved_color2 = C.var_color2.get()
+        preserved_color3 = C.var_color3.get()
+        preserved_extra = C.var_extra.get()
         if not C._list_has_value(n, D_):
             result = C._prompt_add_list_value(
                 n, D_, NAME_NOT_IN_LIST_QUESTION.format(value=D_), C.combo_name
@@ -1936,16 +3963,27 @@ class App(BU.Tk):
             C.combo_name.configure(style=Z)
         else:
             C.combo_name.configure(style=j)
-        I = [A for A in C.lists[t] if A not in E_]
-        C._refresh_combobox_list(C.combo_type, E_ + I, existing_count=Q(E_))
+        remaining_types = [A for A in C.lists[t] if A not in E_]
+        C._refresh_combobox_list(C.combo_type, E_ + remaining_types, existing_count=Q(E_))
         C.combo_type.configure(state=X)
-        C.var_type.set(B)
-        C.var_model.set(B)
-        C.var_color1.set(B)
-        C.var_color2.set(B)
-        C.var_color3.set(B)
-        C.var_extra.set(B)
-        C.var_ean.set(B)
+        if preserve_loaded:
+            C.var_type.set(preserved_type)
+            C.var_model.set(preserved_model)
+            C.var_color1.set(preserved_color1)
+            C.var_color2.set(preserved_color2)
+            C.var_color3.set(preserved_color3)
+            C.var_extra.set(preserved_extra)
+        else:
+            C.var_type.set(B)
+            C.var_model.set(B)
+            C.var_color1.set(B)
+            C.var_color2.set(B)
+            C.var_color3.set(B)
+            C.var_extra.set(B)
+        if not preserve_loaded:
+            C._clear_loaded_entry_context()
+        else:
+            C._last_lookup_signature = None
         for G_ in (
             C.combo_type,
             C.combo_model,
@@ -1962,11 +4000,13 @@ class App(BU.Tk):
             C.combo_color3,
             C.combo_extra,
         ):
-            G_.configure(state=V)
-        C.btn_submit.configure(state=V)
+            G_.configure(state=X)
+        C.btn_submit.configure(state=X)
         C.btn_open.configure(state=V)
         C.entry_ean.configure(state=X)
-        C._clear_all_slots()
+        C._refresh_commit_snapshot()
+        if not preserve_loaded:
+            C._clear_all_slots()
 
     def _on_type_commit(C):
         """React to type changes by unlocking model/colour comboboxes."""
@@ -1975,6 +4015,14 @@ class App(BU.Tk):
         D_ = C.var_type.get().strip()
         if not G_ or not D_:
             return
+        if C._commit_matches_snapshot("type", C._normalize_entry_part(D_)):
+            return
+        preserve_loaded = C._preserve_loaded_binding()
+        preserved_model = C.var_model.get()
+        preserved_color1 = C.var_color1.get()
+        preserved_color2 = C.var_color2.get()
+        preserved_color3 = C.var_color3.get()
+        preserved_extra = C.var_extra.get()
         if not C._list_has_value(t, D_):
             result = C._prompt_add_list_value(
                 t, D_, TYPE_NOT_IN_LIST_QUESTION.format(value=D_), C.combo_type
@@ -1995,72 +4043,118 @@ class App(BU.Tk):
             C.combo_type.configure(style=Z)
         else:
             C.combo_type.configure(style=j)
-        I = [A for A in C.lists[s] if A not in E_]
-        C._refresh_combobox_list(C.combo_model, E_ + I, existing_count=Q(E_))
+        remaining_models = [A for A in C.lists[s] if A not in E_]
+        C._refresh_combobox_list(C.combo_model, E_ + remaining_models, existing_count=Q(E_))
         C.combo_model.configure(state=X)
-        C.var_model.set(B)
-        C.var_color1.set(B)
-        C.var_color2.set(B)
-        C.var_color3.set(B)
-        C.var_extra.set(B)
-        C.var_ean.set(B)
+        if preserve_loaded:
+            C.var_model.set(preserved_model)
+            C.var_color1.set(preserved_color1)
+            C.var_color2.set(preserved_color2)
+            C.var_color3.set(preserved_color3)
+            C.var_extra.set(preserved_extra)
+        else:
+            C.var_model.set(B)
+            C.var_color1.set(B)
+            C.var_color2.set(B)
+            C.var_color3.set(B)
+            C.var_extra.set(B)
+        if not preserve_loaded:
+            C._clear_loaded_entry_context()
+        else:
+            C._last_lookup_signature = None
         for J_ in (C.combo_color1, C.combo_color2, C.combo_color3, C.combo_extra):
-            J_.configure(style=j, state=V)
-        C.btn_submit.configure(state=V)
+            J_.configure(style=j, state=X)
+        C.btn_submit.configure(state=X)
         C.btn_open.configure(state=V)
         C.entry_ean.configure(state=X)
-        C._clear_all_slots()
+        C._refresh_commit_snapshot()
+        if not preserve_loaded:
+            C._clear_all_slots()
 
-    def _load_existing_files(C):
+    def _load_existing_files(C, force=h):
         """Load images from disk and check FTP copies without blocking GUI."""
+
         if C.suppress_next_lookup:
             C.suppress_next_lookup = h
             return
+        if C._load_existing_after_id is not I:
+            try:
+                C.after_cancel(C._load_existing_after_id)
+            except E:
+                pass
+            C._load_existing_after_id = I
+        lookup_signature = C._current_lookup_signature()
+        if not force and lookup_signature == C._last_lookup_signature:
+            return
+        C._load_existing_request_id += 1
+        request_id = C._load_existing_request_id
+        started_at = Ag.perf_counter()
         C.logged_counts = h
-        F = A.path.join(
+        name_value = C.var_name.get().strip()
+        type_value = C.var_type.get().strip()
+        model_value = C.var_model.get().strip()
+        color_values = [
+            value.strip().upper()
+            for value in (
+                C.var_color1.get(),
+                C.var_color2.get(),
+                C.var_color3.get(),
+            )
+            if value and value.strip()
+        ]
+        extra_raw = C.var_extra.get()
+        if isinstance(extra_raw, dict):
+            extra_raw = B
+        extra_value = normalize_extra_segment(extra_raw, default=L)
+        current_ean = C.var_ean.get().strip()
+        product_dir = build_product_directory(
             l,
-            C.var_name.get().strip().upper(),
-            C.var_type.get().strip().upper(),
-            C.var_model.get().strip().upper(),
+            name_value,
+            type_value,
+            model_value,
+            color_values,
+            extra_value,
         )
-        Y_ = C.var_color1.get().strip().upper()
-        Z_ = C.var_color2.get().strip().upper()
-        b_ = C.var_color3.get().strip().upper()
-        if Y_:
-            S_ = [Y_]
-            if Z_:
-                S_.append(Z_)
-            if b_:
-                S_.append(b_)
-            h_ = g.join(S_)
-            F = A.path.join(F, h_)
-        I_raw = C.var_extra.get()
-        if isinstance(I_raw, dict):
-            I_raw = B
-        I_ = G(I_raw).strip()
-        I_ = I_.replace(a, g)
-        if I_ == B:
-            I_ = L
-        else:
-            I_ = I_.upper()
-        F = A.path.join(F, I_)
-        if I_.upper() == L and not A.path.isdir(F):
-            c_ = A.path.join(A.path.dirname(F), L)
+        if extra_value.upper() == L and not A.path.isdir(product_dir):
+            c_ = A.path.join(A.path.dirname(product_dir), L)
             if A.path.isdir(c_):
                 try:
-                    A.rename(c_, F)
+                    A.rename(c_, product_dir)
                 except E as T:
                     log_error_loc("rename_no_led_failed", error=T)
-        C._clear_all_slots()
-        C.original_files = {}
-        if not A.path.isdir(F):
+        C._set_busy_state(
+            LANG.get("busy_loading_product", "Wczytywanie danych produktu"),
+            active=J,
+        )
+
+        def finalize_empty(rid):
+            try:
+                if rid != C._load_existing_request_id:
+                    return
+                if not (C._preserve_loaded_binding() and any(slot.get(f) for slot in C.slots)):
+                    C.original_files = {}
+                    C.ftp_remote_only = {}
+                    C.ftp_presence = {}
+                    C.ftp_downloaded_final = set()
+                    C.sql_presence = I
+                    C._clear_all_slots()
+                C._last_lookup_signature = lookup_signature
+                C._last_lookup_duration_ms = int(
+                    (Ag.perf_counter() - started_at) * 1000
+                )
+                C._queue_dashboard_refresh()
+                C._update_dashboard_summary()
+            finally:
+                C._set_busy_state(B, active=h)
+
+        if not A.path.isdir(product_dir):
+            C.after(0, lambda rid=request_id: finalize_empty(rid))
             return
         C._update_all_slot_activity(active=J, status=C._slot_status["loading"])
+
         def worker():
             try:
-                V_ = [
-                    B for B in A.listdir(F) if A.path.isfile(A.path.join(F, B))
-                ]
+                V_ = [entry for entry in A.scandir(product_dir) if entry.is_file()]
             except E:
                 V_ = []
             original_files = {}
@@ -2068,29 +4162,22 @@ class App(BU.Tk):
             remote_info = {}
             ean_guess = I
             if V_:
-                i_ = V_[0]
-                P_ = i_.split(a)
-                if P_ and C.var_ean.get().strip() == B:
-                    ean_guess = P_[0]
-            for W_ in V_:
-                d_ = A.path.join(F, W_)
-                if not A.path.isfile(d_):
+                parsed = parse_slot_filename(V_[0].name)
+                if parsed and current_ean == B:
+                    ean_guess = parsed.ean
+            for entry in V_:
+                W_ = entry.name
+                d_ = entry.path
+                parsed = parse_slot_filename(W_)
+                if not parsed:
                     continue
-                P_ = W_.split(a)
-                if Q(P_) < 2:
-                    continue
-                label_part = P_[1]
-                label = label_part.split(".")[0]
-                norm_label = label.zfill(2)
-                ext = A.path.splitext(label_part)[1]
-                if label != norm_label:
-                    normalized_name = f"{P_[0]}_{norm_label}{ext}"
-                    normalized_path = A.path.join(F, normalized_name)
+                norm_label = parsed.normalized_label
+                if parsed.normalized_name:
+                    normalized_name = parsed.normalized_name
+                    normalized_path = A.path.join(product_dir, normalized_name)
                     try:
                         A.rename(d_, normalized_path)
-                        log_info_loc(
-                            "file_renamed", old=W_, new=normalized_name
-                        )
+                        log_info_loc("file_renamed", old=W_, new=normalized_name)
                         W_ = normalized_name
                         d_ = normalized_path
                     except E as T:
@@ -2101,7 +4188,8 @@ class App(BU.Tk):
                 slot_paths[norm_label] = d_
             ftp_presence = {}
             sql_presence = I
-            K_ = C.var_ean.get().strip()
+            thumbnail_map = {}
+            K_ = current_ean
             if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
                 remote_files = {}
                 try:
@@ -2111,17 +4199,8 @@ class App(BU.Tk):
                     O_.set_pasv(J)
                     if D[H][m]:
                         O_.cwd(D[H][m])
-                    try:
-                        e_ = O_.nlst()
-                    except AB.error_perm:
-                        e_ = []
-                    j_ = {A.path.basename(B) for B in e_}
-                    for name in j_:
-                        if name.startswith(f"{K_}_"):
-                            rest = name[len(f"{K_}_") :]
-                            label_raw = rest.split(".")[0]
-                            norm_label = label_raw.zfill(2)
-                            remote_files[norm_label] = name
+                    e_ = C._list_remote_filenames(O_)
+                    remote_files = select_remote_files_for_ean(K_, e_)
                     for label, fname in remote_files.items():
                         if label not in slot_paths:
                             temp_dir = tempfile.gettempdir()
@@ -2136,8 +4215,12 @@ class App(BU.Tk):
                                     )
                                 with x(temp_path_raw, "wb") as fh:
                                     O_.retrbinary(f"RETR {fname}", fh.write)
-                                ext = A.path.splitext(fname)[1]
-                                normalized_fname = f"{K_}_{label}{ext}"
+                                parsed_remote = parse_slot_filename(fname)
+                                normalized_fname = (
+                                    parsed_remote.normalized_name
+                                    if parsed_remote and parsed_remote.normalized_name
+                                    else A.path.basename(fname)
+                                )
                                 temp_path = A.path.join(temp_dir, normalized_fname)
                                 try:
                                     A.rename(temp_path_raw, temp_path)
@@ -2145,11 +4228,12 @@ class App(BU.Tk):
                                     temp_path = temp_path_raw
                                 slot_paths[label] = temp_path
                                 ftp_presence[label] = fname
-                                remote_info[label] = {"filename": fname, "temp_path": temp_path}
+                                remote_info[label] = {
+                                    "filename": fname,
+                                    "temp_path": temp_path,
+                                }
                             except E as T:
-                                log_error_loc(
-                                    "ftp_download_error", file=fname, error=T
-                                )
+                                log_error_loc("ftp_download_error", file=fname, error=T)
                         else:
                             ftp_presence[label] = fname
                     O_.quit()
@@ -2176,125 +4260,77 @@ class App(BU.Tk):
                         table, where_clause = context
                         db_type = config.CONFIG.get(p, K).lower()
                         try:
-                            conn = I
-                            cur = I
-                            try:
-                                conn = connect_db()
-                                cur = conn.cursor()
-                                presence_map = {
-                                    prefix: I for prefix, _, _ in columns
-                                }
-                                for prefix, column_name, _ in columns:
-                                    if not column_name:
-                                        continue
-                                    query = C._build_sql_presence_query(
-                                        table, where_clause, column_name, db_type
-                                    )
-                                    if not query:
-                                        continue
-                                    try:
-                                        cur.execute(query)
-                                        row = cur.fetchone()
-                                    except E as column_error:
-                                        presence_map[prefix] = I
-                                        log_error_loc(
-                                            "sql_presence_query_error",
-                                            column=column_name,
-                                            error=column_error,
-                                        )
-                                        continue
-                                    if not row:
-                                        presence_map[prefix] = h
-                                        continue
-                                    value = I
-                                    try:
-                                        value = row[0]
-                                    except E:
-                                        try:
-                                            values = list(row)
-                                        except E:
-                                            values = row
-                                        if values:
-                                            value = values[0]
-                                    if isinstance(value, memoryview):
-                                        value = bytes(value)
-                                    if isinstance(value, (bytes, bytearray)):
-                                        try:
-                                            value = value.decode("utf-8")
-                                        except E:
-                                            value = value.decode(
-                                                "latin-1", errors="ignore"
-                                            )
-                                    if isinstance(value, str):
-                                        presence_map[prefix] = bool(value.strip())
-                                    else:
-                                        presence_map[prefix] = value is not I
-                                sql_presence = presence_map
-                            finally:
-                                if cur is not I:
-                                    try:
-                                        cur.close()
-                                    except E:
-                                        pass
-                                if conn is not I:
-                                    try:
-                                        conn.close()
-                                    except E:
-                                        pass
+                            sql_presence = C._query_sql_presence_map(
+                                columns, table, where_clause, db_type
+                            )
                         except E as T:
                             sql_presence = I
                             log_error_loc("sql_check_error", ean=K_, error=T)
+            for label, slot_path in slot_paths.items():
+                thumbnail_map[label] = C._load_slot_thumbnail(slot_path)
             C.after(
                 0,
-                lambda: finalize(
+                lambda rid=request_id: finalize(
                     original_files,
                     slot_paths,
                     ftp_presence,
                     remote_info,
                     ean_guess,
                     sql_presence,
+                    thumbnail_map,
+                    rid,
                 ),
             )
 
         def finalize(
-            original_files, slot_paths, ftp_presence, remote_info, ean_guess, sql_presence
+            original_files,
+            slot_paths,
+            ftp_presence,
+            remote_info,
+            ean_guess,
+            sql_presence,
+            thumbnail_map,
+            rid,
         ):
-            if ean_guess and C.var_ean.get().strip() == B:
-                C.suppress_next_lookup = J
-                C.var_ean.set(ean_guess)
-                C.suppress_next_lookup = h
-            C.original_files = original_files
-            C.ftp_remote_only = remote_info
-            C.ftp_presence = ftp_presence
-            C.ftp_downloaded_final = set()
-            C.sql_presence = sql_presence
-            slots = list(A0(C.slots))
-            batch_size = 2
-
-            def process_batch(start_index=0):
-                end_index = min(start_index + batch_size, Q(slots))
-                for X_, G_ in slots[start_index:end_index]:
+            try:
+                if rid != C._load_existing_request_id:
+                    return
+                if ean_guess and C.var_ean.get().strip() == B:
+                    C.suppress_next_lookup = J
+                    C.var_ean.set(ean_guess)
+                    C.suppress_next_lookup = h
+                C.original_files = original_files
+                C.ftp_remote_only = remote_info
+                C.ftp_presence = ftp_presence
+                C.ftp_downloaded_final = set()
+                C.sql_presence = sql_presence
+                for X_, G_ in A0(C.slots):
                     R_ = G_[Aa]
                     if R_ in slot_paths:
                         G_[f] = slot_paths[R_]
-                        C._update_slot_ui(X_)
+                        C._set_slot_preview(X_, G_[f], thumbnail_map.get(R_))
                         C._mark_slot(X_, A4)
                     else:
                         G_[f] = I
+                        G_[y].configure(image=B, text=C._slot_placeholder_text)
+                        G_[y].image = I
+                        G_[A7].place_forget()
+                        C._update_slot_activity(X_, active=h)
+                        C._mark_slot(X_, I)
                     C._set_icon_status(G_["local_icon"], R_ in original_files)
                     C._set_icon_status(G_["ftp_icon"], R_ in ftp_presence)
                     if isinstance(sql_presence, dict):
-                        C._set_icon_status(
-                            G_["sql_icon"], sql_presence.get(R_, h)
-                        )
+                        C._set_icon_status(G_["sql_icon"], sql_presence.get(R_, h))
                     else:
                         C._set_icon_status(G_["sql_icon"], I)
-                    if R_ not in slot_paths:
-                        C._update_slot_activity(X_, active=h)
-                if end_index < Q(slots):
-                    C.after(1, lambda: process_batch(end_index))
-
-            process_batch()
+                C._last_lookup_signature = lookup_signature
+                C._last_lookup_duration_ms = int(
+                    (Ag.perf_counter() - started_at) * 1000
+                )
+                C._queue_dashboard_refresh()
+                C._update_dashboard_summary()
+            finally:
+                C._set_busy_state(B, active=h)
 
         threading.Thread(target=worker, daemon=J).start()
 
@@ -2305,6 +4341,13 @@ class App(BU.Tk):
         e_ = D.var_model.get().strip()
         if not o or not p or not e_:
             return
+        if D._commit_matches_snapshot("model", D._normalize_entry_part(e_)):
+            return
+        preserve_loaded = D._preserve_loaded_binding()
+        preserved_color1 = D.var_color1.get()
+        preserved_color2 = D.var_color2.get()
+        preserved_color3 = D.var_color3.get()
+        preserved_extra = D.var_extra.get()
         if not D._list_has_value(s, e_):
             result = D._prompt_add_list_value(
                 s,
@@ -2339,16 +4382,27 @@ class App(BU.Tk):
         D.combo_color3[S] = D.lists[Y]
         for AA_ in (D.combo_color1, D.combo_color2, D.combo_color3):
             AA_.configure(state=X)
-        D.var_color1.set(B)
-        D.var_color2.set(B)
-        D.var_color3.set(B)
-        D.var_extra.set(B)
-        D.var_ean.set(B)
-        D.combo_extra.configure(style=j, state=V)
-        D.btn_submit.configure(state=V)
+        if preserve_loaded:
+            D.var_color1.set(preserved_color1)
+            D.var_color2.set(preserved_color2)
+            D.var_color3.set(preserved_color3)
+            D.var_extra.set(preserved_extra)
+        else:
+            D.var_color1.set(B)
+            D.var_color2.set(B)
+            D.var_color3.set(B)
+            D.var_extra.set(B)
+        if not preserve_loaded:
+            D._clear_loaded_entry_context()
+        else:
+            D._last_lookup_signature = I
+        D.combo_extra.configure(style=j, state=X)
+        D.btn_submit.configure(state=X)
         D.btn_open.configure(state=V)
-        D._clear_all_slots()
-        if not (D.loading_by_ean or D.suppress_scan):
+        D._refresh_commit_snapshot()
+        if not preserve_loaded:
+            D._clear_all_slots()
+        if not (D.loading_by_ean or D.suppress_scan or preserve_loaded):
             k_ = []
             if A.path.isdir(T):
                 for A2 in A.listdir(T):
@@ -2484,6 +4538,12 @@ class App(BU.Tk):
                         D.var_ean.set(R_)
                     else:
                         D.var_ean.set(q)
+                    if R_ in D.entries:
+                        loaded_record = dict(D.entries.get(R_, {}))
+                        loaded_record[EAN_HEADER] = R_
+                        D._set_loaded_entry_context(loaded_record)
+                    else:
+                        D._clear_loaded_entry_context(keep_ean=J)
                     D.combo_extra.configure(
                         style=Z if N_ in H_ or N_ == L and L in H_ else j
                     )
@@ -2493,6 +4553,7 @@ class App(BU.Tk):
                         D.combo_color2.configure(style=Z)
                     if M__:
                         D.combo_color3.configure(style=Z)
+                    D._refresh_commit_snapshot()
                     D._load_existing_files()
                     D.btn_submit.configure(state=X)
                     D.btn_open.configure(state=X)
@@ -2538,9 +4599,14 @@ class App(BU.Tk):
         H_ = C.var_color1.get().strip()
         F_ = C.var_color2.get().strip()
         G_ = C.var_color3.get().strip()
-        if C.var_ean.get().strip():
-            C.var_ean.set(B)
         if not M_ or not N_ or not H_:
+            return
+        color_signature = (
+            C._normalize_entry_part(H_),
+            C._normalize_entry_part(F_),
+            C._normalize_entry_part(G_),
+        )
+        if C._commit_matches_snapshot("colors", color_signature):
             return
         J_ = [A for A in (H_, F_, G_) if A and not C._list_has_value(Y, A)]
         if J_:
@@ -2585,9 +4651,13 @@ class App(BU.Tk):
             K_.append(F_)
         if G_:
             K_.append(G_)
-        V_ = g.join(K_)
-        I_ = A.path.join(
-            l, M_.upper(), N_.upper(), C.var_model.get().strip().upper(), V_
+        I_ = build_product_directory(
+            l,
+            M_,
+            N_,
+            C.var_model.get().strip(),
+            K_,
+            C.var_extra.get().strip(),
         )
         D_ = []
         if A.path.isdir(I_):
@@ -2619,8 +4689,9 @@ class App(BU.Tk):
         C.btn_open.configure(state=X)
         extra_raw = C.var_extra.get()
         C.var_extra.set(G(extra_raw).strip())
-        if not C.suppress_scan:
-            C._load_existing_files()
+        C._refresh_commit_snapshot()
+        if C._should_lookup_existing_files_for_form_edit():
+            C._schedule_existing_files_lookup()
 
     def _on_extra_commit(C):
         D_ = C.var_extra.get().strip()
@@ -2630,6 +4701,11 @@ class App(BU.Tk):
         F_ = C.var_color1.get().strip()
         J_ = C.var_color2.get().strip()
         K_ = C.var_color3.get().strip()
+        if C._commit_matches_snapshot(
+            "extra",
+            C._normalize_entry_part(D_, extra=J),
+        ):
+            return
         if D_ == B:
             C.combo_extra.configure(style=j)
         else:
@@ -2651,21 +4727,21 @@ class App(BU.Tk):
                     D_ = B
                     C.combo_extra.configure(style=j)
                     return
-            E_ = A.path.join(
-                l, G_.upper(), H_.upper(), I_.upper(), F_.upper() if F_ else B
+            E_ = build_product_directory(
+                l,
+                G_,
+                H_,
+                I_,
+                [F_, J_, K_],
+                D_,
             )
-            if J_:
-                E_ = A.path.join(E_, J_.upper())
-                if K_:
-                    E_ = A.path.join(E_, K_.upper())
-            N_ = D_.strip().replace(a, g).upper() if D_ else L
-            E_ = A.path.join(E_, N_)
             if A.path.isdir(E_):
                 C.combo_extra.configure(style=Z)
             else:
                 C.combo_extra.configure(style=j)
-        if G_ and H_ and I_ and F_ and not C.suppress_scan:
-            C._load_existing_files()
+        C._refresh_commit_snapshot()
+        if C._should_lookup_existing_files_for_form_edit():
+            C._schedule_existing_files_lookup()
 
     def _select_file(A, idx):
         if A.is_processing:
@@ -2714,7 +4790,7 @@ class App(BU.Tk):
                         C.pending_deletions[D_] = E_
                     C.slots[D_][f] = I
                     F_ = C.slots[D_]
-                    F_[y].configure(image=B, text=NO_FILE_LABEL)
+                    F_[y].configure(image=B, text=C._slot_placeholder_text)
                     F_[y].image = I
                     F_[A7].place_forget()
                     if H_:
@@ -2723,6 +4799,7 @@ class App(BU.Tk):
                         C._mark_slot(D_, AR)
                     C.focus_force()
             C.dragging_idx = I
+        C._queue_dashboard_refresh()
 
     def _add_file_to_slot(B, idx, src_path):
         E_ = src_path
@@ -2744,6 +4821,7 @@ class App(BU.Tk):
         B._set_icon_status(B.slots[C_]["local_icon"], J)
         if "sql_icon" in B.slots[C_]:
             B._set_icon_status(B.slots[C_]["sql_icon"], I)
+        B._queue_dashboard_refresh()
 
     def _update_slot_ui(J, idx):
         D_ = J.slots[idx]
@@ -2783,7 +4861,7 @@ class App(BU.Tk):
                 if remote_name:
                     C.pending_ftp_deletions[D_] = remote_name
             E_[f] = I
-            E_[y].configure(image=B, text=NO_FILE_LABEL)
+            E_[y].configure(image=B, text=C._slot_placeholder_text)
             E_[y].image = I
             E_[A7].place_forget()
             C._thumb_tokens.pop(D_, I)
@@ -2795,6 +4873,7 @@ class App(BU.Tk):
             else:
                 C._mark_slot(D_, AR)
             C._update_slot_activity(D_, active=h)
+            C._queue_dashboard_refresh()
             C.focus_force()
 
     def _clear_all_slots(C):
@@ -2805,25 +4884,25 @@ class App(BU.Tk):
         C.sql_presence = I
         for A_ in C.slots:
             A_[f] = I
-            A_[y].configure(image=B, text=NO_FILE_LABEL)
+            A_[y].configure(image=B, text=C._slot_placeholder_text)
             A_[y].image = I
             A_[A7].place_forget()
             A_["local_icon"].place_forget()
-            A_["local_icon"].delete("slash")
             A_["ftp_icon"].place_forget()
-            A_["ftp_icon"].delete("slash")
             if "sql_icon" in A_:
                 A_["sql_icon"].place_forget()
-                A_["sql_icon"].delete("slash")
             if "status_label" in A_:
                 A_["status_label"].configure(text=C._slot_status["empty"])
             if "progress" in A_:
-                A_["progress"].stop()
-                A_["progress"].configure(mode="determinate", value=0)
+                progress = A_["progress"]
+                if progress:
+                    progress.stop()
+                    progress.configure(mode="determinate", value=0)
             if AS in A_:
                 A_[AS].configure(
                     highlightthickness=0, highlightbackground=A8, highlightcolor=A8
                 )
+        C._queue_dashboard_refresh()
 
     def _reset_form_fields(A, keep_ean=h):
         A.var_name.set(B)
@@ -2833,36 +4912,43 @@ class App(BU.Tk):
         A.var_color2.set(B)
         A.var_color3.set(B)
         A.var_extra.set(B)
+        A.var_product_id.set(B)
         if not keep_ean:
             A.var_ean.set(B)
         if Aj(A, "combo_name", I):
             A.combo_name.configure(state=X, style=j)
             A.combo_name[S] = A.lists.get(n, [])
         if Aj(A, "combo_type", I):
-            A.combo_type.configure(state=V, style=j)
+            A.combo_type.configure(state=X, style=j)
             A.combo_type[S] = A.lists.get(t, [])
         if Aj(A, "combo_model", I):
-            A.combo_model.configure(state=V, style=j)
+            A.combo_model.configure(state=X, style=j)
             A.combo_model[S] = A.lists.get(s, [])
         if Aj(A, "combo_color1", I):
-            A.combo_color1.configure(state=V, style=j)
+            A.combo_color1.configure(state=X, style=j)
             A.combo_color1[S] = A.lists.get(Y, [])
         if Aj(A, "combo_color2", I):
-            A.combo_color2.configure(state=V, style=j)
+            A.combo_color2.configure(state=X, style=j)
             A.combo_color2[S] = A.lists.get(Y, [])
         if Aj(A, "combo_color3", I):
-            A.combo_color3.configure(state=V, style=j)
+            A.combo_color3.configure(state=X, style=j)
             A.combo_color3[S] = A.lists.get(Y, [])
         if Aj(A, "combo_extra", I):
-            A.combo_extra.configure(state=V, style=j)
+            A.combo_extra.configure(state=X, style=j)
             A.combo_extra[S] = A.lists.get(d, [])
         if Aj(A, "entry_ean", I):
             A.entry_ean.configure(state=X)
         if Aj(A, "btn_submit", I):
-            A.btn_submit.configure(state=V)
+            A.btn_submit.configure(state=X)
+        if Aj(A, "btn_search_entry", I):
+            A.btn_search_entry.configure(state=X)
+        if Aj(A, "btn_new_search", I):
+            A.btn_new_search.configure(state=X)
         if Aj(A, "btn_open", I):
             A.btn_open.configure(state=V)
+        A._refresh_commit_snapshot()
         A._clear_all_slots()
+        A._queue_form_change_refresh()
 
     def _open_list_editor(E, focus_sheet=I):
         existing = Aj(E, "_list_editor_window", I)
@@ -3036,21 +5122,61 @@ class App(BU.Tk):
         else:
             b_ = b_.replace(a, g).upper()
         K_ = C.var_ean.get().strip()
-        BY_ = K_.upper() != q and K_ in C.entries
+        color_values = [AH_, p_, s_]
+        output_dir = build_product_directory(
+            l,
+            AE_,
+            AF_,
+            AG_,
+            color_values,
+            b_,
+        )
+        resize_enabled = bool(C.opt_resize.get())
+        compress_enabled = bool(C.opt_compress.get())
+        limit_size_enabled = bool(C.opt_maxsize.get())
+        convert_tif_enabled = bool(C.opt_convert_tif.get())
+        max_dim = C.resize_max_dim.get() or 2000
+        compress_quality = max(1, min(100, C.compress_quality.get() or 85))
+        max_bytes = (C.max_file_kb.get() or 0) * 1024
+        target_fmt_raw = C.tif_target_format.get().strip().upper() or At
+        target_fmt = "JPEG" if target_fmt_raw == "JPG" else target_fmt_raw
+        target_ext = FORMAT_TO_EXTENSION.get(target_fmt, "." + target_fmt_raw.lower())
+        current_product_id = G(C.var_product_id.get() or B).strip().upper()
         BZ_ = save_ean_entry(
-            K_, AE_, AF_, AG_, AH_, p_ or B, s_ or B, b_ if b_ != B else L
+            K_,
+            AE_,
+            AF_,
+            AG_,
+            AH_,
+            p_ or B,
+            s_ or B,
+            b_ if b_ != B else L,
+            product_id=current_product_id,
         )
         if BZ_ is h:
             return
         else:
             try:
                 BC_ = prepare_excel_lists()
-                if W in BC_:
-                    C.entries = BC_[W]
+                C._reload_entry_cache(BC_)
             except E as R:
                 log_error_loc("reload_entries_failed", error=R)
+        saved_product_id = G(BZ_.get("product_id") or current_product_id).strip().upper()
+        saved_entry = BZ_.get("entry") if isinstance(BZ_, dict) else {}
+        if isinstance(saved_entry, dict):
+            saved_entry = dict(saved_entry)
+            saved_entry[EAN_HEADER] = K_
+        C.var_product_id.set(saved_product_id)
+        C._record_loaded = bool(saved_product_id)
+        C._last_lookup_signature = I
         C.is_processing = J
+        C._set_busy_state(
+            LANG.get("busy_processing", "Przetwarzanie i synchronizacja"),
+            active=J,
+        )
         C.btn_submit.configure(state=V)
+        C.btn_search_entry.configure(state=V)
+        C.btn_new_search.configure(state=V)
         C.btn_open.configure(state=V)
         for widget in [
             C.combo_name,
@@ -3069,7 +5195,7 @@ class App(BU.Tk):
         C.ui_log.configure(state=Az)
         C.ui_log.insert(F.END, PROCESSING_UI_MSG + "\n")
         C.ui_log.configure(state=Ak)
-        result_data = {}
+        result_data = {A2: bool(BZ_.get("updated")) if isinstance(BZ_, dict) else h}
 
         def heavy_work():
             A3 = "rowcount"
@@ -3089,61 +5215,45 @@ class App(BU.Tk):
             result_data[k] = Ay
             result_data[P] = B
             try:
-                i_ = A.path.join(l, AE_.upper(), AF_.upper(), AG_.upper())
-                Av_ = [AH_.upper()]
-                if p_:
-                    Av_.append(p_.upper())
-                if s_:
-                    Av_.append(s_.upper())
-                BX_ = g.join(Av_)
-                i_ = A.path.join(i_, BX_, b_ if b_ != B else L)
+                i_ = output_dir
                 A.makedirs(i_, exist_ok=J)
                 BM_ = []
                 files_to_upload = []
+                ftp_delete_candidates = {
+                    G(remote_name).strip()
+                    for remote_name in C.pending_ftp_deletions.values()
+                    if G(remote_name).strip()
+                }
+                sql_update_prefixes = set()
+                sql_clear_prefixes = {
+                    C.slots[idx][Aa]
+                    for idx in C.pending_ftp_deletions
+                    if 0 <= idx < Q(C.slots)
+                }
                 try:
                     if A.path.exists(AN):
                         Af.rmtree(AN)
                     A.makedirs(AN, exist_ok=J)
                 except E as R:
                     log_error_loc("backup_folder_failed", error=R)
-                backed_up = []
-                for T in set(C.pending_deletions.values()):
-                    if T and A.path.isfile(T):
-                        try:
-                            Af.copy2(T, A.path.join(AN, A.path.basename(T)))
-                            backed_up.append(A.path.basename(T))
-                        except E as R:
-                            log_error_loc(
-                                "backup_file_failed",
-                                file=A.path.basename(T),
-                                error=R,
-                            )
-                if backed_up:
-                    log_info_loc(
-                        "backup_files_done", files=AI.join(backed_up)
-                    )
                 if C.ftp_remote_only:
                     for label, info in C.ftp_remote_only.items():
                         for idx, slot in A0(C.slots):
                             if slot[Aa] == label:
                                 Az_ = slot[Aa]
                                 Be_ = label_category(slot["label"])
-                                P_ = [
-                                    K_ if K_ else q,
+                                ext = A.path.splitext(info["filename"])[1]
+                                c_ = build_slot_filename(
+                                    K_,
                                     Az_,
                                     Be_,
-                                    AE_.upper(),
-                                    AF_.upper(),
-                                    AG_.upper(),
-                                    AH_.upper(),
-                                ]
-                                if p_:
-                                    P_.append(p_.upper())
-                                if s_:
-                                    P_.append(s_.upper())
-                                P_.append(b_ if b_ != B else L)
-                                ext = A.path.splitext(info["filename"])[1]
-                                c_ = a.join(P_) + ext
+                                    AE_,
+                                    AF_,
+                                    AG_,
+                                    color_values,
+                                    b_,
+                                    ext,
+                                )
                                 dest = A.path.join(i_, c_)
                                 try:
                                     Af.copy2(info["temp_path"], dest)
@@ -3163,6 +5273,17 @@ class App(BU.Tk):
                                     )
                                 break
                     C.ftp_remote_only = {}
+                C._seed_metadata_migration(
+                    i_,
+                    K_,
+                    AE_,
+                    AF_,
+                    AG_,
+                    color_values,
+                    b_,
+                    convert_tif_enabled=convert_tif_enabled,
+                    target_ext=target_ext,
+                )
                 AJ_ = set(C.pending_additions.keys())
                 AL_ = set(C.pending_deletions.keys())
                 AM_ = AJ_ & AL_
@@ -3177,53 +5298,172 @@ class App(BU.Tk):
                                 A.path.normpath(A8_)
                             ) == A.path.normcase(A.path.normpath(Ay_))
                         if BD_:
-                            C.pending_additions.pop(F_, I)
-                            C.pending_deletions.pop(F_, I)
+                            BF_ = C._build_slot_target_filename(
+                                F_,
+                                K_,
+                                AE_,
+                                AF_,
+                                AG_,
+                                color_values,
+                                b_,
+                                A8_,
+                                convert_tif_enabled=convert_tif_enabled,
+                                target_ext=target_ext,
+                            )
+                            BG_ = A.path.join(i_, BF_) if BF_ else B
+                            BH_ = h
+                            if BG_:
+                                try:
+                                    BH_ = A.path.samefile(Ay_, BG_)
+                                except E:
+                                    BH_ = A.path.normcase(
+                                        A.path.normpath(Ay_)
+                                    ) == A.path.normcase(A.path.normpath(BG_))
+                            if BH_:
+                                C.pending_additions.pop(F_, I)
+                                C.pending_deletions.pop(F_, I)
                 AJ_ = set(C.pending_additions.keys())
                 AL_ = set(C.pending_deletions.keys())
                 AM_ = AJ_ & AL_
+                backup_candidates = {
+                    path for path in C.pending_deletions.values() if path
+                }
+                for F_, src_path in list(C.pending_additions.items()):
+                    if not src_path or not A.path.isfile(src_path):
+                        continue
+                    c_ = C._build_slot_target_filename(
+                        F_,
+                        K_,
+                        AE_,
+                        AF_,
+                        AG_,
+                        color_values,
+                        b_,
+                        src_path,
+                        convert_tif_enabled=convert_tif_enabled,
+                        target_ext=target_ext,
+                    )
+                    if not c_:
+                        continue
+                    S_ = A.path.join(i_, c_)
+                    try:
+                        same_source_target = A.path.samefile(src_path, S_)
+                    except E:
+                        same_source_target = A.path.normcase(
+                            A.path.normpath(src_path)
+                        ) == A.path.normcase(A.path.normpath(S_))
+                    if same_source_target:
+                        backup_candidates.add(src_path)
+                backed_up = []
+                for T in sorted(backup_candidates):
+                    if T and A.path.isfile(T):
+                        try:
+                            backup_name = A.path.basename(T)
+                            backup_target = A.path.join(AN, backup_name)
+                            if A.path.exists(backup_target):
+                                root_name, ext_name = A.path.splitext(backup_name)
+                                backup_target = A.path.join(
+                                    AN,
+                                    f"{root_name}__backup{ext_name}",
+                                )
+                            Af.copy2(T, backup_target)
+                            backed_up.append(A.path.basename(backup_target))
+                        except E as R:
+                            log_error_loc(
+                                "backup_file_failed",
+                                file=A.path.basename(T),
+                                error=R,
+                            )
+                if backed_up:
+                    log_info_loc(
+                        "backup_files_done", files=AI.join(backed_up)
+                    )
                 BE_ = {}
                 for F_, src_path in list(C.pending_additions.items()):
-                    if F_ not in C.pending_deletions and C.slots[F_].get(B0) != AR:
-                        C.pending_additions.pop(F_, I)
-                        continue
                     if not src_path:
                         C.pending_additions.pop(F_, I)
                         continue
                     if not A.path.isfile(src_path):
                         C.pending_additions.pop(F_, I)
                         continue
+                    c_ = C._build_slot_target_filename(
+                        F_,
+                        K_,
+                        AE_,
+                        AF_,
+                        AG_,
+                        color_values,
+                        b_,
+                        src_path,
+                        convert_tif_enabled=convert_tif_enabled,
+                        target_ext=target_ext,
+                    )
+                    if not c_:
+                        C.pending_additions.pop(F_, I)
+                        continue
+                    S_ = A.path.join(i_, c_)
+                    slot = C.slots[F_]
+                    Az_ = slot[Aa]
+                    actual_remote_name = G(C.ftp_presence.get(Az_) or B).strip()
+                    current_remote_name = C._get_slot_existing_remote_filename(Az_)
+                    expected_remote_name = C._build_expected_remote_filename(
+                        F_,
+                        K_,
+                        src_path,
+                        convert_tif_enabled=convert_tif_enabled,
+                        target_ext=target_ext,
+                    )
+                    try:
+                        same_source_target = A.path.samefile(src_path, S_)
+                    except E:
+                        same_source_target = A.path.normcase(
+                            A.path.normpath(src_path)
+                        ) == A.path.normcase(A.path.normpath(S_))
+                    remote_missing = Az_ not in C.ftp_presence
+                    remote_name_changed = bool(
+                        expected_remote_name
+                        and current_remote_name
+                        and current_remote_name != expected_remote_name
+                    )
+                    remote_sync_needed = bool(
+                        slot.get(B0) == AR or remote_missing or remote_name_changed
+                    )
+                    sql_known_missing = Aq(C.sql_presence, dict) and not C.sql_presence.get(
+                        Az_, h
+                    )
+                    sql_update_needed = bool(
+                        expected_remote_name
+                        and (
+                            remote_name_changed
+                            or sql_known_missing
+                            or (slot.get(B0) == AR and not current_remote_name)
+                        )
+                    )
+                    metadata_migration = (not same_source_target) or remote_name_changed
+                    if (
+                        F_ not in C.pending_deletions
+                        and slot.get(B0) != AR
+                        and not metadata_migration
+                    ):
+                        C.pending_additions.pop(F_, I)
+                        continue
                     C._update_slot_activity(
                         F_, active=J, status=C._slot_status["processing"]
                     )
-                    slot = C.slots[F_]
-                    Az_ = slot[Aa]
-                    Be_ = label_category(slot["label"])
-                    P_ = [
-                        K_ if K_ else q,
-                        Az_,
-                        Be_,
-                        AE_.upper(),
-                        AF_.upper(),
-                        AG_.upper(),
-                        AH_.upper(),
-                    ]
-                    if p_:
-                        P_.append(p_.upper())
-                    if s_:
-                        P_.append(s_.upper())
-                    P_.append(b_ if b_ != B else L)
                     BH_ = A.path.splitext(src_path)[1]
-                    c_ = a.join(P_) + BH_
-                    if F_ in C.pending_ftp_deletions and C.pending_ftp_deletions[F_] == c_:
-                        C.pending_ftp_deletions.pop(F_, I)
-                    S_ = A.path.join(i_, c_)
+                    temp_output_path = B
                     try:
                         if F_ in C.pending_deletions:
                             old_path = C.pending_deletions.get(F_)
                             if not old_path:
                                 C.pending_deletions.pop(F_, I)
                             else:
+                                try:
+                                    same_old_source = A.path.samefile(old_path, src_path)
+                                except E:
+                                    same_old_source = A.path.normcase(
+                                        A.path.normpath(old_path)
+                                    ) == A.path.normcase(A.path.normpath(src_path))
                                 try:
                                     same_target = A.path.samefile(old_path, S_)
                                 except E:
@@ -3232,19 +5472,20 @@ class App(BU.Tk):
                                     ) == A.path.normcase(A.path.normpath(S_))
                                 if same_target:
                                     C.pending_deletions.pop(F_, I)
-                                    try:
-                                        if A.path.exists(old_path):
-                                            A.remove(old_path)
-                                            log_info_loc(
-                                                "deleted_file_before_add",
+                                    if not same_old_source:
+                                        try:
+                                            if A.path.exists(old_path):
+                                                A.remove(old_path)
+                                                log_info_loc(
+                                                    "deleted_file_before_add",
+                                                    file=A.path.basename(old_path),
+                                                )
+                                        except E as z:
+                                            log_error_loc(
+                                                "remove_old_file_failed",
                                                 file=A.path.basename(old_path),
+                                                error=z,
                                             )
-                                    except E as z:
-                                        log_error_loc(
-                                            "remove_old_file_failed",
-                                            file=A.path.basename(old_path),
-                                            error=z,
-                                        )
                                 elif A.path.exists(S_):
                                     try:
                                         A.remove(S_)
@@ -3254,7 +5495,7 @@ class App(BU.Tk):
                                             file=A.path.basename(S_),
                                             error=z,
                                         )
-                        elif A.path.exists(S_):
+                        elif A.path.exists(S_) and not same_source_target:
                             try:
                                 A.remove(S_)
                             except E as z:
@@ -3265,17 +5506,15 @@ class App(BU.Tk):
                                 )
                         ext_lower = BH_.lower()
                         is_image = ext_lower in IMAGE_EXTENSION_FORMATS
-                        if is_image and C.opt_convert_tif.get():
-                            target_fmt_raw = C.tif_target_format.get().strip().upper()
-                            if not target_fmt_raw:
-                                target_fmt_raw = At
-                            target_fmt = "JPEG" if target_fmt_raw == "JPG" else target_fmt_raw
-                            t_ext = FORMAT_TO_EXTENSION.get(
-                                target_fmt, "." + target_fmt_raw.lower()
-                            )
-                            c_ = a.join(P_) + t_ext
-                            S_ = A.path.join(i_, c_)
-                            if A.path.exists(S_):
+                        if is_image and convert_tif_enabled:
+                            t_ext = target_ext
+                            save_target = S_
+                            if same_source_target:
+                                save_target = f"{S_}.__gui_tmp__"
+                                temp_output_path = save_target
+                                if A.path.exists(save_target):
+                                    A.remove(save_target)
+                            elif A.path.exists(S_):
                                 try:
                                     A.remove(S_)
                                 except E as z:
@@ -3287,33 +5526,29 @@ class App(BU.Tk):
                             with AA.open(src_path) as A1:
                                 if target_fmt == "JPEG" and A1.mode in ("RGBA", "LA", "P"):
                                     A1 = A1.convert("RGB")
-                                if C.opt_resize.get():
-                                    max_dim = C.resize_max_dim.get() or 2000
+                                if resize_enabled:
                                     A1.thumbnail((max_dim, max_dim), LANCZOS_FILTER)
                                 save_params = {}
                                 if t_ext in [F, O]:
                                     quality = 95
-                                    if C.opt_compress.get():
-                                        quality = max(
-                                            1, min(100, C.compress_quality.get() or 85)
-                                        )
+                                    if compress_enabled:
+                                        quality = compress_quality
                                     save_params[W] = quality
                                     save_params[X] = J
                                 if t_ext == V:
                                     save_params[X] = J
-                                A1.save(S_, format=target_fmt, **save_params)
-                                if C.opt_maxsize.get():
-                                    max_bytes = (C.max_file_kb.get() or 0) * 1024
+                                A1.save(save_target, format=target_fmt, **save_params)
+                                if limit_size_enabled:
                                     if max_bytes > 0 and t_ext in [F, O]:
                                         try:
                                             quality = save_params.get(W, 95)
                                             while (
                                                 quality > 10
-                                                and A.path.getsize(S_) > max_bytes
+                                                and A.path.getsize(save_target) > max_bytes
                                             ):
                                                 quality -= 5
                                                 A1.save(
-                                                    S_,
+                                                    save_target,
                                                     format=target_fmt,
                                                     quality=quality,
                                                     optimize=J,
@@ -3324,28 +5559,33 @@ class App(BU.Tk):
                                                 file=c_,
                                                 error=R,
                                             )
+                            if temp_output_path:
+                                A.replace(temp_output_path, S_)
+                                temp_output_path = B
                             log_info_loc("image_added_modified", file=c_)
                         elif ext_lower in [F, O, V, ".bmp", ".gif"]:
+                            save_target = S_
+                            if same_source_target:
+                                save_target = f"{S_}.__gui_tmp__"
+                                temp_output_path = save_target
+                                if A.path.exists(save_target):
+                                    A.remove(save_target)
                             with AA.open(src_path) as A1:
-                                if C.opt_resize.get():
-                                    max_dim = C.resize_max_dim.get() or 2000
+                                if resize_enabled:
                                     A1.thumbnail((max_dim, max_dim), LANCZOS_FILTER)
                                 save_params = {}
                                 if ext_lower in [F, O]:
                                     quality = 95
-                                    if C.opt_compress.get():
-                                        quality = max(
-                                            1, min(100, C.compress_quality.get() or 85)
-                                        )
+                                    if compress_enabled:
+                                        quality = compress_quality
                                     save_params[W] = quality
                                     save_params[X] = J
                                 if ext_lower == V:
                                     save_params[X] = J
-                                A1.save(S_, **save_params)
-                                if C.opt_maxsize.get():
-                                    max_bytes = (C.max_file_kb.get() or 0) * 1024
+                                A1.save(save_target, **save_params)
+                                if limit_size_enabled:
                                     if max_bytes > 0:
-                                        if A.path.getsize(S_) > max_bytes and ext_lower in [
+                                        if A.path.getsize(save_target) > max_bytes and ext_lower in [
                                             F,
                                             O,
                                         ]:
@@ -3353,27 +5593,49 @@ class App(BU.Tk):
                                                 quality = save_params.get(W, 95)
                                                 while (
                                                     quality > 10
-                                                    and A.path.getsize(S_) > max_bytes
+                                                    and A.path.getsize(save_target) > max_bytes
                                                 ):
                                                     quality -= 5
-                                                    A1.save(S_, quality=quality, optimize=J)
+                                                    A1.save(
+                                                        save_target,
+                                                        quality=quality,
+                                                        optimize=J,
+                                                    )
                                             except E as R:
                                                 log_error_loc(
                                                     "file_resize_error",
                                                     file=c_,
                                                     error=R,
                                                 )
+                            if temp_output_path:
+                                A.replace(temp_output_path, S_)
+                                temp_output_path = B
                             log_info_loc("image_added_modified", file=c_)
                         elif ext_lower in [".tif", ".tiff"]:
-                            Af.copy2(src_path, S_)
+                            if not same_source_target:
+                                Af.copy2(src_path, S_)
                             log_info_loc("file_added_modified", file=c_)
                         elif is_image:
-                            Af.copy2(src_path, S_)
+                            if not same_source_target:
+                                Af.copy2(src_path, S_)
                             log_info_loc("file_added_modified", file=c_)
                         else:
-                            Af.copy2(src_path, S_)
+                            if not same_source_target:
+                                Af.copy2(src_path, S_)
                             log_info_loc("file_added_modified", file=c_)
-                        files_to_upload.append(c_)
+                        if remote_name_changed and actual_remote_name:
+                            ftp_delete_candidates.add(actual_remote_name)
+                        if sql_update_needed:
+                            sql_update_prefixes.add(Az_)
+                        if (
+                            F_ in C.pending_ftp_deletions
+                            and expected_remote_name
+                            and C.pending_ftp_deletions[F_] == expected_remote_name
+                        ):
+                            C.pending_ftp_deletions.pop(F_, I)
+                            ftp_delete_candidates.discard(expected_remote_name)
+                        if remote_sync_needed and c_ not in files_to_upload:
+                            files_to_upload.append(c_)
                         C.slots[F_][f] = S_
                     except E as y:
                         log_error_loc(
@@ -3381,6 +5643,11 @@ class App(BU.Tk):
                             file=A.path.basename(src_path),
                             error=y,
                         )
+                        if temp_output_path and A.path.exists(temp_output_path):
+                            try:
+                                A.remove(temp_output_path)
+                            except E:
+                                pass
                         result_data[K].add(F_)
                         BE_[F_] = src_path
                         continue
@@ -3436,6 +5703,7 @@ class App(BU.Tk):
                         fname = A.path.basename(path)
                         if fname not in files_to_upload:
                             files_to_upload.append(fname)
+                        sql_update_prefixes.add(slot[Aa])
                         C.pending_additions.setdefault(idx, path)
                 Am_ = {}
                 for F_, T in list(C.pending_deletions.items()):
@@ -3456,14 +5724,13 @@ class App(BU.Tk):
                             log_info_loc(
                                 "file_deleted", file=A.path.basename(T)
                             )
-                            BO_ = A.path.basename(T)
-                            P_ = BO_.split(a)
-                            if Q(P_) >= 2:
-                                An_ = P_[0]
-                                Bi = P_[1]
-                                Bj = A.path.splitext(BO_)[1]
-                                if An_ and Q(An_) == 13 and An_.isdigit():
-                                    BM_.append(f"{An_}_{Bi}{Bj}")
+                            if F_ not in C.pending_additions:
+                                current_remote_name = G(
+                                    C.ftp_presence.get(C.slots[F_][Aa]) or B
+                                ).strip()
+                                if current_remote_name:
+                                    ftp_delete_candidates.add(current_remote_name)
+                                sql_clear_prefixes.add(C.slots[F_][Aa])
                     except E as y:
                         log_error_loc(
                             "file_delete_failed",
@@ -3472,9 +5739,7 @@ class App(BU.Tk):
                         )
                         result_data[K].add(F_)
                         Am_[F_] = T
-                for Cz_ in C.pending_ftp_deletions.values():
-                    if Cz_:
-                        BM_.append(Cz_)
+                BM_ = sorted(ftp_delete_candidates)
                 result_data[n] = BE_
                 result_data[o] = Am_
                 add_set = set(C.pending_additions.keys())
@@ -3631,16 +5896,7 @@ class App(BU.Tk):
                             B3_ = C._resolve_sql_column(Az_, d_["label"], log_missing=J)
                             if not B3_:
                                 continue
-                            if d_[f]:
-                                if Az_ in C.ftp_presence:
-                                    remote_fname = C.ftp_presence.get(Az_)
-                                    if not isinstance(remote_fname, str) or not remote_fname:
-                                        continue
-                                    parts = remote_fname.split(a)
-                                    if Q(parts) >= 2:
-                                        remote_label = parts[1].split(".")[0]
-                                        if remote_label != Az_:
-                                            continue
+                            if Az_ in sql_update_prefixes and d_[f]:
                                 Bs = A.path.basename(d_[f])
                                 ext = A.path.splitext(Bs)[1].lower()
                                 short_name = f"{K_}_{Az_}{ext}"
@@ -3657,7 +5913,7 @@ class App(BU.Tk):
                                 Aq_ += 1
                                 if Aj(cur, A3, -1) >= 0:
                                     CANCEL_LABEL += cur.rowcount
-                            elif Az_ in C.original_files:
+                            elif Az_ in sql_clear_prefixes:
                                 AX_ = D.get(w, SQL_UPDATE_TEMPLATE)
                                 AY_ = I
                                 AZ_ = I
@@ -3725,7 +5981,7 @@ class App(BU.Tk):
                 result_data[Y] = "Operacja przerwana z powodu błędu."
                 result_data[P] = G(exc)
             result_data["ean"] = K_
-            result_data[A2] = BY_
+            result_data["saved_entry"] = saved_entry
 
         thread = threading.Thread(target=heavy_work)
         thread.daemon = True
@@ -3755,9 +6011,16 @@ class App(BU.Tk):
                     widget.configure(state=X)
                 except:
                     pass
+            try:
+                C.entry_product_id.configure(state="readonly")
+            except E:
+                pass
             C.btn_submit.configure(state=X)
+            C.btn_search_entry.configure(state=X)
+            C.btn_new_search.configure(state=X)
             C.btn_open.configure(state=X)
             C.is_processing = h
+            C._set_busy_state(B, active=h)
             err_set = result_data.get(K, set()) or set()
             add_set = result_data.get(p, set())
             del_set = result_data.get(s, set())
@@ -3787,8 +6050,14 @@ class App(BU.Tk):
             A__ = result_data.get(k, Ay)
             AW_msg = result_data.get(P, B)
             K_val = result_data.get("ean", K_)
+            saved_entry_record = result_data.get("saved_entry")
             if not err_set and not A__ and not Y_ and not AW_msg:
-                C._load_existing_files()
+                if saved_entry_record:
+                    C._load_entry_record(saved_entry_record)
+                else:
+                    C._load_existing_files()
+            elif saved_entry_record:
+                C._set_loaded_entry_context(saved_entry_record)
             if err_set:
                 O.showwarning(
                     A,
@@ -3860,40 +6129,10 @@ class App(BU.Tk):
         if D_.upper() == q:
             O.showwarning(E_, CANNOT_SEARCH_NO_EAN_MSG)
             return
-        A._reset_form_fields(keep_ean=J)
-        A.var_ean.set(D_)
         if D_ in A.entries:
-            C_ = A.entries[D_]
-            G_ = C_.get(Ae, B) or B
-            H_ = C_.get(Ad, B) or B
-            I_ = C_.get(AZ, B) or B
-            K_ = C_.get(AY, B) or B
-            M_ = C_.get(AX, B) or B
-            N_ = C_.get(AW, B) or B
-            F_ = C_.get(d, B) or B
-            A.suppress_scan = J
-            try:
-                A.var_name.set(G_)
-                A._on_name_commit()
-                A.var_type.set(H_)
-                A._on_type_commit()
-                A.var_model.set(I_)
-                A.loading_by_ean = J
-                A._on_model_commit()
-                A.loading_by_ean = h
-                A.var_color1.set(K_)
-                A.var_color2.set(M_)
-                A.var_color3.set(N_)
-                A._on_color_commit()
-                if F_.upper() == L:
-                    A.var_extra.set(B)
-                else:
-                    A.var_extra.set(F_)
-                A._on_extra_commit()
-                A.var_ean.set(D_)
-            finally:
-                A.suppress_scan = h
-            A._load_existing_files()
+            record = dict(A.entries[D_])
+            record[EAN_HEADER] = D_
+            A._load_entry_record(record)
         else:
             O.showinfo(NOT_FOUND_LABEL, NO_SAVED_DATA_FOR_EAN_MSG.format(ean=D_))
 
@@ -3911,15 +6150,14 @@ class App(BU.Tk):
                 FILL_REQUIRED_BEFORE_OPEN_MSG,
             )
             return
-        C_ = A.path.join(l, F_.upper(), G_.upper(), H_.upper())
-        D_ = [I_.upper()]
-        if K_:
-            D_.append(K_.upper())
-        if M_:
-            D_.append(M_.upper())
-        Q_ = g.join(D_)
-        R_ = N_.strip().replace(a, g).upper() if N_ else L
-        C_ = A.path.join(C_, Q_, R_)
+        C_ = build_product_directory(
+            l,
+            F_,
+            G_,
+            H_,
+            [I_, K_, M_],
+            N_,
+        )
         A.makedirs(C_, exist_ok=J)
         try:
             if A.name == "nt":
@@ -3969,6 +6207,8 @@ class App(BU.Tk):
         A._settings_window = a_
         a_.title(SETTINGS_LABEL)
         a_.configure(bg=A._ui_colors["bg"])
+        a_.geometry("1080x780")
+        a_.minsize(960, 720)
         try:
             a_.transient(A)
         except E:
@@ -4450,18 +6690,63 @@ class App(BU.Tk):
         ).grid(row=8, column=0, columnspan=2, padx=5, pady=5, sticky="w")
         _slabel(
             V_,
-            text=LANG.get("code_check_report_label", "Raport diagnostyczny"),
+            text=LANG.get("perf_check_label", "Test wydajności GUI"),
             style="SettingsHeader.TLabel",
         ).grid(row=9, column=0, columnspan=2, padx=5, pady=(8, 4), sticky=T)
+        perf_check_status_var = F.StringVar(value=B)
+
+        def _run_perf_check():
+            A._run_performance_benchmark(
+                perf_check_status_var,
+                perf_check_btn,
+                code_report,
+            )
+
+        perf_check_btn = C.Button(
+            V_,
+            text=LANG.get("perf_check_button", "Test wydajności"),
+            command=_run_perf_check,
+        )
+        perf_check_btn.grid(row=10, column=0, padx=5, pady=5, sticky=T)
+        _slabel(
+            V_,
+            textvariable=perf_check_status_var,
+            wraplength=400,
+            justify="left",
+        ).grid(row=10, column=1, padx=5, pady=5, sticky="w")
+        _slabel(
+            V_,
+            text=LANG.get(
+                "perf_check_hint",
+                "Mierzy krok pętli UI i czas przygotowania miniaturek na aktualnych danych.",
+            ),
+            wraplength=400,
+            justify="left",
+            style="SettingsHint.TLabel",
+        ).grid(row=11, column=0, columnspan=2, padx=5, pady=5, sticky="w")
+        _slabel(
+            V_,
+            text=LANG.get("code_check_report_label", "Raport diagnostyczny"),
+            style="SettingsHeader.TLabel",
+        ).grid(row=12, column=0, columnspan=2, padx=5, pady=(8, 4), sticky=T)
         code_report = BS.ScrolledText(
             V_, width=90, height=18, state=V, wrap="word"
         )
         code_report.grid(
-            row=10, column=0, columnspan=2, padx=5, pady=(0, 8), sticky="nsew"
+            row=13, column=0, columnspan=2, padx=5, pady=(0, 8), sticky="nsew"
+        )
+        code_report.configure(
+            background=A._ui_colors["log_bg"],
+            foreground=A._ui_colors["log_fg"],
+            insertbackground=A._ui_colors["hero_text"],
+            padx=10,
+            pady=8,
+            relief="flat",
+            bd=0,
         )
         V_.columnconfigure(0, weight=1)
         V_.columnconfigure(1, weight=1)
-        V_.rowconfigure(10, weight=1)
+        V_.rowconfigure(13, weight=1)
 
         def _toggle_resize(*_args):
             l_.configure(state=X if A.opt_resize.get() else V)
@@ -5873,11 +8158,14 @@ class App(BU.Tk):
             D__ = F.Label(
                 A_,
                 text=text,
-                background="yellow",
+                background="#10242d",
+                foreground="#e4f1ef",
                 relief="solid",
                 borderwidth=1,
-                padx=5,
-                pady=3,
+                padx=8,
+                pady=5,
+                justify="left",
+                wraplength=300,
             )
             D__.pack()
 
