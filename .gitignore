@@ -1,4 +1,4 @@
-local_settings.json
+local_settings
 .venv
 .vscode
 \__pycache__/
