@@ -121,6 +121,26 @@ THUMBNAIL_RESULT_BATCH = 6
 THUMBNAIL_POLL_MS = 28
 PERF_MONITOR_MS = 16
 PERF_SAMPLE_WINDOW = 90
+FORM_TRACKED_FIELDS = (
+    "name",
+    "type",
+    "model",
+    "color1",
+    "color2",
+    "color3",
+    "extra",
+    "ean",
+)
+FORM_TRACKED_VAR_ATTRS = {
+    "name": "var_name",
+    "type": "var_type",
+    "model": "var_model",
+    "color1": "var_color1",
+    "color2": "var_color2",
+    "color3": "var_color3",
+    "extra": "var_extra",
+    "ean": "var_ean",
+}
 
 FORMAT_INFO_TEXTS = {
     "JPEG": LANG.get(
@@ -246,6 +266,9 @@ class App(BU.Tk):
         B._last_lookup_duration_ms = 0
         B._commit_snapshot = {}
         B._record_loaded = h
+        B._field_change_refresh_job = I
+        B._loaded_field_values = {}
+        B._form_field_meta = {}
         B.opt_resize = F.BooleanVar(value=J)
         B.opt_compress = F.BooleanVar(value=h)
         B.opt_maxsize = F.BooleanVar(value=h)
@@ -307,6 +330,10 @@ class App(BU.Tk):
             B.var_ean,
         ):
             var.trace_add("write", B._queue_dashboard_refresh)
+        for field_key in FORM_TRACKED_FIELDS:
+            tracked_var = getattr(B, FORM_TRACKED_VAR_ATTRS[field_key], I)
+            if tracked_var is not I:
+                tracked_var.trace_add("write", B._queue_form_change_refresh)
         B._load_slot_config()
         B._build_form()
         B._build_slots()
@@ -395,6 +422,11 @@ class App(BU.Tk):
         A.option_add("*Text.Font", "Consolas 9")
         A.style.configure("App.TFrame", background=A._ui_colors["bg"])
         A.style.configure("Card.TFrame", background=A._ui_colors["card"], relief="flat")
+        A.style.configure(
+            "ChangedField.TFrame",
+            background="#fff1d9",
+            relief="flat",
+        )
         A.style.configure("Hero.TFrame", background=A._ui_colors["hero"], relief="flat")
         A.style.configure(
             "SidebarCard.TFrame",
@@ -493,6 +525,12 @@ class App(BU.Tk):
             font=("Segoe UI Semibold", 10),
         )
         A.style.configure(
+            "ChangedForm.TLabel",
+            background="#fff1d9",
+            foreground="#8f641f",
+            font=("Segoe UI Semibold", 10),
+        )
+        A.style.configure(
             "FormSection.TLabel",
             background=A._ui_colors["card"],
             foreground=A._ui_colors["text"],
@@ -576,6 +614,34 @@ class App(BU.Tk):
         A.style.map(
             "Outline.TButton",
             background=[("pressed", "#eef3f0"), ("active", "#f5f8f6")],
+        )
+        A.style.configure(
+            "MiniOutline.TButton",
+            background=A._ui_colors["card"],
+            foreground=A._ui_colors["muted"],
+            borderwidth=1,
+            relief="solid",
+            padding=(7, 2),
+            font=("Segoe UI Semibold", 8),
+        )
+        A.style.map(
+            "MiniOutline.TButton",
+            background=[("pressed", "#eef3f0"), ("active", "#f5f8f6")],
+            foreground=[("disabled", "#a9b1ad")],
+        )
+        A.style.configure(
+            "MiniWarn.TButton",
+            background="#fff1d9",
+            foreground="#8f641f",
+            borderwidth=1,
+            relief="solid",
+            padding=(7, 2),
+            font=("Segoe UI Semibold", 8),
+        )
+        A.style.map(
+            "MiniWarn.TButton",
+            background=[("pressed", "#ffe9c3"), ("active", "#fff5e4")],
+            foreground=[("disabled", "#a9b1ad")],
         )
         A.style.configure(
             "TCombobox",
@@ -791,25 +857,171 @@ class App(BU.Tk):
             "extra": A._normalize_entry_part(A.var_extra.get(), extra=J),
         }
 
+    def _get_form_field_raw_value(A, field_key):
+        """Return the current user-visible value for a tracked form field."""
+
+        var_attr = FORM_TRACKED_VAR_ATTRS.get(field_key)
+        tracked_var = getattr(A, var_attr, I) if var_attr else I
+        if tracked_var is I:
+            return B
+        value = G(tracked_var.get() or B).strip()
+        if field_key == "ean":
+            return value.upper()
+        return value
+
+    def _normalize_form_field_value(A, field_key, value=I):
+        """Normalize a tracked form field for dirty-state comparisons."""
+
+        raw_value = A._get_form_field_raw_value(field_key) if value is I else G(value or B).strip()
+        if field_key == "ean":
+            return raw_value.upper()
+        return A._normalize_entry_part(raw_value, extra=field_key == "extra")
+
+    def _capture_loaded_field_values(A):
+        """Snapshot the current visible form values as the original loaded state."""
+
+        A._loaded_field_values = {
+            field_key: A._get_form_field_raw_value(field_key)
+            for field_key in FORM_TRACKED_FIELDS
+        }
+        A._queue_form_change_refresh()
+
+    def _queue_form_change_refresh(A, *_args):
+        """Debounce form dirty/highlight refresh to the next Tk idle turn."""
+
+        if A._field_change_refresh_job is not I:
+            return
+        A._field_change_refresh_job = A.after_idle(A._refresh_form_change_markers)
+
+    def _should_lookup_existing_files_for_form_edit(A):
+        """Return True when metadata edits should trigger a file lookup."""
+
+        if A.suppress_scan or A._preserve_loaded_binding():
+            return h
+        return (
+            bool(A.var_name.get().strip())
+            and bool(A.var_type.get().strip())
+            and bool(A.var_model.get().strip())
+            and bool(A.var_color1.get().strip())
+        )
+
+    def _register_form_field(A, field_key, field, label, widget, restore_button):
+        """Remember widgets that belong to a tracked form field."""
+
+        if not field_key:
+            return
+        A._form_field_meta[field_key] = {
+            "frame": field,
+            "label": label,
+            "widget": widget,
+            "restore": restore_button,
+        }
+        A._queue_form_change_refresh()
+
+    def _refresh_form_change_markers(A):
+        """Highlight edited fields and enable per-field restore buttons."""
+
+        A._field_change_refresh_job = I
+        has_loaded_values = bool(A._loaded_field_values)
+        for field_key, meta in Aj(A, "_form_field_meta", {}).items():
+            dirty = h
+            if has_loaded_values and field_key in A._loaded_field_values:
+                dirty = (
+                    A._normalize_form_field_value(field_key)
+                    != A._normalize_form_field_value(
+                        field_key, A._loaded_field_values.get(field_key, B)
+                    )
+                )
+            frame = meta.get("frame")
+            label = meta.get("label")
+            restore_button = meta.get("restore")
+            if frame:
+                try:
+                    frame.configure(
+                        style="ChangedField.TFrame" if dirty else "Card.TFrame"
+                    )
+                except E:
+                    pass
+            if label:
+                try:
+                    label.configure(
+                        style="ChangedForm.TLabel" if dirty else "Form.TLabel"
+                    )
+                except E:
+                    pass
+            if restore_button:
+                try:
+                    restore_button.configure(
+                        state=X if dirty else V,
+                        style="MiniWarn.TButton" if dirty else "MiniOutline.TButton",
+                    )
+                except E:
+                    pass
+
+    def _restore_form_field_value(A, field_key):
+        """Restore a single field to the value from the last loaded entry."""
+
+        if field_key not in A._loaded_field_values:
+            return
+        restored_value = A._loaded_field_values.get(field_key, B)
+        if field_key == "name":
+            A.var_name.set(restored_value)
+            A._on_name_commit()
+            A._on_type_commit()
+            A._on_model_commit()
+            A._on_color_commit()
+            A._on_extra_commit()
+        elif field_key == "type":
+            A.var_type.set(restored_value)
+            A._on_type_commit()
+            A._on_model_commit()
+            A._on_color_commit()
+            A._on_extra_commit()
+        elif field_key == "model":
+            A.var_model.set(restored_value)
+            A._on_model_commit()
+            A._on_color_commit()
+            A._on_extra_commit()
+        elif field_key in {"color1", "color2", "color3"}:
+            getattr(A, FORM_TRACKED_VAR_ATTRS[field_key]).set(restored_value)
+            A._on_color_commit()
+            A._on_extra_commit()
+        elif field_key == "extra":
+            A.var_extra.set(restored_value)
+            A._on_extra_commit()
+        elif field_key == "ean":
+            A.var_ean.set(restored_value)
+            if A._should_lookup_existing_files_for_form_edit():
+                A._schedule_existing_files_lookup()
+        A._queue_form_change_refresh()
+
     def _commit_matches_snapshot(A, key, value):
         """Return True when the current commit carries no actual form change."""
 
         return A._commit_snapshot.get(key) == value
 
+    def _has_loaded_entry_context(A):
+        """Return True when the form still belongs to a loaded product record."""
+
+        product_id = G(A.var_product_id.get() or B).strip()
+        loaded_values = Aj(A, "_loaded_field_values", {})
+        return bool(product_id or loaded_values or A._record_loaded)
+
     def _preserve_loaded_binding(A):
         """Return True when edits should stay attached to the loaded record."""
 
-        product_id = G(A.var_product_id.get() or B).strip()
-        return bool(A._record_loaded and product_id)
+        return A._has_loaded_entry_context()
 
     def _clear_loaded_entry_context(A, keep_ean=h):
         """Forget the currently loaded product binding and reset lookup cache."""
 
         A._record_loaded = h
         A.var_product_id.set(B)
+        A._loaded_field_values = {}
         A._last_lookup_signature = I
         if not keep_ean:
             A.var_ean.set(B)
+        A._queue_form_change_refresh()
 
     def _set_loaded_entry_context(A, record):
         """Attach the form to a specific saved product entry."""
@@ -823,6 +1035,7 @@ class App(BU.Tk):
         if ean:
             A.var_ean.set(ean)
         A._record_loaded = bool(product_id)
+        A._capture_loaded_field_values()
         A._last_lookup_signature = I
 
     def _find_entry_records_by_fields(A, signature):
@@ -936,6 +1149,7 @@ class App(BU.Tk):
             return
         ean = G(record.get(EAN_HEADER) or B).strip().upper()
         extra_value = G(record.get(EXTRA_HEADER) or B).strip().upper()
+        A._clear_loaded_entry_context(keep_ean=bool(ean))
         A._reset_form_fields(keep_ean=bool(ean))
         A.var_product_id.set(G(record.get(PRODUCT_ID_HEADER) or B).strip().upper())
         if ean:
@@ -970,11 +1184,7 @@ class App(BU.Tk):
     def _search_current_entry(A):
         """Load a saved record by Product ID, EAN or the current form values."""
 
-        product_id = G(A.var_product_id.get() or B).strip().upper()
         ean = G(A.var_ean.get() or B).strip().upper()
-        if product_id and product_id in A.entries_by_id:
-            A._load_entry_record(A.entries_by_id[product_id])
-            return
         if ean:
             record = A.entries.get(ean)
             if record:
@@ -982,25 +1192,28 @@ class App(BU.Tk):
                 resolved[EAN_HEADER] = ean
                 A._load_entry_record(resolved)
                 return
+            A._activate_new_entry_mode(keep_values=J)
+            return
+        product_id = G(A.var_product_id.get() or B).strip().upper()
+        if product_id and product_id in A.entries_by_id:
+            A._load_entry_record(A.entries_by_id[product_id])
+            return
         signature = A._current_entry_signature()
-        if not all(signature[:4]):
+        if not any(signature) and not ean and not product_id:
             O.showwarning(
                 NO_DATA_MSG,
                 LANG.get(
-                    "search_requires_fields",
-                    "Podaj co najmniej nazwę, typ, model i kolor 1, aby wyszukać zapisany produkt.",
+                    "search_requires_any_value",
+                    "Podaj EAN albo dane produktu, aby wyszukac wpis.",
                 ),
             )
             return
+        if not all(signature[:4]):
+            A._activate_new_entry_mode(keep_values=J)
+            return
         matches = A._find_entry_records_by_fields(signature)
         if not matches:
-            O.showinfo(
-                NOT_FOUND_LABEL,
-                LANG.get(
-                    "search_no_entry_match",
-                    "Nie znaleziono zapisanego wpisu dla podanych danych produktu.",
-                ),
-            )
+            A._activate_new_entry_mode(keep_values=J)
             return
         record = A._prompt_select_entry_record(
             matches,
@@ -1013,8 +1226,8 @@ class App(BU.Tk):
         if record:
             A._load_entry_record(record)
 
-    def _start_new_search(A):
-        """Clear the form and switch back to an empty search state."""
+    def _activate_new_entry_mode(A, keep_values=J):
+        """Drop the current loaded binding and continue as a new entry."""
 
         if A._load_existing_after_id is not I:
             try:
@@ -1022,14 +1235,40 @@ class App(BU.Tk):
             except E:
                 pass
             A._load_existing_after_id = I
+        preserve_ean = keep_values and bool(A.var_ean.get().strip())
         A.suppress_scan = J
         try:
-            A._clear_loaded_entry_context()
-            A._reset_form_fields(keep_ean=h)
+            A._clear_loaded_entry_context(keep_ean=preserve_ean)
+            if keep_values:
+                A.original_files = {}
+                A.ftp_remote_only = {}
+                A.ftp_presence = {}
+                A.ftp_downloaded_final = set()
+                A.sql_presence = I
+                A._clear_all_slots()
+            else:
+                A._reset_form_fields(keep_ean=h)
         finally:
             A.suppress_scan = h
         A._busy_status_var.set(LANG.get("busy_state_idle", "Stan: gotowe"))
         A._refresh_commit_snapshot()
+        A._queue_form_change_refresh()
+        A._queue_dashboard_refresh()
+        A._update_dashboard_summary()
+        if (
+            keep_values
+            and A.var_name.get().strip()
+            and A.var_type.get().strip()
+            and A.var_model.get().strip()
+            and A.var_color1.get().strip()
+            and not A.suppress_scan
+        ):
+            A._schedule_existing_files_lookup()
+
+    def _start_new_search(A):
+        """Clear the form and switch back to an empty search state."""
+
+        A._activate_new_entry_mode(keep_values=h)
         A._focus_widget(A.combo_name)
 
     def _set_busy_state(A, text, active=J):
@@ -2464,6 +2703,7 @@ class App(BU.Tk):
             row=1,
             column=0,
             label_text=NAME_LABEL,
+            field_key="name",
             textvariable=A.var_name,
             values=A.lists[n],
             state=X,
@@ -2485,6 +2725,7 @@ class App(BU.Tk):
             row=1,
             column=2,
             label_text=TYPE_LABEL,
+            field_key="type",
             textvariable=A.var_type,
             values=A.lists[t],
             state=X,
@@ -2505,6 +2746,7 @@ class App(BU.Tk):
             row=1,
             column=3,
             label_text=MODEL_LABEL,
+            field_key="model",
             textvariable=A.var_model,
             values=A.lists[s],
             state=X,
@@ -2525,6 +2767,7 @@ class App(BU.Tk):
             row=2,
             column=0,
             label_text=COLOR1_LABEL,
+            field_key="color1",
             textvariable=A.var_color1,
             values=A.lists[Y],
             state=X,
@@ -2542,6 +2785,7 @@ class App(BU.Tk):
             row=2,
             column=1,
             label_text=COLOR2_LABEL,
+            field_key="color2",
             textvariable=A.var_color2,
             values=A.lists[Y],
             state=X,
@@ -2559,6 +2803,7 @@ class App(BU.Tk):
             row=2,
             column=2,
             label_text=COLOR3_LABEL,
+            field_key="color3",
             textvariable=A.var_color3,
             values=A.lists[Y],
             state=X,
@@ -2576,6 +2821,7 @@ class App(BU.Tk):
             row=2,
             column=3,
             label_text=EXTRA_LABEL,
+            field_key="extra",
             textvariable=A.var_extra,
             values=A.lists[d],
             state=X,
@@ -2596,9 +2842,12 @@ class App(BU.Tk):
             row=3, column=0, columnspan=2, sticky="ew", padx=3, pady=(0, 2)
         )
         ean_field.columnconfigure(0, weight=1)
-        ean_field.columnconfigure(2, weight=1)
+        ean_field.columnconfigure(1, weight=1)
+        product_id_field = C.Frame(ean_field, style="Card.TFrame")
+        product_id_field.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        product_id_field.columnconfigure(0, weight=1)
         product_id_label = C.Label(
-            ean_field,
+            product_id_field,
             text=LANG.get("product_id_label", "ID produktu"),
             style="Form.TLabel",
         )
@@ -2611,14 +2860,18 @@ class App(BU.Tk):
             ),
         )
         A.entry_product_id = C.Entry(
-            ean_field,
+            product_id_field,
             textvariable=A.var_product_id,
             state="readonly",
             width=20,
         )
-        A.entry_product_id.grid(row=1, column=0, sticky="ew", padx=(0, 8))
-        N_ = C.Label(ean_field, text=EAN_OPTIONAL_LABEL, style="Form.TLabel")
-        N_.grid(row=0, column=2, columnspan=2, sticky="w", pady=(0, 2))
+        A.entry_product_id.grid(row=1, column=0, sticky="ew")
+        ean_value_field = C.Frame(ean_field, style="Card.TFrame")
+        ean_value_field.grid(row=0, column=1, sticky="ew")
+        ean_value_field.columnconfigure(0, weight=1)
+        ean_value_field.columnconfigure(1, weight=0)
+        N_ = C.Label(ean_value_field, text=EAN_OPTIONAL_LABEL, style="Form.TLabel")
+        N_.grid(row=0, column=0, sticky="w", pady=(0, 2))
         A._add_tooltip(
             N_,
             LANG.get(
@@ -2626,10 +2879,29 @@ class App(BU.Tk):
                 "13-cyfrowy kod EAN produktu. Jesli nie podany, zostanie uzyte 'BRAK-EAN'.",
             ),
         )
-        A.entry_ean = C.Entry(ean_field, textvariable=A.var_ean, state=X, width=22)
-        A.entry_ean.grid(row=1, column=2, columnspan=2, sticky="ew")
+        ean_restore = C.Button(
+            ean_value_field,
+            text=LANG.get("field_restore_button", "Reset"),
+            style="MiniOutline.TButton",
+            width=6,
+            command=lambda: A._restore_form_field_value("ean"),
+            state=V,
+        )
+        ean_restore.grid(row=0, column=1, sticky="e", padx=(6, 0), pady=(0, 2))
+        A._add_tooltip(
+            ean_restore,
+            LANG.get(
+                "field_restore_tooltip",
+                "Przywraca wartosc z ostatnio wczytanego wpisu.",
+            ),
+        )
+        A.entry_ean = C.Entry(
+            ean_value_field, textvariable=A.var_ean, state=X, width=22
+        )
+        A.entry_ean.grid(row=1, column=0, columnspan=2, sticky="ew")
         A.entry_ean.bind("<FocusIn>", A._remember_focus)
         A.entry_ean.bind("<Return>", lambda _event: A._search_current_entry())
+        A._register_form_field("ean", ean_value_field, N_, A.entry_ean, ean_restore)
 
         actions = C.Frame(form_card, style="Card.TFrame")
         actions.grid(row=3, column=2, columnspan=2, sticky="ew", padx=3, pady=(0, 2))
@@ -2652,7 +2924,7 @@ class App(BU.Tk):
         A.btn_search_entry.grid(row=1, column=0, sticky="ew")
         A.btn_new_search = C.Button(
             actions,
-            text=LANG.get("new_search_button", "Nowe wyszukiwanie"),
+            text=LANG.get("new_entry_button", "Wyczysc pola"),
             style="Outline.TButton",
             command=A._start_new_search,
         )
@@ -2667,12 +2939,14 @@ class App(BU.Tk):
         A.btn_edit_lists = C.Button(
             actions,
             text=EDIT_LISTS_LABEL,
+            style="Outline.TButton",
             command=A._open_list_editor,
         )
         A.btn_edit_lists.grid(row=1, column=3, sticky="ew")
         A.btn_settings = C.Button(
             actions,
             text=SETTINGS_LABEL,
+            style="Outline.TButton",
             command=A._open_settings,
         )
         A.btn_settings.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(4, 0))
@@ -2748,6 +3022,7 @@ class App(BU.Tk):
         widget_factory=I,
         tooltip_text=I,
         columnspan=1,
+        field_key=I,
     ):
         field = C.Frame(parent, style="Card.TFrame")
         field.grid(
@@ -2759,14 +3034,34 @@ class App(BU.Tk):
             pady=(0, 4),
         )
         field.columnconfigure(0, weight=1)
+        field.columnconfigure(1, weight=0)
         label = C.Label(field, text=label_text, style="Form.TLabel")
         label.grid(row=0, column=0, sticky="w", pady=(0, 2))
         if tooltip_text:
             A._add_tooltip(label, tooltip_text)
+        restore_button = I
+        if field_key:
+            restore_button = C.Button(
+                field,
+                text=LANG.get("field_restore_button", "Reset"),
+                style="MiniOutline.TButton",
+                width=6,
+                command=lambda key=field_key: A._restore_form_field_value(key),
+                state=V,
+            )
+            restore_button.grid(row=0, column=1, sticky="e", padx=(6, 0), pady=(0, 2))
+            A._add_tooltip(
+                restore_button,
+                LANG.get(
+                    "field_restore_tooltip",
+                    "Przywraca wartosc z ostatnio wczytanego wpisu.",
+                ),
+            )
         if widget_factory is not I:
             widget = widget_factory(field)
         if widget is not I:
-            widget.grid(row=1, column=0, sticky="ew")
+            widget.grid(row=1, column=0, columnspan=2, sticky="ew")
+        A._register_form_field(field_key, field, label, widget, restore_button)
         return field, widget
 
     def _build_form_combobox(
@@ -2782,6 +3077,7 @@ class App(BU.Tk):
         tooltip_text=I,
         columnspan=1,
         width=18,
+        field_key=I,
     ):
         _field, combo = A._build_form_field(
             parent,
@@ -2790,6 +3086,7 @@ class App(BU.Tk):
             label_text=label_text,
             tooltip_text=tooltip_text,
             columnspan=columnspan,
+            field_key=field_key,
             widget_factory=lambda field: C.Combobox(
                 field,
                 textvariable=textvariable,
@@ -3624,6 +3921,13 @@ class App(BU.Tk):
             return
         if C._commit_matches_snapshot("name", C._normalize_entry_part(D_)):
             return
+        preserve_loaded = C._preserve_loaded_binding()
+        preserved_type = C.var_type.get()
+        preserved_model = C.var_model.get()
+        preserved_color1 = C.var_color1.get()
+        preserved_color2 = C.var_color2.get()
+        preserved_color3 = C.var_color3.get()
+        preserved_extra = C.var_extra.get()
         if not C._list_has_value(n, D_):
             result = C._prompt_add_list_value(
                 n, D_, NAME_NOT_IN_LIST_QUESTION.format(value=D_), C.combo_name
@@ -3644,19 +3948,27 @@ class App(BU.Tk):
             C.combo_name.configure(style=Z)
         else:
             C.combo_name.configure(style=j)
-        I = [A for A in C.lists[t] if A not in E_]
-        C._refresh_combobox_list(C.combo_type, E_ + I, existing_count=Q(E_))
+        remaining_types = [A for A in C.lists[t] if A not in E_]
+        C._refresh_combobox_list(C.combo_type, E_ + remaining_types, existing_count=Q(E_))
         C.combo_type.configure(state=X)
-        C.var_type.set(B)
-        C.var_model.set(B)
-        C.var_color1.set(B)
-        C.var_color2.set(B)
-        C.var_color3.set(B)
-        C.var_extra.set(B)
-        if not C._preserve_loaded_binding():
+        if preserve_loaded:
+            C.var_type.set(preserved_type)
+            C.var_model.set(preserved_model)
+            C.var_color1.set(preserved_color1)
+            C.var_color2.set(preserved_color2)
+            C.var_color3.set(preserved_color3)
+            C.var_extra.set(preserved_extra)
+        else:
+            C.var_type.set(B)
+            C.var_model.set(B)
+            C.var_color1.set(B)
+            C.var_color2.set(B)
+            C.var_color3.set(B)
+            C.var_extra.set(B)
+        if not preserve_loaded:
             C._clear_loaded_entry_context()
         else:
-            C._last_lookup_signature = I
+            C._last_lookup_signature = None
         for G_ in (
             C.combo_type,
             C.combo_model,
@@ -3678,7 +3990,8 @@ class App(BU.Tk):
         C.btn_open.configure(state=V)
         C.entry_ean.configure(state=X)
         C._refresh_commit_snapshot()
-        C._clear_all_slots()
+        if not preserve_loaded:
+            C._clear_all_slots()
 
     def _on_type_commit(C):
         """React to type changes by unlocking model/colour comboboxes."""
@@ -3689,6 +4002,12 @@ class App(BU.Tk):
             return
         if C._commit_matches_snapshot("type", C._normalize_entry_part(D_)):
             return
+        preserve_loaded = C._preserve_loaded_binding()
+        preserved_model = C.var_model.get()
+        preserved_color1 = C.var_color1.get()
+        preserved_color2 = C.var_color2.get()
+        preserved_color3 = C.var_color3.get()
+        preserved_extra = C.var_extra.get()
         if not C._list_has_value(t, D_):
             result = C._prompt_add_list_value(
                 t, D_, TYPE_NOT_IN_LIST_QUESTION.format(value=D_), C.combo_type
@@ -3709,25 +4028,33 @@ class App(BU.Tk):
             C.combo_type.configure(style=Z)
         else:
             C.combo_type.configure(style=j)
-        I = [A for A in C.lists[s] if A not in E_]
-        C._refresh_combobox_list(C.combo_model, E_ + I, existing_count=Q(E_))
+        remaining_models = [A for A in C.lists[s] if A not in E_]
+        C._refresh_combobox_list(C.combo_model, E_ + remaining_models, existing_count=Q(E_))
         C.combo_model.configure(state=X)
-        C.var_model.set(B)
-        C.var_color1.set(B)
-        C.var_color2.set(B)
-        C.var_color3.set(B)
-        C.var_extra.set(B)
-        if not C._preserve_loaded_binding():
+        if preserve_loaded:
+            C.var_model.set(preserved_model)
+            C.var_color1.set(preserved_color1)
+            C.var_color2.set(preserved_color2)
+            C.var_color3.set(preserved_color3)
+            C.var_extra.set(preserved_extra)
+        else:
+            C.var_model.set(B)
+            C.var_color1.set(B)
+            C.var_color2.set(B)
+            C.var_color3.set(B)
+            C.var_extra.set(B)
+        if not preserve_loaded:
             C._clear_loaded_entry_context()
         else:
-            C._last_lookup_signature = I
+            C._last_lookup_signature = None
         for J_ in (C.combo_color1, C.combo_color2, C.combo_color3, C.combo_extra):
             J_.configure(style=j, state=X)
         C.btn_submit.configure(state=X)
         C.btn_open.configure(state=V)
         C.entry_ean.configure(state=X)
         C._refresh_commit_snapshot()
-        C._clear_all_slots()
+        if not preserve_loaded:
+            C._clear_all_slots()
 
     def _load_existing_files(C, force=h):
         """Load images from disk and check FTP copies without blocking GUI."""
@@ -4001,6 +4328,11 @@ class App(BU.Tk):
             return
         if D._commit_matches_snapshot("model", D._normalize_entry_part(e_)):
             return
+        preserve_loaded = D._preserve_loaded_binding()
+        preserved_color1 = D.var_color1.get()
+        preserved_color2 = D.var_color2.get()
+        preserved_color3 = D.var_color3.get()
+        preserved_extra = D.var_extra.get()
         if not D._list_has_value(s, e_):
             result = D._prompt_add_list_value(
                 s,
@@ -4035,11 +4367,17 @@ class App(BU.Tk):
         D.combo_color3[S] = D.lists[Y]
         for AA_ in (D.combo_color1, D.combo_color2, D.combo_color3):
             AA_.configure(state=X)
-        D.var_color1.set(B)
-        D.var_color2.set(B)
-        D.var_color3.set(B)
-        D.var_extra.set(B)
-        if not D._preserve_loaded_binding():
+        if preserve_loaded:
+            D.var_color1.set(preserved_color1)
+            D.var_color2.set(preserved_color2)
+            D.var_color3.set(preserved_color3)
+            D.var_extra.set(preserved_extra)
+        else:
+            D.var_color1.set(B)
+            D.var_color2.set(B)
+            D.var_color3.set(B)
+            D.var_extra.set(B)
+        if not preserve_loaded:
             D._clear_loaded_entry_context()
         else:
             D._last_lookup_signature = I
@@ -4047,8 +4385,9 @@ class App(BU.Tk):
         D.btn_submit.configure(state=X)
         D.btn_open.configure(state=V)
         D._refresh_commit_snapshot()
-        D._clear_all_slots()
-        if not (D.loading_by_ean or D.suppress_scan or D._preserve_loaded_binding()):
+        if not preserve_loaded:
+            D._clear_all_slots()
+        if not (D.loading_by_ean or D.suppress_scan or preserve_loaded):
             k_ = []
             if A.path.isdir(T):
                 for A2 in A.listdir(T):
@@ -4336,7 +4675,7 @@ class App(BU.Tk):
         extra_raw = C.var_extra.get()
         C.var_extra.set(G(extra_raw).strip())
         C._refresh_commit_snapshot()
-        if not C.suppress_scan:
+        if C._should_lookup_existing_files_for_form_edit():
             C._schedule_existing_files_lookup()
 
     def _on_extra_commit(C):
@@ -4386,7 +4725,7 @@ class App(BU.Tk):
             else:
                 C.combo_extra.configure(style=j)
         C._refresh_commit_snapshot()
-        if G_ and H_ and I_ and F_ and not C.suppress_scan:
+        if C._should_lookup_existing_files_for_form_edit():
             C._schedule_existing_files_lookup()
 
     def _select_file(A, idx):
@@ -4594,6 +4933,7 @@ class App(BU.Tk):
             A.btn_open.configure(state=V)
         A._refresh_commit_snapshot()
         A._clear_all_slots()
+        A._queue_form_change_refresh()
 
     def _open_list_editor(E, focus_sheet=I):
         existing = Aj(E, "_list_editor_window", I)
