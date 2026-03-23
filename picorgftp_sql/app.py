@@ -2626,15 +2626,9 @@ class App(BU.Tk):
             ),
         )
         A.entry_ean = C.Entry(ean_field, textvariable=A.var_ean, state=X, width=22)
-        A.entry_ean.grid(row=1, column=2, sticky="ew")
+        A.entry_ean.grid(row=1, column=2, columnspan=2, sticky="ew")
         A.entry_ean.bind("<FocusIn>", A._remember_focus)
-        A.btn_load_ean = C.Button(
-            ean_field,
-            text=LOAD_LABEL,
-            style="Outline.TButton",
-            command=A._load_by_ean,
-        )
-        A.btn_load_ean.grid(row=1, column=3, padx=(8, 0))
+        A.entry_ean.bind("<Return>", lambda _event: A._search_current_entry())
 
         actions = C.Frame(form_card, style="Card.TFrame")
         actions.grid(row=3, column=2, columnspan=2, sticky="ew", padx=3, pady=(0, 2))
@@ -3216,8 +3210,6 @@ class App(BU.Tk):
             B.pending_additions[idx] = src_path
             if old_local_path and not local_matches:
                 B.pending_deletions[idx] = old_local_path
-            if current_remote_name and not remote_matches:
-                B.pending_ftp_deletions[idx] = current_remote_name
             seeded += 1
         return seeded
 
@@ -4824,22 +4816,6 @@ class App(BU.Tk):
                     A.makedirs(AN, exist_ok=J)
                 except E as R:
                     log_error_loc("backup_folder_failed", error=R)
-                backed_up = []
-                for T in set(C.pending_deletions.values()):
-                    if T and A.path.isfile(T):
-                        try:
-                            Af.copy2(T, A.path.join(AN, A.path.basename(T)))
-                            backed_up.append(A.path.basename(T))
-                        except E as R:
-                            log_error_loc(
-                                "backup_file_failed",
-                                file=A.path.basename(T),
-                                error=R,
-                            )
-                if backed_up:
-                    log_info_loc(
-                        "backup_files_done", files=AI.join(backed_up)
-                    )
                 if C.ftp_remote_only:
                     for label, info in C.ftp_remote_only.items():
                         for idx, slot in A0(C.slots):
@@ -4929,6 +4905,59 @@ class App(BU.Tk):
                 AJ_ = set(C.pending_additions.keys())
                 AL_ = set(C.pending_deletions.keys())
                 AM_ = AJ_ & AL_
+                backup_candidates = {
+                    path for path in C.pending_deletions.values() if path
+                }
+                for F_, src_path in list(C.pending_additions.items()):
+                    if not src_path or not A.path.isfile(src_path):
+                        continue
+                    c_ = C._build_slot_target_filename(
+                        F_,
+                        K_,
+                        AE_,
+                        AF_,
+                        AG_,
+                        color_values,
+                        b_,
+                        src_path,
+                        convert_tif_enabled=convert_tif_enabled,
+                        target_ext=target_ext,
+                    )
+                    if not c_:
+                        continue
+                    S_ = A.path.join(i_, c_)
+                    try:
+                        same_source_target = A.path.samefile(src_path, S_)
+                    except E:
+                        same_source_target = A.path.normcase(
+                            A.path.normpath(src_path)
+                        ) == A.path.normcase(A.path.normpath(S_))
+                    if same_source_target:
+                        backup_candidates.add(src_path)
+                backed_up = []
+                for T in sorted(backup_candidates):
+                    if T and A.path.isfile(T):
+                        try:
+                            backup_name = A.path.basename(T)
+                            backup_target = A.path.join(AN, backup_name)
+                            if A.path.exists(backup_target):
+                                root_name, ext_name = A.path.splitext(backup_name)
+                                backup_target = A.path.join(
+                                    AN,
+                                    f"{root_name}__backup{ext_name}",
+                                )
+                            Af.copy2(T, backup_target)
+                            backed_up.append(A.path.basename(backup_target))
+                        except E as R:
+                            log_error_loc(
+                                "backup_file_failed",
+                                file=A.path.basename(T),
+                                error=R,
+                            )
+                if backed_up:
+                    log_info_loc(
+                        "backup_files_done", files=AI.join(backed_up)
+                    )
                 BE_ = {}
                 for F_, src_path in list(C.pending_additions.items()):
                     if not src_path:
@@ -4978,12 +5007,19 @@ class App(BU.Tk):
                     Az_ = slot[Aa]
                     if F_ in C.pending_ftp_deletions and C.pending_ftp_deletions[F_] == c_:
                         C.pending_ftp_deletions.pop(F_, I)
+                    temp_output_path = B
                     try:
                         if F_ in C.pending_deletions:
                             old_path = C.pending_deletions.get(F_)
                             if not old_path:
                                 C.pending_deletions.pop(F_, I)
                             else:
+                                try:
+                                    same_old_source = A.path.samefile(old_path, src_path)
+                                except E:
+                                    same_old_source = A.path.normcase(
+                                        A.path.normpath(old_path)
+                                    ) == A.path.normcase(A.path.normpath(src_path))
                                 try:
                                     same_target = A.path.samefile(old_path, S_)
                                 except E:
@@ -4992,19 +5028,20 @@ class App(BU.Tk):
                                     ) == A.path.normcase(A.path.normpath(S_))
                                 if same_target:
                                     C.pending_deletions.pop(F_, I)
-                                    try:
-                                        if A.path.exists(old_path):
-                                            A.remove(old_path)
-                                            log_info_loc(
-                                                "deleted_file_before_add",
+                                    if not same_old_source:
+                                        try:
+                                            if A.path.exists(old_path):
+                                                A.remove(old_path)
+                                                log_info_loc(
+                                                    "deleted_file_before_add",
+                                                    file=A.path.basename(old_path),
+                                                )
+                                        except E as z:
+                                            log_error_loc(
+                                                "remove_old_file_failed",
                                                 file=A.path.basename(old_path),
+                                                error=z,
                                             )
-                                    except E as z:
-                                        log_error_loc(
-                                            "remove_old_file_failed",
-                                            file=A.path.basename(old_path),
-                                            error=z,
-                                        )
                                 elif A.path.exists(S_):
                                     try:
                                         A.remove(S_)
@@ -5027,7 +5064,13 @@ class App(BU.Tk):
                         is_image = ext_lower in IMAGE_EXTENSION_FORMATS
                         if is_image and convert_tif_enabled:
                             t_ext = target_ext
-                            if A.path.exists(S_):
+                            save_target = S_
+                            if same_source_target:
+                                save_target = f"{S_}.__gui_tmp__"
+                                temp_output_path = save_target
+                                if A.path.exists(save_target):
+                                    A.remove(save_target)
+                            elif A.path.exists(S_):
                                 try:
                                     A.remove(S_)
                                 except E as z:
@@ -5050,18 +5093,18 @@ class App(BU.Tk):
                                     save_params[X] = J
                                 if t_ext == V:
                                     save_params[X] = J
-                                A1.save(S_, format=target_fmt, **save_params)
+                                A1.save(save_target, format=target_fmt, **save_params)
                                 if limit_size_enabled:
                                     if max_bytes > 0 and t_ext in [F, O]:
                                         try:
                                             quality = save_params.get(W, 95)
                                             while (
                                                 quality > 10
-                                                and A.path.getsize(S_) > max_bytes
+                                                and A.path.getsize(save_target) > max_bytes
                                             ):
                                                 quality -= 5
                                                 A1.save(
-                                                    S_,
+                                                    save_target,
                                                     format=target_fmt,
                                                     quality=quality,
                                                     optimize=J,
@@ -5072,8 +5115,17 @@ class App(BU.Tk):
                                                 file=c_,
                                                 error=R,
                                             )
+                            if temp_output_path:
+                                A.replace(temp_output_path, S_)
+                                temp_output_path = B
                             log_info_loc("image_added_modified", file=c_)
                         elif ext_lower in [F, O, V, ".bmp", ".gif"]:
+                            save_target = S_
+                            if same_source_target:
+                                save_target = f"{S_}.__gui_tmp__"
+                                temp_output_path = save_target
+                                if A.path.exists(save_target):
+                                    A.remove(save_target)
                             with AA.open(src_path) as A1:
                                 if resize_enabled:
                                     A1.thumbnail((max_dim, max_dim), LANCZOS_FILTER)
@@ -5086,10 +5138,10 @@ class App(BU.Tk):
                                     save_params[X] = J
                                 if ext_lower == V:
                                     save_params[X] = J
-                                A1.save(S_, **save_params)
+                                A1.save(save_target, **save_params)
                                 if limit_size_enabled:
                                     if max_bytes > 0:
-                                        if A.path.getsize(S_) > max_bytes and ext_lower in [
+                                        if A.path.getsize(save_target) > max_bytes and ext_lower in [
                                             F,
                                             O,
                                         ]:
@@ -5097,16 +5149,23 @@ class App(BU.Tk):
                                                 quality = save_params.get(W, 95)
                                                 while (
                                                     quality > 10
-                                                    and A.path.getsize(S_) > max_bytes
+                                                    and A.path.getsize(save_target) > max_bytes
                                                 ):
                                                     quality -= 5
-                                                    A1.save(S_, quality=quality, optimize=J)
+                                                    A1.save(
+                                                        save_target,
+                                                        quality=quality,
+                                                        optimize=J,
+                                                    )
                                             except E as R:
                                                 log_error_loc(
                                                     "file_resize_error",
                                                     file=c_,
                                                     error=R,
                                                 )
+                            if temp_output_path:
+                                A.replace(temp_output_path, S_)
+                                temp_output_path = B
                             log_info_loc("image_added_modified", file=c_)
                         elif ext_lower in [".tif", ".tiff"]:
                             if not same_source_target:
@@ -5128,6 +5187,11 @@ class App(BU.Tk):
                             file=A.path.basename(src_path),
                             error=y,
                         )
+                        if temp_output_path and A.path.exists(temp_output_path):
+                            try:
+                                A.remove(temp_output_path)
+                            except E:
+                                pass
                         result_data[K].add(F_)
                         BE_[F_] = src_path
                         continue
