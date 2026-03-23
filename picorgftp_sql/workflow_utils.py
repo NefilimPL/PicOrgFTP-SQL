@@ -147,6 +147,17 @@ def build_slot_filename(
     )
 
 
+def build_remote_slot_filename(
+    ean: object,
+    prefix: object,
+    extension: str,
+) -> str:
+    """Build the canonical short FTP filename for a slot."""
+
+    ext = extension or ""
+    return f"{normalize_text(ean) or NO_EAN_PLACEHOLDER}_{str(prefix).strip()}{ext}"
+
+
 @dataclass(frozen=True)
 class ParsedSlotFilename:
     """Parsed representation of a slot file name."""

@@ -35,6 +35,7 @@ from .settings import BW, EXCEL_SHEETS, AN, l
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map, next_slot_prefix
 from .workflow_utils import (
     build_product_directory,
+    build_remote_slot_filename,
     build_slot_filename,
     build_sql_presence_query,
     has_presence_value,
@@ -3151,6 +3152,54 @@ class App(BU.Tk):
             final_ext,
         )
 
+    def _build_expected_remote_filename(
+        B,
+        idx,
+        ean,
+        src_path,
+        *,
+        convert_tif_enabled=h,
+        target_ext=B,
+    ):
+        """Return the canonical remote FTP name for a slot output."""
+
+        if idx is I or idx < 0 or idx >= Q(B.slots):
+            return B
+        ext = A.path.splitext(src_path or B)[1]
+        if not ext:
+            return B
+        final_ext = ext
+        if convert_tif_enabled and ext.lower() in IMAGE_EXTENSION_FORMATS and target_ext:
+            final_ext = target_ext
+        return build_remote_slot_filename(ean, B.slots[idx][Aa], final_ext)
+
+    def _list_remote_filenames(B, ftp_conn):
+        """Return remote file names using the most compatible FTP listing method."""
+
+        names = []
+        if hasattr(ftp_conn, "mlsd"):
+            try:
+                for entry_name, facts in ftp_conn.mlsd():
+                    if not entry_name or entry_name in (".", ".."):
+                        continue
+                    entry_type = B
+                    if isinstance(facts, dict):
+                        entry_type = G(facts.get("type") or B).strip().lower()
+                    if entry_type and entry_type not in ("file",):
+                        continue
+                    names.append(A.path.basename(entry_name))
+            except (AB.error_perm, E):
+                names = []
+            if names:
+                return names
+        try:
+            return [A.path.basename(name) for name in ftp_conn.nlst()]
+        except AB.error_perm as exc:
+            msg = G(exc).lower()
+            if "no files found" in msg or "file not found" in msg:
+                return []
+            raise
+
     def _seed_metadata_migration(
         B,
         output_dir,
@@ -3195,6 +3244,13 @@ class App(BU.Tk):
                 continue
             target_path = A.path.join(output_dir, target_name)
             current_remote_name = G(B.ftp_presence.get(slot[Aa]) or B).strip()
+            expected_remote_name = B._build_expected_remote_filename(
+                idx,
+                ean,
+                src_path,
+                convert_tif_enabled=convert_tif_enabled,
+                target_ext=target_ext,
+            )
             old_local_path = src_path if src_path.startswith(l) else I
             local_matches = h
             if old_local_path:
@@ -3204,7 +3260,11 @@ class App(BU.Tk):
                     local_matches = A.path.normcase(A.path.normpath(old_local_path)) == A.path.normcase(
                         A.path.normpath(target_path)
                     )
-            remote_matches = current_remote_name == target_name if current_remote_name else h
+            remote_matches = (
+                current_remote_name == expected_remote_name
+                if current_remote_name and expected_remote_name
+                else h
+            )
             if local_matches and remote_matches:
                 continue
             B.pending_additions[idx] = src_path
@@ -3797,13 +3857,7 @@ class App(BU.Tk):
                     O_.set_pasv(J)
                     if D[H][m]:
                         O_.cwd(D[H][m])
-                    try:
-                        e_ = O_.nlst(f"{K_}_*")
-                    except AB.error_perm:
-                        try:
-                            e_ = O_.nlst()
-                        except AB.error_perm:
-                            e_ = []
+                    e_ = C._list_remote_filenames(O_)
                     remote_files = select_remote_files_for_ean(K_, e_)
                     for label, fname in remote_files.items():
                         if label not in slot_paths:

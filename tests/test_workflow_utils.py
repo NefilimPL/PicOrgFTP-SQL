@@ -7,6 +7,7 @@ import unittest
 from picorgftp_sql.workflow_utils import (
     build_output_filename,
     build_product_path,
+    build_remote_slot_filename,
     build_sql_presence_query,
     parse_slot_filename,
     select_remote_files_for_ean,
@@ -45,6 +46,14 @@ class WorkflowUtilsTests(unittest.TestCase):
             filename,
             "5901234567890_03_DETAIL_MAGGIORE_KOMODA_MA03_BIALY_CZARNY_NO-LED.jpg",
         )
+
+    def test_build_remote_slot_filename_uses_short_ftp_format(self) -> None:
+        filename = build_remote_slot_filename(
+            "5901234567890",
+            "03",
+            ".png",
+        )
+        self.assertEqual(filename, "5901234567890_03.png")
 
     def test_parse_slot_filename_preserves_suffix_when_normalizing(self) -> None:
         parsed = parse_slot_filename("5901234567890_3_DETAIL_MAGGIORE.jpg")
