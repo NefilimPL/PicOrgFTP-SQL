@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import re
 from typing import Iterable, Sequence
 
 NO_EAN_PLACEHOLDER = "BRAK-EAN"
 NO_EXTRA_PLACEHOLDER = "NO-LED"
+INVALID_PATH_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+PATH_SPACING_RE = re.compile(r"\s+")
 
 
 def normalize_text(value: object) -> str:
@@ -16,6 +19,30 @@ def normalize_text(value: object) -> str:
     if value is None:
         return ""
     return str(value).strip().upper()
+
+
+def sanitize_path_segment(value: object, *, fallback: str = "") -> str:
+    """Normalize text for safe directory and file name segments."""
+
+    text = normalize_text(value)
+    if not text:
+        return fallback
+    text = INVALID_PATH_CHARS_RE.sub("-", text)
+    text = PATH_SPACING_RE.sub(" ", text).strip(" .-_")
+    return text or fallback
+
+
+def normalize_color_slots(colors: Iterable[object], slots: int = 3) -> list[str]:
+    """Normalize color slots and compact gaps to the left."""
+
+    compact = []
+    for color in colors:
+        normalized = sanitize_path_segment(color)
+        if normalized:
+            compact.append(normalized)
+    compact = compact[:slots]
+    compact.extend([""] * max(slots - len(compact), 0))
+    return compact
 
 
 def normalize_extra_segment(
@@ -33,7 +60,7 @@ def normalize_extra_segment(
     text = str(value or "").strip().replace("_", "-")
     if not text:
         return fallback
-    normalized = text.upper()
+    normalized = sanitize_path_segment(text.replace("_", "-"), fallback=fallback)
     if normalized == fallback.upper():
         return fallback
     return normalized
@@ -42,7 +69,7 @@ def normalize_extra_segment(
 def build_color_segment(colors: Iterable[object], separator: str = "-") -> str:
     """Join non-empty colors into the canonical directory segment."""
 
-    cleaned = [normalize_text(color) for color in colors]
+    cleaned = normalize_color_slots(colors)
     return separator.join(color for color in cleaned if color)
 
 
@@ -60,9 +87,9 @@ def build_product_path(
     """Return the canonical product directory path."""
 
     segments = [
-        normalize_text(name),
-        normalize_text(type_name),
-        normalize_text(model),
+        sanitize_path_segment(name),
+        sanitize_path_segment(type_name),
+        sanitize_path_segment(model),
         build_color_segment(colors, separator=color_separator),
         normalize_extra_segment(extra, fallback=default_extra),
     ]
@@ -83,14 +110,14 @@ def build_output_filename(
     """Build the structured output filename for a slot."""
 
     parts = [
-        normalize_text(ean) or NO_EAN_PLACEHOLDER,
+        sanitize_path_segment(ean) or NO_EAN_PLACEHOLDER,
         str(prefix).strip(),
-        str(category).strip(),
-        normalize_text(name),
-        normalize_text(type_name),
-        normalize_text(model),
+        sanitize_path_segment(category),
+        sanitize_path_segment(name),
+        sanitize_path_segment(type_name),
+        sanitize_path_segment(model),
     ]
-    parts.extend(color for color in (normalize_text(color) for color in colors) if color)
+    parts.extend(color for color in normalize_color_slots(colors) if color)
     parts.append(normalize_extra_segment(extra))
     ext = extension or ""
     return "_".join(parts) + ext
@@ -155,7 +182,7 @@ def build_remote_slot_filename(
     """Build the canonical short FTP filename for a slot."""
 
     ext = extension or ""
-    return f"{normalize_text(ean) or NO_EAN_PLACEHOLDER}_{str(prefix).strip()}{ext}"
+    return f"{sanitize_path_segment(ean) or NO_EAN_PLACEHOLDER}_{str(prefix).strip()}{ext}"
 
 
 @dataclass(frozen=True)

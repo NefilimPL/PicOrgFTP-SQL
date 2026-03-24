@@ -33,14 +33,6 @@ def load_language_pref():
             if Aq(value, str):
                 value = value.strip() or LANGUAGE_DEFAULT
                 if value:
-                    try:
-                        save_language_pref(value)
-                    except E:
-                        pass
-                    try:
-                        A.remove(legacy_path)
-                    except E:
-                        pass
                     return value
     except E:
         pass
@@ -98,7 +90,9 @@ def load_localization(language=I):
         if A.path.exists(candidate):
             try:
                 with x(candidate, "r", encoding=k) as handle:
-                    return Ar.load(handle)
+                    payload = Ar.load(handle)
+                if Aq(payload, dict):
+                    return payload
             except E:
                 pass
     return {}

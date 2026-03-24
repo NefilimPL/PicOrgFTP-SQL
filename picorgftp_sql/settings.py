@@ -60,6 +60,36 @@ def _is_headless_env():
 BASE_DIR_SETTINGS_PATH = A.path.join(_resolve_settings_root(), BASE_DIR_SETTINGS_FILE)
 BASE_DIR_OVERRIDE_WARNING = I
 HEADLESS_ENV = _is_headless_env()
+MODULE_DIR = A.path.dirname(A.path.abspath(__file__))
+LC_DEFAULT = _resolve_localization_root()
+LC = LC_DEFAULT
+EXCEL_SHEETS = {n: n, t: t, s: s, Y: Y, d: d, W: W}
+BW = [
+    "ODBC Driver 18 for SQL Server",
+    "ODBC Driver 17 for SQL Server",
+    "SQL Server Native Client 11.0",
+    "SQL Server",
+]
+_RUNTIME_INITIALIZED = h
+
+
+def _default_base_dir():
+    return A.path.dirname(BASE_DIR_SETTINGS_PATH) or A.getcwd()
+
+
+def _apply_base_dir(base_dir):
+    """Update shared path globals for the active runtime directory."""
+
+    global AC, l, LISTS_WORKBOOK_PATH, AD, AM, BM, AN, BASE_DIR_OVERRIDE
+    resolved = G(base_dir or _default_base_dir()).strip() or _default_base_dir()
+    BASE_DIR_OVERRIDE = resolved
+    AC = resolved
+    l = A.path.join(AC, "_ZDJECIA PRZEROBIONE_")
+    LISTS_WORKBOOK_PATH = A.path.join(AC, "lists.xlsx")
+    AD = A.path.join(AC, "config.json")
+    AM = A.path.join(AC, "error_log.txt")
+    BM = A.path.join(AC, "changes_log.txt")
+    AN = A.path.join(AC, "temp_backup")
 
 
 def _load_base_dir_override(settings_path, template, fallback_value):
@@ -73,15 +103,23 @@ def _load_base_dir_override(settings_path, template, fallback_value):
             new_value = data.get("base_dir_override", fallback_value)
             if Aq(new_value, str):
                 override_value = new_value.strip()
-        else:
-            try:
-                with x(settings_path, T, encoding=k) as settings_file:
-                    Ar.dump(template, settings_file, indent=4)
-            except E:
-                pass
     except E:
         pass
     return override_value if Aq(override_value, str) else fallback_value
+
+
+def has_saved_base_dir_override(settings_path=BASE_DIR_SETTINGS_PATH):
+    """Return True when ``local_settings.json`` contains an explicit base dir."""
+
+    try:
+        if not A.path.exists(settings_path):
+            return h
+        with x(settings_path, "r", encoding=k) as settings_file:
+            data = Ar.load(settings_file)
+        value = data.get("base_dir_override", B)
+        return bool(G(value or B).strip())
+    except E:
+        return h
 
 
 def _save_base_dir_override(settings_path, template, value):
@@ -118,6 +156,7 @@ def _ensure_directory_access(path):
 def _prompt_for_base_dir(settings_path, template, current_value, message):
     """Interactively ask the user for a working directory location."""
 
+    require_runtime_modules("tkinter")
     root = F.Tk()
     root.withdraw()
     try:
@@ -173,7 +212,6 @@ def _resolve_headless_base_dir(settings_path, template, candidate):
     fallback = A.path.dirname(settings_path) or A.getcwd()
     ok, _ = _ensure_directory_access(fallback)
     if ok:
-        _save_base_dir_override(settings_path, template, fallback)
         return fallback, I
     return A.getcwd(), I
 
@@ -200,11 +238,39 @@ def _ensure_base_dir_override(settings_path, template, fallback_value):
     return _prompt_for_base_dir(settings_path, template, candidate, message)
 
 
-BASE_DIR_OVERRIDE, BASE_DIR_OVERRIDE_WARNING = _ensure_base_dir_override(
-    BASE_DIR_SETTINGS_PATH,
-    BASE_DIR_SETTINGS_TEMPLATE,
-    BASE_DIR_OVERRIDE,
-)
+def is_runtime_initialized():
+    """Return True when runtime paths were resolved explicitly."""
+
+    return bool(_RUNTIME_INITIALIZED)
+
+
+def initialize_runtime(interactive=I):
+    """Resolve runtime paths without doing it implicitly at import time."""
+
+    global BASE_DIR_OVERRIDE_WARNING, _RUNTIME_INITIALIZED
+    if interactive is I:
+        interactive = not HEADLESS_ENV
+    fallback_value = _load_base_dir_override(
+        BASE_DIR_SETTINGS_PATH,
+        BASE_DIR_SETTINGS_TEMPLATE,
+        _default_base_dir(),
+    )
+    if interactive:
+        resolved, warning = _ensure_base_dir_override(
+            BASE_DIR_SETTINGS_PATH,
+            BASE_DIR_SETTINGS_TEMPLATE,
+            fallback_value,
+        )
+    else:
+        resolved, warning = _resolve_headless_base_dir(
+            BASE_DIR_SETTINGS_PATH,
+            BASE_DIR_SETTINGS_TEMPLATE,
+            fallback_value,
+        )
+    _apply_base_dir(resolved)
+    BASE_DIR_OVERRIDE_WARNING = warning
+    _RUNTIME_INITIALIZED = J
+    return AC
 
 
 def get_localization_search_paths():
@@ -217,20 +283,10 @@ def get_localization_search_paths():
     return seen
 
 
-AC = BASE_DIR_OVERRIDE
-l = A.path.join(AC, "_ZDJECIA PRZEROBIONE_")
-LISTS_WORKBOOK_PATH = A.path.join(AC, "lists.xlsx")
-AD = A.path.join(AC, "config.json")
-AM = A.path.join(AC, "error_log.txt")
-BM = A.path.join(AC, "changes_log.txt")
-AN = A.path.join(AC, "temp_backup")
-MODULE_DIR = A.path.dirname(A.path.abspath(__file__))
-LC_DEFAULT = _resolve_localization_root()
-LC = LC_DEFAULT
-EXCEL_SHEETS = {n: n, t: t, s: s, Y: Y, d: d, W: W}
-BW = [
-    "ODBC Driver 18 for SQL Server",
-    "ODBC Driver 17 for SQL Server",
-    "SQL Server Native Client 11.0",
-    "SQL Server",
-]
+_apply_base_dir(
+    _load_base_dir_override(
+        BASE_DIR_SETTINGS_PATH,
+        BASE_DIR_SETTINGS_TEMPLATE,
+        _default_base_dir(),
+    )
+)

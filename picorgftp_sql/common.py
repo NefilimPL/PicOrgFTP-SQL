@@ -81,6 +81,8 @@ PATH_NOT_FOUND_MSG = "Nie znaleziono ścieżki na serwerze"
 NO_SUCH_FILE_MSG = "No such file"
 LOGIN_DATA_ERROR_MSG = "Błędne dane logowania"
 LOGIN_INCORRECT_MSG = "Login incorrect"
+FTP_GENERIC_ERROR_MSG = "Błąd FTP: {error}"
+OTHER_ERROR_MSG = "Inny błąd: {error}"
 NO_DATA_MSG = "Brak danych"
 MISSING_FIELDS_MSG = "Uzupełnij wszystkie wymagane pola przed dodaniem pliku."
 INCOMPLETE_DATA_MSG = "Niekompletne dane"
@@ -266,7 +268,6 @@ DEFAULT_CONFIG.setdefault(
 
 import sys
 import os as A
-import subprocess as BH
 import shutil as Af
 import getpass
 import platform as BR
@@ -275,45 +276,140 @@ from datetime import datetime as A9
 import time as Ag
 import tempfile
 import uuid
-from tkinter import scrolledtext as BS
 import threading
 import urllib.request as BN
 import urllib.parse as BP
+import json as Ar
+import base64 as BL
+import ssl as _ssl
+
+try:
+    import certifi as _certifi
+except Exception:  # pragma: no cover - optional runtime dependency
+    _certifi = None
 
 AO = getpass.getuser()
 AF = BR.node()
 OLD_HOST_KEY = (AF or B) + "secret_OLD"
+RUNTIME_IMPORT_ERRORS = {}
 
 
-def ensure_package(pkg_name, import_name=I):
-    """Ensure that a dependency is installed."""
-    try:
-        __import__(import_name or pkg_name)
-    except ImportError:
-        BH.check_call([sys.executable, "-m", "pip", "install", pkg_name])
+def _remember_import_error(name, exc):
+    """Store optional runtime import failures for later diagnostics."""
+
+    RUNTIME_IMPORT_ERRORS[name] = exc
+    return exc
 
 
-ensure_package("tkinterdnd2")
-ensure_package("Pillow", "PIL")
-ensure_package("openpyxl")
-ensure_package("pyodbc")
-ensure_package("mysql-connector-python", "mysql.connector")
-ensure_package("certifi")
+def get_runtime_import_errors():
+    """Return a copy of optional runtime import failures."""
 
-import tkinter as F
-from tkinter import ttk as C, filedialog as BT, messagebox as O, simpledialog as BI
-from tkinterdnd2 import TkinterDnD as BU, DND_ALL, DND_FILES as BJ, DND_TEXT
-from PIL import Image as AA, ImageTk
-from openpyxl import Workbook as BV, load_workbook as Ah
+    return dict(RUNTIME_IMPORT_ERRORS)
+
+
+def require_runtime_modules(*module_names):
+    """Raise a helpful error when an optional runtime module is unavailable."""
+
+    missing = [name for name in module_names if name in RUNTIME_IMPORT_ERRORS]
+    if not missing:
+        return
+    details = "; ".join(f"{name}: {RUNTIME_IMPORT_ERRORS[name]}" for name in missing)
+    raise ModuleNotFoundError(details)
+
+
+try:
+    import tkinter as F
+    from tkinter import ttk as C, filedialog as BT, messagebox as O, simpledialog as BI
+    from tkinter import scrolledtext as BS
+except Exception as exc:  # pragma: no cover - optional runtime dependency
+    _remember_import_error("tkinter", exc)
+    F = I
+    C = I
+    BT = I
+    O = I
+    BI = I
+    BS = I
+
+try:
+    from tkinterdnd2 import TkinterDnD as BU, DND_ALL, DND_FILES as BJ, DND_TEXT
+except Exception as exc:  # pragma: no cover - optional runtime dependency
+    _remember_import_error("tkinterdnd2", exc)
+
+    class _MissingTkinterDnD:
+        class Tk:
+            def __init__(self, *_args, **_kwargs):
+                require_runtime_modules("tkinter", "tkinterdnd2")
+
+    BU = _MissingTkinterDnD
+    DND_ALL = B
+    BJ = B
+    DND_TEXT = B
+
+try:
+    from PIL import Image as AA, ImageTk
+except Exception as exc:  # pragma: no cover - optional runtime dependency
+    _remember_import_error("PIL", exc)
+
+    class _MissingImageModule:
+        SAVE = set()
+
+        class Resampling:
+            LANCZOS = 3
+
+        @staticmethod
+        def registered_extensions():
+            return {}
+
+        @staticmethod
+        def open(*_args, **_kwargs):
+            require_runtime_modules("PIL")
+
+    class _MissingImageTk:
+        @staticmethod
+        def PhotoImage(*_args, **_kwargs):
+            require_runtime_modules("PIL")
+
+    AA = _MissingImageModule()
+    ImageTk = _MissingImageTk()
+
+try:
+    from openpyxl import Workbook as BV, load_workbook as Ah
+except Exception as exc:  # pragma: no cover - optional runtime dependency
+    _remember_import_error("openpyxl", exc)
+
+    def BV(*_args, **_kwargs):
+        require_runtime_modules("openpyxl")
+
+    def Ah(*_args, **_kwargs):
+        require_runtime_modules("openpyxl")
+
 import ftplib as AB
 import socket as BK
-import pyodbc
-import mysql.connector
+
+try:
+    import pyodbc
+except Exception as exc:  # pragma: no cover - optional runtime dependency
+    _remember_import_error("pyodbc", exc)
+    pyodbc = I
+
+try:
+    import mysql.connector
+except Exception as exc:  # pragma: no cover - optional runtime dependency
+    _remember_import_error("mysql.connector", exc)
+
+    class _MissingMySQLConnector:
+        @staticmethod
+        def connect(*_args, **_kwargs):
+            require_runtime_modules("mysql.connector")
+
+    class _MissingMySQLModule:
+        connector = _MissingMySQLConnector()
+
+    mysql = _MissingMySQLModule()
+else:
+    import mysql
+
 import ctypes
-import json as Ar
-import base64 as BL
-import ssl as _ssl
-import certifi as _certifi
 
 APP_SECRET_PREFIX = "enc:"
 
@@ -408,17 +504,6 @@ def _load_app_secret(fallback):
             if Aq(data, dict):
                 value = data.get(APP_SECRET_KEY, fallback)
                 decoded = _decode_local_secret(value, fallback)
-                if Aq(value, str):
-                    raw_value = value.strip()
-                    if raw_value and not raw_value.startswith(APP_SECRET_PREFIX):
-                        encoded = _encode_local_secret(raw_value)
-                        if encoded and encoded != raw_value:
-                            try:
-                                data[APP_SECRET_KEY] = encoded
-                                with x(settings_path, T, encoding=k) as settings_file:
-                                    Ar.dump(data, settings_file, indent=4)
-                            except E:
-                                pass
                 if decoded:
                     return decoded
     except E:

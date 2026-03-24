@@ -107,6 +107,9 @@ def main():
     """Start the GUI application and warn about configuration issues."""
 
     try:
+        from picorgftp_sql.bootstrap import initialize_application_runtime
+
+        initialize_application_runtime(interactive=True)
         from picorgftp_sql.app import App
         from picorgftp_sql.common import O, SETTINGS_LABEL
         from picorgftp_sql.settings import BASE_DIR_OVERRIDE_WARNING

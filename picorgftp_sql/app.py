@@ -32,13 +32,31 @@ from .database import connect_db
 from .config import save_config
 from . import config, localization, settings, common, encryption
 from .settings import BW, EXCEL_SHEETS, AN, l
+from .product_state import ProductIdentity, ProductState
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map, next_slot_prefix
+from .services.excel_service import merge_saved_entry_into_lists
+from .services.file_service import (
+    build_expected_remote_filename as svc_build_expected_remote_filename,
+    build_slot_target_filename as svc_build_slot_target_filename,
+    infer_existing_remote_filename as svc_infer_existing_remote_filename,
+    seed_metadata_migration as svc_seed_metadata_migration,
+)
+from .services.ftp_service import (
+    download_remote_slots as svc_download_remote_slots,
+    list_remote_filenames as svc_list_remote_filenames,
+)
+from .services.sql_service import (
+    extract_presence_context as svc_extract_presence_context,
+    query_presence_map as svc_query_presence_map,
+    should_check_presence as svc_should_check_presence,
+)
 from .workflow_utils import (
     build_product_directory,
     build_remote_slot_filename,
     build_slot_filename,
     build_sql_presence_query,
     has_presence_value,
+    normalize_color_slots,
     normalize_extra_segment,
     parse_slot_filename,
     select_remote_files_for_ean,
@@ -232,13 +250,8 @@ class App(BU.Tk):
         B.var_extra = F.StringVar()
         B.var_ean = F.StringVar()
         B.var_product_id = F.StringVar()
-        B.pending_additions = {}
-        B.pending_deletions = {}
-        B.pending_ftp_deletions = {}
-        B.ftp_remote_only = {}
-        B.ftp_presence = {}
-        B.ftp_downloaded_final = set()
-        B.sql_presence = I
+        B._product_state = ProductState()
+        B._sync_state_refs()
         B._thumb_tokens = {}
         B._thumb_cache = OrderedDict()
         B._thumb_cache_limit = 192
@@ -287,7 +300,6 @@ class App(BU.Tk):
         B._active_list_prompts = set()
         B._last_focus_widget = I
         B.dragging_idx = I
-        B.original_files = {}
         B.is_processing = h
         B._code_check_running = h
         B._code_check_last_report = ""
@@ -699,15 +711,13 @@ class App(BU.Tk):
         name_value = A.var_name.get().strip()
         type_value = A.var_type.get().strip()
         model_value = A.var_model.get().strip()
-        color_values = [
-            value.strip()
-            for value in (
+        color_values = normalize_color_slots(
+            (
                 A.var_color1.get(),
                 A.var_color2.get(),
                 A.var_color3.get(),
             )
-            if value and value.strip()
-        ]
+        )
         extra_value = normalize_extra_segment(A.var_extra.get(), default=L)
         ean_value = A.var_ean.get().strip() or q
         product_id_value = A.var_product_id.get().strip() or "BRAK-ID"
@@ -774,6 +784,97 @@ class App(BU.Tk):
             )
         )
 
+    def _sync_state_refs(A):
+        """Expose the mutable product state through legacy attributes."""
+
+        A.pending_additions = A._product_state.pending_additions
+        A.pending_deletions = A._product_state.pending_deletions
+        A.pending_ftp_deletions = A._product_state.pending_ftp_deletions
+        A.ftp_remote_only = A._product_state.ftp_remote_only
+        A.ftp_presence = A._product_state.ftp_presence
+        A.ftp_downloaded_final = A._product_state.ftp_downloaded_final
+        A.sql_presence = A._product_state.sql_presence
+        A.original_files = A._product_state.original_files
+
+    def _set_product_identity(A, identity):
+        """Store the latest product identity in the shared product state."""
+
+        A._product_state.identity = identity
+
+    def _snapshot_product_state(A):
+        """Return a deep snapshot suitable for background worker usage."""
+
+        identity = ProductIdentity(
+            name=G(A.var_name.get() or B).strip(),
+            type_name=G(A.var_type.get() or B).strip(),
+            model=G(A.var_model.get() or B).strip(),
+            color1=G(A.var_color1.get() or B).strip(),
+            color2=G(A.var_color2.get() or B).strip(),
+            color3=G(A.var_color3.get() or B).strip(),
+            extra=G(A.var_extra.get() or B).strip(),
+            ean=G(A.var_ean.get() or B).strip(),
+            product_id=G(A.var_product_id.get() or B).strip(),
+        )
+        snapshot = A._product_state.clone()
+        snapshot.identity = identity
+        return snapshot
+
+    def _snapshot_slot_runtime(A):
+        """Return lightweight slot data that can be safely used by workers."""
+
+        slot_records = []
+        for slot in A.slots:
+            slot_records.append(
+                {
+                    Aa: slot[Aa],
+                    "label": slot["label"],
+                    f: slot.get(f),
+                    B0: slot.get(B0),
+                }
+            )
+        return slot_records
+
+    def _commit_product_state(A, state):
+        """Replace runtime product state with a new main-thread snapshot."""
+
+        if not isinstance(state, ProductState):
+            return
+        A._product_state = state
+        A._sync_state_refs()
+
+    def _reset_product_state(A):
+        """Drop all file/FTP/SQL runtime state for the current product."""
+
+        state = ProductState(identity=A._snapshot_product_state().identity)
+        A._commit_product_state(state)
+
+    def _normalize_color_vars(A, *, apply_changes=J):
+        """Return color slots compacted to the left and optionally update the form."""
+
+        normalized = normalize_color_slots(
+            (
+                A.var_color1.get(),
+                A.var_color2.get(),
+                A.var_color3.get(),
+            )
+        )
+        if apply_changes:
+            current = (
+                G(A.var_color1.get() or B).strip().upper(),
+                G(A.var_color2.get() or B).strip().upper(),
+                G(A.var_color3.get() or B).strip().upper(),
+            )
+            normalized_tuple = tuple(normalized)
+            if current != normalized_tuple:
+                A.suppress_scan = J
+                try:
+                    A.var_color1.set(normalized[0])
+                    A.var_color2.set(normalized[1])
+                    A.var_color3.set(normalized[2])
+                finally:
+                    A.suppress_scan = h
+        return normalized
+
     def _reload_entry_cache(A, excel_data):
         """Refresh in-memory entry indices from workbook payload data."""
 
@@ -790,8 +891,6 @@ class App(BU.Tk):
             for record in A.entry_records
             if G(record.get(PRODUCT_ID_HEADER) or B).strip()
         }
-        excel_data.pop(W, I)
-        excel_data.pop(ENTRY_RECORDS_KEY, I)
 
     def _normalize_entry_part(A, value, *, extra=h):
         """Normalize product form values for exact record matching."""
@@ -1240,11 +1339,7 @@ class App(BU.Tk):
         try:
             A._clear_loaded_entry_context(keep_ean=preserve_ean)
             if keep_values:
-                A.original_files = {}
-                A.ftp_remote_only = {}
-                A.ftp_presence = {}
-                A.ftp_downloaded_final = set()
-                A.sql_presence = I
+                A._reset_product_state()
                 A._clear_all_slots()
             else:
                 A._reset_form_fields(keep_ean=h)
@@ -1254,7 +1349,6 @@ class App(BU.Tk):
         A._refresh_commit_snapshot()
         A._queue_form_change_refresh()
         A._queue_dashboard_refresh()
-        A._update_dashboard_summary()
         if (
             keep_values
             and A.var_name.get().strip()
@@ -1346,9 +1440,12 @@ class App(BU.Tk):
                 lookup=snapshot["lookup_ms"],
             )
         )
+        next_interval = PERF_MONITOR_MS
+        if not A.is_processing and snapshot["thumb_queue"] == 0 and A._busy_counter == 0:
+            next_interval = 220
         try:
             if A.winfo_exists():
-                A._perf_monitor_job = A.after(PERF_MONITOR_MS, A._perf_monitor_tick)
+                A._perf_monitor_job = A.after(next_interval, A._perf_monitor_tick)
         except E:
             A._perf_monitor_job = I
 
@@ -3362,14 +3459,7 @@ class App(BU.Tk):
         return I
 
     def _apply_slot_definitions(B, slot_defs):
-        B.pending_additions = {}
-        B.pending_deletions = {}
-        B.pending_ftp_deletions = {}
-        B.ftp_remote_only = {}
-        B.ftp_presence = {}
-        B.ftp_downloaded_final = set()
-        B.sql_presence = I
-        B.original_files = {}
+        B._reset_product_state()
         B.dragging_idx = I
         B.loading_by_ean = h
         B.suppress_scan = h
@@ -3428,25 +3518,18 @@ class App(BU.Tk):
     ):
         """Return the final output filename for a slot and source file."""
 
-        if idx is I or idx < 0 or idx >= Q(B.slots):
-            return B
-        ext = A.path.splitext(src_path or B)[1]
-        if not ext:
-            return B
-        final_ext = ext
-        if convert_tif_enabled and ext.lower() in IMAGE_EXTENSION_FORMATS and target_ext:
-            final_ext = target_ext
-        slot = B.slots[idx]
-        return build_slot_filename(
+        return svc_build_slot_target_filename(
+            B.slots,
+            idx,
             ean,
-            slot[Aa],
-            label_category(slot["label"]),
             name,
             type_value,
             model,
             color_values,
             extra_value,
-            final_ext,
+            src_path,
+            convert_tif_enabled=convert_tif_enabled,
+            target_ext=target_ext,
         )
 
     def _build_expected_remote_filename(
@@ -3460,42 +3543,19 @@ class App(BU.Tk):
     ):
         """Return the canonical remote FTP name for a slot output."""
 
-        if idx is I or idx < 0 or idx >= Q(B.slots):
-            return B
-        ext = A.path.splitext(src_path or B)[1]
-        if not ext:
-            return B
-        final_ext = ext
-        if convert_tif_enabled and ext.lower() in IMAGE_EXTENSION_FORMATS and target_ext:
-            final_ext = target_ext
-        return build_remote_slot_filename(ean, B.slots[idx][Aa], final_ext)
+        return svc_build_expected_remote_filename(
+            B.slots,
+            idx,
+            ean,
+            src_path,
+            convert_tif_enabled=convert_tif_enabled,
+            target_ext=target_ext,
+        )
 
     def _list_remote_filenames(B, ftp_conn):
         """Return remote file names using the most compatible FTP listing method."""
 
-        names = []
-        if hasattr(ftp_conn, "mlsd"):
-            try:
-                for entry_name, facts in ftp_conn.mlsd():
-                    if not entry_name or entry_name in (".", ".."):
-                        continue
-                    entry_type = B
-                    if isinstance(facts, dict):
-                        entry_type = G(facts.get("type") or B).strip().lower()
-                    if entry_type and entry_type not in ("file",):
-                        continue
-                    names.append(A.path.basename(entry_name))
-            except (AB.error_perm, E):
-                names = []
-            if names:
-                return names
-        try:
-            return [A.path.basename(name) for name in ftp_conn.nlst()]
-        except AB.error_perm as exc:
-            msg = G(exc).lower()
-            if "no files found" in msg or "file not found" in msg:
-                return []
-            raise
+        return svc_list_remote_filenames(ftp_conn)
 
     def _seed_metadata_migration(
         B,
@@ -3514,76 +3574,25 @@ class App(BU.Tk):
 
         if not B._preserve_loaded_binding():
             return 0
-        seeded = 0
-        for idx, slot in A0(B.slots):
-            if (
-                idx in B.pending_additions
-                or idx in B.pending_deletions
-                or idx in B.pending_ftp_deletions
-            ):
-                continue
-            src_path = slot.get(f)
-            if not src_path or not A.path.isfile(src_path):
-                continue
-            target_name = B._build_slot_target_filename(
-                idx,
-                ean,
-                name,
-                type_value,
-                model,
-                color_values,
-                extra_value,
-                src_path,
-                convert_tif_enabled=convert_tif_enabled,
-                target_ext=target_ext,
-            )
-            if not target_name:
-                continue
-            target_path = A.path.join(output_dir, target_name)
-            current_remote_name = G(B.ftp_presence.get(slot[Aa]) or B).strip()
-            expected_remote_name = B._build_expected_remote_filename(
-                idx,
-                ean,
-                src_path,
-                convert_tif_enabled=convert_tif_enabled,
-                target_ext=target_ext,
-            )
-            old_local_path = src_path if src_path.startswith(l) else I
-            local_matches = h
-            if old_local_path:
-                try:
-                    local_matches = A.path.samefile(old_local_path, target_path)
-                except E:
-                    local_matches = A.path.normcase(A.path.normpath(old_local_path)) == A.path.normcase(
-                        A.path.normpath(target_path)
-                    )
-            remote_matches = (
-                current_remote_name == expected_remote_name
-                if current_remote_name and expected_remote_name
-                else h
-            )
-            if local_matches and remote_matches:
-                continue
-            B.pending_additions[idx] = src_path
-            if old_local_path and not local_matches:
-                B.pending_deletions[idx] = old_local_path
-            seeded += 1
-        return seeded
+        return svc_seed_metadata_migration(
+            B._product_state,
+            B.slots,
+            l,
+            output_dir,
+            ean,
+            name,
+            type_value,
+            model,
+            color_values,
+            extra_value,
+            convert_tif_enabled=convert_tif_enabled,
+            target_ext=target_ext,
+        )
 
     def _get_slot_existing_remote_filename(A, slot_prefix):
         """Return the current short remote name for a slot when it can be inferred."""
 
-        current_remote_name = G(A.ftp_presence.get(slot_prefix) or B).strip()
-        if current_remote_name:
-            return current_remote_name
-        original_name = G(A.original_files.get(slot_prefix) or B).strip()
-        if not original_name:
-            return B
-        original_ext = A.path.splitext(original_name)[1].lower()
-        parsed = parse_slot_filename(original_name)
-        if not parsed or not parsed.ean:
-            return B
-        return f"{parsed.ean}_{slot_prefix}{original_ext}"
+        return svc_infer_existing_remote_filename(A._product_state, slot_prefix)
 
     def _load_slot_thumbnail(B, path):
         cache_key, thumb = B._get_cached_thumbnail(path)
@@ -3660,6 +3669,9 @@ class App(BU.Tk):
                 progress.stop()
                 progress.configure(mode="determinate", value=100 if active_state else 0)
 
+        if threading.current_thread() == threading.main_thread():
+            _apply()
+            return
         try:
             B.after(0, _apply)
         except E:
@@ -3672,41 +3684,15 @@ class App(BU.Tk):
     def _should_check_sql_presence(A):
         """Return True when database credentials are configured for lookups."""
 
-        db_type = config.CONFIG.get(p, K).lower()
-        if db_type == K:
-            mysql_cfg = config.CONFIG.get(K, {})
-            return all(mysql_cfg.get(key) for key in (c, b, N))
-        sql_cfg = config.CONFIG.get(P, {})
-        if not (sql_cfg.get(c) and sql_cfg.get(b)):
-            return h
-        user = sql_cfg.get(N)
-        password = sql_cfg.get(M)
-        if user or password:
-            return bool(user and password)
-        return J
+        return svc_should_check_presence(config.CONFIG)
 
     def _extract_sql_presence_context(A, ean):
         """Return the table name and WHERE clause used for SQL presence checks."""
 
-        if not ean:
-            return I
-        template = config.CONFIG.get(w, SQL_UPDATE_TEMPLATE) or SQL_UPDATE_TEMPLATE
-        update_match = re.search(r"(?is)update\s+([^\s]+)\s+set", template)
-        if not update_match:
+        context = svc_extract_presence_context(config.CONFIG, ean)
+        if not context:
             log_error_loc("sql_presence_table_parse_failed")
-            return I
-        table = update_match.group(1).strip().rstrip(";")
-        where_match = re.search(r"(?is)\bwhere\b(.+)", template)
-        if where_match:
-            where_template = " WHERE" + where_match.group(1)
-        else:
-            where_template = " WHERE EAN = '{ean}' OR Towar_powiazany_z_SKU = '{ean}'"
-        where_clause = where_template.replace("{ean}", ean)
-        where_clause = where_clause.replace("{EAN}", ean)
-        where_clause = where_clause.rstrip(";\n\r\t ")
-        if where_clause and not where_clause.startswith(" "):
-            where_clause = " " + where_clause
-        return table, where_clause
+        return context
 
     def _build_sql_presence_query(A, table, where_clause, column, db_type):
         """Compose a per-column SELECT used to check for SQL data availability."""
@@ -3723,102 +3709,7 @@ class App(BU.Tk):
     def _query_sql_presence_map(A, columns, table, where_clause, db_type):
         """Fetch SQL presence for all mapped columns, batching when possible."""
 
-        presence_map = {prefix: I for prefix, _, _ in columns}
-        ordered_columns = unique_columns(
-            [column_name for _, column_name, _ in columns if column_name]
-        )
-        if not ordered_columns:
-            return presence_map
-        conn = I
-        cur = I
-        try:
-            conn = connect_db()
-            cur = conn.cursor()
-            batch_failed = h
-            query = build_sql_presence_query(
-                table,
-                where_clause,
-                ordered_columns,
-                db_type,
-                mysql_key=K,
-            )
-            if query:
-                try:
-                    cur.execute(query)
-                    row = cur.fetchone()
-                except E as batch_error:
-                    batch_failed = J
-                    log_error_loc(
-                        "sql_presence_query_error",
-                        column=AI.join(ordered_columns),
-                        error=batch_error,
-                    )
-                else:
-                    if not row:
-                        for prefix, column_name, _ in columns:
-                            if column_name:
-                                presence_map[prefix] = h
-                        return presence_map
-                    try:
-                        values = list(row)
-                    except E:
-                        values = [row]
-                    value_map = {
-                        column_name: values[idx] if idx < Q(values) else I
-                        for idx, column_name in A0(ordered_columns)
-                    }
-                    for prefix, column_name, _ in columns:
-                        if not column_name:
-                            continue
-                        presence_map[prefix] = has_presence_value(
-                            value_map.get(column_name)
-                        )
-                    return presence_map
-            if not batch_failed:
-                return presence_map
-            for prefix, column_name, _ in columns:
-                if not column_name:
-                    continue
-                query = A._build_sql_presence_query(
-                    table, where_clause, column_name, db_type
-                )
-                if not query:
-                    continue
-                try:
-                    cur.execute(query)
-                    row = cur.fetchone()
-                except E as column_error:
-                    presence_map[prefix] = I
-                    log_error_loc(
-                        "sql_presence_query_error",
-                        column=column_name,
-                        error=column_error,
-                    )
-                    continue
-                if not row:
-                    presence_map[prefix] = h
-                    continue
-                try:
-                    value = row[0]
-                except E:
-                    try:
-                        row_values = list(row)
-                    except E:
-                        row_values = [row]
-                    value = row_values[0] if row_values else I
-                presence_map[prefix] = has_presence_value(value)
-            return presence_map
-        finally:
-            if cur is not I:
-                try:
-                    cur.close()
-                except E:
-                    pass
-            if conn is not I:
-                try:
-                    conn.close()
-                except E:
-                    pass
+        return svc_query_presence_map(columns, table, where_clause, db_type)
 
     def _refresh_combobox_list(B, combobox, all_values, existing_count=0):
         """Refresh the dropdown values while remembering which entries exist."""
@@ -4089,19 +3980,18 @@ class App(BU.Tk):
         C._load_existing_request_id += 1
         request_id = C._load_existing_request_id
         started_at = Ag.perf_counter()
+        state_snapshot = C._snapshot_product_state()
         C.logged_counts = h
         name_value = C.var_name.get().strip()
         type_value = C.var_type.get().strip()
         model_value = C.var_model.get().strip()
-        color_values = [
-            value.strip().upper()
-            for value in (
+        color_values = normalize_color_slots(
+            (
                 C.var_color1.get(),
                 C.var_color2.get(),
                 C.var_color3.get(),
             )
-            if value and value.strip()
-        ]
+        )
         extra_raw = C.var_extra.get()
         if isinstance(extra_raw, dict):
             extra_raw = B
@@ -4132,18 +4022,13 @@ class App(BU.Tk):
                 if rid != C._load_existing_request_id:
                     return
                 if not (C._preserve_loaded_binding() and any(slot.get(f) for slot in C.slots)):
-                    C.original_files = {}
-                    C.ftp_remote_only = {}
-                    C.ftp_presence = {}
-                    C.ftp_downloaded_final = set()
-                    C.sql_presence = I
+                    C._reset_product_state()
                     C._clear_all_slots()
                 C._last_lookup_signature = lookup_signature
                 C._last_lookup_duration_ms = int(
                     (Ag.perf_counter() - started_at) * 1000
                 )
                 C._queue_dashboard_refresh()
-                C._update_dashboard_summary()
             finally:
                 C._set_busy_state(B, active=h)
 
@@ -4153,13 +4038,13 @@ class App(BU.Tk):
         C._update_all_slot_activity(active=J, status=C._slot_status["loading"])
 
         def worker():
+            worker_state = state_snapshot.clone()
             try:
                 V_ = [entry for entry in A.scandir(product_dir) if entry.is_file()]
             except E:
                 V_ = []
-            original_files = {}
+            worker_state.original_files.clear()
             slot_paths = {}
-            remote_info = {}
             ean_guess = I
             if V_:
                 parsed = parse_slot_filename(V_[0].name)
@@ -4184,69 +4069,44 @@ class App(BU.Tk):
                         log_error_loc(
                             "file_rename_error", old=W_, new=normalized_name, error=T
                         )
-                original_files[norm_label] = W_
+                worker_state.original_files[norm_label] = W_
                 slot_paths[norm_label] = d_
-            ftp_presence = {}
-            sql_presence = I
+            worker_state.ftp_presence.clear()
+            worker_state.ftp_remote_only.clear()
+            worker_state.sql_presence = I
             thumbnail_map = {}
             K_ = current_ean
             if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
                 remote_files = {}
                 try:
-                    O_ = AB.FTP()
-                    O_.connect(D[H][v], D[H][r], timeout=10)
-                    O_.login(D[H][N], D[H][M])
-                    O_.set_pasv(J)
-                    if D[H][m]:
-                        O_.cwd(D[H][m])
-                    e_ = C._list_remote_filenames(O_)
-                    remote_files = select_remote_files_for_ean(K_, e_)
-                    for label, fname in remote_files.items():
-                        if label not in slot_paths:
-                            temp_dir = tempfile.gettempdir()
-                            temp_path_raw = A.path.join(temp_dir, fname)
-                            try:
-                                idx = C._slot_index_by_prefix.get(label)
-                                if idx is not I:
-                                    C._update_slot_activity(
-                                        idx,
-                                        active=J,
-                                        status=C._slot_status["downloading"],
-                                    )
-                                with x(temp_path_raw, "wb") as fh:
-                                    O_.retrbinary(f"RETR {fname}", fh.write)
-                                parsed_remote = parse_slot_filename(fname)
-                                normalized_fname = (
-                                    parsed_remote.normalized_name
-                                    if parsed_remote and parsed_remote.normalized_name
-                                    else A.path.basename(fname)
-                                )
-                                temp_path = A.path.join(temp_dir, normalized_fname)
-                                try:
-                                    A.rename(temp_path_raw, temp_path)
-                                except E:
-                                    temp_path = temp_path_raw
-                                slot_paths[label] = temp_path
-                                ftp_presence[label] = fname
-                                remote_info[label] = {
-                                    "filename": fname,
-                                    "temp_path": temp_path,
-                                }
-                            except E as T:
-                                log_error_loc("ftp_download_error", file=fname, error=T)
-                        else:
-                            ftp_presence[label] = fname
-                    O_.quit()
+                    remote_files, ftp_presence, remote_info = svc_download_remote_slots(
+                        D[H],
+                        K_,
+                        slot_paths,
+                        C._slot_index_by_prefix,
+                        temp_root=A.path.join(tempfile.gettempdir(), f"picorgftp_sql_{request_id}"),
+                        status_callback=lambda idx, status: C._update_slot_activity(
+                            idx,
+                            active=J,
+                            status=C._slot_status.get(status, status),
+                        )
+                        if idx is not I
+                        else I,
+                    )
+                    worker_state.ftp_presence.update(ftp_presence)
+                    worker_state.ftp_remote_only.update(remote_info)
+                    for label, info in remote_info.items():
+                        slot_paths[label] = info["temp_path"]
                 except E as T:
                     log_error_loc("ftp_check_error", ean=K_, error=T)
                 if not C.logged_counts:
                     log_info_loc(
                         "found_images_counts",
-                        local=Q(original_files),
+                        local=Q(worker_state.original_files),
                         ftp=Q(remote_files),
                     )
                     C.logged_counts = J
-                if C._should_check_sql_presence():
+                if svc_should_check_presence(config.CONFIG):
                     columns = []
                     for slot in C.slots:
                         prefix = slot[Aa]
@@ -4255,40 +4115,34 @@ class App(BU.Tk):
                             prefix, label, log_missing=J
                         )
                         columns.append((prefix, column_name, label))
-                    context = C._extract_sql_presence_context(K_)
+                    context = svc_extract_presence_context(config.CONFIG, K_)
                     if context:
                         table, where_clause = context
                         db_type = config.CONFIG.get(p, K).lower()
                         try:
-                            sql_presence = C._query_sql_presence_map(
+                            worker_state.sql_presence = svc_query_presence_map(
                                 columns, table, where_clause, db_type
                             )
                         except E as T:
-                            sql_presence = I
+                            worker_state.sql_presence = I
                             log_error_loc("sql_check_error", ean=K_, error=T)
             for label, slot_path in slot_paths.items():
                 thumbnail_map[label] = C._load_slot_thumbnail(slot_path)
             C.after(
                 0,
                 lambda rid=request_id: finalize(
-                    original_files,
+                    worker_state,
                     slot_paths,
-                    ftp_presence,
-                    remote_info,
                     ean_guess,
-                    sql_presence,
                     thumbnail_map,
                     rid,
                 ),
             )
 
         def finalize(
-            original_files,
+            worker_state,
             slot_paths,
-            ftp_presence,
-            remote_info,
             ean_guess,
-            sql_presence,
             thumbnail_map,
             rid,
         ):
@@ -4299,11 +4153,8 @@ class App(BU.Tk):
                     C.suppress_next_lookup = J
                     C.var_ean.set(ean_guess)
                     C.suppress_next_lookup = h
-                C.original_files = original_files
-                C.ftp_remote_only = remote_info
-                C.ftp_presence = ftp_presence
-                C.ftp_downloaded_final = set()
-                C.sql_presence = sql_presence
+                worker_state.ftp_downloaded_final = set()
+                C._commit_product_state(worker_state)
                 for X_, G_ in A0(C.slots):
                     R_ = G_[Aa]
                     if R_ in slot_paths:
@@ -4317,10 +4168,10 @@ class App(BU.Tk):
                         G_[A7].place_forget()
                         C._update_slot_activity(X_, active=h)
                         C._mark_slot(X_, I)
-                    C._set_icon_status(G_["local_icon"], R_ in original_files)
-                    C._set_icon_status(G_["ftp_icon"], R_ in ftp_presence)
-                    if isinstance(sql_presence, dict):
-                        C._set_icon_status(G_["sql_icon"], sql_presence.get(R_, h))
+                    C._set_icon_status(G_["local_icon"], R_ in worker_state.original_files)
+                    C._set_icon_status(G_["ftp_icon"], R_ in worker_state.ftp_presence)
+                    if isinstance(worker_state.sql_presence, dict):
+                        C._set_icon_status(G_["sql_icon"], worker_state.sql_presence.get(R_, h))
                     else:
                         C._set_icon_status(G_["sql_icon"], I)
                 C._last_lookup_signature = lookup_signature
@@ -4328,7 +4179,6 @@ class App(BU.Tk):
                     (Ag.perf_counter() - started_at) * 1000
                 )
                 C._queue_dashboard_refresh()
-                C._update_dashboard_summary()
             finally:
                 C._set_busy_state(B, active=h)
 
@@ -4596,9 +4446,7 @@ class App(BU.Tk):
     def _on_color_commit(C):
         M_ = C.var_name.get().strip()
         N_ = C.var_type.get().strip()
-        H_ = C.var_color1.get().strip()
-        F_ = C.var_color2.get().strip()
-        G_ = C.var_color3.get().strip()
+        H_, F_, G_ = C._normalize_color_vars()
         if not M_ or not N_ or not H_:
             return
         color_signature = (
@@ -4881,7 +4729,12 @@ class App(BU.Tk):
         C.pending_deletions.clear()
         C.pending_ftp_deletions.clear()
         C._thumb_tokens.clear()
-        C.sql_presence = I
+        C._product_state.original_files.clear()
+        C._product_state.ftp_remote_only.clear()
+        C._product_state.ftp_presence.clear()
+        C._product_state.ftp_downloaded_final.clear()
+        C._product_state.sql_presence = I
+        C._sync_state_refs()
         for A_ in C.slots:
             A_[f] = I
             A_[y].configure(image=B, text=C._slot_placeholder_text)
@@ -5113,9 +4966,7 @@ class App(BU.Tk):
         AE_ = C.var_name.get().strip()
         AF_ = C.var_type.get().strip()
         AG_ = C.var_model.get().strip()
-        AH_ = C.var_color1.get().strip()
-        p_ = C.var_color2.get().strip()
-        s_ = C.var_color3.get().strip()
+        AH_, p_, s_ = C._normalize_color_vars()
         b_ = C.var_extra.get().strip()
         if b_ == B or b_.upper() in [L, L]:
             b_ = L
@@ -5157,8 +5008,12 @@ class App(BU.Tk):
             return
         else:
             try:
-                BC_ = prepare_excel_lists()
+                BC_seed = copy.deepcopy(C.lists)
+                BC_seed[W] = copy.deepcopy(C.entries)
+                BC_seed[ENTRY_RECORDS_KEY] = copy.deepcopy(C.entry_records)
+                BC_ = merge_saved_entry_into_lists(BC_seed, BZ_)
                 C._reload_entry_cache(BC_)
+                C.lists = BC_
             except E as R:
                 log_error_loc("reload_entries_failed", error=R)
         saved_product_id = G(BZ_.get("product_id") or current_product_id).strip().upper()
@@ -5196,6 +5051,10 @@ class App(BU.Tk):
         C.ui_log.insert(F.END, PROCESSING_UI_MSG + "\n")
         C.ui_log.configure(state=Ak)
         result_data = {A2: bool(BZ_.get("updated")) if isinstance(BZ_, dict) else h}
+        state_snapshot = C._snapshot_product_state()
+        C._set_product_identity(state_snapshot.identity)
+        slot_state = C._snapshot_slot_runtime()
+        preserve_loaded = C._preserve_loaded_binding()
 
         def heavy_work():
             A3 = "rowcount"
@@ -5214,6 +5073,8 @@ class App(BU.Tk):
             result_data[Y] = B
             result_data[k] = Ay
             result_data[P] = B
+            worker_state = state_snapshot.clone()
+            worker_slots = copy.deepcopy(slot_state)
             try:
                 i_ = output_dir
                 A.makedirs(i_, exist_ok=J)
@@ -5221,14 +5082,14 @@ class App(BU.Tk):
                 files_to_upload = []
                 ftp_delete_candidates = {
                     G(remote_name).strip()
-                    for remote_name in C.pending_ftp_deletions.values()
+                    for remote_name in worker_state.pending_ftp_deletions.values()
                     if G(remote_name).strip()
                 }
                 sql_update_prefixes = set()
                 sql_clear_prefixes = {
-                    C.slots[idx][Aa]
-                    for idx in C.pending_ftp_deletions
-                    if 0 <= idx < Q(C.slots)
+                    worker_slots[idx][Aa]
+                    for idx in worker_state.pending_ftp_deletions
+                    if 0 <= idx < Q(worker_slots)
                 }
                 try:
                     if A.path.exists(AN):
@@ -5236,9 +5097,9 @@ class App(BU.Tk):
                     A.makedirs(AN, exist_ok=J)
                 except E as R:
                     log_error_loc("backup_folder_failed", error=R)
-                if C.ftp_remote_only:
-                    for label, info in C.ftp_remote_only.items():
-                        for idx, slot in A0(C.slots):
+                if worker_state.ftp_remote_only:
+                    for label, info in worker_state.ftp_remote_only.items():
+                        for idx, slot in A0(worker_slots):
                             if slot[Aa] == label:
                                 Az_ = slot[Aa]
                                 Be_ = label_category(slot["label"])
@@ -5263,8 +5124,8 @@ class App(BU.Tk):
                                         temp=c_,
                                     )
                                     files_to_upload.append(c_)
-                                    C.slots[idx][f] = dest
-                                    C.ftp_downloaded_final.add(c_)
+                                    worker_slots[idx][f] = dest
+                                    worker_state.ftp_downloaded_final.add(c_)
                                 except E as R:
                                     log_error_loc(
                                         "file_save_error",
@@ -5272,24 +5133,28 @@ class App(BU.Tk):
                                         error=R,
                                     )
                                 break
-                    C.ftp_remote_only = {}
-                C._seed_metadata_migration(
-                    i_,
-                    K_,
-                    AE_,
-                    AF_,
-                    AG_,
-                    color_values,
-                    b_,
-                    convert_tif_enabled=convert_tif_enabled,
-                    target_ext=target_ext,
-                )
-                AJ_ = set(C.pending_additions.keys())
-                AL_ = set(C.pending_deletions.keys())
+                    worker_state.ftp_remote_only.clear()
+                if preserve_loaded:
+                    svc_seed_metadata_migration(
+                        worker_state,
+                        worker_slots,
+                        l,
+                        i_,
+                        K_,
+                        AE_,
+                        AF_,
+                        AG_,
+                        color_values,
+                        b_,
+                        convert_tif_enabled=convert_tif_enabled,
+                        target_ext=target_ext,
+                    )
+                AJ_ = set(worker_state.pending_additions.keys())
+                AL_ = set(worker_state.pending_deletions.keys())
                 AM_ = AJ_ & AL_
                 for F_ in list(AM_):
-                    A8_ = C.pending_additions.get(F_)
-                    Ay_ = C.pending_deletions.get(F_)
+                    A8_ = worker_state.pending_additions.get(F_)
+                    Ay_ = worker_state.pending_deletions.get(F_)
                     if A8_ and Ay_:
                         try:
                             BD_ = A.path.samefile(A8_, Ay_)
@@ -5298,7 +5163,8 @@ class App(BU.Tk):
                                 A.path.normpath(A8_)
                             ) == A.path.normcase(A.path.normpath(Ay_))
                         if BD_:
-                            BF_ = C._build_slot_target_filename(
+                            BF_ = svc_build_slot_target_filename(
+                                worker_slots,
                                 F_,
                                 K_,
                                 AE_,
@@ -5320,18 +5186,19 @@ class App(BU.Tk):
                                         A.path.normpath(Ay_)
                                     ) == A.path.normcase(A.path.normpath(BG_))
                             if BH_:
-                                C.pending_additions.pop(F_, I)
-                                C.pending_deletions.pop(F_, I)
-                AJ_ = set(C.pending_additions.keys())
-                AL_ = set(C.pending_deletions.keys())
+                                worker_state.pending_additions.pop(F_, I)
+                                worker_state.pending_deletions.pop(F_, I)
+                AJ_ = set(worker_state.pending_additions.keys())
+                AL_ = set(worker_state.pending_deletions.keys())
                 AM_ = AJ_ & AL_
                 backup_candidates = {
-                    path for path in C.pending_deletions.values() if path
+                    path for path in worker_state.pending_deletions.values() if path
                 }
-                for F_, src_path in list(C.pending_additions.items()):
+                for F_, src_path in list(worker_state.pending_additions.items()):
                     if not src_path or not A.path.isfile(src_path):
                         continue
-                    c_ = C._build_slot_target_filename(
+                    c_ = svc_build_slot_target_filename(
+                        worker_slots,
                         F_,
                         K_,
                         AE_,
@@ -5379,14 +5246,15 @@ class App(BU.Tk):
                         "backup_files_done", files=AI.join(backed_up)
                     )
                 BE_ = {}
-                for F_, src_path in list(C.pending_additions.items()):
+                for F_, src_path in list(worker_state.pending_additions.items()):
                     if not src_path:
-                        C.pending_additions.pop(F_, I)
+                        worker_state.pending_additions.pop(F_, I)
                         continue
                     if not A.path.isfile(src_path):
-                        C.pending_additions.pop(F_, I)
+                        worker_state.pending_additions.pop(F_, I)
                         continue
-                    c_ = C._build_slot_target_filename(
+                    c_ = svc_build_slot_target_filename(
+                        worker_slots,
                         F_,
                         K_,
                         AE_,
@@ -5399,14 +5267,17 @@ class App(BU.Tk):
                         target_ext=target_ext,
                     )
                     if not c_:
-                        C.pending_additions.pop(F_, I)
+                        worker_state.pending_additions.pop(F_, I)
                         continue
                     S_ = A.path.join(i_, c_)
-                    slot = C.slots[F_]
+                    slot = worker_slots[F_]
                     Az_ = slot[Aa]
-                    actual_remote_name = G(C.ftp_presence.get(Az_) or B).strip()
-                    current_remote_name = C._get_slot_existing_remote_filename(Az_)
-                    expected_remote_name = C._build_expected_remote_filename(
+                    actual_remote_name = G(worker_state.ftp_presence.get(Az_) or B).strip()
+                    current_remote_name = svc_infer_existing_remote_filename(
+                        worker_state, Az_
+                    )
+                    expected_remote_name = svc_build_expected_remote_filename(
+                        worker_slots,
                         F_,
                         K_,
                         src_path,
@@ -5419,7 +5290,7 @@ class App(BU.Tk):
                         same_source_target = A.path.normcase(
                             A.path.normpath(src_path)
                         ) == A.path.normcase(A.path.normpath(S_))
-                    remote_missing = Az_ not in C.ftp_presence
+                    remote_missing = Az_ not in worker_state.ftp_presence
                     remote_name_changed = bool(
                         expected_remote_name
                         and current_remote_name
@@ -5428,7 +5299,7 @@ class App(BU.Tk):
                     remote_sync_needed = bool(
                         slot.get(B0) == AR or remote_missing or remote_name_changed
                     )
-                    sql_known_missing = Aq(C.sql_presence, dict) and not C.sql_presence.get(
+                    sql_known_missing = Aq(worker_state.sql_presence, dict) and not worker_state.sql_presence.get(
                         Az_, h
                     )
                     sql_update_needed = bool(
@@ -5441,11 +5312,11 @@ class App(BU.Tk):
                     )
                     metadata_migration = (not same_source_target) or remote_name_changed
                     if (
-                        F_ not in C.pending_deletions
+                        F_ not in worker_state.pending_deletions
                         and slot.get(B0) != AR
                         and not metadata_migration
                     ):
-                        C.pending_additions.pop(F_, I)
+                        worker_state.pending_additions.pop(F_, I)
                         continue
                     C._update_slot_activity(
                         F_, active=J, status=C._slot_status["processing"]
@@ -5453,10 +5324,10 @@ class App(BU.Tk):
                     BH_ = A.path.splitext(src_path)[1]
                     temp_output_path = B
                     try:
-                        if F_ in C.pending_deletions:
-                            old_path = C.pending_deletions.get(F_)
+                        if F_ in worker_state.pending_deletions:
+                            old_path = worker_state.pending_deletions.get(F_)
                             if not old_path:
-                                C.pending_deletions.pop(F_, I)
+                                worker_state.pending_deletions.pop(F_, I)
                             else:
                                 try:
                                     same_old_source = A.path.samefile(old_path, src_path)
@@ -5471,7 +5342,7 @@ class App(BU.Tk):
                                         A.path.normpath(old_path)
                                     ) == A.path.normcase(A.path.normpath(S_))
                                 if same_target:
-                                    C.pending_deletions.pop(F_, I)
+                                    worker_state.pending_deletions.pop(F_, I)
                                     if not same_old_source:
                                         try:
                                             if A.path.exists(old_path):
@@ -5628,15 +5499,15 @@ class App(BU.Tk):
                         if sql_update_needed:
                             sql_update_prefixes.add(Az_)
                         if (
-                            F_ in C.pending_ftp_deletions
+                            F_ in worker_state.pending_ftp_deletions
                             and expected_remote_name
-                            and C.pending_ftp_deletions[F_] == expected_remote_name
+                            and worker_state.pending_ftp_deletions[F_] == expected_remote_name
                         ):
-                            C.pending_ftp_deletions.pop(F_, I)
+                            worker_state.pending_ftp_deletions.pop(F_, I)
                             ftp_delete_candidates.discard(expected_remote_name)
                         if remote_sync_needed and c_ not in files_to_upload:
                             files_to_upload.append(c_)
-                        C.slots[F_][f] = S_
+                        worker_slots[F_][f] = S_
                     except E as y:
                         log_error_loc(
                             "file_copy_failed",
@@ -5657,7 +5528,7 @@ class App(BU.Tk):
                     except E:
                         file_list = []
                     remove_candidates = {
-                        A.path.basename(B) for B in C.pending_deletions.values()
+                        A.path.basename(B) for B in worker_state.pending_deletions.values()
                     }
                     for X_ in file_list:
                         path = A.path.join(i_, X_)
@@ -5677,9 +5548,9 @@ class App(BU.Tk):
                                 log_info_loc(
                                     "file_renamed", old=X_, new=new_name
                                 )
-                                for F_, d_ in A0(C.slots):
+                                for F_, d_ in A0(worker_slots):
                                     if d_[f] and A.path.basename(d_[f]) == X_:
-                                        C.slots[F_][f] = new_path
+                                        worker_slots[F_][f] = new_path
                                         break
                                 if X_ in files_to_upload:
                                     Bh_ = files_to_upload.index(X_)
@@ -5688,31 +5559,31 @@ class App(BU.Tk):
                                 log_error_loc(
                                     "file_rename_error", ean=K_, error=y
                                 )
-                                for i, d_ in A0(C.slots):
+                                for i, d_ in A0(worker_slots):
                                     if d_[f] and A.path.basename(d_[f]) == X_:
                                         result_data[K].add(i)
                                         break
-                for idx, slot in A0(C.slots):
+                for idx, slot in A0(worker_slots):
                     path = slot[f]
                     if (
                         path
                         and A.path.isfile(path)
-                        and idx not in C.pending_deletions
-                        and slot[Aa] not in C.ftp_presence
+                        and idx not in worker_state.pending_deletions
+                        and slot[Aa] not in worker_state.ftp_presence
                     ):
                         fname = A.path.basename(path)
                         if fname not in files_to_upload:
                             files_to_upload.append(fname)
                         sql_update_prefixes.add(slot[Aa])
-                        C.pending_additions.setdefault(idx, path)
+                        worker_state.pending_additions.setdefault(idx, path)
                 Am_ = {}
-                for F_, T in list(C.pending_deletions.items()):
+                for F_, T in list(worker_state.pending_deletions.items()):
                     if F_ in result_data[K]:
                         Am_[F_] = T
                         continue
                     conflict_error = h
                     for Bh in result_data[K]:
-                        if C.pending_additions.get(Bh) == T:
+                        if worker_state.pending_additions.get(Bh) == T:
                             conflict_error = J
                             break
                     if conflict_error:
@@ -5724,13 +5595,13 @@ class App(BU.Tk):
                             log_info_loc(
                                 "file_deleted", file=A.path.basename(T)
                             )
-                            if F_ not in C.pending_additions:
+                            if F_ not in worker_state.pending_additions:
                                 current_remote_name = G(
-                                    C.ftp_presence.get(C.slots[F_][Aa]) or B
+                                    worker_state.ftp_presence.get(worker_slots[F_][Aa]) or B
                                 ).strip()
                                 if current_remote_name:
                                     ftp_delete_candidates.add(current_remote_name)
-                                sql_clear_prefixes.add(C.slots[F_][Aa])
+                                sql_clear_prefixes.add(worker_slots[F_][Aa])
                     except E as y:
                         log_error_loc(
                             "file_delete_failed",
@@ -5739,12 +5610,14 @@ class App(BU.Tk):
                         )
                         result_data[K].add(F_)
                         Am_[F_] = T
-                BM_ = sorted(ftp_delete_candidates)
-                result_data[n] = BE_
-                result_data[o] = Am_
-                add_set = set(C.pending_additions.keys())
-                del_set = set(C.pending_deletions.keys())
+                add_set = set(worker_state.pending_additions.keys())
+                del_set = set(worker_state.pending_deletions.keys())
                 inter_set = add_set & del_set
+                worker_state.pending_additions = BE_
+                worker_state.pending_deletions = Am_
+                BM_ = sorted(ftp_delete_candidates)
+                result_data[n] = dict(BE_)
+                result_data[o] = dict(Am_)
                 result_data[p] = add_set
                 result_data[s] = del_set
                 result_data[t] = inter_set
@@ -5791,14 +5664,14 @@ class App(BU.Tk):
                                     if A.path.isfile(A.path.join(i_, B))
                                 ]
                                 slot_index_by_filename = {}
-                                for idx, slot in A0(C.slots):
+                                for idx, slot in A0(worker_slots):
                                     if slot.get(f):
                                         slot_index_by_filename[
                                             A.path.basename(slot[f])
                                         ] = idx
                                 ftp_error = h
                                 for X_ in files_local:
-                                    if X_ in C.ftp_downloaded_final:
+                                    if X_ in worker_state.ftp_downloaded_final:
                                         log_info_loc(
                                             "ftp_upload_skipped_downloaded", file=X_
                                         )
@@ -5891,7 +5764,7 @@ class App(BU.Tk):
                     try:
                         conn = connect_db()
                         cur = conn.cursor()
-                        for d_ in C.slots:
+                        for d_ in worker_slots:
                             Az_ = d_[Aa]
                             B3_ = C._resolve_sql_column(Az_, d_["label"], log_missing=J)
                             if not B3_:
@@ -5977,9 +5850,19 @@ class App(BU.Tk):
                 log_error_loc(
                     "processing_unexpected_error", error=exc
                 )
-                result_data[K] = set(range(len(C.slots)))
+                result_data[K] = set(range(len(worker_slots)))
                 result_data[Y] = "Operacja przerwana z powodu błędu."
                 result_data[P] = G(exc)
+            worker_state.original_files = {
+                slot[Aa]: A.path.basename(slot[f])
+                for slot in worker_slots
+                if slot.get(f) and A.path.isfile(slot[f])
+            }
+            result_data["product_state"] = worker_state
+            result_data["slot_paths"] = {
+                idx: slot.get(f)
+                for idx, slot in A0(worker_slots)
+            }
             result_data["ean"] = K_
             result_data["saved_entry"] = saved_entry
 
@@ -6025,6 +5908,45 @@ class App(BU.Tk):
             add_set = result_data.get(p, set())
             del_set = result_data.get(s, set())
             inter_set = result_data.get(t, set())
+            committed_state = result_data.get("product_state")
+            slot_paths = result_data.get("slot_paths", {}) or {}
+            if isinstance(committed_state, ProductState):
+                C._commit_product_state(committed_state)
+            else:
+                C.pending_additions = result_data.get(n, {})
+                C.pending_deletions = result_data.get(o, {})
+            Y_ = result_data.get(Y, B)
+            A__ = result_data.get(k, Ay)
+            AW_msg = result_data.get(P, B)
+            if err_set or A__ or Y_ or AW_msg:
+                for idx, slot in A0(C.slots):
+                    path = slot_paths.get(idx)
+                    slot[f] = path if path and A.path.isfile(path) else I
+                    if slot[f]:
+                        C._set_slot_preview(
+                            idx,
+                            slot[f],
+                            C._load_slot_thumbnail(slot[f]),
+                        )
+                        C._set_icon_status(slot["local_icon"], J)
+                    else:
+                        slot[y].configure(image=B, text=C._slot_placeholder_text)
+                        slot[y].image = I
+                        slot[A7].place_forget()
+                        C._update_slot_activity(idx, active=h)
+                        C._set_icon_status(slot["local_icon"], I)
+                    if isinstance(committed_state, ProductState):
+                        prefix = slot[Aa]
+                        C._set_icon_status(
+                            slot["ftp_icon"], prefix in committed_state.ftp_presence
+                        )
+                        if isinstance(committed_state.sql_presence, dict):
+                            C._set_icon_status(
+                                slot["sql_icon"],
+                                committed_state.sql_presence.get(prefix, h),
+                            )
+                        else:
+                            C._set_icon_status(slot["sql_icon"], I)
             for F_ in err_set:
                 C._mark_slot(F_, Ab)
             for F_ in inter_set:
@@ -6044,11 +5966,7 @@ class App(BU.Tk):
                 else:
                     C._mark_slot(F_, I)
             C._update_all_slot_activity(active=h)
-            C.pending_additions = result_data.get(n, {})
-            C.pending_deletions = result_data.get(o, {})
-            Y_ = result_data.get(Y, B)
-            A__ = result_data.get(k, Ay)
-            AW_msg = result_data.get(P, B)
+            C._queue_dashboard_refresh()
             K_val = result_data.get("ean", K_)
             saved_entry_record = result_data.get("saved_entry")
             if not err_set and not A__ and not Y_ and not AW_msg:
