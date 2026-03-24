@@ -2,8 +2,11 @@
 
 import json
 import os
+import sys
 import traceback
 from datetime import datetime
+
+from picorgftp_sql.runtime_lock import SingleInstanceGuard, acquire_single_instance_lock
 
 
 def _resolve_boot_log_dir():
@@ -18,6 +21,14 @@ def _resolve_boot_log_dir():
     except Exception:
         pass
     return os.getcwd()
+
+
+def _resolve_instance_lock_path():
+    if getattr(sys, "frozen", False):
+        base_dir = os.path.dirname(sys.executable) or os.getcwd()
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__)) or os.getcwd()
+    return os.path.join(base_dir, "PicOrgFTP-SQL.lock")
 
 
 def _write_boot_log(message):
@@ -48,6 +59,19 @@ def _show_boot_error(message):
         root = tk.Tk()
         root.withdraw()
         messagebox.showerror("Błąd aplikacji", message)
+        root.destroy()
+    except Exception:
+        pass
+
+
+def _show_boot_info(message):
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo("PicOrgFTP-SQL", message)
         root.destroy()
     except Exception:
         pass
@@ -106,51 +130,70 @@ def _build_boot_hint(exc):
 def main():
     """Start the GUI application and warn about configuration issues."""
 
-    try:
-        from picorgftp_sql.bootstrap import initialize_application_runtime
-
-        initialize_application_runtime(interactive=True)
-        from picorgftp_sql.app import App
-        from picorgftp_sql.common import O, SETTINGS_LABEL
-        from picorgftp_sql.settings import BASE_DIR_OVERRIDE_WARNING
-    except Exception as exc:
-        trace = traceback.format_exc()
-        hint = _build_boot_hint(exc)
-        boot_message = (
-            "Krytyczny błąd podczas uruchamiania aplikacji.\n\n"
-            f"{trace}\n\nSzczegóły zapisano w error_log_boot.txt."
+    instance_lock_path = _resolve_instance_lock_path()
+    instance_lock = acquire_single_instance_lock(instance_lock_path)
+    if instance_lock is None:
+        notice_lock = SingleInstanceGuard(
+            "PicOrgFTP-SQL-notice",
+            scope=os.path.dirname(instance_lock_path),
         )
-        log_path = _write_boot_log(f"{trace}\n{hint}".strip())
-        hint_block = f"\n\n{hint}" if hint else ""
-        _show_boot_error(f"{boot_message}{hint_block}\n\nPlik: {log_path}")
-        raise
-
+        if notice_lock.acquire():
+            try:
+                _show_boot_info(
+                    "Aplikacja już się uruchamia albo jest już otwarta.\n"
+                    "Poczekaj chwilę i sprawdź pasek zadań."
+                )
+            finally:
+                notice_lock.release()
+        return
     try:
-        app = App()
-        if BASE_DIR_OVERRIDE_WARNING:
-            O.showwarning(SETTINGS_LABEL, BASE_DIR_OVERRIDE_WARNING)
-        for combo in (
-            app.combo_name,
-            app.combo_type,
-            app.combo_model,
-            app.combo_color1,
-            app.combo_color2,
-            app.combo_color3,
-            app.combo_extra,
-        ):
-            combo.configure(postcommand=lambda c=combo: app._style_combobox_list(c))
-        app.mainloop()
-    except Exception as exc:
-        trace = traceback.format_exc()
-        hint = _build_boot_hint(exc)
-        boot_message = (
-            "Krytyczny błąd podczas uruchamiania aplikacji.\n\n"
-            f"{trace}\n\nSzczegóły zapisano w error_log_boot.txt."
-        )
-        log_path = _write_boot_log(f"{trace}\n{hint}".strip())
-        hint_block = f"\n\n{hint}" if hint else ""
-        _show_boot_error(f"{boot_message}{hint_block}\n\nPlik: {log_path}")
-        raise
+        try:
+            from picorgftp_sql.bootstrap import initialize_application_runtime
+
+            initialize_application_runtime(interactive=True)
+            from picorgftp_sql.app import App
+            from picorgftp_sql.common import O, SETTINGS_LABEL
+            from picorgftp_sql.settings import BASE_DIR_OVERRIDE_WARNING
+        except Exception as exc:
+            trace = traceback.format_exc()
+            hint = _build_boot_hint(exc)
+            boot_message = (
+                "Krytyczny błąd podczas uruchamiania aplikacji.\n\n"
+                f"{trace}\n\nSzczegóły zapisano w error_log_boot.txt."
+            )
+            log_path = _write_boot_log(f"{trace}\n{hint}".strip())
+            hint_block = f"\n\n{hint}" if hint else ""
+            _show_boot_error(f"{boot_message}{hint_block}\n\nPlik: {log_path}")
+            raise
+
+        try:
+            app = App()
+            if BASE_DIR_OVERRIDE_WARNING:
+                O.showwarning(SETTINGS_LABEL, BASE_DIR_OVERRIDE_WARNING)
+            for combo in (
+                app.combo_name,
+                app.combo_type,
+                app.combo_model,
+                app.combo_color1,
+                app.combo_color2,
+                app.combo_color3,
+                app.combo_extra,
+            ):
+                combo.configure(postcommand=lambda c=combo: app._style_combobox_list(c))
+            app.mainloop()
+        except Exception as exc:
+            trace = traceback.format_exc()
+            hint = _build_boot_hint(exc)
+            boot_message = (
+                "Krytyczny błąd podczas uruchamiania aplikacji.\n\n"
+                f"{trace}\n\nSzczegóły zapisano w error_log_boot.txt."
+            )
+            log_path = _write_boot_log(f"{trace}\n{hint}".strip())
+            hint_block = f"\n\n{hint}" if hint else ""
+            _show_boot_error(f"{boot_message}{hint_block}\n\nPlik: {log_path}")
+            raise
+    finally:
+        instance_lock.release()
 
 
 if __name__ == "__main__":

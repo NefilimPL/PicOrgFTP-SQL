@@ -205,6 +205,7 @@ w = "sql_query"
 SLOT_DEFS_KEY = "slot_definitions"
 SQL_COLUMN_MAP_KEY = "sql_column_map"
 SQL_AVAILABLE_COLUMNS_KEY = "sql_available_columns"
+LOCAL_FILE_INDEX_KEY = "enable_local_file_index"
 TRANSLATION_SETTINGS_KEY = "translation"
 TRANSLATION_PROVIDER_KEY = "provider"
 TRANSLATION_API_KEY = "api_key"
@@ -257,6 +258,7 @@ DEFAULT_CONFIG.setdefault(
     {slot["prefix"]: slot["label"] for slot in DEFAULT_SLOT_DEFS},
 )
 DEFAULT_CONFIG.setdefault(SQL_AVAILABLE_COLUMNS_KEY, [])
+DEFAULT_CONFIG.setdefault(LOCAL_FILE_INDEX_KEY, True)
 DEFAULT_CONFIG.setdefault(
     TRANSLATION_SETTINGS_KEY,
     {

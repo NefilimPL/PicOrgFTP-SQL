@@ -29,6 +29,7 @@ from .excel_utils import (
 from .logging_utils import log_error, log_error_loc, log_info, log_info_loc, set_app
 from .system_utils import get_file_lock_user, is_admin
 from .database import connect_db
+from .file_index import LocalFileIndex
 from .config import save_config
 from . import config, localization, settings, common, encryption
 from .settings import BW, EXCEL_SHEETS, AN, l
@@ -238,9 +239,29 @@ class App(BU.Tk):
                 B.lists[key] = []
         if not A.path.isdir(l):
             A.makedirs(l, exist_ok=J)
-        E_ = [B_.upper() for B_ in A.listdir(l) if A.path.isdir(A.path.join(l, B_))]
-        G_ = [A_ for A_ in B.lists[n] if A_ not in E_]
-        B.lists[n] = E_ + G_
+        B._local_file_index_enabled = bool(D.get(LOCAL_FILE_INDEX_KEY, J))
+        B._file_index_status_var = F.StringVar()
+        B._file_index = LocalFileIndex(
+            l,
+            A.path.join(settings.AC, "file_index.json"),
+            status_callback=B._on_file_index_status_change,
+        )
+        if B._local_file_index_enabled and B._file_index.load_cache():
+            B._refresh_name_values_from_index()
+        elif B._local_file_index_enabled:
+            B._file_index_status_var.set(
+                LANG.get(
+                    "file_index_status_cold_start",
+                    "Indeks plików: brak cache, pierwszy skan ruszy w tle po starcie.",
+                )
+            )
+        else:
+            B._file_index_status_var.set(
+                LANG.get(
+                    "file_index_status_disabled",
+                    "Indeks plików: wyłączony w ustawieniach aplikacji.",
+                )
+            )
         B.var_name = F.StringVar()
         B.var_type = F.StringVar()
         B.var_model = F.StringVar()
@@ -276,6 +297,10 @@ class App(BU.Tk):
         )
         B._busy_counter = 0
         B._current_busy_label = ""
+        B._existing_lookup_lock = threading.Lock()
+        B._existing_lookup_running = h
+        B._existing_lookup_busy = h
+        B._retry_existing_lookup = h
         B._last_lookup_duration_ms = 0
         B._commit_snapshot = {}
         B._record_loaded = h
@@ -352,17 +377,41 @@ class App(BU.Tk):
         B._slot_index_by_prefix = {
             slot["prefix"]: idx for idx, slot in A0(B.slot_definitions)
         }
-        H_ = Q(E_)
-        B.combo_name.existing_count = H_
+        B._refresh_name_values_from_index()
         B._refresh_commit_snapshot()
         B._update_dashboard_summary()
         B._thumb_poll_job = B.after(THUMBNAIL_POLL_MS, B._poll_thumbnail_results)
         B._perf_monitor_job = B.after(PERF_MONITOR_MS, B._perf_monitor_tick)
+        B.protocol("WM_DELETE_WINDOW", B.destroy)
+        B.after(150, B._start_file_index_refresh)
         set_app(B)
         B._install_exception_handlers()
 
     def report_callback_exception(A, exc, val, tb):
         A._handle_exception(exc, val, tb, context="Tk callback")
+
+    def destroy(A):
+        for job_attr in (
+            "_thumb_poll_job",
+            "_perf_monitor_job",
+            "_load_existing_after_id",
+            "_dashboard_refresh_job",
+            "_field_change_refresh_job",
+            "_slots_refresh_job",
+        ):
+            job_id = getattr(A, job_attr, I)
+            if job_id is I:
+                continue
+            try:
+                A.after_cancel(job_id)
+            except E:
+                pass
+            setattr(A, job_attr, I)
+        try:
+            A._thumb_request_queue.put_nowait(I)
+        except E:
+            pass
+        return super().destroy()
 
     def _install_exception_handlers(A):
         def _sys_excepthook(exc_type, exc, tb):
@@ -781,6 +830,264 @@ class App(BU.Tk):
                 ftp=ftp_count,
                 sql=sql_count,
                 extra=extra_value,
+            )
+        )
+
+    def _format_file_index_status(A, status):
+        """Build a short UI message describing the local index state."""
+
+        if not getattr(A, "_local_file_index_enabled", J):
+            return LANG.get(
+                "file_index_status_disabled",
+                "Indeks plików: wyłączony w ustawieniach aplikacji.",
+            )
+        state = G(status.get("state") or "idle").strip().lower()
+        error = G(status.get("error") or B).strip()
+        name_count = int(status.get("name_count") or 0)
+        products_scanned = int(status.get("products_scanned") or 0)
+        dirs_scanned = int(status.get("dirs_scanned") or 0)
+        cache_loaded = bool(status.get("cache_loaded"))
+        if state == "cached":
+            return LANG.get(
+                "file_index_status_cached",
+                "Indeks plików: wczytano cache lokalne ({names} nazw).",
+            ).format(names=name_count)
+        if state == "refreshing":
+            if cache_loaded:
+                return LANG.get(
+                    "file_index_status_refreshing_cached",
+                    "Indeks plików: odświeżanie w tle ({products} katalogów produktów).",
+                ).format(products=products_scanned)
+            return LANG.get(
+                "file_index_status_refreshing",
+                "Indeks plików: pierwszy skan w tle ({dirs} katalogów).",
+            ).format(dirs=dirs_scanned)
+        if state == "ready":
+            return LANG.get(
+                "file_index_status_ready",
+                "Indeks plików: gotowy ({names} nazw, {products} katalogów produktów).",
+            ).format(names=name_count, products=products_scanned)
+        if state == "error":
+            details = f": {error}" if error else B
+            return LANG.get(
+                "file_index_status_error",
+                "Indeks plików: błąd odświeżania{details}",
+            ).format(details=details)
+        return LANG.get(
+            "file_index_status_idle",
+            "Indeks plików: oczekiwanie na start.",
+        )
+
+    def _on_file_index_status_change(A, status):
+        """Synchronize background index progress back into the Tk UI."""
+
+        def _apply():
+            if not A.winfo_exists():
+                return
+            if not getattr(A, "_local_file_index_enabled", J):
+                A._file_index_status_var.set(
+                    LANG.get(
+                        "file_index_status_disabled",
+                        "Indeks plików: wyłączony w ustawieniach aplikacji.",
+                    )
+                )
+                return
+            A._file_index_status_var.set(A._format_file_index_status(status))
+            if G(status.get("state") or B).strip().lower() in {"cached", "ready"}:
+                A._refresh_name_values_from_index()
+
+        if threading.current_thread() == threading.main_thread():
+            _apply()
+            return
+        try:
+            A.after(0, _apply)
+        except E:
+            pass
+
+    def _start_file_index_refresh(A):
+        """Kick off the background filesystem index if it is not already running."""
+
+        if not getattr(A, "_local_file_index_enabled", J):
+            A._file_index_status_var.set(
+                LANG.get(
+                    "file_index_status_disabled",
+                    "Indeks plików: wyłączony w ustawieniach aplikacji.",
+                )
+            )
+            return h
+        file_index = Aj(A, "_file_index", I)
+        if file_index is I:
+            return h
+        started = file_index.refresh_async()
+        if not started:
+            A._on_file_index_status_change(file_index.get_status())
+        return started
+
+    def _merge_existing_lookup_values(A, existing_values, fallback_values):
+        """Merge disk-backed values ahead of workbook values without duplicates."""
+
+        merged = []
+        seen = set()
+        for group in (existing_values or [], fallback_values or []):
+            for raw_value in group:
+                value = G(raw_value or B).strip()
+                if not value or value in seen:
+                    continue
+                merged.append(value)
+                seen.add(value)
+        existing_count = 0
+        for raw_value in existing_values or []:
+            value = G(raw_value or B).strip()
+            if value:
+                existing_count += 1
+        return merged, existing_count
+
+    def _list_child_directories(A, path, uppercase=h):
+        """Return direct child directories using ``scandir`` for lower overhead."""
+
+        values = []
+        try:
+            with A.scandir(path) as entries:
+                for entry in entries:
+                    if not entry.is_dir():
+                        continue
+                    value = entry.name.upper() if uppercase else entry.name
+                    values.append(value)
+        except E:
+            return []
+        values.sort()
+        return values
+
+    def _refresh_name_values_from_index(A):
+        """Apply indexed top-level names to the main combobox when available."""
+
+        if not getattr(A, "_local_file_index_enabled", J):
+            return
+        file_index = Aj(A, "_file_index", I)
+        if file_index is I:
+            return
+        existing_names = file_index.get_names()
+        if not existing_names:
+            return
+        merged, existing_count = A._merge_existing_lookup_values(
+            existing_names,
+            A.lists.get(n, []),
+        )
+        A.lists[n] = merged
+        if Aj(A, "combo_name", I) is not I:
+            A._refresh_combobox_list(A.combo_name, merged, existing_count=existing_count)
+
+    def _resolve_types_for_name(A, name_value, path):
+        """Return type directories from the index or direct disk fallback."""
+
+        file_index = Aj(A, "_file_index", I)
+        if getattr(A, "_local_file_index_enabled", J) and file_index is not I and file_index.has_snapshot():
+            indexed = file_index.get_types(name_value)
+            if indexed is not None:
+                return indexed, J
+        if A.path.isdir(path):
+            return A._list_child_directories(path), J
+        return [], h
+
+    def _resolve_models_for_type(A, name_value, type_value, path):
+        """Return model directories from the index or direct disk fallback."""
+
+        file_index = Aj(A, "_file_index", I)
+        if getattr(A, "_local_file_index_enabled", J) and file_index is not I and file_index.has_snapshot():
+            indexed = file_index.get_models(name_value, type_value)
+            if indexed is not None:
+                return indexed, J
+        if A.path.isdir(path):
+            return A._list_child_directories(path), J
+        return [], h
+
+    def _resolve_colors_for_model(A, name_value, type_value, model_value, path):
+        """Return colour directories from the index or direct disk fallback."""
+
+        file_index = Aj(A, "_file_index", I)
+        if getattr(A, "_local_file_index_enabled", J) and file_index is not I and file_index.has_snapshot():
+            indexed = file_index.get_colors(name_value, type_value, model_value)
+            if indexed is not None:
+                return indexed, J
+        if A.path.isdir(path):
+            return A._list_child_directories(path), J
+        return [], h
+
+    def _resolve_extras_for_colors(
+        A,
+        name_value,
+        type_value,
+        model_value,
+        color_values,
+        path,
+    ):
+        """Return extra directories from the index or direct disk fallback."""
+
+        file_index = Aj(A, "_file_index", I)
+        if getattr(A, "_local_file_index_enabled", J) and file_index is not I and file_index.has_snapshot():
+            indexed = file_index.get_extras(
+                name_value,
+                type_value,
+                model_value,
+                color_values,
+            )
+            if indexed is not None:
+                return indexed, J
+        if A.path.isdir(path):
+            return A._list_child_directories(path), J
+        return [], h
+
+    def _resolve_product_file_rows(
+        A,
+        product_dir,
+        name_value,
+        type_value,
+        model_value,
+        color_values,
+        extra_value,
+    ):
+        """Return product files using the index first and ``scandir`` as fallback."""
+
+        file_index = Aj(A, "_file_index", I)
+        if getattr(A, "_local_file_index_enabled", J) and file_index is not I and file_index.has_snapshot():
+            indexed_files = file_index.get_product_files(
+                name_value,
+                type_value,
+                model_value,
+                color_values,
+                extra_value,
+            )
+            if indexed_files:
+                resolved = []
+                for filename in indexed_files:
+                    path = A.path.join(product_dir, filename)
+                    if A.path.isfile(path):
+                        resolved.append((filename, path))
+                if resolved:
+                    return resolved
+        try:
+            with A.scandir(product_dir) as entries:
+                return [(entry.name, entry.path) for entry in entries if entry.is_file()]
+        except E:
+            return []
+
+    def _set_local_file_index_enabled(A, enabled):
+        """Toggle whether GUI lookups should use the persisted local file index."""
+
+        A._local_file_index_enabled = bool(enabled)
+        if A._local_file_index_enabled:
+            file_index = Aj(A, "_file_index", I)
+            if file_index is not I:
+                if not file_index.has_snapshot():
+                    file_index.load_cache()
+                A._on_file_index_status_change(file_index.get_status())
+            A._refresh_name_values_from_index()
+            A._start_file_index_refresh()
+            return
+        A._file_index_status_var.set(
+            LANG.get(
+                "file_index_status_disabled",
+                "Indeks plików: wyłączony w ustawieniach aplikacji.",
             )
         )
 
@@ -2794,6 +3101,13 @@ class App(BU.Tk):
             anchor="e",
             justify="right",
         ).grid(row=2, column=1, sticky="e", pady=(2, 0))
+        C.Label(
+            summary,
+            textvariable=A._file_index_status_var,
+            style="SectionHint.TLabel",
+            wraplength=980,
+            justify="left",
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         G_ = A._build_form_combobox(
             form_card,
@@ -3848,12 +4162,8 @@ class App(BU.Tk):
                 C.var_name.set(B)
                 return
         F = A.path.join(l, D_.upper())
-        E_ = []
-        if A.path.isdir(F):
-            E_ = [B for B in A.listdir(F) if A.path.isdir(A.path.join(F, B))]
-            C.combo_name.configure(style=Z)
-        else:
-            C.combo_name.configure(style=j)
+        E_, path_exists = C._resolve_types_for_name(D_, F)
+        C.combo_name.configure(style=Z if path_exists else j)
         remaining_types = [A for A in C.lists[t] if A not in E_]
         C._refresh_combobox_list(C.combo_type, E_ + remaining_types, existing_count=Q(E_))
         C.combo_type.configure(state=X)
@@ -3928,12 +4238,8 @@ class App(BU.Tk):
                 C.var_type.set(B)
                 return
         F = A.path.join(l, G_.upper(), D_.upper())
-        E_ = []
-        if A.path.isdir(F):
-            E_ = [B for B in A.listdir(F) if A.path.isdir(A.path.join(F, B))]
-            C.combo_type.configure(style=Z)
-        else:
-            C.combo_type.configure(style=j)
+        E_, path_exists = C._resolve_models_for_type(G_, D_, F)
+        C.combo_type.configure(style=Z if path_exists else j)
         remaining_models = [A for A in C.lists[s] if A not in E_]
         C._refresh_combobox_list(C.combo_model, E_ + remaining_models, existing_count=Q(E_))
         C.combo_model.configure(state=X)
@@ -4012,47 +4318,89 @@ class App(BU.Tk):
                     A.rename(c_, product_dir)
                 except E as T:
                     log_error_loc("rename_no_led_failed", error=T)
-        C._set_busy_state(
-            LANG.get("busy_loading_product", "Wczytywanie danych produktu"),
-            active=J,
-        )
-
         def finalize_empty(rid):
-            try:
-                if rid != C._load_existing_request_id:
-                    return
-                if not (C._preserve_loaded_binding() and any(slot.get(f) for slot in C.slots)):
-                    C._reset_product_state()
-                    C._clear_all_slots()
-                C._last_lookup_signature = lookup_signature
-                C._last_lookup_duration_ms = int(
-                    (Ag.perf_counter() - started_at) * 1000
-                )
-                C._queue_dashboard_refresh()
-            finally:
-                C._set_busy_state(B, active=h)
+            if rid != C._load_existing_request_id:
+                return
+            if not (C._preserve_loaded_binding() and any(slot.get(f) for slot in C.slots)):
+                C._reset_product_state()
+                C._clear_all_slots()
+            C._last_lookup_signature = lookup_signature
+            C._last_lookup_duration_ms = int(
+                (Ag.perf_counter() - started_at) * 1000
+            )
+            C._queue_dashboard_refresh()
 
         if not A.path.isdir(product_dir):
             C.after(0, lambda rid=request_id: finalize_empty(rid))
             return
         C._update_all_slot_activity(active=J, status=C._slot_status["loading"])
+        with C._existing_lookup_lock:
+            if C._existing_lookup_running:
+                C._retry_existing_lookup = J
+                return
+            C._existing_lookup_running = J
+            if not C._existing_lookup_busy:
+                C._existing_lookup_busy = J
+                C._set_busy_state(
+                    LANG.get("busy_loading_product", "Wczytywanie danych produktu"),
+                    active=J,
+                )
+
+        def apply_local_results(
+            worker_state,
+            slot_paths,
+            ean_guess,
+            rid,
+        ):
+            if rid != C._load_existing_request_id:
+                return
+            if ean_guess and C.var_ean.get().strip() == B:
+                C.suppress_next_lookup = J
+                C.var_ean.set(ean_guess)
+                C.suppress_next_lookup = h
+            partial_state = worker_state.clone()
+            partial_state.ftp_presence.clear()
+            partial_state.ftp_remote_only.clear()
+            partial_state.sql_presence = I
+            partial_state.ftp_downloaded_final = set()
+            C._commit_product_state(partial_state)
+            for X_, G_ in A0(C.slots):
+                R_ = G_[Aa]
+                if R_ in slot_paths:
+                    G_[f] = slot_paths[R_]
+                    C._set_slot_preview(X_, G_[f], I)
+                    C._queue_thumbnail(X_, G_[f])
+                    C._mark_slot(X_, A4)
+                else:
+                    G_[f] = I
+                    G_[y].configure(image=B, text=C._slot_placeholder_text)
+                    G_[y].image = I
+                    G_[A7].place_forget()
+                    C._update_slot_activity(X_, active=h)
+                    C._mark_slot(X_, I)
+                C._set_icon_status(G_["local_icon"], R_ in partial_state.original_files)
+                C._set_icon_status(G_["ftp_icon"], I)
+                C._set_icon_status(G_["sql_icon"], I)
+            C._queue_dashboard_refresh()
 
         def worker():
             worker_state = state_snapshot.clone()
-            try:
-                V_ = [entry for entry in A.scandir(product_dir) if entry.is_file()]
-            except E:
-                V_ = []
+            V_ = C._resolve_product_file_rows(
+                product_dir,
+                name_value,
+                type_value,
+                model_value,
+                color_values,
+                extra_value,
+            )
             worker_state.original_files.clear()
             slot_paths = {}
             ean_guess = I
             if V_:
-                parsed = parse_slot_filename(V_[0].name)
+                parsed = parse_slot_filename(V_[0][0])
                 if parsed and current_ean == B:
                     ean_guess = parsed.ean
-            for entry in V_:
-                W_ = entry.name
-                d_ = entry.path
+            for W_, d_ in V_:
                 parsed = parse_slot_filename(W_)
                 if not parsed:
                     continue
@@ -4071,10 +4419,19 @@ class App(BU.Tk):
                         )
                 worker_state.original_files[norm_label] = W_
                 slot_paths[norm_label] = d_
+            local_slot_paths = dict(slot_paths)
+            C.after(
+                0,
+                lambda rid=request_id: apply_local_results(
+                    worker_state,
+                    local_slot_paths,
+                    ean_guess,
+                    rid,
+                ),
+            )
             worker_state.ftp_presence.clear()
             worker_state.ftp_remote_only.clear()
             worker_state.sql_presence = I
-            thumbnail_map = {}
             K_ = current_ean
             if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
                 remote_files = {}
@@ -4126,15 +4483,12 @@ class App(BU.Tk):
                         except E as T:
                             worker_state.sql_presence = I
                             log_error_loc("sql_check_error", ean=K_, error=T)
-            for label, slot_path in slot_paths.items():
-                thumbnail_map[label] = C._load_slot_thumbnail(slot_path)
             C.after(
                 0,
                 lambda rid=request_id: finalize(
                     worker_state,
                     slot_paths,
                     ean_guess,
-                    thumbnail_map,
                     rid,
                 ),
             )
@@ -4143,7 +4497,6 @@ class App(BU.Tk):
             worker_state,
             slot_paths,
             ean_guess,
-            thumbnail_map,
             rid,
         ):
             try:
@@ -4159,7 +4512,8 @@ class App(BU.Tk):
                     R_ = G_[Aa]
                     if R_ in slot_paths:
                         G_[f] = slot_paths[R_]
-                        C._set_slot_preview(X_, G_[f], thumbnail_map.get(R_))
+                        C._set_slot_preview(X_, G_[f], I)
+                        C._queue_thumbnail(X_, G_[f])
                         C._mark_slot(X_, A4)
                     else:
                         G_[f] = I
@@ -4215,15 +4569,8 @@ class App(BU.Tk):
                 D.var_model.set(B)
                 return
         T = A.path.join(l, o.upper(), p.upper(), e_.upper())
-        A0_ = []
-        if A.path.isdir(T):
-            for A1 in A.listdir(T):
-                A7 = A.path.join(T, A1)
-                if A.path.isdir(A7):
-                    A0_.append(A1)
-            D.combo_model.configure(style=Z)
-        else:
-            D.combo_model.configure(style=j)
+        A0_, model_path_exists = D._resolve_colors_for_model(o, p, e_, T)
+        D.combo_model.configure(style=Z if model_path_exists else j)
         r = [A_ for A_ in A0_ if g not in A_]
         A8_ = [A_ for A_ in D.lists[Y] if A_ not in r]
         A9_ = r + A8_
@@ -4254,36 +4601,41 @@ class App(BU.Tk):
             D._clear_all_slots()
         if not (D.loading_by_ean or D.suppress_scan or preserve_loaded):
             k_ = []
-            if A.path.isdir(T):
-                for A2 in A.listdir(T):
+            A0_, model_path_exists = D._resolve_colors_for_model(o, p, e_, T)
+            if model_path_exists:
+                for A2 in A0_:
                     t_ = A.path.join(T, A2)
-                    if A.path.isdir(t_):
-                        f_ = A2.split(g)
-                        a_ = f_[0] if Q(f_) > 0 else B
-                        K__ = f_[1] if Q(f_) > 1 else B
-                        M__ = f_[2] if Q(f_) > 2 else B
-                        for A3 in A.listdir(t_):
-                            AB_ = A.path.join(t_, A3)
-                            if A.path.isdir(AB_):
-                                u = A3
-                                if u.upper() == L or u.upper() == L:
-                                    N_ = L
-                                else:
-                                    N_ = u
-                                R_ = q
-                                for AC_, b_ in D.entries.items():
-                                    if (
-                                        b_.get(Ae) == o.upper()
-                                        and b_.get(Ad) == p.upper()
-                                        and b_.get(AZ) == e_.upper()
-                                        and G(b_.get(AY) or B) == a_
-                                        and G(b_.get(AX) or B) == K__
-                                        and G(b_.get(AW) or B) == M__
-                                        and G(b_.get(d) or B) == N_
-                                    ):
-                                        R_ = AC_
-                                        break
-                                k_.append((a_, K__, M__, N_, R_))
+                    f_ = A2.split(g)
+                    a_ = f_[0] if Q(f_) > 0 else B
+                    K__ = f_[1] if Q(f_) > 1 else B
+                    M__ = f_[2] if Q(f_) > 2 else B
+                    extras_for_color, _extras_path_exists = D._resolve_extras_for_colors(
+                        o,
+                        p,
+                        e_,
+                        (a_, K__, M__),
+                        t_,
+                    )
+                    for A3 in extras_for_color:
+                        u = A3
+                        if u.upper() == L or u.upper() == L:
+                            N_ = L
+                        else:
+                            N_ = u
+                        R_ = q
+                        for AC_, b_ in D.entries.items():
+                            if (
+                                b_.get(Ae) == o.upper()
+                                and b_.get(Ad) == p.upper()
+                                and b_.get(AZ) == e_.upper()
+                                and G(b_.get(AY) or B) == a_
+                                and G(b_.get(AX) or B) == K__
+                                and G(b_.get(AW) or B) == M__
+                                and G(b_.get(d) or B) == N_
+                            ):
+                                R_ = AC_
+                                break
+                        k_.append((a_, K__, M__, N_, R_))
             if k_:
                 if D.model_select_win_open:
                     return
@@ -4349,31 +4701,31 @@ class App(BU.Tk):
                     D.var_color3.set(M__)
                     AI_ = g.join([A_ for A_ in (a_, K__, M__) if A_])
                     c_ = A.path.join(T, AI_)
-                    H_ = []
-                    if A.path.isdir(c_):
-                        H_ = [
-                            B for B in A.listdir(c_) if A.path.isdir(A.path.join(c_, B))
-                        ]
-                        D.combo_color1.configure(style=Z)
-                        if K__:
-                            D.combo_color2.configure(style=Z)
-                        if M__:
-                            D.combo_color3.configure(style=Z)
-                    else:
-                        D.combo_color1.configure(style=j)
-                        if K__:
-                            D.combo_color2.configure(style=j)
-                        if M__:
-                            D.combo_color3.configure(style=j)
+                    H_, extras_path_exists = D._resolve_extras_for_colors(
+                        o,
+                        p,
+                        e_,
+                        (a_, K__, M__),
+                        c_,
+                    )
+                    D.combo_color1.configure(style=Z if extras_path_exists else j)
+                    if K__:
+                        D.combo_color2.configure(style=Z if extras_path_exists else j)
+                    if M__:
+                        D.combo_color3.configure(style=Z if extras_path_exists else j)
                     AK_ = [A_ for A_ in D.lists[d] if A_ not in H_]
                     if L in H_ and L not in H_:
                         try:
                             A.rename(A.path.join(c_, L), A.path.join(c_, L))
                         except E as AL_:
                             log_error_loc("rename_no_led_failed", error=AL_)
-                        H_ = [
-                            B for B in A.listdir(c_) if A.path.isdir(A.path.join(c_, B))
-                        ]
+                        H_, _extras_path_exists = D._resolve_extras_for_colors(
+                            o,
+                            p,
+                            e_,
+                            (a_, K__, M__),
+                            c_,
+                        )
                         if L in H_:
                             H_[H_.index(L)] = L
                     D._refresh_combobox_list(
@@ -4507,28 +4859,32 @@ class App(BU.Tk):
             K_,
             C.var_extra.get().strip(),
         )
-        D_ = []
-        if A.path.isdir(I_):
-            D_ = [B for B in A.listdir(I_) if A.path.isdir(A.path.join(I_, B))]
-            if L in D_ and L not in D_:
-                try:
-                    A.rename(A.path.join(I_, L), A.path.join(I_, L))
-                except E as a_:
-                    log_error_loc("rename_no_led_failed", error=a_)
-                D_ = [B for B in A.listdir(I_) if A.path.isdir(A.path.join(I_, B))]
-            if L in D_:
-                D_[D_.index(L)] = L
-            C.combo_color1.configure(style=Z)
-            if F_:
-                C.combo_color2.configure(style=Z)
-            if G_:
-                C.combo_color3.configure(style=Z)
-        else:
-            C.combo_color1.configure(style=j)
-            if F_:
-                C.combo_color2.configure(style=j)
-            if G_:
-                C.combo_color3.configure(style=j)
+        D_, extras_path_exists = C._resolve_extras_for_colors(
+            M_,
+            N_,
+            C.var_model.get().strip(),
+            K_,
+            I_,
+        )
+        if L in D_ and L not in D_:
+            try:
+                A.rename(A.path.join(I_, L), A.path.join(I_, L))
+            except E as a_:
+                log_error_loc("rename_no_led_failed", error=a_)
+            D_, extras_path_exists = C._resolve_extras_for_colors(
+                M_,
+                N_,
+                C.var_model.get().strip(),
+                K_,
+                I_,
+            )
+        if L in D_:
+            D_[D_.index(L)] = L
+        C.combo_color1.configure(style=Z if extras_path_exists else j)
+        if F_:
+            C.combo_color2.configure(style=Z if extras_path_exists else j)
+        if G_:
+            C.combo_color3.configure(style=Z if extras_path_exists else j)
         b_ = [A for A in C.lists[d] if A not in D_]
         C._refresh_combobox_list(C.combo_extra, D_ + b_, existing_count=Q(D_))
         C.combo_extra.configure(state=X)
@@ -5923,11 +6279,8 @@ class App(BU.Tk):
                     path = slot_paths.get(idx)
                     slot[f] = path if path and A.path.isfile(path) else I
                     if slot[f]:
-                        C._set_slot_preview(
-                            idx,
-                            slot[f],
-                            C._load_slot_thumbnail(slot[f]),
-                        )
+                        C._set_slot_preview(idx, slot[f], I)
+                        C._queue_thumbnail(idx, slot[f])
                         C._set_icon_status(slot["local_icon"], J)
                     else:
                         slot[y].configure(image=B, text=C._slot_placeholder_text)
@@ -6037,6 +6390,7 @@ class App(BU.Tk):
                     color3=s_,
                     extras=b_,
                 )
+            C._start_file_index_refresh()
 
     def _load_by_ean(A):
         E_ = NO_EAN_LABEL
@@ -6421,6 +6775,9 @@ class App(BU.Tk):
         app_secret_mask = "*" * max(8, Q(app_secret_value))
         app_secret_var = F.StringVar(value=app_secret_mask)
         base_dir_var = F.StringVar(value=base_dir_value)
+        local_file_index_var = F.BooleanVar(
+            value=bool(D.get(LOCAL_FILE_INDEX_KEY, J))
+        )
         system_unlocked = Ay
 
         def _choose_base_dir():
@@ -6482,11 +6839,33 @@ class App(BU.Tk):
             wraplength=520,
             justify="left",
         ).grid(row=3, column=0, columnspan=3, padx=5, pady=(6, 4), sticky="w")
+        file_index_toggle = C.Checkbutton(
+            system_tab,
+            text=LANG.get(
+                "file_index_enable_label",
+                "Używaj lokalnego indeksu katalogów do przyspieszenia podpowiedzi i odczytu plików.",
+            ),
+            variable=local_file_index_var,
+        )
+        file_index_toggle.grid(row=4, column=0, columnspan=3, padx=5, pady=(4, 0), sticky="w")
+        file_index_btn = C.Button(
+            system_tab,
+            text=LANG.get("file_index_rebuild_action", "Odbuduj indeks plików"),
+            command=A._start_file_index_refresh,
+        )
+        file_index_btn.grid(row=5, column=0, padx=5, pady=(6, 0), sticky="w")
+        _slabel(
+            system_tab,
+            textvariable=A._file_index_status_var,
+            style="SettingsHint.TLabel",
+            wraplength=420,
+            justify="left",
+        ).grid(row=5, column=1, columnspan=2, padx=5, pady=(6, 0), sticky="w")
         system_admin_btn = C.Button(
             system_tab, text=Ag_, command=_unlock_system_settings
         )
         system_admin_btn.grid(
-            row=4, column=0, columnspan=3, padx=5, pady=(4, 0), sticky="e"
+            row=6, column=0, columnspan=3, padx=5, pady=(6, 0), sticky="e"
         )
         system_tab.columnconfigure(1, weight=1)
         _set_system_state(Ay)
@@ -7837,6 +8216,7 @@ class App(BU.Tk):
             )
             LANG_PREF = new_lang_pref
             localization.LANG_PREF = LANG_PREF
+            D[LOCAL_FILE_INDEX_KEY] = bool(local_file_index_var.get())
             D[TRANSLATION_SETTINGS_KEY] = {
                 TRANSLATION_PROVIDER_KEY: translation_provider_map.get(
                     translation_provider_var.get(), TRANSLATION_PROVIDER_DEFAULT
@@ -7914,6 +8294,7 @@ class App(BU.Tk):
                 updated_config = config.load_config()
                 config.CONFIG.clear()
                 config.CONFIG.update(updated_config)
+            A._set_local_file_index_enabled(D.get(LOCAL_FILE_INDEX_KEY, J))
             if restart_needed and not language_changed:
                 O.showinfo(SETTINGS_LABEL, APP_SETTINGS_RESTART_MSG)
             A.sql_column_map = updated_sql_map

@@ -25,6 +25,7 @@ from .common import (
     SQL_UPDATE_TEMPLATE,
     SQL_COLUMN_MAP_KEY,
     SQL_AVAILABLE_COLUMNS_KEY,
+    LOCAL_FILE_INDEX_KEY,
     AK,
     SLOT_DEFS_KEY,
     TRANSLATION_API_KEY,
@@ -136,6 +137,7 @@ def load_config(interactive=I):
                 SLOT_DEFS_KEY: config_copy.get(SLOT_DEFS_KEY),
                 SQL_COLUMN_MAP_KEY: config_copy.get(SQL_COLUMN_MAP_KEY),
                 SQL_AVAILABLE_COLUMNS_KEY: config_copy.get(SQL_AVAILABLE_COLUMNS_KEY),
+                LOCAL_FILE_INDEX_KEY: config_copy.get(LOCAL_FILE_INDEX_KEY, True),
                 TRANSLATION_SETTINGS_KEY: {
                     TRANSLATION_PROVIDER_KEY: translation_defaults.get(
                         TRANSLATION_PROVIDER_KEY, TRANSLATION_PROVIDER_DEFAULT
@@ -181,6 +183,9 @@ def load_config(interactive=I):
         config_copy[w] = raw_config.get(w, config_copy[w])
         config_copy[ft] = raw_config.get(ft, config_copy[ft])
         config_copy[u] = raw_config.get(u, config_copy[u])
+        config_copy[LOCAL_FILE_INDEX_KEY] = raw_config.get(
+            LOCAL_FILE_INDEX_KEY, config_copy.get(LOCAL_FILE_INDEX_KEY, True)
+        )
         raw_slot_defs = raw_config.get(SLOT_DEFS_KEY, config_copy.get(SLOT_DEFS_KEY))
         slot_defs, _ = normalize_slot_definitions(raw_slot_defs)
         config_copy[SLOT_DEFS_KEY] = slot_defs
@@ -314,6 +319,7 @@ def save_config(config, raw_config=None, preserve_secrets=None):
         SQL_AVAILABLE_COLUMNS_KEY: _normalize_sql_columns(
             config.get(SQL_AVAILABLE_COLUMNS_KEY, [])
         ),
+        LOCAL_FILE_INDEX_KEY: bool(config.get(LOCAL_FILE_INDEX_KEY, True)),
         TRANSLATION_SETTINGS_KEY: {
             TRANSLATION_PROVIDER_KEY: translation_settings.get(
                 TRANSLATION_PROVIDER_KEY, TRANSLATION_PROVIDER_DEFAULT
