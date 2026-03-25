@@ -358,6 +358,9 @@ SQL_TEST_LABEL = LANG.get("sql_test_label", "Test połączenia SQL:")
 SQL_MAPPING_LABEL = LANG.get("sql_mapping_label", "Przypisanie kolumn SQL")
 SQL_DETECT_COLUMNS_LABEL = LANG.get("sql_detect_columns", "Wykryj kolumny")
 SQL_COLUMNS_LABEL = LANG.get("sql_columns_label", "Dostępne kolumny")
+SQL_COLUMNS_QUERY_LABEL = LANG.get(
+    "sql_columns_query_label", "Zapytanie wykrywania kolumn:"
+)
 SQL_COLUMNS_DETECTED_MSG = LANG.get(
     "sql_columns_detected_msg",
     "Wykryto {count} kolumn w tabeli {table}.",
@@ -369,6 +372,10 @@ SQL_COLUMNS_DETECT_FAILED_MSG = LANG.get(
 SQL_COLUMNS_PARSE_FAILED_MSG = LANG.get(
     "sql_columns_parse_failed_msg",
     "Nie udało się odczytać nazwy tabeli z zapytania SQL.",
+)
+SQL_COLUMNS_QUERY_UNAVAILABLE_MSG = LANG.get(
+    "sql_columns_query_unavailable",
+    "Podgląd zapytania pojawi się po wpisaniu poprawnego zapytania UPDATE.",
 )
 SQL_MAPPING_FIELD_LABEL = LANG.get("sql_mapping_field_label", "Pole")
 SQL_MAPPING_COLUMN_LABEL = LANG.get("sql_mapping_column_label", "Kolumna SQL")

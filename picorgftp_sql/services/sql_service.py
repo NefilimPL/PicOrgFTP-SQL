@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from ..common import (
     AI,
@@ -28,6 +29,24 @@ from ..workflow_utils import (
 )
 
 SAFE_IDENTIFIER_RE = re.compile(r"^[0-9A-Za-z_\.]+$")
+UPDATE_TABLE_RE = re.compile(
+    r"update\s+(?:top\s+\(?\d+\)?\s+)?"
+    r"(?:(?:low_priority|high_priority|ignore)\s+)*"
+    r"([^\s]+)\s+set",
+    flags=re.I | re.S,
+)
+
+
+@dataclass(frozen=True)
+class ColumnDetectionQuery:
+    """Description of the metadata query used to list SQL columns."""
+
+    table_ref: str
+    table_name: str
+    schema: str
+    query: str
+    params: tuple[str, ...]
+    preview: str
 
 
 def _safe_identifier(value):
@@ -35,6 +54,133 @@ def _safe_identifier(value):
     if not text or not SAFE_IDENTIFIER_RE.fullmatch(text):
         return ""
     return text
+
+
+def _quote_sql_literal(value: str) -> str:
+    return "'" + str(value or "").replace("'", "''") + "'"
+
+
+def extract_update_table_ref(template):
+    """Return the raw table reference from an UPDATE statement."""
+
+    if not template:
+        return ""
+    match = UPDATE_TABLE_RE.search(str(template))
+    if not match:
+        return ""
+    return str(match.group(1)).strip().rstrip(";")
+
+
+def normalize_table_ref(table_ref):
+    """Return a sanitized dotted table reference."""
+
+    if not table_ref:
+        return ""
+    cleaned = (
+        str(table_ref)
+        .replace("[", "")
+        .replace("]", "")
+        .replace("`", "")
+        .replace('"', "")
+        .strip()
+    )
+    parts = []
+    for raw_part in cleaned.split("."):
+        part = str(raw_part or "").strip()
+        if not part:
+            continue
+        safe_part = _safe_identifier(part)
+        if not safe_part:
+            return ""
+        parts.append(safe_part)
+    if not parts:
+        return ""
+    return ".".join(parts)
+
+
+def split_table_ref(table_ref):
+    """Split a table reference into table name and optional schema."""
+
+    normalized = normalize_table_ref(table_ref)
+    if not normalized:
+        return "", ""
+    parts = [part for part in normalized.split(".") if part]
+    if not parts:
+        return "", ""
+    table_name = parts[-1]
+    schema = parts[-2] if len(parts) > 1 else ""
+    return table_name, schema
+
+
+def build_column_detection_query(template, db_type):
+    """Build the query used to inspect available columns for the UPDATE target."""
+
+    table_ref = normalize_table_ref(extract_update_table_ref(template))
+    if not table_ref:
+        return None
+    table_name, schema = split_table_ref(table_ref)
+    if not table_name:
+        return None
+    if str(db_type or K).lower() == K:
+        if schema:
+            query = (
+                "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s "
+                "ORDER BY ORDINAL_POSITION"
+            )
+            params = (schema, table_name)
+            preview = (
+                "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                f"WHERE TABLE_SCHEMA = {_quote_sql_literal(schema)} "
+                f"AND TABLE_NAME = {_quote_sql_literal(table_name)} "
+                "ORDER BY ORDINAL_POSITION"
+            )
+        else:
+            query = (
+                "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s "
+                "ORDER BY ORDINAL_POSITION"
+            )
+            params = (table_name,)
+            preview = (
+                "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() "
+                f"AND TABLE_NAME = {_quote_sql_literal(table_name)} "
+                "ORDER BY ORDINAL_POSITION"
+            )
+    else:
+        if schema:
+            query = (
+                "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? "
+                "ORDER BY ORDINAL_POSITION"
+            )
+            params = (schema, table_name)
+            preview = (
+                "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                f"WHERE TABLE_SCHEMA = {_quote_sql_literal(schema)} "
+                f"AND TABLE_NAME = {_quote_sql_literal(table_name)} "
+                "ORDER BY ORDINAL_POSITION"
+            )
+        else:
+            query = (
+                "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_NAME = ? ORDER BY ORDINAL_POSITION"
+            )
+            params = (table_name,)
+            preview = (
+                "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                f"WHERE TABLE_NAME = {_quote_sql_literal(table_name)} "
+                "ORDER BY ORDINAL_POSITION"
+            )
+    return ColumnDetectionQuery(
+        table_ref=table_ref,
+        table_name=table_name,
+        schema=schema,
+        query=query,
+        params=params,
+        preview=preview,
+    )
 
 
 def should_check_presence(config_dict):
@@ -60,10 +206,7 @@ def extract_presence_context(config_dict, ean):
     if not ean:
         return None
     template = config_dict.get(w, SQL_UPDATE_TEMPLATE) or SQL_UPDATE_TEMPLATE
-    update_match = re.search(r"(?is)update\s+([^\s]+)\s+set", template)
-    if not update_match:
-        return None
-    table = _safe_identifier(update_match.group(1).strip().rstrip(";"))
+    table = normalize_table_ref(extract_update_table_ref(template))
     if not table:
         return None
     where_match = re.search(r"(?is)\bwhere\b(.+)", template)

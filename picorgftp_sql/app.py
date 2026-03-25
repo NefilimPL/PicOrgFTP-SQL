@@ -51,6 +51,7 @@ from .services.ftp_service import (
     list_remote_filenames as svc_list_remote_filenames,
 )
 from .services.sql_service import (
+    build_column_detection_query as svc_build_column_detection_query,
     extract_presence_context as svc_extract_presence_context,
     query_presence_details as svc_query_presence_details,
     query_presence_map as svc_query_presence_map,
@@ -7936,6 +7937,7 @@ class App(BU.Tk):
             else:
                 W.grid_remove()
                 U.grid()
+            _refresh_detect_query_preview()
 
         A1.bind(A2, Az)
         _slabel(S, text=SQL_UPDATE_LABEL).grid(
@@ -7950,12 +7952,17 @@ class App(BU.Tk):
         h_ = F.Text(S, width=80, height=3)
         h_.insert(A_, D.get(w, SQL_UPDATE_TEMPLATE))
         h_.grid(row=3, column=1, padx=5, pady=2, sticky=T)
+        _slabel(S, text=SQL_COLUMNS_QUERY_LABEL).grid(
+            row=4, column=0, sticky="ne", padx=5, pady=2
+        )
+        detect_query_preview = F.Text(S, width=80, height=4, wrap="word", state=V)
+        detect_query_preview.grid(row=4, column=1, padx=5, pady=2, sticky=T)
         _slabel(S, text=SQL_TEST_LABEL).grid(
-            row=4, column=0, sticky=R, padx=5, pady=5
+            row=5, column=0, sticky=R, padx=5, pady=5
         )
         A3_ = F.StringVar(value=B)
-        MISSING_FIELDS_MSG = C.Entry(S, textvariable=A3_, width=50, state=d_)
-        MISSING_FIELDS_MSG.grid(row=4, column=1, padx=5, pady=5, sticky=T)
+        sql_test_entry = C.Entry(S, textvariable=A3_, width=50, state=d_)
+        sql_test_entry.grid(row=5, column=1, padx=5, pady=5, sticky=T)
 
         def INCOMPLETE_DATA_MSG():
             try:
@@ -7980,8 +7987,8 @@ class App(BU.Tk):
             except E as C_:
                 A3_.set(SQL_TEST_ERROR_MSG.format(error=C_))
 
-        EDIT_LISTS_LABEL = C.Button(S, text=AA_, command=INCOMPLETE_DATA_MSG)
-        EDIT_LISTS_LABEL.grid(row=4, column=1, padx=5, pady=5, sticky=R)
+        sql_test_btn = C.Button(S, text=AA_, command=INCOMPLETE_DATA_MSG)
+        sql_test_btn.grid(row=5, column=1, padx=5, pady=5, sticky=R)
 
         available_columns = list(D.get(SQL_AVAILABLE_COLUMNS_KEY, []))
         sql_mapping_controls = []
@@ -8063,48 +8070,34 @@ class App(BU.Tk):
                     )
                 )
 
-        def _parse_table_name(template):
-            if not template:
-                return B
-            pattern = (
-                r"update\s+(?:top\s+\(?\d+\)?\s+)?"
-                r"(?:(?:low_priority|high_priority|ignore)\s+)*"
-                r"([^\s]+)\s+set"
-            )
-            match = re.search(pattern, template, flags=re.I | re.S)
-            if not match:
-                return B
-            return match.group(1).strip().rstrip(";")
+        def _set_detect_query_preview(value):
+            preview_text = G(value or B).strip() or SQL_COLUMNS_QUERY_UNAVAILABLE_MSG
+            detect_query_preview.configure(state=X)
+            detect_query_preview.delete(A_, "end")
+            detect_query_preview.insert(A_, preview_text)
+            detect_query_preview.configure(state=V)
 
-        def _split_table_ref(table_ref):
-            if not table_ref:
-                return B, B
-            cleaned = (
-                table_ref.replace("[", B)
-                .replace("]", B)
-                .replace("`", B)
-                .replace('"', B)
+        def _refresh_detect_query_preview(*_args):
+            db_type = K if db_type_var.get() == f_ else "mssql"
+            query_info = svc_build_column_detection_query(
+                h_.get(A_, "end"),
+                db_type,
             )
-            parts = [p for p in cleaned.split(".") if p]
-            if not parts:
-                return B, B
-            table_name = parts[-1]
-            schema = parts[-2] if len(parts) > 1 else B
-            return table_name, schema
+            if query_info is I:
+                _set_detect_query_preview(SQL_COLUMNS_QUERY_UNAVAILABLE_MSG)
+            else:
+                _set_detect_query_preview(query_info.preview)
 
         def _detect_sql_columns():
             template = h_.get(A_, "end").strip()
-            table_ref = _parse_table_name(template)
-            if not table_ref:
+            db_type = K if db_type_var.get() == f_ else "mssql"
+            query_info = svc_build_column_detection_query(template, db_type)
+            if query_info is I:
                 detect_status_var.set(SQL_COLUMNS_PARSE_FAILED_MSG)
                 log_error_loc("sql_columns_parse_failed")
                 return
-            table_name, schema = _split_table_ref(table_ref)
-            if not table_name:
-                detect_status_var.set(SQL_COLUMNS_PARSE_FAILED_MSG)
-                log_error_loc("sql_columns_parse_failed")
-                return
-            db_is_mysql = db_type_var.get() == f_
+            table_ref = query_info.table_ref
+            db_is_mysql = db_type == K
             conn = I
             cur = I
             try:
@@ -8117,20 +8110,6 @@ class App(BU.Tk):
                         connection_timeout=5,
                         use_pure=True,
                     )
-                    if schema:
-                        query = (
-                            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
-                            "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s "
-                            "ORDER BY ORDINAL_POSITION"
-                        )
-                        params = (schema, table_name)
-                    else:
-                        query = (
-                            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
-                            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s "
-                            "ORDER BY ORDINAL_POSITION"
-                        )
-                        params = (table_name,)
                 else:
                     last_exc = I
                     extra = "Encrypt=yes;TrustServerCertificate=yes;Connection Timeout=5"
@@ -8147,21 +8126,8 @@ class App(BU.Tk):
                             last_exc = exc
                     if conn is I:
                         raise E(last_exc or "Connection failed")
-                    if schema:
-                        query = (
-                            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
-                            "WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? "
-                            "ORDER BY ORDINAL_POSITION"
-                        )
-                        params = (schema, table_name)
-                    else:
-                        query = (
-                            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
-                            "WHERE TABLE_NAME = ? ORDER BY ORDINAL_POSITION"
-                        )
-                        params = (table_name,)
                 cur = conn.cursor()
-                cur.execute(query, params)
+                cur.execute(query_info.query, query_info.params)
                 columns = [G(row[0]) for row in cur.fetchall() if row and row[0]]
             except E as exc:
                 detect_status_var.set(
@@ -8197,27 +8163,38 @@ class App(BU.Tk):
                 count=len(columns),
             )
 
-        detect_row = C.Frame(S, style="Settings.TFrame")
-        detect_row.grid(row=6, column=0, columnspan=2, sticky="w", padx=5, pady=(10, 5))
-        detect_btn = C.Button(
-            detect_row, text=SQL_DETECT_COLUMNS_LABEL, command=_detect_sql_columns
-        )
-        detect_btn.grid(row=0, column=0, padx=(0, 6))
-        _slabel(detect_row, textvariable=detect_status_var).grid(
-            row=0, column=1, sticky="w"
-        )
-        sql_mapping_controls[:] = [detect_btn]
+        _refresh_detect_query_preview()
+        h_.bind("<KeyRelease>", _refresh_detect_query_preview)
+        h_.bind("<FocusOut>", _refresh_detect_query_preview)
 
         fields_tab.columnconfigure(0, weight=1)
         fields_tab.columnconfigure(1, weight=2)
-        fields_tab.rowconfigure(1, weight=1)
+        fields_tab.rowconfigure(2, weight=1)
         _slabel(
             fields_tab, text=FIELDS_MANAGE_LABEL, style="SettingsHeader.TLabel"
         ).grid(
             row=0, column=0, sticky="w", padx=5, pady=5
         )
+        detect_row = C.Frame(fields_tab, style="Settings.TFrame")
+        detect_row.grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=5,
+            pady=(0, 5),
+        )
+        detect_row.columnconfigure(1, weight=1)
+        detect_btn = C.Button(
+            detect_row, text=SQL_DETECT_COLUMNS_LABEL, command=_detect_sql_columns
+        )
+        detect_btn.grid(row=0, column=0, padx=(0, 6), sticky="w")
+        _slabel(detect_row, textvariable=detect_status_var).grid(
+            row=0, column=1, sticky="w"
+        )
+        sql_mapping_controls[:] = [detect_btn]
         columns_panel = C.Frame(fields_tab, style="Settings.TFrame")
-        columns_panel.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        columns_panel.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
         columns_panel.columnconfigure(0, weight=1)
         columns_panel.rowconfigure(1, weight=1)
         _slabel(columns_panel, text=SQL_COLUMNS_LABEL).grid(
@@ -8243,7 +8220,7 @@ class App(BU.Tk):
         if available_columns:
             _set_available_columns(available_columns)
         fields_grid = C.Frame(fields_tab, style="Settings.TFrame")
-        fields_grid.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
+        fields_grid.grid(row=2, column=1, sticky="nsew", padx=5, pady=5)
 
         def _configure_tile_text(widget):
             try:
@@ -8807,7 +8784,7 @@ class App(BU.Tk):
 
         AI_.configure(command=LIGHT_GREEN)
         BC_ = C.Button(S, text=Ag_, command=NO_DATA_MSG)
-        BC_.grid(row=5, column=1, sticky=T, padx=5, pady=5)
+        BC_.grid(row=6, column=1, sticky=T, padx=5, pady=5)
         fields_admin_btn = C.Button(fields_tab, text=Ag_, command=NO_DATA_MSG)
         fields_admin_btn.grid(row=0, column=1, sticky="e", padx=5, pady=5)
         A4 = C.Frame(a_, style="Settings.TFrame")
