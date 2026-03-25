@@ -26,6 +26,7 @@ from .common import (
     SQL_COLUMN_MAP_KEY,
     SQL_AVAILABLE_COLUMNS_KEY,
     LOCAL_FILE_INDEX_KEY,
+    COLOR_FIELD_LABELS_KEY,
     AK,
     SLOT_DEFS_KEY,
     TRANSLATION_API_KEY,
@@ -90,6 +91,20 @@ def _normalize_sql_columns(raw_columns):
     return cleaned
 
 
+def _normalize_color_field_labels(raw_labels):
+    if not isinstance(raw_labels, dict):
+        return {}
+    cleaned = {}
+    for field_key in ("color1", "color2", "color3"):
+        value = raw_labels.get(field_key, B)
+        if not Aq(value, str):
+            continue
+        text = str(value).strip().rstrip(":").rstrip("*").strip()
+        if text:
+            cleaned[field_key] = text
+    return cleaned
+
+
 def load_config(interactive=I):
     """Return a configuration dictionary, creating defaults when necessary."""
 
@@ -138,6 +153,7 @@ def load_config(interactive=I):
                 SQL_COLUMN_MAP_KEY: config_copy.get(SQL_COLUMN_MAP_KEY),
                 SQL_AVAILABLE_COLUMNS_KEY: config_copy.get(SQL_AVAILABLE_COLUMNS_KEY),
                 LOCAL_FILE_INDEX_KEY: config_copy.get(LOCAL_FILE_INDEX_KEY, True),
+                COLOR_FIELD_LABELS_KEY: config_copy.get(COLOR_FIELD_LABELS_KEY, {}),
                 TRANSLATION_SETTINGS_KEY: {
                     TRANSLATION_PROVIDER_KEY: translation_defaults.get(
                         TRANSLATION_PROVIDER_KEY, TRANSLATION_PROVIDER_DEFAULT
@@ -185,6 +201,12 @@ def load_config(interactive=I):
         config_copy[u] = raw_config.get(u, config_copy[u])
         config_copy[LOCAL_FILE_INDEX_KEY] = raw_config.get(
             LOCAL_FILE_INDEX_KEY, config_copy.get(LOCAL_FILE_INDEX_KEY, True)
+        )
+        config_copy[COLOR_FIELD_LABELS_KEY] = _normalize_color_field_labels(
+            raw_config.get(
+                COLOR_FIELD_LABELS_KEY,
+                config_copy.get(COLOR_FIELD_LABELS_KEY, {}),
+            )
         )
         raw_slot_defs = raw_config.get(SLOT_DEFS_KEY, config_copy.get(SLOT_DEFS_KEY))
         slot_defs, _ = normalize_slot_definitions(raw_slot_defs)
@@ -320,6 +342,9 @@ def save_config(config, raw_config=None, preserve_secrets=None):
             config.get(SQL_AVAILABLE_COLUMNS_KEY, [])
         ),
         LOCAL_FILE_INDEX_KEY: bool(config.get(LOCAL_FILE_INDEX_KEY, True)),
+        COLOR_FIELD_LABELS_KEY: _normalize_color_field_labels(
+            config.get(COLOR_FIELD_LABELS_KEY, {})
+        ),
         TRANSLATION_SETTINGS_KEY: {
             TRANSLATION_PROVIDER_KEY: translation_settings.get(
                 TRANSLATION_PROVIDER_KEY, TRANSLATION_PROVIDER_DEFAULT

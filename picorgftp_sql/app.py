@@ -1320,6 +1320,60 @@ class App(BU.Tk):
             "extra": A._normalize_entry_part(A.var_extra.get(), extra=J),
         }
 
+    def _default_color_field_name(A, field_key):
+        """Return the localized fallback name for a color field."""
+
+        label_map = {
+            "color1": COLOR1_LABEL,
+            "color2": COLOR2_LABEL,
+            "color3": COLOR3_LABEL,
+        }
+        fallback_map = {
+            "color1": "Kolor 1",
+            "color2": "Kolor 2",
+            "color3": "Kolor 3",
+        }
+        label_text = G(label_map.get(field_key) or B).strip()
+        label_text = label_text.rstrip(":").rstrip("*").strip()
+        return label_text or fallback_map.get(field_key, "Kolor")
+
+    def _normalize_color_field_label_overrides(A, raw_labels):
+        """Normalize custom UI labels for color fields."""
+
+        if not Aq(raw_labels, dict):
+            return {}
+        cleaned = {}
+        for field_key in ("color1", "color2", "color3"):
+            value = raw_labels.get(field_key, B)
+            if not Aq(value, str):
+                continue
+            text = G(value).strip().rstrip(":").rstrip("*").strip()
+            if text:
+                cleaned[field_key] = text
+        return cleaned
+
+    def _get_color_field_label_text(A, field_key):
+        """Return the current UI label text for a color field."""
+
+        labels = A._normalize_color_field_label_overrides(
+            D.get(COLOR_FIELD_LABELS_KEY, {})
+        )
+        base_label = labels.get(field_key) or A._default_color_field_name(field_key)
+        return f"{base_label}*:" if field_key == "color1" else f"{base_label}:"
+
+    def _refresh_color_field_labels(A):
+        """Apply current custom color field labels to the form."""
+
+        for field_key in ("color1", "color2", "color3"):
+            meta = Aj(A, "_form_field_meta", {}).get(field_key, {})
+            label = meta.get("label")
+            if not label:
+                continue
+            try:
+                label.configure(text=A._get_color_field_label_text(field_key))
+            except E:
+                pass
+
     def _get_form_field_raw_value(A, field_key):
         """Return the current user-visible value for a tracked form field."""
 
@@ -1593,10 +1647,37 @@ class App(BU.Tk):
         )
         return h
 
+    def _should_skip_ean_focus_out_warning(A):
+        """Return True when leaving EAN is part of pressing the search button."""
+
+        search_button = Aj(A, "btn_search_entry", I)
+        if not search_button:
+            return h
+        try:
+            if A.focus_get() == search_button:
+                return J
+        except E:
+            pass
+        try:
+            pointer_x, pointer_y = A.winfo_pointerxy()
+            if A.winfo_containing(pointer_x, pointer_y) == search_button:
+                return J
+        except E:
+            pass
+        return h
+
     def _on_ean_focus_out(A, _event=I):
         """Run a quick duplicate-EAN check after leaving the field."""
 
-        A._warn_about_ean_conflict(force_message=h, quick_check=J)
+        def _deferred_check():
+            if A._should_skip_ean_focus_out_warning():
+                return
+            A._warn_about_ean_conflict(force_message=h, quick_check=J)
+
+        try:
+            A.after_idle(_deferred_check)
+        except E:
+            _deferred_check()
 
     def _describe_entry_record(A, record):
         """Build a concise label used in record selection prompts."""
@@ -3361,7 +3442,7 @@ class App(BU.Tk):
             form_card,
             row=2,
             column=0,
-            label_text=COLOR1_LABEL,
+            label_text=A._get_color_field_label_text("color1"),
             field_key="color1",
             textvariable=A.var_color1,
             values=A.lists[Y],
@@ -3379,7 +3460,7 @@ class App(BU.Tk):
             form_card,
             row=2,
             column=1,
-            label_text=COLOR2_LABEL,
+            label_text=A._get_color_field_label_text("color2"),
             field_key="color2",
             textvariable=A.var_color2,
             values=A.lists[Y],
@@ -3397,7 +3478,7 @@ class App(BU.Tk):
             form_card,
             row=2,
             column=2,
-            label_text=COLOR3_LABEL,
+            label_text=A._get_color_field_label_text("color3"),
             field_key="color3",
             textvariable=A.var_color3,
             values=A.lists[Y],
@@ -7381,6 +7462,18 @@ class App(BU.Tk):
         local_file_index_var = F.BooleanVar(
             value=bool(D.get(LOCAL_FILE_INDEX_KEY, J))
         )
+        color_field_labels = A._normalize_color_field_label_overrides(
+            D.get(COLOR_FIELD_LABELS_KEY, {})
+        )
+        color1_label_var = F.StringVar(
+            value=color_field_labels.get("color1") or A._default_color_field_name("color1")
+        )
+        color2_label_var = F.StringVar(
+            value=color_field_labels.get("color2") or A._default_color_field_name("color2")
+        )
+        color3_label_var = F.StringVar(
+            value=color_field_labels.get("color3") or A._default_color_field_name("color3")
+        )
         system_unlocked = Ay
 
         def _choose_base_dir():
@@ -7464,11 +7557,50 @@ class App(BU.Tk):
             wraplength=420,
             justify="left",
         ).grid(row=5, column=1, columnspan=2, padx=5, pady=(6, 0), sticky="w")
+        _slabel(
+            system_tab,
+            text=LANG.get(
+                "color_field_labels_section",
+                "Własne nazwy pól kolorów",
+            ),
+            style="SettingsHeader.TLabel",
+        ).grid(row=6, column=0, columnspan=3, padx=5, pady=(10, 4), sticky="w")
+        _slabel(
+            system_tab,
+            text=LANG.get("color1_custom_label", "Pole 1:"),
+        ).grid(row=7, column=0, padx=5, pady=4, sticky=R)
+        C.Entry(system_tab, textvariable=color1_label_var, width=30).grid(
+            row=7, column=1, columnspan=2, padx=5, pady=4, sticky="ew"
+        )
+        _slabel(
+            system_tab,
+            text=LANG.get("color2_custom_label", "Pole 2:"),
+        ).grid(row=8, column=0, padx=5, pady=4, sticky=R)
+        C.Entry(system_tab, textvariable=color2_label_var, width=30).grid(
+            row=8, column=1, columnspan=2, padx=5, pady=4, sticky="ew"
+        )
+        _slabel(
+            system_tab,
+            text=LANG.get("color3_custom_label", "Pole 3:"),
+        ).grid(row=9, column=0, padx=5, pady=4, sticky=R)
+        C.Entry(system_tab, textvariable=color3_label_var, width=30).grid(
+            row=9, column=1, columnspan=2, padx=5, pady=4, sticky="ew"
+        )
+        _slabel(
+            system_tab,
+            text=LANG.get(
+                "color_field_labels_hint",
+                "Zmienia tylko nazwy pól w formularzu. Nie zmienia nazw kolumn w Excelu ani SQL.",
+            ),
+            style="SettingsHint.TLabel",
+            wraplength=520,
+            justify="left",
+        ).grid(row=10, column=0, columnspan=3, padx=5, pady=(2, 0), sticky="w")
         system_admin_btn = C.Button(
             system_tab, text=Ag_, command=_unlock_system_settings
         )
         system_admin_btn.grid(
-            row=6, column=0, columnspan=3, padx=5, pady=(6, 0), sticky="e"
+            row=11, column=0, columnspan=3, padx=5, pady=(6, 0), sticky="e"
         )
         system_tab.columnconfigure(1, weight=1)
         _set_system_state(Ay)
@@ -8820,6 +8952,13 @@ class App(BU.Tk):
             LANG_PREF = new_lang_pref
             localization.LANG_PREF = LANG_PREF
             D[LOCAL_FILE_INDEX_KEY] = bool(local_file_index_var.get())
+            D[COLOR_FIELD_LABELS_KEY] = A._normalize_color_field_label_overrides(
+                {
+                    "color1": color1_label_var.get(),
+                    "color2": color2_label_var.get(),
+                    "color3": color3_label_var.get(),
+                }
+            )
             D[TRANSLATION_SETTINGS_KEY] = {
                 TRANSLATION_PROVIDER_KEY: translation_provider_map.get(
                     translation_provider_var.get(), TRANSLATION_PROVIDER_DEFAULT
@@ -8898,6 +9037,7 @@ class App(BU.Tk):
                 config.CONFIG.clear()
                 config.CONFIG.update(updated_config)
             A._set_local_file_index_enabled(D.get(LOCAL_FILE_INDEX_KEY, J))
+            A._refresh_color_field_labels()
             if restart_needed and not language_changed:
                 O.showinfo(SETTINGS_LABEL, APP_SETTINGS_RESTART_MSG)
             A.sql_column_map = updated_sql_map
