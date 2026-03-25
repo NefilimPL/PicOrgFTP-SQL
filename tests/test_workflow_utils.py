@@ -12,6 +12,7 @@ from picorgftp_sql.workflow_utils import (
     parse_slot_filename,
     select_remote_files_for_ean,
     sql_row_to_presence_map,
+    sql_row_to_value_map,
 )
 
 
@@ -116,6 +117,21 @@ class WorkflowUtilsTests(unittest.TestCase):
                 "02": False,
                 "03": True,
                 "04": False,
+            },
+        )
+
+    def test_sql_row_to_value_map_returns_trimmed_raw_values(self) -> None:
+        values = sql_row_to_value_map(
+            ["01", "02", "03", "04"],
+            (" https://img/1.jpg ", "   ", memoryview(b"abc"), None),
+        )
+        self.assertEqual(
+            values,
+            {
+                "01": "https://img/1.jpg",
+                "02": "",
+                "03": "abc",
+                "04": "",
             },
         )
 

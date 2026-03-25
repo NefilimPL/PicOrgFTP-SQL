@@ -1,5 +1,7 @@
 """Configuration file loading and persistence."""
 
+import tempfile
+
 from .common import (
     A,
     A6,
@@ -14,6 +16,7 @@ from .common import (
     DEFAULT_CONFIG,
     E,
     H,
+    I,
     K,
     M,
     N,
@@ -22,6 +25,8 @@ from .common import (
     SQL_UPDATE_TEMPLATE,
     SQL_COLUMN_MAP_KEY,
     SQL_AVAILABLE_COLUMNS_KEY,
+    LOCAL_FILE_INDEX_KEY,
+    COLOR_FIELD_LABELS_KEY,
     AK,
     SLOT_DEFS_KEY,
     TRANSLATION_API_KEY,
@@ -39,13 +44,37 @@ from .common import (
     u,
     v,
     w,
+    require_runtime_modules,
 )
 from .encryption import decrypt, encrypt
-from .settings import AC, AM, BASE_DIR_OVERRIDE, HEADLESS_ENV
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
+from . import settings
 
-CONFIG_PATH = A.path.join(AC, "config.json")
+CONFIG_PATH = A.path.join(settings.AC, "config.json")
 CONFIG_SAVE_FAILED_MSG = "Nie udało się zapisać pliku konfiguracyjnego:\n{error}"
+CONFIG = Ar.loads(Ar.dumps(DEFAULT_CONFIG))
+
+
+def _get_config_path():
+    return A.path.join(settings.AC, "config.json")
+
+
+def _write_json_atomic(path, payload):
+    """Persist JSON using a temp file to avoid partial writes."""
+
+    directory = A.path.dirname(path) or "."
+    A.makedirs(directory, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix="config_", suffix=".json.tmp", dir=directory)
+    try:
+        with A.fdopen(fd, "w", encoding=k) as handle:
+            Ar.dump(payload, handle, indent=4)
+        A.replace(temp_path, path)
+    finally:
+        if A.path.exists(temp_path):
+            try:
+                A.remove(temp_path)
+            except OSError:
+                pass
 
 
 def _normalize_sql_columns(raw_columns):
@@ -62,16 +91,33 @@ def _normalize_sql_columns(raw_columns):
     return cleaned
 
 
-def load_config():
+def _normalize_color_field_labels(raw_labels):
+    if not isinstance(raw_labels, dict):
+        return {}
+    cleaned = {}
+    for field_key in ("color1", "color2", "color3"):
+        value = raw_labels.get(field_key, B)
+        if not Aq(value, str):
+            continue
+        text = str(value).strip().rstrip(":").rstrip("*").strip()
+        if text:
+            cleaned[field_key] = text
+    return cleaned
+
+
+def load_config(interactive=I):
     """Return a configuration dictionary, creating defaults when necessary."""
 
     # Work on a copy so that callers modifying the result do not mutate
     # DEFAULT_CONFIG, which acts as a template for new installations.
     global CONFIG_PATH
+    if interactive is I:
+        interactive = not settings.HEADLESS_ENV
     config_copy = Ar.loads(Ar.dumps(DEFAULT_CONFIG))
-    config_path = CONFIG_PATH
+    config_path = _get_config_path()
     if not A.path.exists(config_path):
-        if not BASE_DIR_OVERRIDE and not HEADLESS_ENV:
+        if interactive and not settings.has_saved_base_dir_override():
+            require_runtime_modules("tkinter")
             chosen_dir = BT.askdirectory(title=CONFIG_DIR_PROMPT_TITLE)
             if chosen_dir:
                 config_path = A.path.join(chosen_dir, "config.json")
@@ -106,6 +152,8 @@ def load_config():
                 SLOT_DEFS_KEY: config_copy.get(SLOT_DEFS_KEY),
                 SQL_COLUMN_MAP_KEY: config_copy.get(SQL_COLUMN_MAP_KEY),
                 SQL_AVAILABLE_COLUMNS_KEY: config_copy.get(SQL_AVAILABLE_COLUMNS_KEY),
+                LOCAL_FILE_INDEX_KEY: config_copy.get(LOCAL_FILE_INDEX_KEY, True),
+                COLOR_FIELD_LABELS_KEY: config_copy.get(COLOR_FIELD_LABELS_KEY, {}),
                 TRANSLATION_SETTINGS_KEY: {
                     TRANSLATION_PROVIDER_KEY: translation_defaults.get(
                         TRANSLATION_PROVIDER_KEY, TRANSLATION_PROVIDER_DEFAULT
@@ -120,12 +168,10 @@ def load_config():
             }
             try:
                 # Ensure the configuration directory exists before writing.
-                A.makedirs(A.path.dirname(config_path), exist_ok=True)
-                with open(config_path, "w", encoding=k) as handle:
-                    Ar.dump(initial, handle, indent=4)
+                _write_json_atomic(config_path, initial)
             except E as exc:
                 try:
-                    with open(AM, "a", encoding=k) as log_file:
+                    with open(settings.AM, "a", encoding=k) as log_file:
                         log_file.write(
                             f"[{A9.now().strftime(A6)}] [USER: {AO}] [PC: {AF}] "
                             f"ERROR: Failed to create config.json: {exc}\n"
@@ -153,6 +199,15 @@ def load_config():
         config_copy[w] = raw_config.get(w, config_copy[w])
         config_copy[ft] = raw_config.get(ft, config_copy[ft])
         config_copy[u] = raw_config.get(u, config_copy[u])
+        config_copy[LOCAL_FILE_INDEX_KEY] = raw_config.get(
+            LOCAL_FILE_INDEX_KEY, config_copy.get(LOCAL_FILE_INDEX_KEY, True)
+        )
+        config_copy[COLOR_FIELD_LABELS_KEY] = _normalize_color_field_labels(
+            raw_config.get(
+                COLOR_FIELD_LABELS_KEY,
+                config_copy.get(COLOR_FIELD_LABELS_KEY, {}),
+            )
+        )
         raw_slot_defs = raw_config.get(SLOT_DEFS_KEY, config_copy.get(SLOT_DEFS_KEY))
         slot_defs, _ = normalize_slot_definitions(raw_slot_defs)
         config_copy[SLOT_DEFS_KEY] = slot_defs
@@ -203,7 +258,7 @@ def load_config():
             pass
     except E as exc:
         try:
-            with open(AM, "a", encoding=k) as log_file:
+            with open(settings.AM, "a", encoding=k) as log_file:
                 log_file.write(
                     f"[{A9.now().strftime(A6)}] [USER: {AO}] [PC: {AF}] "
                     f"ERROR: Failed to load config.json: {exc}\n"
@@ -217,8 +272,9 @@ def _load_raw_config():
     """Return the raw configuration dict without decryption."""
 
     try:
-        if A.path.exists(CONFIG_PATH):
-            with open(CONFIG_PATH, "r", encoding=k) as handle:
+        config_path = _get_config_path()
+        if A.path.exists(config_path):
+            with open(config_path, "r", encoding=k) as handle:
                 raw_config = Ar.load(handle)
             if Aq(raw_config, dict):
                 return raw_config
@@ -231,6 +287,7 @@ def save_config(config, raw_config=None, preserve_secrets=None):
     """Serialise the provided configuration dictionary to disk."""
 
     # Persist secrets in encrypted form to avoid storing clear text credentials.
+    global CONFIG_PATH
     if preserve_secrets is None:
         preserve_secrets = {}
     if raw_config is None and preserve_secrets:
@@ -284,6 +341,10 @@ def save_config(config, raw_config=None, preserve_secrets=None):
         SQL_AVAILABLE_COLUMNS_KEY: _normalize_sql_columns(
             config.get(SQL_AVAILABLE_COLUMNS_KEY, [])
         ),
+        LOCAL_FILE_INDEX_KEY: bool(config.get(LOCAL_FILE_INDEX_KEY, True)),
+        COLOR_FIELD_LABELS_KEY: _normalize_color_field_labels(
+            config.get(COLOR_FIELD_LABELS_KEY, {})
+        ),
         TRANSLATION_SETTINGS_KEY: {
             TRANSLATION_PROVIDER_KEY: translation_settings.get(
                 TRANSLATION_PROVIDER_KEY, TRANSLATION_PROVIDER_DEFAULT
@@ -297,12 +358,14 @@ def save_config(config, raw_config=None, preserve_secrets=None):
         },
     }
     try:
-        with open(CONFIG_PATH, "w", encoding=k) as handle:
-            Ar.dump(payload, handle, indent=4)
+        config_path = _get_config_path()
+        CONFIG_PATH = config_path
+        _write_json_atomic(config_path, payload)
     except E as exc:
-        O.showerror(AK, CONFIG_SAVE_FAILED_MSG.format(error=exc))
+        if O:
+            O.showerror(AK, CONFIG_SAVE_FAILED_MSG.format(error=exc))
         try:
-            with open(AM, "a", encoding=k) as log_file:
+            with open(settings.AM, "a", encoding=k) as log_file:
                 log_file.write(
                     f"[{A9.now().strftime(A6)}] [USER: {AO}] [PC: {AF}] "
                     f"ERROR: Failed to save config.json: {exc}\n"
@@ -311,4 +374,12 @@ def save_config(config, raw_config=None, preserve_secrets=None):
             pass
 
 
-CONFIG = load_config()
+def initialize_config(interactive=I):
+    """Load configuration into the shared mutable config dictionary."""
+
+    if not settings.is_runtime_initialized():
+        settings.initialize_runtime(interactive=interactive)
+    loaded = load_config(interactive=interactive)
+    CONFIG.clear()
+    CONFIG.update(loaded)
+    return CONFIG

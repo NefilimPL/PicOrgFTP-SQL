@@ -122,6 +122,13 @@ def _load_workbook():
     return load_workbook(LISTS_WORKBOOK_PATH)
 
 
+def _load_workbook_readonly():
+    """Load the shared workbook in read-only mode for startup cache reads."""
+
+    _ensure_workbook_exists()
+    return load_workbook(LISTS_WORKBOOK_PATH, read_only=True, data_only=True)
+
+
 def _entry_header_map(sheet, *, ensure_missing: bool = False) -> tuple[dict[str, int], bool]:
     """Return a map of entry-sheet header names to 1-based column indices."""
 
@@ -130,7 +137,8 @@ def _entry_header_map(sheet, *, ensure_missing: bool = False) -> tuple[dict[str,
         sheet.append(ENTRY_HEADERS)
         changed = True
     header_map: dict[str, int] = {}
-    for idx, cell in enumerate(sheet[1], start=1):
+    first_row = next(sheet.iter_rows(min_row=1, max_row=1), ())
+    for idx, cell in enumerate(first_row, start=1):
         header = _normalize_cell(cell.value).upper()
         if header:
             header_map[header] = idx
@@ -214,57 +222,90 @@ def _write_entry_row(row, header_map: dict[str, int], payload: dict[str, str]) -
         _set_row_value(row, header_map, header, value)
 
 
+def _find_ean_conflict_row(sheet, header_map: dict[str, int], ean: str, skip_row=None):
+    """Return a row using the same EAN, excluding the provided target row."""
+
+    normalized = str(ean or EMPTY).strip().upper()
+    if not normalized or normalized == NO_EAN_PLACEHOLDER:
+        return None
+    skip_row_number = None
+    if skip_row:
+        try:
+            skip_row_number = skip_row[0].row
+        except Exception:
+            skip_row_number = None
+    for row in sheet.iter_rows(min_row=2):
+        try:
+            row_number = row[0].row
+        except Exception:
+            row_number = None
+        if skip_row_number is not None and row_number == skip_row_number:
+            continue
+        raw_ean = _entry_row_value(row, header_map, EAN_HEADER).upper()
+        if raw_ean == normalized:
+            return row
+    return None
+
+
 def prepare_excel_lists() -> Dict[str, Dict[str, dict] | list]:
     """Load all Excel lists into memory."""
 
-    workbook = _load_workbook()
+    workbook = _load_workbook_readonly()
     lists: Dict[str, Dict[str, dict] | list] = {}
-    for sheet_name in EXCEL_SHEETS.values():
-        sheet = workbook[sheet_name]
-        if sheet_name == ENTRY_SHEET:
-            entries: Dict[str, dict] = {}
-            records: list[dict[str, str]] = []
-            header_map, _changed = _entry_header_map(sheet, ensure_missing=False)
-            for row in sheet.iter_rows(min_row=2):
-                ean = _entry_row_value(row, header_map, EAN_HEADER)
-                if not ean:
-                    continue
-                entry = _build_entry_payload(
-                    ean,
-                    _entry_row_value(row, header_map, NAME_HEADER),
-                    _entry_row_value(row, header_map, TYPE_HEADER),
-                    _entry_row_value(row, header_map, MODEL_HEADER),
-                    _entry_row_value(row, header_map, COLOR1_HEADER),
-                    _entry_row_value(row, header_map, COLOR2_HEADER),
-                    _entry_row_value(row, header_map, COLOR3_HEADER),
-                    _entry_row_value(row, header_map, EXTRA_HEADER),
-                    _entry_row_value(row, header_map, PRODUCT_ID_HEADER),
-                )
-                entries[ean.strip()] = {
-                    NAME_HEADER: entry[NAME_HEADER],
-                    TYPE_HEADER: entry[TYPE_HEADER],
-                    MODEL_HEADER: entry[MODEL_HEADER],
-                    COLOR1_HEADER: entry[COLOR1_HEADER],
-                    COLOR2_HEADER: entry[COLOR2_HEADER],
-                    COLOR3_HEADER: entry[COLOR3_HEADER],
-                    EXTRA_HEADER: entry[EXTRA_HEADER],
-                    PRODUCT_ID_HEADER: entry[PRODUCT_ID_HEADER],
-                }
-                records.append(entry)
-            lists[sheet_name] = entries
-            lists[ENTRY_RECORDS_KEY] = records
-        else:
-            values: list[str] = []
-            for cell in sheet["A"]:
-                if not cell.value:
-                    continue
-                raw = str(cell.value).strip()
-                if sheet_name == EXTRAS_SHEET:
-                    raw = raw.replace(UNDERSCORE, HYPHEN)
-                normalized = raw.upper()
-                if normalized not in values:
-                    values.append(normalized)
-            lists[sheet_name] = values
+    try:
+        for sheet_name in EXCEL_SHEETS.values():
+            sheet = workbook[sheet_name]
+            if sheet_name == ENTRY_SHEET:
+                entries: Dict[str, dict] = {}
+                records: list[dict[str, str]] = []
+                header_map, _changed = _entry_header_map(sheet, ensure_missing=False)
+                for row in sheet.iter_rows(min_row=2):
+                    ean = _entry_row_value(row, header_map, EAN_HEADER)
+                    if not ean:
+                        continue
+                    entry = _build_entry_payload(
+                        ean,
+                        _entry_row_value(row, header_map, NAME_HEADER),
+                        _entry_row_value(row, header_map, TYPE_HEADER),
+                        _entry_row_value(row, header_map, MODEL_HEADER),
+                        _entry_row_value(row, header_map, COLOR1_HEADER),
+                        _entry_row_value(row, header_map, COLOR2_HEADER),
+                        _entry_row_value(row, header_map, COLOR3_HEADER),
+                        _entry_row_value(row, header_map, EXTRA_HEADER),
+                        _entry_row_value(row, header_map, PRODUCT_ID_HEADER),
+                    )
+                    entries[ean.strip()] = {
+                        NAME_HEADER: entry[NAME_HEADER],
+                        TYPE_HEADER: entry[TYPE_HEADER],
+                        MODEL_HEADER: entry[MODEL_HEADER],
+                        COLOR1_HEADER: entry[COLOR1_HEADER],
+                        COLOR2_HEADER: entry[COLOR2_HEADER],
+                        COLOR3_HEADER: entry[COLOR3_HEADER],
+                        EXTRA_HEADER: entry[EXTRA_HEADER],
+                        PRODUCT_ID_HEADER: entry[PRODUCT_ID_HEADER],
+                    }
+                    records.append(entry)
+                lists[sheet_name] = entries
+                lists[ENTRY_RECORDS_KEY] = records
+            else:
+                values: list[str] = []
+                for row in sheet.iter_rows(
+                    min_col=1,
+                    max_col=1,
+                    values_only=True,
+                ):
+                    cell_value = row[0]
+                    if not cell_value:
+                        continue
+                    raw = str(cell_value).strip()
+                    if sheet_name == EXTRAS_SHEET:
+                        raw = raw.replace(UNDERSCORE, HYPHEN)
+                    normalized = raw.upper()
+                    if normalized not in values:
+                        values.append(normalized)
+                lists[sheet_name] = values
+    finally:
+        workbook.close()
     return lists
 
 
@@ -460,6 +501,36 @@ def save_ean_entry(
                 break
 
     if target_row is not None:
+        conflict_row = _find_ean_conflict_row(
+            sheet,
+            header_map,
+            trimmed,
+            skip_row=target_row,
+        )
+        if conflict_row is not None:
+            conflict_product_id = _entry_row_value(
+                conflict_row,
+                header_map,
+                PRODUCT_ID_HEADER,
+            ).upper()
+            messagebox.showwarning(
+                localization.LANG.get("ean_duplicate_title", "Duplikat EAN"),
+                localization.LANG.get(
+                    "ean_duplicate_save_blocked",
+                    "Kod EAN {ean} jest już zapisany w innym wpisie"
+                    " (PRODUCT_ID: {product_id}).\n\n"
+                    "Wczytaj istniejący wpis albo użyj innego EAN.",
+                ).format(
+                    ean=trimmed,
+                    product_id=conflict_product_id or "BRAK-ID",
+                ),
+            )
+            log_error_loc(
+                "excel_entry_save_duplicate_ean",
+                ean=trimmed,
+                product_id=conflict_product_id or "BRAK-ID",
+            )
+            return False
         existing_product_id = _entry_row_value(
             target_row,
             header_map,
