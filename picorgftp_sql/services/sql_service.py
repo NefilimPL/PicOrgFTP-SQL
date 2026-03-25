@@ -20,7 +20,12 @@ from ..common import (
     w,
 )
 from ..database import connect_db
-from ..workflow_utils import build_sql_presence_query, has_presence_value, unique_columns
+from ..workflow_utils import (
+    build_sql_presence_query,
+    has_presence_value,
+    normalize_sql_value,
+    unique_columns,
+)
 
 SAFE_IDENTIFIER_RE = re.compile(r"^[0-9A-Za-z_\.]+$")
 
@@ -76,12 +81,20 @@ def extract_presence_context(config_dict, ean):
 def query_presence_map(columns, table, where_clause, db_type):
     """Fetch SQL presence for all mapped columns, batching when possible."""
 
+    presence_map, _value_map = query_presence_details(columns, table, where_clause, db_type)
+    return presence_map
+
+
+def query_presence_details(columns, table, where_clause, db_type):
+    """Fetch SQL presence flags together with the raw SQL values."""
+
     presence_map = {prefix: I for prefix, _, _ in columns}
+    value_map = {prefix: "" for prefix, _, _ in columns}
     ordered_columns = unique_columns(
         [_safe_identifier(column_name) for _, column_name, _ in columns if column_name]
     )
     if not ordered_columns or not table:
-        return presence_map
+        return presence_map, value_map
     conn = None
     cur = None
     try:
@@ -106,12 +119,12 @@ def query_presence_map(columns, table, where_clause, db_type):
                     for prefix, column_name, _ in columns:
                         if column_name:
                             presence_map[prefix] = False
-                    return presence_map
+                    return presence_map, value_map
                 try:
                     values = list(row)
                 except E:
                     values = [row]
-                value_map = {
+                column_value_map = {
                     column_name: values[idx] if idx < Q(values) else I
                     for idx, column_name in enumerate(ordered_columns)
                 }
@@ -119,10 +132,12 @@ def query_presence_map(columns, table, where_clause, db_type):
                     safe_column = _safe_identifier(column_name)
                     if not safe_column:
                         continue
-                    presence_map[prefix] = has_presence_value(value_map.get(safe_column))
-                return presence_map
+                    raw_value = column_value_map.get(safe_column)
+                    presence_map[prefix] = has_presence_value(raw_value)
+                    value_map[prefix] = normalize_sql_value(raw_value)
+                return presence_map, value_map
         if not batch_failed:
-            return presence_map
+            return presence_map, value_map
         for prefix, column_name, _ in columns:
             safe_column = _safe_identifier(column_name)
             if not safe_column:
@@ -151,7 +166,8 @@ def query_presence_map(columns, table, where_clause, db_type):
                     row_values = [row]
                 value = row_values[0] if row_values else I
             presence_map[prefix] = has_presence_value(value)
-        return presence_map
+            value_map[prefix] = normalize_sql_value(value)
+        return presence_map, value_map
     finally:
         if cur is not None:
             try:

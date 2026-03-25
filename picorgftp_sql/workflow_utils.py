@@ -281,6 +281,21 @@ def has_sql_value(value: object) -> bool:
     return value is not None
 
 
+def normalize_sql_value(value: object) -> str:
+    """Normalize a SQL cell value into a displayable string."""
+
+    if isinstance(value, memoryview):
+        value = bytes(value)
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode("utf-8")
+        except Exception:
+            value = value.decode("latin-1", errors="ignore")
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
 def has_presence_value(value: object) -> bool:
     """Backward-compatible alias used by the GUI refactor."""
 
@@ -316,4 +331,21 @@ def sql_row_to_presence_map(prefixes: Sequence[str], row: object) -> dict[str, b
         if index >= len(values):
             break
         result[prefix] = has_sql_value(values[index])
+    return result
+
+
+def sql_row_to_value_map(prefixes: Sequence[str], row: object) -> dict[str, str]:
+    """Convert a SQL row into a per-slot raw value map."""
+
+    result = {prefix: "" for prefix in prefixes}
+    if row is None:
+        return result
+    try:
+        values = list(row)
+    except TypeError:
+        values = [row]
+    for index, prefix in enumerate(prefixes):
+        if index >= len(values):
+            break
+        result[prefix] = normalize_sql_value(values[index])
     return result
