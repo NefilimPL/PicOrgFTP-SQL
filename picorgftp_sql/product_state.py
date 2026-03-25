@@ -32,6 +32,7 @@ class ProductState:
     pending_ftp_deletions: dict[int, str] = field(default_factory=dict)
     ftp_remote_only: dict[str, dict[str, str]] = field(default_factory=dict)
     ftp_presence: dict[str, str] = field(default_factory=dict)
+    ftp_preview_files: dict[str, dict[str, str]] = field(default_factory=dict)
     ftp_downloaded_final: set[str] = field(default_factory=set)
     sql_presence: dict[str, bool] | None = None
 
@@ -45,5 +46,6 @@ class ProductState:
         self.pending_ftp_deletions.clear()
         self.ftp_remote_only.clear()
         self.ftp_presence.clear()
+        self.ftp_preview_files.clear()
         self.ftp_downloaded_final.clear()
         self.sql_presence = None

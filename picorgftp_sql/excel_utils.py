@@ -222,6 +222,31 @@ def _write_entry_row(row, header_map: dict[str, int], payload: dict[str, str]) -
         _set_row_value(row, header_map, header, value)
 
 
+def _find_ean_conflict_row(sheet, header_map: dict[str, int], ean: str, skip_row=None):
+    """Return a row using the same EAN, excluding the provided target row."""
+
+    normalized = str(ean or EMPTY).strip().upper()
+    if not normalized or normalized == NO_EAN_PLACEHOLDER:
+        return None
+    skip_row_number = None
+    if skip_row:
+        try:
+            skip_row_number = skip_row[0].row
+        except Exception:
+            skip_row_number = None
+    for row in sheet.iter_rows(min_row=2):
+        try:
+            row_number = row[0].row
+        except Exception:
+            row_number = None
+        if skip_row_number is not None and row_number == skip_row_number:
+            continue
+        raw_ean = _entry_row_value(row, header_map, EAN_HEADER).upper()
+        if raw_ean == normalized:
+            return row
+    return None
+
+
 def prepare_excel_lists() -> Dict[str, Dict[str, dict] | list]:
     """Load all Excel lists into memory."""
 
@@ -476,6 +501,36 @@ def save_ean_entry(
                 break
 
     if target_row is not None:
+        conflict_row = _find_ean_conflict_row(
+            sheet,
+            header_map,
+            trimmed,
+            skip_row=target_row,
+        )
+        if conflict_row is not None:
+            conflict_product_id = _entry_row_value(
+                conflict_row,
+                header_map,
+                PRODUCT_ID_HEADER,
+            ).upper()
+            messagebox.showwarning(
+                localization.LANG.get("ean_duplicate_title", "Duplikat EAN"),
+                localization.LANG.get(
+                    "ean_duplicate_save_blocked",
+                    "Kod EAN {ean} jest już zapisany w innym wpisie"
+                    " (PRODUCT_ID: {product_id}).\n\n"
+                    "Wczytaj istniejący wpis albo użyj innego EAN.",
+                ).format(
+                    ean=trimmed,
+                    product_id=conflict_product_id or "BRAK-ID",
+                ),
+            )
+            log_error_loc(
+                "excel_entry_save_duplicate_ean",
+                ean=trimmed,
+                product_id=conflict_product_id or "BRAK-ID",
+            )
+            return False
         existing_product_id = _entry_row_value(
             target_row,
             header_map,

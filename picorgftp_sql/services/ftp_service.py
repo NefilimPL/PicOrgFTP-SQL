@@ -88,19 +88,19 @@ def download_remote_slots(
     temp_root=None,
     status_callback=None,
 ):
-    """Download remote-only files for the product and return local temp info."""
+    """Download FTP preview files and mark which slots are remote-only."""
 
     ftp = connect_ftp(ftp_config)
     try:
         remote_files = select_remote_files_for_ean(ean, list_remote_filenames(ftp))
         ftp_presence = {}
-        remote_info = {}
+        preview_info = {}
+        remote_only_info = {}
         temp_root = temp_root or tempfile.mkdtemp(prefix="picorgftp_sql_")
+        os.makedirs(temp_root, exist_ok=True)
         for label, filename in remote_files.items():
-            if label in existing_slot_paths:
-                ftp_presence[label] = filename
-                continue
             raw_temp_path = os.path.join(temp_root, filename)
+            ftp_presence[label] = filename
             if status_callback:
                 status_callback(slot_index_by_prefix.get(label), "downloading")
             with open(raw_temp_path, "wb") as handle:
@@ -116,9 +116,11 @@ def download_remote_slots(
                 os.replace(raw_temp_path, temp_path)
             except OSError:
                 temp_path = raw_temp_path
-            ftp_presence[label] = filename
-            remote_info[label] = {"filename": filename, "temp_path": temp_path}
-        return remote_files, ftp_presence, remote_info
+            info = {"filename": filename, "temp_path": temp_path}
+            preview_info[label] = info
+            if label not in existing_slot_paths:
+                remote_only_info[label] = info
+        return remote_files, ftp_presence, preview_info, remote_only_info
     finally:
         try:
             ftp.quit()

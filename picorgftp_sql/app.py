@@ -304,6 +304,7 @@ class App(BU.Tk):
         B._last_lookup_duration_ms = 0
         B._commit_snapshot = {}
         B._record_loaded = h
+        B._last_ean_conflict_notice = I
         B._field_change_refresh_job = I
         B._loaded_field_values = {}
         B._form_field_meta = {}
@@ -942,7 +943,16 @@ class App(BU.Tk):
                 existing_count += 1
         return merged, existing_count
 
-    def _list_child_directories(A, path, uppercase=h):
+    def _merge_live_lookup_values(B, indexed_values, live_values):
+        """Merge indexed entries with live disk results without duplicates."""
+
+        merged, _existing_count = B._merge_existing_lookup_values(
+            indexed_values,
+            live_values,
+        )
+        return merged
+
+    def _list_child_directories(B, path, uppercase=h):
         """Return direct child directories using ``scandir`` for lower overhead."""
 
         values = []
@@ -958,63 +968,73 @@ class App(BU.Tk):
         values.sort()
         return values
 
-    def _refresh_name_values_from_index(A):
+    def _refresh_name_values_from_index(B):
         """Apply indexed top-level names to the main combobox when available."""
 
-        if not getattr(A, "_local_file_index_enabled", J):
-            return
-        file_index = Aj(A, "_file_index", I)
-        if file_index is I:
-            return
-        existing_names = file_index.get_names()
+        existing_names = []
+        if getattr(B, "_local_file_index_enabled", J):
+            file_index = Aj(B, "_file_index", I)
+            if file_index is not I:
+                existing_names = file_index.get_names()
+        live_names = B._list_child_directories(l, uppercase=J)
+        existing_names = B._merge_live_lookup_values(existing_names, live_names)
         if not existing_names:
             return
-        merged, existing_count = A._merge_existing_lookup_values(
+        merged, existing_count = B._merge_existing_lookup_values(
             existing_names,
-            A.lists.get(n, []),
+            B.lists.get(n, []),
         )
-        A.lists[n] = merged
-        if Aj(A, "combo_name", I) is not I:
-            A._refresh_combobox_list(A.combo_name, merged, existing_count=existing_count)
+        B.lists[n] = merged
+        if Aj(B, "combo_name", I) is not I:
+            B._refresh_combobox_list(B.combo_name, merged, existing_count=existing_count)
 
-    def _resolve_types_for_name(A, name_value, path):
+    def _resolve_types_for_name(B, name_value, path):
         """Return type directories from the index or direct disk fallback."""
 
-        file_index = Aj(A, "_file_index", I)
-        if getattr(A, "_local_file_index_enabled", J) and file_index is not I and file_index.has_snapshot():
+        indexed = I
+        file_index = Aj(B, "_file_index", I)
+        if getattr(B, "_local_file_index_enabled", J) and file_index is not I and file_index.has_snapshot():
             indexed = file_index.get_types(name_value)
-            if indexed is not None:
-                return indexed, J
-        if A.path.isdir(path):
-            return A._list_child_directories(path), J
+        path_exists = A.path.isdir(path)
+        live_values = B._list_child_directories(path) if path_exists else []
+        if indexed is not I:
+            return B._merge_live_lookup_values(indexed, live_values), path_exists
+        if path_exists:
+            return live_values, J
         return [], h
 
-    def _resolve_models_for_type(A, name_value, type_value, path):
+    def _resolve_models_for_type(B, name_value, type_value, path):
         """Return model directories from the index or direct disk fallback."""
 
-        file_index = Aj(A, "_file_index", I)
-        if getattr(A, "_local_file_index_enabled", J) and file_index is not I and file_index.has_snapshot():
+        indexed = I
+        file_index = Aj(B, "_file_index", I)
+        if getattr(B, "_local_file_index_enabled", J) and file_index is not I and file_index.has_snapshot():
             indexed = file_index.get_models(name_value, type_value)
-            if indexed is not None:
-                return indexed, J
-        if A.path.isdir(path):
-            return A._list_child_directories(path), J
+        path_exists = A.path.isdir(path)
+        live_values = B._list_child_directories(path) if path_exists else []
+        if indexed is not I:
+            return B._merge_live_lookup_values(indexed, live_values), path_exists
+        if path_exists:
+            return live_values, J
         return [], h
 
-    def _resolve_colors_for_model(A, name_value, type_value, model_value, path):
+    def _resolve_colors_for_model(B, name_value, type_value, model_value, path):
         """Return colour directories from the index or direct disk fallback."""
 
-        file_index = Aj(A, "_file_index", I)
-        if getattr(A, "_local_file_index_enabled", J) and file_index is not I and file_index.has_snapshot():
+        indexed = I
+        file_index = Aj(B, "_file_index", I)
+        if getattr(B, "_local_file_index_enabled", J) and file_index is not I and file_index.has_snapshot():
             indexed = file_index.get_colors(name_value, type_value, model_value)
-            if indexed is not None:
-                return indexed, J
-        if A.path.isdir(path):
-            return A._list_child_directories(path), J
+        path_exists = A.path.isdir(path)
+        live_values = B._list_child_directories(path) if path_exists else []
+        if indexed is not I:
+            return B._merge_live_lookup_values(indexed, live_values), path_exists
+        if path_exists:
+            return live_values, J
         return [], h
 
     def _resolve_extras_for_colors(
-        A,
+        B,
         name_value,
         type_value,
         model_value,
@@ -1023,22 +1043,25 @@ class App(BU.Tk):
     ):
         """Return extra directories from the index or direct disk fallback."""
 
-        file_index = Aj(A, "_file_index", I)
-        if getattr(A, "_local_file_index_enabled", J) and file_index is not I and file_index.has_snapshot():
+        indexed = I
+        file_index = Aj(B, "_file_index", I)
+        if getattr(B, "_local_file_index_enabled", J) and file_index is not I and file_index.has_snapshot():
             indexed = file_index.get_extras(
                 name_value,
                 type_value,
                 model_value,
                 color_values,
             )
-            if indexed is not None:
-                return indexed, J
-        if A.path.isdir(path):
-            return A._list_child_directories(path), J
+        path_exists = A.path.isdir(path)
+        live_values = B._list_child_directories(path) if path_exists else []
+        if indexed is not I:
+            return B._merge_live_lookup_values(indexed, live_values), path_exists
+        if path_exists:
+            return live_values, J
         return [], h
 
     def _resolve_product_file_rows(
-        A,
+        B,
         product_dir,
         name_value,
         type_value,
@@ -1048,8 +1071,10 @@ class App(BU.Tk):
     ):
         """Return product files using the index first and ``scandir`` as fallback."""
 
-        file_index = Aj(A, "_file_index", I)
-        if getattr(A, "_local_file_index_enabled", J) and file_index is not I and file_index.has_snapshot():
+        resolved = []
+        seen = set()
+        file_index = Aj(B, "_file_index", I)
+        if getattr(B, "_local_file_index_enabled", J) and file_index is not I and file_index.has_snapshot():
             indexed_files = file_index.get_product_files(
                 name_value,
                 type_value,
@@ -1057,19 +1082,25 @@ class App(BU.Tk):
                 color_values,
                 extra_value,
             )
-            if indexed_files:
-                resolved = []
+            if indexed_files is not I:
                 for filename in indexed_files:
                     path = A.path.join(product_dir, filename)
                     if A.path.isfile(path):
                         resolved.append((filename, path))
-                if resolved:
-                    return resolved
+                        seen.add(filename)
         try:
+            live_rows = []
             with A.scandir(product_dir) as entries:
-                return [(entry.name, entry.path) for entry in entries if entry.is_file()]
+                for entry in entries:
+                    if entry.is_file():
+                        live_rows.append((entry.name, entry.path))
+            for filename, path in sorted(live_rows, key=lambda item: G(item[0]).lower()):
+                if filename in seen:
+                    continue
+                resolved.append((filename, path))
+            return resolved
         except E:
-            return []
+            return resolved
 
     def _set_local_file_index_enabled(A, enabled):
         """Toggle whether GUI lookups should use the persisted local file index."""
@@ -1099,6 +1130,7 @@ class App(BU.Tk):
         A.pending_ftp_deletions = A._product_state.pending_ftp_deletions
         A.ftp_remote_only = A._product_state.ftp_remote_only
         A.ftp_presence = A._product_state.ftp_presence
+        A.ftp_preview_files = A._product_state.ftp_preview_files
         A.ftp_downloaded_final = A._product_state.ftp_downloaded_final
         A.sql_presence = A._product_state.sql_presence
         A.original_files = A._product_state.original_files
@@ -1295,6 +1327,7 @@ class App(BU.Tk):
     def _queue_form_change_refresh(A, *_args):
         """Debounce form dirty/highlight refresh to the next Tk idle turn."""
 
+        A._last_ean_conflict_notice = I
         if A._field_change_refresh_job is not I:
             return
         A._field_change_refresh_job = A.after_idle(A._refresh_form_change_markers)
@@ -1462,6 +1495,85 @@ class App(BU.Tk):
             == signature
         ]
 
+    def _find_entry_records_by_ean(A, ean):
+        """Return cached records using the provided EAN value."""
+
+        normalized = G(ean or B).strip().upper()
+        if not normalized:
+            return []
+        return [
+            record
+            for record in A.entry_records
+            if G(record.get(EAN_HEADER) or B).strip().upper() == normalized
+        ]
+
+    def _entry_record_signature(A, record):
+        """Return the canonical product signature for a saved record."""
+
+        if not isinstance(record, dict):
+            return ()
+        return A._build_entry_signature(
+            record.get(NAME_HEADER, B),
+            record.get(TYPE_HEADER, B),
+            record.get(MODEL_HEADER, B),
+            record.get(COLOR1_HEADER, B),
+            record.get(COLOR2_HEADER, B),
+            record.get(COLOR3_HEADER, B),
+            record.get(EXTRA_HEADER, B),
+        )
+
+    def _resolve_ean_conflict(A, ean=I, *, quick_check=h):
+        """Return a conflicting saved entry for the current EAN, if one exists."""
+
+        normalized = G(ean if ean is not I else A.var_ean.get() or B).strip().upper()
+        if not normalized or normalized == q:
+            return I
+        current_signature = A._current_entry_signature()
+        if quick_check and not all(current_signature[:4]):
+            return I
+        current_product_id = G(A.var_product_id.get() or B).strip().upper()
+        for record in A._find_entry_records_by_ean(normalized):
+            record_product_id = G(record.get(PRODUCT_ID_HEADER) or B).strip().upper()
+            if current_product_id and record_product_id and current_product_id == record_product_id:
+                continue
+            if A._entry_record_signature(record) == current_signature:
+                continue
+            return record
+        return I
+
+    def _warn_about_ean_conflict(A, *, force_message=h, quick_check=J):
+        """Warn when the current EAN already belongs to another saved product."""
+
+        ean = G(A.var_ean.get() or B).strip().upper()
+        conflict = A._resolve_ean_conflict(ean, quick_check=quick_check)
+        if conflict is I:
+            A._last_ean_conflict_notice = I
+            return J
+        notice_key = (
+            ean,
+            G(conflict.get(PRODUCT_ID_HEADER) or B).strip().upper(),
+            A._entry_record_signature(conflict),
+        )
+        if not force_message and A._last_ean_conflict_notice == notice_key:
+            return h
+        A._last_ean_conflict_notice = notice_key
+        O.showwarning(
+            LANG.get("ean_duplicate_title", "Duplikat EAN"),
+            LANG.get(
+                "ean_duplicate_warning",
+                "Kod EAN {ean} jest już przypisany do innego wpisu:\n\n{record}\n\nWczytaj istniejący wpis albo użyj innego EAN.",
+            ).format(
+                ean=ean,
+                record=A._describe_entry_record(conflict),
+            ),
+        )
+        return h
+
+    def _on_ean_focus_out(A, _event=I):
+        """Run a quick duplicate-EAN check after leaving the field."""
+
+        A._warn_about_ean_conflict(force_message=h, quick_check=J)
+
     def _describe_entry_record(A, record):
         """Build a concise label used in record selection prompts."""
 
@@ -1598,6 +1710,7 @@ class App(BU.Tk):
                 resolved[EAN_HEADER] = ean
                 A._load_entry_record(resolved)
                 return
+            O.showinfo(NOT_FOUND_LABEL, NO_SAVED_DATA_FOR_EAN_MSG.format(ean=ean))
             A._activate_new_entry_mode(keep_values=J)
             return
         product_id = G(A.var_product_id.get() or B).strip().upper()
@@ -1899,7 +2012,7 @@ class App(BU.Tk):
                 continue
             if idx < 0 or idx >= Q(B.slots):
                 continue
-            if B.slots[idx].get(f) != path:
+            if B._get_slot_preview_path(B.slots[idx]) != path:
                 continue
             B._set_slot_preview(idx, path, thumb)
         try:
@@ -1924,6 +2037,24 @@ class App(BU.Tk):
     def _run_scheduled_existing_files_lookup(B):
         B._load_existing_after_id = I
         B._load_existing_files()
+
+    def _finish_existing_lookup(B):
+        should_retry = h
+        clear_busy = h
+        with B._existing_lookup_lock:
+            should_retry = B._retry_existing_lookup
+            B._retry_existing_lookup = h
+            B._existing_lookup_running = h
+            if B._existing_lookup_busy:
+                B._existing_lookup_busy = h
+                clear_busy = J
+        if clear_busy:
+            B._set_busy_state("", active=h)
+        if should_retry:
+            try:
+                B.after(0, lambda: B._load_existing_files(force=J))
+            except E:
+                pass
 
     def _trigger_test_error(A, key):
         if key == "zero_div":
@@ -3311,6 +3442,7 @@ class App(BU.Tk):
         )
         A.entry_ean.grid(row=1, column=0, columnspan=2, sticky="ew")
         A.entry_ean.bind("<FocusIn>", A._remember_focus)
+        A.entry_ean.bind("<FocusOut>", A._on_ean_focus_out)
         A.entry_ean.bind("<Return>", lambda _event: A._search_current_entry())
         A._register_form_field("ean", ean_value_field, N_, A.entry_ean, ean_restore)
 
@@ -3643,7 +3775,11 @@ class App(BU.Tk):
                 padx=6,
                 pady=1,
                 font=("Segoe UI Semibold", 7),
+                bd=1,
+                relief="flat",
+                cursor="arrow",
             )
+            local_icon.bind(Q_, lambda e, i=G_: B._set_slot_preview_source(i, "local"))
             local_icon.offset_x = -74
             local_icon.place(relx=1.0, rely=1.0, anchor="se", x=local_icon.offset_x)
             local_icon.place_forget()
@@ -3655,7 +3791,11 @@ class App(BU.Tk):
                 padx=6,
                 pady=1,
                 font=("Segoe UI Semibold", 7),
+                bd=1,
+                relief="flat",
+                cursor="arrow",
             )
+            ftp_icon.bind(Q_, lambda e, i=G_: B._set_slot_preview_source(i, "ftp"))
             ftp_icon.offset_x = -38
             ftp_icon.place(relx=1.0, rely=1.0, anchor="se", x=ftp_icon.offset_x)
             ftp_icon.place_forget()
@@ -3698,6 +3838,10 @@ class App(BU.Tk):
                     "status_label": status_label,
                     "progress": I,
                     f: I,
+                    "local_path": I,
+                    "ftp_path": I,
+                    "preview_path": I,
+                    "preview_source": B,
                     AS: H_,
                     B0: I,
                 }
@@ -3921,11 +4065,155 @@ class App(BU.Tk):
         except E:
             return I
 
+    def _same_path(C, left, right):
+        if not (left and right):
+            return h
+        try:
+            return A.path.samefile(left, right)
+        except E:
+            return A.path.normcase(A.path.normpath(left)) == A.path.normcase(
+                A.path.normpath(right)
+            )
+
+    def _get_slot_preview_path(B, slot):
+        return slot.get("preview_path") or slot.get(f)
+
+    def _resolve_slot_preview_source(C, slot, preferred_source=""):
+        if preferred_source == "ftp" and slot.get("ftp_path"):
+            return "ftp", slot.get("ftp_path")
+        if preferred_source == "local" and slot.get("local_path"):
+            return "local", slot.get("local_path")
+        ftp_path = slot.get("ftp_path")
+        if ftp_path:
+            return "ftp", ftp_path
+        local_path = slot.get("local_path") or slot.get(f)
+        if local_path:
+            return "local", local_path
+        return B, I
+
+    def _set_slot_paths(
+        C,
+        idx,
+        *,
+        working_path=I,
+        local_path=I,
+        ftp_path=I,
+        preferred_preview="",
+    ):
+        if idx < 0 or idx >= Q(C.slots):
+            return
+        slot = C.slots[idx]
+        slot[f] = working_path
+        slot["local_path"] = local_path
+        slot["ftp_path"] = ftp_path
+        preview_source, preview_path = C._resolve_slot_preview_source(
+            slot,
+            preferred_source=preferred_preview,
+        )
+        slot["preview_source"] = preview_source
+        slot["preview_path"] = preview_path
+        C._refresh_slot_source_icons(idx)
+
+    def _get_state_slot_ftp_path(B, state, slot_prefix):
+        if not isinstance(state, ProductState):
+            return I
+        info = state.ftp_preview_files.get(slot_prefix) or state.ftp_remote_only.get(
+            slot_prefix
+        )
+        if isinstance(info, dict):
+            return info.get("temp_path")
+        return I
+
+    def _resolve_state_slot_local_path(B, slot_prefix, working_path, state):
+        if not (working_path and A.path.isfile(working_path)):
+            return I
+        ftp_path = B._get_state_slot_ftp_path(state, slot_prefix)
+        if isinstance(state, ProductState) and slot_prefix in state.original_files:
+            return working_path
+        if ftp_path and B._same_path(working_path, ftp_path):
+            return I
+        return working_path
+
+    def _refresh_slot_source_icons(C, idx):
+        if idx < 0 or idx >= Q(C.slots):
+            return
+        slot = C.slots[idx]
+        local_path = slot.get("local_path")
+        ftp_path = slot.get("ftp_path")
+        has_any_source = bool(slot.get(f) or local_path or ftp_path)
+        preview_source = slot.get("preview_source")
+        C._set_icon_status(
+            slot.get("local_icon"),
+            J if local_path else (I if not has_any_source else h),
+            selected=bool(local_path and preview_source == "local"),
+            clickable=bool(local_path),
+        )
+        C._set_icon_status(
+            slot.get("ftp_icon"),
+            J if ftp_path else (I if not has_any_source else h),
+            selected=bool(ftp_path and preview_source == "ftp"),
+            clickable=bool(ftp_path),
+        )
+
+    def _prime_slot_preview(C, idx, path):
+        if idx < 0 or idx >= Q(C.slots):
+            return
+        slot = C.slots[idx]
+        if C._get_slot_preview_path(slot) != path:
+            return
+        slot[y].configure(text=A.path.basename(path), image="")
+        slot[y].image = I
+        slot[A7].place(x=0, y=0)
+
+    def _display_slot_preview(C, idx):
+        if idx < 0 or idx >= Q(C.slots):
+            return
+        slot = C.slots[idx]
+        preview_path = C._get_slot_preview_path(slot)
+        if not preview_path:
+            C._clear_slot_preview(idx)
+            return
+        C._refresh_slot_source_icons(idx)
+        C._update_slot_activity(idx, active=J, status=C._slot_status["loading"])
+        C._prime_slot_preview(idx, preview_path)
+        C._queue_thumbnail(idx, preview_path)
+
+    def _clear_slot_preview(C, idx):
+        if idx < 0 or idx >= Q(C.slots):
+            return
+        slot = C.slots[idx]
+        slot[f] = I
+        slot["local_path"] = I
+        slot["ftp_path"] = I
+        slot["preview_path"] = I
+        slot["preview_source"] = B
+        slot[y].configure(image=B, text=C._slot_placeholder_text)
+        slot[y].image = I
+        slot[A7].place_forget()
+        C._thumb_tokens.pop(idx, I)
+        C._refresh_slot_source_icons(idx)
+        C._update_slot_activity(idx, active=h)
+
+    def _set_slot_preview_source(C, idx, source):
+        if idx < 0 or idx >= Q(C.slots):
+            return
+        slot = C.slots[idx]
+        preview_source, preview_path = C._resolve_slot_preview_source(
+            slot,
+            preferred_source=source,
+        )
+        if not preview_path:
+            C._refresh_slot_source_icons(idx)
+            return
+        slot["preview_source"] = preview_source
+        slot["preview_path"] = preview_path
+        C._display_slot_preview(idx)
+
     def _set_slot_preview(B, idx, path, thumb):
         if idx < 0 or idx >= Q(B.slots):
             return
         slot = B.slots[idx]
-        if slot.get(f) != path:
+        if B._get_slot_preview_path(slot) != path:
             return
         label = slot[y]
         remove_label = slot[A7]
@@ -3939,7 +4227,7 @@ class App(BU.Tk):
         remove_label.place(x=0, y=0)
         B._update_slot_activity(idx, active=h)
 
-    def _set_icon_status(C, icon, present):
+    def _set_icon_status(C, icon, present, *, selected=h, clickable=h):
         """Toggle the coloured indicator showing local/remote file presence."""
 
         if not icon:
@@ -3955,16 +4243,31 @@ class App(BU.Tk):
                 icon.config(bg=C._ui_colors["warning"] if hasattr(C, "_ui_colors") else "#555555")
             else:
                 icon.place_forget()
+            try:
+                icon.config(cursor="arrow", relief="flat")
+            except E:
+                pass
             return
         icon.place(relx=1.0, rely=1.0, anchor="se", x=getattr(icon, "offset_x", 0))
         if hasattr(C, "_ui_colors"):
-            icon.config(bg=C._ui_colors["accent"] if present else C._ui_colors["danger"])
+            if present:
+                bg = C._ui_colors["accent"] if selected else C._ui_colors["hero"]
+            else:
+                bg = C._ui_colors["danger"]
         else:
-            icon.config(bg="green" if present else "red")
+            bg = "green" if present else "red"
+        try:
+            icon.config(
+                bg=bg,
+                relief="sunken" if (present and selected) else "flat",
+                cursor="hand2" if (present and clickable) else "arrow",
+            )
+        except E:
+            icon.config(bg=bg)
 
     def _get_slot_idle_status(B, idx):
         slot = B.slots[idx]
-        if slot.get(f):
+        if slot.get(f) or slot.get("local_path") or slot.get("ftp_path"):
             return B._slot_status["ready"]
         return B._slot_status["empty"]
 
@@ -4333,7 +4636,6 @@ class App(BU.Tk):
         if not A.path.isdir(product_dir):
             C.after(0, lambda rid=request_id: finalize_empty(rid))
             return
-        C._update_all_slot_activity(active=J, status=C._slot_status["loading"])
         with C._existing_lookup_lock:
             if C._existing_lookup_running:
                 C._retry_existing_lookup = J
@@ -4345,6 +4647,7 @@ class App(BU.Tk):
                     LANG.get("busy_loading_product", "Wczytywanie danych produktu"),
                     active=J,
                 )
+        C._update_all_slot_activity(active=J, status=C._slot_status["loading"])
 
         def apply_local_results(
             worker_state,
@@ -4360,141 +4663,166 @@ class App(BU.Tk):
                 C.suppress_next_lookup = h
             partial_state = worker_state.clone()
             partial_state.ftp_presence.clear()
+            partial_state.ftp_preview_files.clear()
             partial_state.ftp_remote_only.clear()
             partial_state.sql_presence = I
             partial_state.ftp_downloaded_final = set()
             C._commit_product_state(partial_state)
             for X_, G_ in A0(C.slots):
                 R_ = G_[Aa]
-                if R_ in slot_paths:
-                    G_[f] = slot_paths[R_]
-                    C._set_slot_preview(X_, G_[f], I)
-                    C._queue_thumbnail(X_, G_[f])
+                local_path = slot_paths.get(R_)
+                if local_path:
+                    C._set_slot_paths(
+                        X_,
+                        working_path=local_path,
+                        local_path=local_path,
+                        preferred_preview="local",
+                    )
+                    C._display_slot_preview(X_)
                     C._mark_slot(X_, A4)
                 else:
-                    G_[f] = I
-                    G_[y].configure(image=B, text=C._slot_placeholder_text)
-                    G_[y].image = I
-                    G_[A7].place_forget()
-                    C._update_slot_activity(X_, active=h)
+                    C._clear_slot_preview(X_)
                     C._mark_slot(X_, I)
-                C._set_icon_status(G_["local_icon"], R_ in partial_state.original_files)
-                C._set_icon_status(G_["ftp_icon"], I)
                 C._set_icon_status(G_["sql_icon"], I)
             C._queue_dashboard_refresh()
 
         def worker():
             worker_state = state_snapshot.clone()
-            V_ = C._resolve_product_file_rows(
-                product_dir,
-                name_value,
-                type_value,
-                model_value,
-                color_values,
-                extra_value,
-            )
-            worker_state.original_files.clear()
-            slot_paths = {}
-            ean_guess = I
-            if V_:
-                parsed = parse_slot_filename(V_[0][0])
-                if parsed and current_ean == B:
-                    ean_guess = parsed.ean
-            for W_, d_ in V_:
-                parsed = parse_slot_filename(W_)
-                if not parsed:
-                    continue
-                norm_label = parsed.normalized_label
-                if parsed.normalized_name:
-                    normalized_name = parsed.normalized_name
-                    normalized_path = A.path.join(product_dir, normalized_name)
-                    try:
-                        A.rename(d_, normalized_path)
-                        log_info_loc("file_renamed", old=W_, new=normalized_name)
-                        W_ = normalized_name
-                        d_ = normalized_path
-                    except E as T:
-                        log_error_loc(
-                            "file_rename_error", old=W_, new=normalized_name, error=T
-                        )
-                worker_state.original_files[norm_label] = W_
-                slot_paths[norm_label] = d_
-            local_slot_paths = dict(slot_paths)
-            C.after(
-                0,
-                lambda rid=request_id: apply_local_results(
-                    worker_state,
-                    local_slot_paths,
-                    ean_guess,
-                    rid,
-                ),
-            )
-            worker_state.ftp_presence.clear()
-            worker_state.ftp_remote_only.clear()
-            worker_state.sql_presence = I
-            K_ = current_ean
-            if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
-                remote_files = {}
-                try:
-                    remote_files, ftp_presence, remote_info = svc_download_remote_slots(
-                        D[H],
-                        K_,
-                        slot_paths,
-                        C._slot_index_by_prefix,
-                        temp_root=A.path.join(tempfile.gettempdir(), f"picorgftp_sql_{request_id}"),
-                        status_callback=lambda idx, status: C._update_slot_activity(
-                            idx,
-                            active=J,
-                            status=C._slot_status.get(status, status),
-                        )
-                        if idx is not I
-                        else I,
-                    )
-                    worker_state.ftp_presence.update(ftp_presence)
-                    worker_state.ftp_remote_only.update(remote_info)
-                    for label, info in remote_info.items():
-                        slot_paths[label] = info["temp_path"]
-                except E as T:
-                    log_error_loc("ftp_check_error", ean=K_, error=T)
-                if not C.logged_counts:
-                    log_info_loc(
-                        "found_images_counts",
-                        local=Q(worker_state.original_files),
-                        ftp=Q(remote_files),
-                    )
-                    C.logged_counts = J
-                if svc_should_check_presence(config.CONFIG):
-                    columns = []
-                    for slot in C.slots:
-                        prefix = slot[Aa]
-                        label = slot["label"]
-                        column_name = C._resolve_sql_column(
-                            prefix, label, log_missing=J
-                        )
-                        columns.append((prefix, column_name, label))
-                    context = svc_extract_presence_context(config.CONFIG, K_)
-                    if context:
-                        table, where_clause = context
-                        db_type = config.CONFIG.get(p, K).lower()
+            try:
+                V_ = C._resolve_product_file_rows(
+                    product_dir,
+                    name_value,
+                    type_value,
+                    model_value,
+                    color_values,
+                    extra_value,
+                )
+                worker_state.original_files.clear()
+                slot_paths = {}
+                ean_guess = I
+                if V_:
+                    parsed = parse_slot_filename(V_[0][0])
+                    if parsed and current_ean == B:
+                        ean_guess = parsed.ean
+                for W_, d_ in V_:
+                    parsed = parse_slot_filename(W_)
+                    if not parsed:
+                        continue
+                    norm_label = parsed.normalized_label
+                    if parsed.normalized_name:
+                        normalized_name = parsed.normalized_name
+                        normalized_path = A.path.join(product_dir, normalized_name)
                         try:
-                            worker_state.sql_presence = svc_query_presence_map(
-                                columns, table, where_clause, db_type
-                            )
+                            A.rename(d_, normalized_path)
+                            log_info_loc("file_renamed", old=W_, new=normalized_name)
+                            W_ = normalized_name
+                            d_ = normalized_path
                         except E as T:
-                            worker_state.sql_presence = I
-                            log_error_loc("sql_check_error", ean=K_, error=T)
-            C.after(
-                0,
-                lambda rid=request_id: finalize(
-                    worker_state,
-                    slot_paths,
-                    ean_guess,
-                    rid,
-                ),
-            )
+                            log_error_loc(
+                                "file_rename_error", old=W_, new=normalized_name, error=T
+                            )
+                    worker_state.original_files[norm_label] = W_
+                    slot_paths[norm_label] = d_
+                local_slot_paths = dict(slot_paths)
+                try:
+                    C.after(
+                        0,
+                        lambda rid=request_id: apply_local_results(
+                            worker_state.clone(),
+                            local_slot_paths,
+                            ean_guess,
+                            rid,
+                        ),
+                    )
+                except E:
+                    pass
+                worker_state.ftp_presence.clear()
+                worker_state.ftp_preview_files.clear()
+                worker_state.ftp_remote_only.clear()
+                worker_state.sql_presence = I
+                K_ = current_ean or G(ean_guess or B).strip()
+                if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
+                    remote_files = {}
+                    try:
+                        (
+                            remote_files,
+                            ftp_presence,
+                            ftp_preview_files,
+                            ftp_remote_only,
+                        ) = svc_download_remote_slots(
+                            D[H],
+                            K_,
+                            slot_paths,
+                            C._slot_index_by_prefix,
+                            temp_root=A.path.join(
+                                tempfile.gettempdir(),
+                                f"picorgftp_sql_{request_id}",
+                            ),
+                            status_callback=lambda idx, status: C._update_slot_activity(
+                                idx,
+                                active=J,
+                                status=C._slot_status.get(status, status),
+                            )
+                            if idx is not I
+                            else I,
+                        )
+                        worker_state.ftp_presence.update(ftp_presence)
+                        worker_state.ftp_preview_files.update(ftp_preview_files)
+                        worker_state.ftp_remote_only.update(ftp_remote_only)
+                        for label, info in ftp_remote_only.items():
+                            slot_paths[label] = info["temp_path"]
+                    except E as T:
+                        log_error_loc("ftp_check_error", ean=K_, error=T)
+                    if not C.logged_counts:
+                        log_info_loc(
+                            "found_images_counts",
+                            local=Q(worker_state.original_files),
+                            ftp=Q(remote_files),
+                        )
+                        C.logged_counts = J
+                    if svc_should_check_presence(config.CONFIG):
+                        columns = []
+                        for slot in C.slots:
+                            prefix = slot[Aa]
+                            label = slot["label"]
+                            column_name = C._resolve_sql_column(
+                                prefix, label, log_missing=J
+                            )
+                            columns.append((prefix, column_name, label))
+                        context = svc_extract_presence_context(config.CONFIG, K_)
+                        if context:
+                            table, where_clause = context
+                            db_type = config.CONFIG.get(p, K).lower()
+                            try:
+                                worker_state.sql_presence = svc_query_presence_map(
+                                    columns, table, where_clause, db_type
+                                )
+                            except E as T:
+                                worker_state.sql_presence = I
+                                log_error_loc("sql_check_error", ean=K_, error=T)
+                try:
+                    C.after(
+                        0,
+                        lambda rid=request_id: finalize(
+                            worker_state,
+                            local_slot_paths,
+                            slot_paths,
+                            ean_guess,
+                            rid,
+                        ),
+                    )
+                except E:
+                    C._finish_existing_lookup()
+            except E:
+                log_error(traceback.format_exc())
+                try:
+                    C.after(0, lambda rid=request_id: finalize_lookup_error(rid))
+                except E:
+                    C._finish_existing_lookup()
 
         def finalize(
             worker_state,
+            local_slot_paths,
             slot_paths,
             ean_guess,
             rid,
@@ -4510,20 +4838,22 @@ class App(BU.Tk):
                 C._commit_product_state(worker_state)
                 for X_, G_ in A0(C.slots):
                     R_ = G_[Aa]
-                    if R_ in slot_paths:
-                        G_[f] = slot_paths[R_]
-                        C._set_slot_preview(X_, G_[f], I)
-                        C._queue_thumbnail(X_, G_[f])
+                    working_path = slot_paths.get(R_)
+                    local_path = local_slot_paths.get(R_)
+                    ftp_path = C._get_state_slot_ftp_path(worker_state, R_)
+                    if working_path or local_path or ftp_path:
+                        C._set_slot_paths(
+                            X_,
+                            working_path=working_path,
+                            local_path=local_path,
+                            ftp_path=ftp_path,
+                            preferred_preview="ftp",
+                        )
+                        C._display_slot_preview(X_)
                         C._mark_slot(X_, A4)
                     else:
-                        G_[f] = I
-                        G_[y].configure(image=B, text=C._slot_placeholder_text)
-                        G_[y].image = I
-                        G_[A7].place_forget()
-                        C._update_slot_activity(X_, active=h)
+                        C._clear_slot_preview(X_)
                         C._mark_slot(X_, I)
-                    C._set_icon_status(G_["local_icon"], R_ in worker_state.original_files)
-                    C._set_icon_status(G_["ftp_icon"], R_ in worker_state.ftp_presence)
                     if isinstance(worker_state.sql_presence, dict):
                         C._set_icon_status(G_["sql_icon"], worker_state.sql_presence.get(R_, h))
                     else:
@@ -4534,7 +4864,16 @@ class App(BU.Tk):
                 )
                 C._queue_dashboard_refresh()
             finally:
-                C._set_busy_state(B, active=h)
+                C._finish_existing_lookup()
+
+        def finalize_lookup_error(rid):
+            try:
+                if rid != C._load_existing_request_id:
+                    return
+                C._update_all_slot_activity(active=h)
+                C._queue_dashboard_refresh()
+            finally:
+                C._finish_existing_lookup()
 
         threading.Thread(target=worker, daemon=J).start()
 
@@ -4992,11 +5331,7 @@ class App(BU.Tk):
                         H_ = J
                     elif E_.startswith(l) and A.path.isfile(E_):
                         C.pending_deletions[D_] = E_
-                    C.slots[D_][f] = I
-                    F_ = C.slots[D_]
-                    F_[y].configure(image=B, text=C._slot_placeholder_text)
-                    F_[y].image = I
-                    F_[A7].place_forget()
+                    C._clear_slot_preview(D_)
                     if H_:
                         C._mark_slot(D_, I)
                     else:
@@ -5014,27 +5349,30 @@ class App(BU.Tk):
                 B.pending_additions.pop(C_, I)
             elif D_.startswith(l) and A.path.isfile(D_):
                 B.pending_deletions[C_] = D_
-        F_ = B.var_ean.get().strip()
-        if not F_:
-            F_ = q
+        B.pending_ftp_deletions.pop(C_, I)
+        label = B.slots[C_][Aa]
+        ftp_info = B.ftp_remote_only.pop(label, I)
+        if ftp_info and label not in B.ftp_preview_files:
+            B.ftp_preview_files[label] = ftp_info
         B.pending_additions[C_] = E_
-        B.slots[C_][f] = E_
+        B._set_slot_paths(
+            C_,
+            working_path=E_,
+            local_path=E_,
+            ftp_path=B._get_state_slot_ftp_path(B._product_state, label),
+            preferred_preview="local",
+        )
         B._update_slot_ui(C_)
-        B.slots[C_][A7].place(x=0, y=0)
         B._mark_slot(C_, AR)
-        B._set_icon_status(B.slots[C_]["local_icon"], J)
         if "sql_icon" in B.slots[C_]:
             B._set_icon_status(B.slots[C_]["sql_icon"], I)
         B._queue_dashboard_refresh()
 
     def _update_slot_ui(J, idx):
         D_ = J.slots[idx]
-        F_ = D_[f]
-        if not F_:
+        if not (D_.get(f) or D_.get("local_path") or D_.get("ftp_path")):
             return
-        J._update_slot_activity(idx, active=Al, status=J._slot_status["loading"])
-        D_[A7].place(x=0, y=0)
-        J._queue_thumbnail(idx, F_)
+        J._display_slot_preview(idx)
 
     def _remove_file(C, idx):
         if C.is_processing:
@@ -5048,6 +5386,7 @@ class App(BU.Tk):
                 "Usuń plik", f"Czy na pewno usunąć plik {A.path.basename(F_)}?"
             ):
                 return
+            label = E_[Aa]
             G_ = h
             if D_ in C.pending_additions:
                 C.pending_additions.pop(D_, I)
@@ -5055,7 +5394,6 @@ class App(BU.Tk):
             elif F_.startswith(l) and A.path.isfile(F_):
                 C.pending_deletions[D_] = F_
             elif not F_.startswith(l):
-                label = E_[Aa]
                 remote_name = I
                 info = C.ftp_remote_only.pop(label, I)
                 if info:
@@ -5064,19 +5402,14 @@ class App(BU.Tk):
                     remote_name = C.ftp_presence.get(label)
                 if remote_name:
                     C.pending_ftp_deletions[D_] = remote_name
-            E_[f] = I
-            E_[y].configure(image=B, text=C._slot_placeholder_text)
-            E_[y].image = I
-            E_[A7].place_forget()
-            C._thumb_tokens.pop(D_, I)
-            C._set_icon_status(E_["local_icon"], h)
+            C.ftp_preview_files.pop(label, I)
+            C._clear_slot_preview(D_)
             if "sql_icon" in E_:
                 C._set_icon_status(E_["sql_icon"], I)
             if G_:
                 C._mark_slot(D_, I)
             else:
                 C._mark_slot(D_, AR)
-            C._update_slot_activity(D_, active=h)
             C._queue_dashboard_refresh()
             C.focus_force()
 
@@ -5088,16 +5421,12 @@ class App(BU.Tk):
         C._product_state.original_files.clear()
         C._product_state.ftp_remote_only.clear()
         C._product_state.ftp_presence.clear()
+        C._product_state.ftp_preview_files.clear()
         C._product_state.ftp_downloaded_final.clear()
         C._product_state.sql_presence = I
         C._sync_state_refs()
-        for A_ in C.slots:
-            A_[f] = I
-            A_[y].configure(image=B, text=C._slot_placeholder_text)
-            A_[y].image = I
-            A_[A7].place_forget()
-            A_["local_icon"].place_forget()
-            A_["ftp_icon"].place_forget()
+        for idx, A_ in A0(C.slots):
+            C._clear_slot_preview(idx)
             if "sql_icon" in A_:
                 A_["sql_icon"].place_forget()
             if "status_label" in A_:
@@ -5330,6 +5659,8 @@ class App(BU.Tk):
             b_ = b_.replace(a, g).upper()
         K_ = C.var_ean.get().strip()
         color_values = [AH_, p_, s_]
+        if not C._warn_about_ean_conflict(force_message=J, quick_check=h):
+            return
         output_dir = build_product_directory(
             l,
             AE_,
@@ -6277,22 +6608,31 @@ class App(BU.Tk):
             if err_set or A__ or Y_ or AW_msg:
                 for idx, slot in A0(C.slots):
                     path = slot_paths.get(idx)
-                    slot[f] = path if path and A.path.isfile(path) else I
-                    if slot[f]:
-                        C._set_slot_preview(idx, slot[f], I)
-                        C._queue_thumbnail(idx, slot[f])
-                        C._set_icon_status(slot["local_icon"], J)
-                    else:
-                        slot[y].configure(image=B, text=C._slot_placeholder_text)
-                        slot[y].image = I
-                        slot[A7].place_forget()
-                        C._update_slot_activity(idx, active=h)
-                        C._set_icon_status(slot["local_icon"], I)
+                    if path and not A.path.isfile(path):
+                        path = I
+                    prefix = slot[Aa]
+                    ftp_path = I
+                    local_path = path
                     if isinstance(committed_state, ProductState):
-                        prefix = slot[Aa]
-                        C._set_icon_status(
-                            slot["ftp_icon"], prefix in committed_state.ftp_presence
+                        ftp_path = C._get_state_slot_ftp_path(committed_state, prefix)
+                        local_path = C._resolve_state_slot_local_path(
+                            prefix,
+                            path,
+                            committed_state,
                         )
+                    working_path = path or ftp_path
+                    if working_path or local_path or ftp_path:
+                        C._set_slot_paths(
+                            idx,
+                            working_path=working_path,
+                            local_path=local_path,
+                            ftp_path=ftp_path,
+                            preferred_preview="ftp" if ftp_path else "local",
+                        )
+                        C._display_slot_preview(idx)
+                    else:
+                        C._clear_slot_preview(idx)
+                    if isinstance(committed_state, ProductState):
                         if isinstance(committed_state.sql_presence, dict):
                             C._set_icon_status(
                                 slot["sql_icon"],
