@@ -38,7 +38,12 @@ from .product_state import (
     ProductState,
     merge_lookup_state as merge_product_lookup_state,
 )
-from .slot_utils import normalize_slot_definitions, normalize_sql_column_map, next_slot_prefix
+from .slot_utils import (
+    normalize_slot_definitions,
+    normalize_slot_prefix,
+    normalize_sql_column_map,
+    next_slot_prefix,
+)
 from .services.excel_service import merge_saved_entry_into_lists
 from .services.file_service import (
     build_expected_remote_filename as svc_build_expected_remote_filename,
@@ -8322,8 +8327,14 @@ class App(BU.Tk):
             name_entry = C.Entry(editor, textvariable=name_var, width=30)
             name_entry.grid(row=0, column=1, padx=5, pady=5, sticky="w")
             name_entry.focus_set()
-            C.Label(editor, text=SQL_MAPPING_COLUMN_LABEL).grid(
+            C.Label(editor, text=FIELD_ID_LABEL).grid(
                 row=1, column=0, padx=5, pady=5, sticky=R
+            )
+            prefix_var = F.StringVar(value=slot["prefix"])
+            prefix_entry = C.Entry(editor, textvariable=prefix_var, width=10)
+            prefix_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+            C.Label(editor, text=SQL_MAPPING_COLUMN_LABEL).grid(
+                row=2, column=0, padx=5, pady=5, sticky=R
             )
             column_var = F.StringVar(value=sql_column_map.get(slot["prefix"], B))
             column_entry = C.Combobox(
@@ -8333,7 +8344,7 @@ class App(BU.Tk):
                 state=X,
                 width=30,
             )
-            column_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+            column_entry.grid(row=2, column=1, padx=5, pady=5, sticky="w")
             if hasattr(column_entry, "drop_target_register") and hasattr(
                 column_entry, "dnd_bind"
             ):
@@ -8369,8 +8380,44 @@ class App(BU.Tk):
                         parent=editor,
                     )
                     return
+                raw_prefix = prefix_var.get().strip()
+                if not raw_prefix:
+                    O.showwarning(
+                        WARNING_LABEL, FIELD_ID_REQUIRED_MSG, parent=editor
+                    )
+                    return
+                new_prefix = normalize_slot_prefix(raw_prefix)
+                if not new_prefix:
+                    O.showwarning(
+                        WARNING_LABEL, FIELD_ID_INVALID_MSG, parent=editor
+                    )
+                    return
+                for existing_slot in slot_defs:
+                    if existing_slot is slot:
+                        continue
+                    existing_prefix = (
+                        normalize_slot_prefix(existing_slot.get("prefix"))
+                        or G(existing_slot.get("prefix") or B).strip()
+                    )
+                    if existing_prefix == new_prefix:
+                        O.showwarning(
+                            WARNING_LABEL,
+                            FIELD_ID_DUPLICATE_MSG.format(
+                                prefix=new_prefix,
+                                label=existing_slot.get("label", B),
+                            ),
+                            parent=editor,
+                        )
+                        return
+                old_prefix = slot["prefix"]
                 slot["label"] = new_label
-                sql_column_map[slot["prefix"]] = G(column_var.get() or B).strip()
+                new_column = G(column_var.get() or B).strip()
+                if new_prefix != old_prefix:
+                    old_column = sql_column_map.pop(old_prefix, B)
+                    slot["prefix"] = new_prefix
+                    sql_column_map[new_prefix] = new_column or old_column
+                else:
+                    sql_column_map[old_prefix] = new_column
                 _refresh_fields_grid()
                 _close_editor()
 
@@ -8698,14 +8745,14 @@ class App(BU.Tk):
                         )
 
             translate_row = C.Frame(editor)
-            translate_row.grid(row=2, column=0, columnspan=2, pady=(0, 5))
+            translate_row.grid(row=3, column=0, columnspan=2, pady=(0, 5))
             C.Button(
                 translate_row,
                 text=FIELD_TRANSLATE_LABEL,
                 command=_open_translation_dialog,
             ).grid(row=0, column=0, padx=5)
             button_row = C.Frame(editor)
-            button_row.grid(row=3, column=0, columnspan=2, pady=5)
+            button_row.grid(row=4, column=0, columnspan=2, pady=5)
 
             C.Button(button_row, text=SAVE_LABEL, command=_save_field).grid(
                 row=0, column=0, padx=5

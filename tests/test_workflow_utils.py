@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import unittest
 
 from picorgftp_sql.workflow_utils import (
@@ -28,7 +29,14 @@ class WorkflowUtilsTests(unittest.TestCase):
         )
         self.assertEqual(
             path,
-            "/tmp/base/MAGGIORE/KOMODA/MA03/BIALY-DAB ARTISAN/LED-RGB",
+            os.path.join(
+                "/tmp/base",
+                "MAGGIORE",
+                "KOMODA",
+                "MA03",
+                "BIALY-DAB ARTISAN",
+                "LED-RGB",
+            ),
         )
 
     def test_build_output_filename_keeps_structured_segments(self) -> None:

@@ -427,6 +427,17 @@ FIELD_NAME_REQUIRED_MSG = LANG.get(
 FIELD_NAME_DUPLICATE_MSG = LANG.get(
     "field_name_duplicate", "Pole '{label}' już istnieje."
 )
+FIELD_ID_LABEL = LANG.get("field_id_label", "ID w nazwie pliku:")
+FIELD_ID_REQUIRED_MSG = LANG.get(
+    "field_id_required", "Podaj ID pola."
+)
+FIELD_ID_INVALID_MSG = LANG.get(
+    "field_id_invalid", "ID pola musi być liczbą większą od 0."
+)
+FIELD_ID_DUPLICATE_MSG = LANG.get(
+    "field_id_duplicate",
+    "ID '{prefix}' jest już zajęte przez pole '{label}'.",
+)
 FIELD_DELETE_LABEL = LANG.get("field_delete_label", "Usuń")
 FIELD_DELETE_CONFIRM_MSG = LANG.get(
     "field_delete_confirm", "Czy usunąć pole '{label}'?"

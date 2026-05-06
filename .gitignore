@@ -2,3 +2,6 @@ local_settings
 .venv
 .vscode
 \__pycache__/
+.pytest_cache/
+pytest-cache-files-*/
+tmp_test/

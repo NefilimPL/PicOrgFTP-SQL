@@ -363,6 +363,10 @@
   "field_name_prompt": "Введіть назву поля:",
   "field_name_required": "Введіть назву поля.",
   "field_name_duplicate": "Поле '{label}' вже існує.",
+  "field_id_label": "ID у назві файлу:",
+  "field_id_required": "Введіть ID поля.",
+  "field_id_invalid": "ID поля має бути числом більше 0.",
+  "field_id_duplicate": "ID '{prefix}' вже використовується полем '{label}'.",
   "field_delete_label": "Видалити",
   "field_delete_confirm": "Видалити поле '{label}'?",
   "field_translate_label": "Пропозиції перекладу",
@@ -390,5 +394,7 @@
   "sql_columns_parse_failed": "Не вдалося зчитати назву таблиці з SQL-запиту.",
   "slot_defs_apply_restart": "Зміни полів фото будуть видимі після перезапуску.",
   "sql_mapping_empty_label": "SQL: (немає)",
-  "slot_label_zdjęcie na białym tle": "Фотографія білого фону"
+  "slot_label_zdjęcie na białym tle": "Фотографія білого фону",
+  "slot_label_zdjęcie na białym tle 2": "Фото на білому тлі 2",
+  "slot_label_zdjęcie wb 1": "Фото WB 1"
 }
