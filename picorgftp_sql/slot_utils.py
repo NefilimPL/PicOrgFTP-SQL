@@ -15,6 +15,22 @@ def _as_text(value) -> str:
     return str(value).strip()
 
 
+def normalize_slot_prefix(value, *, width: int = 2) -> str:
+    """Return the canonical numeric slot ID used in file names."""
+
+    text = _as_text(value)
+    if not text or not text.isdigit():
+        return ""
+    number = int(text)
+    if number <= 0:
+        return ""
+    return str(number).zfill(max(width, len(str(number))))
+
+
+def _slot_prefix_key(value) -> str:
+    return normalize_slot_prefix(value) or _as_text(value)
+
+
 def normalize_slot_definitions(raw_defs) -> Tuple[List[Dict[str, str]], List[dict]]:
     """Return a cleaned list of slot definitions and any issues found."""
 
@@ -35,11 +51,13 @@ def normalize_slot_definitions(raw_defs) -> Tuple[List[Dict[str, str]], List[dic
                 if entry:
                     issues.append({"type": "slot_def_invalid", "entry": entry})
                 continue
-            if prefix in seen:
+            normalized_prefix = normalize_slot_prefix(prefix) or prefix
+            prefix_key = _slot_prefix_key(normalized_prefix).lower()
+            if prefix_key in seen:
                 issues.append({"type": "slot_def_duplicate", "prefix": prefix})
                 continue
-            slot_defs.append({"prefix": prefix, "label": label})
-            seen.add(prefix)
+            slot_defs.append({"prefix": normalized_prefix, "label": label})
+            seen.add(prefix_key)
     if not slot_defs:
         slot_defs = [dict(item) for item in DEFAULT_SLOT_DEFS]
         if raw_defs:
@@ -54,7 +72,7 @@ def normalize_sql_column_map(raw_map, slot_defs) -> Tuple[Dict[str, str], List[d
     normalized: Dict[str, str] = {}
     if isinstance(raw_map, dict):
         for key, value in raw_map.items():
-            prefix = _as_text(key)
+            prefix = normalize_slot_prefix(key) or _as_text(key)
             if not prefix:
                 continue
             normalized[prefix] = _as_text(value)
@@ -75,8 +93,8 @@ def next_slot_prefix(slot_defs) -> str:
 
     used = []
     for slot in slot_defs or []:
-        prefix = _as_text(slot.get("prefix"))
-        if prefix.isdigit():
+        prefix = normalize_slot_prefix(slot.get("prefix"))
+        if prefix:
             used.append(int(prefix))
     if used:
         next_num = max(used) + 1
