@@ -149,8 +149,13 @@ SLOT_GRID_COLUMNS = 5
 SLOT_PREVIEW_SIZE = (240, 176)
 THUMBNAIL_RESULT_BATCH = 6
 THUMBNAIL_POLL_MS = 28
+THUMBNAIL_IDLE_POLL_MS = 140
+THUMBNAIL_SCROLL_DEFER_MS = 90
 PERF_MONITOR_MS = 16
 PERF_SAMPLE_WINDOW = 90
+SLOT_SCROLL_FLUSH_MS = 12
+SLOT_SCROLL_SETTLE_MS = 120
+SLOT_SCROLL_MAX_STEPS = 10
 FORM_TRACKED_FIELDS = (
     "name",
     "type",
@@ -248,6 +253,8 @@ class App(BU.Tk):
         for key in (n, t, s, Y, d):
             if not isinstance(B.lists.get(key), list):
                 B.lists[key] = []
+        B._list_value_sets = B._build_list_value_sets()
+        B._list_filter_cache = {}
         if not A.path.isdir(l):
             A.makedirs(l, exist_ok=J)
         B._local_file_index_enabled = bool(D.get(LOCAL_FILE_INDEX_KEY, J))
@@ -292,12 +299,19 @@ class App(BU.Tk):
         B._thumb_result_queue = queue.Queue()
         B._thumb_request_seq = 0
         B._thumb_poll_job = I
+        B._ui_log_buffer = []
+        B._ui_log_flush_job = I
         B._load_existing_after_id = I
         B._load_existing_request_id = 0
         B._last_lookup_signature = I
         B._dashboard_refresh_job = I
         B._slot_grid_columns = 0
         B._slots_refresh_job = I
+        B._slots_scroll_job = I
+        B._slots_scroll_end_job = I
+        B._slots_scroll_pending_steps = 0
+        B._slots_scroll_active = h
+        B._slot_row_height = 0
         B._perf_monitor_job = I
         B._perf_samples = deque(maxlen=PERF_SAMPLE_WINDOW)
         B._perf_last_tick = Ag.perf_counter()
@@ -411,6 +425,9 @@ class App(BU.Tk):
             "_dashboard_refresh_job",
             "_field_change_refresh_job",
             "_slots_refresh_job",
+            "_slots_scroll_job",
+            "_slots_scroll_end_job",
+            "_ui_log_flush_job",
         ):
             job_id = getattr(A, job_attr, I)
             if job_id is I:
@@ -770,7 +787,6 @@ class App(BU.Tk):
 
     def _update_dashboard_summary(A):
         A._dashboard_refresh_job = I
-        A._refresh_all_slot_sql_ui()
         name_value = A.var_name.get().strip()
         type_value = A.var_type.get().strip()
         model_value = A.var_model.get().strip()
@@ -965,6 +981,66 @@ class App(BU.Tk):
         )
         return merged
 
+    def _build_list_value_sets(A):
+        """Build normalized lookup sets for fast list membership checks."""
+
+        value_sets = {}
+        for list_key in (n, t, s, Y, d):
+            values = A.lists.get(list_key, [])
+            normalized_values = set()
+            if isinstance(values, list):
+                for value in values:
+                    normalized = A._normalize_list_value(list_key, value)
+                    if normalized:
+                        normalized_values.add(normalized)
+            value_sets[list_key] = normalized_values
+        return value_sets
+
+    def _invalidate_list_filter_cache(A, list_key=I):
+        cache = Aj(A, "_list_filter_cache", I)
+        if not isinstance(cache, dict):
+            A._list_filter_cache = {}
+            return
+        if list_key is I:
+            cache.clear()
+        else:
+            cache.pop(list_key, I)
+
+    def _refresh_list_value_set(A, list_key):
+        value_sets = Aj(A, "_list_value_sets", I)
+        if not isinstance(value_sets, dict):
+            value_sets = {}
+            A._list_value_sets = value_sets
+        values = A.lists.get(list_key, [])
+        normalized_values = set()
+        if isinstance(values, list):
+            for value in values:
+                normalized = A._normalize_list_value(list_key, value)
+                if normalized:
+                    normalized_values.add(normalized)
+        value_sets[list_key] = normalized_values
+        A._invalidate_list_filter_cache(list_key)
+
+    def _get_list_filter_pairs(A, list_key):
+        """Return cached lowercase/value pairs used by combobox autocomplete."""
+
+        values = A.lists.get(list_key, [])
+        signature = (id(values), Q(values) if isinstance(values, list) else 0)
+        cache = Aj(A, "_list_filter_cache", I)
+        if not isinstance(cache, dict):
+            cache = {}
+            A._list_filter_cache = cache
+        cached = cache.get(list_key)
+        if cached and cached[0] == signature:
+            return cached[1]
+        pairs = []
+        if isinstance(values, list):
+            for value in values:
+                if value:
+                    pairs.append((G(value).lower(), value))
+        cache[list_key] = (signature, pairs)
+        return pairs
+
     def _list_child_directories(B, path, uppercase=h):
         """Return direct child directories using ``scandir`` for lower overhead."""
 
@@ -998,6 +1074,7 @@ class App(BU.Tk):
             B.lists.get(n, []),
         )
         B.lists[n] = merged
+        B._refresh_list_value_set(n)
         if Aj(B, "combo_name", I) is not I:
             B._refresh_combobox_list(B.combo_name, merged, existing_count=existing_count)
 
@@ -1954,12 +2031,25 @@ class App(BU.Tk):
         A._perf_last_tick = now
         A._perf_samples.append(delta_ms)
         snapshot = A._current_perf_snapshot()
-        A._perf_status_var.set(
-            LANG.get(
-                "perf_status_line",
-                "UI ~{fps:.0f} FPS  |  opóźnienie {lag:.0f} ms",
-            ).format(fps=snapshot["fps"], lag=snapshot["lag_ms"])
+        idle_mode = (
+            not A.is_processing
+            and snapshot["thumb_queue"] == 0
+            and A._busy_counter == 0
         )
+        if idle_mode:
+            A._perf_status_var.set(
+                LANG.get(
+                    "perf_status_idle_line",
+                    "UI: spoczynek  |  monitor zwolniony",
+                )
+            )
+        else:
+            A._perf_status_var.set(
+                LANG.get(
+                    "perf_status_line",
+                    "UI ~{fps:.0f} FPS  |  opóźnienie {lag:.0f} ms",
+                ).format(fps=snapshot["fps"], lag=snapshot["lag_ms"])
+            )
         A._perf_detail_var.set(
             LANG.get(
                 "perf_detail_line",
@@ -1970,7 +2060,7 @@ class App(BU.Tk):
             )
         )
         next_interval = PERF_MONITOR_MS
-        if not A.is_processing and snapshot["thumb_queue"] == 0 and A._busy_counter == 0:
+        if idle_mode:
             next_interval = 220
         try:
             if A.winfo_exists():
@@ -2028,8 +2118,36 @@ class App(BU.Tk):
             bbox = canvas.bbox("all")
             if bbox:
                 canvas.configure(scrollregion=bbox)
+            row_height = B._measure_slot_row_height()
+            if row_height:
+                current_increment = int(float(canvas.cget("yscrollincrement") or 0))
+                if current_increment != row_height:
+                    canvas.configure(yscrollincrement=row_height)
         except E:
             pass
+
+    def _measure_slot_row_height(B):
+        """Return the slot row pitch used for stable row-by-row scrolling."""
+
+        columns = B._slot_grid_columns or SLOT_GRID_COLUMNS
+        heights = []
+        for idx, slot in A0(Aj(B, "slots", [])):
+            if idx >= columns:
+                break
+            frame = slot.get(AS)
+            if not frame:
+                continue
+            try:
+                height = frame.winfo_height() or frame.winfo_reqheight()
+                if height:
+                    heights.append(int(height))
+            except E:
+                pass
+        if not heights:
+            return Aj(B, "_slot_row_height", 0) or (SLOT_PREVIEW_SIZE[1] + 92)
+        row_height = max(heights) + 12
+        B._slot_row_height = row_height
+        return row_height
 
     def _bind_slot_scroll_target(B, widget):
         if not widget:
@@ -2043,14 +2161,66 @@ class App(BU.Tk):
         for child in widget.winfo_children():
             B._bind_slot_scroll_target(child)
 
-    def _scroll_slots(B, steps):
+    def _finish_slots_scroll(B):
+        B._slots_scroll_end_job = I
+        B._slots_scroll_active = h
+        B._schedule_slots_canvas_refresh()
+
+    def _mark_slots_scroll_active(B):
+        B._slots_scroll_active = J
+        end_job = Aj(B, "_slots_scroll_end_job", I)
+        if end_job is not I:
+            try:
+                B.after_cancel(end_job)
+            except E:
+                pass
+        try:
+            B._slots_scroll_end_job = B.after(
+                SLOT_SCROLL_SETTLE_MS,
+                B._finish_slots_scroll,
+            )
+        except E:
+            B._slots_scroll_end_job = I
+
+    def _flush_slots_scroll(B):
+        B._slots_scroll_job = I
+        requested_steps = int(Aj(B, "_slots_scroll_pending_steps", 0) or 0)
+        steps = requested_steps
+        if not steps:
+            return
+        if steps > SLOT_SCROLL_MAX_STEPS:
+            steps = SLOT_SCROLL_MAX_STEPS
+        elif steps < -SLOT_SCROLL_MAX_STEPS:
+            steps = -SLOT_SCROLL_MAX_STEPS
+        B._slots_scroll_pending_steps = requested_steps - steps
         canvas = Aj(B, "_slots_canvas", I)
         if not canvas:
             return
         try:
             canvas.yview_scroll(steps, "units")
+            canvas.update_idletasks()
         except E:
             return
+        if Aj(B, "_slots_scroll_pending_steps", 0):
+            try:
+                B._slots_scroll_job = B.after(
+                    SLOT_SCROLL_FLUSH_MS,
+                    B._flush_slots_scroll,
+                )
+            except E:
+                B._slots_scroll_job = I
+
+    def _scroll_slots(B, steps):
+        B._mark_slots_scroll_active()
+        B._slots_scroll_pending_steps += int(steps or 0)
+        if B._slots_scroll_job is I:
+            try:
+                B._slots_scroll_job = B.after(
+                    SLOT_SCROLL_FLUSH_MS,
+                    B._flush_slots_scroll,
+                )
+            except E:
+                B._flush_slots_scroll()
         return "break"
 
     def _on_slots_mousewheel(B, event):
@@ -2110,6 +2280,16 @@ class App(BU.Tk):
 
     def _poll_thumbnail_results(B):
         B._thumb_poll_job = I
+        if Aj(B, "_slots_scroll_active", h):
+            try:
+                if B.winfo_exists():
+                    B._thumb_poll_job = B.after(
+                        THUMBNAIL_SCROLL_DEFER_MS,
+                        B._poll_thumbnail_results,
+                    )
+            except E:
+                B._thumb_poll_job = I
+            return
         processed = 0
         while processed < THUMBNAIL_RESULT_BATCH:
             try:
@@ -2125,9 +2305,18 @@ class App(BU.Tk):
                 continue
             B._set_slot_preview(idx, path, thumb)
         try:
+            pending_requests = B._thumb_request_queue.qsize()
+        except E:
+            pending_requests = 0
+        next_interval = (
+            THUMBNAIL_POLL_MS
+            if processed or pending_requests
+            else THUMBNAIL_IDLE_POLL_MS
+        )
+        try:
             if B.winfo_exists():
                 B._thumb_poll_job = B.after(
-                    THUMBNAIL_POLL_MS,
+                    next_interval,
                     B._poll_thumbnail_results,
                 )
         except E:
@@ -3778,6 +3967,8 @@ class App(BU.Tk):
                 width=width,
             ),
         )
+        combo._picorg_values = tuple(values or ())
+        combo._picorg_styled_total = I
         return combo
 
     def _configure_log_widget(A):
@@ -3822,9 +4013,16 @@ class App(BU.Tk):
         body.grid(row=1, column=0, sticky="nsew")
         body.columnconfigure(0, weight=1)
         body.rowconfigure(0, weight=1)
-        A_ = F.Canvas(body, bg=B._ui_colors["card"], highlightthickness=0, bd=0)
+        A_ = F.Canvas(
+            body,
+            bg=B._ui_colors["card"],
+            highlightthickness=0,
+            bd=0,
+            yscrollincrement=SLOT_PREVIEW_SIZE[1] + 92,
+        )
         B._slots_canvas = A_
         def _on_scroll(*args):
+            B._mark_slots_scroll_active()
             A_.yview(*args)
 
         T = C.Scrollbar(body, orient=An, command=_on_scroll)
@@ -4655,12 +4853,26 @@ class App(BU.Tk):
 
         return svc_query_presence_details(columns, table, where_clause, db_type)
 
+    def _set_combobox_values(A, combobox, values):
+        """Assign combobox values only when the visible list actually changed."""
+
+        if combobox is I:
+            return
+        normalized_values = tuple(values or ())
+        if Aj(combobox, "_picorg_values", I) == normalized_values:
+            return
+        combobox[S] = normalized_values
+        combobox._picorg_values = normalized_values
+        combobox._picorg_styled_total = I
+
     def _refresh_combobox_list(B, combobox, all_values, existing_count=0):
         """Refresh the dropdown values while remembering which entries exist."""
 
         A_ = combobox
-        A_[S] = all_values
+        if Aj(A_, "existing_count", I) != existing_count:
+            A_._picorg_styled_total = I
         A_.existing_count = existing_count
+        B._set_combobox_values(A_, all_values)
 
     def _normalize_list_value(A, list_key, value):
         """Return a normalized list entry for comparisons and saves."""
@@ -4678,26 +4890,30 @@ class App(BU.Tk):
         normalized = A._normalize_list_value(list_key, value)
         if not normalized:
             return h
-        values = A.lists.get(list_key, [])
-        return normalized in [G(A_).strip().upper() for A_ in values if A_]
+        value_sets = Aj(A, "_list_value_sets", I)
+        if not isinstance(value_sets, dict) or list_key not in value_sets:
+            A._refresh_list_value_set(list_key)
+            value_sets = A._list_value_sets
+        return normalized in value_sets.get(list_key, set())
 
     def _sync_list_comboboxes(A, list_key):
         values = A.lists.get(list_key, [])
+        A._refresh_list_value_set(list_key)
         if list_key == n and Aj(A, "combo_name", I):
-            A.combo_name[S] = values
+            A._set_combobox_values(A.combo_name, values)
         elif list_key == t and Aj(A, "combo_type", I):
-            A.combo_type[S] = values
+            A._set_combobox_values(A.combo_type, values)
         elif list_key == s and Aj(A, "combo_model", I):
-            A.combo_model[S] = values
+            A._set_combobox_values(A.combo_model, values)
         elif list_key == Y:
             if Aj(A, "combo_color1", I):
-                A.combo_color1[S] = values
+                A._set_combobox_values(A.combo_color1, values)
             if Aj(A, "combo_color2", I):
-                A.combo_color2[S] = values
+                A._set_combobox_values(A.combo_color2, values)
             if Aj(A, "combo_color3", I):
-                A.combo_color3[S] = values
+                A._set_combobox_values(A.combo_color3, values)
         elif list_key == d and Aj(A, "combo_extra", I):
-            A.combo_extra[S] = values
+            A._set_combobox_values(A.combo_extra, values)
 
     def _remember_focus(A, event):
         A._last_focus_widget = Aj(event, "widget", I)
@@ -5256,8 +5472,8 @@ class App(BU.Tk):
         A8_ = [A_ for A_ in D.lists[Y] if A_ not in r]
         A9_ = r + A8_
         D._refresh_combobox_list(D.combo_color1, A9_, existing_count=Q(r))
-        D.combo_color2[S] = D.lists[Y]
-        D.combo_color3[S] = D.lists[Y]
+        D._set_combobox_values(D.combo_color2, D.lists[Y])
+        D._set_combobox_values(D.combo_color3, D.lists[Y])
         for AA_ in (D.combo_color1, D.combo_color2, D.combo_color3):
             AA_.configure(state=X)
         if preserve_loaded:
@@ -5462,12 +5678,13 @@ class App(BU.Tk):
             return
         E_ = A_.get()
         if E_ == B:
-            A_[S] = C.lists[D_]
+            C._set_combobox_values(A_, C.lists[D_])
             return
-        H_ = [A for A in C.lists[D_] if A and A.lower().startswith(E_.lower())]
+        prefix = E_.lower()
+        H_ = [value for lowered, value in C._get_list_filter_pairs(D_) if lowered.startswith(prefix)]
         if H_:
             H_.sort(key=G.lower)
-            A_[S] = H_
+            C._set_combobox_values(A_, H_)
             if J_.keysym not in ("BackSpace", "Delete"):
                 K_ = H_[0]
                 if E_.lower() != K_.lower():
@@ -5475,7 +5692,7 @@ class App(BU.Tk):
                     A_.icursor(Q(E_))
                     A_.selection_range(Q(E_), F.END)
         else:
-            A_[S] = []
+            C._set_combobox_values(A_, [])
 
     def _on_color_commit(C):
         M_ = C.var_name.get().strip()
@@ -5798,25 +6015,25 @@ class App(BU.Tk):
             A.var_ean.set(B)
         if Aj(A, "combo_name", I):
             A.combo_name.configure(state=X, style=j)
-            A.combo_name[S] = A.lists.get(n, [])
+            A._set_combobox_values(A.combo_name, A.lists.get(n, []))
         if Aj(A, "combo_type", I):
             A.combo_type.configure(state=X, style=j)
-            A.combo_type[S] = A.lists.get(t, [])
+            A._set_combobox_values(A.combo_type, A.lists.get(t, []))
         if Aj(A, "combo_model", I):
             A.combo_model.configure(state=X, style=j)
-            A.combo_model[S] = A.lists.get(s, [])
+            A._set_combobox_values(A.combo_model, A.lists.get(s, []))
         if Aj(A, "combo_color1", I):
             A.combo_color1.configure(state=X, style=j)
-            A.combo_color1[S] = A.lists.get(Y, [])
+            A._set_combobox_values(A.combo_color1, A.lists.get(Y, []))
         if Aj(A, "combo_color2", I):
             A.combo_color2.configure(state=X, style=j)
-            A.combo_color2[S] = A.lists.get(Y, [])
+            A._set_combobox_values(A.combo_color2, A.lists.get(Y, []))
         if Aj(A, "combo_color3", I):
             A.combo_color3.configure(state=X, style=j)
-            A.combo_color3[S] = A.lists.get(Y, [])
+            A._set_combobox_values(A.combo_color3, A.lists.get(Y, []))
         if Aj(A, "combo_extra", I):
             A.combo_extra.configure(state=X, style=j)
-            A.combo_extra[S] = A.lists.get(d, [])
+            A._set_combobox_values(A.combo_extra, A.lists.get(d, []))
         if Aj(A, "entry_ean", I):
             A.entry_ean.configure(state=X)
         if Aj(A, "btn_submit", I):
@@ -5939,19 +6156,20 @@ class App(BU.Tk):
                 A.lists[B_] = [
                     A_ for A_ in A.lists[B_] if A_.upper() != C_.strip().upper()
                 ]
+                A._refresh_list_value_set(B_)
             D_.delete(F_)
             if B_ == n:
-                A.combo_name[S] = A.lists[B_]
+                A._set_combobox_values(A.combo_name, A.lists[B_])
             elif B_ == t:
-                A.combo_type[S] = A.lists[B_]
+                A._set_combobox_values(A.combo_type, A.lists[B_])
             elif B_ == s:
-                A.combo_model[S] = A.lists[B_]
+                A._set_combobox_values(A.combo_model, A.lists[B_])
             elif B_ == Y:
-                A.combo_color1[S] = A.lists[B_]
-                A.combo_color2[S] = A.lists[B_]
-                A.combo_color3[S] = A.lists[B_]
+                A._set_combobox_values(A.combo_color1, A.lists[B_])
+                A._set_combobox_values(A.combo_color2, A.lists[B_])
+                A._set_combobox_values(A.combo_color3, A.lists[B_])
             elif B_ == d:
-                A.combo_extra[S] = A.lists[B_]
+                A._set_combobox_values(A.combo_extra, A.lists[B_])
 
     def _on_submit(C):
         A2 = "was_existing"
@@ -9187,12 +9405,19 @@ class App(BU.Tk):
             return
         F_ = A_.cget(S)
         J_ = Q(F_) if F_ else 0
+        previous_count = Aj(A_, "_picorg_styled_existing_count", 0) or 0
+        previous_total = Aj(A_, "_picorg_styled_total", I)
+        if previous_count == D_ and previous_total == J_:
+            return
         K_ = B_.cget("background")
-        for C_ in Ax(J_):
-            if C_ < D_:
-                B_.itemconfig(C_, background=LIGHT_GREEN)
-            else:
-                B_.itemconfig(C_, background=K_)
+        highlight_count = min(D_, J_)
+        for C_ in Ax(highlight_count):
+            B_.itemconfig(C_, background=LIGHT_GREEN)
+        reset_stop = min(max(previous_count, D_), J_)
+        for C_ in Ax(highlight_count, reset_stop):
+            B_.itemconfig(C_, background=K_)
+        A_._picorg_styled_existing_count = D_
+        A_._picorg_styled_total = J_
 
     def _mark_slot(D, idx, color):
         B_ = color
@@ -9256,18 +9481,59 @@ class App(BU.Tk):
     def _on_drag_end(A, event):
         A.dragging_idx = I
 
+    def _flush_ui_log(A):
+        A._ui_log_flush_job = I
+        pending = Aj(A, "_ui_log_buffer", [])
+        if not pending:
+            return
+        A._ui_log_buffer = []
+        try:
+            A.ui_log.configure(state=Az)
+            A.ui_log.insert(F.END, "\n".join(pending) + "\n")
+            try:
+                line_count = int(G(A.ui_log.index("end-1c")).split(".", 1)[0])
+                max_lines = 500
+                if line_count > max_lines:
+                    A.ui_log.delete(A_, f"{line_count - max_lines + 1}.0")
+            except E:
+                pass
+            A.ui_log.see(F.END)
+        except E:
+            pass
+        finally:
+            try:
+                A.ui_log.configure(state=Ak)
+            except E:
+                pass
+
     def _ui_log(A, msg=AQ, clear=Ay):
+        if threading.current_thread() != threading.main_thread():
+            try:
+                A.after(0, lambda: A._ui_log(msg=msg, clear=clear))
+            except E:
+                pass
+            return
         try:
             if clear:
+                job = Aj(A, "_ui_log_flush_job", I)
+                if job is not I:
+                    try:
+                        A.after_cancel(job)
+                    except E:
+                        pass
+                    A._ui_log_flush_job = I
+                if Aj(A, "_ui_log_buffer", I) is not I:
+                    A._ui_log_buffer.clear()
                 A.ui_log.configure(state=Az)
                 A.ui_log.delete(A_, F.END)
                 A.ui_log.configure(state=Ak)
                 return
             if not msg:
                 return
-            A.ui_log.configure(state=Az)
-            A.ui_log.insert(F.END, f"{msg}\n")
-            A.ui_log.see(F.END)
-            A.ui_log.configure(state=Ak)
+            if Aj(A, "_ui_log_buffer", I) is I:
+                A._ui_log_buffer = []
+            A._ui_log_buffer.append(G(msg))
+            if Aj(A, "_ui_log_flush_job", I) is I:
+                A._ui_log_flush_job = A.after(40, A._flush_ui_log)
         except E:
             pass
