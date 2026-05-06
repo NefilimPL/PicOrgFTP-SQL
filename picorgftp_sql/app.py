@@ -151,11 +151,13 @@ THUMBNAIL_RESULT_BATCH = 6
 THUMBNAIL_POLL_MS = 28
 THUMBNAIL_IDLE_POLL_MS = 140
 THUMBNAIL_SCROLL_DEFER_MS = 90
+THUMBNAIL_MEMORY_ROWS = 10
 PERF_MONITOR_MS = 16
 PERF_SAMPLE_WINDOW = 90
 SLOT_SCROLL_FLUSH_MS = 12
 SLOT_SCROLL_SETTLE_MS = 120
-SLOT_SCROLL_MAX_STEPS = 10
+SLOT_SCROLL_MAX_STEPS = 5
+SLOT_SCROLL_UNIT_PX = 28
 FORM_TRACKED_FIELDS = (
     "name",
     "type",
@@ -294,6 +296,8 @@ class App(BU.Tk):
         B._thumb_tokens = {}
         B._thumb_cache = OrderedDict()
         B._thumb_cache_limit = 192
+        B._thumb_photo_cache = OrderedDict()
+        B._thumb_photo_cache_limit = SLOT_GRID_COLUMNS * THUMBNAIL_MEMORY_ROWS
         B._thumb_cache_lock = threading.Lock()
         B._thumb_request_queue = queue.Queue()
         B._thumb_result_queue = queue.Queue()
@@ -311,7 +315,6 @@ class App(BU.Tk):
         B._slots_scroll_end_job = I
         B._slots_scroll_pending_steps = 0
         B._slots_scroll_active = h
-        B._slot_row_height = 0
         B._perf_monitor_job = I
         B._perf_samples = deque(maxlen=PERF_SAMPLE_WINDOW)
         B._perf_last_tick = Ag.perf_counter()
@@ -2118,36 +2121,8 @@ class App(BU.Tk):
             bbox = canvas.bbox("all")
             if bbox:
                 canvas.configure(scrollregion=bbox)
-            row_height = B._measure_slot_row_height()
-            if row_height:
-                current_increment = int(float(canvas.cget("yscrollincrement") or 0))
-                if current_increment != row_height:
-                    canvas.configure(yscrollincrement=row_height)
         except E:
             pass
-
-    def _measure_slot_row_height(B):
-        """Return the slot row pitch used for stable row-by-row scrolling."""
-
-        columns = B._slot_grid_columns or SLOT_GRID_COLUMNS
-        heights = []
-        for idx, slot in A0(Aj(B, "slots", [])):
-            if idx >= columns:
-                break
-            frame = slot.get(AS)
-            if not frame:
-                continue
-            try:
-                height = frame.winfo_height() or frame.winfo_reqheight()
-                if height:
-                    heights.append(int(height))
-            except E:
-                pass
-        if not heights:
-            return Aj(B, "_slot_row_height", 0) or (SLOT_PREVIEW_SIZE[1] + 92)
-        row_height = max(heights) + 12
-        B._slot_row_height = row_height
-        return row_height
 
     def _bind_slot_scroll_target(B, widget):
         if not widget:
@@ -2198,7 +2173,6 @@ class App(BU.Tk):
             return
         try:
             canvas.yview_scroll(steps, "units")
-            canvas.update_idletasks()
         except E:
             return
         if Aj(B, "_slots_scroll_pending_steps", 0):
@@ -2262,6 +2236,32 @@ class App(BU.Tk):
             B._thumb_cache.move_to_end(cache_key)
             while Q(B._thumb_cache) > B._thumb_cache_limit:
                 B._thumb_cache.popitem(last=h)
+
+    def _get_cached_thumbnail_photo(B, cache_key):
+        cache = Aj(B, "_thumb_photo_cache", I)
+        if not isinstance(cache, OrderedDict):
+            return I
+        photo = cache.get(cache_key)
+        if photo is I:
+            return I
+        cache.move_to_end(cache_key)
+        return photo
+
+    def _store_cached_thumbnail_photo(B, cache_key, photo):
+        if cache_key is I or photo is I:
+            return
+        cache = Aj(B, "_thumb_photo_cache", I)
+        if not isinstance(cache, OrderedDict):
+            cache = OrderedDict()
+            B._thumb_photo_cache = cache
+        cache[cache_key] = photo
+        cache.move_to_end(cache_key)
+        limit = max(
+            1,
+            int(Aj(B, "_thumb_photo_cache_limit", SLOT_GRID_COLUMNS * THUMBNAIL_MEMORY_ROWS)),
+        )
+        while Q(cache) > limit:
+            cache.popitem(last=h)
 
     def _next_thumbnail_token(B):
         B._thumb_request_seq += 1
@@ -4018,7 +4018,7 @@ class App(BU.Tk):
             bg=B._ui_colors["card"],
             highlightthickness=0,
             bd=0,
-            yscrollincrement=SLOT_PREVIEW_SIZE[1] + 92,
+            yscrollincrement=SLOT_SCROLL_UNIT_PX,
         )
         B._slots_canvas = A_
         def _on_scroll(*args):
@@ -4741,7 +4741,11 @@ class App(BU.Tk):
             label.configure(text=A.path.basename(path), image="")
             label.image = I
         else:
-            photo = ImageTk.PhotoImage(thumb)
+            cache_key = B._get_thumbnail_cache_key(path)
+            photo = B._get_cached_thumbnail_photo(cache_key)
+            if photo is I:
+                photo = ImageTk.PhotoImage(thumb)
+                B._store_cached_thumbnail_photo(cache_key, photo)
             label.configure(image=photo, text="")
             label.image = photo
         remove_label.place(x=0, y=0)

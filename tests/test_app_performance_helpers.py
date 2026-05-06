@@ -112,8 +112,8 @@ class AppPerformanceHelperTests(unittest.TestCase):
         App._flush_slots_scroll(harness)
 
         self.assertTrue(harness._slots_scroll_active)
-        self.assertEqual(harness._slots_canvas.scroll_calls, [(10, "units")])
-        self.assertEqual(harness._slots_scroll_pending_steps, 40)
+        self.assertEqual(harness._slots_canvas.scroll_calls, [(5, "units")])
+        self.assertEqual(harness._slots_scroll_pending_steps, 45)
         self.assertIsNotNone(harness._slots_scroll_job)
 
 
