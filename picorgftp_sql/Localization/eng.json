@@ -394,5 +394,7 @@
   "sql_columns_parse_failed": "Unable to read the table name from the SQL query.",
   "slot_defs_apply_restart": "Photo field changes will be visible after restart.",
   "sql_mapping_empty_label": "SQL: (none)",
-  "slot_label_zdjęcie na białym tle": "White background photo"
+  "slot_label_zdjęcie na białym tle": "White background photo",
+  "slot_label_zdjęcie na białym tle 2": "Photo on a white background 2",
+  "slot_label_zdjęcie wb 1": "Photo WB 1"
 }

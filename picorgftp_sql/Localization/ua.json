@@ -394,5 +394,7 @@
   "sql_columns_parse_failed": "Не вдалося зчитати назву таблиці з SQL-запиту.",
   "slot_defs_apply_restart": "Зміни полів фото будуть видимі після перезапуску.",
   "sql_mapping_empty_label": "SQL: (немає)",
-  "slot_label_zdjęcie na białym tle": "Фотографія білого фону"
+  "slot_label_zdjęcie na białym tle": "Фотографія білого фону",
+  "slot_label_zdjęcie na białym tle 2": "Фото на білому тлі 2",
+  "slot_label_zdjęcie wb 1": "Фото WB 1"
 }
