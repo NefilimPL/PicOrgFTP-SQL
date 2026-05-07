@@ -8233,8 +8233,8 @@ class App(BU.Tk):
         _slabel(compress_frame, text=UNIT_PERCENT_LABEL).grid(
             row=0, column=1, sticky="w", padx=4
         )
-        Aj = C.Checkbutton(L, text=B, variable=A.opt_maxsize)
-        Aj.grid(row=3, column=0, padx=5, sticky=T)
+        maxsize_checkbox = C.Checkbutton(L, text=B, variable=A.opt_maxsize)
+        maxsize_checkbox.grid(row=3, column=0, padx=5, sticky=T)
         _slabel(L, text=LIMIT_SIZE_LABEL).grid(row=3, column=1, sticky=T)
         maxsize_frame = C.Frame(L, style="Settings.TFrame")
         maxsize_frame.grid(row=3, column=2, sticky="w")
