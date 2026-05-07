@@ -4494,7 +4494,7 @@ class App(BU.Tk):
         if B._point_in_bounds(x, y0, bounds.get("preview", (0, 0, -1, -1))) and not B._get_slot_preview_path(slot):
             B._select_file(idx)
             return "break"
-        return "break"
+        return None
 
     def _on_slots_canvas_drop(B, event):
         x, y0 = B._canvas_event_coords(event)
@@ -5151,6 +5151,51 @@ class App(BU.Tk):
 
     def _get_slot_preview_path(B, slot):
         return slot.get("preview_path") or slot.get(f)
+
+    def _get_slot_transfer_path(C, idx):
+        if idx < 0 or idx >= Q(C.slots):
+            return I
+        slot = C.slots[idx]
+        candidates = (
+            C._get_slot_preview_path(slot),
+            slot.get("local_path"),
+            slot.get(f),
+            slot.get("ftp_path"),
+        )
+        for path in candidates:
+            if path and A.path.isfile(path):
+                return path
+        return I
+
+    def _stage_slot_clear_after_move(C, idx):
+        if idx < 0 or idx >= Q(C.slots):
+            return
+        slot = C.slots[idx]
+        label = slot[Aa]
+        local_or_working_path = slot.get(f) or slot.get("local_path")
+        reset_marker = h
+        if idx in C.pending_additions:
+            C.pending_additions.pop(idx, I)
+            reset_marker = J
+        elif (
+            local_or_working_path
+            and local_or_working_path.startswith(l)
+            and A.path.isfile(local_or_working_path)
+        ):
+            C.pending_deletions[idx] = local_or_working_path
+        else:
+            remote_name = C._get_slot_existing_remote_filename(label)
+            if remote_name:
+                C.pending_ftp_deletions[idx] = remote_name
+        C.ftp_preview_files.pop(label, I)
+        C.ftp_remote_only.pop(label, I)
+        C._clear_slot_preview(idx)
+        slot["sql_presence_unknown"] = J
+        C._refresh_slot_sql_ui(idx, present=I)
+        if reset_marker:
+            C._mark_slot(idx, I)
+        else:
+            C._mark_slot(idx, AR)
 
     def _resolve_slot_preview_source(C, slot, preferred_source=""):
         if preferred_source == "ftp" and slot.get("ftp_path"):
@@ -6576,29 +6621,27 @@ class App(BU.Tk):
         ):
             O.showwarning(INCOMPLETE_DATA_MSG, MISSING_FIELDS_MSG)
             return
+        if C.dragging_idx is not I:
+            source_idx = C.dragging_idx
+            C.dragging_idx = I
+            if source_idx == idx:
+                return
+            source_path = C._get_slot_transfer_path(source_idx)
+            if source_path:
+                source_content_fit = bool(
+                    C.slots[source_idx].get("content_fit", h)
+                )
+                C._add_file_to_slot(idx, source_path)
+                if idx < Q(C.slots):
+                    C.slots[idx]["content_fit"] = source_content_fit
+                    C._display_slot_preview(idx)
+                C._stage_slot_clear_after_move(source_idx)
+                C.focus_force()
+            C._queue_dashboard_refresh()
+            return
         G_ = C.tk.splitlist(event.data)
         if G_:
             C._add_file_to_slot(idx, G_[0])
-        if C.dragging_idx is not I:
-            D_ = C.dragging_idx
-            if D_ != idx:
-                H_ = h
-                E_ = C.slots[D_][f]
-                if E_:
-                    if D_ in C.pending_additions:
-                        C.pending_additions.pop(D_, I)
-                        H_ = J
-                    elif E_.startswith(l) and A.path.isfile(E_):
-                        C.pending_deletions[D_] = E_
-                    C._clear_slot_preview(D_)
-                    C.slots[D_]["sql_presence_unknown"] = J
-                    C._refresh_slot_sql_ui(D_, present=I)
-                    if H_:
-                        C._mark_slot(D_, I)
-                    else:
-                        C._mark_slot(D_, AR)
-                    C.focus_force()
-            C.dragging_idx = I
         C._queue_dashboard_refresh()
 
     def _add_file_to_slot(B, idx, src_path):
@@ -10225,7 +10268,7 @@ class App(BU.Tk):
     def _on_drag_init(A, event, idx):
         if A.is_processing:
             return
-        B_ = A.slots[idx][f]
+        B_ = A._get_slot_transfer_path(idx)
         if not B_:
             return
         A.dragging_idx = idx
