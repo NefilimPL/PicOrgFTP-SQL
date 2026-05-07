@@ -97,7 +97,7 @@
   "compress_label": "Compress JPEG (quality)",
   "limit_size_label": "Limit file size to",
   "convert_tif_label": "Convert all image files to",
-  "auto_content_fit_default_label": "Fit photos to content by default (crop excess background)",
+  "auto_content_fit_default_label": "Zoom photos to content by default (keep image proportions)",
   "format_info_label": "Format info:",
   "format_info_placeholder": "Select a format to see details. Conversion saves the image in the new format.",
   "format_info_generic": "No description for this format. Size depends on image content.",

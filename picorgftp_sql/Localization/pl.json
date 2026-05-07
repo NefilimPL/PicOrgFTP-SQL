@@ -97,7 +97,7 @@
   "compress_label": "Kompresuj JPEG (jakość)",
   "limit_size_label": "Ogranicz rozmiar pliku do",
   "convert_tif_label": "Konwertuj wszystkie pliki graficzne na",
-  "auto_content_fit_default_label": "Domyślnie dopasowuj zdjęcia do zawartości (przytnij nadmiar tła)",
+  "auto_content_fit_default_label": "Domyślnie powiększaj zdjęcia do zawartości (bez zmiany proporcji)",
   "format_info_label": "Informacje o formacie:",
   "format_info_placeholder": "Wybierz format, aby zobaczyć opis. Konwersja polega na zapisaniu obrazu w nowym formacie.",
   "format_info_generic": "Brak opisu dla tego formatu. Rozmiar zależy od treści obrazu.",

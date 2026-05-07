@@ -22,18 +22,21 @@ def test_find_content_bbox_detects_white_border() -> None:
     assert 195 <= bbox[3] <= 210
 
 
-def test_fit_image_to_content_crops_background_and_matches_target_aspect() -> None:
+def test_fit_image_to_content_zooms_without_changing_image_size() -> None:
     image = Image.new("RGB", (400, 300), "white")
     for x in range(150, 251):
         for y in range(100, 201):
             image.putpixel((x, y), (20, 20, 20))
 
+    original_bbox = find_content_bbox(image)
     fitted = fit_image_to_content(image, target_size=(200, 200), margin_ratio=0.08)
+    fitted_bbox = find_content_bbox(fitted)
 
-    assert fitted.size[0] < image.size[0]
-    assert fitted.size[1] < image.size[1]
-    assert abs((fitted.size[0] / fitted.size[1]) - 1.0) < 0.05
-    assert fitted.getbbox() is not None
+    assert original_bbox is not None
+    assert fitted_bbox is not None
+    assert fitted.size == image.size
+    assert fitted_bbox[2] - fitted_bbox[0] > original_bbox[2] - original_bbox[0]
+    assert fitted_bbox[3] - fitted_bbox[1] > original_bbox[3] - original_bbox[1]
 
 
 def test_fit_image_to_content_uses_alpha_border() -> None:
@@ -42,8 +45,12 @@ def test_fit_image_to_content_uses_alpha_border() -> None:
         for y in range(60, 141):
             image.putpixel((x, y), (0, 0, 0, 255))
 
+    original_bbox = find_content_bbox(image)
     fitted = fit_image_to_content(image, target_size=(240, 176), margin_ratio=0.05)
+    fitted_bbox = find_content_bbox(fitted)
 
-    assert fitted.size[0] < image.size[0]
-    assert fitted.size[1] < image.size[1]
-    assert fitted.getbbox() is not None
+    assert original_bbox is not None
+    assert fitted_bbox is not None
+    assert fitted.size == image.size
+    assert fitted_bbox[2] - fitted_bbox[0] > original_bbox[2] - original_bbox[0]
+    assert fitted_bbox[3] - fitted_bbox[1] > original_bbox[3] - original_bbox[1]

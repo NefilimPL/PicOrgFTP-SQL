@@ -187,24 +187,28 @@ def _fit_box_to_aspect(
     return new_left, new_top, new_right, new_bottom
 
 
+def _resample_filter():
+    if hasattr(AA, "Resampling"):
+        return AA.Resampling.LANCZOS
+    return getattr(AA, "LANCZOS", getattr(AA, "BICUBIC", 3))
+
+
 def fit_image_to_content(
     image,
     *,
     target_size: tuple[int, int] | None = None,
     margin_ratio: float = DEFAULT_CONTENT_FIT_MARGIN_RATIO,
 ) -> object:
-    """Crop excessive uniform background while preserving image proportions."""
+    """Zoom into detected content while keeping the original image dimensions."""
 
     bbox = find_content_bbox(image)
     if bbox is None:
         return image.copy()
+    # ``target_size`` is accepted for existing callers; zoom output keeps source size.
+    width, height = image.size
+    target_aspect = width / max(1, height)
     crop_box = _expand_box(bbox, image.size, margin_ratio=margin_ratio)
-    target_aspect = None
-    if target_size:
-        target_w, target_h = target_size
-        if target_w > 0 and target_h > 0:
-            target_aspect = target_w / target_h
     crop_box = _fit_box_to_aspect(crop_box, image.size, target_aspect)
     if not _is_effective_crop(crop_box, image.size):
         return image.copy()
-    return image.crop(crop_box)
+    return image.crop(crop_box).resize(image.size, _resample_filter())
