@@ -62,6 +62,7 @@ from .services.sql_service import (
     query_presence_map as svc_query_presence_map,
     should_check_presence as svc_should_check_presence,
 )
+from .image_utils import fit_image_to_content
 from .workflow_utils import (
     build_product_directory,
     build_remote_slot_filename,
@@ -345,6 +346,9 @@ class App(BU.Tk):
         B.opt_resize = F.BooleanVar(value=J)
         B.opt_compress = F.BooleanVar(value=h)
         B.opt_maxsize = F.BooleanVar(value=h)
+        B.opt_auto_content_fit = F.BooleanVar(
+            value=bool(D.get(AUTO_CONTENT_FIT_KEY, h))
+        )
         B.resize_max_dim = F.IntVar(value=2000)
         B.compress_quality = F.IntVar(value=85)
         B.max_file_kb = F.IntVar(value=500)
@@ -382,6 +386,7 @@ class App(BU.Tk):
         )
         B._slot_select_label = LANG.get("slot_select_action", "Wybierz")
         B._slot_remove_label = LANG.get("slot_remove_action", "Usun")
+        B._slot_content_fit_label = LANG.get("slot_content_fit_action", "FIT")
         B.bind_class("SlotScroll", "<MouseWheel>", B._on_slots_mousewheel)
         B.bind_class("SlotScroll", "<Button-4>", B._on_slots_scroll_up)
         B.bind_class("SlotScroll", "<Button-5>", B._on_slots_scroll_down)
@@ -1267,6 +1272,7 @@ class App(BU.Tk):
                     "label": slot["label"],
                     f: slot.get(f),
                     B0: slot.get(B0),
+                    "content_fit": bool(slot.get("content_fit", h)),
                 }
             )
         return slot_records
@@ -2299,15 +2305,20 @@ class App(BU.Tk):
     def _on_slots_scroll_down(B, _event):
         return B._scroll_slots_by_pixels(SLOT_SCROLL_UNIT_PX)
 
-    def _get_thumbnail_cache_key(B, path):
+    def _get_thumbnail_cache_key(B, path, content_fit=h):
         try:
             stat = A.stat(path)
-            return (A.path.abspath(path), stat.st_mtime_ns, stat.st_size)
+            return (
+                A.path.abspath(path),
+                stat.st_mtime_ns,
+                stat.st_size,
+                bool(content_fit),
+            )
         except E:
-            return (A.path.abspath(path), I, I)
+            return (A.path.abspath(path), I, I, bool(content_fit))
 
-    def _get_cached_thumbnail(B, path):
-        cache_key = B._get_thumbnail_cache_key(path)
+    def _get_cached_thumbnail(B, path, content_fit=h):
+        cache_key = B._get_thumbnail_cache_key(path, content_fit)
         with B._thumb_cache_lock:
             thumb = B._thumb_cache.get(cache_key)
             if thumb is I:
@@ -2359,11 +2370,15 @@ class App(BU.Tk):
             job = B._thumb_request_queue.get()
             if job is I:
                 return
-            idx, path, token = job
+            if Q(job) >= 4:
+                idx, path, token, content_fit = job[:4]
+            else:
+                idx, path, token = job
+                content_fit = h
             thumb = I
             if path and A.path.isfile(path):
-                thumb = B._load_slot_thumbnail(path)
-            B._thumb_result_queue.put((idx, path, token, thumb))
+                thumb = B._load_slot_thumbnail(path, content_fit=content_fit)
+            B._thumb_result_queue.put((idx, path, token, thumb, content_fit))
 
     def _poll_thumbnail_results(B):
         B._thumb_poll_job = I
@@ -2380,12 +2395,18 @@ class App(BU.Tk):
         processed = 0
         while processed < THUMBNAIL_RESULT_BATCH:
             try:
-                idx, path, token, thumb = B._thumb_result_queue.get_nowait()
+                result = B._thumb_result_queue.get_nowait()
             except queue.Empty:
                 break
+            if Q(result) >= 5:
+                idx, path, token, thumb, content_fit = result[:5]
+            else:
+                idx, path, token, thumb = result
+                content_fit = h
             processed += 1
             pending_paths = Aj(B, "_thumb_pending_paths", I)
-            if isinstance(pending_paths, dict) and pending_paths.get(idx) == path:
+            pending_key = (path, content_fit)
+            if isinstance(pending_paths, dict) and pending_paths.get(idx) == pending_key:
                 pending_paths.pop(idx, I)
             if B._thumb_tokens.get(idx) != token:
                 continue
@@ -2393,7 +2414,7 @@ class App(BU.Tk):
                 continue
             if B._get_slot_preview_path(B.slots[idx]) != path:
                 continue
-            B._set_slot_preview(idx, path, thumb)
+            B._set_slot_preview(idx, path, thumb, content_fit=content_fit)
         try:
             pending_requests = B._thumb_request_queue.qsize()
         except E:
@@ -4171,6 +4192,7 @@ class App(BU.Tk):
                     "sql_present": h,
                     "status_label": I,
                     "progress": I,
+                    "content_fit": bool(B.opt_auto_content_fit.get()),
                     f: I,
                     "local_path": I,
                     "ftp_path": I,
@@ -4194,6 +4216,8 @@ class App(BU.Tk):
             "placeholder": canvas.create_text(0, 0, text=B._slot_placeholder_text, anchor="center", fill=B._ui_colors["muted"], font=("Segoe UI", 9), justify="center", width=SLOT_PREVIEW_SIZE[0] - 18, tags=(tag,)),
             "remove_bg": canvas.create_rectangle(0, 0, 1, 1, fill=B._ui_colors["danger"], outline=B._ui_colors["danger"], state="hidden", tags=(tag, "slot-remove")),
             "remove_text": canvas.create_text(0, 0, text=B._slot_remove_label, anchor="center", fill=AT, font=("Segoe UI Semibold", 8), state="hidden", tags=(tag, "slot-remove")),
+            "fit_bg": canvas.create_rectangle(0, 0, 1, 1, fill=B._ui_colors["slot_border"], outline=B._ui_colors["slot_border"], state="hidden", tags=(tag, "slot-fit")),
+            "fit_text": canvas.create_text(0, 0, text=B._slot_content_fit_label, anchor="center", fill=B._ui_colors["text"], font=("Segoe UI Semibold", 7), state="hidden", tags=(tag, "slot-fit")),
             "select_bg": canvas.create_rectangle(0, 0, 1, 1, fill=B._ui_colors["hero"], outline=B._ui_colors["hero"], tags=(tag, "slot-select")),
             "select_text": canvas.create_text(0, 0, text=B._slot_select_label, anchor="center", fill=AT, font=("Segoe UI Semibold", 8), tags=(tag, "slot-select")),
             "local_bg": canvas.create_rectangle(0, 0, 1, 1, fill=B._ui_colors["hero"], outline=B._ui_colors["hero"], state="hidden", tags=(tag, "slot-local")),
@@ -4252,6 +4276,8 @@ class App(BU.Tk):
         status_y = preview_y2 + 12
         sql_y = status_y + 18
         select_w = 58
+        fit_w = 34
+        button_gap = 4
         button_h = 20
         badge_w = 32
         badge_h = 18
@@ -4266,6 +4292,12 @@ class App(BU.Tk):
             "preview": (preview_x1, preview_y1, preview_x2, preview_y2),
             "remove": (preview_x1, preview_y1, preview_x1 + 54, preview_y1 + button_h),
             "select": (preview_x2 - select_w, preview_y1, preview_x2, preview_y1 + button_h),
+            "fit": (
+                preview_x2 - select_w - button_gap - fit_w,
+                preview_y1,
+                preview_x2 - select_w - button_gap,
+                preview_y1 + button_h,
+            ),
             "local": (local_x2 - badge_w, badge_y1, local_x2, badge_y2),
             "ftp": (ftp_x2 - badge_w, badge_y1, ftp_x2, badge_y2),
             "sql": (sql_x2 - badge_w, badge_y1, sql_x2, badge_y2),
@@ -4281,6 +4313,7 @@ class App(BU.Tk):
         canvas.itemconfigure(items["placeholder"], width=max(20, preview_x2 - preview_x1 - 18))
         B._coords_canvas_button(items, "remove", bounds["remove"])
         B._coords_canvas_button(items, "select", bounds["select"])
+        B._coords_canvas_button(items, "fit", bounds["fit"])
         B._coords_canvas_button(items, "local", bounds["local"])
         B._coords_canvas_button(items, "ftp", bounds["ftp"])
         B._coords_canvas_button(items, "sql", bounds["sql"])
@@ -4326,6 +4359,7 @@ class App(BU.Tk):
             canvas.itemconfigure(items["placeholder"], text=placeholder, state=Az)
         has_file = bool(slot.get(f) or slot.get("local_path") or slot.get("ftp_path") or preview_path)
         B._set_canvas_item_pair_state(items, "remove", has_file)
+        B._configure_canvas_content_fit_button(items, has_file, bool(slot.get("content_fit", h)))
         B._set_canvas_item_pair_state(items, "select", J)
         B._redraw_canvas_source_badges(idx)
         status = slot.get("status_text") or B._get_slot_idle_status(idx)
@@ -4340,6 +4374,21 @@ class App(BU.Tk):
         state = Az if visible else "hidden"
         B._slots_canvas.itemconfigure(items[f"{name}_bg"], state=state)
         B._slots_canvas.itemconfigure(items[f"{name}_text"], state=state)
+
+    def _configure_canvas_content_fit_button(B, items, visible, active):
+        canvas = B._slots_canvas
+        if not visible:
+            B._set_canvas_item_pair_state(items, "fit", h)
+            return
+        if active:
+            bg = B._ui_colors["accent"]
+            fg = AT
+        else:
+            bg = B._ui_colors["slot_border"]
+            fg = B._ui_colors["text"]
+        canvas.itemconfigure(items["fit_bg"], fill=bg, outline=bg)
+        canvas.itemconfigure(items["fit_text"], fill=fg)
+        B._set_canvas_item_pair_state(items, "fit", J)
 
     def _redraw_canvas_source_badges(B, idx):
         slot = B.slots[idx]
@@ -4423,6 +4472,10 @@ class App(BU.Tk):
             if slot.get(f) or slot.get("local_path") or slot.get("ftp_path"):
                 B._remove_file(idx)
             return "break"
+        if B._point_in_bounds(x, y0, bounds.get("fit", (0, 0, -1, -1))):
+            if B._get_slot_preview_path(slot):
+                B._toggle_slot_content_fit(idx)
+            return "break"
         if B._point_in_bounds(x, y0, bounds.get("select", (0, 0, -1, -1))):
             B._select_file(idx)
             return "break"
@@ -4441,7 +4494,7 @@ class App(BU.Tk):
         if B._point_in_bounds(x, y0, bounds.get("preview", (0, 0, -1, -1))) and not B._get_slot_preview_path(slot):
             B._select_file(idx)
             return "break"
-        return "break"
+        return None
 
     def _on_slots_canvas_drop(B, event):
         x, y0 = B._canvas_event_coords(event)
@@ -4696,6 +4749,7 @@ class App(BU.Tk):
                     "sql_presence_unknown": h,
                     "status_label": status_label,
                     "progress": I,
+                    "content_fit": bool(B.opt_auto_content_fit.get()),
                     f: I,
                     "local_path": I,
                     "ftp_path": I,
@@ -4862,6 +4916,11 @@ class App(BU.Tk):
         first_idx, last_idx = B._visible_slot_index_bounds()
         return first_idx <= idx <= last_idx
 
+    def _is_slot_content_fit_enabled(B, idx):
+        if idx is I or idx < 0 or idx >= Q(Aj(B, "slots", [])):
+            return h
+        return bool(B.slots[idx].get("content_fit", h))
+
     def _prefetch_visible_slot_thumbnails(B):
         first_idx, last_idx = B._visible_slot_index_bounds()
         if last_idx < first_idx:
@@ -4876,19 +4935,21 @@ class App(BU.Tk):
     def _queue_thumbnail(B, idx, path):
         if not path:
             return
+        content_fit = B._is_slot_content_fit_enabled(idx)
+        pending_key = (path, content_fit)
         if not isinstance(Aj(B, "_thumb_pending_paths", I), dict):
             B._thumb_pending_paths = {}
         pending_path = B._thumb_pending_paths.get(idx)
-        if pending_path == path:
+        if pending_path == pending_key:
             return
         token = B._next_thumbnail_token()
         B._thumb_tokens[idx] = token
-        _cache_key, thumb = B._get_cached_thumbnail(path)
+        _cache_key, thumb = B._get_cached_thumbnail(path, content_fit)
         if thumb is not I:
-            B._set_slot_preview(idx, path, thumb)
+            B._set_slot_preview(idx, path, thumb, content_fit=content_fit)
             return
-        B._thumb_pending_paths[idx] = path
-        B._thumb_request_queue.put((idx, path, token))
+        B._thumb_pending_paths[idx] = pending_key
+        B._thumb_request_queue.put((idx, path, token, content_fit))
 
     def _build_slot_target_filename(
         B,
@@ -5063,12 +5124,14 @@ class App(BU.Tk):
 
         return svc_infer_existing_remote_filename(A._product_state, slot_prefix)
 
-    def _load_slot_thumbnail(B, path):
-        cache_key, thumb = B._get_cached_thumbnail(path)
+    def _load_slot_thumbnail(B, path, content_fit=h):
+        cache_key, thumb = B._get_cached_thumbnail(path, content_fit)
         if thumb is not I:
             return thumb
         try:
             with AA.open(path) as img:
+                if content_fit:
+                    img = fit_image_to_content(img, target_size=SLOT_PREVIEW_SIZE)
                 img.thumbnail(SLOT_PREVIEW_SIZE, LANCZOS_FILTER)
                 thumb = img.copy()
             B._store_cached_thumbnail(cache_key, thumb)
@@ -5088,6 +5151,51 @@ class App(BU.Tk):
 
     def _get_slot_preview_path(B, slot):
         return slot.get("preview_path") or slot.get(f)
+
+    def _get_slot_transfer_path(C, idx):
+        if idx < 0 or idx >= Q(C.slots):
+            return I
+        slot = C.slots[idx]
+        candidates = (
+            C._get_slot_preview_path(slot),
+            slot.get("local_path"),
+            slot.get(f),
+            slot.get("ftp_path"),
+        )
+        for path in candidates:
+            if path and A.path.isfile(path):
+                return path
+        return I
+
+    def _stage_slot_clear_after_move(C, idx):
+        if idx < 0 or idx >= Q(C.slots):
+            return
+        slot = C.slots[idx]
+        label = slot[Aa]
+        local_or_working_path = slot.get(f) or slot.get("local_path")
+        reset_marker = h
+        if idx in C.pending_additions:
+            C.pending_additions.pop(idx, I)
+            reset_marker = J
+        elif (
+            local_or_working_path
+            and local_or_working_path.startswith(l)
+            and A.path.isfile(local_or_working_path)
+        ):
+            C.pending_deletions[idx] = local_or_working_path
+        else:
+            remote_name = C._get_slot_existing_remote_filename(label)
+            if remote_name:
+                C.pending_ftp_deletions[idx] = remote_name
+        C.ftp_preview_files.pop(label, I)
+        C.ftp_remote_only.pop(label, I)
+        C._clear_slot_preview(idx)
+        slot["sql_presence_unknown"] = J
+        C._refresh_slot_sql_ui(idx, present=I)
+        if reset_marker:
+            C._mark_slot(idx, I)
+        else:
+            C._mark_slot(idx, AR)
 
     def _resolve_slot_preview_source(C, slot, preferred_source=""):
         if preferred_source == "ftp" and slot.get("ftp_path"):
@@ -5281,6 +5389,7 @@ class App(BU.Tk):
         slot["photo"] = I
         slot["status_text"] = C._slot_status["empty"]
         slot["sql_present"] = h
+        slot["content_fit"] = bool(C.opt_auto_content_fit.get())
         if slot.get("canvas_items"):
             C._thumb_tokens.pop(idx, I)
             pending_paths = Aj(C, "_thumb_pending_paths", I)
@@ -5318,17 +5427,43 @@ class App(BU.Tk):
         slot["preview_path"] = preview_path
         C._display_slot_preview(idx)
 
-    def _set_slot_preview(B, idx, path, thumb):
+    def _toggle_slot_content_fit(C, idx):
+        if C.is_processing:
+            O.showwarning(OPERATION_TITLE, PROCESSING_MSG)
+            return
+        if idx < 0 or idx >= Q(C.slots):
+            return
+        slot = C.slots[idx]
+        preview_path = C._get_slot_preview_path(slot)
+        if not preview_path:
+            return
+        slot["content_fit"] = not bool(slot.get("content_fit", h))
+        C._thumb_tokens.pop(idx, I)
+        pending_paths = Aj(C, "_thumb_pending_paths", I)
+        if isinstance(pending_paths, dict):
+            pending_paths.pop(idx, I)
+        C._display_slot_preview(idx)
+        source_path = slot.get(f) or slot.get("local_path") or preview_path
+        if source_path and A.path.isfile(source_path):
+            C.pending_additions[idx] = source_path
+            slot["sql_presence_unknown"] = J
+            C._refresh_slot_sql_ui(idx, present=I)
+            C._mark_slot(idx, AR)
+            C._queue_dashboard_refresh()
+
+    def _set_slot_preview(B, idx, path, thumb, *, content_fit=h):
         if idx < 0 or idx >= Q(B.slots):
             return
         slot = B.slots[idx]
         if B._get_slot_preview_path(slot) != path:
             return
+        if B._is_slot_content_fit_enabled(idx) != bool(content_fit):
+            return
         if slot.get("canvas_items"):
             if thumb is I:
                 slot["photo"] = I
             else:
-                cache_key = B._get_thumbnail_cache_key(path)
+                cache_key = B._get_thumbnail_cache_key(path, content_fit)
                 photo = B._get_cached_thumbnail_photo(cache_key)
                 if photo is I:
                     photo = ImageTk.PhotoImage(thumb)
@@ -5343,7 +5478,7 @@ class App(BU.Tk):
             label.configure(text=A.path.basename(path), image="")
             label.image = I
         else:
-            cache_key = B._get_thumbnail_cache_key(path)
+            cache_key = B._get_thumbnail_cache_key(path, content_fit)
             photo = B._get_cached_thumbnail_photo(cache_key)
             if photo is I:
                 photo = ImageTk.PhotoImage(thumb)
@@ -6486,35 +6621,41 @@ class App(BU.Tk):
         ):
             O.showwarning(INCOMPLETE_DATA_MSG, MISSING_FIELDS_MSG)
             return
+        if C.dragging_idx is not I:
+            source_idx = C.dragging_idx
+            C.dragging_idx = I
+            if source_idx == idx:
+                return
+            source_path = C._get_slot_transfer_path(source_idx)
+            if source_path:
+                source_content_fit = bool(
+                    C.slots[source_idx].get("content_fit", h)
+                )
+                C._add_file_to_slot(idx, source_path)
+                if idx < Q(C.slots):
+                    C.slots[idx]["content_fit"] = source_content_fit
+                    C._display_slot_preview(idx)
+                C._stage_slot_clear_after_move(source_idx)
+                C.focus_force()
+            C._queue_dashboard_refresh()
+            return
         G_ = C.tk.splitlist(event.data)
         if G_:
             C._add_file_to_slot(idx, G_[0])
-        if C.dragging_idx is not I:
-            D_ = C.dragging_idx
-            if D_ != idx:
-                H_ = h
-                E_ = C.slots[D_][f]
-                if E_:
-                    if D_ in C.pending_additions:
-                        C.pending_additions.pop(D_, I)
-                        H_ = J
-                    elif E_.startswith(l) and A.path.isfile(E_):
-                        C.pending_deletions[D_] = E_
-                    C._clear_slot_preview(D_)
-                    C.slots[D_]["sql_presence_unknown"] = J
-                    C._refresh_slot_sql_ui(D_, present=I)
-                    if H_:
-                        C._mark_slot(D_, I)
-                    else:
-                        C._mark_slot(D_, AR)
-                    C.focus_force()
-            C.dragging_idx = I
         C._queue_dashboard_refresh()
 
     def _add_file_to_slot(B, idx, src_path):
         E_ = src_path
         C_ = idx
         D_ = B.slots[C_][f]
+        was_empty = not (
+            D_
+            or B.slots[C_].get("local_path")
+            or B.slots[C_].get("ftp_path")
+            or B._get_slot_preview_path(B.slots[C_])
+        )
+        if was_empty:
+            B.slots[C_]["content_fit"] = bool(B.opt_auto_content_fit.get())
         if D_:
             if C_ in B.pending_additions:
                 B.pending_additions.pop(C_, I)
@@ -7243,6 +7384,7 @@ class App(BU.Tk):
                                 )
                         ext_lower = BH_.lower()
                         is_image = ext_lower in IMAGE_EXTENSION_FORMATS
+                        content_fit_enabled = bool(slot.get("content_fit", h))
                         if is_image and convert_tif_enabled:
                             t_ext = target_ext
                             save_target = S_
@@ -7261,6 +7403,11 @@ class App(BU.Tk):
                                         error=z,
                                     )
                             with AA.open(src_path) as A1:
+                                if content_fit_enabled:
+                                    A1 = fit_image_to_content(
+                                        A1,
+                                        target_size=SLOT_PREVIEW_SIZE,
+                                    )
                                 if target_fmt == "JPEG" and A1.mode in ("RGBA", "LA", "P"):
                                     A1 = A1.convert("RGB")
                                 if resize_enabled:
@@ -7300,7 +7447,9 @@ class App(BU.Tk):
                                 A.replace(temp_output_path, S_)
                                 temp_output_path = B
                             log_info_loc("image_added_modified", file=c_)
-                        elif ext_lower in [F, O, V, ".bmp", ".gif"]:
+                        elif ext_lower in [F, O, V, ".bmp", ".gif"] or (
+                            content_fit_enabled and is_image
+                        ):
                             save_target = S_
                             if same_source_target:
                                 save_target = f"{S_}.__gui_tmp__"
@@ -7308,6 +7457,11 @@ class App(BU.Tk):
                                 if A.path.exists(save_target):
                                     A.remove(save_target)
                             with AA.open(src_path) as A1:
+                                if content_fit_enabled:
+                                    A1 = fit_image_to_content(
+                                        A1,
+                                        target_size=SLOT_PREVIEW_SIZE,
+                                    )
                                 if resize_enabled:
                                     A1.thumbnail((max_dim, max_dim), LANCZOS_FILTER)
                                 save_params = {}
@@ -8122,8 +8276,8 @@ class App(BU.Tk):
         _slabel(compress_frame, text=UNIT_PERCENT_LABEL).grid(
             row=0, column=1, sticky="w", padx=4
         )
-        Aj = C.Checkbutton(L, text=B, variable=A.opt_maxsize)
-        Aj.grid(row=3, column=0, padx=5, sticky=T)
+        maxsize_checkbox = C.Checkbutton(L, text=B, variable=A.opt_maxsize)
+        maxsize_checkbox.grid(row=3, column=0, padx=5, sticky=T)
         _slabel(L, text=LIMIT_SIZE_LABEL).grid(row=3, column=1, sticky=T)
         maxsize_frame = C.Frame(L, style="Settings.TFrame")
         maxsize_frame.grid(row=3, column=2, sticky="w")
@@ -8172,6 +8326,17 @@ class App(BU.Tk):
             anchor="nw",
         )
         format_info_label.grid(row=0, column=0, sticky="nw", padx=4, pady=2)
+        auto_content_fit_cb = C.Checkbutton(
+            L,
+            text=LANG.get(
+                "auto_content_fit_default_label",
+                "Domyslnie dopasowuj zdjecia do zawartosci",
+            ),
+            variable=A.opt_auto_content_fit,
+        )
+        auto_content_fit_cb.grid(
+            row=6, column=0, columnspan=4, padx=5, pady=(6, 0), sticky="w"
+        )
         _slabel(U, text=LANGUAGE_LABEL).grid(
             row=0, column=0, sticky=R, padx=5, pady=2
         )
@@ -9696,6 +9861,7 @@ class App(BU.Tk):
             D[p] = K if db_type_var.get() == f_ else "mssql"
             D[w] = h_.get(A_, "end").strip()
             D[u] = bool(Ab.get())
+            D[AUTO_CONTENT_FIT_KEY] = bool(A.opt_auto_content_fit.get())
             D[SQL_AVAILABLE_COLUMNS_KEY] = list(available_columns)
             updated_slot_defs, slot_issues = normalize_slot_definitions(slot_defs)
             updated_sql_map, map_issues = normalize_sql_column_map(
@@ -9897,6 +10063,15 @@ class App(BU.Tk):
                 config.CONFIG.clear()
                 config.CONFIG.update(updated_config)
             A._set_local_file_index_enabled(D.get(LOCAL_FILE_INDEX_KEY, J))
+            default_content_fit = bool(A.opt_auto_content_fit.get())
+            for slot in Aj(A, "slots", []):
+                if not (
+                    slot.get(f)
+                    or slot.get("local_path")
+                    or slot.get("ftp_path")
+                    or A._get_slot_preview_path(slot)
+                ):
+                    slot["content_fit"] = default_content_fit
             A._refresh_color_field_labels()
             if restart_needed and not language_changed:
                 O.showinfo(SETTINGS_LABEL, APP_SETTINGS_RESTART_MSG)
@@ -10093,7 +10268,7 @@ class App(BU.Tk):
     def _on_drag_init(A, event, idx):
         if A.is_processing:
             return
-        B_ = A.slots[idx][f]
+        B_ = A._get_slot_transfer_path(idx)
         if not B_:
             return
         A.dragging_idx = idx

@@ -26,6 +26,7 @@ from .common import (
     SQL_COLUMN_MAP_KEY,
     SQL_AVAILABLE_COLUMNS_KEY,
     LOCAL_FILE_INDEX_KEY,
+    AUTO_CONTENT_FIT_KEY,
     COLOR_FIELD_LABELS_KEY,
     AK,
     SLOT_DEFS_KEY,
@@ -153,6 +154,9 @@ def load_config(interactive=I):
                 SQL_COLUMN_MAP_KEY: config_copy.get(SQL_COLUMN_MAP_KEY),
                 SQL_AVAILABLE_COLUMNS_KEY: config_copy.get(SQL_AVAILABLE_COLUMNS_KEY),
                 LOCAL_FILE_INDEX_KEY: config_copy.get(LOCAL_FILE_INDEX_KEY, True),
+                AUTO_CONTENT_FIT_KEY: bool(
+                    config_copy.get(AUTO_CONTENT_FIT_KEY, False)
+                ),
                 COLOR_FIELD_LABELS_KEY: config_copy.get(COLOR_FIELD_LABELS_KEY, {}),
                 TRANSLATION_SETTINGS_KEY: {
                     TRANSLATION_PROVIDER_KEY: translation_defaults.get(
@@ -201,6 +205,12 @@ def load_config(interactive=I):
         config_copy[u] = raw_config.get(u, config_copy[u])
         config_copy[LOCAL_FILE_INDEX_KEY] = raw_config.get(
             LOCAL_FILE_INDEX_KEY, config_copy.get(LOCAL_FILE_INDEX_KEY, True)
+        )
+        config_copy[AUTO_CONTENT_FIT_KEY] = bool(
+            raw_config.get(
+                AUTO_CONTENT_FIT_KEY,
+                config_copy.get(AUTO_CONTENT_FIT_KEY, False),
+            )
         )
         config_copy[COLOR_FIELD_LABELS_KEY] = _normalize_color_field_labels(
             raw_config.get(
@@ -342,6 +352,7 @@ def save_config(config, raw_config=None, preserve_secrets=None):
             config.get(SQL_AVAILABLE_COLUMNS_KEY, [])
         ),
         LOCAL_FILE_INDEX_KEY: bool(config.get(LOCAL_FILE_INDEX_KEY, True)),
+        AUTO_CONTENT_FIT_KEY: bool(config.get(AUTO_CONTENT_FIT_KEY, False)),
         COLOR_FIELD_LABELS_KEY: _normalize_color_field_labels(
             config.get(COLOR_FIELD_LABELS_KEY, {})
         ),
