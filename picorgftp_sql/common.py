@@ -206,6 +206,7 @@ SLOT_DEFS_KEY = "slot_definitions"
 SQL_COLUMN_MAP_KEY = "sql_column_map"
 SQL_AVAILABLE_COLUMNS_KEY = "sql_available_columns"
 LOCAL_FILE_INDEX_KEY = "enable_local_file_index"
+AUTO_CONTENT_FIT_KEY = "auto_content_fit"
 COLOR_FIELD_LABELS_KEY = "color_field_labels"
 TRANSLATION_SETTINGS_KEY = "translation"
 TRANSLATION_PROVIDER_KEY = "provider"
@@ -260,6 +261,7 @@ DEFAULT_CONFIG.setdefault(
 )
 DEFAULT_CONFIG.setdefault(SQL_AVAILABLE_COLUMNS_KEY, [])
 DEFAULT_CONFIG.setdefault(LOCAL_FILE_INDEX_KEY, True)
+DEFAULT_CONFIG.setdefault(AUTO_CONTENT_FIT_KEY, False)
 DEFAULT_CONFIG.setdefault(COLOR_FIELD_LABELS_KEY, {})
 DEFAULT_CONFIG.setdefault(
     TRANSLATION_SETTINGS_KEY,
