@@ -53,7 +53,7 @@ Changing these values before running the script helps tailor the program to your
 
 The repository also includes an early local-network web panel. It keeps the desktop application unchanged, but allows users on the same LAN to open a browser, log in and upload files into the configured photo slots. The first implementation saves uploaded files into the same `_ZDJECIA PRZEROBIONE_` product folder structure as the desktop workflow. FTP and SQL synchronization can be added to the same backend workflow later.
 
-The web panel currently includes product entry loading/search by EAN, product matching by name/type/model, saving new or existing Excel entries, datalist suggestions, a basic list editor, a clear-form action, and a read-only settings view with Windows administrator status. Settings editing is intentionally not exposed yet unless the backend is designed to run in an elevated/admin mode.
+The web panel currently includes product entry loading/search by EAN, product matching by name/type/model with an in-page selection dialog, loading existing local photos into slots, saving new or existing Excel entries, datalist suggestions, a basic list editor, a clear-form action, browser-editable settings, and a Users tab prepared for the later account system. Authentication is disabled by default for this LAN MVP.
 
 Install the web dependencies:
 
@@ -69,11 +69,10 @@ On Windows you can use the included double-click launchers instead of typing com
 Start the backend on the server or workstation that should host the service:
 
 ```powershell
-$env:PICORG_WEB_ADMIN_PASSWORD = "change-this-password"
 python -m uvicorn picorgftp_sql.web.app:app --host 0.0.0.0 --port 8000
 ```
 
-Open `http://SERVER_IP:8000` from another computer in the same local network. The default login is `admin` / `admin` if `PICORG_WEB_ADMIN_PASSWORD` is not set. Keep the service inside a trusted LAN or VPN; do not expose this development login directly to the public internet.
+Open `http://SERVER_IP:8000` from another computer in the same local network. Keep the service inside a trusted LAN or VPN; do not expose this LAN MVP directly to the public internet.
 
 ### Building an executable
 
@@ -141,7 +140,7 @@ Zmiana tych wartości przed uruchomieniem skryptu umożliwia szybkie dostosowani
 
 Repozytorium zawiera także pierwszy lokalny panel webowy. Obecna aplikacja desktopowa zostaje bez zmian, a użytkownicy w tej samej sieci lokalnej mogą otworzyć stronę w przeglądarce, zalogować się i wgrać pliki do skonfigurowanych slotów zdjęć. Pierwsza wersja zapisuje uploady do tej samej struktury `_ZDJECIA PRZEROBIONE_`, której używa desktop. Synchronizację FTP i SQL można później dopiąć w tym samym workflow backendu.
 
-Panel webowy obsługuje obecnie wczytywanie i wyszukiwanie wpisów po EAN, dopasowanie produktu po nazwie/typie/modelu, zapis nowego albo istniejącego wpisu Excel, podpowiedzi z list, podstawowy edytor list, czyszczenie formularza oraz podgląd ustawień ze statusem administratora Windows. Edycja ustawień nie jest jeszcze wystawiona, dopóki backend nie będzie działał w zaprojektowanym trybie podwyższonych uprawnień.
+Panel webowy obsługuje obecnie wczytywanie i wyszukiwanie wpisów po EAN, dopasowanie produktu po nazwie/typie/modelu z oknem wyboru wewnątrz strony, wczytywanie istniejących lokalnych zdjęć do slotów, zapis nowego albo istniejącego wpisu Excel, podpowiedzi z list, podstawowy edytor list, czyszczenie formularza, edycję ustawień w przeglądarce oraz zakładkę Użytkownicy przygotowaną pod późniejszy system kont. Logowanie jest domyślnie wyłączone dla tego MVP w LAN.
 
 Instalacja zależności webowych:
 
@@ -157,11 +156,10 @@ Na Windows możesz użyć plików do dwukliku zamiast wpisywać komendy:
 Uruchomienie backendu na serwerze albo komputerze hostującym usługę:
 
 ```powershell
-$env:PICORG_WEB_ADMIN_PASSWORD = "zmien-to-haslo"
 python -m uvicorn picorgftp_sql.web.app:app --host 0.0.0.0 --port 8000
 ```
 
-Z innego komputera w tej samej sieci otwórz `http://IP_SERWERA:8000`. Domyślne logowanie to `admin` / `admin`, jeżeli nie ustawiono `PICORG_WEB_ADMIN_PASSWORD`. Trzymaj usługę w zaufanej sieci LAN albo VPN; tego prostego logowania nie należy wystawiać bezpośrednio do publicznego internetu.
+Z innego komputera w tej samej sieci otwórz `http://IP_SERWERA:8000`. Trzymaj usługę w zaufanej sieci LAN albo VPN; tego MVP nie należy wystawiać bezpośrednio do publicznego internetu.
 
 ### Budowanie pliku wykonywalnego
 

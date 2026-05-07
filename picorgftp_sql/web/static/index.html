@@ -13,9 +13,8 @@
         <span id="serverInfo"></span>
       </div>
       <nav class="topnav" aria-label="Widoki">
-        <button type="button" class="nav-button active" data-view="workspace">Produkt</button>
-        <button type="button" class="nav-button" data-view="lists">Listy</button>
-        <button type="button" class="nav-button" data-view="settings">Ustawienia</button>
+        <button type="button" class="nav-button" data-modal="lists">Listy</button>
+        <button type="button" class="nav-button" data-modal="settings">Ustawienia</button>
       </nav>
       <button id="logoutButton" type="button" class="ghost-button">Wyloguj</button>
     </header>
@@ -93,11 +92,24 @@
       </section>
     </main>
 
-    <main id="listsView" class="manager-view app-view">
+    <div id="entryModal" class="modal-view">
+      <section class="modal-panel compact-modal">
+        <div class="section-heading">
+          <h1>Istniejace wpisy</h1>
+          <button type="button" class="ghost-button modal-close" data-close-modal> Zamknij </button>
+        </div>
+        <div id="entryMatches" class="entry-matches"></div>
+      </section>
+    </div>
+
+    <div id="listsView" class="manager-view modal-view">
       <section class="manager-panel">
         <div class="section-heading">
           <h1>Edytor list</h1>
-          <span id="listStatus"></span>
+          <div class="heading-actions">
+            <span id="listStatus"></span>
+            <button type="button" class="ghost-button modal-close" data-close-modal>Zamknij</button>
+          </div>
         </div>
         <div class="list-editor-layout">
           <aside id="listTabs" class="list-tabs"></aside>
@@ -110,17 +122,27 @@
           </section>
         </div>
       </section>
-    </main>
+    </div>
 
-    <main id="settingsView" class="manager-view app-view">
+    <div id="settingsView" class="manager-view modal-view">
       <section class="manager-panel">
         <div class="section-heading">
           <h1>Ustawienia</h1>
-          <span id="settingsStatus"></span>
+          <div class="heading-actions">
+            <span id="settingsStatus"></span>
+            <button type="button" class="ghost-button modal-close" data-close-modal>Zamknij</button>
+          </div>
+        </div>
+        <div class="settings-tabs">
+          <button type="button" class="settings-tab active" data-settings-tab="app">Aplikacja</button>
+          <button type="button" class="settings-tab" data-settings-tab="ftp">FTP</button>
+          <button type="button" class="settings-tab" data-settings-tab="sql">SQL</button>
+          <button type="button" class="settings-tab" data-settings-tab="slots">Sloty</button>
+          <button type="button" class="settings-tab" data-settings-tab="users">Uzytkownicy</button>
         </div>
         <div id="settingsOutput" class="settings-grid"></div>
       </section>
-    </main>
+    </div>
 
     <datalist id="namesList"></datalist>
     <datalist id="typesList"></datalist>

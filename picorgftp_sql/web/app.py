@@ -31,11 +31,16 @@ from ..web_workflow import (
 )
 from ..web_data import (
     add_list_value,
+    add_user,
+    find_product_photos,
     load_web_data,
+    load_users,
     remove_list_value,
     save_web_entry,
     search_entries,
     settings_snapshot,
+    update_settings,
+    update_user,
 )
 
 
@@ -44,6 +49,10 @@ SESSION_COOKIE = "picorg_web_session"
 SESSION_MAX_AGE_SECONDS = 12 * 60 * 60
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "admin"
+
+
+def _auth_enabled() -> bool:
+    return os.environ.get("PICORG_WEB_AUTH", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _admin_username() -> str:
@@ -95,10 +104,14 @@ def _read_session_token(token: str | None) -> str | None:
 
 
 def _current_user(request: Request) -> str | None:
+    if not _auth_enabled():
+        return _admin_username()
     return _read_session_token(request.cookies.get(SESSION_COOKIE))
 
 
 def _require_user(request: Request) -> str:
+    if not _auth_enabled():
+        return _admin_username()
     username = _current_user(request)
     if not username:
         raise HTTPException(status_code=401, detail="Brak aktywnej sesji.")
@@ -114,6 +127,33 @@ def _safe_upload_name(filename: str | None, fallback: str) -> str:
     if not name:
         name = fallback
     return name
+
+
+def _file_token(path: str) -> str:
+    payload = os.path.abspath(path)
+    token = f"{payload}|{_sign(payload)}"
+    return base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii")
+
+
+def _path_from_file_token(token: str) -> str:
+    try:
+        decoded = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
+        path, signature = decoded.rsplit("|", 1)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Niepoprawny token pliku.") from exc
+    if not hmac.compare_digest(_sign(path), signature):
+        raise HTTPException(status_code=403, detail="Niepoprawny podpis pliku.")
+    abs_path = os.path.abspath(path)
+    root = os.path.abspath(settings.l)
+    try:
+        common = os.path.commonpath([abs_path, root])
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="Plik poza katalogiem zdjec.") from exc
+    if common != root:
+        raise HTTPException(status_code=403, detail="Plik poza katalogiem zdjec.")
+    if not os.path.isfile(abs_path):
+        raise HTTPException(status_code=404, detail="Nie znaleziono pliku.")
+    return abs_path
 
 
 async def _save_upload(upload: UploadFile, temp_dir: str, prefix: str) -> str:
@@ -163,12 +203,14 @@ def create_app() -> FastAPI:
 
     @app.get("/")
     def index(request: Request) -> Response:
-        if not _current_user(request):
+        if _auth_enabled() and not _current_user(request):
             return RedirectResponse("/login", status_code=303)
         return _static_file("index.html")
 
     @app.get("/login")
     def login_page(request: Request) -> Response:
+        if not _auth_enabled():
+            return RedirectResponse("/", status_code=303)
         if _current_user(request):
             return RedirectResponse("/", status_code=303)
         return _static_file("login.html")
@@ -212,6 +254,7 @@ def create_app() -> FastAPI:
             "config_path": runtime_info["config_path"],
             "slots": slots,
             "admin_user": _admin_username(),
+            "auth_enabled": _auth_enabled(),
             **load_web_data(),
         }
 
@@ -252,6 +295,24 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse({"ok": True, "entry": result})
 
+    @app.post("/api/entries/photos")
+    async def entries_photos(request: Request) -> JSONResponse:
+        _require_user(request)
+        payload = await request.json()
+        photos = find_product_photos(payload if isinstance(payload, dict) else {})
+        enriched = []
+        for photo in photos:
+            item = dict(photo)
+            item["url"] = f"/api/file?token={_file_token(str(photo['path']))}"
+            enriched.append(item)
+        return JSONResponse({"photos": enriched})
+
+    @app.get("/api/file")
+    def file_preview(request: Request, token: str) -> FileResponse:
+        _require_user(request)
+        path = _path_from_file_token(token)
+        return FileResponse(path)
+
     @app.post("/api/lists/{list_key}")
     async def list_add(request: Request, list_key: str) -> JSONResponse:
         _require_user(request)
@@ -278,6 +339,52 @@ def create_app() -> FastAPI:
     def settings_api(request: Request) -> dict[str, Any]:
         _require_user(request)
         return settings_snapshot()
+
+    @app.post("/api/settings")
+    async def settings_save(request: Request) -> JSONResponse:
+        _require_user(request)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Niepoprawne ustawienia.")
+        try:
+            snapshot = update_settings(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(snapshot)
+
+    @app.get("/api/users")
+    def users_get(request: Request) -> dict[str, Any]:
+        _require_user(request)
+        return {"users": load_users()}
+
+    @app.post("/api/users")
+    async def users_add(request: Request) -> JSONResponse:
+        _require_user(request)
+        payload = await request.json()
+        try:
+            users = add_user(
+                str(payload.get("username") if isinstance(payload, dict) else ""),
+                str(payload.get("role") if isinstance(payload, dict) else "user"),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse({"users": users})
+
+    @app.patch("/api/users/{username}")
+    async def users_update(request: Request, username: str) -> JSONResponse:
+        _require_user(request)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            payload = {}
+        try:
+            users = update_user(
+                username,
+                enabled=payload.get("enabled") if "enabled" in payload else None,
+                role=payload.get("role") if "role" in payload else None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse({"users": users})
 
     @app.post("/api/process")
     async def process_uploads(request: Request) -> JSONResponse:
