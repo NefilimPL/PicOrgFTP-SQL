@@ -154,10 +154,14 @@ THUMBNAIL_SCROLL_DEFER_MS = 90
 THUMBNAIL_MEMORY_ROWS = 10
 PERF_MONITOR_MS = 16
 PERF_SAMPLE_WINDOW = 90
-SLOT_SCROLL_FLUSH_MS = 12
-SLOT_SCROLL_SETTLE_MS = 120
-SLOT_SCROLL_MAX_STEPS = 5
-SLOT_SCROLL_UNIT_PX = 28
+SLOT_SCROLL_FLUSH_MS = 16
+SLOT_SCROLL_SETTLE_MS = 90
+SLOT_SCROLL_EASING = 0.28
+SLOT_SCROLL_MIN_DELTA_PX = 0.5
+SLOT_SCROLL_UNIT_PX = 30
+SLOT_CANVAS_GAP = 8
+SLOT_CANVAS_TILE_HEIGHT = 270
+SLOT_CANVAS_MIN_TILE_WIDTH = SLOT_PREVIEW_SIZE[0] + 28
 FORM_TRACKED_FIELDS = (
     "name",
     "type",
@@ -302,6 +306,7 @@ class App(BU.Tk):
         B._thumb_request_queue = queue.Queue()
         B._thumb_result_queue = queue.Queue()
         B._thumb_request_seq = 0
+        B._thumb_pending_paths = {}
         B._thumb_poll_job = I
         B._ui_log_buffer = []
         B._ui_log_flush_job = I
@@ -313,7 +318,7 @@ class App(BU.Tk):
         B._slots_refresh_job = I
         B._slots_scroll_job = I
         B._slots_scroll_end_job = I
-        B._slots_scroll_pending_steps = 0
+        B._slots_scroll_target_px = 0.0
         B._slots_scroll_active = h
         B._perf_monitor_job = I
         B._perf_samples = deque(maxlen=PERF_SAMPLE_WINDOW)
@@ -2117,12 +2122,18 @@ class App(BU.Tk):
         canvas = Aj(B, "_slots_canvas", I)
         if not canvas:
             return
+        if Aj(B, "slots_frame", I) is I:
+            B._layout_canvas_slots()
+            return
         try:
             bbox = canvas.bbox("all")
             if bbox:
                 canvas.configure(scrollregion=bbox)
         except E:
             pass
+        B._clamp_slots_scroll_target()
+        if not Aj(B, "_slots_scroll_active", h):
+            B._prefetch_visible_slot_thumbnails()
 
     def _bind_slot_scroll_target(B, widget):
         if not widget:
@@ -2139,6 +2150,7 @@ class App(BU.Tk):
     def _finish_slots_scroll(B):
         B._slots_scroll_end_job = I
         B._slots_scroll_active = h
+        B._prefetch_visible_slot_thumbnails()
         B._schedule_slots_canvas_refresh()
 
     def _mark_slots_scroll_active(B):
@@ -2157,25 +2169,73 @@ class App(BU.Tk):
         except E:
             B._slots_scroll_end_job = I
 
-    def _flush_slots_scroll(B):
-        B._slots_scroll_job = I
-        requested_steps = int(Aj(B, "_slots_scroll_pending_steps", 0) or 0)
-        steps = requested_steps
-        if not steps:
-            return
-        if steps > SLOT_SCROLL_MAX_STEPS:
-            steps = SLOT_SCROLL_MAX_STEPS
-        elif steps < -SLOT_SCROLL_MAX_STEPS:
-            steps = -SLOT_SCROLL_MAX_STEPS
-        B._slots_scroll_pending_steps = requested_steps - steps
+    def _get_slots_scroll_metrics(B):
         canvas = Aj(B, "_slots_canvas", I)
         if not canvas:
-            return
+            return I, 0.0, 0.0
         try:
-            canvas.yview_scroll(steps, "units")
+            bbox = canvas.bbox("all")
         except E:
+            bbox = I
+        if not bbox:
+            return canvas, 0.0, 0.0
+        content_height = max(1.0, float(bbox[3] - bbox[1]))
+        try:
+            viewport_height = max(1.0, float(canvas.winfo_height()))
+        except E:
+            viewport_height = 1.0
+        return canvas, content_height, max(0.0, content_height - viewport_height)
+
+    def _get_slots_scroll_offset(B, canvas=I, content_height=I):
+        if canvas is I or content_height is I:
+            canvas, content_height, _max_offset = B._get_slots_scroll_metrics()
+        if not canvas or not content_height:
+            return 0.0
+        try:
+            return max(0.0, float(canvas.yview()[0]) * float(content_height))
+        except E:
+            try:
+                return max(0.0, float(canvas.canvasy(0)))
+            except E:
+                return 0.0
+
+    def _set_slots_scroll_offset(B, offset_px):
+        canvas, content_height, max_offset = B._get_slots_scroll_metrics()
+        if not canvas or not content_height:
+            return 0.0
+        offset = max(0.0, min(max_offset, float(offset_px or 0.0)))
+        try:
+            canvas.yview_moveto(offset / content_height)
+        except E:
+            return B._get_slots_scroll_offset(canvas, content_height)
+        return offset
+
+    def _clamp_slots_scroll_target(B):
+        canvas, content_height, max_offset = B._get_slots_scroll_metrics()
+        if not canvas:
             return
-        if Aj(B, "_slots_scroll_pending_steps", 0):
+        current = B._get_slots_scroll_offset(canvas, content_height)
+        target = Aj(B, "_slots_scroll_target_px", current)
+        B._slots_scroll_target_px = max(0.0, min(max_offset, float(target or 0.0)))
+
+    def _flush_slots_scroll(B):
+        B._slots_scroll_job = I
+        canvas, content_height, max_offset = B._get_slots_scroll_metrics()
+        if not canvas:
+            return
+        target = max(
+            0.0,
+            min(max_offset, float(Aj(B, "_slots_scroll_target_px", 0.0) or 0.0)),
+        )
+        current = B._get_slots_scroll_offset(canvas, content_height)
+        distance = target - current
+        if abs(distance) <= SLOT_SCROLL_MIN_DELTA_PX:
+            B._set_slots_scroll_offset(target)
+            B._slots_scroll_target_px = target
+            return
+        next_offset = current + distance * SLOT_SCROLL_EASING
+        B._set_slots_scroll_offset(next_offset)
+        if abs(target - next_offset) > SLOT_SCROLL_MIN_DELTA_PX:
             try:
                 B._slots_scroll_job = B.after(
                     SLOT_SCROLL_FLUSH_MS,
@@ -2184,9 +2244,22 @@ class App(BU.Tk):
             except E:
                 B._slots_scroll_job = I
 
-    def _scroll_slots(B, steps):
+    def _scroll_slots_by_pixels(B, delta_px):
+        canvas, content_height, max_offset = B._get_slots_scroll_metrics()
+        if not canvas:
+            return "break"
+        if max_offset <= 0:
+            B._slots_scroll_target_px = 0.0
+            return "break"
         B._mark_slots_scroll_active()
-        B._slots_scroll_pending_steps += int(steps or 0)
+        current = B._get_slots_scroll_offset(canvas, content_height)
+        if B._slots_scroll_job is I:
+            B._slots_scroll_target_px = current
+        target = float(Aj(B, "_slots_scroll_target_px", current) or 0.0)
+        B._slots_scroll_target_px = max(
+            0.0,
+            min(max_offset, target + float(delta_px or 0.0)),
+        )
         if B._slots_scroll_job is I:
             try:
                 B._slots_scroll_job = B.after(
@@ -2197,20 +2270,34 @@ class App(BU.Tk):
                 B._flush_slots_scroll()
         return "break"
 
+    def _scroll_slots_to_fraction(B, fraction):
+        canvas, content_height, max_offset = B._get_slots_scroll_metrics()
+        if not canvas:
+            return "break"
+        try:
+            target = float(fraction) * content_height
+        except (TypeError, ValueError):
+            return "break"
+        B._mark_slots_scroll_active()
+        target = max(0.0, min(max_offset, target))
+        B._slots_scroll_target_px = target
+        B._set_slots_scroll_offset(target)
+        return "break"
+
+    def _scroll_slots(B, steps):
+        return B._scroll_slots_by_pixels(float(steps or 0) * SLOT_SCROLL_UNIT_PX)
+
     def _on_slots_mousewheel(B, event):
         delta = getattr(event, "delta", 0)
         if not delta:
             return
-        steps = max(1, int(abs(delta) / 120)) or 1
-        if delta > 0:
-            steps *= -1
-        return B._scroll_slots(steps)
+        return B._scroll_slots_by_pixels(-(float(delta) / 120.0) * SLOT_SCROLL_UNIT_PX)
 
     def _on_slots_scroll_up(B, _event):
-        return B._scroll_slots(-1)
+        return B._scroll_slots_by_pixels(-SLOT_SCROLL_UNIT_PX)
 
     def _on_slots_scroll_down(B, _event):
-        return B._scroll_slots(1)
+        return B._scroll_slots_by_pixels(SLOT_SCROLL_UNIT_PX)
 
     def _get_thumbnail_cache_key(B, path):
         try:
@@ -2297,6 +2384,9 @@ class App(BU.Tk):
             except queue.Empty:
                 break
             processed += 1
+            pending_paths = Aj(B, "_thumb_pending_paths", I)
+            if isinstance(pending_paths, dict) and pending_paths.get(idx) == path:
+                pending_paths.pop(idx, I)
             if B._thumb_tokens.get(idx) != token:
                 continue
             if idx < 0 or idx >= Q(B.slots):
@@ -3986,6 +4076,387 @@ class App(BU.Tk):
             selectforeground=A._ui_colors["hero_text"],
         )
 
+    def _build_slots_canvas_native(B, mount):
+        """Prepare a Canvas-drawn slot grid without embedded Tk widgets."""
+
+        M_ = C.Frame(mount, style="Card.TFrame")
+        M_.grid(row=0, column=0, sticky="nsew")
+        M_.columnconfigure(0, weight=1)
+        M_.rowconfigure(1, weight=1)
+        B._slots_container = M_
+
+        header = C.Frame(M_, style="Card.TFrame")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        header.columnconfigure(0, weight=1)
+        C.Label(
+            header,
+            text=LANG.get("slots_section", "Sloty zdjec"),
+            style="SectionTitle.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+
+        body = C.Frame(M_, style="Card.TFrame")
+        body.grid(row=1, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+        canvas = F.Canvas(
+            body,
+            bg=B._ui_colors["card"],
+            highlightthickness=0,
+            bd=0,
+            yscrollincrement=1,
+        )
+        B._slots_canvas = canvas
+        B.slots_frame = I
+        B._slot_grid_columns = SLOT_GRID_COLUMNS
+        B._slot_canvas_tile_height = SLOT_CANVAS_TILE_HEIGHT
+
+        def _on_scroll(*args):
+            if not args:
+                return
+            action = args[0]
+            if action == "moveto" and Q(args) > 1:
+                B._scroll_slots_to_fraction(args[1])
+                return
+            if action == "scroll" and Q(args) > 2:
+                try:
+                    amount = int(args[1])
+                except (TypeError, ValueError):
+                    return
+                unit = args[2]
+                step_px = SLOT_SCROLL_UNIT_PX
+                if unit == "pages":
+                    try:
+                        step_px = max(1, canvas.winfo_height() - SLOT_SCROLL_UNIT_PX)
+                    except E:
+                        step_px = SLOT_SCROLL_UNIT_PX
+                B._scroll_slots_by_pixels(amount * step_px)
+
+        scroll = C.Scrollbar(body, orient=An, command=_on_scroll)
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side=Am, fill=z, expand=J)
+        scroll.pack(side=AV, fill="y")
+
+        canvas.bind("<Configure>", lambda _event: B._layout_canvas_slots())
+        canvas.bind("<Button-1>", B._on_slots_canvas_click)
+        if hasattr(canvas, "drop_target_register") and hasattr(canvas, "dnd_bind"):
+            canvas.drop_target_register(DND_ALL)
+            canvas.dnd_bind("<<Drop>>", B._on_slots_canvas_drop)
+        if hasattr(canvas, "drag_source_register") and hasattr(canvas, "dnd_bind"):
+            canvas.drag_source_register(1, BJ)
+            canvas.dnd_bind("<<DragInitCmd>>", B._on_slots_canvas_drag_init)
+            canvas.dnd_bind("<<DragEndCmd>>", B._on_drag_end)
+
+        B.slots = []
+        for idx, slot_def in A0(B.slot_definitions):
+            prefix = slot_def["prefix"]
+            label = slot_def["label"]
+            items = B._create_canvas_slot_items(canvas, idx)
+            B.slots.append(
+                {
+                    Aa: prefix,
+                    "label": label,
+                    "canvas_items": items,
+                    "canvas_bounds": {},
+                    "status_text": B._slot_status["empty"],
+                    "photo": I,
+                    "title_label": I,
+                    y: I,
+                    A7: I,
+                    "local_icon": I,
+                    "ftp_icon": I,
+                    "sql_icon": I,
+                    "sql_link": I,
+                    "sql_url": "",
+                    "sql_presence_unknown": h,
+                    "sql_present": h,
+                    "status_label": I,
+                    "progress": I,
+                    f: I,
+                    "local_path": I,
+                    "ftp_path": I,
+                    "preview_path": I,
+                    "preview_source": "",
+                    AS: I,
+                    B0: I,
+                }
+            )
+        B._bind_slot_scroll_target(canvas)
+        B.after_idle(B._layout_canvas_slots)
+        B._update_dashboard_summary()
+
+    def _create_canvas_slot_items(B, canvas, idx):
+        tag = f"slot-{idx}"
+        return {
+            "tile": canvas.create_rectangle(0, 0, 1, 1, fill=B._ui_colors["card"], outline=B._ui_colors["slot_border"], width=1, tags=(tag,)),
+            "title": canvas.create_text(0, 0, text="", anchor="w", fill=B._ui_colors["text"], font=("Segoe UI Semibold", 9), tags=(tag,)),
+            "preview_bg": canvas.create_rectangle(0, 0, 1, 1, fill=B._ui_colors["slot_bg"], outline=B._ui_colors["slot_border"], width=1, tags=(tag,)),
+            "preview_img": canvas.create_image(0, 0, anchor="center", state="hidden", tags=(tag,)),
+            "placeholder": canvas.create_text(0, 0, text=B._slot_placeholder_text, anchor="center", fill=B._ui_colors["muted"], font=("Segoe UI", 9), justify="center", width=SLOT_PREVIEW_SIZE[0] - 18, tags=(tag,)),
+            "remove_bg": canvas.create_rectangle(0, 0, 1, 1, fill=B._ui_colors["danger"], outline=B._ui_colors["danger"], state="hidden", tags=(tag, "slot-remove")),
+            "remove_text": canvas.create_text(0, 0, text=B._slot_remove_label, anchor="center", fill=AT, font=("Segoe UI Semibold", 8), state="hidden", tags=(tag, "slot-remove")),
+            "select_bg": canvas.create_rectangle(0, 0, 1, 1, fill=B._ui_colors["hero"], outline=B._ui_colors["hero"], tags=(tag, "slot-select")),
+            "select_text": canvas.create_text(0, 0, text=B._slot_select_label, anchor="center", fill=AT, font=("Segoe UI Semibold", 8), tags=(tag, "slot-select")),
+            "local_bg": canvas.create_rectangle(0, 0, 1, 1, fill=B._ui_colors["hero"], outline=B._ui_colors["hero"], state="hidden", tags=(tag, "slot-local")),
+            "local_text": canvas.create_text(0, 0, text=LOCAL_ICON_LABEL, anchor="center", fill=AT, font=("Segoe UI Semibold", 7), state="hidden", tags=(tag, "slot-local")),
+            "ftp_bg": canvas.create_rectangle(0, 0, 1, 1, fill=B._ui_colors["hero"], outline=B._ui_colors["hero"], state="hidden", tags=(tag, "slot-ftp")),
+            "ftp_text": canvas.create_text(0, 0, text=FTP_ICON_LABEL, anchor="center", fill=AT, font=("Segoe UI Semibold", 7), state="hidden", tags=(tag, "slot-ftp")),
+            "sql_bg": canvas.create_rectangle(0, 0, 1, 1, fill=B._ui_colors["warning"], outline=B._ui_colors["warning"], state="hidden", tags=(tag, "slot-sql")),
+            "sql_text": canvas.create_text(0, 0, text=SQL_ICON_LABEL, anchor="center", fill=AT, font=("Segoe UI Semibold", 7), state="hidden", tags=(tag, "slot-sql")),
+            "status": canvas.create_text(0, 0, text=B._slot_status["empty"], anchor="w", fill=B._ui_colors["muted"], font=("Segoe UI", 8), tags=(tag,)),
+            "sql_link": canvas.create_text(0, 0, text="", anchor="w", fill=B._ui_colors["hero"], font=("Segoe UI", 8, "underline"), width=SLOT_PREVIEW_SIZE[0] - 18, state="hidden", tags=(tag, "slot-sql-link")),
+        }
+
+    def _layout_canvas_slots(B):
+        canvas = Aj(B, "_slots_canvas", I)
+        if not canvas or not Aj(B, "slots", I):
+            return
+        try:
+            viewport_width = max(1, canvas.winfo_width())
+        except E:
+            viewport_width = SLOT_GRID_COLUMNS * SLOT_CANVAS_MIN_TILE_WIDTH
+        columns = SLOT_GRID_COLUMNS
+        gap = SLOT_CANVAS_GAP
+        tile_w = max(
+            SLOT_CANVAS_MIN_TILE_WIDTH,
+            int((viewport_width - gap * (columns + 1)) / max(1, columns)),
+        )
+        tile_h = SLOT_CANVAS_TILE_HEIGHT
+        B._slot_canvas_tile_width = tile_w
+        B._slot_canvas_tile_height = tile_h
+        B._slot_grid_columns = columns
+        for idx in Ax(Q(B.slots)):
+            row = idx // columns
+            column = idx % columns
+            x = gap + column * (tile_w + gap)
+            y0 = gap + row * (tile_h + gap)
+            B._layout_canvas_slot(idx, x, y0, tile_w, tile_h)
+        rows = (Q(B.slots) + columns - 1) // columns
+        content_h = gap + rows * (tile_h + gap)
+        canvas.configure(scrollregion=(0, 0, max(viewport_width, columns * (tile_w + gap) + gap), content_h))
+        B._clamp_slots_scroll_target()
+        if not Aj(B, "_slots_scroll_active", h):
+            B._prefetch_visible_slot_thumbnails()
+
+    def _layout_canvas_slot(B, idx, x, y0, tile_w, tile_h):
+        canvas = B._slots_canvas
+        slot = B.slots[idx]
+        items = slot.get("canvas_items")
+        if not items:
+            return
+        pad = 8
+        title_h = 24
+        preview_x1 = x + pad
+        preview_y1 = y0 + pad + title_h + 8
+        preview_x2 = x + tile_w - pad
+        preview_y2 = preview_y1 + SLOT_PREVIEW_SIZE[1]
+        status_y = preview_y2 + 12
+        sql_y = status_y + 18
+        select_w = 58
+        button_h = 20
+        badge_w = 32
+        badge_h = 18
+        badge_gap = 4
+        badge_y2 = preview_y2 - 4
+        badge_y1 = badge_y2 - badge_h
+        sql_x2 = preview_x2 - 4
+        ftp_x2 = sql_x2 - badge_w - badge_gap
+        local_x2 = ftp_x2 - badge_w - badge_gap
+        bounds = {
+            "tile": (x, y0, x + tile_w, y0 + tile_h),
+            "preview": (preview_x1, preview_y1, preview_x2, preview_y2),
+            "remove": (preview_x1, preview_y1, preview_x1 + 54, preview_y1 + button_h),
+            "select": (preview_x2 - select_w, preview_y1, preview_x2, preview_y1 + button_h),
+            "local": (local_x2 - badge_w, badge_y1, local_x2, badge_y2),
+            "ftp": (ftp_x2 - badge_w, badge_y1, ftp_x2, badge_y2),
+            "sql": (sql_x2 - badge_w, badge_y1, sql_x2, badge_y2),
+            "sql_link": (x + pad, sql_y - 8, x + tile_w - pad, sql_y + 12),
+        }
+        slot["canvas_bounds"] = bounds
+        canvas.coords(items["tile"], x + 1, y0 + 1, x + tile_w - 1, y0 + tile_h - 1)
+        canvas.coords(items["title"], x + pad, y0 + pad + 11)
+        canvas.itemconfigure(items["title"], width=max(20, tile_w - 2 * pad))
+        canvas.coords(items["preview_bg"], preview_x1, preview_y1, preview_x2, preview_y2)
+        canvas.coords(items["preview_img"], (preview_x1 + preview_x2) / 2, (preview_y1 + preview_y2) / 2)
+        canvas.coords(items["placeholder"], (preview_x1 + preview_x2) / 2, (preview_y1 + preview_y2) / 2)
+        canvas.itemconfigure(items["placeholder"], width=max(20, preview_x2 - preview_x1 - 18))
+        B._coords_canvas_button(items, "remove", bounds["remove"])
+        B._coords_canvas_button(items, "select", bounds["select"])
+        B._coords_canvas_button(items, "local", bounds["local"])
+        B._coords_canvas_button(items, "ftp", bounds["ftp"])
+        B._coords_canvas_button(items, "sql", bounds["sql"])
+        canvas.coords(items["status"], x + pad, status_y)
+        canvas.itemconfigure(items["status"], width=max(20, tile_w - 2 * pad))
+        canvas.coords(items["sql_link"], x + pad, sql_y)
+        canvas.itemconfigure(items["sql_link"], width=max(20, tile_w - 2 * pad))
+        B._redraw_canvas_slot(idx)
+
+    def _coords_canvas_button(B, items, name, bounds):
+        canvas = B._slots_canvas
+        x1, y1, x2, y2 = bounds
+        canvas.coords(items[f"{name}_bg"], x1, y1, x2, y2)
+        canvas.coords(items[f"{name}_text"], (x1 + x2) / 2, (y1 + y2) / 2)
+
+    def _slot_mark_color(B, color):
+        return {AR: "#0000ff", A4: "#00ff00", "gray": "#808080", Ab: "#ff0000"}.get(color, B._ui_colors["slot_border"])
+
+    def _redraw_canvas_slot(B, idx):
+        if idx < 0 or idx >= Q(Aj(B, "slots", [])):
+            return
+        canvas = Aj(B, "_slots_canvas", I)
+        slot = B.slots[idx]
+        items = slot.get("canvas_items")
+        if not canvas or not items:
+            return
+        title = SLOT_TITLE_FORMAT.format(index=slot[Aa], label=get_slot_label(slot["label"]))
+        canvas.itemconfigure(items["title"], text=title)
+        mark = slot.get(B0)
+        canvas.itemconfigure(
+            items["tile"],
+            outline=B._slot_mark_color(mark) if mark is not I else B._ui_colors["slot_border"],
+            width=2 if mark is not I else 1,
+        )
+        photo = slot.get("photo")
+        preview_path = B._get_slot_preview_path(slot)
+        if photo is not I:
+            canvas.itemconfigure(items["preview_img"], image=photo, state=Az)
+            canvas.itemconfigure(items["placeholder"], state="hidden")
+        else:
+            canvas.itemconfigure(items["preview_img"], image="", state="hidden")
+            placeholder = A.path.basename(preview_path) if preview_path else B._slot_placeholder_text
+            canvas.itemconfigure(items["placeholder"], text=placeholder, state=Az)
+        has_file = bool(slot.get(f) or slot.get("local_path") or slot.get("ftp_path") or preview_path)
+        B._set_canvas_item_pair_state(items, "remove", has_file)
+        B._set_canvas_item_pair_state(items, "select", J)
+        B._redraw_canvas_source_badges(idx)
+        status = slot.get("status_text") or B._get_slot_idle_status(idx)
+        canvas.itemconfigure(items["status"], text=status)
+        url = G(slot.get("sql_url") or "").strip()
+        if url:
+            canvas.itemconfigure(items["sql_link"], text=url, state=Az)
+        else:
+            canvas.itemconfigure(items["sql_link"], text="", state="hidden")
+
+    def _set_canvas_item_pair_state(B, items, name, visible):
+        state = Az if visible else "hidden"
+        B._slots_canvas.itemconfigure(items[f"{name}_bg"], state=state)
+        B._slots_canvas.itemconfigure(items[f"{name}_text"], state=state)
+
+    def _redraw_canvas_source_badges(B, idx):
+        slot = B.slots[idx]
+        items = slot.get("canvas_items")
+        if not items:
+            return
+        local_path = slot.get("local_path")
+        ftp_path = slot.get("ftp_path")
+        has_any_source = bool(slot.get(f) or local_path or ftp_path)
+        preview_source = slot.get("preview_source")
+        B._configure_canvas_badge(
+            items,
+            "local",
+            J if local_path else (I if not has_any_source else h),
+            selected=bool(local_path and preview_source == "local"),
+            show_when_unknown=h,
+        )
+        B._configure_canvas_badge(
+            items,
+            "ftp",
+            J if ftp_path else (I if not has_any_source else h),
+            selected=bool(ftp_path and preview_source == "ftp"),
+            show_when_unknown=h,
+        )
+        B._configure_canvas_badge(
+            items,
+            "sql",
+            slot.get("sql_present", h),
+            selected=h,
+            show_when_unknown=bool(slot.get("sql_presence_unknown")),
+        )
+
+    def _configure_canvas_badge(B, items, name, present, *, selected=h, show_when_unknown=h):
+        canvas = B._slots_canvas
+        if present is I:
+            if not show_when_unknown:
+                B._set_canvas_item_pair_state(items, name, h)
+                return
+            bg = B._ui_colors["warning"]
+        elif present:
+            bg = B._ui_colors["accent"] if selected else B._ui_colors["hero"]
+        else:
+            bg = B._ui_colors["danger"]
+        canvas.itemconfigure(items[f"{name}_bg"], fill=bg, outline=bg)
+        canvas.itemconfigure(items[f"{name}_text"], fill=AT)
+        B._set_canvas_item_pair_state(items, name, J)
+
+    def _canvas_event_coords(B, event):
+        canvas = B._slots_canvas
+        try:
+            x = canvas.canvasx(getattr(event, "x"))
+            y0 = canvas.canvasy(getattr(event, "y"))
+            return x, y0
+        except E:
+            try:
+                x = canvas.canvasx(canvas.winfo_pointerx() - canvas.winfo_rootx())
+                y0 = canvas.canvasy(canvas.winfo_pointery() - canvas.winfo_rooty())
+                return x, y0
+            except E:
+                return 0.0, 0.0
+
+    def _slot_index_from_canvas_coords(B, x, y0):
+        for idx, slot in A0(Aj(B, "slots", [])):
+            bounds = slot.get("canvas_bounds", {}).get("tile")
+            if bounds and B._point_in_bounds(x, y0, bounds):
+                return idx
+        return I
+
+    def _point_in_bounds(B, x, y0, bounds):
+        x1, y1, x2, y2 = bounds
+        return x1 <= x <= x2 and y1 <= y0 <= y2
+
+    def _on_slots_canvas_click(B, event):
+        x, y0 = B._canvas_event_coords(event)
+        idx = B._slot_index_from_canvas_coords(x, y0)
+        if idx is I:
+            return
+        slot = B.slots[idx]
+        bounds = slot.get("canvas_bounds", {})
+        if B._point_in_bounds(x, y0, bounds.get("remove", (0, 0, -1, -1))):
+            if slot.get(f) or slot.get("local_path") or slot.get("ftp_path"):
+                B._remove_file(idx)
+            return "break"
+        if B._point_in_bounds(x, y0, bounds.get("select", (0, 0, -1, -1))):
+            B._select_file(idx)
+            return "break"
+        if B._point_in_bounds(x, y0, bounds.get("local", (0, 0, -1, -1))) and slot.get("local_path"):
+            B._set_slot_preview_source(idx, "local")
+            return "break"
+        if B._point_in_bounds(x, y0, bounds.get("ftp", (0, 0, -1, -1))) and slot.get("ftp_path"):
+            B._set_slot_preview_source(idx, "ftp")
+            return "break"
+        if (
+            B._point_in_bounds(x, y0, bounds.get("sql", (0, 0, -1, -1)))
+            or B._point_in_bounds(x, y0, bounds.get("sql_link", (0, 0, -1, -1)))
+        ) and slot.get("sql_url"):
+            B._copy_slot_sql_url(idx)
+            return "break"
+        if B._point_in_bounds(x, y0, bounds.get("preview", (0, 0, -1, -1))) and not B._get_slot_preview_path(slot):
+            B._select_file(idx)
+            return "break"
+        return "break"
+
+    def _on_slots_canvas_drop(B, event):
+        x, y0 = B._canvas_event_coords(event)
+        idx = B._slot_index_from_canvas_coords(x, y0)
+        if idx is I:
+            return
+        return B._on_drop(event, idx)
+
+    def _on_slots_canvas_drag_init(B, event):
+        x, y0 = B._canvas_event_coords(event)
+        idx = B._slot_index_from_canvas_coords(x, y0)
+        if idx is I:
+            return
+        return B._on_drag_init(event, idx)
+
     def _build_slots(B):
         """Prepare the scrollable grid of drop targets used for images."""
 
@@ -3996,6 +4467,7 @@ class App(BU.Tk):
         mount = Aj(B, "_slots_mount", I)
         if not mount:
             return
+        return B._build_slots_canvas_native(mount)
         M_ = C.Frame(mount, style="Card.TFrame")
         M_.grid(row=0, column=0, sticky="nsew")
         M_.columnconfigure(0, weight=1)
@@ -4018,12 +4490,29 @@ class App(BU.Tk):
             bg=B._ui_colors["card"],
             highlightthickness=0,
             bd=0,
-            yscrollincrement=SLOT_SCROLL_UNIT_PX,
+            yscrollincrement=1,
         )
         B._slots_canvas = A_
         def _on_scroll(*args):
-            B._mark_slots_scroll_active()
-            A_.yview(*args)
+            if not args:
+                return
+            action = args[0]
+            if action == "moveto" and Q(args) > 1:
+                B._scroll_slots_to_fraction(args[1])
+                return
+            if action == "scroll" and Q(args) > 2:
+                try:
+                    amount = int(args[1])
+                except (TypeError, ValueError):
+                    return
+                unit = args[2]
+                step_px = SLOT_SCROLL_UNIT_PX
+                if unit == "pages":
+                    try:
+                        step_px = max(1, A_.winfo_height() - SLOT_SCROLL_UNIT_PX)
+                    except E:
+                        step_px = SLOT_SCROLL_UNIT_PX
+                B._scroll_slots_by_pixels(amount * step_px)
 
         T = C.Scrollbar(body, orient=An, command=_on_scroll)
         N_ = C.Frame(A_, style="Card.TFrame")
@@ -4311,6 +4800,9 @@ class App(BU.Tk):
             if not new_label:
                 continue
             slot["label"] = new_label
+            if slot.get("canvas_items"):
+                B._redraw_canvas_slot(Aj(B, "_slot_index_by_prefix", {}).get(prefix, -1))
+                continue
             title_label = slot.get("title_label")
             if title_label:
                 title_label.configure(
@@ -4319,8 +4811,75 @@ class App(BU.Tk):
                     )
                 )
 
+    def _get_slot_row_pitch(B):
+        if Aj(B, "slots_frame", I) is I and Aj(B, "_slots_canvas", I):
+            return float(Aj(B, "_slot_canvas_tile_height", SLOT_CANVAS_TILE_HEIGHT) + SLOT_CANVAS_GAP)
+        slots = Aj(B, "slots", [])
+        if not slots:
+            return float(SLOT_PREVIEW_SIZE[1] + 70)
+        columns = max(1, int(Aj(B, "_slot_grid_columns", 0) or SLOT_GRID_COLUMNS))
+        try:
+            if Q(slots) > columns:
+                first = slots[0].get(AS)
+                second_row = slots[columns].get(AS)
+                if first and second_row:
+                    pitch = float(second_row.winfo_y() - first.winfo_y())
+                    if pitch > 1:
+                        return pitch
+            frame = slots[0].get(AS)
+            if frame:
+                height = float(frame.winfo_height())
+                if height > 1:
+                    return height + 12.0
+        except E:
+            pass
+        return float(SLOT_PREVIEW_SIZE[1] + 70)
+
+    def _visible_slot_index_bounds(B, offset_px=I):
+        slots = Aj(B, "slots", [])
+        if not slots:
+            return 0, -1
+        columns = max(1, int(Aj(B, "_slot_grid_columns", 0) or SLOT_GRID_COLUMNS))
+        row_pitch = max(1.0, B._get_slot_row_pitch())
+        canvas = Aj(B, "_slots_canvas", I)
+        if offset_px is I:
+            canvas, content_height, _max_offset = B._get_slots_scroll_metrics()
+            offset_px = B._get_slots_scroll_offset(canvas, content_height)
+        try:
+            viewport_height = max(1.0, float(canvas.winfo_height())) if canvas else row_pitch
+        except E:
+            viewport_height = row_pitch
+        first_visible_row = max(0, int(float(offset_px or 0.0) // row_pitch))
+        visible_rows = max(1, int(viewport_height // row_pitch) + 1)
+        extra_rows = max(0, THUMBNAIL_MEMORY_ROWS - visible_rows)
+        first_row = max(0, first_visible_row - min(2, extra_rows))
+        last_row = first_row + THUMBNAIL_MEMORY_ROWS - 1
+        last_slot_row = max(0, (Q(slots) + columns - 1) // columns - 1)
+        last_row = min(last_slot_row, last_row)
+        return first_row * columns, min(Q(slots) - 1, ((last_row + 1) * columns) - 1)
+
+    def _is_slot_in_thumbnail_window(B, idx):
+        first_idx, last_idx = B._visible_slot_index_bounds()
+        return first_idx <= idx <= last_idx
+
+    def _prefetch_visible_slot_thumbnails(B):
+        first_idx, last_idx = B._visible_slot_index_bounds()
+        if last_idx < first_idx:
+            return
+        for idx in Ax(first_idx, last_idx + 1):
+            if idx < 0 or idx >= Q(B.slots):
+                continue
+            path = B._get_slot_preview_path(B.slots[idx])
+            if path:
+                B._queue_thumbnail(idx, path)
+
     def _queue_thumbnail(B, idx, path):
         if not path:
+            return
+        if not isinstance(Aj(B, "_thumb_pending_paths", I), dict):
+            B._thumb_pending_paths = {}
+        pending_path = B._thumb_pending_paths.get(idx)
+        if pending_path == path:
             return
         token = B._next_thumbnail_token()
         B._thumb_tokens[idx] = token
@@ -4328,6 +4887,7 @@ class App(BU.Tk):
         if thumb is not I:
             B._set_slot_preview(idx, path, thumb)
             return
+        B._thumb_pending_paths[idx] = path
         B._thumb_request_queue.put((idx, path, token))
 
     def _build_slot_target_filename(
@@ -4412,6 +4972,10 @@ class App(BU.Tk):
         if present is J:
             url = A._get_slot_sql_url(idx, state=state)
         slot["sql_url"] = url
+        if slot.get("canvas_items"):
+            slot["sql_present"] = present
+            A._redraw_canvas_slot(idx)
+            return
         sql_link = slot.get("sql_link")
         if sql_link:
             if url:
@@ -4589,6 +5153,9 @@ class App(BU.Tk):
         ftp_path = slot.get("ftp_path")
         has_any_source = bool(slot.get(f) or local_path or ftp_path)
         preview_source = slot.get("preview_source")
+        if slot.get("canvas_items"):
+            C._redraw_canvas_slot(idx)
+            return
         C._set_icon_status(
             slot.get("local_icon"),
             J if local_path else (I if not has_any_source else h),
@@ -4677,6 +5244,10 @@ class App(BU.Tk):
         slot = C.slots[idx]
         if C._get_slot_preview_path(slot) != path:
             return
+        if slot.get("canvas_items"):
+            slot["photo"] = I
+            C._redraw_canvas_slot(idx)
+            return
         slot[y].configure(text=A.path.basename(path), image="")
         slot[y].image = I
         slot[A7].place(x=0, y=0)
@@ -4692,7 +5263,10 @@ class App(BU.Tk):
         C._refresh_slot_source_icons(idx)
         C._update_slot_activity(idx, active=J, status=C._slot_status["loading"])
         C._prime_slot_preview(idx, preview_path)
-        C._queue_thumbnail(idx, preview_path)
+        if C._is_slot_in_thumbnail_window(idx):
+            C._queue_thumbnail(idx, preview_path)
+        else:
+            C._update_slot_activity(idx, active=h)
 
     def _clear_slot_preview(C, idx):
         if idx < 0 or idx >= Q(C.slots):
@@ -4704,6 +5278,18 @@ class App(BU.Tk):
         slot["preview_path"] = I
         slot["preview_source"] = B
         slot["sql_url"] = B
+        slot["photo"] = I
+        slot["status_text"] = C._slot_status["empty"]
+        slot["sql_present"] = h
+        if slot.get("canvas_items"):
+            C._thumb_tokens.pop(idx, I)
+            pending_paths = Aj(C, "_thumb_pending_paths", I)
+            if isinstance(pending_paths, dict):
+                pending_paths.pop(idx, I)
+            slot["sql_presence_unknown"] = h
+            C._redraw_canvas_slot(idx)
+            C._update_slot_activity(idx, active=h)
+            return
         slot[y].configure(image=B, text=C._slot_placeholder_text)
         slot[y].image = I
         slot[A7].place_forget()
@@ -4711,6 +5297,9 @@ class App(BU.Tk):
         if sql_link and sql_link.winfo_manager():
             sql_link.pack_forget()
         C._thumb_tokens.pop(idx, I)
+        pending_paths = Aj(C, "_thumb_pending_paths", I)
+        if isinstance(pending_paths, dict):
+            pending_paths.pop(idx, I)
         C._refresh_slot_source_icons(idx)
         C._update_slot_activity(idx, active=h)
 
@@ -4734,6 +5323,19 @@ class App(BU.Tk):
             return
         slot = B.slots[idx]
         if B._get_slot_preview_path(slot) != path:
+            return
+        if slot.get("canvas_items"):
+            if thumb is I:
+                slot["photo"] = I
+            else:
+                cache_key = B._get_thumbnail_cache_key(path)
+                photo = B._get_cached_thumbnail_photo(cache_key)
+                if photo is I:
+                    photo = ImageTk.PhotoImage(thumb)
+                    B._store_cached_thumbnail_photo(cache_key, photo)
+                slot["photo"] = photo
+            B._redraw_canvas_slot(idx)
+            B._update_slot_activity(idx, active=h)
             return
         label = slot[y]
         remove_label = slot[A7]
@@ -4802,6 +5404,10 @@ class App(BU.Tk):
             slot = B.slots[idx]
             if status_text is I:
                 status_text = B._get_slot_idle_status(idx)
+            if slot.get("canvas_items"):
+                slot["status_text"] = status_text
+                B._redraw_canvas_slot(idx)
+                return
             label = slot.get("status_label")
             progress = slot.get("progress")
             if label:
@@ -5983,6 +6589,8 @@ class App(BU.Tk):
         C.pending_deletions.clear()
         C.pending_ftp_deletions.clear()
         C._thumb_tokens.clear()
+        if isinstance(Aj(C, "_thumb_pending_paths", I), dict):
+            C._thumb_pending_paths.clear()
         C._product_state.original_files.clear()
         C._product_state.ftp_remote_only.clear()
         C._product_state.ftp_presence.clear()
@@ -5994,6 +6602,12 @@ class App(BU.Tk):
         for idx, A_ in A0(C.slots):
             C._clear_slot_preview(idx)
             A_["sql_presence_unknown"] = h
+            if A_.get("canvas_items"):
+                A_["sql_present"] = h
+                A_["status_text"] = C._slot_status["empty"]
+                C._redraw_canvas_slot(idx)
+                C._mark_slot(idx, I)
+                continue
             if "sql_icon" in A_:
                 A_["sql_icon"].place_forget()
             if "status_label" in A_:
@@ -9429,6 +10043,9 @@ class App(BU.Tk):
         C_ = E_.get(B_, "#000000")
         slot = D.slots[idx]
         slot[B0] = B_
+        if slot.get("canvas_items"):
+            D._redraw_canvas_slot(idx)
+            return
         A_ = slot.get(AS)
         if A_:
             if B_ is I:
