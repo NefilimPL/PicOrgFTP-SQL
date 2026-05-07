@@ -27,6 +27,15 @@ from ..web_workflow import (
     process_web_uploads,
     processing_options_from_config,
     slot_definitions_from_config,
+    validate_product_form,
+)
+from ..web_data import (
+    add_list_value,
+    load_web_data,
+    remove_list_value,
+    save_web_entry,
+    search_entries,
+    settings_snapshot,
 )
 
 
@@ -203,7 +212,72 @@ def create_app() -> FastAPI:
             "config_path": runtime_info["config_path"],
             "slots": slots,
             "admin_user": _admin_username(),
+            **load_web_data(),
         }
+
+    @app.get("/api/data")
+    def data(request: Request) -> dict[str, Any]:
+        _require_user(request)
+        return load_web_data()
+
+    @app.get("/api/entries/search")
+    def entries_search(
+        request: Request,
+        ean: str = "",
+        product_id: str = "",
+        name: str = "",
+        type_name: str = "",
+        model: str = "",
+        query: str = "",
+    ) -> dict[str, Any]:
+        _require_user(request)
+        return {
+            "entries": search_entries(
+                ean=ean,
+                product_id=product_id,
+                name=name,
+                type_name=type_name,
+                model=model,
+                query=query,
+            )
+        }
+
+    @app.post("/api/entries/save")
+    async def entries_save(request: Request) -> JSONResponse:
+        _require_user(request)
+        payload = await request.json()
+        try:
+            result = save_web_entry(payload if isinstance(payload, dict) else {})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse({"ok": True, "entry": result})
+
+    @app.post("/api/lists/{list_key}")
+    async def list_add(request: Request, list_key: str) -> JSONResponse:
+        _require_user(request)
+        payload = await request.json()
+        value = str(payload.get("value") if isinstance(payload, dict) else "")
+        try:
+            data_payload = add_list_value(list_key, value)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(data_payload)
+
+    @app.delete("/api/lists/{list_key}")
+    async def list_remove(request: Request, list_key: str) -> JSONResponse:
+        _require_user(request)
+        payload = await request.json()
+        value = str(payload.get("value") if isinstance(payload, dict) else "")
+        try:
+            data_payload = remove_list_value(list_key, value)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(data_payload)
+
+    @app.get("/api/settings")
+    def settings_api(request: Request) -> dict[str, Any]:
+        _require_user(request)
+        return settings_snapshot()
 
     @app.post("/api/process")
     async def process_uploads(request: Request) -> JSONResponse:
@@ -236,6 +310,23 @@ def create_app() -> FastAPI:
                 color3=str(form.get("color3") or ""),
                 extra=str(form.get("extra") or ""),
                 ean=str(form.get("ean") or ""),
+                product_id=str(form.get("product_id") or ""),
+            )
+            errors = validate_product_form(product)
+            if errors:
+                raise ValueError(" ".join(errors))
+            entry_result = save_web_entry(
+                {
+                    "product_id": product.product_id,
+                    "ean": product.ean,
+                    "name": product.name,
+                    "type_name": product.type_name,
+                    "model": product.model,
+                    "color1": product.color1,
+                    "color2": product.color2,
+                    "color3": product.color3,
+                    "extra": product.extra,
+                }
             )
             result = process_web_uploads(
                 base_output_dir=settings.l,
@@ -247,7 +338,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
-        return JSONResponse(_result_payload(result))
+        payload = _result_payload(result)
+        payload["entry"] = entry_result
+        return JSONResponse(payload)
 
     return app
 

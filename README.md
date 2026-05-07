@@ -53,6 +53,8 @@ Changing these values before running the script helps tailor the program to your
 
 The repository also includes an early local-network web panel. It keeps the desktop application unchanged, but allows users on the same LAN to open a browser, log in and upload files into the configured photo slots. The first implementation saves uploaded files into the same `_ZDJECIA PRZEROBIONE_` product folder structure as the desktop workflow. FTP and SQL synchronization can be added to the same backend workflow later.
 
+The web panel currently includes product entry loading/search by EAN, product matching by name/type/model, saving new or existing Excel entries, datalist suggestions, a basic list editor, a clear-form action, and a read-only settings view with Windows administrator status. Settings editing is intentionally not exposed yet unless the backend is designed to run in an elevated/admin mode.
+
 Install the web dependencies:
 
 ```powershell
@@ -138,6 +140,8 @@ Zmiana tych wartości przed uruchomieniem skryptu umożliwia szybkie dostosowani
 ### Panel webowy w LAN
 
 Repozytorium zawiera także pierwszy lokalny panel webowy. Obecna aplikacja desktopowa zostaje bez zmian, a użytkownicy w tej samej sieci lokalnej mogą otworzyć stronę w przeglądarce, zalogować się i wgrać pliki do skonfigurowanych slotów zdjęć. Pierwsza wersja zapisuje uploady do tej samej struktury `_ZDJECIA PRZEROBIONE_`, której używa desktop. Synchronizację FTP i SQL można później dopiąć w tym samym workflow backendu.
+
+Panel webowy obsługuje obecnie wczytywanie i wyszukiwanie wpisów po EAN, dopasowanie produktu po nazwie/typie/modelu, zapis nowego albo istniejącego wpisu Excel, podpowiedzi z list, podstawowy edytor list, czyszczenie formularza oraz podgląd ustawień ze statusem administratora Windows. Edycja ustawień nie jest jeszcze wystawiona, dopóki backend nie będzie działał w zaprojektowanym trybie podwyższonych uprawnień.
 
 Instalacja zależności webowych:
 

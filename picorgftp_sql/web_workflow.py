@@ -55,6 +55,7 @@ class WebProductForm:
     color3: str = ""
     extra: str = ""
     ean: str = ""
+    product_id: str = ""
 
 
 @dataclass(frozen=True)

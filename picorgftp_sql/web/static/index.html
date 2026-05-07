@@ -12,48 +12,65 @@
         <strong>PicOrgFTP-SQL Web</strong>
         <span id="serverInfo"></span>
       </div>
+      <nav class="topnav" aria-label="Widoki">
+        <button type="button" class="nav-button active" data-view="workspace">Produkt</button>
+        <button type="button" class="nav-button" data-view="lists">Listy</button>
+        <button type="button" class="nav-button" data-view="settings">Ustawienia</button>
+      </nav>
       <button id="logoutButton" type="button" class="ghost-button">Wyloguj</button>
     </header>
 
-    <main class="workspace">
+    <main id="workspaceView" class="workspace app-view active">
       <section class="product-section" aria-labelledby="productTitle">
         <h1 id="productTitle">Produkt</h1>
         <form id="productForm" class="product-form">
+          <input name="product_id" type="hidden">
           <label>
             Nazwa
-            <input name="name" required>
+            <input name="name" list="namesList" required>
           </label>
           <label>
             Typ
-            <input name="type_name" required>
+            <input name="type_name" list="typesList" required>
           </label>
           <label>
             Model
-            <input name="model" required>
+            <input name="model" list="modelsList" required>
           </label>
           <label>
             Kolor 1
-            <input name="color1" required>
+            <input name="color1" list="colorsList" required>
           </label>
           <label>
             Kolor 2
-            <input name="color2">
+            <input name="color2" list="colorsList">
           </label>
           <label>
             Kolor 3
-            <input name="color3">
+            <input name="color3" list="colorsList">
           </label>
           <label>
             Dodatek
-            <input name="extra" placeholder="NO-LED">
+            <input name="extra" list="extrasList" placeholder="NO-LED">
           </label>
           <label>
             EAN
             <input name="ean" inputmode="numeric" maxlength="13">
           </label>
+          <div class="lookup-actions">
+            <button id="findByEanButton" type="button" class="secondary-button">Szukaj EAN</button>
+            <button id="findProductButton" type="button" class="secondary-button">Dopasuj produkt</button>
+            <button id="saveEntryButton" type="button" class="secondary-button">Zapisz wpis</button>
+          </div>
+          <label>
+            Istniejacy wpis
+            <select id="entrySelect">
+              <option value="">Brak wybranego wpisu</option>
+            </select>
+          </label>
           <div class="form-actions">
             <button id="submitButton" type="submit">Przetworz</button>
-            <button id="clearButton" type="button" class="secondary-button">Wyczysc</button>
+            <button id="clearButton" type="button" class="secondary-button">Wyczysc dane</button>
             <span id="formStatus" role="status"></span>
           </div>
         </form>
@@ -75,6 +92,41 @@
         <div id="resultOutput" class="result-output empty-state">Brak wykonanych operacji.</div>
       </section>
     </main>
+
+    <main id="listsView" class="manager-view app-view">
+      <section class="manager-panel">
+        <div class="section-heading">
+          <h1>Edytor list</h1>
+          <span id="listStatus"></span>
+        </div>
+        <div class="list-editor-layout">
+          <aside id="listTabs" class="list-tabs"></aside>
+          <section class="list-editor">
+            <form id="listAddForm" class="inline-form">
+              <input id="listAddInput" placeholder="Nowa wartosc">
+              <button type="submit">Dodaj</button>
+            </form>
+            <div id="listValues" class="list-values"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <main id="settingsView" class="manager-view app-view">
+      <section class="manager-panel">
+        <div class="section-heading">
+          <h1>Ustawienia</h1>
+          <span id="settingsStatus"></span>
+        </div>
+        <div id="settingsOutput" class="settings-grid"></div>
+      </section>
+    </main>
+
+    <datalist id="namesList"></datalist>
+    <datalist id="typesList"></datalist>
+    <datalist id="modelsList"></datalist>
+    <datalist id="colorsList"></datalist>
+    <datalist id="extrasList"></datalist>
 
     <template id="slotTemplate">
       <article class="slot-card">
