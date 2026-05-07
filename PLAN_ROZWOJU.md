@@ -87,6 +87,12 @@ Status:
 | UI-009 | Oddzielenie nazwy pola od nazwy kolumny SQL w edycji pol | P1 | Planowane | 2026-04-26 | 2026-04-26 | - | Edycja pola nie moze nadpisywac nazwy pola nazwa kolumny SQL. Warunki wykonania: nazwa widoczna dla uzytkownika, numer pola i przypisana kolumna SQL sa trzema osobnymi wartosciami, a zapis ustawien nie miesza tych danych. | Oddziel w edycji pol trzy wartosci: nazwe pola widoczna dla uzytkownika, numer slotu uzywany po EAN oraz nazwe kolumny SQL. Edycja kolumny SQL nie moze nadpisywac nazwy pola, a zmiana nazwy pola nie moze przypadkiem zmieniac mapowania SQL. Zadbaj o migracje istniejacej konfiguracji i czytelne komunikaty przy konflikcie. Dodaj testy regresji dla edycji nazwy, edycji kolumny i zapisu ustawien. Po wykonaniu zaktualizuj ten wiersz w `PLAN_ROZWOJU.md`: status, daty i opis rozdzielenia danych. |
 | UI-010 | Stabilny klucz tlumaczenia dla wlasnych pol | P2 | Planowane | 2026-04-26 | 2026-04-26 | - | Tlumaczenia wlasnych pol powinny byc powiazane ze stalym identyfikatorem pola albo numerem, a nie tylko z aktualnym tekstem etykiety. Dzieki temu zmiana nazwy w jednym jezyku nie powinna psuc tlumaczen w pozostalych jezykach. | Wprowadz stabilny klucz tlumaczenia dla wlasnych pol zdjec. Obecne tlumaczenie nie powinno zalezec wylacznie od aktualnego tekstu etykiety, bo zmiana nazwy moze zerwac tlumaczenia. Zaprojektuj identyfikator oparty o stabilne ID pola albo numer slotu i zapewnij migracje istniejacych wpisow lokalizacji. Dodaj testy dla zmiany nazwy pola i zachowania tlumaczen w innych jezykach. Po wykonaniu zaktualizuj ten wiersz w `PLAN_ROZWOJU.md`: status, daty i opis przyjetego klucza. |
 
+## Panel webowy LAN
+
+| ID | Zadanie | Priorytet | Status | Data dodania | Data aktualizacji | Data wykonania | Opis / notatki | Prompt do wykonania |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| WEB-001 | MVP panelu webowego z uploadem przez przegladarke | P1 | Wykonane | 2026-05-07 | 2026-05-07 | 2026-05-07 | Dodano backend FastAPI `picorgftp_sql.web.app`, statyczny panel webowy, proste logowanie admin/admin z mozliwoscia zmiany hasla przez `PICORG_WEB_ADMIN_PASSWORD`, upload plikow do slotow oraz zapis do tej samej struktury `_ZDJECIA PRZEROBIONE_` co desktop. Dodano `START_WEB.bat` i `STOP_WEB.bat` do uruchamiania oraz zatrzymywania panelu bez wpisywania komend. FTP/SQL pozostaja do dopiecia w kolejnym etapie. | - |
+
 ## Testy, CI i wydania
 
 | ID | Zadanie | Priorytet | Status | Data dodania | Data aktualizacji | Data wykonania | Opis / notatki | Prompt do wykonania |

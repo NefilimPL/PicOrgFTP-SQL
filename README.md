@@ -49,6 +49,30 @@ The first lines of the file contain a configuration section that makes the scrip
 
 Changing these values before running the script helps tailor the program to your environment.
 
+### LAN web panel
+
+The repository also includes an early local-network web panel. It keeps the desktop application unchanged, but allows users on the same LAN to open a browser, log in and upload files into the configured photo slots. The first implementation saves uploaded files into the same `_ZDJECIA PRZEROBIONE_` product folder structure as the desktop workflow. FTP and SQL synchronization can be added to the same backend workflow later.
+
+Install the web dependencies:
+
+```powershell
+python -m pip install -r requirements-web.txt
+```
+
+On Windows you can use the included double-click launchers instead of typing commands:
+
+- `START_WEB.bat` starts the web panel, installs missing web dependencies if needed, opens the browser and prints the LAN address.
+- `STOP_WEB.bat` stops the web panel started on the configured port.
+
+Start the backend on the server or workstation that should host the service:
+
+```powershell
+$env:PICORG_WEB_ADMIN_PASSWORD = "change-this-password"
+python -m uvicorn picorgftp_sql.web.app:app --host 0.0.0.0 --port 8000
+```
+
+Open `http://SERVER_IP:8000` from another computer in the same local network. The default login is `admin` / `admin` if `PICORG_WEB_ADMIN_PASSWORD` is not set. Keep the service inside a trusted LAN or VPN; do not expose this development login directly to the public internet.
+
 ### Building an executable
 
 The application can be frozen with tools such as PyInstaller. When doing so, make sure the `Localization` directory is bundled together with the program so that the language switcher keeps working after conversion to `.exe`. The helper script `Dodatkowe (konwerter)/Konwerter PY oraz PYW na EXE v0.0.3.py` already adds the translation folders automatically and forces PyInstaller to bundle the `mysql.connector` package together with all locale data used for error messages, so the resulting EXE contains every runtime dependency required by the GUI. If you build manually, one possible command is:
@@ -110,6 +134,30 @@ Pierwsze linie pliku zawierają sekcję konfiguracyjną ułatwiającą dostosowa
 - `DEFAULT_CONFIG` – początkowe dane logowania FTP/SQL/MySQL oraz zapytanie SQL wykorzystywane przy aktualizacji ścieżek. Wszystkie pola tekstowe używają surowych łańcuchów `r""`, dzięki czemu nie trzeba uciekać znaków specjalnych. Sekcje `ftp`, `sql` i `mysql` zawierają odpowiednio pola `host`/`server`, `port`, `user`, `pass` (oraz `path` dla FTP). Pozostałe klucze to `db_type`, `sql_query`, `enable_ftp_update` i `enable_sql_update`.
 
 Zmiana tych wartości przed uruchomieniem skryptu umożliwia szybkie dostosowanie działania programu do własnego środowiska.
+
+### Panel webowy w LAN
+
+Repozytorium zawiera także pierwszy lokalny panel webowy. Obecna aplikacja desktopowa zostaje bez zmian, a użytkownicy w tej samej sieci lokalnej mogą otworzyć stronę w przeglądarce, zalogować się i wgrać pliki do skonfigurowanych slotów zdjęć. Pierwsza wersja zapisuje uploady do tej samej struktury `_ZDJECIA PRZEROBIONE_`, której używa desktop. Synchronizację FTP i SQL można później dopiąć w tym samym workflow backendu.
+
+Instalacja zależności webowych:
+
+```powershell
+python -m pip install -r requirements-web.txt
+```
+
+Na Windows możesz użyć plików do dwukliku zamiast wpisywać komendy:
+
+- `START_WEB.bat` uruchamia panel webowy, doinstalowuje brakujące zależności webowe, otwiera przeglądarkę i pokazuje adres w LAN.
+- `STOP_WEB.bat` zatrzymuje panel webowy uruchomiony na skonfigurowanym porcie.
+
+Uruchomienie backendu na serwerze albo komputerze hostującym usługę:
+
+```powershell
+$env:PICORG_WEB_ADMIN_PASSWORD = "zmien-to-haslo"
+python -m uvicorn picorgftp_sql.web.app:app --host 0.0.0.0 --port 8000
+```
+
+Z innego komputera w tej samej sieci otwórz `http://IP_SERWERA:8000`. Domyślne logowanie to `admin` / `admin`, jeżeli nie ustawiono `PICORG_WEB_ADMIN_PASSWORD`. Trzymaj usługę w zaufanej sieci LAN albo VPN; tego prostego logowania nie należy wystawiać bezpośrednio do publicznego internetu.
 
 ### Budowanie pliku wykonywalnego
 
