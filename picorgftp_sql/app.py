@@ -8441,7 +8441,10 @@ class App(BU.Tk):
             if raw_secret:
                 payload[APP_SECRET_KEY] = common._encode_local_secret(raw_secret)
             try:
-                A.makedirs(A.path.dirname(settings.BASE_DIR_SETTINGS_PATH) or ".", exist_ok=J)
+                common.A.makedirs(
+                    common.A.path.dirname(settings.BASE_DIR_SETTINGS_PATH) or ".",
+                    exist_ok=J,
+                )
             except E:
                 pass
             with x(settings.BASE_DIR_SETTINGS_PATH, T, encoding=k) as handle:
@@ -8484,7 +8487,7 @@ class App(BU.Tk):
         system_unlocked = Ay
 
         def _choose_base_dir():
-            initial_dir = base_dir_var.get().strip() or A.path.expanduser("~")
+            initial_dir = base_dir_var.get().strip() or common.A.path.expanduser("~")
             selected = BT.askdirectory(
                 parent=a_, title=BASE_DIR_PROMPT_TITLE, initialdir=initial_dir
             )
