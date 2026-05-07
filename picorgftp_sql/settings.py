@@ -108,6 +108,23 @@ def _load_base_dir_override(settings_path, template, fallback_value):
     return override_value if Aq(override_value, str) else fallback_value
 
 
+def _load_saved_base_dir_override(settings_path):
+    """Read only an explicit base directory saved in ``local_settings.json``."""
+
+    try:
+        if not A.path.exists(settings_path):
+            return B
+        with x(settings_path, "r", encoding=k) as settings_file:
+            data = Ar.load(settings_file)
+        if Aq(data, dict):
+            value = data.get("base_dir_override", B)
+            if Aq(value, str):
+                return value.strip()
+    except E:
+        pass
+    return B
+
+
 def has_saved_base_dir_override(settings_path=BASE_DIR_SETTINGS_PATH):
     """Return True when ``local_settings.json`` contains an explicit base dir."""
 
@@ -219,10 +236,12 @@ def _resolve_headless_base_dir(settings_path, template, candidate):
 def _ensure_base_dir_override(settings_path, template, fallback_value):
     """Resolve a usable base directory, prompting when necessary."""
 
-    override_value = _load_base_dir_override(settings_path, template, fallback_value)
-    candidate = override_value.strip() if Aq(override_value, str) else B
+    candidate = _load_saved_base_dir_override(settings_path)
     if HEADLESS_ENV:
-        return _resolve_headless_base_dir(settings_path, template, candidate)
+        fallback_candidate = candidate
+        if not fallback_candidate and Aq(fallback_value, str):
+            fallback_candidate = fallback_value.strip()
+        return _resolve_headless_base_dir(settings_path, template, fallback_candidate)
     if candidate:
         ok, error = _ensure_directory_access(candidate)
         if ok:
@@ -235,7 +254,10 @@ def _ensure_base_dir_override(settings_path, template, fallback_value):
             message = f"{message}\n\n{error}"
     else:
         message = BASE_DIR_PROMPT_REASON_MSG
-    return _prompt_for_base_dir(settings_path, template, candidate, message)
+    initial_dir = candidate
+    if not initial_dir and Aq(fallback_value, str):
+        initial_dir = fallback_value.strip()
+    return _prompt_for_base_dir(settings_path, template, initial_dir, message)
 
 
 def is_runtime_initialized():
