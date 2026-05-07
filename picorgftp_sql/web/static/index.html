@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PicOrgFTP-SQL Web</title>
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body class="app-screen">
+    <header class="topbar">
+      <div>
+        <strong>PicOrgFTP-SQL Web</strong>
+        <span id="serverInfo"></span>
+      </div>
+      <button id="logoutButton" type="button" class="ghost-button">Wyloguj</button>
+    </header>
+
+    <main class="workspace">
+      <section class="product-section" aria-labelledby="productTitle">
+        <h1 id="productTitle">Produkt</h1>
+        <form id="productForm" class="product-form">
+          <label>
+            Nazwa
+            <input name="name" required>
+          </label>
+          <label>
+            Typ
+            <input name="type_name" required>
+          </label>
+          <label>
+            Model
+            <input name="model" required>
+          </label>
+          <label>
+            Kolor 1
+            <input name="color1" required>
+          </label>
+          <label>
+            Kolor 2
+            <input name="color2">
+          </label>
+          <label>
+            Kolor 3
+            <input name="color3">
+          </label>
+          <label>
+            Dodatek
+            <input name="extra" placeholder="NO-LED">
+          </label>
+          <label>
+            EAN
+            <input name="ean" inputmode="numeric" maxlength="13">
+          </label>
+          <div class="form-actions">
+            <button id="submitButton" type="submit">Przetworz</button>
+            <button id="clearButton" type="button" class="secondary-button">Wyczysc</button>
+            <span id="formStatus" role="status"></span>
+          </div>
+        </form>
+      </section>
+
+      <section class="slots-section" aria-labelledby="slotsTitle">
+        <div class="section-heading">
+          <h2 id="slotsTitle">Sloty zdjec</h2>
+          <span id="slotCount"></span>
+        </div>
+        <div id="slotGrid" class="slot-grid"></div>
+      </section>
+
+      <section class="result-section" aria-labelledby="resultTitle">
+        <div class="section-heading">
+          <h2 id="resultTitle">Wynik</h2>
+          <span id="resultMeta"></span>
+        </div>
+        <div id="resultOutput" class="result-output empty-state">Brak wykonanych operacji.</div>
+      </section>
+    </main>
+
+    <template id="slotTemplate">
+      <article class="slot-card">
+        <div class="slot-preview">
+          <span class="slot-empty">Brak pliku</span>
+          <img alt="">
+        </div>
+        <div class="slot-meta">
+          <strong></strong>
+          <span></span>
+        </div>
+        <label class="file-picker">
+          <input type="file" accept="image/*,.pdf,.eps,.psd,.ai,.tif,.tiff">
+          <span>Wybierz plik</span>
+        </label>
+      </article>
+    </template>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
