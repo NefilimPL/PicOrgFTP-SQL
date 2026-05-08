@@ -1,6 +1,7 @@
 const state = {
   slots: [],
   files: new Map(),
+  filePreviewUrls: new Map(),
   loadedPhotos: new Map(),
   deletedSlots: new Map(),
   lists: {},
@@ -466,6 +467,173 @@ function selectedPhotoToken(photo, prefix) {
   return photo?.token || "";
 }
 
+function revokeFilePreviewUrl(prefix) {
+  const url = state.filePreviewUrls.get(prefix);
+  if (url) URL.revokeObjectURL(url);
+  state.filePreviewUrls.delete(prefix);
+}
+
+function filePreviewUrl(prefix, file) {
+  const current = state.filePreviewUrls.get(prefix);
+  if (current) return current;
+  const url = URL.createObjectURL(file);
+  state.filePreviewUrls.set(prefix, url);
+  return url;
+}
+
+function isFileImageLike(file) {
+  const name = String(file?.name || "").toLowerCase();
+  return (
+    String(file?.type || "").startsWith("image/") ||
+    [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".psd", ".eps", ".ai"].some((ext) =>
+      name.endsWith(ext)
+    )
+  );
+}
+
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src = url;
+  });
+}
+
+function fittedImageDataUrl(image) {
+  const sourceWidth = image.naturalWidth || image.width;
+  const sourceHeight = image.naturalHeight || image.height;
+  if (!sourceWidth || !sourceHeight) return "";
+  const detectScale = Math.min(1, 512 / Math.max(sourceWidth, sourceHeight));
+  const detectWidth = Math.max(1, Math.round(sourceWidth * detectScale));
+  const detectHeight = Math.max(1, Math.round(sourceHeight * detectScale));
+  const detect = document.createElement("canvas");
+  detect.width = detectWidth;
+  detect.height = detectHeight;
+  const detectCtx = detect.getContext("2d", { willReadFrequently: true });
+  detectCtx.drawImage(image, 0, 0, detectWidth, detectHeight);
+  const pixels = detectCtx.getImageData(0, 0, detectWidth, detectHeight).data;
+  const cornerSize = Math.max(1, Math.min(detectWidth, detectHeight, Math.floor(Math.min(detectWidth, detectHeight) / 20) || 1));
+  const corners = [
+    [0, 0],
+    [detectWidth - cornerSize, 0],
+    [0, detectHeight - cornerSize],
+    [detectWidth - cornerSize, detectHeight - cornerSize],
+  ];
+  const bg = [0, 0, 0, 0];
+  let bgCount = 0;
+  for (const [startX, startY] of corners) {
+    for (let y = startY; y < startY + cornerSize; y += 1) {
+      for (let x = startX; x < startX + cornerSize; x += 1) {
+        const idx = (y * detectWidth + x) * 4;
+        bg[0] += pixels[idx];
+        bg[1] += pixels[idx + 1];
+        bg[2] += pixels[idx + 2];
+        bg[3] += pixels[idx + 3];
+        bgCount += 1;
+      }
+    }
+  }
+  bg[0] = bg[0] / Math.max(1, bgCount);
+  bg[1] = bg[1] / Math.max(1, bgCount);
+  bg[2] = bg[2] / Math.max(1, bgCount);
+  bg[3] = bg[3] / Math.max(1, bgCount);
+  let left = detectWidth;
+  let top = detectHeight;
+  let right = -1;
+  let bottom = -1;
+  for (let y = 0; y < detectHeight; y += 1) {
+    for (let x = 0; x < detectWidth; x += 1) {
+      const idx = (y * detectWidth + x) * 4;
+      const alpha = pixels[idx + 3];
+      const diff =
+        Math.abs(pixels[idx] - bg[0]) +
+        Math.abs(pixels[idx + 1] - bg[1]) +
+        Math.abs(pixels[idx + 2] - bg[2]);
+      const alphaDiff = Math.abs(alpha - bg[3]);
+      if ((bg[3] < 250 && alpha > 8) || alphaDiff > 32 || (alpha > 8 && diff > 54)) {
+        left = Math.min(left, x);
+        top = Math.min(top, y);
+        right = Math.max(right, x + 1);
+        bottom = Math.max(bottom, y + 1);
+      }
+    }
+  }
+  if (right <= left || bottom <= top) return "";
+  const areaRatio = ((right - left) * (bottom - top)) / Math.max(1, detectWidth * detectHeight);
+  if (areaRatio > 0.98) return "";
+  const scaleX = sourceWidth / detectWidth;
+  const scaleY = sourceHeight / detectHeight;
+  let cropLeft = Math.floor(left * scaleX);
+  let cropTop = Math.floor(top * scaleY);
+  let cropRight = Math.ceil(right * scaleX);
+  let cropBottom = Math.ceil(bottom * scaleY);
+  const margin = Math.ceil(Math.max(cropRight - cropLeft, cropBottom - cropTop) * 0.06);
+  cropLeft = Math.max(0, cropLeft - margin);
+  cropTop = Math.max(0, cropTop - margin);
+  cropRight = Math.min(sourceWidth, cropRight + margin);
+  cropBottom = Math.min(sourceHeight, cropBottom + margin);
+  const sourceAspect = sourceWidth / Math.max(1, sourceHeight);
+  let cropWidth = cropRight - cropLeft;
+  let cropHeight = cropBottom - cropTop;
+  if (cropWidth / cropHeight < sourceAspect) {
+    const targetWidth = Math.min(sourceWidth, cropHeight * sourceAspect);
+    cropLeft = Math.max(0, Math.min(sourceWidth - targetWidth, cropLeft - (targetWidth - cropWidth) / 2));
+    cropWidth = targetWidth;
+  } else {
+    const targetHeight = Math.min(sourceHeight, cropWidth / sourceAspect);
+    cropTop = Math.max(0, Math.min(sourceHeight - targetHeight, cropTop - (targetHeight - cropHeight) / 2));
+    cropHeight = targetHeight;
+  }
+  const outScale = Math.min(1, 1200 / Math.max(sourceWidth, sourceHeight));
+  const outWidth = Math.max(1, Math.round(sourceWidth * outScale));
+  const outHeight = Math.max(1, Math.round(sourceHeight * outScale));
+  const out = document.createElement("canvas");
+  out.width = outWidth;
+  out.height = outHeight;
+  out
+    .getContext("2d")
+    .drawImage(image, cropLeft, cropTop, cropWidth, cropHeight, 0, 0, outWidth, outHeight);
+  return out.toDataURL("image/jpeg", 0.9);
+}
+
+async function renderSelectedFilePreview(prefix, file, preview, previewImage, empty) {
+  const url = filePreviewUrl(prefix, file);
+  preview.classList.add("thumb-loading");
+  try {
+    const image = await loadImage(url);
+    if (state.files.get(prefix) !== file || !document.body.contains(preview)) return;
+    const fitted = isSlotFit(prefix) ? fittedImageDataUrl(image) : "";
+    previewImage.src = fitted || url;
+    preview.classList.add("has-image");
+    preview.classList.remove("thumb-loading");
+  } catch (_error) {
+    if (state.files.get(prefix) !== file || !document.body.contains(preview)) return;
+    preview.classList.remove("thumb-loading", "has-image");
+    empty.textContent = "Podglad niedostepny";
+  }
+}
+
+function loadedFileUrl(photo, prefix) {
+  const token = selectedPhotoToken(photo, prefix);
+  return token ? `/api/file?token=${encodeURIComponent(token)}` : "";
+}
+
+async function openSlotFile(prefix) {
+  const selectedFile = state.files.get(prefix);
+  if (selectedFile) {
+    window.open(filePreviewUrl(prefix, selectedFile), "_blank", "noopener");
+    return;
+  }
+  let photo = state.loadedPhotos.get(prefix);
+  if (selectedSlotSource(prefix, photo) === "ftp" && photo?.ftp_filename && !photo.ftp_token) {
+    await loadFtpPreview(photo, prefix);
+    photo = state.loadedPhotos.get(prefix);
+  }
+  const url = loadedFileUrl(photo, prefix);
+  if (url) window.open(url, "_blank", "noopener");
+}
+
 function markSlotDeletion(prefix, photo) {
   if (!photo) return;
   state.deletedSlots.set(prefix, {
@@ -584,6 +752,7 @@ function clearSlotAssignment(prefix, options = {}) {
   if (markDelete) {
     markSlotDeletion(prefix, state.loadedPhotos.get(prefix));
   }
+  revokeFilePreviewUrl(prefix);
   state.files.delete(prefix);
   state.loadedPhotos.delete(prefix);
   state.slotFits.delete(prefix);
@@ -592,6 +761,7 @@ function clearSlotAssignment(prefix, options = {}) {
 
 function setSlotFile(prefix, file) {
   markSlotDeletion(prefix, state.loadedPhotos.get(prefix));
+  revokeFilePreviewUrl(prefix);
   state.files.set(prefix, file);
   state.loadedPhotos.delete(prefix);
   state.slotSources.delete(prefix);
@@ -664,10 +834,17 @@ function updateSlotPreview(prefix) {
   if (fitButton) {
     fitButton.classList.toggle("active", isSlotFit(prefix));
   }
-  if (selectedFile) return;
   preview.classList.remove("has-image", "thumb-loading", "loaded-photo");
   previewImage.removeAttribute("src");
   empty.textContent = "Brak pliku";
+  if (selectedFile) {
+    if (isFileImageLike(selectedFile)) {
+      renderSelectedFilePreview(prefix, selectedFile, preview, previewImage, empty);
+    } else {
+      empty.textContent = selectedFile.name;
+    }
+    return;
+  }
   if (!loadedPhoto) return;
   preview.classList.add("loaded-photo");
   const thumb = thumbnailUrl(loadedPhoto, prefix);
@@ -717,6 +894,7 @@ function renderSlots(slots = state.slots) {
     const overlay = document.createElement("div");
     const controls = document.createElement("div");
     const fitButton = document.createElement("button");
+    const openButton = document.createElement("button");
     const clearButton = document.createElement("button");
     node.dataset.slotPrefix = slot.prefix;
     node.dataset.activeSource = selectedSlotSource(slot.prefix, loadedPhoto) || "";
@@ -744,6 +922,16 @@ function renderSlots(slots = state.slots) {
       state.slotFits.set(slot.prefix, !isSlotFit(slot.prefix));
       updateSlotPreview(slot.prefix);
     });
+    openButton.type = "button";
+    openButton.className = "slot-open-button";
+    openButton.textContent = "Otworz";
+    openButton.title = "Otworz oryginalny plik z tego slotu";
+    openButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openSlotFile(slot.prefix).catch((error) => {
+        formStatus.textContent = error.message;
+      });
+    });
     clearButton.type = "button";
     clearButton.className = "slot-clear-button";
     clearButton.textContent = "Usun";
@@ -755,17 +943,26 @@ function renderSlots(slots = state.slots) {
       renderSlots();
     });
     if (selectedFile || loadedPhoto) {
-      if (selectedFile || loadedPhoto?.token || loadedPhoto?.ftp_token) {
+      const hasOpenableFile =
+        Boolean(selectedFile) ||
+        Boolean(selectedPhotoToken(loadedPhoto, slot.prefix)) ||
+        Boolean(loadedPhoto?.ftp_filename);
+      const hasFittablePreview =
+        (selectedFile && isFileImageLike(selectedFile)) ||
+        (loadedPhoto?.is_image && (selectedPhotoToken(loadedPhoto, slot.prefix) || loadedPhoto?.ftp_filename));
+      if (hasFittablePreview) {
         controls.appendChild(fitButton);
+      }
+      if (hasOpenableFile) {
+        controls.appendChild(openButton);
       }
       controls.appendChild(clearButton);
       meta.appendChild(controls);
     }
 
     if (selectedFile) {
-      if (selectedFile.type.startsWith("image/")) {
-        previewImage.src = URL.createObjectURL(selectedFile);
-        preview.classList.add("has-image");
+      if (isFileImageLike(selectedFile)) {
+        renderSelectedFilePreview(slot.prefix, selectedFile, preview, previewImage, empty);
       } else {
         empty.textContent = selectedFile.name;
       }
@@ -1316,6 +1513,9 @@ function inputField(name, label, value = "", attrs = {}) {
   input.name = name;
   if (attrs.type) input.type = attrs.type;
   if (attrs.className) wrapper.className = attrs.className;
+  if (attrs.min !== undefined) input.min = attrs.min;
+  if (attrs.max !== undefined) input.max = attrs.max;
+  if (attrs.step !== undefined) input.step = attrs.step;
   if (attrs.checked !== undefined) input.checked = Boolean(attrs.checked);
   if (attrs.type === "checkbox") {
     input.value = "1";
@@ -1521,6 +1721,80 @@ function renderSettingsApp() {
         color2: data.get("color2"),
         color3: data.get("color3"),
       },
+    },
+  }));
+  settingsOutput.appendChild(form);
+}
+
+function renderSettingsProcessing() {
+  const p = state.settings.processing || {};
+  const formats = state.settings.processing_formats?.length
+    ? state.settings.processing_formats
+    : ["JPG", "PNG", "WEBP", "BMP", "GIF", "TIFF"];
+  const form = document.createElement("form");
+  form.className = "settings-form";
+  const note = document.createElement("p");
+  note.className = "settings-note wide-field";
+  note.textContent =
+    "Te ustawienia sa stosowane przy zapisie z panelu webowego. FIT w slocie nadal moze byc wlaczany osobno dla pojedynczego zdjecia.";
+  form.append(
+    note,
+    checkField(
+      "resize_enabled",
+      "Zmniejszanie obrazu",
+      p.resize_enabled,
+      "Najdluzszy bok obrazu zostanie ograniczony do podanej liczby pikseli."
+    ),
+    inputField("max_dim", "Maksymalny bok (px)", p.max_dim || 2000, {
+      type: "number",
+      min: 64,
+      max: 20000,
+    }),
+    checkField(
+      "compress_enabled",
+      "Kompresja JPG/WEBP",
+      p.compress_enabled,
+      "Uzywa podanej jakosci przy zapisie stratnych formatow."
+    ),
+    inputField("compress_quality", "Jakosc (%)", p.compress_quality || 85, {
+      type: "number",
+      min: 1,
+      max: 100,
+    }),
+    checkField(
+      "max_size_enabled",
+      "Limit rozmiaru pliku",
+      p.max_size_enabled,
+      "Dla JPG/WEBP jakosc jest obnizana stopniowo, az plik miesci sie w limicie."
+    ),
+    inputField("max_file_kb", "Maksymalny rozmiar (KB)", p.max_file_kb || 500, {
+      type: "number",
+      min: 1,
+      max: 102400,
+    }),
+    checkField(
+      "convert_enabled",
+      "Konwersja formatu obrazow",
+      p.convert_enabled,
+      "Obrazy sa zapisywane w wybranym formacie zamiast w formacie zrodlowym."
+    ),
+    selectField(
+      "target_format",
+      "Format docelowy",
+      p.target_format || "PNG",
+      formats.map((format) => [format, format])
+    )
+  );
+  settingsSaveButton(form, (data) => ({
+    processing: {
+      resize_enabled: data.has("resize_enabled"),
+      max_dim: data.get("max_dim"),
+      compress_enabled: data.has("compress_enabled"),
+      compress_quality: data.get("compress_quality"),
+      max_size_enabled: data.has("max_size_enabled"),
+      max_file_kb: data.get("max_file_kb"),
+      convert_enabled: data.has("convert_enabled"),
+      target_format: data.get("target_format"),
     },
   }));
   settingsOutput.appendChild(form);
@@ -1768,6 +2042,7 @@ function renderSettings() {
     ? "Proces backendu ma uprawnienia administratora Windows. Rola web admin jest niezalezna."
     : "Proces backendu dziala bez uprawnien administratora Windows. Rola web admin jest niezalezna.";
   if (state.activeSettingsTab === "app") renderSettingsApp();
+  if (state.activeSettingsTab === "processing") renderSettingsProcessing();
   if (state.activeSettingsTab === "ftp") renderSettingsFtp();
   if (state.activeSettingsTab === "sql") renderSettingsSql();
   if (state.activeSettingsTab === "slots") renderSettingsSlots();
@@ -1876,6 +2151,9 @@ productForm.addEventListener("submit", async (event) => {
 clearButton.addEventListener("click", () => {
   productForm.reset();
   productForm.elements.product_id.value = "";
+  for (const prefix of Array.from(state.filePreviewUrls.keys())) {
+    revokeFilePreviewUrl(prefix);
+  }
   state.files.clear();
   state.loadedPhotos.clear();
   state.slotFits.clear();

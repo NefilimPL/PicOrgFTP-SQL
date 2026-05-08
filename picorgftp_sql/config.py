@@ -27,6 +27,7 @@ from .common import (
     SQL_AVAILABLE_COLUMNS_KEY,
     LOCAL_FILE_INDEX_KEY,
     AUTO_CONTENT_FIT_KEY,
+    PROCESSING_SETTINGS_KEY,
     COLOR_FIELD_LABELS_KEY,
     AK,
     SLOT_DEFS_KEY,
@@ -106,6 +107,34 @@ def _normalize_color_field_labels(raw_labels):
     return cleaned
 
 
+def _normalize_processing_settings(raw_settings):
+    defaults = DEFAULT_CONFIG.get(PROCESSING_SETTINGS_KEY, {})
+    raw = raw_settings if Aq(raw_settings, dict) else {}
+
+    def _int_value(key, minimum, maximum):
+        try:
+            value = int(raw.get(key, defaults.get(key)))
+        except (TypeError, ValueError):
+            value = int(defaults.get(key))
+        return max(minimum, min(maximum, value))
+
+    target_format = str(raw.get("target_format", defaults.get("target_format", "PNG")) or "PNG").strip().upper()
+    if target_format == "JPEG":
+        target_format = "JPG"
+    if target_format not in {"JPG", "PNG", "WEBP", "BMP", "GIF", "TIFF"}:
+        target_format = "PNG"
+    return {
+        "resize_enabled": bool(raw.get("resize_enabled", defaults.get("resize_enabled", True))),
+        "max_dim": _int_value("max_dim", 64, 20000),
+        "compress_enabled": bool(raw.get("compress_enabled", defaults.get("compress_enabled", False))),
+        "compress_quality": _int_value("compress_quality", 1, 100),
+        "max_size_enabled": bool(raw.get("max_size_enabled", defaults.get("max_size_enabled", False))),
+        "max_file_kb": _int_value("max_file_kb", 1, 102400),
+        "convert_enabled": bool(raw.get("convert_enabled", defaults.get("convert_enabled", False))),
+        "target_format": target_format,
+    }
+
+
 def load_config(interactive=I):
     """Return a configuration dictionary, creating defaults when necessary."""
 
@@ -156,6 +185,9 @@ def load_config(interactive=I):
                 LOCAL_FILE_INDEX_KEY: config_copy.get(LOCAL_FILE_INDEX_KEY, True),
                 AUTO_CONTENT_FIT_KEY: bool(
                     config_copy.get(AUTO_CONTENT_FIT_KEY, False)
+                ),
+                PROCESSING_SETTINGS_KEY: _normalize_processing_settings(
+                    config_copy.get(PROCESSING_SETTINGS_KEY)
                 ),
                 COLOR_FIELD_LABELS_KEY: config_copy.get(COLOR_FIELD_LABELS_KEY, {}),
                 TRANSLATION_SETTINGS_KEY: {
@@ -210,6 +242,12 @@ def load_config(interactive=I):
             raw_config.get(
                 AUTO_CONTENT_FIT_KEY,
                 config_copy.get(AUTO_CONTENT_FIT_KEY, False),
+            )
+        )
+        config_copy[PROCESSING_SETTINGS_KEY] = _normalize_processing_settings(
+            raw_config.get(
+                PROCESSING_SETTINGS_KEY,
+                config_copy.get(PROCESSING_SETTINGS_KEY, {}),
             )
         )
         config_copy[COLOR_FIELD_LABELS_KEY] = _normalize_color_field_labels(
@@ -353,6 +391,9 @@ def save_config(config, raw_config=None, preserve_secrets=None):
         ),
         LOCAL_FILE_INDEX_KEY: bool(config.get(LOCAL_FILE_INDEX_KEY, True)),
         AUTO_CONTENT_FIT_KEY: bool(config.get(AUTO_CONTENT_FIT_KEY, False)),
+        PROCESSING_SETTINGS_KEY: _normalize_processing_settings(
+            config.get(PROCESSING_SETTINGS_KEY, {})
+        ),
         COLOR_FIELD_LABELS_KEY: _normalize_color_field_labels(
             config.get(COLOR_FIELD_LABELS_KEY, {})
         ),

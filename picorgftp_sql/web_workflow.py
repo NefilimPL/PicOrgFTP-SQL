@@ -12,6 +12,7 @@ from .common import (
     ELEMENT_PIC,
     NON_PIC,
     OPEN_FURNITURE,
+    PROCESSING_SETTINGS_KEY,
     SLOT_DEFS_KEY,
 )
 from .image_utils import fit_image_to_content
@@ -41,6 +42,35 @@ IMAGE_EXTENSIONS = {
     ".tiff",
     ".webp",
 }
+
+CONVERT_FORMATS = {
+    "JPG": ("JPEG", ".jpg"),
+    "JPEG": ("JPEG", ".jpg"),
+    "PNG": ("PNG", ".png"),
+    "WEBP": ("WEBP", ".webp"),
+    "BMP": ("BMP", ".bmp"),
+    "GIF": ("GIF", ".gif"),
+    "TIFF": ("TIFF", ".tif"),
+    "TIF": ("TIFF", ".tif"),
+}
+
+
+def available_convert_formats() -> list[str]:
+    if Image is None:
+        return ["JPG", "PNG", "BMP", "GIF"]
+    try:
+        Image.init()
+        writable = set(getattr(Image, "SAVE", {}).keys())
+    except Exception:
+        writable = set()
+    choices = []
+    for label, (pil_format, _extension) in CONVERT_FORMATS.items():
+        display = "JPG" if label == "JPEG" else label
+        if display in choices or display == "TIF":
+            continue
+        if not writable or pil_format in writable:
+            choices.append(display)
+    return choices or ["JPG", "PNG", "BMP", "GIF"]
 
 
 @dataclass(frozen=True)
@@ -77,6 +107,10 @@ class WebProcessingOptions:
     max_dim: int = 2000
     compress_enabled: bool = False
     compress_quality: int = 85
+    max_size_enabled: bool = False
+    max_file_kb: int = 500
+    convert_enabled: bool = False
+    target_format: str = "PNG"
     auto_content_fit: bool = False
 
 
@@ -181,6 +215,64 @@ def _resample_filter():
     return getattr(Image, "LANCZOS", getattr(Image, "BICUBIC", 3))
 
 
+def _target_format_info(options: WebProcessingOptions) -> tuple[str, str]:
+    target = str(options.target_format or "PNG").strip().upper()
+    return CONVERT_FORMATS.get(target, CONVERT_FORMATS["PNG"])
+
+
+def _output_extension(source_extension: str, options: WebProcessingOptions) -> str:
+    source_extension = (source_extension or "").lower()
+    if options.convert_enabled and Image is not None and source_extension in IMAGE_EXTENSIONS:
+        return _target_format_info(options)[1]
+    return source_extension
+
+
+def _prepare_for_format(image, target_format: str):
+    if target_format == "JPEG" and image.mode in ("RGBA", "LA", "P"):
+        background = Image.new("RGB", image.size, (255, 255, 255))
+        rgba = image.convert("RGBA")
+        background.paste(rgba, (0, 0), rgba.getchannel("A"))
+        return background
+    if target_format in {"BMP", "GIF"} and image.mode in ("RGBA", "LA"):
+        return image.convert("RGB")
+    return image
+
+
+def _save_image_with_options(image, target_path: str, target_format: str | None, options: WebProcessingOptions) -> None:
+    save_params = {}
+    suffix = os.path.splitext(target_path)[1].lower()
+    if target_format == "JPEG" or suffix in {".jpg", ".jpeg"}:
+        quality = max(1, min(100, int(options.compress_quality or 85)))
+        save_params["quality"] = quality if options.compress_enabled else 95
+        save_params["optimize"] = True
+    elif target_format == "WEBP" or suffix == ".webp":
+        quality = max(1, min(100, int(options.compress_quality or 85)))
+        save_params["quality"] = quality if options.compress_enabled else 95
+    elif target_format == "PNG" or suffix == ".png":
+        save_params["optimize"] = True
+    if target_format:
+        image.save(target_path, format=target_format, **save_params)
+    else:
+        image.save(target_path, **save_params)
+
+    if not options.max_size_enabled:
+        return
+    max_bytes = max(1, int(options.max_file_kb or 500)) * 1024
+    if os.path.getsize(target_path) <= max_bytes:
+        return
+    if not (target_format == "JPEG" or suffix in {".jpg", ".jpeg", ".webp"}):
+        return
+    quality = int(save_params.get("quality", 95))
+    while quality > 10 and os.path.getsize(target_path) > max_bytes:
+        quality -= 5
+        params = dict(save_params)
+        params["quality"] = quality
+        if target_format:
+            image.save(target_path, format=target_format, **params)
+        else:
+            image.save(target_path, **params)
+
+
 def _save_processed_file(
     source_path: str,
     target_path: str,
@@ -194,6 +286,14 @@ def _save_processed_file(
     if ext not in IMAGE_EXTENSIONS:
         shutil.copy2(source_path, target_path)
         return
+    if (
+        not options.convert_enabled
+        and ext not in {".jpg", ".jpeg", ".png", ".bmp", ".gif"}
+        and not content_fit
+        and not options.auto_content_fit
+    ):
+        shutil.copy2(source_path, target_path)
+        return
     if Image is None:
         shutil.copy2(source_path, target_path)
         return
@@ -205,18 +305,11 @@ def _save_processed_file(
         if options.resize_enabled:
             max_dim = max(1, int(options.max_dim or 2000))
             work.thumbnail((max_dim, max_dim), _resample_filter())
-
-        save_params = {}
-        if ext in {".jpg", ".jpeg"}:
-            if work.mode in ("RGBA", "LA", "P"):
-                work = work.convert("RGB")
-            quality = max(1, min(100, int(options.compress_quality or 85)))
-            save_params["quality"] = quality if options.compress_enabled else 95
-            save_params["optimize"] = True
-        elif ext == ".png":
-            save_params["optimize"] = True
-
-        work.save(target_path, **save_params)
+        target_format = None
+        if options.convert_enabled:
+            target_format, _target_ext = _target_format_info(options)
+        work = _prepare_for_format(work, target_format or image.format or "")
+        _save_image_with_options(work, target_path, target_format, options)
 
 
 def process_web_uploads(
@@ -260,6 +353,7 @@ def process_web_uploads(
         if not ext:
             skipped_slots.append(upload.prefix)
             continue
+        ext = _output_extension(ext, options)
         filename = build_slot_filename(
             payload["ean"],
             upload.prefix,
@@ -297,10 +391,15 @@ def process_web_uploads(
 def processing_options_from_config(config_dict: dict) -> WebProcessingOptions:
     """Build conservative web defaults from the existing runtime config."""
 
+    processing = config_dict.get(PROCESSING_SETTINGS_KEY, {}) or {}
     return WebProcessingOptions(
-        resize_enabled=True,
-        max_dim=2000,
-        compress_enabled=False,
-        compress_quality=85,
+        resize_enabled=bool(processing.get("resize_enabled", True)),
+        max_dim=max(64, min(20000, int(processing.get("max_dim", 2000) or 2000))),
+        compress_enabled=bool(processing.get("compress_enabled", False)),
+        compress_quality=max(1, min(100, int(processing.get("compress_quality", 85) or 85))),
+        max_size_enabled=bool(processing.get("max_size_enabled", False)),
+        max_file_kb=max(1, min(102400, int(processing.get("max_file_kb", 500) or 500))),
+        convert_enabled=bool(processing.get("convert_enabled", False)),
+        target_format=str(processing.get("target_format", "PNG") or "PNG").upper(),
         auto_content_fit=bool(config_dict.get(AUTO_CONTENT_FIT_KEY, False)),
     )

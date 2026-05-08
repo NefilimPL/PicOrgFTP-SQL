@@ -851,6 +851,21 @@ button.slot-badge.on:hover {
   color: #ffffff;
 }
 
+.slot-open-button {
+  min-height: 26px;
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.slot-open-button:hover {
+  border-color: var(--accent);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
 .slot-controls {
   display: flex;
   flex-wrap: wrap;
@@ -956,8 +971,12 @@ button.slot-badge.on:hover {
 }
 
 .slot-empty {
+  max-width: 100%;
+  overflow: hidden;
+  overflow-wrap: anywhere;
   color: var(--muted);
   font-size: 13px;
+  line-height: 1.35;
   text-align: center;
   padding: 8px;
 }

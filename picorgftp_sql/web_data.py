@@ -25,6 +25,7 @@ from .common import (
     M,
     N,
     P,
+    PROCESSING_SETTINGS_KEY,
     SQL_AVAILABLE_COLUMNS_KEY,
     SQL_COLUMN_MAP_KEY,
     SLOT_DEFS_KEY,
@@ -71,6 +72,7 @@ from .workflow_utils import (
     sanitize_path_segment,
     select_remote_files_for_ean,
 )
+from .web_workflow import available_convert_formats
 
 
 LIST_SHEETS = {
@@ -90,6 +92,8 @@ IMAGE_PREVIEW_EXTENSIONS = {
     ".jpg",
     ".png",
     ".psd",
+    ".eps",
+    ".ai",
     ".tif",
     ".tiff",
     ".webp",
@@ -818,6 +822,7 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
     app_payload = payload.get("app") if isinstance(payload.get("app"), dict) else {}
     ftp_payload = payload.get("ftp") if isinstance(payload.get("ftp"), dict) else {}
     db_payload = payload.get("database") if isinstance(payload.get("database"), dict) else {}
+    processing_payload = payload.get("processing") if isinstance(payload.get("processing"), dict) else {}
     slots_payload = payload.get("slots") if isinstance(payload.get("slots"), list) else None
 
     if "base_dir" in app_payload:
@@ -841,6 +846,11 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
             for key, value in app_payload[COLOR_FIELD_LABELS_KEY].items()
             if key in {"color1", "color2", "color3"} and _text(value)
         }
+
+    if processing_payload:
+        merged_processing = dict(cfg.get(PROCESSING_SETTINGS_KEY, {}) or {})
+        merged_processing.update(processing_payload)
+        cfg[PROCESSING_SETTINGS_KEY] = config._normalize_processing_settings(merged_processing)
 
     if ftp_payload:
         ftp = cfg.setdefault(H, {})
@@ -926,6 +936,10 @@ def settings_snapshot() -> dict[str, object]:
         "users": load_users(),
         "local_file_index": bool(cfg.get(LOCAL_FILE_INDEX_KEY, True)),
         "auto_content_fit": bool(cfg.get(AUTO_CONTENT_FIT_KEY, False)),
+        "processing": config._normalize_processing_settings(
+            cfg.get(PROCESSING_SETTINGS_KEY, {})
+        ),
+        "processing_formats": available_convert_formats(),
         "ftp": {
             "host": _text(ftp.get(v)),
             "port": ftp.get(r),

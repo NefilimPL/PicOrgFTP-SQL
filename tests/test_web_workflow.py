@@ -9,6 +9,7 @@ import unittest
 from picorgftp_sql.web_workflow import (
     WebProductForm,
     WebUploadedSlot,
+    processing_options_from_config,
     process_web_uploads,
     slot_definitions_from_config,
     validate_product_form,
@@ -100,6 +101,33 @@ class WebWorkflowTests(unittest.TestCase):
                 ),
                 uploaded_slots=[],
             )
+
+    def test_processing_options_from_config_uses_web_processing_settings(self) -> None:
+        options = processing_options_from_config(
+            {
+                "processing": {
+                    "resize_enabled": False,
+                    "max_dim": 1200,
+                    "compress_enabled": True,
+                    "compress_quality": 72,
+                    "max_size_enabled": True,
+                    "max_file_kb": 250,
+                    "convert_enabled": True,
+                    "target_format": "WEBP",
+                },
+                "auto_content_fit": True,
+            }
+        )
+
+        self.assertFalse(options.resize_enabled)
+        self.assertEqual(options.max_dim, 1200)
+        self.assertTrue(options.compress_enabled)
+        self.assertEqual(options.compress_quality, 72)
+        self.assertTrue(options.max_size_enabled)
+        self.assertEqual(options.max_file_kb, 250)
+        self.assertTrue(options.convert_enabled)
+        self.assertEqual(options.target_format, "WEBP")
+        self.assertTrue(options.auto_content_fit)
 
     def test_slot_definitions_from_config_uses_defaults_when_missing(self) -> None:
         slots = slot_definitions_from_config({})
