@@ -27,6 +27,7 @@ from .common import (
     SQL_AVAILABLE_COLUMNS_KEY,
     LOCAL_FILE_INDEX_KEY,
     AUTO_CONTENT_FIT_KEY,
+    PROCESSING_SETTINGS_KEY,
     COLOR_FIELD_LABELS_KEY,
     AK,
     SLOT_DEFS_KEY,
@@ -78,6 +79,20 @@ def _write_json_atomic(path, payload):
                 pass
 
 
+def _write_error_log_direct(message):
+    """Write a fallback error log entry without importing logging_utils."""
+
+    try:
+        settings.ensure_log_dir()
+        with open(settings.AM, "a", encoding=k) as log_file:
+            log_file.write(
+                f"[{A9.now().strftime(A6)}] [USER: {AO}] [PC: {AF}] "
+                f"ERROR: {message}\n"
+            )
+    except Exception:
+        pass
+
+
 def _normalize_sql_columns(raw_columns):
     if not isinstance(raw_columns, list):
         return []
@@ -104,6 +119,34 @@ def _normalize_color_field_labels(raw_labels):
         if text:
             cleaned[field_key] = text
     return cleaned
+
+
+def _normalize_processing_settings(raw_settings):
+    defaults = DEFAULT_CONFIG.get(PROCESSING_SETTINGS_KEY, {})
+    raw = raw_settings if Aq(raw_settings, dict) else {}
+
+    def _int_value(key, minimum, maximum):
+        try:
+            value = int(raw.get(key, defaults.get(key)))
+        except (TypeError, ValueError):
+            value = int(defaults.get(key))
+        return max(minimum, min(maximum, value))
+
+    target_format = str(raw.get("target_format", defaults.get("target_format", "PNG")) or "PNG").strip().upper()
+    if target_format == "JPEG":
+        target_format = "JPG"
+    if target_format not in {"JPG", "PNG", "WEBP", "BMP", "GIF", "TIFF"}:
+        target_format = "PNG"
+    return {
+        "resize_enabled": bool(raw.get("resize_enabled", defaults.get("resize_enabled", True))),
+        "max_dim": _int_value("max_dim", 64, 20000),
+        "compress_enabled": bool(raw.get("compress_enabled", defaults.get("compress_enabled", False))),
+        "compress_quality": _int_value("compress_quality", 1, 100),
+        "max_size_enabled": bool(raw.get("max_size_enabled", defaults.get("max_size_enabled", False))),
+        "max_file_kb": _int_value("max_file_kb", 1, 102400),
+        "convert_enabled": bool(raw.get("convert_enabled", defaults.get("convert_enabled", False))),
+        "target_format": target_format,
+    }
 
 
 def load_config(interactive=I):
@@ -157,6 +200,9 @@ def load_config(interactive=I):
                 AUTO_CONTENT_FIT_KEY: bool(
                     config_copy.get(AUTO_CONTENT_FIT_KEY, False)
                 ),
+                PROCESSING_SETTINGS_KEY: _normalize_processing_settings(
+                    config_copy.get(PROCESSING_SETTINGS_KEY)
+                ),
                 COLOR_FIELD_LABELS_KEY: config_copy.get(COLOR_FIELD_LABELS_KEY, {}),
                 TRANSLATION_SETTINGS_KEY: {
                     TRANSLATION_PROVIDER_KEY: translation_defaults.get(
@@ -174,14 +220,7 @@ def load_config(interactive=I):
                 # Ensure the configuration directory exists before writing.
                 _write_json_atomic(config_path, initial)
             except E as exc:
-                try:
-                    with open(settings.AM, "a", encoding=k) as log_file:
-                        log_file.write(
-                            f"[{A9.now().strftime(A6)}] [USER: {AO}] [PC: {AF}] "
-                            f"ERROR: Failed to create config.json: {exc}\n"
-                        )
-                except Exception:
-                    pass
+                _write_error_log_direct(f"Failed to create config.json: {exc}")
     CONFIG_PATH = config_path
     try:
         with open(CONFIG_PATH, "r", encoding=k) as handle:
@@ -210,6 +249,12 @@ def load_config(interactive=I):
             raw_config.get(
                 AUTO_CONTENT_FIT_KEY,
                 config_copy.get(AUTO_CONTENT_FIT_KEY, False),
+            )
+        )
+        config_copy[PROCESSING_SETTINGS_KEY] = _normalize_processing_settings(
+            raw_config.get(
+                PROCESSING_SETTINGS_KEY,
+                config_copy.get(PROCESSING_SETTINGS_KEY, {}),
             )
         )
         config_copy[COLOR_FIELD_LABELS_KEY] = _normalize_color_field_labels(
@@ -268,11 +313,7 @@ def load_config(interactive=I):
             pass
     except E as exc:
         try:
-            with open(settings.AM, "a", encoding=k) as log_file:
-                log_file.write(
-                    f"[{A9.now().strftime(A6)}] [USER: {AO}] [PC: {AF}] "
-                    f"ERROR: Failed to load config.json: {exc}\n"
-                )
+            _write_error_log_direct(f"Failed to load config.json: {exc}")
         except Exception:
             pass
     return config_copy
@@ -353,6 +394,9 @@ def save_config(config, raw_config=None, preserve_secrets=None):
         ),
         LOCAL_FILE_INDEX_KEY: bool(config.get(LOCAL_FILE_INDEX_KEY, True)),
         AUTO_CONTENT_FIT_KEY: bool(config.get(AUTO_CONTENT_FIT_KEY, False)),
+        PROCESSING_SETTINGS_KEY: _normalize_processing_settings(
+            config.get(PROCESSING_SETTINGS_KEY, {})
+        ),
         COLOR_FIELD_LABELS_KEY: _normalize_color_field_labels(
             config.get(COLOR_FIELD_LABELS_KEY, {})
         ),
@@ -376,11 +420,7 @@ def save_config(config, raw_config=None, preserve_secrets=None):
         if O:
             O.showerror(AK, CONFIG_SAVE_FAILED_MSG.format(error=exc))
         try:
-            with open(settings.AM, "a", encoding=k) as log_file:
-                log_file.write(
-                    f"[{A9.now().strftime(A6)}] [USER: {AO}] [PC: {AF}] "
-                    f"ERROR: Failed to save config.json: {exc}\n"
-                )
+            _write_error_log_direct(f"Failed to save config.json: {exc}")
         except Exception:
             pass
 

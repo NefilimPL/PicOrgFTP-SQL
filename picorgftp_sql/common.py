@@ -207,6 +207,7 @@ SQL_COLUMN_MAP_KEY = "sql_column_map"
 SQL_AVAILABLE_COLUMNS_KEY = "sql_available_columns"
 LOCAL_FILE_INDEX_KEY = "enable_local_file_index"
 AUTO_CONTENT_FIT_KEY = "auto_content_fit"
+PROCESSING_SETTINGS_KEY = "processing"
 COLOR_FIELD_LABELS_KEY = "color_field_labels"
 TRANSLATION_SETTINGS_KEY = "translation"
 TRANSLATION_PROVIDER_KEY = "provider"
@@ -262,6 +263,19 @@ DEFAULT_CONFIG.setdefault(
 DEFAULT_CONFIG.setdefault(SQL_AVAILABLE_COLUMNS_KEY, [])
 DEFAULT_CONFIG.setdefault(LOCAL_FILE_INDEX_KEY, True)
 DEFAULT_CONFIG.setdefault(AUTO_CONTENT_FIT_KEY, False)
+DEFAULT_CONFIG.setdefault(
+    PROCESSING_SETTINGS_KEY,
+    {
+        "resize_enabled": True,
+        "max_dim": 2000,
+        "compress_enabled": False,
+        "compress_quality": 85,
+        "max_size_enabled": False,
+        "max_file_kb": 500,
+        "convert_enabled": False,
+        "target_format": "PNG",
+    },
+)
 DEFAULT_CONFIG.setdefault(COLOR_FIELD_LABELS_KEY, {})
 DEFAULT_CONFIG.setdefault(
     TRANSLATION_SETTINGS_KEY,

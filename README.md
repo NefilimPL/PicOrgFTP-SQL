@@ -21,7 +21,7 @@ The script provides a graphical interface where you enter the product name, type
 3. If `enable_ftp_update` is enabled, new files are uploaded to the FTP server and old versions with the same EAN can be removed.
 4. If `enable_sql_update` is enabled, an SQL query is executed to update image paths in the `sql` or `mysql` database.
 
-Program actions are logged to `changes_log.txt` and errors to `error_log.txt`. On first run a `config.json` file with connection settings is created.
+Program actions are logged to `logs/changes_log.txt` and errors to `logs/error_log.txt`. On first run a `config.json` file with connection settings is created.
 
 ### Features
 - Product form with auto-complete lists (name/type/model/colors/extras) backed by an Excel workbook; prompts to add missing values and includes a list editor.
@@ -33,7 +33,7 @@ Program actions are logged to `changes_log.txt` and errors to `error_log.txt`. O
 - SQL integration (MS SQL via ODBC or MySQL): connection test, parameterized update query, optional presence check per slot, column detection, and drag-and-drop column mapping.
 - Customizable photo fields (add/rename/remove slot definitions) with SQL mapping and translation suggestions (Google/MyMemory/DeepL) saved to localization files.
 - Settings & localization: base directory in `local_settings.json`, language switch (auto/pl/ua/eng), encrypted secrets via `APP_SECRET`, admin-unlocked settings where required.
-- Diagnostics & logs: error test buttons, code/UI diagnostics reports, `changes_log.txt`/`error_log.txt` plus the in-app log with a clear button.
+- Diagnostics & logs: error test buttons, code/UI diagnostics reports, `logs/changes_log.txt`/`logs/error_log.txt` plus the in-app log with a clear button.
 
 ### Configuration
 The application stores its working files in the directory defined in the `local_settings.json` file located next to `PicOrgFTP-SQL.pyw`. The file is created automatically on first launch; if it does not contain a path, the script asks for a folder and saves the selected location back to `local_settings.json`. You can use forward slashes in the path (e.g. `C:/TEST/GUI_ZDJ`) to avoid escaping backslashes on Windows. If the configured folder later becomes unavailable, the application asks you to point to a new location.
@@ -48,6 +48,31 @@ The first lines of the file contain a configuration section that makes the scrip
 - `DEFAULT_CONFIG` – initial FTP/SQL/MySQL login data and SQL query used when updating paths. All text fields use raw strings `r""`, so special characters do not need escaping. The `ftp`, `sql` and `mysql` sections include `host`/`server`, `port`, `user`, `pass` (and `path` for FTP). Additional keys are `db_type`, `sql_query`, `enable_ftp_update` and `enable_sql_update`.
 
 Changing these values before running the script helps tailor the program to your environment.
+
+### LAN web panel
+
+The repository also includes an early local-network web panel. It keeps the desktop application unchanged, but allows users on the same LAN to open a browser, log in and upload files into the configured photo slots. The panel saves uploaded files into the same `_ZDJECIA PRZEROBIONE_` product folder structure as the desktop workflow and can show local or cached FTP previews when those sources are available.
+
+The web panel currently includes product entry loading/search by EAN, product matching by name/type/model with an in-page selection dialog, thumbnail-based slot previews, per-slot FIT processing, loading existing local/FTP photos into slots, drag-and-drop upload and moving between slots, per-slot clearing, LOCAL/FTP/SQL presence badges with lazy FTP preview loading, FTP upload after processing, saving new or existing Excel entries, EAN-grouped web history with user filtering, context-aware custom suggestions, changed-field warnings with per-field undo, a list editor, a clear-form action, browser-editable settings, local file index status/refresh, adding/editing slots with slot-to-SQL-column mapping, local/FTP/SQL connection tests, and user administration with password changes. Login is enabled by default. The initial account is `admin` / `admin`; change that password in **Settings -> Users** before using the panel beyond a trusted test LAN.
+
+Install the web dependencies:
+
+```powershell
+python -m pip install -r requirements-web.txt
+```
+
+On Windows you can use the included double-click launchers instead of typing commands:
+
+- `START_WEB.bat` starts the web panel, installs missing web dependencies if needed, opens the browser and prints the LAN address.
+- `STOP_WEB.bat` stops the web panel started on the configured port.
+
+Start the backend on the server or workstation that should host the service:
+
+```powershell
+python -m uvicorn picorgftp_sql.web.app:app --host 0.0.0.0 --port 8000
+```
+
+Open `http://SERVER_IP:8000` from another computer in the same local network. Keep the service inside a trusted LAN or VPN; do not expose this LAN MVP directly to the public internet. Settings are visible only to web users with the `admin` role.
 
 ### Building an executable
 
@@ -83,7 +108,7 @@ Skrypt udostępnia graficzny interfejs, w którym wprowadza się nazwę, typ, mo
 3. Jeżeli włączono `enable_ftp_update`, nowe pliki są wysyłane na serwer FTP, a stare wersje o tym samym EAN mogą zostać usunięte.
 4. Jeżeli włączono `enable_sql_update`, wykonywane jest zapytanie SQL, które aktualizuje ścieżki obrazów w bazie `sql` lub `mysql`.
 
-Działania programu są zapisywane w `changes_log.txt`, a ewentualne błędy w `error_log.txt`. Przy pierwszym uruchomieniu tworzony jest plik `config.json` z ustawieniami połączeń.
+Działania programu są zapisywane w `logs/changes_log.txt`, a ewentualne błędy w `logs/error_log.txt`. Przy pierwszym uruchomieniu tworzony jest plik `config.json` z ustawieniami połączeń.
 
 ### Funkcje
 - Formularz danych produktu z listami podpowiedzi (nazwa/typ/model/kolory/dodatki) opartymi o plik Excel; pytania o dodanie nowych pozycji i edytor list.
@@ -95,7 +120,7 @@ Działania programu są zapisywane w `changes_log.txt`, a ewentualne błędy w `
 - SQL (MS SQL przez ODBC lub MySQL): test połączenia, zapytanie aktualizujące, opcjonalne sprawdzanie obecności dla slotów, wykrywanie kolumn i mapowanie przez drag-and-drop.
 - Konfigurowalne pola zdjęć (dodawanie/zmiana/usuwanie slotów) wraz z mapowaniem SQL i podpowiedziami tłumaczeń (Google/MyMemory/DeepL) zapisywanymi do plików lokalizacji.
 - Ustawienia i język: katalog roboczy w `local_settings.json`, przełączanie języka (auto/pl/ua/eng), szyfrowanie sekretów przez `APP_SECRET`, blokada edycji wrażliwych ustawień bez uprawnień administratora.
-- Diagnostyka i logi: testy błędów, raporty diagnostyki kodu/UI, `changes_log.txt` i `error_log.txt` plus log w aplikacji z przyciskiem czyszczenia.
+- Diagnostyka i logi: testy błędów, raporty diagnostyki kodu/UI, `logs/changes_log.txt` i `logs/error_log.txt` plus log w aplikacji z przyciskiem czyszczenia.
 
 ### Konfiguracja
 Aplikacja zapisuje pliki robocze w katalogu zdefiniowanym w pliku `local_settings.json`, znajdującym się obok `PicOrgFTP-SQL.pyw`. Plik tworzy się automatycznie przy pierwszym uruchomieniu; jeżeli nie zawiera ścieżki, skrypt poprosi o wskazanie folderu i zapisze wybór do `local_settings.json`. W ścieżce możesz użyć ukośników (np. `C:/TEST/GUI_ZDJ`), aby uniknąć konieczności podwójnego wpisywania ukośników odwrotnych w systemie Windows. Jeżeli zapisany katalog stanie się niedostępny, aplikacja poprosi o wybranie nowej lokalizacji.
@@ -110,6 +135,31 @@ Pierwsze linie pliku zawierają sekcję konfiguracyjną ułatwiającą dostosowa
 - `DEFAULT_CONFIG` – początkowe dane logowania FTP/SQL/MySQL oraz zapytanie SQL wykorzystywane przy aktualizacji ścieżek. Wszystkie pola tekstowe używają surowych łańcuchów `r""`, dzięki czemu nie trzeba uciekać znaków specjalnych. Sekcje `ftp`, `sql` i `mysql` zawierają odpowiednio pola `host`/`server`, `port`, `user`, `pass` (oraz `path` dla FTP). Pozostałe klucze to `db_type`, `sql_query`, `enable_ftp_update` i `enable_sql_update`.
 
 Zmiana tych wartości przed uruchomieniem skryptu umożliwia szybkie dostosowanie działania programu do własnego środowiska.
+
+### Panel webowy w LAN
+
+Repozytorium zawiera także pierwszy lokalny panel webowy. Obecna aplikacja desktopowa zostaje bez zmian, a użytkownicy w tej samej sieci lokalnej mogą otworzyć stronę w przeglądarce, zalogować się i wgrać pliki do skonfigurowanych slotów zdjęć. Panel zapisuje uploady do tej samej struktury `_ZDJECIA PRZEROBIONE_`, której używa desktop, oraz potrafi pokazywać lokalne albo cache'owane podglądy FTP, gdy takie źródła są dostępne.
+
+Panel webowy obsługuje obecnie wczytywanie i wyszukiwanie wpisów po EAN, dopasowanie produktu po nazwie/typie/modelu z oknem wyboru wewnątrz strony, miniatury w slotach, per-slot FIT, wczytywanie istniejących zdjęć lokalnych/FTP do slotów, upload przez przeciąganie plików, przenoszenie zdjęć między slotami, czyszczenie pojedynczego slotu, znaczniki LOCAL/FTP/SQL z leniwym pobieraniem podglądu FTP, wysyłkę FTP po przetworzeniu, zapis nowego albo istniejącego wpisu Excel, historię webową pogrupowaną po EAN z filtrem użytkownika, kontekstowe customowe podpowiedzi, ostrzeżenia zmienionych pól z cofnięciem pojedynczego pola, edytor list, czyszczenie formularza, edycję ustawień w przeglądarce, status i odświeżanie indeksu lokalnych plików, dodawanie/edycję slotów z mapowaniem do kolumn SQL, testy folderów lokalnych/FTP/SQL oraz administrację użytkownikami z ustawianiem haseł. Logowanie jest domyślnie włączone. Pierwsze konto to `admin` / `admin`; zmień to hasło w **Ustawienia -> Użytkownicy** przed używaniem panelu poza zaufanym testem w LAN.
+
+Instalacja zależności webowych:
+
+```powershell
+python -m pip install -r requirements-web.txt
+```
+
+Na Windows możesz użyć plików do dwukliku zamiast wpisywać komendy:
+
+- `START_WEB.bat` uruchamia panel webowy, doinstalowuje brakujące zależności webowe, otwiera przeglądarkę i pokazuje adres w LAN.
+- `STOP_WEB.bat` zatrzymuje panel webowy uruchomiony na skonfigurowanym porcie.
+
+Uruchomienie backendu na serwerze albo komputerze hostującym usługę:
+
+```powershell
+python -m uvicorn picorgftp_sql.web.app:app --host 0.0.0.0 --port 8000
+```
+
+Z innego komputera w tej samej sieci otwórz `http://IP_SERWERA:8000`. Trzymaj usługę w zaufanej sieci LAN albo VPN; tego MVP nie należy wystawiać bezpośrednio do publicznego internetu. Ustawienia są widoczne tylko dla użytkowników webowych z rolą `admin`.
 
 ### Budowanie pliku wykonywalnego
 

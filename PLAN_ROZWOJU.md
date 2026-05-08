@@ -1,7 +1,7 @@
 # Plan rozwoju PicOrgFTP-SQL
 
 Data utworzenia planu: 2026-04-26  
-Ostatnia aktualizacja planu: 2026-05-06
+Ostatnia aktualizacja planu: 2026-05-07
 
 ## Zasady aktualizacji
 
@@ -86,6 +86,15 @@ Status:
 | UI-008 | Naprawa tlumaczen nazw pol zdjec po zmianie jezyka | P1 | Planowane | 2026-04-26 | 2026-04-26 | - | Po wybraniu angielskiego nazwy pol nie powinny zostawac po polsku, jezeli istnieje tlumaczenie. Warunki wykonania: sloty glowne i pola w ustawieniach pobieraja etykiety z aktywnego jezyka, a test lub diagnostyka potwierdza brak cofania do polskiej nazwy przy przelaczeniu na `en`. | Napraw tlumaczenia nazw pol zdjec po zmianie jezyka. Sprawdz sloty na glownym ekranie, kafelki w ustawieniach i edytor pola. Jezeli istnieje tlumaczenie w aktywnym jezyku, etykieta nie moze zostawac po polsku. Zachowaj osobno wartosc techniczna pola, numer slotu i mapowanie SQL. Dodaj test albo diagnostyke, ktora potwierdza poprawne etykiety po przelaczeniu na angielski. Po wykonaniu zaktualizuj ten wiersz w `PLAN_ROZWOJU.md`: status, daty i opis naprawionych miejsc. |
 | UI-009 | Oddzielenie nazwy pola od nazwy kolumny SQL w edycji pol | P1 | Planowane | 2026-04-26 | 2026-04-26 | - | Edycja pola nie moze nadpisywac nazwy pola nazwa kolumny SQL. Warunki wykonania: nazwa widoczna dla uzytkownika, numer pola i przypisana kolumna SQL sa trzema osobnymi wartosciami, a zapis ustawien nie miesza tych danych. | Oddziel w edycji pol trzy wartosci: nazwe pola widoczna dla uzytkownika, numer slotu uzywany po EAN oraz nazwe kolumny SQL. Edycja kolumny SQL nie moze nadpisywac nazwy pola, a zmiana nazwy pola nie moze przypadkiem zmieniac mapowania SQL. Zadbaj o migracje istniejacej konfiguracji i czytelne komunikaty przy konflikcie. Dodaj testy regresji dla edycji nazwy, edycji kolumny i zapisu ustawien. Po wykonaniu zaktualizuj ten wiersz w `PLAN_ROZWOJU.md`: status, daty i opis rozdzielenia danych. |
 | UI-010 | Stabilny klucz tlumaczenia dla wlasnych pol | P2 | Planowane | 2026-04-26 | 2026-04-26 | - | Tlumaczenia wlasnych pol powinny byc powiazane ze stalym identyfikatorem pola albo numerem, a nie tylko z aktualnym tekstem etykiety. Dzieki temu zmiana nazwy w jednym jezyku nie powinna psuc tlumaczen w pozostalych jezykach. | Wprowadz stabilny klucz tlumaczenia dla wlasnych pol zdjec. Obecne tlumaczenie nie powinno zalezec wylacznie od aktualnego tekstu etykiety, bo zmiana nazwy moze zerwac tlumaczenia. Zaprojektuj identyfikator oparty o stabilne ID pola albo numer slotu i zapewnij migracje istniejacych wpisow lokalizacji. Dodaj testy dla zmiany nazwy pola i zachowania tlumaczen w innych jezykach. Po wykonaniu zaktualizuj ten wiersz w `PLAN_ROZWOJU.md`: status, daty i opis przyjetego klucza. |
+
+## Panel webowy LAN
+
+| ID | Zadanie | Priorytet | Status | Data dodania | Data aktualizacji | Data wykonania | Opis / notatki | Prompt do wykonania |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| WEB-001 | MVP panelu webowego z uploadem przez przegladarke | P1 | Wykonane | 2026-05-07 | 2026-05-07 | 2026-05-07 | Dodano backend FastAPI `picorgftp_sql.web.app`, statyczny panel webowy, proste logowanie admin/admin z mozliwoscia zmiany hasla przez `PICORG_WEB_ADMIN_PASSWORD`, upload plikow do slotow oraz zapis do tej samej struktury `_ZDJECIA PRZEROBIONE_` co desktop. Dodano `START_WEB.bat` i `STOP_WEB.bat` do uruchamiania oraz zatrzymywania panelu bez wpisywania komend. FTP/SQL pozostaja do dopiecia w kolejnym etapie. | - |
+| WEB-002 | Podstawowe funkcje danych w panelu webowym | P1 | Wykonane | 2026-05-07 | 2026-05-07 | 2026-05-07 | Dodano API i UI dla list Excel, wyszukiwania wpisow po EAN, dopasowania produktu po nazwie/typie/modelu, wyboru istniejacego wpisu, zapisu nowego/istniejacego wpisu, czyszczenia formularza oraz podstawowego podgladu ustawien ze statusem administratora Windows. Edycja ustawien pozostaje do osobnego etapu z bezpiecznym trybem podwyzszonych uprawnien backendu. | - |
+| WEB-003 | Web UI blizsze wersji desktopowej | P1 | Wykonane | 2026-05-07 | 2026-05-07 | 2026-05-07 | Przeniesiono Listy i Ustawienia do okien modalnych wewnatrz strony, dodano edycje ustawien z poziomu przegladarki, zakladke Uzytkownicy, modal wyboru istniejacych wpisow po nazwie/typie/modelu oraz wczytywanie lokalnych zdjec produktu do slotow. | - |
+| WEB-004 | Admin, diagnostyka i sloty w panelu webowym | P1 | Wykonane | 2026-05-07 | 2026-05-07 | 2026-05-07 | Przywrocono logowanie domyslne `admin/admin`, ograniczono Ustawienia do uzytkownikow z rola `admin`, dodano hasla uzytkownikow i blokade wylaczenia aktualnego konta, opisane kompaktowe checkboxy, testy folderow lokalnych/FTP/SQL, mapowanie slotow do kolumn SQL, drag-and-drop plikow na sloty, przenoszenie lokalnych zdjec miedzy slotami oraz znaczniki LOCAL/FTP/SQL w slotach webowych. | - |
 
 ## Testy, CI i wydania
 

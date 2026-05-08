@@ -25,6 +25,29 @@ class _FakeFTP:
         return None
 
 
+class _SyncFTP:
+    def __init__(self) -> None:
+        self.deleted: list[str] = []
+
+    def connect(self, host: str, port: int, timeout: int = 10) -> None:
+        return None
+
+    def login(self, user: str, password: str) -> None:
+        return None
+
+    def set_pasv(self, passive: bool) -> None:
+        return None
+
+    def cwd(self, path: str) -> None:
+        return None
+
+    def delete(self, filename: str) -> None:
+        self.deleted.append(filename)
+
+    def quit(self) -> None:
+        return None
+
+
 class DownloadRemoteSlotsTests(unittest.TestCase):
     def test_download_remote_slots_keeps_preview_for_local_slots(self) -> None:
         files = {
@@ -64,6 +87,21 @@ class DownloadRemoteSlotsTests(unittest.TestCase):
                 remote_only_info["02"]["filename"],
                 "5901234567890_02_DETAIL.png",
             )
+
+    def test_sync_remote_files_deletes_candidates_without_uploads(self) -> None:
+        fake_ftp = _SyncFTP()
+        with TemporaryDirectory() as temp_dir:
+            with patch.object(ftp_service.AB, "FTP", return_value=fake_ftp):
+                result = ftp_service.sync_remote_files(
+                    {"host": "x", "port": 21, "user": "u", "pass": "p", "path": ""},
+                    temp_dir,
+                    [],
+                    ["5901234567890_02.jpg"],
+                    set(),
+                )
+
+        self.assertEqual(result["deleted"], 1)
+        self.assertEqual(fake_ftp.deleted, ["5901234567890_02.jpg"])
 
 
 if __name__ == "__main__":

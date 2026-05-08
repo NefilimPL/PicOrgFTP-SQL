@@ -10,17 +10,11 @@ from picorgftp_sql.runtime_lock import SingleInstanceGuard, acquire_single_insta
 
 
 def _resolve_boot_log_dir():
-    settings_path = os.path.join(os.getcwd(), "local_settings.json")
-    try:
-        if os.path.exists(settings_path):
-            with open(settings_path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-            base_dir = data.get("base_dir_override")
-            if isinstance(base_dir, str) and base_dir.strip():
-                return base_dir.strip()
-    except Exception:
-        pass
-    return os.getcwd()
+    if getattr(sys, "frozen", False):
+        base_dir = os.path.dirname(sys.executable) or os.getcwd()
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__)) or os.getcwd()
+    return os.path.join(base_dir, "logs")
 
 
 def _resolve_instance_lock_path():
