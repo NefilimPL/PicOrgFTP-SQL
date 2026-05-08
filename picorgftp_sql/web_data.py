@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import secrets
 import tempfile
+import time
 
 from . import common, config, settings
 from .common import (
@@ -56,14 +57,20 @@ from .excel_utils import (
     save_ean_entry,
     NO_EAN_PLACEHOLDER,
 )
-from .services.ftp_service import list_remote_files_for_ean
+from .services.ftp_service import connect_ftp, list_remote_files_for_ean, list_remote_filenames
 from .services.sql_service import (
     extract_presence_context,
     query_presence_details,
     should_check_presence,
 )
+from .file_index import LocalFileIndex
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
-from .workflow_utils import build_product_directory, parse_slot_filename
+from .workflow_utils import (
+    build_product_directory,
+    parse_slot_filename,
+    sanitize_path_segment,
+    select_remote_files_for_ean,
+)
 
 
 LIST_SHEETS = {
@@ -75,9 +82,23 @@ LIST_SHEETS = {
 }
 
 WEB_USERS_PATH = "web_users.json"
-IMAGE_PREVIEW_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"}
+WEB_HISTORY_PATH = "web_history.json"
+IMAGE_PREVIEW_EXTENSIONS = {
+    ".bmp",
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".psd",
+    ".tif",
+    ".tiff",
+    ".webp",
+}
 PASSWORD_ALGORITHM = "pbkdf2_sha256"
 PASSWORD_ITERATIONS = 200_000
+_FILE_INDEX: LocalFileIndex | None = None
+_FILE_INDEX_KEY: tuple[str, str] | None = None
+_FILE_INDEX_REFRESH_STARTED = False
 
 
 @dataclass(frozen=True)
@@ -195,7 +216,316 @@ def load_web_data() -> dict[str, object]:
             for key, sheet in LIST_SHEETS.items()
         },
         "entries": [entry_to_payload(entry) for entry in entries],
+        "file_index": file_index_status(start=True),
     }
+
+
+def _file_index_enabled() -> bool:
+    return bool(config.CONFIG.get(LOCAL_FILE_INDEX_KEY, True))
+
+
+def _get_file_index(*, start: bool = False) -> LocalFileIndex | None:
+    global _FILE_INDEX
+    global _FILE_INDEX_KEY
+    global _FILE_INDEX_REFRESH_STARTED
+    if not _file_index_enabled():
+        return None
+    root_dir = os.path.abspath(settings.l)
+    index_path = os.path.abspath(os.path.join(settings.AC, "file_index.json"))
+    key = (root_dir, index_path)
+    if _FILE_INDEX is None or _FILE_INDEX_KEY != key:
+        index = LocalFileIndex(root_dir, index_path)
+        index.load_cache()
+        _FILE_INDEX = index
+        _FILE_INDEX_KEY = key
+        _FILE_INDEX_REFRESH_STARTED = False
+    if start and _FILE_INDEX is not None and not _FILE_INDEX_REFRESH_STARTED:
+        _FILE_INDEX.refresh_async()
+        _FILE_INDEX_REFRESH_STARTED = True
+    return _FILE_INDEX
+
+
+def file_index_status(*, start: bool = False) -> dict[str, object]:
+    """Return web-friendly local file index status."""
+
+    if not _file_index_enabled():
+        return {"enabled": False, "state": "disabled", "label": "Indeks lokalny wylaczony."}
+    index = _get_file_index(start=start)
+    if index is None:
+        return {"enabled": False, "state": "disabled", "label": "Indeks lokalny wylaczony."}
+    status = index.get_status()
+    generated_at = status.get("generated_at")
+    age_seconds = int(time.time() - float(generated_at)) if generated_at else None
+    state = str(status.get("state") or "idle")
+    if state == "refreshing":
+        label = "Indeksowanie lokalnych plikow..."
+    elif generated_at:
+        label = f"Indeks lokalny: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(float(generated_at)))}"
+    elif status.get("cache_loaded"):
+        label = "Indeks lokalny: cache wczytany."
+    else:
+        label = "Indeks lokalny: brak snapshotu."
+    return {
+        "enabled": True,
+        "state": state,
+        "cache_loaded": bool(status.get("cache_loaded")),
+        "has_snapshot": bool(status.get("has_snapshot")),
+        "dirs_scanned": int(status.get("dirs_scanned") or 0),
+        "products_scanned": int(status.get("products_scanned") or 0),
+        "name_count": int(status.get("name_count") or 0),
+        "generated_at": generated_at,
+        "age_seconds": age_seconds,
+        "error": str(status.get("error") or ""),
+        "label": label,
+    }
+
+
+def refresh_file_index() -> dict[str, object]:
+    """Start a background local file index refresh."""
+
+    index = _get_file_index(start=False)
+    if index is not None:
+        index.refresh_async()
+    return file_index_status()
+
+
+def _history_path() -> Path:
+    return Path(settings.AC) / WEB_HISTORY_PATH
+
+
+def _load_history_records() -> list[dict[str, object]]:
+    path = _history_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _save_history_records(records: list[dict[str, object]]) -> None:
+    path = _history_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(records[-2000:], indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def record_history(
+    *,
+    username: str,
+    action: str,
+    ean: object = "",
+    product_id: object = "",
+    summary: str = "",
+    details: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Append a compact web history entry."""
+
+    timestamp = time.time()
+    record = {
+        "id": f"{int(timestamp * 1000)}-{secrets.token_hex(4)}",
+        "ts": timestamp,
+        "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp)),
+        "user": _text(username) or "unknown",
+        "action": _text(action),
+        "ean": _text(ean) or "BRAK-EAN",
+        "product_id": _text(product_id),
+        "summary": _text(summary),
+        "details": details or {},
+    }
+    records = _load_history_records()
+    records.append(record)
+    _save_history_records(records)
+    return record
+
+
+def history_snapshot(*, user: str = "", limit: int = 200) -> dict[str, object]:
+    """Return recent web history grouped by EAN."""
+
+    user_filter = _text(user).lower()
+    records = sorted(_load_history_records(), key=lambda item: float(item.get("ts") or 0), reverse=True)
+    if user_filter:
+        records = [item for item in records if _text(item.get("user")).lower() == user_filter]
+    limit = max(1, min(1000, int(limit or 200)))
+    records = records[:limit]
+    grouped: dict[str, dict[str, object]] = {}
+    for item in records:
+        ean = _text(item.get("ean")) or "BRAK-EAN"
+        group = grouped.setdefault(ean, {"ean": ean, "latest_ts": 0.0, "items": []})
+        group["items"].append(item)
+        group["latest_ts"] = max(float(group.get("latest_ts") or 0), float(item.get("ts") or 0))
+    groups = sorted(grouped.values(), key=lambda item: float(item.get("latest_ts") or 0), reverse=True)
+    users = sorted({_text(item.get("user")) for item in _load_history_records() if _text(item.get("user"))})
+    return {"groups": groups, "users": users, "count": len(records)}
+
+
+def _ftp_cache_dir(ean: object) -> str:
+    safe_ean = sanitize_path_segment(ean) or "NO-EAN"
+    return os.path.join(settings.AC, "web_ftp_cache", safe_ean)
+
+
+def _ftp_cache_filename(filename: object) -> str:
+    basename = os.path.basename(_text(filename))
+    parsed = parse_slot_filename(basename)
+    if parsed and parsed.normalized_name:
+        basename = parsed.normalized_name
+    stem, ext = os.path.splitext(basename)
+    safe_stem = sanitize_path_segment(stem) or "ftp_file"
+    safe_ext = ext if ext and len(ext) <= 12 else ""
+    return f"{safe_stem}{safe_ext}"
+
+
+def _cached_ftp_previews(ean: object) -> tuple[dict[str, str], dict[str, str]]:
+    """Return remote FTP filenames and cached local preview paths for an EAN."""
+
+    if not ean or not bool(config.CONFIG.get(ft, True)):
+        return {}, {}
+    ftp = connect_ftp(config.CONFIG.get(H, {}))
+    cache_dir = _ftp_cache_dir(ean)
+    os.makedirs(cache_dir, exist_ok=True)
+    try:
+        remote_files = select_remote_files_for_ean(ean, list_remote_filenames(ftp))
+        preview_paths: dict[str, str] = {}
+        for prefix, filename in remote_files.items():
+            target_path = os.path.join(cache_dir, _ftp_cache_filename(filename))
+            if not os.path.isfile(target_path):
+                temp_path = f"{target_path}.download"
+                try:
+                    with open(temp_path, "wb") as handle:
+                        ftp.retrbinary(f"RETR {filename}", handle.write)
+                    os.replace(temp_path, target_path)
+                finally:
+                    if os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except OSError:
+                            pass
+            if os.path.isfile(target_path):
+                preview_paths[prefix] = target_path
+        return remote_files, preview_paths
+    finally:
+        try:
+            ftp.quit()
+        except Exception:
+            pass
+
+
+def cache_ftp_preview(ean: object, filename: object) -> str:
+    """Download one FTP file to the web preview cache and return the local path."""
+
+    ean_text = _text(ean)
+    filename_text = os.path.basename(_text(filename))
+    if not ean_text or not filename_text:
+        raise ValueError("Brakuje EAN albo nazwy pliku FTP.")
+    ftp = connect_ftp(config.CONFIG.get(H, {}))
+    cache_dir = _ftp_cache_dir(ean_text)
+    os.makedirs(cache_dir, exist_ok=True)
+    try:
+        remote_files = select_remote_files_for_ean(ean_text, list_remote_filenames(ftp))
+        allowed = {os.path.basename(value) for value in remote_files.values()}
+        if filename_text not in allowed:
+            raise ValueError("Plik FTP nie pasuje do wybranego EAN.")
+        target_path = os.path.join(cache_dir, _ftp_cache_filename(filename_text))
+        if not os.path.isfile(target_path):
+            temp_path = f"{target_path}.download"
+            try:
+                with open(temp_path, "wb") as handle:
+                    ftp.retrbinary(f"RETR {filename_text}", handle.write)
+                os.replace(temp_path, target_path)
+            finally:
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
+        return target_path
+    finally:
+        try:
+            ftp.quit()
+        except Exception:
+            pass
+
+
+def _dedupe(values: list[object], *, limit: int = 200) -> list[str]:
+    seen = set()
+    result = []
+    for value in values:
+        text = _text(value)
+        if not text:
+            continue
+        key = text.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def field_suggestions(field: str, payload: dict[str, object]) -> list[str]:
+    """Return context-aware suggestions, with existing product data first."""
+
+    lists = prepare_excel_lists()
+    entries = [_entry_from_record(item) for item in lists.get(ENTRY_RECORDS_KEY, [])]
+    name = _text(payload.get("name"))
+    type_name = _text(payload.get("type_name"))
+    model = _text(payload.get("model"))
+    colors = [_text(payload.get("color1")), _text(payload.get("color2")), _text(payload.get("color3"))]
+    extra = _text(payload.get("extra"))
+    existing: list[object] = []
+
+    def _entry_context(entry: WebEntry, *, through: str) -> bool:
+        if through in {"type_name", "model", "color", "extra"} and name and not _matches_field(entry.name, name):
+            return False
+        if through in {"model", "color", "extra"} and type_name and not _matches_field(entry.type_name, type_name):
+            return False
+        if through in {"color", "extra"} and model and not _matches_field(entry.model, model):
+            return False
+        return True
+
+    index = _get_file_index(start=True)
+    if field == "name":
+        if index is not None and index.has_snapshot():
+            existing.extend(index.get_names())
+        existing.extend(entry.name for entry in entries)
+        workbook = lists.get(LIST_SHEETS["names"], [])
+    elif field == "type_name":
+        if index is not None and index.has_snapshot():
+            indexed = index.get_types(name)
+            if indexed:
+                existing.extend(indexed)
+        existing.extend(entry.type_name for entry in entries if _entry_context(entry, through="type_name"))
+        workbook = lists.get(LIST_SHEETS["types"], [])
+    elif field == "model":
+        if index is not None and index.has_snapshot():
+            indexed = index.get_models(name, type_name)
+            if indexed:
+                existing.extend(indexed)
+        existing.extend(entry.model for entry in entries if _entry_context(entry, through="model"))
+        workbook = lists.get(LIST_SHEETS["models"], [])
+    elif field in {"color1", "color2", "color3"}:
+        if index is not None and index.has_snapshot():
+            indexed = index.get_colors(name, type_name, model)
+            if indexed:
+                for item in indexed:
+                    existing.extend(str(item).replace("_", "-").split("-"))
+        for entry in entries:
+            if _entry_context(entry, through="color"):
+                existing.extend([entry.color1, entry.color2, entry.color3])
+        workbook = lists.get(LIST_SHEETS["colors"], [])
+    elif field == "extra":
+        if index is not None and index.has_snapshot():
+            indexed = index.get_extras(name, type_name, model, colors)
+            if indexed:
+                existing.extend(indexed)
+        existing.extend(entry.extra for entry in entries if _entry_context(entry, through="extra"))
+        workbook = lists.get(LIST_SHEETS["extras"], [])
+    else:
+        workbook = []
+    if field == "extra" and not extra:
+        existing.insert(0, "NO-LED")
+    return _dedupe([*existing, *list(workbook or [])])
 
 
 def _public_user(user: dict[str, object]) -> dict[str, object]:
@@ -726,8 +1056,22 @@ def find_product_photos(entry_payload: dict[str, object]) -> list[dict[str, obje
     )
     target_ean = _norm(entry.ean)
     results_by_prefix: dict[str, dict[str, object]] = {}
-    if os.path.isdir(product_dir):
-        for filename in os.listdir(product_dir):
+    file_names: list[str] | None = None
+    index = _get_file_index(start=True)
+    if index is not None and index.has_snapshot():
+        indexed = index.get_product_files(
+            entry.name,
+            entry.type_name,
+            entry.model,
+            [entry.color1, entry.color2, entry.color3],
+            entry.extra,
+        )
+        if indexed is not None:
+            file_names = list(indexed)
+    if file_names is None and os.path.isdir(product_dir):
+        file_names = os.listdir(product_dir)
+    if file_names:
+        for filename in file_names:
             path = os.path.join(product_dir, filename)
             if not os.path.isfile(path):
                 continue
@@ -745,6 +1089,7 @@ def find_product_photos(entry_payload: dict[str, object]) -> list[dict[str, obje
                 "local": True,
                 "ftp": False,
                 "sql": False,
+                "ftp_path": "",
                 "ftp_filename": "",
                 "sql_value": "",
             }
@@ -767,6 +1112,9 @@ def find_product_photos(entry_payload: dict[str, object]) -> list[dict[str, obje
                 )
                 item["ftp"] = True
                 item["ftp_filename"] = filename
+                item["ftp_path"] = ""
+                ext = os.path.splitext(filename)[1].lower()
+                item["is_image"] = bool(item.get("is_image")) or ext in IMAGE_PREVIEW_EXTENSIONS
         except Exception:
             pass
     if ean and should_check_presence(config.CONFIG):
@@ -797,6 +1145,7 @@ def find_product_photos(entry_payload: dict[str, object]) -> list[dict[str, obje
                             "is_image": False,
                             "local": False,
                             "ftp": False,
+                            "ftp_path": "",
                             "ftp_filename": "",
                         },
                     )

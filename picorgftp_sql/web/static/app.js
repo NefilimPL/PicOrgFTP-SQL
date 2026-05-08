@@ -2,13 +2,23 @@ const state = {
   slots: [],
   files: new Map(),
   loadedPhotos: new Map(),
+  deletedSlots: new Map(),
   lists: {},
   entries: [],
   selectedList: "names",
   settings: null,
   currentUser: null,
   isAdmin: false,
+  fileIndex: null,
+  photosLoading: false,
+  loadedEntryOriginal: null,
+  slotFits: new Map(),
+  slotSources: new Map(),
+  draggedSlotPrefix: "",
+  lastLookupMs: null,
   activeSettingsTab: "app",
+  history: null,
+  theme: localStorage.getItem("picorg-theme") || "light",
   suppressAutoSearch: false,
   lastAutoSearchKey: "",
 };
@@ -28,10 +38,13 @@ const formStatus = document.querySelector("#formStatus");
 const resultOutput = document.querySelector("#resultOutput");
 const resultMeta = document.querySelector("#resultMeta");
 const slotCount = document.querySelector("#slotCount");
+const fileIndexInfo = document.querySelector("#fileIndexInfo");
+const latencyInfo = document.querySelector("#latencyInfo");
 const serverInfo = document.querySelector("#serverInfo");
 const submitButton = document.querySelector("#submitButton");
 const clearButton = document.querySelector("#clearButton");
 const logoutButton = document.querySelector("#logoutButton");
+const themeToggleButton = document.querySelector("#themeToggleButton");
 const settingsNavButton = document.querySelector('[data-modal="settings"]');
 const entrySelect = document.querySelector("#entrySelect");
 const findByEanButton = document.querySelector("#findByEanButton");
@@ -45,6 +58,11 @@ const listStatus = document.querySelector("#listStatus");
 const settingsOutput = document.querySelector("#settingsOutput");
 const settingsStatus = document.querySelector("#settingsStatus");
 const entryMatches = document.querySelector("#entryMatches");
+const historyUserFilter = document.querySelector("#historyUserFilter");
+const historyRefreshButton = document.querySelector("#historyRefreshButton");
+const historyOutput = document.querySelector("#historyOutput");
+const historyDetailTitle = document.querySelector("#historyDetailTitle");
+const historyDetailOutput = document.querySelector("#historyDetailOutput");
 
 async function requestJson(path, options = {}) {
   const response = await fetch(path, options);
@@ -65,6 +83,14 @@ function updateAdminUi() {
   }
 }
 
+function applyTheme() {
+  document.body.dataset.theme = state.theme;
+  if (themeToggleButton) {
+    themeToggleButton.textContent = state.theme === "dark" ? "Jasny" : "Ciemny";
+  }
+  localStorage.setItem("picorg-theme", state.theme);
+}
+
 function openModal(name) {
   if (name === "settings" && !state.isAdmin) {
     formStatus.textContent = "Ustawienia sa dostepne tylko dla administratora.";
@@ -75,6 +101,11 @@ function openModal(name) {
   if (name === "settings") {
     loadSettings().catch((error) => {
       settingsStatus.textContent = error.message;
+    });
+  }
+  if (name === "history") {
+    loadHistory().catch((error) => {
+      historyOutput.textContent = error.message;
     });
   }
 }
@@ -89,6 +120,48 @@ function fileLabel(file) {
   }
   const kb = Math.max(1, Math.round(file.size / 1024));
   return `${file.name} (${kb} KB)`;
+}
+
+function updateRuntimeMetrics() {
+  if (fileIndexInfo) {
+    fileIndexInfo.textContent = state.fileIndex?.label || "";
+    fileIndexInfo.title = state.fileIndex?.error || "";
+  }
+  if (latencyInfo) {
+    latencyInfo.textContent =
+      state.lastLookupMs === null ? "" : `ostatnie wczytanie: ${Math.round(state.lastLookupMs)} ms`;
+  }
+}
+
+function formValue(name) {
+  return productForm.elements[name]?.value?.trim() || "";
+}
+
+function currentFormPayload() {
+  return {
+    name: formValue("name"),
+    type_name: formValue("type_name"),
+    model: formValue("model"),
+    color1: formValue("color1"),
+    color2: formValue("color2"),
+    color3: formValue("color3"),
+    extra: formValue("extra"),
+  };
+}
+
+function uniqueValues(values, limit = 200) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values || []) {
+    const text = String(value || "").trim();
+    if (!text) continue;
+    const key = text.toUpperCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(text);
+    if (result.length >= limit) break;
+  }
+  return result;
 }
 
 function setOptions(datalistId, values) {
@@ -107,6 +180,130 @@ function renderDatalists() {
   setOptions("#modelsList", state.lists.models);
   setOptions("#colorsList", state.lists.colors);
   setOptions("#extrasList", state.lists.extras);
+}
+
+const fieldListKey = {
+  name: "names",
+  type_name: "types",
+  model: "models",
+  color1: "colors",
+  color2: "colors",
+  color3: "colors",
+  extra: "extras",
+};
+
+function entryMatchesContext(entry, fieldName) {
+  const payload = currentFormPayload();
+  if (["type_name", "model", "color1", "color2", "color3", "extra"].includes(fieldName)) {
+    if (payload.name && String(entry.name || "").toUpperCase() !== payload.name.toUpperCase()) return false;
+  }
+  if (["model", "color1", "color2", "color3", "extra"].includes(fieldName)) {
+    if (payload.type_name && String(entry.type_name || "").toUpperCase() !== payload.type_name.toUpperCase()) return false;
+  }
+  if (["color1", "color2", "color3", "extra"].includes(fieldName)) {
+    if (payload.model && String(entry.model || "").toUpperCase() !== payload.model.toUpperCase()) return false;
+  }
+  return true;
+}
+
+function localSuggestions(fieldName) {
+  const existing = [];
+  for (const entry of state.entries || []) {
+    if (!entryMatchesContext(entry, fieldName)) continue;
+    if (fieldName === "name") existing.push(entry.name);
+    if (fieldName === "type_name") existing.push(entry.type_name);
+    if (fieldName === "model") existing.push(entry.model);
+    if (["color1", "color2", "color3"].includes(fieldName)) {
+      existing.push(entry.color1, entry.color2, entry.color3);
+    }
+    if (fieldName === "extra") existing.push(entry.extra);
+  }
+  const listValues = state.lists[fieldListKey[fieldName]] || [];
+  return uniqueValues([...existing, ...listValues]);
+}
+
+async function remoteSuggestions(fieldName) {
+  const params = new URLSearchParams({ field: fieldName, ...currentFormPayload() });
+  const payload = await requestJson(`/api/suggestions?${params.toString()}`);
+  state.fileIndex = payload.file_index || state.fileIndex;
+  updateRuntimeMetrics();
+  return payload.values || [];
+}
+
+function closeAutocompletePanels(exceptPanel = null) {
+  document.querySelectorAll(".autocomplete-panel").forEach((panel) => {
+    if (panel !== exceptPanel) panel.classList.remove("active");
+  });
+}
+
+function renderAutocompletePanel(input, panel, values) {
+  closeAutocompletePanels(panel);
+  const typed = input.value.trim().toUpperCase();
+  const filtered = values.filter((value) => !typed || value.toUpperCase().includes(typed)).slice(0, 200);
+  panel.textContent = "";
+  if (!filtered.length) {
+    panel.classList.remove("active");
+    return;
+  }
+  for (const value of filtered) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = value;
+    button.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      closeAutocompletePanels();
+    });
+    panel.appendChild(button);
+  }
+  panel.classList.add("active");
+}
+
+function setupAutocomplete() {
+  productForm.setAttribute("autocomplete", "off");
+  for (const fieldName of Object.keys(fieldListKey)) {
+    const input = productForm.elements[fieldName];
+    if (!input) continue;
+    input.removeAttribute("list");
+    input.setAttribute("autocomplete", "new-password");
+    input.setAttribute("spellcheck", "false");
+    input.setAttribute("aria-autocomplete", "list");
+    input.setAttribute("data-lpignore", "true");
+    const host = input.closest("label");
+    if (!host) continue;
+    host.classList.add("autocomplete-host");
+    const panel = document.createElement("div");
+    panel.className = "autocomplete-panel";
+    host.appendChild(panel);
+    let requestId = 0;
+    let remoteTimer = 0;
+    const refresh = () => {
+      closeAutocompletePanels(panel);
+      const local = localSuggestions(fieldName);
+      renderAutocompletePanel(input, panel, local);
+      const currentRequest = ++requestId;
+      window.clearTimeout(remoteTimer);
+      remoteTimer = window.setTimeout(() => {
+        remoteSuggestions(fieldName)
+          .then((values) => {
+            if (currentRequest === requestId) {
+              renderAutocompletePanel(input, panel, uniqueValues([...values, ...local]));
+            }
+          })
+          .catch(() => {});
+      }, 180);
+    };
+    input.addEventListener("focus", refresh);
+    input.addEventListener("input", refresh);
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeAutocompletePanels();
+    });
+  }
+  document.addEventListener("mousedown", (event) => {
+    if (!event.target.closest(".autocomplete-host")) closeAutocompletePanels();
+  });
 }
 
 function renderEntrySelect(entries = state.entries) {
@@ -153,9 +350,94 @@ function renderEntryModal(entries) {
   document.querySelector("#entryModal").classList.add("active");
 }
 
-function slotStatusText(photo) {
+const trackedProductFields = [
+  "name",
+  "type_name",
+  "model",
+  "color1",
+  "color2",
+  "color3",
+  "extra",
+  "ean",
+];
+
+function updateFieldWarnings() {
+  for (const fieldName of trackedProductFields) {
+    const input = productForm.elements[fieldName];
+    if (!input) continue;
+    const label = input.closest("label");
+    if (!label) continue;
+    let warning = label.querySelector(".field-warning");
+    if (!warning) {
+      warning = document.createElement("span");
+      warning.className = "field-warning";
+      label.appendChild(warning);
+    }
+    const original = state.loadedEntryOriginal ? String(state.loadedEntryOriginal[fieldName] || "") : "";
+    const current = String(input.value || "");
+    const changed = Boolean(state.loadedEntryOriginal) && current !== original;
+    label.classList.toggle("field-changed", changed);
+    warning.textContent = "";
+    warning.classList.toggle("active", changed);
+    if (changed) {
+      const text = document.createElement("span");
+      const undo = document.createElement("button");
+      text.textContent = `Bylo: ${original || "(puste)"}`;
+      undo.type = "button";
+      undo.textContent = "Cofnij";
+      undo.addEventListener("click", () => {
+        input.value = original;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        updateFieldWarnings();
+      });
+      warning.append(text, undo);
+    }
+  }
+}
+
+function setupFieldChangeTracking() {
+  for (const fieldName of trackedProductFields) {
+    productForm.elements[fieldName]?.addEventListener("input", updateFieldWarnings);
+  }
+}
+
+function defaultSlotSource(photo) {
+  if (photo?.local && photo?.token) return "local";
+  if (photo?.ftp && (photo?.ftp_token || photo?.ftp_filename)) return "ftp";
+  return "";
+}
+
+function selectedSlotSource(prefix, photo) {
+  const selected = state.slotSources.get(prefix);
+  if (selected === "local" && photo?.token) return "local";
+  if (selected === "ftp" && (photo?.ftp_token || photo?.ftp_filename)) return "ftp";
+  return defaultSlotSource(photo);
+}
+
+function selectedPhotoToken(photo, prefix) {
+  const source = selectedSlotSource(prefix, photo);
+  if (source === "ftp") return photo?.ftp_token || "";
+  return photo?.token || "";
+}
+
+function markSlotDeletion(prefix, photo) {
+  if (!photo) return;
+  state.deletedSlots.set(prefix, {
+    prefix,
+    token: photo.token || "",
+    ftp_filename: photo.ftp_filename || "",
+    sql: Boolean(photo.sql),
+    filename: photo.filename || "",
+    source: selectedSlotSource(prefix, photo),
+  });
+}
+
+function slotStatusText(photo, prefix = "") {
   if (!photo) {
     return "Przeciagnij albo wybierz plik";
+  }
+  if (selectedSlotSource(prefix, photo) === "ftp" && photo.ftp_filename) {
+    return `FTP: ${photo.ftp_filename}`;
   }
   if (photo.filename) {
     return photo.filename;
@@ -173,7 +455,7 @@ function slotStatusText(photo) {
   return parts.length ? parts.join(" / ") : "Brak lokalnego pliku";
 }
 
-function renderSlotBadges(container, photo, file) {
+function renderSlotBadges(container, photo, file, prefix) {
   const badges = document.createElement("div");
   badges.className = "slot-badges";
   const statuses = [
@@ -189,46 +471,111 @@ function renderSlotBadges(container, photo, file) {
     badges.appendChild(badge);
   }
   for (const [key, label, title] of statuses) {
-    const badge = document.createElement("span");
-    badge.className = `slot-badge ${photo && photo[key] ? "on" : ""}`;
+    const canPreview = (key === "local" && photo?.token) || (key === "ftp" && photo?.ftp_filename);
+    const badge = document.createElement(canPreview ? "button" : "span");
+    badge.dataset.source = key;
+    badge.className = `slot-badge slot-badge-${key} ${photo && photo[key] ? "on" : ""} ${
+      selectedSlotSource(prefix, photo) === key ? "selected" : ""
+    }`;
     badge.title = title;
     badge.textContent = label;
+    if (canPreview) {
+      badge.type = "button";
+      badge.addEventListener("click", (event) => {
+        event.stopPropagation();
+        state.slotSources.set(prefix, key);
+        if (key === "ftp" && !photo.ftp_token) {
+          loadFtpPreview(photo, prefix).catch((error) => {
+            formStatus.textContent = error.message;
+          });
+        } else {
+          updateSlotPreview(prefix);
+        }
+      });
+    }
     badges.appendChild(badge);
   }
   container.appendChild(badges);
 }
 
-function clearSlotAssignment(prefix) {
+async function loadFtpPreview(photo, prefix) {
+  if (!photo?.ftp_filename) return;
+  const payload = await requestJson("/api/ftp-preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ean: formValue("ean") || photo.ean || "", filename: photo.ftp_filename }),
+  });
+  const updated = {
+    ...photo,
+    ftp_token: payload.token || "",
+    ftp_url: payload.url || "",
+    ftp_thumb_url: payload.thumb_url || "",
+  };
+  state.loadedPhotos.set(prefix, updated);
+  state.slotSources.set(prefix, "ftp");
+  updateSlotPreview(prefix);
+}
+
+function isSlotFit(prefix) {
+  return Boolean(state.slotFits.get(prefix));
+}
+
+function thumbnailUrl(photo, prefix) {
+  const source = selectedSlotSource(prefix, photo);
+  const url =
+    source === "ftp"
+      ? photo?.ftp_thumb_url || photo?.ftp_url || ""
+      : photo?.thumb_url || photo?.url || "";
+  if (!url) return "";
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}fit=${isSlotFit(prefix) ? "1" : "0"}&width=260&height=180`;
+}
+
+function clearSlotAssignment(prefix, options = {}) {
+  const markDelete = options.markDelete !== false;
+  if (markDelete) {
+    markSlotDeletion(prefix, state.loadedPhotos.get(prefix));
+  }
   state.files.delete(prefix);
   state.loadedPhotos.delete(prefix);
+  state.slotFits.delete(prefix);
+  state.slotSources.delete(prefix);
 }
 
 function setSlotFile(prefix, file) {
+  markSlotDeletion(prefix, state.loadedPhotos.get(prefix));
   state.files.set(prefix, file);
   state.loadedPhotos.delete(prefix);
+  state.slotSources.delete(prefix);
 }
 
 function getSlotAssignment(prefix) {
   if (state.files.has(prefix)) {
-    return { type: "file", value: state.files.get(prefix) };
+    return { type: "file", prefix, value: state.files.get(prefix), source: state.slotSources.get(prefix) || "" };
   }
   if (state.loadedPhotos.has(prefix)) {
-    return { type: "loaded", value: state.loadedPhotos.get(prefix) };
+    return { type: "loaded", prefix, value: state.loadedPhotos.get(prefix), source: state.slotSources.get(prefix) || "" };
   }
   return null;
 }
 
 function setSlotAssignment(prefix, assignment) {
+  const sourceFit = assignment ? isSlotFit(assignment.prefix || prefix) : false;
+  const sourceType = assignment?.source || "";
   clearSlotAssignment(prefix);
   if (!assignment) {
     return;
   }
   if (assignment.type === "file") {
     state.files.set(prefix, assignment.value);
+    state.slotFits.set(prefix, sourceFit);
+    if (sourceType) state.slotSources.set(prefix, sourceType);
     return;
   }
   if (assignment.type === "loaded") {
     state.loadedPhotos.set(prefix, { ...assignment.value, prefix, dirty: true });
+    state.slotFits.set(prefix, sourceFit);
+    if (sourceType) state.slotSources.set(prefix, sourceType);
   }
 }
 
@@ -240,10 +587,64 @@ function moveSlotContent(sourcePrefix, targetPrefix) {
   if (!source) {
     return;
   }
-  const target = getSlotAssignment(targetPrefix);
   setSlotAssignment(targetPrefix, source);
-  setSlotAssignment(sourcePrefix, target);
+  clearSlotAssignment(sourcePrefix);
+  formStatus.textContent = `Przeniesiono slot ${sourcePrefix} -> ${targetPrefix}.`;
   renderSlots();
+}
+
+function updateSlotPreview(prefix) {
+  const card = slotGrid.querySelector(`[data-slot-prefix="${prefix}"]`);
+  if (!card) {
+    renderSlots();
+    return;
+  }
+  const loadedPhoto = state.loadedPhotos.get(prefix);
+  const selectedFile = state.files.get(prefix);
+  const detail = card.querySelector(".slot-meta span");
+  const preview = card.querySelector(".slot-preview");
+  const previewImage = preview.querySelector("img");
+  const empty = preview.querySelector(".slot-empty");
+  const fitButton = card.querySelector(".slot-fit-button");
+  detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, prefix);
+  card.querySelectorAll(".slot-badge[data-source]").forEach((badge) => {
+    badge.classList.toggle("selected", selectedSlotSource(prefix, loadedPhoto) === badge.dataset.source);
+  });
+  if (fitButton) {
+    fitButton.classList.toggle("active", isSlotFit(prefix));
+  }
+  if (selectedFile) return;
+  preview.classList.remove("has-image", "thumb-loading", "loaded-photo");
+  previewImage.removeAttribute("src");
+  empty.textContent = "Brak pliku";
+  if (!loadedPhoto) return;
+  preview.classList.add("loaded-photo");
+  const thumb = thumbnailUrl(loadedPhoto, prefix);
+  if (loadedPhoto.is_image && thumb) {
+    preview.classList.add("thumb-loading");
+    previewImage.addEventListener(
+      "load",
+      () => {
+        preview.classList.remove("thumb-loading");
+      },
+      { once: true }
+    );
+    previewImage.addEventListener(
+      "error",
+      () => {
+        preview.classList.remove("thumb-loading", "has-image");
+        empty.textContent = "Podglad niedostepny";
+      },
+      { once: true }
+    );
+    previewImage.src = thumb;
+    preview.classList.add("has-image");
+    return;
+  }
+  empty.textContent =
+    selectedSlotSource(prefix, loadedPhoto) === "ftp" && loadedPhoto.ftp_filename && !loadedPhoto.ftp_token
+      ? "Kliknij FTP, aby pobrac podglad"
+      : slotStatusText(loadedPhoto, prefix);
 }
 
 function renderSlots(slots = state.slots) {
@@ -259,14 +660,55 @@ function renderSlots(slots = state.slots) {
     const preview = node.querySelector(".slot-preview");
     const previewImage = node.querySelector("img");
     const empty = node.querySelector(".slot-empty");
+    const meta = node.querySelector(".slot-meta");
     const loadedPhoto = state.loadedPhotos.get(slot.prefix);
     const selectedFile = state.files.get(slot.prefix);
+    const overlay = document.createElement("div");
+    const controls = document.createElement("div");
+    const fitButton = document.createElement("button");
+    const clearButton = document.createElement("button");
+    node.dataset.slotPrefix = slot.prefix;
 
     title.textContent = `${slot.prefix} - ${slot.label}`;
-    detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto);
+    detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, slot.prefix);
     input.name = `slot_${slot.prefix}`;
-    node.draggable = Boolean(selectedFile || loadedPhoto?.token);
-    renderSlotBadges(node.querySelector(".slot-meta"), loadedPhoto, selectedFile);
+    previewImage.draggable = false;
+    previewImage.loading = "lazy";
+    previewImage.decoding = "async";
+    node.draggable = Boolean(selectedFile || loadedPhoto?.token || loadedPhoto?.ftp_token);
+    renderSlotBadges(meta, loadedPhoto, selectedFile, slot.prefix);
+    overlay.className = "slot-loading-overlay";
+    overlay.innerHTML = '<span>Wczytywanie</span><div class="progress-line"><i></i></div>';
+    if (state.photosLoading) {
+      preview.appendChild(overlay);
+    }
+    controls.className = "slot-controls";
+    fitButton.type = "button";
+    fitButton.className = `slot-fit-button ${isSlotFit(slot.prefix) ? "active" : ""}`;
+    fitButton.textContent = "FIT";
+    fitButton.title = "Dopasuj zapis tego slotu do zawartosci obrazu";
+    fitButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      state.slotFits.set(slot.prefix, !isSlotFit(slot.prefix));
+      updateSlotPreview(slot.prefix);
+    });
+    clearButton.type = "button";
+    clearButton.className = "slot-clear-button";
+    clearButton.textContent = "Usun";
+    clearButton.title = "Usun plik z tego slotu w formularzu";
+    clearButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      clearSlotAssignment(slot.prefix);
+      formStatus.textContent = `Wyczyszczono slot ${slot.prefix}.`;
+      renderSlots();
+    });
+    if (selectedFile || loadedPhoto) {
+      if (selectedFile || loadedPhoto?.token || loadedPhoto?.ftp_token) {
+        controls.appendChild(fitButton);
+      }
+      controls.appendChild(clearButton);
+      meta.appendChild(controls);
+    }
 
     if (selectedFile) {
       if (selectedFile.type.startsWith("image/")) {
@@ -277,41 +719,71 @@ function renderSlots(slots = state.slots) {
       }
     } else if (loadedPhoto) {
       preview.classList.add("loaded-photo");
-      if (loadedPhoto.is_image && loadedPhoto.url) {
-        previewImage.src = loadedPhoto.url;
+      const thumb = thumbnailUrl(loadedPhoto, slot.prefix);
+      if (loadedPhoto.is_image && thumb) {
+        preview.classList.add("thumb-loading");
+        previewImage.addEventListener("load", () => {
+          preview.classList.remove("thumb-loading");
+        });
+        previewImage.addEventListener("error", () => {
+          preview.classList.remove("thumb-loading", "has-image");
+          empty.textContent = "Podglad niedostepny";
+        });
+        previewImage.src = thumb;
         preview.classList.add("has-image");
       } else {
-        empty.textContent = slotStatusText(loadedPhoto);
+        empty.textContent =
+          selectedSlotSource(slot.prefix, loadedPhoto) === "ftp" && loadedPhoto.ftp_filename && !loadedPhoto.ftp_token
+            ? "Kliknij FTP, aby pobrac podglad"
+            : slotStatusText(loadedPhoto, slot.prefix);
       }
     }
 
     node.addEventListener("dragstart", (event) => {
       const assignment = getSlotAssignment(slot.prefix);
-      if (!assignment || (assignment.type === "loaded" && !assignment.value.token)) {
+      if (!assignment || (assignment.type === "loaded" && !selectedPhotoToken(assignment.value, slot.prefix))) {
         event.preventDefault();
         return;
       }
+      state.draggedSlotPrefix = slot.prefix;
+      event.dataTransfer.setData("application/x-picorg-slot", slot.prefix);
       event.dataTransfer.setData("text/plain", slot.prefix);
       event.dataTransfer.effectAllowed = "move";
     });
     node.addEventListener("dragover", (event) => {
       event.preventDefault();
       node.classList.add("drag-over");
-      event.dataTransfer.dropEffect = event.dataTransfer.files?.length ? "copy" : "move";
+      const sourcePrefix =
+        event.dataTransfer.getData("application/x-picorg-slot") ||
+        state.draggedSlotPrefix ||
+        event.dataTransfer.getData("text/plain");
+      event.dataTransfer.dropEffect = sourcePrefix ? "move" : "copy";
     });
     node.addEventListener("dragleave", () => {
+      node.classList.remove("drag-over");
+    });
+    node.addEventListener("dragend", () => {
+      state.draggedSlotPrefix = "";
       node.classList.remove("drag-over");
     });
     node.addEventListener("drop", (event) => {
       event.preventDefault();
       node.classList.remove("drag-over");
-      const file = event.dataTransfer.files && event.dataTransfer.files[0] ? event.dataTransfer.files[0] : null;
-      if (file) {
-        setSlotFile(slot.prefix, file);
-        renderSlots();
+      const sourcePrefix =
+        event.dataTransfer.getData("application/x-picorg-slot") ||
+        state.draggedSlotPrefix ||
+        event.dataTransfer.getData("text/plain");
+      if (sourcePrefix && getSlotAssignment(sourcePrefix)) {
+        state.draggedSlotPrefix = "";
+        moveSlotContent(sourcePrefix, slot.prefix);
         return;
       }
-      moveSlotContent(event.dataTransfer.getData("text/plain"), slot.prefix);
+      const file = event.dataTransfer.files && event.dataTransfer.files[0] ? event.dataTransfer.files[0] : null;
+      if (file) {
+        state.draggedSlotPrefix = "";
+        setSlotFile(slot.prefix, file);
+        renderSlots();
+      }
     });
 
     input.addEventListener("change", () => {
@@ -405,6 +877,117 @@ function showResult(payload) {
     list.appendChild(item);
   }
   resultOutput.appendChild(list);
+  if (payload.ftp?.enabled) {
+    const ftp = document.createElement("p");
+    ftp.className = payload.ftp.error ? "error-text" : "ok-text";
+    ftp.textContent = payload.ftp.error
+      ? `FTP: blad - ${payload.ftp.error}`
+      : `FTP: wyslano ${payload.ftp.uploaded || 0}, usunieto ${payload.ftp.deleted || 0}, ${payload.ftp.elapsed_ms || 0} ms`;
+    resultOutput.appendChild(ftp);
+  }
+  if (payload.local_delete?.deleted || payload.local_delete?.skipped) {
+    const deletions = document.createElement("p");
+    deletions.className = "ok-text";
+    deletions.textContent = `Usunieto lokalnie: ${payload.local_delete.deleted || 0}`;
+    resultOutput.appendChild(deletions);
+  }
+  if (payload.sql?.enabled) {
+    const sql = document.createElement("p");
+    sql.className = payload.sql.error ? "error-text" : "ok-text";
+    sql.textContent = payload.sql.error
+      ? `SQL: blad - ${payload.sql.error}`
+      : `SQL: aktualizacje ${payload.sql.updated || 0}, czyszczenia ${payload.sql.cleared || 0}`;
+    resultOutput.appendChild(sql);
+  }
+}
+
+function entryFromHistoryGroup(group) {
+  for (const item of group.items || []) {
+    if (item.details?.entry) return item.details.entry;
+  }
+  return {};
+}
+
+function historyEntryLabel(entry) {
+  return [entry.NAZWA || entry.name, entry.TYP || entry.type_name, entry.MODEL || entry.model]
+    .filter(Boolean)
+    .join(" / ");
+}
+
+function renderHistoryDetails(group) {
+  historyDetailTitle.textContent = `Historia EAN ${group.ean}`;
+  historyDetailOutput.textContent = "";
+  for (const item of group.items || []) {
+    const row = document.createElement("article");
+    const meta = document.createElement("div");
+    const summary = document.createElement("strong");
+    const details = document.createElement("span");
+    row.className = "history-item";
+    meta.className = "history-meta";
+    meta.textContent = `${item.time || ""} | ${item.user || ""}`;
+    summary.textContent = item.summary || item.action || "Zmiana";
+    const saved = item.details?.saved_files?.length || 0;
+    const deleted = item.details?.deleted_slots?.length || 0;
+    const ftp = item.details?.ftp;
+    const sql = item.details?.sql;
+    details.textContent = [
+      saved ? `zapisane pliki: ${saved}` : "",
+      deleted ? `usuniete sloty: ${deleted}` : "",
+      ftp?.enabled ? `FTP wyslano/usunieto: ${ftp.uploaded || 0}/${ftp.deleted || 0}${ftp.error ? `, blad: ${ftp.error}` : ""}` : "",
+      sql?.enabled ? `SQL aktualizacje/czyszczenia: ${sql.updated || 0}/${sql.cleared || 0}${sql.error ? `, blad: ${sql.error}` : ""}` : "",
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    row.append(meta, summary, details);
+    historyDetailOutput.appendChild(row);
+  }
+  document.querySelector("#historyDetailModal").classList.add("active");
+}
+
+function renderHistory(payload) {
+  state.history = payload;
+  const selectedUser = historyUserFilter.value;
+  historyUserFilter.textContent = "";
+  const all = document.createElement("option");
+  all.value = "";
+  all.textContent = "Wszyscy uzytkownicy";
+  historyUserFilter.appendChild(all);
+  for (const user of payload.users || []) {
+    const option = document.createElement("option");
+    option.value = user;
+    option.textContent = user;
+    option.selected = user === selectedUser;
+    historyUserFilter.appendChild(option);
+  }
+  historyOutput.textContent = "";
+  const groups = payload.groups || [];
+  if (!groups.length) {
+    historyOutput.className = "history-output empty-state";
+    historyOutput.textContent = "Brak historii dla wybranego filtra.";
+    return;
+  }
+  historyOutput.className = "history-output";
+  for (const group of groups) {
+    const entry = entryFromHistoryGroup(group);
+    const row = document.createElement("button");
+    const title = document.createElement("strong");
+    const fields = document.createElement("span");
+    const meta = document.createElement("small");
+    row.type = "button";
+    row.className = "history-summary-row";
+    title.textContent = `EAN ${group.ean}`;
+    fields.textContent = historyEntryLabel(entry) || "Brak danych pól tekstowych";
+    meta.textContent = `${(group.items || []).length} zmian | ostatnio: ${group.items?.[0]?.time || ""}`;
+    row.append(title, fields, meta);
+    row.addEventListener("click", () => renderHistoryDetails(group));
+    historyOutput.appendChild(row);
+  }
+}
+
+async function loadHistory() {
+  const params = new URLSearchParams({ user: historyUserFilter.value || "", limit: "300" });
+  const payload = await requestJson(`/api/history?${params.toString()}`);
+  renderHistory(payload);
 }
 
 function formPayload() {
@@ -422,20 +1005,40 @@ function formPayload() {
 }
 
 async function loadPhotosForEntry(entry) {
-  const payload = await requestJson("/api/entries/photos", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(entry),
-  });
+  const started = performance.now();
+  state.photosLoading = true;
   state.loadedPhotos.clear();
-  for (const photo of payload.photos || []) {
-    state.loadedPhotos.set(photo.prefix, photo);
-  }
+  state.deletedSlots.clear();
+  state.slotSources.clear();
   renderSlots();
+  try {
+    const payload = await requestJson("/api/entries/photos", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(entry),
+    });
+    state.loadedPhotos.clear();
+    state.deletedSlots.clear();
+    state.slotSources.clear();
+    for (const photo of payload.photos || []) {
+      state.loadedPhotos.set(photo.prefix, photo);
+      const source = defaultSlotSource(photo);
+      if (source) state.slotSources.set(photo.prefix, source);
+    }
+    state.lastLookupMs = performance.now() - started;
+  } finally {
+    state.photosLoading = false;
+    updateRuntimeMetrics();
+    renderSlots();
+  }
 }
 
 function fillForm(entry, options = {}) {
   state.suppressAutoSearch = true;
+  state.loadedEntryOriginal = { ...entry };
+  state.slotFits.clear();
+  state.deletedSlots.clear();
+  state.slotSources.clear();
   productForm.elements.product_id.value = entry.product_id || "";
   productForm.elements.name.value = entry.name || "";
   productForm.elements.type_name.value = entry.type_name || "";
@@ -446,6 +1049,7 @@ function fillForm(entry, options = {}) {
   productForm.elements.extra.value = entry.extra || "";
   productForm.elements.ean.value = entry.ean || "";
   formStatus.textContent = entry.product_id ? `Wczytano ${entry.product_id}` : "Wczytano wpis";
+  updateFieldWarnings();
   setTimeout(() => {
     state.suppressAutoSearch = false;
   }, 200);
@@ -460,9 +1064,11 @@ async function refreshData() {
   const payload = await requestJson("/api/data");
   state.lists = payload.lists || {};
   state.entries = payload.entries || [];
+  state.fileIndex = payload.file_index || state.fileIndex;
   renderDatalists();
   renderEntrySelect();
   renderListEditor();
+  updateRuntimeMetrics();
 }
 
 async function loadBootstrap() {
@@ -473,10 +1079,18 @@ async function loadBootstrap() {
   updateAdminUi();
   state.lists = payload.lists || {};
   state.entries = payload.entries || [];
+  state.fileIndex = payload.file_index || null;
   renderDatalists();
   renderEntrySelect();
   renderSlots(payload.slots || []);
   renderListEditor();
+  updateRuntimeMetrics();
+}
+
+async function refreshFileIndexStatus() {
+  const payload = await requestJson("/api/file-index/status");
+  state.fileIndex = payload;
+  updateRuntimeMetrics();
 }
 
 async function searchByEan() {
@@ -539,6 +1153,8 @@ async function saveEntryOnly() {
   if (entry.product_id) {
     productForm.elements.product_id.value = entry.product_id;
   }
+  state.loadedEntryOriginal = { ...formPayload(), product_id: productForm.elements.product_id.value };
+  updateFieldWarnings();
   formStatus.textContent = entry.updated ? "Zaktualizowano wpis." : "Dodano nowy wpis.";
   await refreshData();
 }
@@ -676,6 +1292,28 @@ function diagnosticButton(target, label) {
   return button;
 }
 
+function fileIndexRefreshButton() {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary-button";
+  button.textContent = "Odswiez indeks";
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    settingsStatus.textContent = "Uruchamiam indeksowanie...";
+    try {
+      const payload = await requestJson("/api/file-index/refresh", { method: "POST" });
+      state.fileIndex = payload;
+      updateRuntimeMetrics();
+      settingsStatus.textContent = payload.label || "Indeksowanie uruchomione.";
+    } catch (error) {
+      settingsStatus.textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
 function ensureSqlColumnsDatalist() {
   let datalist = document.querySelector("#sqlColumnsList");
   if (!datalist) {
@@ -709,6 +1347,9 @@ function settingsSaveButton(form, buildPayload) {
     });
     state.currentUser = state.settings.current_user || state.currentUser;
     updateAdminUi();
+    if (Array.isArray(state.settings.slots)) {
+      renderSlots(state.settings.slots);
+    }
     settingsStatus.textContent = "Zapisano.";
     renderSettings();
   });
@@ -750,7 +1391,7 @@ function renderSettingsApp() {
       "Przed zapisem zdjecia sa przycinane do widocznej zawartosci."
     ),
     colorGroup,
-    actionRow(diagnosticButton("local", "Test folderow backendu"))
+    actionRow(diagnosticButton("local", "Test folderow backendu"), fileIndexRefreshButton())
   );
   settingsSaveButton(form, (data) => ({
     app: {
@@ -851,20 +1492,43 @@ function renderSettingsSlots() {
   note.className = "settings-note wide-field";
   note.textContent = "Kazdy slot moze miec przypisane pole SQL uzywane przy sprawdzaniu i aktualizacji wpisu.";
   const list = document.createElement("div");
+  const addButton = document.createElement("button");
   list.className = "slot-settings-list";
-  for (const slot of state.settings.slots || []) {
+  const nextPrefix = () => {
+    const used = [...list.querySelectorAll('[name="prefix"]')]
+      .map((input) => parseInt(input.value, 10))
+      .filter((value) => Number.isFinite(value));
+    const next = Math.max(0, ...used) + 1;
+    return String(next).padStart(2, "0");
+  };
+  const addSlotRow = (slot = {}) => {
     const row = document.createElement("div");
+    const remove = document.createElement("button");
     row.className = "slot-settings-row";
     const column = inputField("sql_column", "Pole SQL", slot.sql_column || "");
     column.querySelector("input").setAttribute("list", "sqlColumnsList");
+    remove.type = "button";
+    remove.className = "secondary-button";
+    remove.textContent = "Usun";
+    remove.addEventListener("click", () => row.remove());
     row.append(
       inputField("prefix", "ID", slot.prefix),
       inputField("label", "Nazwa", slot.label),
-      column
+      column,
+      remove
     );
     list.appendChild(row);
+  };
+  for (const slot of state.settings.slots || []) {
+    addSlotRow(slot);
   }
-  form.append(note, list);
+  addButton.type = "button";
+  addButton.className = "secondary-button";
+  addButton.textContent = "Dodaj slot";
+  addButton.addEventListener("click", () => {
+    addSlotRow({ prefix: nextPrefix(), label: `Slot ${nextPrefix()}`, sql_column: "" });
+  });
+  form.append(note, list, actionRow(addButton));
   settingsSaveButton(form, () => {
     const slots = [...form.querySelectorAll(".slot-settings-row")].map((row) => ({
       prefix: row.querySelector('[name="prefix"]').value,
@@ -1007,10 +1671,33 @@ document.querySelectorAll("[data-close-modal]").forEach((button) => {
   button.addEventListener("click", closeModals);
 });
 
+document.querySelectorAll("[data-close-history-detail]").forEach((button) => {
+  button.addEventListener("click", () => {
+    document.querySelector("#historyDetailModal")?.classList.remove("active");
+  });
+});
+
+themeToggleButton?.addEventListener("click", () => {
+  state.theme = state.theme === "dark" ? "light" : "dark";
+  applyTheme();
+});
+
 document.querySelectorAll(".settings-tab").forEach((button) => {
   button.addEventListener("click", () => {
     state.activeSettingsTab = button.dataset.settingsTab;
     renderSettings();
+  });
+});
+
+historyUserFilter?.addEventListener("change", () => {
+  loadHistory().catch((error) => {
+    historyOutput.textContent = error.message;
+  });
+});
+
+historyRefreshButton?.addEventListener("click", () => {
+  loadHistory().catch((error) => {
+    historyOutput.textContent = error.message;
   });
 });
 
@@ -1031,15 +1718,29 @@ productForm.addEventListener("submit", async (event) => {
   const data = new FormData(productForm);
   for (const [prefix, file] of state.files.entries()) {
     data.set(`slot_${prefix}`, file, file.name);
+    if (isSlotFit(prefix)) {
+      data.set(`slot_fit_${prefix}`, "1");
+    }
   }
   for (const [prefix, photo] of state.loadedPhotos.entries()) {
-    if (!state.files.has(prefix) && photo.dirty && photo.token) {
-      data.set(`existing_slot_${prefix}`, photo.token);
+    const token = selectedPhotoToken(photo, prefix);
+    if (!state.files.has(prefix) && photo.dirty && token) {
+      data.set(`existing_slot_${prefix}`, token);
+      if (isSlotFit(prefix)) {
+        data.set(`slot_fit_${prefix}`, "1");
+      }
     }
+  }
+  for (const [prefix, item] of state.deletedSlots.entries()) {
+    data.set(`delete_slot_${prefix}`, "1");
+    if (item.token) data.set(`delete_local_slot_${prefix}`, item.token);
+    if (item.ftp_filename) data.set(`delete_ftp_slot_${prefix}`, item.ftp_filename);
+    if (item.sql) data.set(`delete_sql_slot_${prefix}`, "1");
   }
   try {
     const payload = await requestJson("/api/process", { method: "POST", body: data });
     showResult(payload);
+    state.deletedSlots.clear();
     await refreshData();
     setBusy(false, "Zakonczono.");
   } catch (error) {
@@ -1053,9 +1754,14 @@ clearButton.addEventListener("click", () => {
   productForm.elements.product_id.value = "";
   state.files.clear();
   state.loadedPhotos.clear();
+  state.slotFits.clear();
+  state.deletedSlots.clear();
+  state.slotSources.clear();
+  state.loadedEntryOriginal = null;
   state.lastAutoSearchKey = "";
   renderSlots();
   renderEntrySelect();
+  updateFieldWarnings();
   clearResult();
   formStatus.textContent = "";
 });
@@ -1089,4 +1795,10 @@ logoutButton.addEventListener("click", async () => {
   window.location.href = "/";
 });
 
+setupAutocomplete();
+setupFieldChangeTracking();
+applyTheme();
 loadBootstrap().catch(showError);
+setInterval(() => {
+  refreshFileIndexStatus().catch(() => {});
+}, 5000);

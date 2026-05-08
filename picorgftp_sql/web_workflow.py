@@ -66,6 +66,7 @@ class WebUploadedSlot:
     label: str
     source_path: str
     original_filename: str = ""
+    content_fit: bool = False
 
 
 @dataclass(frozen=True)
@@ -180,7 +181,13 @@ def _resample_filter():
     return getattr(Image, "LANCZOS", getattr(Image, "BICUBIC", 3))
 
 
-def _save_processed_file(source_path: str, target_path: str, options: WebProcessingOptions) -> None:
+def _save_processed_file(
+    source_path: str,
+    target_path: str,
+    options: WebProcessingOptions,
+    *,
+    content_fit: bool = False,
+) -> None:
     """Copy or lightly process a browser-uploaded file to its target path."""
 
     ext = os.path.splitext(source_path)[1].lower()
@@ -193,7 +200,7 @@ def _save_processed_file(source_path: str, target_path: str, options: WebProcess
 
     with Image.open(source_path) as image:
         work = image.copy()
-        if options.auto_content_fit:
+        if options.auto_content_fit or content_fit:
             work = fit_image_to_content(work)
         if options.resize_enabled:
             max_dim = max(1, int(options.max_dim or 2000))
@@ -264,7 +271,7 @@ def process_web_uploads(
             ext.lower(),
         )
         target_path = os.path.join(output_dir, filename)
-        _save_processed_file(source_path, target_path, options)
+        _save_processed_file(source_path, target_path, options, content_fit=upload.content_fit)
         saved_files.append(
             WebProcessedFile(
                 prefix=upload.prefix,
