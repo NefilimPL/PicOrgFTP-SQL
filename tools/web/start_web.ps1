@@ -10,6 +10,7 @@ $PidFile = Join-Path $Root ".picorg_web.pid"
 $OutLog = Join-Path $Root "picorg_web_out.log"
 $ErrLog = Join-Path $Root "picorg_web_err.log"
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
+$MinPythonVersion = if ($env:PICORG_WEB_MIN_PYTHON) { $env:PICORG_WEB_MIN_PYTHON } else { "3.10" }
 $FirewallEnabled = $env:PICORG_WEB_FIREWALL -ne "0"
 $FirewallRemoveOnStop = $env:PICORG_WEB_FIREWALL_CLOSE -ne "0"
 $CustomFirewallRuleName = [bool]$env:PICORG_WEB_FIREWALL_RULE
@@ -49,16 +50,139 @@ function Test-Administrator {
     }
 }
 
-function Test-Python($Candidate) {
+function Get-MinPythonParts {
+    $parts = ([string]$MinPythonVersion).Split(".")
+    $major = 3
+    $minor = 10
+    if ($parts.Count -ge 1) {
+        [int]::TryParse($parts[0], [ref]$major) | Out-Null
+    }
+    if ($parts.Count -ge 2) {
+        [int]::TryParse($parts[1], [ref]$minor) | Out-Null
+    }
+    return [pscustomobject]@{ Major = $major; Minor = $minor }
+}
+
+function Get-PythonInfo($Candidate) {
+    if (-not $Candidate) {
+        return $null
+    }
     try {
-        & $Candidate --version *> $null
-        return $LASTEXITCODE -eq 0
+        $code = "import sys; print('%d.%d.%d' % sys.version_info[:3]); print(sys.executable)"
+        $output = & $Candidate -c $code 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $output -or $output.Count -lt 2) {
+            return $null
+        }
+        $version = [string]$output[0]
+        $versionParts = $version.Split(".")
+        return [pscustomobject]@{
+            Command = [string]$Candidate
+            Executable = [string]$output[1]
+            Version = $version
+            Major = [int]$versionParts[0]
+            Minor = [int]$versionParts[1]
+            Micro = [int]$versionParts[2]
+        }
     } catch {
-        return $false
+        return $null
     }
 }
 
-$Python = if ((Test-Path $VenvPython) -and (Test-Python $VenvPython)) { $VenvPython } else { "python" }
+function Test-PythonVersionAllowed($Info) {
+    if (-not $Info) {
+        return $false
+    }
+    $min = Get-MinPythonParts
+    if ($Info.Major -gt $min.Major) {
+        return $true
+    }
+    if ($Info.Major -eq $min.Major -and $Info.Minor -ge $min.Minor) {
+        return $true
+    }
+    return $false
+}
+
+function Add-PythonCandidate([ref]$Candidates, $Candidate) {
+    if (-not $Candidate) {
+        return
+    }
+    $text = [string]$Candidate
+    if ($Candidates.Value -notcontains $text) {
+        $Candidates.Value += $text
+    }
+}
+
+function Get-PyLauncherExecutable($Version) {
+    if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
+        return ""
+    }
+    try {
+        $code = "import sys; print(sys.executable)"
+        $output = & py "-$Version" -c $code 2>$null
+        if ($LASTEXITCODE -eq 0 -and $output) {
+            return [string]$output[0]
+        }
+    } catch {
+    }
+    return ""
+}
+
+function Select-WebPython {
+    $candidates = @()
+    Add-PythonCandidate ([ref]$candidates) $env:PICORG_WEB_PYTHON
+    if (Test-Path $VenvPython) {
+        Add-PythonCandidate ([ref]$candidates) $VenvPython
+    }
+    foreach ($version in @("3.13", "3.12", "3.11", "3.10", "3")) {
+        Add-PythonCandidate ([ref]$candidates) (Get-PyLauncherExecutable $version)
+    }
+    foreach ($versionDir in @("Python313", "Python312", "Python311", "Python310")) {
+        foreach ($rootDir in @($env:LOCALAPPDATA, $env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+            if ($rootDir) {
+                $relativePath = if ($rootDir -eq $env:LOCALAPPDATA) {
+                    "Programs\Python\$versionDir\python.exe"
+                } else {
+                    "$versionDir\python.exe"
+                }
+                Add-PythonCandidate ([ref]$candidates) (Join-Path $rootDir $relativePath)
+            }
+        }
+    }
+    foreach ($commandName in @("python", "python3")) {
+        $command = Get-Command $commandName -ErrorAction SilentlyContinue
+        if ($command) {
+            Add-PythonCandidate ([ref]$candidates) $command.Source
+        }
+    }
+
+    $rejected = @()
+    foreach ($candidate in $candidates) {
+        if ($candidate -and ($candidate -in @("python", "python3") -or (Test-Path $candidate))) {
+            $info = Get-PythonInfo $candidate
+            if (Test-PythonVersionAllowed $info) {
+                return $info
+            }
+            if ($info) {
+                $rejected += "$($info.Executable) ($($info.Version))"
+            }
+        }
+    }
+
+    Write-Info "Nie znaleziono Pythona >= $MinPythonVersion."
+    if ($rejected.Count -gt 0) {
+        Write-Info "Odrzucone wersje:"
+        $rejected | ForEach-Object { Write-Info "  $_" }
+    }
+    Write-Info "Zainstaluj Python 3.10+ albo ustaw sciezke:"
+    Write-Info '$env:PICORG_WEB_PYTHON="C:\Path\To\Python312\python.exe"'
+    return $null
+}
+
+$PythonInfo = Select-WebPython
+if (-not $PythonInfo) {
+    exit 1
+}
+$Python = $PythonInfo.Executable
 
 function Get-ProcessCommandLine($PidValue) {
     try {
@@ -600,23 +724,52 @@ function Write-RunMetadata($PidValue, $FirewallState) {
 }
 
 function Test-WebDeps {
-    $check = "__import__('fastapi'); __import__('uvicorn'); __import__('multipart')"
+    $requiredModules = @(
+        "fastapi",
+        "uvicorn",
+        "multipart",
+        "PIL",
+        "openpyxl",
+        "certifi",
+        "mysql.connector",
+        "pyodbc"
+    )
+    $missing = Get-MissingPythonModules $requiredModules
+    if ($missing.Count -eq 0) {
+        return $true
+    }
+    Write-Info "Brak wymaganych modulow dla wybranego Pythona:"
+    foreach ($item in $missing) {
+        Write-Info "  $($item.Module): $($item.Error)"
+    }
+    return $false
+}
+
+function Get-MissingPythonModules($Modules) {
+    $missing = @()
     Push-Location $Root
     try {
-        & $Python -c $check *> $null
-        return $LASTEXITCODE -eq 0
+        foreach ($module in $Modules) {
+            $output = & $Python -c "import $module" 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                $message = (($output | Out-String).Trim())
+                if (-not $message) {
+                    $message = "import failed"
+                }
+                $missing += [pscustomobject]@{
+                    Module = $module
+                    Error = $message
+                }
+            }
+        }
     } finally {
         Pop-Location
     }
+    return $missing
 }
 
 function Write-PythonInfo {
-    try {
-        $version = & $Python --version 2>&1
-        Write-Info "Python: $Python ($version)"
-    } catch {
-        Write-Info "Python: $Python"
-    }
+    Write-Info "Python: $($PythonInfo.Executable) ($($PythonInfo.Version))"
 }
 
 function Test-WebAppImport {
@@ -648,6 +801,12 @@ Write-PythonInfo
 
 if (-not (Test-WebDeps)) {
     Install-WebDeps
+    if (-not (Test-WebDeps)) {
+        Write-Info "Nie wszystkie wymagane moduly sa dostepne po instalacji."
+        Write-Info "Sprawdz recznie:"
+        Write-Info "`"$Python`" -m pip install -r `"$Root\requirements-web.txt`""
+        exit 1
+    }
 }
 
 if (-not (Test-WebAppImport)) {
