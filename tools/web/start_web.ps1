@@ -7,8 +7,9 @@ $LocalUrl = "http://127.0.0.1:$Port"
 $OpenBrowser = $env:PICORG_WEB_NO_BROWSER -ne "1"
 $StarterMenu = $env:PICORG_WEB_STARTER_MENU -ne "0"
 $PidFile = Join-Path $Root ".picorg_web.pid"
-$OutLog = Join-Path $Root "picorg_web_out.log"
-$ErrLog = Join-Path $Root "picorg_web_err.log"
+$LogDir = Join-Path $Root "logs"
+$OutLog = Join-Path $LogDir "picorg_web_out.log"
+$ErrLog = Join-Path $LogDir "picorg_web_err.log"
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
 $MinPythonVersion = if ($env:PICORG_WEB_MIN_PYTHON) { $env:PICORG_WEB_MIN_PYTHON } else { "3.10" }
 $FirewallEnabled = $env:PICORG_WEB_FIREWALL -ne "0"
@@ -28,6 +29,8 @@ $FirewallProfiles = if ($env:PICORG_WEB_FIREWALL_PROFILE) {
 function Write-Info($Text) {
     Write-Host "[WEB] $Text"
 }
+
+New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 
 function Set-WebPort($NewPort) {
     $script:Port = [int]$NewPort

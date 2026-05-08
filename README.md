@@ -21,7 +21,7 @@ The script provides a graphical interface where you enter the product name, type
 3. If `enable_ftp_update` is enabled, new files are uploaded to the FTP server and old versions with the same EAN can be removed.
 4. If `enable_sql_update` is enabled, an SQL query is executed to update image paths in the `sql` or `mysql` database.
 
-Program actions are logged to `changes_log.txt` and errors to `error_log.txt`. On first run a `config.json` file with connection settings is created.
+Program actions are logged to `logs/changes_log.txt` and errors to `logs/error_log.txt`. On first run a `config.json` file with connection settings is created.
 
 ### Features
 - Product form with auto-complete lists (name/type/model/colors/extras) backed by an Excel workbook; prompts to add missing values and includes a list editor.
@@ -33,7 +33,7 @@ Program actions are logged to `changes_log.txt` and errors to `error_log.txt`. O
 - SQL integration (MS SQL via ODBC or MySQL): connection test, parameterized update query, optional presence check per slot, column detection, and drag-and-drop column mapping.
 - Customizable photo fields (add/rename/remove slot definitions) with SQL mapping and translation suggestions (Google/MyMemory/DeepL) saved to localization files.
 - Settings & localization: base directory in `local_settings.json`, language switch (auto/pl/ua/eng), encrypted secrets via `APP_SECRET`, admin-unlocked settings where required.
-- Diagnostics & logs: error test buttons, code/UI diagnostics reports, `changes_log.txt`/`error_log.txt` plus the in-app log with a clear button.
+- Diagnostics & logs: error test buttons, code/UI diagnostics reports, `logs/changes_log.txt`/`logs/error_log.txt` plus the in-app log with a clear button.
 
 ### Configuration
 The application stores its working files in the directory defined in the `local_settings.json` file located next to `PicOrgFTP-SQL.pyw`. The file is created automatically on first launch; if it does not contain a path, the script asks for a folder and saves the selected location back to `local_settings.json`. You can use forward slashes in the path (e.g. `C:/TEST/GUI_ZDJ`) to avoid escaping backslashes on Windows. If the configured folder later becomes unavailable, the application asks you to point to a new location.
@@ -108,7 +108,7 @@ Skrypt udostępnia graficzny interfejs, w którym wprowadza się nazwę, typ, mo
 3. Jeżeli włączono `enable_ftp_update`, nowe pliki są wysyłane na serwer FTP, a stare wersje o tym samym EAN mogą zostać usunięte.
 4. Jeżeli włączono `enable_sql_update`, wykonywane jest zapytanie SQL, które aktualizuje ścieżki obrazów w bazie `sql` lub `mysql`.
 
-Działania programu są zapisywane w `changes_log.txt`, a ewentualne błędy w `error_log.txt`. Przy pierwszym uruchomieniu tworzony jest plik `config.json` z ustawieniami połączeń.
+Działania programu są zapisywane w `logs/changes_log.txt`, a ewentualne błędy w `logs/error_log.txt`. Przy pierwszym uruchomieniu tworzony jest plik `config.json` z ustawieniami połączeń.
 
 ### Funkcje
 - Formularz danych produktu z listami podpowiedzi (nazwa/typ/model/kolory/dodatki) opartymi o plik Excel; pytania o dodanie nowych pozycji i edytor list.
@@ -120,7 +120,7 @@ Działania programu są zapisywane w `changes_log.txt`, a ewentualne błędy w `
 - SQL (MS SQL przez ODBC lub MySQL): test połączenia, zapytanie aktualizujące, opcjonalne sprawdzanie obecności dla slotów, wykrywanie kolumn i mapowanie przez drag-and-drop.
 - Konfigurowalne pola zdjęć (dodawanie/zmiana/usuwanie slotów) wraz z mapowaniem SQL i podpowiedziami tłumaczeń (Google/MyMemory/DeepL) zapisywanymi do plików lokalizacji.
 - Ustawienia i język: katalog roboczy w `local_settings.json`, przełączanie języka (auto/pl/ua/eng), szyfrowanie sekretów przez `APP_SECRET`, blokada edycji wrażliwych ustawień bez uprawnień administratora.
-- Diagnostyka i logi: testy błędów, raporty diagnostyki kodu/UI, `changes_log.txt` i `error_log.txt` plus log w aplikacji z przyciskiem czyszczenia.
+- Diagnostyka i logi: testy błędów, raporty diagnostyki kodu/UI, `logs/changes_log.txt` i `logs/error_log.txt` plus log w aplikacji z przyciskiem czyszczenia.
 
 ### Konfiguracja
 Aplikacja zapisuje pliki robocze w katalogu zdefiniowanym w pliku `local_settings.json`, znajdującym się obok `PicOrgFTP-SQL.pyw`. Plik tworzy się automatycznie przy pierwszym uruchomieniu; jeżeli nie zawiera ścieżki, skrypt poprosi o wskazanie folderu i zapisze wybór do `local_settings.json`. W ścieżce możesz użyć ukośników (np. `C:/TEST/GUI_ZDJ`), aby uniknąć konieczności podwójnego wpisywania ukośników odwrotnych w systemie Windows. Jeżeli zapisany katalog stanie się niedostępny, aplikacja poprosi o wybranie nowej lokalizacji.

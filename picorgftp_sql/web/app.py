@@ -501,6 +501,7 @@ def create_app() -> FastAPI:
             "base_dir": runtime_info["base_dir"],
             "processed_dir": settings.l,
             "config_path": runtime_info["config_path"],
+            "runtime_warning": runtime_info.get("warning"),
             "slots": slots,
             "admin_user": _admin_username(),
             "auth_enabled": _auth_enabled(),
@@ -530,6 +531,16 @@ def create_app() -> FastAPI:
             "logs": [
                 {"key": "errors", "label": "Bledy i exception", **_read_log_tail(settings.AM, limit)},
                 {"key": "changes", "label": "Zmiany", **_read_log_tail(settings.BM, limit)},
+                {
+                    "key": "web_out",
+                    "label": "Web stdout",
+                    **_read_log_tail(Path(settings.LOG_DIR) / "picorg_web_out.log", limit),
+                },
+                {
+                    "key": "web_err",
+                    "label": "Web stderr",
+                    **_read_log_tail(Path(settings.LOG_DIR) / "picorg_web_err.log", limit),
+                },
             ]
         }
 

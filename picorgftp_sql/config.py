@@ -79,6 +79,20 @@ def _write_json_atomic(path, payload):
                 pass
 
 
+def _write_error_log_direct(message):
+    """Write a fallback error log entry without importing logging_utils."""
+
+    try:
+        settings.ensure_log_dir()
+        with open(settings.AM, "a", encoding=k) as log_file:
+            log_file.write(
+                f"[{A9.now().strftime(A6)}] [USER: {AO}] [PC: {AF}] "
+                f"ERROR: {message}\n"
+            )
+    except Exception:
+        pass
+
+
 def _normalize_sql_columns(raw_columns):
     if not isinstance(raw_columns, list):
         return []
@@ -206,14 +220,7 @@ def load_config(interactive=I):
                 # Ensure the configuration directory exists before writing.
                 _write_json_atomic(config_path, initial)
             except E as exc:
-                try:
-                    with open(settings.AM, "a", encoding=k) as log_file:
-                        log_file.write(
-                            f"[{A9.now().strftime(A6)}] [USER: {AO}] [PC: {AF}] "
-                            f"ERROR: Failed to create config.json: {exc}\n"
-                        )
-                except Exception:
-                    pass
+                _write_error_log_direct(f"Failed to create config.json: {exc}")
     CONFIG_PATH = config_path
     try:
         with open(CONFIG_PATH, "r", encoding=k) as handle:
@@ -306,11 +313,7 @@ def load_config(interactive=I):
             pass
     except E as exc:
         try:
-            with open(settings.AM, "a", encoding=k) as log_file:
-                log_file.write(
-                    f"[{A9.now().strftime(A6)}] [USER: {AO}] [PC: {AF}] "
-                    f"ERROR: Failed to load config.json: {exc}\n"
-                )
+            _write_error_log_direct(f"Failed to load config.json: {exc}")
         except Exception:
             pass
     return config_copy
@@ -417,11 +420,7 @@ def save_config(config, raw_config=None, preserve_secrets=None):
         if O:
             O.showerror(AK, CONFIG_SAVE_FAILED_MSG.format(error=exc))
         try:
-            with open(settings.AM, "a", encoding=k) as log_file:
-                log_file.write(
-                    f"[{A9.now().strftime(A6)}] [USER: {AO}] [PC: {AF}] "
-                    f"ERROR: Failed to save config.json: {exc}\n"
-                )
+            _write_error_log_direct(f"Failed to save config.json: {exc}")
         except Exception:
             pass
 

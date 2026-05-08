@@ -77,18 +77,30 @@ def _default_base_dir():
     return A.path.dirname(BASE_DIR_SETTINGS_PATH) or A.getcwd()
 
 
+def _default_log_dir():
+    return A.path.join(_resolve_settings_root(), "logs")
+
+
+def ensure_log_dir():
+    """Create and return the shared application log directory."""
+
+    A.makedirs(LOG_DIR, exist_ok=J)
+    return LOG_DIR
+
+
 def _apply_base_dir(base_dir):
     """Update shared path globals for the active runtime directory."""
 
-    global AC, l, LISTS_WORKBOOK_PATH, AD, AM, BM, AN, BASE_DIR_OVERRIDE
+    global AC, l, LISTS_WORKBOOK_PATH, AD, AM, BM, AN, BASE_DIR_OVERRIDE, LOG_DIR
     resolved = G(base_dir or _default_base_dir()).strip() or _default_base_dir()
     BASE_DIR_OVERRIDE = resolved
     AC = resolved
+    LOG_DIR = _default_log_dir()
     l = A.path.join(AC, "_ZDJECIA PRZEROBIONE_")
     LISTS_WORKBOOK_PATH = A.path.join(AC, "lists.xlsx")
     AD = A.path.join(AC, "config.json")
-    AM = A.path.join(AC, "error_log.txt")
-    BM = A.path.join(AC, "changes_log.txt")
+    AM = A.path.join(LOG_DIR, "error_log.txt")
+    BM = A.path.join(LOG_DIR, "changes_log.txt")
     AN = A.path.join(AC, "temp_backup")
 
 
@@ -222,15 +234,22 @@ def _prompt_for_base_dir(settings_path, template, current_value, message):
 def _resolve_headless_base_dir(settings_path, template, candidate):
     """Resolve a base directory without prompting for input."""
 
+    warning = I
     if candidate:
-        ok, _ = _ensure_directory_access(candidate)
+        ok, error = _ensure_directory_access(candidate)
         if ok:
             return candidate, I
+        warning = BASE_DIR_OVERRIDE_INVALID_MSG.format(
+            path=candidate,
+            reason=BASE_DIR_PROMPT_REASON_MSG,
+        )
+        if error:
+            warning = f"{warning}\n\n{error}"
     fallback = A.path.dirname(settings_path) or A.getcwd()
     ok, _ = _ensure_directory_access(fallback)
     if ok:
-        return fallback, I
-    return A.getcwd(), I
+        return fallback, warning
+    return A.getcwd(), warning
 
 
 def _ensure_base_dir_override(settings_path, template, fallback_value):

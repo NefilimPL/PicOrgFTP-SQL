@@ -4,10 +4,12 @@ config.json
 .vscode
 \__pycache__/
 .pytest_cache/
+.tmp-test/
 pytest-cache-files-*/
 pytest-temp/
 tmp_test/
 tmp[a-z0-9_]*/
 .picorg_web.pid
+logs/
 picorg_web_*.log
 picorg_web_uvicorn.*.log

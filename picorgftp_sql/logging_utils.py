@@ -1,7 +1,7 @@
 """Convenience helpers for writing to the UI and rotating log files."""
 
 from .common import *  # noqa: F401,F403 - reuse shared helpers
-from .settings import AM, BM
+from . import settings
 from . import localization
 
 AG = None
@@ -60,13 +60,26 @@ def rotate_log(path, max_bytes=1073741824, backups=3):
         pass
 
 
+def _ensure_log_parent(path):
+    """Ensure the parent directory for ``path`` exists."""
+
+    try:
+        directory = A.path.dirname(path)
+        if directory:
+            A.makedirs(directory, exist_ok=J)
+    except E:
+        pass
+
+
 def log_error(message, ui_message=None):
     """Write an error entry to the log files and optionally the UI."""
 
     try:
-        rotate_log(AM)
+        path = settings.AM
+        _ensure_log_parent(path)
+        rotate_log(path)
         timestamp = A9.now().strftime(A6)
-        with x(AM, "a", encoding=k) as handle:
+        with x(path, "a", encoding=k) as handle:
             handle.write(f"[{timestamp}] [USER: {AO}] [PC: {AF}] ERROR: {message}\n")
     except E:
         pass
@@ -86,9 +99,11 @@ def log_info(message, ui_message=None):
     """Write an informational log entry and mirror it to the UI."""
 
     try:
-        rotate_log(BM)
+        path = settings.BM
+        _ensure_log_parent(path)
+        rotate_log(path)
         timestamp = A9.now().strftime(A6)
-        with x(BM, "a", encoding=k) as handle:
+        with x(path, "a", encoding=k) as handle:
             handle.write(f"[{timestamp}] [USER: {AO}] [PC: {AF}] {message}\n")
     except E:
         pass

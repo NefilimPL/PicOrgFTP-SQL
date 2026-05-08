@@ -12,8 +12,7 @@ from tkinter import messagebox
 from .common import DEFAULT_SLOT_DEFS, ELEMENT_PIC, NON_PIC, OPEN_FURNITURE
 from .logging_utils import log_error_loc, log_info_loc
 from .system_utils import get_file_lock_user
-from . import localization
-from .settings import EXCEL_SHEETS, LISTS_WORKBOOK_PATH
+from . import localization, settings
 
 ENTRY_SHEET = "ENTRIES"
 ENTRY_RECORDS_KEY = "__ENTRY_RECORDS__"
@@ -52,6 +51,14 @@ WRITE_ERROR_TITLE = localization.Ac
 
 # Order used by the GUI when building slot labels.
 SLOT_LABELS = [(slot["prefix"], slot["label"]) for slot in DEFAULT_SLOT_DEFS]
+
+
+def _workbook_path() -> str:
+    return settings.LISTS_WORKBOOK_PATH
+
+
+def _excel_sheets() -> dict[str, str]:
+    return settings.EXCEL_SHEETS
 
 
 def label_category(label: str) -> str:
@@ -97,19 +104,20 @@ def _normalize_cell(value: object) -> str:
 def _ensure_workbook_exists() -> None:
     """Create the workbook on disk if it is missing."""
 
-    base_dir = os.path.dirname(LISTS_WORKBOOK_PATH)
+    workbook_path = _workbook_path()
+    base_dir = os.path.dirname(workbook_path)
     if not os.path.isdir(base_dir):
         os.makedirs(base_dir, exist_ok=True)
-    if os.path.exists(LISTS_WORKBOOK_PATH):
+    if os.path.exists(workbook_path):
         return
     workbook = Workbook()
     workbook.remove(workbook.active)
-    for sheet_name in EXCEL_SHEETS.values():
+    for sheet_name in _excel_sheets().values():
         sheet = workbook.create_sheet(title=sheet_name)
         if sheet_name == ENTRY_SHEET:
             sheet.append(ENTRY_HEADERS)
     try:
-        workbook.save(LISTS_WORKBOOK_PATH)
+        workbook.save(workbook_path)
     except Exception as exc:  # pylint: disable=broad-except
         messagebox.showerror(ERROR_TITLE, localization.LIST_CREATE_FAILED_MSG.format(error=exc))
         log_error_loc("excel_create_failed", error=exc)
@@ -119,14 +127,14 @@ def _load_workbook():
     """Load the shared workbook, ensuring it exists first."""
 
     _ensure_workbook_exists()
-    return load_workbook(LISTS_WORKBOOK_PATH)
+    return load_workbook(_workbook_path())
 
 
 def _load_workbook_readonly():
     """Load the shared workbook in read-only mode for startup cache reads."""
 
     _ensure_workbook_exists()
-    return load_workbook(LISTS_WORKBOOK_PATH, read_only=True, data_only=True)
+    return load_workbook(_workbook_path(), read_only=True, data_only=True)
 
 
 def _entry_header_map(sheet, *, ensure_missing: bool = False) -> tuple[dict[str, int], bool]:
@@ -253,7 +261,7 @@ def prepare_excel_lists() -> Dict[str, Dict[str, dict] | list]:
     workbook = _load_workbook_readonly()
     lists: Dict[str, Dict[str, dict] | list] = {}
     try:
-        for sheet_name in EXCEL_SHEETS.values():
+        for sheet_name in _excel_sheets().values():
             sheet = workbook[sheet_name]
             if sheet_name == ENTRY_SHEET:
                 entries: Dict[str, dict] = {}
@@ -324,7 +332,7 @@ def _save_workbook(workbook: Workbook, error_event: str, **context) -> bool:
     """Persist the workbook and log a translated error message on failure."""
 
     try:
-        workbook.save(LISTS_WORKBOOK_PATH)
+        workbook.save(_workbook_path())
         return True
     except Exception as exc:  # pylint: disable=broad-except
         messagebox.showerror(WRITE_ERROR_TITLE, localization.LIST_SAVE_FAILED_MSG.format(error=exc))
@@ -339,9 +347,9 @@ def add_to_list(sheet_name: str, value: str) -> bool:
     if not value:
         return False
     normalized = value.strip().upper()
-    if sheet_name == EXCEL_SHEETS[EXTRAS_SHEET]:
+    if sheet_name == _excel_sheets()[EXTRAS_SHEET]:
         normalized = normalized.replace(UNDERSCORE, HYPHEN)
-    locked_by = get_file_lock_user(LISTS_WORKBOOK_PATH)
+    locked_by = get_file_lock_user(_workbook_path())
     if locked_by:
         reason = (
             LOCKED_BY_USER_TEMPLATE.format(user=locked_by)
@@ -371,7 +379,7 @@ def add_to_list(sheet_name: str, value: str) -> bool:
 def remove_from_list(sheet_name: str, value: str) -> None:
     """Remove the first occurrence of ``value`` from the target sheet."""
 
-    locked_by = get_file_lock_user(LISTS_WORKBOOK_PATH)
+    locked_by = get_file_lock_user(_workbook_path())
     if locked_by:
         reason = (
             LOCKED_BY_USER_TEMPLATE.format(user=locked_by)
@@ -440,7 +448,7 @@ def save_ean_entry(
 ) -> dict[str, object] | bool:
     """Insert or update a row in the entries sheet, handling locks gracefully."""
 
-    locked_by = get_file_lock_user(LISTS_WORKBOOK_PATH)
+    locked_by = get_file_lock_user(_workbook_path())
     if locked_by:
         reason = (
             LOCKED_BY_USER_TEMPLATE.format(user=locked_by)
@@ -460,7 +468,7 @@ def save_ean_entry(
         return False
 
     workbook = _load_workbook()
-    sheet = workbook[EXCEL_SHEETS[ENTRY_SHEET]]
+    sheet = workbook[_excel_sheets()[ENTRY_SHEET]]
     header_map, _changed = _entry_header_map(sheet, ensure_missing=True)
 
     payload = _build_entry_payload(
