@@ -5,6 +5,7 @@ $Port = if ($env:PICORG_WEB_PORT) { [int]$env:PICORG_WEB_PORT } else { 8010 }
 $HostAddress = if ($env:PICORG_WEB_HOST) { $env:PICORG_WEB_HOST } else { "0.0.0.0" }
 $LocalUrl = "http://127.0.0.1:$Port"
 $OpenBrowser = $env:PICORG_WEB_NO_BROWSER -ne "1"
+$StarterMenu = $env:PICORG_WEB_STARTER_MENU -ne "0"
 $PidFile = Join-Path $Root ".picorg_web.pid"
 $OutLog = Join-Path $Root "picorg_web_out.log"
 $ErrLog = Join-Path $Root "picorg_web_err.log"
@@ -181,6 +182,7 @@ function Resolve-PortConflict {
                     if ($OpenBrowser) {
                         Start-Process $LocalUrl
                     }
+                    Show-StarterMenu
                     exit 0
                 }
                 "R" {
@@ -318,6 +320,124 @@ function Write-StartupDiagnostics {
         Write-FirewallRuleSummary $rule
     } else {
         Write-Info "Nie znaleziono reguly firewall: $FirewallRuleName."
+    }
+}
+
+function Get-WebEstablishedConnections {
+    $items = @()
+    try {
+        $connections = Get-NetTCPConnection -LocalPort $Port -State Established -ErrorAction Stop
+        foreach ($connection in $connections) {
+            $items += [pscustomobject]@{
+                LocalAddress = [string]$connection.LocalAddress
+                LocalPort = [int]$connection.LocalPort
+                RemoteAddress = [string]$connection.RemoteAddress
+                RemotePort = [int]$connection.RemotePort
+                State = [string]$connection.State
+                Pid = [int]$connection.OwningProcess
+            }
+        }
+    } catch {
+    }
+    if ($items.Count -eq 0) {
+        try {
+            $lines = netstat -ano | Where-Object {
+                $_ -match ":$Port\s" -and $_ -match "\sESTABLISHED\s+(\d+)\s*$"
+            }
+            foreach ($line in $lines) {
+                if ($line -match "^\s*TCP\s+(\S+):$Port\s+(\S+):(\d+)\s+ESTABLISHED\s+(\d+)\s*$") {
+                    $items += [pscustomobject]@{
+                        LocalAddress = [string]$Matches[1]
+                        LocalPort = [int]$Port
+                        RemoteAddress = [string]$Matches[2]
+                        RemotePort = [int]$Matches[3]
+                        State = "Established"
+                        Pid = [int]$Matches[4]
+                    }
+                }
+            }
+        } catch {
+        }
+    }
+    return $items
+}
+
+function Test-WebAccessLogLine($Line) {
+    if (-not $Line) {
+        return $false
+    }
+    return $Line -match 'HTTP/\d(\.\d)?"' -or $Line -match ' - "[A-Z]+ '
+}
+
+function Watch-WebConnections {
+    Write-Info "Monitor polaczen TCP na porcie $Port."
+    Write-Info "Otworz panel z innego PC. Pokaze aktywne TCP oraz nowe wpisy HTTP z logu."
+    Write-Info "Nacisnij Q, Enter albo Esc, zeby zakonczyc monitoring."
+    $seen = @{}
+    $seenLogLines = @{}
+    if (Test-Path $OutLog) {
+        try {
+            Get-Content -Path $OutLog -Tail 80 -ErrorAction SilentlyContinue |
+                Where-Object { Test-WebAccessLogLine $_ } |
+                ForEach-Object { $seenLogLines[[string]$_] = $true }
+        } catch {
+        }
+    }
+    $lastIdleMessage = Get-Date
+    while ($true) {
+        try {
+            if ([Console]::KeyAvailable) {
+                $key = [Console]::ReadKey($true)
+                if ($key.Key -in @("Q", "Enter", "Escape")) {
+                    Write-Info "Monitoring zakonczony. Panel webowy nadal dziala w tle."
+                    return
+                }
+            }
+        } catch {
+        }
+
+        $connections = @(Get-WebEstablishedConnections)
+        foreach ($connection in $connections) {
+            $key = "$($connection.LocalAddress):$($connection.LocalPort)<-$($connection.RemoteAddress):$($connection.RemotePort)"
+            if (-not $seen.ContainsKey($key)) {
+                $seen[$key] = $true
+                $stamp = (Get-Date).ToString("HH:mm:ss")
+                Write-Info "$stamp polaczenie: $($connection.RemoteAddress):$($connection.RemotePort) -> $($connection.LocalAddress):$($connection.LocalPort), PID $($connection.Pid)"
+            }
+        }
+
+        if (Test-Path $OutLog) {
+            try {
+                $logLines = Get-Content -Path $OutLog -Tail 80 -ErrorAction SilentlyContinue |
+                    Where-Object { Test-WebAccessLogLine $_ }
+                foreach ($line in $logLines) {
+                    $logKey = [string]$line
+                    if (-not $seenLogLines.ContainsKey($logKey)) {
+                        $seenLogLines[$logKey] = $true
+                        Write-Info "HTTP: $line"
+                    }
+                }
+            } catch {
+            }
+        }
+
+        if ($connections.Count -eq 0 -and ((Get-Date) - $lastIdleMessage).TotalSeconds -ge 15) {
+            Write-Info "Czekam na polaczenie z innego PC..."
+            $lastIdleMessage = Get-Date
+        }
+        Start-Sleep -Milliseconds 700
+    }
+}
+
+function Show-StarterMenu {
+    if (-not $StarterMenu) {
+        return
+    }
+    Write-Host ""
+    Write-Info "M = monitoruj polaczenia z innych PC, Enter = zamknij starter (panel dziala w tle)"
+    $choice = (Read-Host "Decyzja [M/Enter]").Trim().ToUpperInvariant()
+    if ($choice -eq "M") {
+        Watch-WebConnections
     }
 }
 
@@ -556,3 +676,4 @@ Write-Info "Z drugiego PC uzyj adresu z aktywnej karty Ethernet/Wi-Fi, nie VPN."
 if ($OpenBrowser) {
     Start-Process $LocalUrl
 }
+Show-StarterMenu
