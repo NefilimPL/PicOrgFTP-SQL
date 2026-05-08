@@ -225,13 +225,14 @@ def process_web_uploads(
     form: WebProductForm,
     uploaded_slots: Sequence[WebUploadedSlot],
     options: WebProcessingOptions | None = None,
+    allow_empty: bool = False,
 ) -> WebProcessingResult:
     """Save uploaded slot files into the product folder tree."""
 
     errors = validate_product_form(form)
     if errors:
         raise ValueError(" ".join(errors))
-    if not uploaded_slots:
+    if not uploaded_slots and not allow_empty:
         raise ValueError("Dodaj przynajmniej jeden plik do slotu.")
 
     payload = normalized_product_payload(form)
@@ -283,7 +284,7 @@ def process_web_uploads(
             )
         )
 
-    if not saved_files:
+    if not saved_files and not allow_empty:
         raise ValueError("Nie zapisano zadnego pliku.")
     return WebProcessingResult(
         output_dir=output_dir,

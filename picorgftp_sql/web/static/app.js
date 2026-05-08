@@ -18,6 +18,7 @@ const state = {
   lastLookupMs: null,
   activeSettingsTab: "app",
   history: null,
+  logs: null,
   theme: localStorage.getItem("picorg-theme") || "light",
   suppressAutoSearch: false,
   lastAutoSearchKey: "",
@@ -45,7 +46,6 @@ const submitButton = document.querySelector("#submitButton");
 const clearButton = document.querySelector("#clearButton");
 const logoutButton = document.querySelector("#logoutButton");
 const themeToggleButton = document.querySelector("#themeToggleButton");
-const settingsNavButton = document.querySelector('[data-modal="settings"]');
 const entrySelect = document.querySelector("#entrySelect");
 const findByEanButton = document.querySelector("#findByEanButton");
 const findProductButton = document.querySelector("#findProductButton");
@@ -63,9 +63,20 @@ const historyRefreshButton = document.querySelector("#historyRefreshButton");
 const historyOutput = document.querySelector("#historyOutput");
 const historyDetailTitle = document.querySelector("#historyDetailTitle");
 const historyDetailOutput = document.querySelector("#historyDetailOutput");
+const logsRefreshButton = document.querySelector("#logsRefreshButton");
+const logsOutput = document.querySelector("#logsOutput");
 
 async function requestJson(path, options = {}) {
-  const response = await fetch(path, options);
+  let response;
+  try {
+    response = await fetch(path, options);
+  } catch (error) {
+    throw new Error(
+      `Nie udalo sie polaczyc z backendem (${path}). Sprawdz, czy serwer web dziala. Szczegoly: ${
+        error.message || error
+      }`
+    );
+  }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 401) {
@@ -78,9 +89,15 @@ async function requestJson(path, options = {}) {
 
 function updateAdminUi() {
   state.isAdmin = state.currentUser?.role === "admin";
-  if (settingsNavButton) {
-    settingsNavButton.style.display = state.isAdmin ? "" : "none";
-  }
+  document.querySelectorAll(".admin-only").forEach((node) => {
+    node.style.display = state.isAdmin ? "" : "none";
+  });
+}
+
+function setActiveModalNav(name = "") {
+  document.querySelectorAll("[data-modal]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.modal === name);
+  });
 }
 
 function applyTheme() {
@@ -92,12 +109,17 @@ function applyTheme() {
 }
 
 function openModal(name) {
-  if (name === "settings" && !state.isAdmin) {
-    formStatus.textContent = "Ustawienia sa dostepne tylko dla administratora.";
+  if (!name) {
     return;
   }
+  if ((name === "settings" || name === "logs") && !state.isAdmin) {
+    formStatus.textContent = "Ten widok jest dostepny tylko dla administratora.";
+    return;
+  }
+  closeAutocompletePanels();
   document.querySelector(`#${name}View`)?.classList.add("active");
   document.querySelector(`#${name}Modal`)?.classList.add("active");
+  setActiveModalNav(name);
   if (name === "settings") {
     loadSettings().catch((error) => {
       settingsStatus.textContent = error.message;
@@ -108,10 +130,16 @@ function openModal(name) {
       historyOutput.textContent = error.message;
     });
   }
+  if (name === "logs") {
+    loadLogs().catch((error) => {
+      logsOutput.textContent = error.message;
+    });
+  }
 }
 
 function closeModals() {
   document.querySelectorAll(".modal-view").forEach((modal) => modal.classList.remove("active"));
+  setActiveModalNav("");
 }
 
 function fileLabel(file) {
@@ -230,13 +258,19 @@ async function remoteSuggestions(fieldName) {
   return payload.values || [];
 }
 
+let activeAutocompletePanel = null;
+
 function closeAutocompletePanels(exceptPanel = null) {
+  activeAutocompletePanel = exceptPanel;
   document.querySelectorAll(".autocomplete-panel").forEach((panel) => {
     if (panel !== exceptPanel) panel.classList.remove("active");
   });
 }
 
 function renderAutocompletePanel(input, panel, values) {
+  if (activeAutocompletePanel && activeAutocompletePanel !== panel && document.activeElement !== input) {
+    return;
+  }
   closeAutocompletePanels(panel);
   const typed = input.value.trim().toUpperCase();
   const filtered = values.filter((value) => !typed || value.toUpperCase().includes(typed)).slice(0, 200);
@@ -259,6 +293,7 @@ function renderAutocompletePanel(input, panel, values) {
     panel.appendChild(button);
   }
   panel.classList.add("active");
+  activeAutocompletePanel = panel;
 }
 
 function setupAutocomplete() {
@@ -267,10 +302,14 @@ function setupAutocomplete() {
     const input = productForm.elements[fieldName];
     if (!input) continue;
     input.removeAttribute("list");
-    input.setAttribute("autocomplete", "new-password");
+    input.setAttribute("autocomplete", "off");
     input.setAttribute("spellcheck", "false");
     input.setAttribute("aria-autocomplete", "list");
     input.setAttribute("data-lpignore", "true");
+    input.setAttribute("data-1p-ignore", "true");
+    input.setAttribute("data-bwignore", "true");
+    input.setAttribute("data-form-type", "other");
+    input.setAttribute("readonly", "readonly");
     const host = input.closest("label");
     if (!host) continue;
     host.classList.add("autocomplete-host");
@@ -279,7 +318,12 @@ function setupAutocomplete() {
     host.appendChild(panel);
     let requestId = 0;
     let remoteTimer = 0;
+    const unlockBrowserAutofill = () => {
+      input.removeAttribute("readonly");
+      window.setTimeout(() => input.setAttribute("autocomplete", "off"), 0);
+    };
     const refresh = () => {
+      activeAutocompletePanel = panel;
       closeAutocompletePanels(panel);
       const local = localSuggestions(fieldName);
       renderAutocompletePanel(input, panel, local);
@@ -288,13 +332,15 @@ function setupAutocomplete() {
       remoteTimer = window.setTimeout(() => {
         remoteSuggestions(fieldName)
           .then((values) => {
-            if (currentRequest === requestId) {
+            if (currentRequest === requestId && activeAutocompletePanel === panel) {
               renderAutocompletePanel(input, panel, uniqueValues([...values, ...local]));
             }
           })
           .catch(() => {});
       }, 180);
     };
+    input.addEventListener("mousedown", unlockBrowserAutofill);
+    input.addEventListener("focus", unlockBrowserAutofill);
     input.addEventListener("focus", refresh);
     input.addEventListener("input", refresh);
     input.addEventListener("keydown", (event) => {
@@ -473,14 +519,16 @@ function renderSlotBadges(container, photo, file, prefix) {
   for (const [key, label, title] of statuses) {
     const canPreview = (key === "local" && photo?.token) || (key === "ftp" && photo?.ftp_filename);
     const badge = document.createElement(canPreview ? "button" : "span");
+    const selected = selectedSlotSource(prefix, photo) === key;
     badge.dataset.source = key;
     badge.className = `slot-badge slot-badge-${key} ${photo && photo[key] ? "on" : ""} ${
-      selectedSlotSource(prefix, photo) === key ? "selected" : ""
+      selected ? "selected" : ""
     }`;
-    badge.title = title;
+    badge.title = selected ? `${title} (aktywny podglad)` : title;
     badge.textContent = label;
     if (canPreview) {
       badge.type = "button";
+      badge.setAttribute("aria-pressed", selected ? "true" : "false");
       badge.addEventListener("click", (event) => {
         event.stopPropagation();
         state.slotSources.set(prefix, key);
@@ -606,9 +654,12 @@ function updateSlotPreview(prefix) {
   const previewImage = preview.querySelector("img");
   const empty = preview.querySelector(".slot-empty");
   const fitButton = card.querySelector(".slot-fit-button");
+  card.dataset.activeSource = selectedSlotSource(prefix, loadedPhoto) || "";
   detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, prefix);
   card.querySelectorAll(".slot-badge[data-source]").forEach((badge) => {
-    badge.classList.toggle("selected", selectedSlotSource(prefix, loadedPhoto) === badge.dataset.source);
+    const selected = selectedSlotSource(prefix, loadedPhoto) === badge.dataset.source;
+    badge.classList.toggle("selected", selected);
+    badge.setAttribute("aria-pressed", selected ? "true" : "false");
   });
   if (fitButton) {
     fitButton.classList.toggle("active", isSlotFit(prefix));
@@ -668,6 +719,7 @@ function renderSlots(slots = state.slots) {
     const fitButton = document.createElement("button");
     const clearButton = document.createElement("button");
     node.dataset.slotPrefix = slot.prefix;
+    node.dataset.activeSource = selectedSlotSource(slot.prefix, loadedPhoto) || "";
 
     title.textContent = `${slot.prefix} - ${slot.label}`;
     detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, slot.prefix);
@@ -867,7 +919,7 @@ function showResult(payload) {
   }
   const list = document.createElement("ul");
   list.className = "result-list";
-  for (const file of payload.saved_files) {
+  for (const file of payload.saved_files || []) {
     const item = document.createElement("li");
     const name = document.createElement("strong");
     const path = document.createElement("span");
@@ -876,7 +928,14 @@ function showResult(payload) {
     item.append(name, path);
     list.appendChild(item);
   }
-  resultOutput.appendChild(list);
+  if ((payload.saved_files || []).length) {
+    resultOutput.appendChild(list);
+  } else {
+    const noFiles = document.createElement("p");
+    noFiles.className = "ok-text";
+    noFiles.textContent = "Nie dodano nowych plikow; zapisano pozostale zmiany.";
+    resultOutput.appendChild(noFiles);
+  }
   if (payload.ftp?.enabled) {
     const ftp = document.createElement("p");
     ftp.className = payload.ftp.error ? "error-text" : "ok-text";
@@ -908,10 +967,31 @@ function entryFromHistoryGroup(group) {
   return {};
 }
 
+function entryField(entry, ...keys) {
+  for (const key of keys) {
+    const value = entry?.[key];
+    if (value) return value;
+  }
+  return "";
+}
+
 function historyEntryLabel(entry) {
-  return [entry.NAZWA || entry.name, entry.TYP || entry.type_name, entry.MODEL || entry.model]
+  const colors = [
+    entryField(entry, "KOLOR1", "color1"),
+    entryField(entry, "KOLOR2", "color2"),
+    entryField(entry, "KOLOR3", "color3"),
+  ]
     .filter(Boolean)
     .join(" / ");
+  return [
+    entryField(entry, "NAZWA", "name") ? `Nazwa: ${entryField(entry, "NAZWA", "name")}` : "",
+    entryField(entry, "TYP", "type_name") ? `Typ: ${entryField(entry, "TYP", "type_name")}` : "",
+    entryField(entry, "MODEL", "model") ? `Model: ${entryField(entry, "MODEL", "model")}` : "",
+    colors ? `Kolory: ${colors}` : "",
+    entryField(entry, "DODATKI", "extra") ? `Dodatek: ${entryField(entry, "DODATKI", "extra")}` : "",
+  ]
+    .filter(Boolean)
+    .join(" | ");
 }
 
 function renderHistoryDetails(group) {
@@ -931,8 +1011,10 @@ function renderHistoryDetails(group) {
     const ftp = item.details?.ftp;
     const sql = item.details?.sql;
     details.textContent = [
+      historyEntryLabel(item.details?.entry) || "",
       saved ? `zapisane pliki: ${saved}` : "",
       deleted ? `usuniete sloty: ${deleted}` : "",
+      item.details?.local_delete?.deleted ? `usunieto lokalnie: ${item.details.local_delete.deleted}` : "",
       ftp?.enabled ? `FTP wyslano/usunieto: ${ftp.uploaded || 0}/${ftp.deleted || 0}${ftp.error ? `, blad: ${ftp.error}` : ""}` : "",
       sql?.enabled ? `SQL aktualizacje/czyszczenia: ${sql.updated || 0}/${sql.cleared || 0}${sql.error ? `, blad: ${sql.error}` : ""}` : "",
     ]
@@ -976,7 +1058,8 @@ function renderHistory(payload) {
     row.type = "button";
     row.className = "history-summary-row";
     title.textContent = `EAN ${group.ean}`;
-    fields.textContent = historyEntryLabel(entry) || "Brak danych pól tekstowych";
+    const readableFields = historyEntryLabel(entry);
+    fields.textContent = readableFields || "Brak danych pol tekstowych";
     meta.textContent = `${(group.items || []).length} zmian | ostatnio: ${group.items?.[0]?.time || ""}`;
     row.append(title, fields, meta);
     row.addEventListener("click", () => renderHistoryDetails(group));
@@ -988,6 +1071,41 @@ async function loadHistory() {
   const params = new URLSearchParams({ user: historyUserFilter.value || "", limit: "300" });
   const payload = await requestJson(`/api/history?${params.toString()}`);
   renderHistory(payload);
+}
+
+function renderLogs(payload) {
+  state.logs = payload;
+  logsOutput.textContent = "";
+  const logs = payload.logs || [];
+  if (!logs.length) {
+    logsOutput.className = "logs-output empty-state";
+    logsOutput.textContent = "Brak dostepnych logow.";
+    return;
+  }
+  logsOutput.className = "logs-output";
+  for (const log of logs) {
+    const block = document.createElement("article");
+    const heading = document.createElement("div");
+    const title = document.createElement("strong");
+    const path = document.createElement("span");
+    const lines = document.createElement("pre");
+    block.className = "log-block";
+    heading.className = "log-heading";
+    title.textContent = log.label || log.key || "Log";
+    path.textContent = log.path || "";
+    lines.className = "log-lines";
+    lines.textContent =
+      (log.lines || []).join("\n") ||
+      (log.exists ? "Plik logu jest pusty." : "Plik logu jeszcze nie istnieje.");
+    heading.append(title, path);
+    block.append(heading, lines);
+    logsOutput.appendChild(block);
+  }
+}
+
+async function loadLogs() {
+  const payload = await requestJson("/api/logs?limit=400");
+  renderLogs(payload);
 }
 
 function formPayload() {
@@ -1663,7 +1781,7 @@ async function loadSettings() {
   renderSettings();
 }
 
-document.querySelectorAll(".nav-button").forEach((button) => {
+document.querySelectorAll("[data-modal]").forEach((button) => {
   button.addEventListener("click", () => openModal(button.dataset.modal));
 });
 
@@ -1698,6 +1816,12 @@ historyUserFilter?.addEventListener("change", () => {
 historyRefreshButton?.addEventListener("click", () => {
   loadHistory().catch((error) => {
     historyOutput.textContent = error.message;
+  });
+});
+
+logsRefreshButton?.addEventListener("click", () => {
+  loadLogs().catch((error) => {
+    logsOutput.textContent = error.message;
   });
 });
 

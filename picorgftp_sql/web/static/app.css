@@ -10,16 +10,17 @@
   --accent-strong: #245548;
   --warn: #a45f21;
   --error: #9b2c2c;
-  --local: #26734d;
-  --ftp: #2867b2;
-  --sql: #7057b8;
-  --fit: #996515;
+  --local: #18864b;
+  --ftp: #1f62d0;
+  --sql: #7b3fc8;
+  --fit: #b7791f;
   --danger: #b23b3b;
   --shadow: 0 10px 30px rgba(32, 38, 35, 0.08);
   font-family: "Segoe UI", Arial, sans-serif;
 }
 
 body[data-theme="dark"] {
+  color-scheme: dark;
   --bg: #151918;
   --surface: #202624;
   --surface-2: #2b3330;
@@ -30,10 +31,10 @@ body[data-theme="dark"] {
   --accent-strong: #61bd98;
   --warn: #d79a52;
   --error: #f07878;
-  --local: #4cb477;
-  --ftp: #6fa8f2;
-  --sql: #a58ce8;
-  --fit: #d6a13b;
+  --local: #42c97a;
+  --ftp: #69a7ff;
+  --sql: #c095ff;
+  --fit: #f0b84f;
   --danger: #ef7777;
   --shadow: 0 14px 34px rgba(0, 0, 0, 0.28);
 }
@@ -673,6 +674,16 @@ h2 {
   box-shadow: 0 0 0 2px rgba(47, 111, 94, 0.18);
 }
 
+.slot-card[data-active-source="local"] {
+  border-color: var(--local);
+  box-shadow: inset 3px 0 0 var(--local);
+}
+
+.slot-card[data-active-source="ftp"] {
+  border-color: var(--ftp);
+  box-shadow: inset 3px 0 0 var(--ftp);
+}
+
 .slot-badges {
   display: flex;
   flex-wrap: wrap;
@@ -686,8 +697,9 @@ h2 {
   background: var(--surface-2);
   color: var(--muted);
   font-size: 10px;
+  font-weight: 700;
   line-height: 1;
-  padding: 4px 5px;
+  padding: 4px 6px;
 }
 
 button.slot-badge {
@@ -716,8 +728,21 @@ button.slot-badge:hover {
 }
 
 .slot-badge.selected {
+  border-color: #ffffff;
   box-shadow: 0 0 0 2px var(--text);
   transform: translateY(-1px);
+}
+
+.slot-badge-local.selected {
+  box-shadow: 0 0 0 2px var(--local);
+}
+
+.slot-badge-ftp.selected {
+  box-shadow: 0 0 0 2px var(--ftp);
+}
+
+.slot-badge-sql.selected {
+  box-shadow: 0 0 0 2px var(--sql);
 }
 
 button.slot-badge.on:hover {
@@ -834,7 +859,8 @@ button.slot-badge.on:hover {
 }
 
 .history-output,
-.history-detail-output {
+.history-detail-output,
+.logs-output {
   display: grid;
   gap: 12px;
 }
@@ -885,6 +911,39 @@ button.slot-badge.on:hover {
 .history-item span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.log-block {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.log-heading {
+  display: grid;
+  gap: 4px;
+}
+
+.log-heading span {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.log-lines {
+  max-height: 360px;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 10px;
+  font: 12px/1.45 Consolas, "Courier New", monospace;
+  white-space: pre-wrap;
 }
 
 @keyframes progress-slide {

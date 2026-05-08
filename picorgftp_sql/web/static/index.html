@@ -14,8 +14,9 @@
       </div>
       <nav class="topnav" aria-label="Widoki">
         <button type="button" class="nav-button" data-modal="history">Historia</button>
+        <button type="button" class="nav-button admin-only" data-modal="logs" style="display: none">Logi</button>
         <button type="button" class="nav-button" data-modal="lists">Listy</button>
-        <button type="button" class="nav-button" data-modal="settings">Ustawienia</button>
+        <button type="button" class="nav-button admin-only" data-modal="settings" style="display: none">Ustawienia</button>
         <button id="themeToggleButton" type="button" class="nav-button">Ciemny</button>
       </nav>
       <button id="logoutButton" type="button" class="ghost-button">Wyloguj</button>
@@ -28,31 +29,31 @@
           <input name="product_id" type="hidden">
           <label>
             Nazwa
-            <input name="name" list="namesList" autocomplete="new-password" spellcheck="false" required>
+            <input name="name" autocomplete="off" spellcheck="false" required>
           </label>
           <label>
             Typ
-            <input name="type_name" list="typesList" autocomplete="new-password" spellcheck="false" required>
+            <input name="type_name" autocomplete="off" spellcheck="false" required>
           </label>
           <label>
             Model
-            <input name="model" list="modelsList" autocomplete="new-password" spellcheck="false" required>
+            <input name="model" autocomplete="off" spellcheck="false" required>
           </label>
           <label>
             Kolor 1
-            <input name="color1" list="colorsList" autocomplete="new-password" spellcheck="false" required>
+            <input name="color1" autocomplete="off" spellcheck="false" required>
           </label>
           <label>
             Kolor 2
-            <input name="color2" list="colorsList" autocomplete="new-password" spellcheck="false">
+            <input name="color2" autocomplete="off" spellcheck="false">
           </label>
           <label>
             Kolor 3
-            <input name="color3" list="colorsList" autocomplete="new-password" spellcheck="false">
+            <input name="color3" autocomplete="off" spellcheck="false">
           </label>
           <label>
             Dodatek
-            <input name="extra" list="extrasList" autocomplete="new-password" spellcheck="false" placeholder="NO-LED">
+            <input name="extra" autocomplete="off" spellcheck="false" placeholder="NO-LED">
           </label>
           <label>
             EAN
@@ -153,6 +154,19 @@
           <button type="button" class="ghost-button modal-close" data-close-history-detail>Zamknij</button>
         </div>
         <div id="historyDetailOutput" class="history-detail-output"></div>
+      </section>
+    </div>
+
+    <div id="logsView" class="manager-view modal-view">
+      <section class="manager-panel">
+        <div class="section-heading">
+          <h1>Logi</h1>
+          <div class="heading-actions">
+            <button id="logsRefreshButton" type="button" class="secondary-button">Odswiez</button>
+            <button type="button" class="ghost-button modal-close" data-close-modal>Zamknij</button>
+          </div>
+        </div>
+        <div id="logsOutput" class="logs-output empty-state">Logi sa dostepne tylko dla administratora.</div>
       </section>
     </div>
 

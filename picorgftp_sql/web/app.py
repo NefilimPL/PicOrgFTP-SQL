@@ -13,6 +13,7 @@ import secrets
 import shutil
 import tempfile
 import time
+import traceback
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -25,6 +26,7 @@ from ..bootstrap import initialize_application_runtime
 from ..common import APP_SECRET, H, K, SQL_COLUMN_MAP_KEY, SQL_UPDATE_TEMPLATE, ft, p, u, w
 from ..database import connect_db
 from ..image_utils import fit_image_to_content
+from ..logging_utils import log_error
 from ..services.ftp_service import sync_remote_files
 from ..services.sql_service import extract_presence_context
 from ..workflow_utils import parse_slot_filename
@@ -413,11 +415,35 @@ def _delete_local_files(delete_requests: list[dict[str, Any]], saved_paths: set[
     return payload
 
 
+def _read_log_tail(path: str, limit: int = 300) -> dict[str, Any]:
+    line_limit = max(1, min(2000, int(limit or 300)))
+    log_path = Path(path)
+    payload: dict[str, Any] = {"path": str(log_path), "exists": log_path.exists(), "lines": []}
+    if not log_path.exists():
+        return payload
+    try:
+        with log_path.open("r", encoding="utf-8", errors="replace") as handle:
+            payload["lines"] = [line.rstrip("\r\n") for line in handle.readlines()[-line_limit:]]
+    except OSError as exc:
+        payload["error"] = str(exc)
+    return payload
+
+
 def create_app() -> FastAPI:
     """Create the LAN web backend."""
 
     app = FastAPI(title="PicOrgFTP-SQL Web", version="0.1.0")
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+    @app.middleware("http")
+    async def _log_unhandled_web_errors(request: Request, call_next):
+        try:
+            return await call_next(request)
+        except Exception as exc:
+            log_error(
+                f"WEB {request.method} {request.url.path}: {exc}\n{traceback.format_exc()}"
+            )
+            raise
 
     @app.on_event("startup")
     def _startup() -> None:
@@ -496,6 +522,16 @@ def create_app() -> FastAPI:
     def history_api(request: Request, user: str = "", limit: int = 200) -> dict[str, Any]:
         _require_user(request)
         return history_snapshot(user=user, limit=limit)
+
+    @app.get("/api/logs")
+    def logs_api(request: Request, limit: int = 300) -> dict[str, Any]:
+        _require_admin(request)
+        return {
+            "logs": [
+                {"key": "errors", "label": "Bledy i exception", **_read_log_tail(settings.AM, limit)},
+                {"key": "changes", "label": "Zmiany", **_read_log_tail(settings.BM, limit)},
+            ]
+        }
 
     @app.post("/api/file-index/refresh")
     def file_index_refresh_api(request: Request) -> dict[str, Any]:
@@ -816,6 +852,7 @@ def create_app() -> FastAPI:
                 form=product,
                 uploaded_slots=uploaded_slots,
                 options=processing_options_from_config(config.CONFIG),
+                allow_empty=bool(delete_requests),
             )
             saved_paths = {os.path.abspath(item.path) for item in result.saved_files}
             local_delete_result = _delete_local_files(delete_requests, saved_paths)
@@ -845,7 +882,11 @@ def create_app() -> FastAPI:
             action="process",
             ean=product.ean,
             product_id=entry_result.get("product_id", "") if isinstance(entry_result, dict) else "",
-            summary="Przetworzono pliki produktu.",
+            summary=(
+                "Zapisano usuniecia produktu."
+                if delete_requests and not result.saved_files
+                else "Przetworzono pliki produktu."
+            ),
             details={
                 "saved_files": payload["saved_files"],
                 "deleted_slots": delete_requests,

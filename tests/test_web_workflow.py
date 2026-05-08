@@ -67,6 +67,40 @@ class WebWorkflowTests(unittest.TestCase):
 
         self.assertIn("EAN musi miec 13 cyfr albo zostac pusty.", errors)
 
+    def test_process_web_uploads_allows_empty_change_when_requested(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            result = process_web_uploads(
+                base_output_dir=str(Path(temp_dir) / "processed"),
+                form=WebProductForm(
+                    name="Maggiore",
+                    type_name="komoda",
+                    model="MA03",
+                    color1="bialy",
+                    ean="5901234567890",
+                ),
+                uploaded_slots=[],
+                allow_empty=True,
+            )
+
+            self.assertEqual(result.ean, "5901234567890")
+            self.assertEqual(result.saved_files, [])
+            self.assertTrue(Path(result.output_dir).is_dir())
+
+    def test_process_web_uploads_rejects_empty_change_by_default(self) -> None:
+        with self.assertRaises(ValueError):
+            process_web_uploads(
+                base_output_dir="processed",
+                form=WebProductForm(
+                    name="Maggiore",
+                    type_name="komoda",
+                    model="MA03",
+                    color1="bialy",
+                    ean="5901234567890",
+                ),
+                uploaded_slots=[],
+            )
+
     def test_slot_definitions_from_config_uses_defaults_when_missing(self) -> None:
         slots = slot_definitions_from_config({})
 
