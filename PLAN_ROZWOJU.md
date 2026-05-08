@@ -1,7 +1,7 @@
 # Plan rozwoju PicOrgFTP-SQL
 
 Data utworzenia planu: 2026-04-26  
-Ostatnia aktualizacja planu: 2026-05-06
+Ostatnia aktualizacja planu: 2026-05-07
 
 ## Zasady aktualizacji
 
@@ -93,7 +93,8 @@ Status:
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | WEB-001 | MVP panelu webowego z uploadem przez przegladarke | P1 | Wykonane | 2026-05-07 | 2026-05-07 | 2026-05-07 | Dodano backend FastAPI `picorgftp_sql.web.app`, statyczny panel webowy, proste logowanie admin/admin z mozliwoscia zmiany hasla przez `PICORG_WEB_ADMIN_PASSWORD`, upload plikow do slotow oraz zapis do tej samej struktury `_ZDJECIA PRZEROBIONE_` co desktop. Dodano `START_WEB.bat` i `STOP_WEB.bat` do uruchamiania oraz zatrzymywania panelu bez wpisywania komend. FTP/SQL pozostaja do dopiecia w kolejnym etapie. | - |
 | WEB-002 | Podstawowe funkcje danych w panelu webowym | P1 | Wykonane | 2026-05-07 | 2026-05-07 | 2026-05-07 | Dodano API i UI dla list Excel, wyszukiwania wpisow po EAN, dopasowania produktu po nazwie/typie/modelu, wyboru istniejacego wpisu, zapisu nowego/istniejacego wpisu, czyszczenia formularza oraz podstawowego podgladu ustawien ze statusem administratora Windows. Edycja ustawien pozostaje do osobnego etapu z bezpiecznym trybem podwyzszonych uprawnien backendu. | - |
-| WEB-003 | Web UI blizsze wersji desktopowej | P1 | Wykonane | 2026-05-07 | 2026-05-07 | 2026-05-07 | Wylaczono domyslne logowanie dla MVP LAN, przeniesiono Listy i Ustawienia do okien modalnych wewnatrz strony, dodano edycje ustawien z poziomu przegladarki, zakladke Uzytkownicy pod przyszle konta, modal wyboru istniejacych wpisow po nazwie/typie/modelu oraz wczytywanie lokalnych zdjec produktu do slotow. | - |
+| WEB-003 | Web UI blizsze wersji desktopowej | P1 | Wykonane | 2026-05-07 | 2026-05-07 | 2026-05-07 | Przeniesiono Listy i Ustawienia do okien modalnych wewnatrz strony, dodano edycje ustawien z poziomu przegladarki, zakladke Uzytkownicy, modal wyboru istniejacych wpisow po nazwie/typie/modelu oraz wczytywanie lokalnych zdjec produktu do slotow. | - |
+| WEB-004 | Admin, diagnostyka i sloty w panelu webowym | P1 | Wykonane | 2026-05-07 | 2026-05-07 | 2026-05-07 | Przywrocono logowanie domyslne `admin/admin`, ograniczono Ustawienia do uzytkownikow z rola `admin`, dodano hasla uzytkownikow i blokade wylaczenia aktualnego konta, opisane kompaktowe checkboxy, testy folderow lokalnych/FTP/SQL, mapowanie slotow do kolumn SQL, drag-and-drop plikow na sloty, przenoszenie lokalnych zdjec miedzy slotami oraz znaczniki LOCAL/FTP/SQL w slotach webowych. | - |
 
 ## Testy, CI i wydania
 

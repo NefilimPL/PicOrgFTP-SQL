@@ -32,6 +32,8 @@ from ..web_workflow import (
 from ..web_data import (
     add_list_value,
     add_user,
+    authenticate_user,
+    find_user,
     find_product_photos,
     load_web_data,
     load_users,
@@ -39,6 +41,9 @@ from ..web_data import (
     save_web_entry,
     search_entries,
     settings_snapshot,
+    test_ftp_connection,
+    test_local_paths,
+    test_sql_connection,
     update_settings,
     update_user,
 )
@@ -52,7 +57,7 @@ DEFAULT_ADMIN_PASSWORD = "admin"
 
 
 def _auth_enabled() -> bool:
-    return os.environ.get("PICORG_WEB_AUTH", "0").strip().lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("PICORG_WEB_AUTH", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _admin_username() -> str:
@@ -98,7 +103,8 @@ def _read_session_token(token: str | None) -> str | None:
         return None
     if int(time.time()) - issued > SESSION_MAX_AGE_SECONDS:
         return None
-    if username != _admin_username():
+    user = find_user(username)
+    if not user or not user.get("enabled"):
         return None
     return username
 
@@ -116,6 +122,21 @@ def _require_user(request: Request) -> str:
     if not username:
         raise HTTPException(status_code=401, detail="Brak aktywnej sesji.")
     return username
+
+
+def _current_user_payload(request: Request) -> dict[str, Any]:
+    username = _require_user(request)
+    user = find_user(username)
+    if not user:
+        raise HTTPException(status_code=401, detail="Brak aktywnej sesji.")
+    return user
+
+
+def _require_admin(request: Request) -> dict[str, Any]:
+    user = _current_user_payload(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Wymagane konto administratora.")
+    return user
 
 
 def _static_file(name: str) -> FileResponse:
@@ -220,11 +241,10 @@ def create_app() -> FastAPI:
         form = await request.form()
         username = str(form.get("username") or "").strip()
         password = str(form.get("password") or "")
-        if username != _admin_username() or not hmac.compare_digest(
-            password, _admin_password()
-        ):
+        user = authenticate_user(username, password)
+        if not user:
             raise HTTPException(status_code=401, detail="Niepoprawny login lub haslo.")
-        response = JSONResponse({"ok": True, "username": username})
+        response = JSONResponse({"ok": True, "user": user})
         response.set_cookie(
             SESSION_COOKIE,
             _make_session_token(username),
@@ -255,6 +275,7 @@ def create_app() -> FastAPI:
             "slots": slots,
             "admin_user": _admin_username(),
             "auth_enabled": _auth_enabled(),
+            "current_user": _current_user_payload(request),
             **load_web_data(),
         }
 
@@ -303,7 +324,14 @@ def create_app() -> FastAPI:
         enriched = []
         for photo in photos:
             item = dict(photo)
-            item["url"] = f"/api/file?token={_file_token(str(photo['path']))}"
+            path = str(photo.get("path") or "")
+            if path:
+                token = _file_token(path)
+                item["token"] = token
+                item["url"] = f"/api/file?token={token}"
+            else:
+                item["token"] = ""
+                item["url"] = ""
             enriched.append(item)
         return JSONResponse({"photos": enriched})
 
@@ -337,12 +365,14 @@ def create_app() -> FastAPI:
 
     @app.get("/api/settings")
     def settings_api(request: Request) -> dict[str, Any]:
-        _require_user(request)
-        return settings_snapshot()
+        user = _require_admin(request)
+        payload = settings_snapshot()
+        payload["current_user"] = user
+        return payload
 
     @app.post("/api/settings")
     async def settings_save(request: Request) -> JSONResponse:
-        _require_user(request)
+        _require_admin(request)
         payload = await request.json()
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Niepoprawne ustawienia.")
@@ -350,29 +380,31 @@ def create_app() -> FastAPI:
             snapshot = update_settings(payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        snapshot["current_user"] = _current_user_payload(request)
         return JSONResponse(snapshot)
 
     @app.get("/api/users")
     def users_get(request: Request) -> dict[str, Any]:
-        _require_user(request)
-        return {"users": load_users()}
+        user = _require_admin(request)
+        return {"users": load_users(), "current_user": user}
 
     @app.post("/api/users")
     async def users_add(request: Request) -> JSONResponse:
-        _require_user(request)
+        _require_admin(request)
         payload = await request.json()
         try:
             users = add_user(
                 str(payload.get("username") if isinstance(payload, dict) else ""),
+                str(payload.get("password") if isinstance(payload, dict) else ""),
                 str(payload.get("role") if isinstance(payload, dict) else "user"),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse({"users": users})
+        return JSONResponse({"users": users, "current_user": _current_user_payload(request)})
 
     @app.patch("/api/users/{username}")
     async def users_update(request: Request, username: str) -> JSONResponse:
-        _require_user(request)
+        current_user = _require_admin(request)
         payload = await request.json()
         if not isinstance(payload, dict):
             payload = {}
@@ -381,10 +413,23 @@ def create_app() -> FastAPI:
                 username,
                 enabled=payload.get("enabled") if "enabled" in payload else None,
                 role=payload.get("role") if "role" in payload else None,
+                password=payload.get("password") if "password" in payload else None,
+                current_username=str(current_user.get("username") or ""),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse({"users": users})
+        return JSONResponse({"users": users, "current_user": _current_user_payload(request)})
+
+    @app.post("/api/diagnostics/{target}")
+    def diagnostics(request: Request, target: str) -> JSONResponse:
+        _require_admin(request)
+        if target == "local":
+            return JSONResponse(test_local_paths())
+        if target == "ftp":
+            return JSONResponse(test_ftp_connection())
+        if target == "sql":
+            return JSONResponse(test_sql_connection())
+        raise HTTPException(status_code=404, detail="Nieznany test diagnostyczny.")
 
     @app.post("/api/process")
     async def process_uploads(request: Request) -> JSONResponse:
@@ -398,6 +443,17 @@ def create_app() -> FastAPI:
             for prefix, slot in slot_by_prefix.items():
                 value = form.get(f"slot_{prefix}")
                 if not isinstance(value, UploadFile) or not value.filename:
+                    token = str(form.get(f"existing_slot_{prefix}") or "").strip()
+                    if token:
+                        source_path = _path_from_file_token(token)
+                        uploaded_slots.append(
+                            WebUploadedSlot(
+                                prefix=prefix,
+                                label=slot["label"],
+                                source_path=source_path,
+                                original_filename=os.path.basename(source_path),
+                            )
+                        )
                     continue
                 source_path = await _save_upload(value, temp_dir, prefix)
                 uploaded_slots.append(

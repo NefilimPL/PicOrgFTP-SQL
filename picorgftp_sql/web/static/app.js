@@ -6,6 +6,8 @@ const state = {
   entries: [],
   selectedList: "names",
   settings: null,
+  currentUser: null,
+  isAdmin: false,
   activeSettingsTab: "app",
   suppressAutoSearch: false,
   lastAutoSearchKey: "",
@@ -30,6 +32,7 @@ const serverInfo = document.querySelector("#serverInfo");
 const submitButton = document.querySelector("#submitButton");
 const clearButton = document.querySelector("#clearButton");
 const logoutButton = document.querySelector("#logoutButton");
+const settingsNavButton = document.querySelector('[data-modal="settings"]');
 const entrySelect = document.querySelector("#entrySelect");
 const findByEanButton = document.querySelector("#findByEanButton");
 const findProductButton = document.querySelector("#findProductButton");
@@ -47,12 +50,26 @@ async function requestJson(path, options = {}) {
   const response = await fetch(path, options);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 401) {
+      window.location.href = "/login";
+    }
     throw new Error(payload.detail || "Operacja nie powiodla sie.");
   }
   return payload;
 }
 
+function updateAdminUi() {
+  state.isAdmin = state.currentUser?.role === "admin";
+  if (settingsNavButton) {
+    settingsNavButton.style.display = state.isAdmin ? "" : "none";
+  }
+}
+
 function openModal(name) {
+  if (name === "settings" && !state.isAdmin) {
+    formStatus.textContent = "Ustawienia sa dostepne tylko dla administratora.";
+    return;
+  }
   document.querySelector(`#${name}View`)?.classList.add("active");
   document.querySelector(`#${name}Modal`)?.classList.add("active");
   if (name === "settings") {
@@ -136,6 +153,99 @@ function renderEntryModal(entries) {
   document.querySelector("#entryModal").classList.add("active");
 }
 
+function slotStatusText(photo) {
+  if (!photo) {
+    return "Przeciagnij albo wybierz plik";
+  }
+  if (photo.filename) {
+    return photo.filename;
+  }
+  if (photo.ftp_filename) {
+    return `FTP: ${photo.ftp_filename}`;
+  }
+  if (photo.sql_value) {
+    return `SQL: ${photo.sql_value}`;
+  }
+  const parts = [];
+  if (photo.local) parts.push("LOCAL");
+  if (photo.ftp) parts.push("FTP");
+  if (photo.sql) parts.push("SQL");
+  return parts.length ? parts.join(" / ") : "Brak lokalnego pliku";
+}
+
+function renderSlotBadges(container, photo, file) {
+  const badges = document.createElement("div");
+  badges.className = "slot-badges";
+  const statuses = [
+    ["local", "LOCAL", "Plik jest w folderze backendu"],
+    ["ftp", "FTP", "Wpis dla slotu jest na FTP"],
+    ["sql", "SQL", "Wpis dla slotu jest w SQL"],
+  ];
+  if (file) {
+    const badge = document.createElement("span");
+    badge.className = "slot-badge on";
+    badge.title = "Nowy plik wybrany w przegladarce";
+    badge.textContent = "NOWY";
+    badges.appendChild(badge);
+  }
+  for (const [key, label, title] of statuses) {
+    const badge = document.createElement("span");
+    badge.className = `slot-badge ${photo && photo[key] ? "on" : ""}`;
+    badge.title = title;
+    badge.textContent = label;
+    badges.appendChild(badge);
+  }
+  container.appendChild(badges);
+}
+
+function clearSlotAssignment(prefix) {
+  state.files.delete(prefix);
+  state.loadedPhotos.delete(prefix);
+}
+
+function setSlotFile(prefix, file) {
+  state.files.set(prefix, file);
+  state.loadedPhotos.delete(prefix);
+}
+
+function getSlotAssignment(prefix) {
+  if (state.files.has(prefix)) {
+    return { type: "file", value: state.files.get(prefix) };
+  }
+  if (state.loadedPhotos.has(prefix)) {
+    return { type: "loaded", value: state.loadedPhotos.get(prefix) };
+  }
+  return null;
+}
+
+function setSlotAssignment(prefix, assignment) {
+  clearSlotAssignment(prefix);
+  if (!assignment) {
+    return;
+  }
+  if (assignment.type === "file") {
+    state.files.set(prefix, assignment.value);
+    return;
+  }
+  if (assignment.type === "loaded") {
+    state.loadedPhotos.set(prefix, { ...assignment.value, prefix, dirty: true });
+  }
+}
+
+function moveSlotContent(sourcePrefix, targetPrefix) {
+  if (!sourcePrefix || !targetPrefix || sourcePrefix === targetPrefix) {
+    return;
+  }
+  const source = getSlotAssignment(sourcePrefix);
+  if (!source) {
+    return;
+  }
+  const target = getSlotAssignment(targetPrefix);
+  setSlotAssignment(targetPrefix, source);
+  setSlotAssignment(sourcePrefix, target);
+  renderSlots();
+}
+
 function renderSlots(slots = state.slots) {
   slotGrid.textContent = "";
   state.slots = slots;
@@ -150,20 +260,59 @@ function renderSlots(slots = state.slots) {
     const previewImage = node.querySelector("img");
     const empty = node.querySelector(".slot-empty");
     const loadedPhoto = state.loadedPhotos.get(slot.prefix);
+    const selectedFile = state.files.get(slot.prefix);
 
     title.textContent = `${slot.prefix} - ${slot.label}`;
-    detail.textContent = loadedPhoto ? loadedPhoto.filename : "Brak pliku";
+    detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto);
     input.name = `slot_${slot.prefix}`;
+    node.draggable = Boolean(selectedFile || loadedPhoto?.token);
+    renderSlotBadges(node.querySelector(".slot-meta"), loadedPhoto, selectedFile);
 
-    if (loadedPhoto) {
+    if (selectedFile) {
+      if (selectedFile.type.startsWith("image/")) {
+        previewImage.src = URL.createObjectURL(selectedFile);
+        preview.classList.add("has-image");
+      } else {
+        empty.textContent = selectedFile.name;
+      }
+    } else if (loadedPhoto) {
       preview.classList.add("loaded-photo");
-      if (loadedPhoto.is_image) {
+      if (loadedPhoto.is_image && loadedPhoto.url) {
         previewImage.src = loadedPhoto.url;
         preview.classList.add("has-image");
       } else {
-        empty.textContent = loadedPhoto.filename;
+        empty.textContent = slotStatusText(loadedPhoto);
       }
     }
+
+    node.addEventListener("dragstart", (event) => {
+      const assignment = getSlotAssignment(slot.prefix);
+      if (!assignment || (assignment.type === "loaded" && !assignment.value.token)) {
+        event.preventDefault();
+        return;
+      }
+      event.dataTransfer.setData("text/plain", slot.prefix);
+      event.dataTransfer.effectAllowed = "move";
+    });
+    node.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      node.classList.add("drag-over");
+      event.dataTransfer.dropEffect = event.dataTransfer.files?.length ? "copy" : "move";
+    });
+    node.addEventListener("dragleave", () => {
+      node.classList.remove("drag-over");
+    });
+    node.addEventListener("drop", (event) => {
+      event.preventDefault();
+      node.classList.remove("drag-over");
+      const file = event.dataTransfer.files && event.dataTransfer.files[0] ? event.dataTransfer.files[0] : null;
+      if (file) {
+        setSlotFile(slot.prefix, file);
+        renderSlots();
+        return;
+      }
+      moveSlotContent(event.dataTransfer.getData("text/plain"), slot.prefix);
+    });
 
     input.addEventListener("change", () => {
       const file = input.files && input.files[0] ? input.files[0] : null;
@@ -172,18 +321,8 @@ function renderSlots(slots = state.slots) {
         renderSlots();
         return;
       }
-      state.files.set(slot.prefix, file);
-      state.loadedPhotos.delete(slot.prefix);
-      detail.textContent = fileLabel(file);
-      preview.classList.remove("loaded-photo");
-      if (file.type.startsWith("image/")) {
-        previewImage.src = URL.createObjectURL(file);
-        preview.classList.add("has-image");
-      } else {
-        preview.classList.remove("has-image");
-        previewImage.removeAttribute("src");
-        empty.textContent = file.name;
-      }
+      setSlotFile(slot.prefix, file);
+      renderSlots();
     });
 
     slotGrid.appendChild(node);
@@ -330,6 +469,8 @@ async function loadBootstrap() {
   const payload = await requestJson("/api/bootstrap");
   serverInfo.textContent = payload.processed_dir;
   logoutButton.style.display = payload.auth_enabled ? "" : "none";
+  state.currentUser = payload.current_user || null;
+  updateAdminUi();
   state.lists = payload.lists || {};
   state.entries = payload.entries || [];
   renderDatalists();
@@ -451,6 +592,34 @@ function inputField(name, label, value = "", attrs = {}) {
   return wrapper;
 }
 
+function checkField(name, label, checked = false, description = "") {
+  const wrapper = document.createElement("div");
+  const input = document.createElement("input");
+  const text = document.createElement("div");
+  const title = document.createElement("strong");
+  wrapper.className = "check-row";
+  input.type = "checkbox";
+  input.name = name;
+  input.checked = Boolean(checked);
+  input.setAttribute("aria-label", label);
+  title.textContent = label;
+  text.appendChild(title);
+  if (description) {
+    const small = document.createElement("small");
+    small.textContent = description;
+    text.appendChild(small);
+  }
+  wrapper.append(input, text);
+  return wrapper;
+}
+
+function credentialField(name, label, isSet = false, attrs = {}) {
+  const field = inputField(name, label, "", attrs);
+  const input = field.querySelector("input");
+  input.placeholder = isSet ? "Zapisane - wpisz nowe, zeby zmienic" : "Nie ustawiono";
+  return field;
+}
+
 function selectField(name, label, value, choices) {
   const wrapper = document.createElement("label");
   const select = document.createElement("select");
@@ -465,6 +634,61 @@ function selectField(name, label, value, choices) {
   }
   wrapper.appendChild(select);
   return wrapper;
+}
+
+function actionRow(...buttons) {
+  const actions = document.createElement("div");
+  actions.className = "settings-actions";
+  actions.append(...buttons);
+  return actions;
+}
+
+function formatDiagnosticResult(target, payload) {
+  if (target === "local" && Array.isArray(payload.checks)) {
+    const failed = payload.checks.filter((item) => !item.read || !item.write);
+    if (!failed.length) {
+      return "Foldery lokalne: odczyt i zapis dzialaja.";
+    }
+    return failed
+      .map((item) => `${item.key}: ${item.error || "brak odczytu lub zapisu"} (${item.path})`)
+      .join(" | ");
+  }
+  return payload.message || (payload.ok ? "Test zakonczony powodzeniem." : "Test nie powiodl sie.");
+}
+
+function diagnosticButton(target, label) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary-button";
+  button.textContent = label;
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    settingsStatus.textContent = "Testowanie...";
+    try {
+      const payload = await requestJson(`/api/diagnostics/${target}`, { method: "POST" });
+      settingsStatus.textContent = formatDiagnosticResult(target, payload);
+    } catch (error) {
+      settingsStatus.textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
+function ensureSqlColumnsDatalist() {
+  let datalist = document.querySelector("#sqlColumnsList");
+  if (!datalist) {
+    datalist = document.createElement("datalist");
+    datalist.id = "sqlColumnsList";
+    document.body.appendChild(datalist);
+  }
+  datalist.textContent = "";
+  for (const column of state.settings?.sql_available_columns || []) {
+    const option = document.createElement("option");
+    option.value = column;
+    datalist.appendChild(option);
+  }
 }
 
 function settingsSaveButton(form, buildPayload) {
@@ -483,6 +707,8 @@ function settingsSaveButton(form, buildPayload) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(buildPayload(new FormData(form))),
     });
+    state.currentUser = state.settings.current_user || state.currentUser;
+    updateAdminUi();
     settingsStatus.textContent = "Zapisano.";
     renderSettings();
   });
@@ -492,13 +718,39 @@ function renderSettingsApp() {
   const s = state.settings;
   const form = document.createElement("form");
   form.className = "settings-form";
+  const configNote = document.createElement("p");
+  configNote.className = "settings-note wide-field";
+  configNote.textContent =
+    "Panel webowy uzywa tej samej lokalizacji, config.json i APP_SECRET co lokalna aplikacja uruchomiona na backendzie.";
+  const colorGroup = document.createElement("div");
+  colorGroup.className = "settings-field-group wide-field";
+  const colorTitle = document.createElement("h2");
+  colorTitle.textContent = "Nazwy pol kolorow";
+  const colorGrid = document.createElement("div");
+  colorGrid.className = "settings-form nested-grid";
+  colorGrid.append(
+    inputField("color1", "Kolor 1", s.color_field_labels?.color1 || ""),
+    inputField("color2", "Kolor 2", s.color_field_labels?.color2 || ""),
+    inputField("color3", "Kolor 3", s.color_field_labels?.color3 || "")
+  );
+  colorGroup.append(colorTitle, colorGrid);
   form.append(
+    configNote,
     inputField("base_dir", "Katalog bazowy", s.base_dir),
-    inputField("local_file_index", "Indeks plikow", "", { type: "checkbox", checked: s.local_file_index }),
-    inputField("auto_content_fit", "Auto fit zdjec", "", { type: "checkbox", checked: s.auto_content_fit }),
-    inputField("color1", "Nazwa pola kolor 1", s.color_field_labels?.color1 || ""),
-    inputField("color2", "Nazwa pola kolor 2", s.color_field_labels?.color2 || ""),
-    inputField("color3", "Nazwa pola kolor 3", s.color_field_labels?.color3 || "")
+    checkField(
+      "local_file_index",
+      "Indeks plikow lokalnych",
+      s.local_file_index,
+      "Backend sprawdza lokalne pliki przy wczytywaniu statusow slotow."
+    ),
+    checkField(
+      "auto_content_fit",
+      "Automatyczne dopasowanie zdjec",
+      s.auto_content_fit,
+      "Przed zapisem zdjecia sa przycinane do widocznej zawartosci."
+    ),
+    colorGroup,
+    actionRow(diagnosticButton("local", "Test folderow backendu"))
   );
   settingsSaveButton(form, (data) => ({
     app: {
@@ -520,12 +772,18 @@ function renderSettingsFtp() {
   const form = document.createElement("form");
   form.className = "settings-form";
   form.append(
-    inputField("enabled", "Aktualizacja FTP", "", { type: "checkbox", checked: ftp.enabled }),
+    checkField(
+      "enabled",
+      "Aktualizacja FTP",
+      ftp.enabled,
+      "Po zapisie backend bedzie wysylal przetworzone pliki na FTP."
+    ),
     inputField("host", "Host", ftp.host),
     inputField("port", "Port", ftp.port, { type: "number" }),
     inputField("path", "Sciezka", ftp.path),
-    inputField("user", "Uzytkownik", ""),
-    inputField("password", "Haslo", "", { type: "password" })
+    credentialField("user", "Uzytkownik", ftp.user_set),
+    credentialField("password", "Haslo", ftp.password_set, { type: "password" }),
+    actionRow(diagnosticButton("ftp", "Test FTP"))
   );
   settingsSaveButton(form, (data) => ({
     ftp: {
@@ -546,19 +804,22 @@ function renderSettingsSql() {
   form.className = "settings-form";
   form.append(
     selectField("type", "Typ bazy", db.type, [["mysql", "MySQL"], ["mssql", "MS SQL"]]),
-    inputField("sql_update_enabled", "Aktualizacja SQL", "", {
-      type: "checkbox",
-      checked: db.sql_update_enabled,
-    }),
+    checkField(
+      "sql_update_enabled",
+      "Aktualizacja SQL",
+      db.sql_update_enabled,
+      "Backend bedzie aktualizowal pola SQL przypisane w zakladce Sloty."
+    ),
     inputField("query", "Zapytanie SQL", db.query, { textarea: true, className: "wide-field" }),
     inputField("mssql_server", "MS SQL server", db.mssql.server),
     inputField("mssql_database", "MS SQL database", db.mssql.database),
-    inputField("mssql_user", "MS SQL user", ""),
-    inputField("mssql_password", "MS SQL haslo", "", { type: "password" }),
+    credentialField("mssql_user", "MS SQL user", db.mssql.user_set),
+    credentialField("mssql_password", "MS SQL haslo", db.mssql.password_set, { type: "password" }),
     inputField("mysql_server", "MySQL server", db.mysql.server),
     inputField("mysql_database", "MySQL database", db.mysql.database),
-    inputField("mysql_user", "MySQL user", ""),
-    inputField("mysql_password", "MySQL haslo", "", { type: "password" })
+    credentialField("mysql_user", "MySQL user", db.mysql.user_set),
+    credentialField("mysql_password", "MySQL haslo", db.mysql.password_set, { type: "password" }),
+    actionRow(diagnosticButton("sql", "Test SQL"))
   );
   settingsSaveButton(form, (data) => ({
     database: {
@@ -583,26 +844,32 @@ function renderSettingsSql() {
 }
 
 function renderSettingsSlots() {
+  ensureSqlColumnsDatalist();
   const form = document.createElement("form");
   form.className = "settings-form";
+  const note = document.createElement("p");
+  note.className = "settings-note wide-field";
+  note.textContent = "Kazdy slot moze miec przypisane pole SQL uzywane przy sprawdzaniu i aktualizacji wpisu.";
   const list = document.createElement("div");
   list.className = "slot-settings-list";
   for (const slot of state.settings.slots || []) {
     const row = document.createElement("div");
     row.className = "slot-settings-row";
+    const column = inputField("sql_column", "Pole SQL", slot.sql_column || "");
+    column.querySelector("input").setAttribute("list", "sqlColumnsList");
     row.append(
       inputField("prefix", "ID", slot.prefix),
       inputField("label", "Nazwa", slot.label),
-      document.createElement("span"),
-      document.createElement("span")
+      column
     );
     list.appendChild(row);
   }
-  form.appendChild(list);
+  form.append(note, list);
   settingsSaveButton(form, () => {
     const slots = [...form.querySelectorAll(".slot-settings-row")].map((row) => ({
       prefix: row.querySelector('[name="prefix"]').value,
       label: row.querySelector('[name="label"]').value,
+      sql_column: row.querySelector('[name="sql_column"]').value,
     }));
     return { slots };
   });
@@ -613,20 +880,36 @@ function renderSettingsUsers() {
   const wrapper = document.createElement("div");
   wrapper.className = "settings-form";
   const addForm = document.createElement("form");
-  addForm.className = "inline-form wide-field";
+  addForm.className = "user-add-form wide-field";
   const input = document.createElement("input");
+  const password = document.createElement("input");
+  const role = document.createElement("select");
   const button = document.createElement("button");
   input.name = "username";
   input.placeholder = "Nowy uzytkownik";
+  password.name = "password";
+  password.type = "password";
+  password.placeholder = "Haslo";
+  for (const value of ["user", "admin"]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    role.appendChild(option);
+  }
   button.textContent = "Dodaj";
-  addForm.append(input, button);
+  addForm.append(input, password, role, button);
   addForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    state.settings.users = (await requestJson("/api/users", {
+    const payload = await requestJson("/api/users", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: input.value, role: "user" }),
-    })).users;
+      body: JSON.stringify({ username: input.value, password: password.value, role: role.value }),
+    });
+    state.settings.users = payload.users;
+    state.currentUser = payload.current_user || state.currentUser;
+    updateAdminUi();
+    input.value = "";
+    password.value = "";
     renderSettings();
   });
   const list = document.createElement("div");
@@ -637,7 +920,15 @@ function renderSettingsUsers() {
     const name = document.createElement("strong");
     const role = document.createElement("select");
     const enabled = document.createElement("input");
+    const enabledWrap = document.createElement("div");
+    const enabledText = document.createElement("div");
+    const enabledTitle = document.createElement("strong");
+    const enabledDescription = document.createElement("small");
+    const passwordInput = document.createElement("input");
     const save = document.createElement("button");
+    const isCurrentUser =
+      state.currentUser &&
+      String(state.currentUser.username || "").toLowerCase() === String(user.username || "").toLowerCase();
     name.textContent = user.username;
     for (const value of ["user", "admin"]) {
       const option = document.createElement("option");
@@ -648,17 +939,35 @@ function renderSettingsUsers() {
     }
     enabled.type = "checkbox";
     enabled.checked = Boolean(user.enabled);
+    enabled.disabled = Boolean(isCurrentUser);
+    enabled.setAttribute("aria-label", `Konto aktywne: ${user.username}`);
+    enabledTitle.textContent = "Konto aktywne";
+    enabledDescription.textContent = isCurrentUser
+      ? "Nie mozna wylaczyc konta aktualnej sesji."
+      : "Wylaczenie blokuje logowanie tego uzytkownika.";
+    enabledText.append(enabledTitle, enabledDescription);
+    enabledWrap.className = "check-row compact-check";
+    enabledWrap.append(enabled, enabledText);
+    passwordInput.type = "password";
+    passwordInput.placeholder = user.has_password ? "Nowe haslo opcjonalnie" : "Ustaw haslo";
     save.type = "button";
     save.textContent = "Zapisz";
     save.addEventListener("click", async () => {
-      state.settings.users = (await requestJson(`/api/users/${encodeURIComponent(user.username)}`, {
+      const payload = { enabled: enabled.checked, role: role.value };
+      if (passwordInput.value) {
+        payload.password = passwordInput.value;
+      }
+      const response = await requestJson(`/api/users/${encodeURIComponent(user.username)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: enabled.checked, role: role.value }),
-      })).users;
+        body: JSON.stringify(payload),
+      });
+      state.settings.users = response.users;
+      state.currentUser = response.current_user || state.currentUser;
+      updateAdminUi();
       renderSettings();
     });
-    row.append(name, role, enabled, save);
+    row.append(name, role, passwordInput, enabledWrap, save);
     list.appendChild(row);
   }
   wrapper.append(addForm, list);
@@ -673,9 +982,9 @@ function renderSettings() {
   document.querySelectorAll(".settings-tab").forEach((button) => {
     button.classList.toggle("active", button.dataset.settingsTab === state.activeSettingsTab);
   });
-  settingsStatus.textContent = state.settings.auth_enabled
-    ? "Logowanie wlaczone."
-    : "Logowanie wylaczone. Konta sa przygotowane pod kolejny etap.";
+  settingsStatus.textContent = state.settings.windows_admin
+    ? "Proces backendu ma uprawnienia administratora Windows. Rola web admin jest niezalezna."
+    : "Proces backendu dziala bez uprawnien administratora Windows. Rola web admin jest niezalezna.";
   if (state.activeSettingsTab === "app") renderSettingsApp();
   if (state.activeSettingsTab === "ftp") renderSettingsFtp();
   if (state.activeSettingsTab === "sql") renderSettingsSql();
@@ -685,6 +994,8 @@ function renderSettings() {
 
 async function loadSettings() {
   state.settings = await requestJson("/api/settings");
+  state.currentUser = state.settings.current_user || state.currentUser;
+  updateAdminUi();
   renderSettings();
 }
 
@@ -720,6 +1031,11 @@ productForm.addEventListener("submit", async (event) => {
   const data = new FormData(productForm);
   for (const [prefix, file] of state.files.entries()) {
     data.set(`slot_${prefix}`, file, file.name);
+  }
+  for (const [prefix, photo] of state.loadedPhotos.entries()) {
+    if (!state.files.has(prefix) && photo.dirty && photo.token) {
+      data.set(`existing_slot_${prefix}`, photo.token);
+    }
   }
   try {
     const payload = await requestJson("/api/process", { method: "POST", body: data });

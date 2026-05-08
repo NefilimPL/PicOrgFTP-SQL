@@ -53,7 +53,7 @@ Changing these values before running the script helps tailor the program to your
 
 The repository also includes an early local-network web panel. It keeps the desktop application unchanged, but allows users on the same LAN to open a browser, log in and upload files into the configured photo slots. The first implementation saves uploaded files into the same `_ZDJECIA PRZEROBIONE_` product folder structure as the desktop workflow. FTP and SQL synchronization can be added to the same backend workflow later.
 
-The web panel currently includes product entry loading/search by EAN, product matching by name/type/model with an in-page selection dialog, loading existing local photos into slots, saving new or existing Excel entries, datalist suggestions, a basic list editor, a clear-form action, browser-editable settings, and a Users tab prepared for the later account system. Authentication is disabled by default for this LAN MVP.
+The web panel currently includes product entry loading/search by EAN, product matching by name/type/model with an in-page selection dialog, loading existing local photos into slots, drag-and-drop upload and moving between slots, LOCAL/FTP/SQL presence badges, saving new or existing Excel entries, datalist suggestions, a list editor, a clear-form action, browser-editable settings, slot-to-SQL-column mapping, local/FTP/SQL connection tests, and user administration with password changes. Login is enabled by default. The initial account is `admin` / `admin`; change that password in **Settings -> Users** before using the panel beyond a trusted test LAN.
 
 Install the web dependencies:
 
@@ -72,7 +72,7 @@ Start the backend on the server or workstation that should host the service:
 python -m uvicorn picorgftp_sql.web.app:app --host 0.0.0.0 --port 8000
 ```
 
-Open `http://SERVER_IP:8000` from another computer in the same local network. Keep the service inside a trusted LAN or VPN; do not expose this LAN MVP directly to the public internet.
+Open `http://SERVER_IP:8000` from another computer in the same local network. Keep the service inside a trusted LAN or VPN; do not expose this LAN MVP directly to the public internet. Settings are visible only to web users with the `admin` role.
 
 ### Building an executable
 
@@ -140,7 +140,7 @@ Zmiana tych wartości przed uruchomieniem skryptu umożliwia szybkie dostosowani
 
 Repozytorium zawiera także pierwszy lokalny panel webowy. Obecna aplikacja desktopowa zostaje bez zmian, a użytkownicy w tej samej sieci lokalnej mogą otworzyć stronę w przeglądarce, zalogować się i wgrać pliki do skonfigurowanych slotów zdjęć. Pierwsza wersja zapisuje uploady do tej samej struktury `_ZDJECIA PRZEROBIONE_`, której używa desktop. Synchronizację FTP i SQL można później dopiąć w tym samym workflow backendu.
 
-Panel webowy obsługuje obecnie wczytywanie i wyszukiwanie wpisów po EAN, dopasowanie produktu po nazwie/typie/modelu z oknem wyboru wewnątrz strony, wczytywanie istniejących lokalnych zdjęć do slotów, zapis nowego albo istniejącego wpisu Excel, podpowiedzi z list, podstawowy edytor list, czyszczenie formularza, edycję ustawień w przeglądarce oraz zakładkę Użytkownicy przygotowaną pod późniejszy system kont. Logowanie jest domyślnie wyłączone dla tego MVP w LAN.
+Panel webowy obsługuje obecnie wczytywanie i wyszukiwanie wpisów po EAN, dopasowanie produktu po nazwie/typie/modelu z oknem wyboru wewnątrz strony, wczytywanie istniejących lokalnych zdjęć do slotów, upload przez przeciąganie plików, przenoszenie zdjęć między slotami, znaczniki LOCAL/FTP/SQL, zapis nowego albo istniejącego wpisu Excel, podpowiedzi z list, edytor list, czyszczenie formularza, edycję ustawień w przeglądarce, mapowanie slotów do kolumn SQL, testy folderów lokalnych/FTP/SQL oraz administrację użytkownikami z ustawianiem haseł. Logowanie jest domyślnie włączone. Pierwsze konto to `admin` / `admin`; zmień to hasło w **Ustawienia -> Użytkownicy** przed używaniem panelu poza zaufanym testem w LAN.
 
 Instalacja zależności webowych:
 
@@ -159,7 +159,7 @@ Uruchomienie backendu na serwerze albo komputerze hostującym usługę:
 python -m uvicorn picorgftp_sql.web.app:app --host 0.0.0.0 --port 8000
 ```
 
-Z innego komputera w tej samej sieci otwórz `http://IP_SERWERA:8000`. Trzymaj usługę w zaufanej sieci LAN albo VPN; tego MVP nie należy wystawiać bezpośrednio do publicznego internetu.
+Z innego komputera w tej samej sieci otwórz `http://IP_SERWERA:8000`. Trzymaj usługę w zaufanej sieci LAN albo VPN; tego MVP nie należy wystawiać bezpośrednio do publicznego internetu. Ustawienia są widoczne tylko dla użytkowników webowych z rolą `admin`.
 
 ### Budowanie pliku wykonywalnego
 

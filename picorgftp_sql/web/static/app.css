@@ -62,6 +62,16 @@ select {
   padding: 8px 10px;
 }
 
+input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  min-height: 18px;
+  flex: 0 0 18px;
+  padding: 0;
+  cursor: pointer;
+}
+
 input:focus,
 select:focus {
   border-color: var(--accent);
@@ -274,6 +284,31 @@ h2 {
   gap: 8px;
 }
 
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--text);
+}
+
+.check-row strong {
+  display: block;
+  font-size: 13px;
+}
+
+.check-row small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.compact-check {
+  padding: 6px 8px;
+}
+
 #formStatus {
   min-height: 22px;
   color: var(--muted);
@@ -312,6 +347,13 @@ h2 {
 .inline-form {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) auto;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.user-add-form {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr) minmax(120px, 150px) auto;
   gap: 10px;
   margin-bottom: 14px;
 }
@@ -397,6 +439,28 @@ h2 {
   grid-column: 1 / -1;
 }
 
+.settings-field-group {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.settings-field-group h2 {
+  margin: 0;
+}
+
+.nested-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.settings-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .settings-form textarea {
   width: 100%;
   min-height: 110px;
@@ -424,9 +488,16 @@ h2 {
 .slot-settings-row,
 .user-row {
   display: grid;
-  grid-template-columns: 90px minmax(140px, 1fr) minmax(140px, 1fr) auto;
   gap: 8px;
   align-items: center;
+}
+
+.slot-settings-row {
+  grid-template-columns: 90px minmax(140px, 1fr) minmax(180px, 1fr);
+}
+
+.user-row {
+  grid-template-columns: 140px minmax(120px, 160px) minmax(180px, 1fr) minmax(120px, 160px) auto;
 }
 
 .loaded-photo {
@@ -491,6 +562,31 @@ h2 {
   border-radius: 8px;
   background: #ffffff;
   padding: 10px;
+}
+
+.slot-card.drag-over {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(47, 111, 94, 0.18);
+}
+
+.slot-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.slot-badge {
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 5px;
+}
+
+.slot-badge.on {
+  background: var(--accent);
+  color: #ffffff;
 }
 
 .slot-preview {
@@ -649,7 +745,8 @@ h2 {
 
   .topnav button,
   .lookup-actions,
-  .inline-form {
+  .inline-form,
+  .user-add-form {
     grid-template-columns: 1fr;
   }
 
