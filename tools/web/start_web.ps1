@@ -12,13 +12,15 @@ $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
 $FirewallEnabled = $env:PICORG_WEB_FIREWALL -ne "0"
 $FirewallRemoveOnStop = $env:PICORG_WEB_FIREWALL_CLOSE -ne "0"
 $CustomFirewallRuleName = [bool]$env:PICORG_WEB_FIREWALL_RULE
-$FirewallRuleName = if ($env:PICORG_WEB_FIREWALL_RULE) { $env:PICORG_WEB_FIREWALL_RULE } else { "PicOrgFTP-SQL Web $Port" }
-$FirewallRemoteAddress = if ($env:PICORG_WEB_FIREWALL_REMOTE) { $env:PICORG_WEB_FIREWALL_REMOTE } else { "LocalSubnet" }
+$CustomFirewallBlockRuleName = [bool]$env:PICORG_WEB_FIREWALL_BLOCK_RULE
+$FirewallRuleName = if ($env:PICORG_WEB_FIREWALL_RULE) { $env:PICORG_WEB_FIREWALL_RULE } else { "Allow TCP $Port" }
+$FirewallBlockRuleName = if ($env:PICORG_WEB_FIREWALL_BLOCK_RULE) { $env:PICORG_WEB_FIREWALL_BLOCK_RULE } else { "Block TCP $Port" }
+$FirewallRemoteAddress = if ($env:PICORG_WEB_FIREWALL_REMOTE) { $env:PICORG_WEB_FIREWALL_REMOTE } else { "Any" }
 $FirewallInterfaceAlias = if ($env:PICORG_WEB_FIREWALL_INTERFACE) { $env:PICORG_WEB_FIREWALL_INTERFACE } else { "" }
 $FirewallProfiles = if ($env:PICORG_WEB_FIREWALL_PROFILE) {
     $env:PICORG_WEB_FIREWALL_PROFILE -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ }
 } else {
-    @("Private", "Domain", "Public")
+    @("Any")
 }
 
 function Write-Info($Text) {
@@ -29,7 +31,10 @@ function Set-WebPort($NewPort) {
     $script:Port = [int]$NewPort
     $script:LocalUrl = "http://127.0.0.1:$script:Port"
     if (-not $script:CustomFirewallRuleName) {
-        $script:FirewallRuleName = "PicOrgFTP-SQL Web $script:Port"
+        $script:FirewallRuleName = "Allow TCP $script:Port"
+    }
+    if (-not $script:CustomFirewallBlockRuleName) {
+        $script:FirewallBlockRuleName = "Block TCP $script:Port"
     }
 }
 
@@ -237,6 +242,31 @@ function Get-WebFirewallRule {
     return Get-NetFirewallRule -DisplayName $FirewallRuleName -ErrorAction SilentlyContinue | Select-Object -First 1
 }
 
+function Remove-WebBlockFirewallRule {
+    if (-not $FirewallEnabled) {
+        return
+    }
+    if (-not (Get-Command Remove-NetFirewallRule -ErrorAction SilentlyContinue)) {
+        return
+    }
+    $blockRule = Get-NetFirewallRule -DisplayName $FirewallBlockRuleName -ErrorAction SilentlyContinue
+    if (-not $blockRule) {
+        return
+    }
+    if (-not (Test-Administrator)) {
+        Write-Info "Istnieje regula blokujaca '$FirewallBlockRuleName', ale bez administratora nie moge jej usunac."
+        Write-Info "Uruchom START_WEB.bat jako administrator albo wykonaj:"
+        Write-Info "Remove-NetFirewallRule -DisplayName `"$FirewallBlockRuleName`""
+        return
+    }
+    try {
+        $blockRule | Remove-NetFirewallRule
+        Write-Info "Usunieto regule blokujaca firewall: $FirewallBlockRuleName."
+    } catch {
+        Write-Info "Nie udalo sie usunac reguly blokujacej firewall: $($_.Exception.Message)"
+    }
+}
+
 function Write-FirewallRuleSummary($Rule) {
     try {
         $portFilter = $Rule | Get-NetFirewallPortFilter
@@ -293,6 +323,7 @@ function Ensure-FirewallRule {
         Write-Info "Brak cmdletow Windows Firewall. Pominieto automatyczne odblokowanie portu."
         return $result
     }
+    Remove-WebBlockFirewallRule
     $existingRule = Get-WebFirewallRule
     if ($existingRule) {
         $result.exists = $true
