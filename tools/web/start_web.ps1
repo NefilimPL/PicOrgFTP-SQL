@@ -131,6 +131,41 @@ function Get-WebFirewallRule {
     return Get-NetFirewallRule -DisplayName $FirewallRuleName -ErrorAction SilentlyContinue | Select-Object -First 1
 }
 
+function Write-FirewallRuleSummary($Rule) {
+    try {
+        $portFilter = $Rule | Get-NetFirewallPortFilter
+        $addressFilter = $Rule | Get-NetFirewallAddressFilter
+        Write-Info "Firewall: Enabled=$($Rule.Enabled), Profile=$($Rule.Profile), LocalPort=$($portFilter.LocalPort), RemoteAddress=$($addressFilter.RemoteAddress)."
+    } catch {
+        Write-Info "Nie udalo sie odczytac szczegolow reguly firewall: $($_.Exception.Message)"
+    }
+}
+
+function Update-ExistingFirewallRule($Rule) {
+    if (-not (Test-Administrator)) {
+        Write-Info "Regula firewall juz istnieje, ale bez administratora nie moge jej poprawic."
+        Write-FirewallRuleSummary $Rule
+        Write-Info "Uruchom START_WEB.bat jako administrator, zeby wymusic port/profil/adres reguly."
+        return
+    }
+    try {
+        $Rule | Set-NetFirewallRule `
+            -Enabled True `
+            -Direction Inbound `
+            -Action Allow `
+            -Profile $FirewallProfiles
+        $Rule | Get-NetFirewallPortFilter | Set-NetFirewallPortFilter `
+            -Protocol TCP `
+            -LocalPort $Port
+        $Rule | Get-NetFirewallAddressFilter | Set-NetFirewallAddressFilter `
+            -RemoteAddress $FirewallRemoteAddress
+        Write-Info "Zaktualizowano regule firewall: $FirewallRuleName."
+        Write-FirewallRuleSummary (Get-WebFirewallRule)
+    } catch {
+        Write-Info "Nie udalo sie zaktualizowac reguly firewall: $($_.Exception.Message)"
+    }
+}
+
 function Ensure-FirewallRule {
     $result = [ordered]@{
         enabled = $FirewallEnabled
@@ -151,6 +186,7 @@ function Ensure-FirewallRule {
     if ($existingRule) {
         $result.exists = $true
         Write-Info "Regula firewall juz istnieje: $FirewallRuleName."
+        Update-ExistingFirewallRule $existingRule
         return $result
     }
     if (-not (Test-Administrator)) {
