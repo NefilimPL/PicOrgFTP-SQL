@@ -5,10 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from picorgftp_sql.web_workflow import (
+    Image,
     WebProductForm,
     WebUploadedSlot,
+    WebProcessingOptions,
     processing_options_from_config,
     process_web_uploads,
     slot_definitions_from_config,
@@ -17,6 +20,11 @@ from picorgftp_sql.web_workflow import (
 
 
 class WebWorkflowTests(unittest.TestCase):
+    def _make_image(self, path: Path) -> None:
+        if Image is None:
+            self.skipTest("Pillow is not available")
+        Image.new("RGB", (16, 16), "white").save(path)
+
     def test_process_web_uploads_saves_file_with_desktop_style_name(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
@@ -101,6 +109,77 @@ class WebWorkflowTests(unittest.TestCase):
                 ),
                 uploaded_slots=[],
             )
+
+    def test_process_web_uploads_uses_global_fit_as_default(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            source = Path(temp_dir) / "source.png"
+            self._make_image(source)
+
+            with patch(
+                "picorgftp_sql.web_workflow.fit_image_to_content",
+                side_effect=lambda image: image,
+            ) as fit:
+                process_web_uploads(
+                    base_output_dir=str(Path(temp_dir) / "processed"),
+                    form=WebProductForm(
+                        name="Maggiore",
+                        type_name="komoda",
+                        model="MA03",
+                        color1="bialy",
+                        ean="5901234567890",
+                    ),
+                    uploaded_slots=[
+                        WebUploadedSlot(
+                            prefix="03",
+                            label="DETAIL_pic",
+                            source_path=str(source),
+                            original_filename="front.png",
+                        )
+                    ],
+                    options=WebProcessingOptions(
+                        resize_enabled=False,
+                        auto_content_fit=True,
+                    ),
+                )
+
+            fit.assert_called_once()
+
+    def test_process_web_uploads_allows_fit_override_false(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            source = Path(temp_dir) / "source.png"
+            self._make_image(source)
+
+            with patch(
+                "picorgftp_sql.web_workflow.fit_image_to_content",
+                side_effect=lambda image: image,
+            ) as fit:
+                process_web_uploads(
+                    base_output_dir=str(Path(temp_dir) / "processed"),
+                    form=WebProductForm(
+                        name="Maggiore",
+                        type_name="komoda",
+                        model="MA03",
+                        color1="bialy",
+                        ean="5901234567890",
+                    ),
+                    uploaded_slots=[
+                        WebUploadedSlot(
+                            prefix="03",
+                            label="DETAIL_pic",
+                            source_path=str(source),
+                            original_filename="front.png",
+                            content_fit=False,
+                        )
+                    ],
+                    options=WebProcessingOptions(
+                        resize_enabled=False,
+                        auto_content_fit=True,
+                    ),
+                )
+
+            fit.assert_not_called()
 
     def test_processing_options_from_config_uses_web_processing_settings(self) -> None:
         options = processing_options_from_config(

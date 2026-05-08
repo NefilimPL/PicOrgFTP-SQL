@@ -23,7 +23,18 @@ from starlette.datastructures import UploadFile
 
 from .. import config, settings
 from ..bootstrap import initialize_application_runtime
-from ..common import APP_SECRET, H, K, SQL_COLUMN_MAP_KEY, SQL_UPDATE_TEMPLATE, ft, p, u, w
+from ..common import (
+    APP_SECRET,
+    AUTO_CONTENT_FIT_KEY,
+    H,
+    K,
+    SQL_COLUMN_MAP_KEY,
+    SQL_UPDATE_TEMPLATE,
+    ft,
+    p,
+    u,
+    w,
+)
 from ..database import connect_db
 from ..image_utils import fit_image_to_content
 from ..logging_utils import log_error
@@ -62,6 +73,7 @@ from ..web_data import (
     update_settings,
     update_user,
 )
+from ..version import get_app_version, get_display_version
 
 try:  # pragma: no cover - optional runtime dependency
     from PIL import Image, ImageOps
@@ -429,10 +441,17 @@ def _read_log_tail(path: str, limit: int = 300) -> Dict[str, Any]:
     return payload
 
 
+def _optional_form_bool(form: Any, key: str) -> Optional[bool]:
+    value = form.get(key)
+    if value is None:
+        return None
+    return str(value).strip() == "1"
+
+
 def create_app() -> FastAPI:
     """Create the LAN web backend."""
 
-    app = FastAPI(title="PicOrgFTP-SQL Web", version="0.1.0")
+    app = FastAPI(title="PicOrgFTP-SQL Web", version=get_app_version())
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.middleware("http")
@@ -501,6 +520,8 @@ def create_app() -> FastAPI:
             "base_dir": runtime_info["base_dir"],
             "processed_dir": settings.l,
             "config_path": runtime_info["config_path"],
+            "version": get_display_version(),
+            "auto_content_fit": bool(config.CONFIG.get(AUTO_CONTENT_FIT_KEY, False)),
             "runtime_warning": runtime_info.get("warning"),
             "slots": slots,
             "admin_user": _admin_username(),
@@ -817,7 +838,7 @@ def create_app() -> FastAPI:
                                 label=slot["label"],
                                 source_path=source_path,
                                 original_filename=os.path.basename(source_path),
-                                content_fit=str(form.get(f"slot_fit_{prefix}") or "") == "1",
+                                content_fit=_optional_form_bool(form, f"slot_fit_{prefix}"),
                             )
                         )
                     continue
@@ -828,7 +849,7 @@ def create_app() -> FastAPI:
                         label=slot["label"],
                         source_path=source_path,
                         original_filename=value.filename or "",
-                        content_fit=str(form.get(f"slot_fit_{prefix}") or "") == "1",
+                        content_fit=_optional_form_bool(form, f"slot_fit_{prefix}"),
                     )
                 )
             product = WebProductForm(

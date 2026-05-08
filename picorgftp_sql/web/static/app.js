@@ -14,6 +14,7 @@ const state = {
   photosLoading: false,
   loadedEntryOriginal: null,
   slotFits: new Map(),
+  defaultSlotFit: false,
   slotSources: new Map(),
   draggedSlotPrefix: "",
   lastLookupMs: null,
@@ -43,6 +44,7 @@ const slotCount = document.querySelector("#slotCount");
 const fileIndexInfo = document.querySelector("#fileIndexInfo");
 const latencyInfo = document.querySelector("#latencyInfo");
 const serverInfo = document.querySelector("#serverInfo");
+const versionInfo = document.querySelector("#versionInfo");
 const submitButton = document.querySelector("#submitButton");
 const clearButton = document.querySelector("#clearButton");
 const logoutButton = document.querySelector("#logoutButton");
@@ -733,7 +735,10 @@ async function loadFtpPreview(photo, prefix) {
 }
 
 function isSlotFit(prefix) {
-  return Boolean(state.slotFits.get(prefix));
+  if (state.slotFits.has(prefix)) {
+    return Boolean(state.slotFits.get(prefix));
+  }
+  return Boolean(state.defaultSlotFit);
 }
 
 function thumbnailUrl(photo, prefix) {
@@ -1388,6 +1393,10 @@ async function refreshData() {
 
 async function loadBootstrap() {
   const payload = await requestJson("/api/bootstrap");
+  state.defaultSlotFit = Boolean(payload.auto_content_fit);
+  if (versionInfo) {
+    versionInfo.textContent = payload.version ? `Wersja ${payload.version}` : "";
+  }
   serverInfo.textContent = payload.processed_dir;
   logoutButton.style.display = payload.auth_enabled ? "" : "none";
   state.currentUser = payload.current_user || null;
@@ -1664,6 +1673,7 @@ function settingsSaveButton(form, buildPayload) {
       body: JSON.stringify(buildPayload(new FormData(form))),
     });
     state.currentUser = state.settings.current_user || state.currentUser;
+    state.defaultSlotFit = Boolean(state.settings.auto_content_fit);
     updateAdminUi();
     if (Array.isArray(state.settings.slots)) {
       renderSlots(state.settings.slots);
@@ -1681,6 +1691,9 @@ function renderSettingsApp() {
   configNote.className = "settings-note wide-field";
   configNote.textContent =
     "Panel webowy uzywa tej samej lokalizacji, config.json i APP_SECRET co lokalna aplikacja uruchomiona na backendzie.";
+  const versionNote = document.createElement("p");
+  versionNote.className = "settings-note wide-field";
+  versionNote.textContent = `Wersja programu: ${s.version || "dev"}`;
   const colorGroup = document.createElement("div");
   colorGroup.className = "settings-field-group wide-field";
   const colorTitle = document.createElement("h2");
@@ -1694,6 +1707,7 @@ function renderSettingsApp() {
   );
   colorGroup.append(colorTitle, colorGrid);
   form.append(
+    versionNote,
     configNote,
     inputField("base_dir", "Katalog bazowy", s.base_dir),
     checkField(
@@ -1702,12 +1716,6 @@ function renderSettingsApp() {
       s.local_file_index,
       "Backend sprawdza lokalne pliki przy wczytywaniu statusow slotow."
     ),
-    checkField(
-      "auto_content_fit",
-      "Automatyczne dopasowanie zdjec",
-      s.auto_content_fit,
-      "Przed zapisem zdjecia sa przycinane do widocznej zawartosci."
-    ),
     colorGroup,
     actionRow(diagnosticButton("local", "Test folderow backendu"), fileIndexRefreshButton())
   );
@@ -1715,7 +1723,6 @@ function renderSettingsApp() {
     app: {
       base_dir: data.get("base_dir"),
       local_file_index: data.has("local_file_index"),
-      auto_content_fit: data.has("auto_content_fit"),
       color_field_labels: {
         color1: data.get("color1"),
         color2: data.get("color2"),
@@ -1739,6 +1746,12 @@ function renderSettingsProcessing() {
     "Te ustawienia sa stosowane przy zapisie z panelu webowego. FIT w slocie nadal moze byc wlaczany osobno dla pojedynczego zdjecia.";
   form.append(
     note,
+    checkField(
+      "auto_content_fit",
+      "FIT domyslnie dla kazdego slotu",
+      state.settings.auto_content_fit,
+      "Nowe i wczytane sloty startuja z wlaczonym FIT, ale pojedynczy slot nadal mozna przelaczyc."
+    ),
     checkField(
       "resize_enabled",
       "Zmniejszanie obrazu",
@@ -1786,6 +1799,9 @@ function renderSettingsProcessing() {
     )
   );
   settingsSaveButton(form, (data) => ({
+    app: {
+      auto_content_fit: data.has("auto_content_fit"),
+    },
     processing: {
       resize_enabled: data.has("resize_enabled"),
       max_dim: data.get("max_dim"),
@@ -2052,6 +2068,7 @@ function renderSettings() {
 async function loadSettings() {
   state.settings = await requestJson("/api/settings");
   state.currentUser = state.settings.current_user || state.currentUser;
+  state.defaultSlotFit = Boolean(state.settings.auto_content_fit);
   updateAdminUi();
   renderSettings();
 }
@@ -2117,17 +2134,13 @@ productForm.addEventListener("submit", async (event) => {
   const data = new FormData(productForm);
   for (const [prefix, file] of state.files.entries()) {
     data.set(`slot_${prefix}`, file, file.name);
-    if (isSlotFit(prefix)) {
-      data.set(`slot_fit_${prefix}`, "1");
-    }
+    data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
   }
   for (const [prefix, photo] of state.loadedPhotos.entries()) {
     const token = selectedPhotoToken(photo, prefix);
     if (!state.files.has(prefix) && photo.dirty && token) {
       data.set(`existing_slot_${prefix}`, token);
-      if (isSlotFit(prefix)) {
-        data.set(`slot_fit_${prefix}`, "1");
-      }
+      data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
     }
   }
   for (const [prefix, item] of state.deletedSlots.entries()) {

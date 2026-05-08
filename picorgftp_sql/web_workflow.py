@@ -96,7 +96,7 @@ class WebUploadedSlot:
     label: str
     source_path: str
     original_filename: str = ""
-    content_fit: bool = False
+    content_fit: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -290,7 +290,6 @@ def _save_processed_file(
         not options.convert_enabled
         and ext not in {".jpg", ".jpeg", ".png", ".bmp", ".gif"}
         and not content_fit
-        and not options.auto_content_fit
     ):
         shutil.copy2(source_path, target_path)
         return
@@ -300,7 +299,7 @@ def _save_processed_file(
 
     with Image.open(source_path) as image:
         work = image.copy()
-        if options.auto_content_fit or content_fit:
+        if content_fit:
             work = fit_image_to_content(work)
         if options.resize_enabled:
             max_dim = max(1, int(options.max_dim or 2000))
@@ -366,7 +365,12 @@ def process_web_uploads(
             ext.lower(),
         )
         target_path = os.path.join(output_dir, filename)
-        _save_processed_file(source_path, target_path, options, content_fit=upload.content_fit)
+        content_fit = (
+            bool(upload.content_fit)
+            if upload.content_fit is not None
+            else bool(options.auto_content_fit)
+        )
+        _save_processed_file(source_path, target_path, options, content_fit=content_fit)
         saved_files.append(
             WebProcessedFile(
                 prefix=upload.prefix,

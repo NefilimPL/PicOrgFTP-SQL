@@ -73,6 +73,7 @@ from .workflow_utils import (
     select_remote_files_for_ean,
 )
 from .web_workflow import available_convert_formats
+from .version import get_display_version
 
 
 LIST_SHEETS = {
@@ -928,6 +929,7 @@ def settings_snapshot() -> dict[str, object]:
     slot_defs = cfg.get(SLOT_DEFS_KEY, []) or []
     sql_map = cfg.get(SQL_COLUMN_MAP_KEY, {}) or {}
     return {
+        "version": get_display_version(),
         "windows_admin": is_windows_admin_process(),
         "base_dir": settings.AC,
         "processed_dir": settings.l,

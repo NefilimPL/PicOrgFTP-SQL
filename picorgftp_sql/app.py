@@ -63,6 +63,7 @@ from .services.sql_service import (
     should_check_presence as svc_should_check_presence,
 )
 from .image_utils import fit_image_to_content
+from .version import get_display_version
 from .workflow_utils import (
     build_product_directory,
     build_remote_slot_filename,
@@ -78,6 +79,7 @@ from .workflow_utils import (
 
 D = config.CONFIG
 LANG_PREF = localization.LANG_PREF
+APP_DISPLAY_VERSION = get_display_version()
 
 from .localization import *  # noqa: F401,F403
 
@@ -234,7 +236,7 @@ class App(BU.Tk):
         """Initialise the Tk window, form state and runtime caches."""
 
         super().__init__()
-        B.title(APP_TITLE)
+        B.title(f"{APP_TITLE} {APP_DISPLAY_VERSION}")
         B.geometry("1360x900")
         B.minsize(1180, 780)
         B.style = C.Style()
@@ -3630,9 +3632,18 @@ class App(BU.Tk):
         summary.columnconfigure(0, weight=1)
         summary.columnconfigure(1, weight=1)
 
-        C.Label(summary, text=APP_TITLE, style="SectionTitle.TLabel").grid(
+        title_row = C.Frame(summary, style="Card.TFrame")
+        title_row.grid(row=0, column=0, sticky="w")
+        C.Label(title_row, text=APP_TITLE, style="SectionTitle.TLabel").grid(
             row=0, column=0, sticky="w"
         )
+        C.Label(
+            title_row,
+            text=LANG.get("app_version_label", "Wersja: {version}").format(
+                version=APP_DISPLAY_VERSION
+            ),
+            style="SectionHint.TLabel",
+        ).grid(row=0, column=1, sticky="w", padx=(10, 0))
         C.Label(
             summary,
             textvariable=A._hero_slots_var,
@@ -8520,31 +8531,39 @@ class App(BU.Tk):
             text=APP_SETTINGS_LABEL,
             style="SettingsHeader.TLabel",
         ).grid(row=0, column=0, columnspan=3, padx=5, pady=(0, 6), sticky="w")
-        _slabel(system_tab, text=APP_SECRET_LABEL).grid(
+        _slabel(system_tab, text=LANG.get("app_version_heading", "Wersja programu")).grid(
             row=1, column=0, padx=5, pady=4, sticky=R
+        )
+        _slabel(
+            system_tab,
+            text=APP_DISPLAY_VERSION,
+            style="SettingsHint.TLabel",
+        ).grid(row=1, column=1, columnspan=2, padx=5, pady=4, sticky="w")
+        _slabel(system_tab, text=APP_SECRET_LABEL).grid(
+            row=2, column=0, padx=5, pady=4, sticky=R
         )
         app_secret_entry = C.Entry(
             system_tab, textvariable=app_secret_var, show=Y, width=30, state=i_
         )
-        app_secret_entry.grid(row=1, column=1, padx=5, pady=4, sticky="ew")
+        app_secret_entry.grid(row=2, column=1, padx=5, pady=4, sticky="ew")
         _slabel(system_tab, text=BASE_DIR_OVERRIDE_LABEL).grid(
-            row=2, column=0, padx=5, pady=4, sticky=R
+            row=3, column=0, padx=5, pady=4, sticky=R
         )
         base_dir_entry = C.Entry(
             system_tab, textvariable=base_dir_var, width=50, state=i_
         )
-        base_dir_entry.grid(row=2, column=1, padx=5, pady=4, sticky="ew")
+        base_dir_entry.grid(row=3, column=1, padx=5, pady=4, sticky="ew")
         base_dir_btn = C.Button(
             system_tab, text=CHOOSE_LABEL, command=_choose_base_dir, state=V
         )
-        base_dir_btn.grid(row=2, column=2, padx=5, pady=4, sticky="w")
+        base_dir_btn.grid(row=3, column=2, padx=5, pady=4, sticky="w")
         _slabel(
             system_tab,
             text=APP_SETTINGS_HINT,
             style="SettingsHint.TLabel",
             wraplength=520,
             justify="left",
-        ).grid(row=3, column=0, columnspan=3, padx=5, pady=(6, 4), sticky="w")
+        ).grid(row=4, column=0, columnspan=3, padx=5, pady=(6, 4), sticky="w")
         file_index_toggle = C.Checkbutton(
             system_tab,
             text=LANG.get(
@@ -8553,20 +8572,20 @@ class App(BU.Tk):
             ),
             variable=local_file_index_var,
         )
-        file_index_toggle.grid(row=4, column=0, columnspan=3, padx=5, pady=(4, 0), sticky="w")
+        file_index_toggle.grid(row=5, column=0, columnspan=3, padx=5, pady=(4, 0), sticky="w")
         file_index_btn = C.Button(
             system_tab,
             text=LANG.get("file_index_rebuild_action", "Odbuduj indeks plików"),
             command=A._start_file_index_refresh,
         )
-        file_index_btn.grid(row=5, column=0, padx=5, pady=(6, 0), sticky="w")
+        file_index_btn.grid(row=6, column=0, padx=5, pady=(6, 0), sticky="w")
         _slabel(
             system_tab,
             textvariable=A._file_index_status_var,
             style="SettingsHint.TLabel",
             wraplength=420,
             justify="left",
-        ).grid(row=5, column=1, columnspan=2, padx=5, pady=(6, 0), sticky="w")
+        ).grid(row=6, column=1, columnspan=2, padx=5, pady=(6, 0), sticky="w")
         _slabel(
             system_tab,
             text=LANG.get(
@@ -8574,27 +8593,27 @@ class App(BU.Tk):
                 "Własne nazwy pól kolorów",
             ),
             style="SettingsHeader.TLabel",
-        ).grid(row=6, column=0, columnspan=3, padx=5, pady=(10, 4), sticky="w")
+        ).grid(row=7, column=0, columnspan=3, padx=5, pady=(10, 4), sticky="w")
         _slabel(
             system_tab,
             text=LANG.get("color1_custom_label", "Pole 1:"),
-        ).grid(row=7, column=0, padx=5, pady=4, sticky=R)
-        C.Entry(system_tab, textvariable=color1_label_var, width=30).grid(
-            row=7, column=1, columnspan=2, padx=5, pady=4, sticky="ew"
-        )
-        _slabel(
-            system_tab,
-            text=LANG.get("color2_custom_label", "Pole 2:"),
         ).grid(row=8, column=0, padx=5, pady=4, sticky=R)
-        C.Entry(system_tab, textvariable=color2_label_var, width=30).grid(
+        C.Entry(system_tab, textvariable=color1_label_var, width=30).grid(
             row=8, column=1, columnspan=2, padx=5, pady=4, sticky="ew"
         )
         _slabel(
             system_tab,
-            text=LANG.get("color3_custom_label", "Pole 3:"),
+            text=LANG.get("color2_custom_label", "Pole 2:"),
         ).grid(row=9, column=0, padx=5, pady=4, sticky=R)
-        C.Entry(system_tab, textvariable=color3_label_var, width=30).grid(
+        C.Entry(system_tab, textvariable=color2_label_var, width=30).grid(
             row=9, column=1, columnspan=2, padx=5, pady=4, sticky="ew"
+        )
+        _slabel(
+            system_tab,
+            text=LANG.get("color3_custom_label", "Pole 3:"),
+        ).grid(row=10, column=0, padx=5, pady=4, sticky=R)
+        C.Entry(system_tab, textvariable=color3_label_var, width=30).grid(
+            row=10, column=1, columnspan=2, padx=5, pady=4, sticky="ew"
         )
         _slabel(
             system_tab,
@@ -8605,12 +8624,12 @@ class App(BU.Tk):
             style="SettingsHint.TLabel",
             wraplength=520,
             justify="left",
-        ).grid(row=10, column=0, columnspan=3, padx=5, pady=(2, 0), sticky="w")
+        ).grid(row=11, column=0, columnspan=3, padx=5, pady=(2, 0), sticky="w")
         system_admin_btn = C.Button(
             system_tab, text=Ag_, command=_unlock_system_settings
         )
         system_admin_btn.grid(
-            row=11, column=0, columnspan=3, padx=5, pady=(6, 0), sticky="e"
+            row=12, column=0, columnspan=3, padx=5, pady=(6, 0), sticky="e"
         )
         system_tab.columnconfigure(1, weight=1)
         _set_system_state(Ay)
