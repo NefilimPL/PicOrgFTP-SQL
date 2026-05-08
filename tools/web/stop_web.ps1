@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
-$Port = if ($env:PICORG_WEB_PORT) { [int]$env:PICORG_WEB_PORT } else { 8000 }
+$Port = if ($env:PICORG_WEB_PORT) { [int]$env:PICORG_WEB_PORT } else { 8010 }
 $PidFile = Join-Path $Root ".picorg_web.pid"
 
 function Write-Info($Text) {

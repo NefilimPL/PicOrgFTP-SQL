@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
-$Port = if ($env:PICORG_WEB_PORT) { [int]$env:PICORG_WEB_PORT } else { 8000 }
+$Port = if ($env:PICORG_WEB_PORT) { [int]$env:PICORG_WEB_PORT } else { 8010 }
 $HostAddress = if ($env:PICORG_WEB_HOST) { $env:PICORG_WEB_HOST } else { "0.0.0.0" }
 $LocalUrl = "http://127.0.0.1:$Port"
 $OpenBrowser = $env:PICORG_WEB_NO_BROWSER -ne "1"
@@ -11,8 +11,10 @@ $ErrLog = Join-Path $Root "picorg_web_err.log"
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
 $FirewallEnabled = $env:PICORG_WEB_FIREWALL -ne "0"
 $FirewallRemoveOnStop = $env:PICORG_WEB_FIREWALL_CLOSE -ne "0"
+$CustomFirewallRuleName = [bool]$env:PICORG_WEB_FIREWALL_RULE
 $FirewallRuleName = if ($env:PICORG_WEB_FIREWALL_RULE) { $env:PICORG_WEB_FIREWALL_RULE } else { "PicOrgFTP-SQL Web $Port" }
 $FirewallRemoteAddress = if ($env:PICORG_WEB_FIREWALL_REMOTE) { $env:PICORG_WEB_FIREWALL_REMOTE } else { "LocalSubnet" }
+$FirewallInterfaceAlias = if ($env:PICORG_WEB_FIREWALL_INTERFACE) { $env:PICORG_WEB_FIREWALL_INTERFACE } else { "" }
 $FirewallProfiles = if ($env:PICORG_WEB_FIREWALL_PROFILE) {
     $env:PICORG_WEB_FIREWALL_PROFILE -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ }
 } else {
@@ -21,6 +23,14 @@ $FirewallProfiles = if ($env:PICORG_WEB_FIREWALL_PROFILE) {
 
 function Write-Info($Text) {
     Write-Host "[WEB] $Text"
+}
+
+function Set-WebPort($NewPort) {
+    $script:Port = [int]$NewPort
+    $script:LocalUrl = "http://127.0.0.1:$script:Port"
+    if (-not $script:CustomFirewallRuleName) {
+        $script:FirewallRuleName = "PicOrgFTP-SQL Web $script:Port"
+    }
 }
 
 function Test-Administrator {
@@ -65,6 +75,14 @@ function Test-WebProcess($PidValue) {
     return $process.ProcessName -in @("python", "pythonw")
 }
 
+function Stop-WebProcessIfSafe($PidValue) {
+    if (-not (Test-WebProcess $PidValue)) {
+        return $false
+    }
+    Stop-Process -Id $PidValue -Force
+    return $true
+}
+
 function Get-PortListeners {
     $items = @()
     try {
@@ -90,6 +108,94 @@ function Write-PortListeners($Listeners) {
     foreach ($listener in $Listeners) {
         $owner = if ($listener.ProcessName) { "$($listener.ProcessName), PID $($listener.Pid)" } else { "PID $($listener.Pid)" }
         Write-Info "Port $($listener.LocalPort) slucha na $($listener.LocalAddress) ($owner)."
+    }
+}
+
+function Read-AlternatePort {
+    while ($true) {
+        $value = Read-Host "Podaj inny port, np. 8011, albo Enter aby przerwac"
+        if (-not $value) {
+            return $null
+        }
+        $newPort = 0
+        if ([int]::TryParse($value, [ref]$newPort) -and $newPort -ge 1 -and $newPort -le 65535) {
+            return $newPort
+        }
+        Write-Info "Niepoprawny port. Dozwolony zakres: 1-65535."
+    }
+}
+
+function Resolve-PortConflict {
+    while ($true) {
+        $listeners = @(Get-PortListeners)
+        if ($listeners.Count -eq 0) {
+            return
+        }
+
+        Write-Info "Port $Port jest juz uzywany."
+        Write-PortListeners $listeners
+        $webListeners = @($listeners | Where-Object { $_.IsWebPanel })
+
+        if ($webListeners.Count -gt 0) {
+            Write-Info "Wykryto juz uruchomiony panel PicOrg Web na porcie $Port."
+            Write-Info "K = uzyj dzialajacego panelu, R = restartuj panel, P = wybierz inny port, Q = przerwij"
+            $choice = (Read-Host "Decyzja [K/R/P/Q]").Trim().ToUpperInvariant()
+            if (-not $choice) {
+                $choice = "K"
+            }
+            switch ($choice) {
+                "K" {
+                    $firewallState = Ensure-FirewallRule
+                    Write-RunMetadata $webListeners[0].Pid $firewallState
+                    Write-Info "Panel webowy juz dziala."
+                    Write-Urls
+                    Write-Info "Z drugiego PC uzyj adresu z aktywnej karty Ethernet/Wi-Fi, nie VPN."
+                    if ($OpenBrowser) {
+                        Start-Process $LocalUrl
+                    }
+                    exit 0
+                }
+                "R" {
+                    foreach ($listener in $webListeners) {
+                        if (Stop-WebProcessIfSafe $listener.Pid) {
+                            Write-Info "Zatrzymano panel webowy, PID $($listener.Pid)."
+                        }
+                    }
+                    Start-Sleep -Seconds 1
+                    continue
+                }
+                "P" {
+                    $newPort = Read-AlternatePort
+                    if (-not $newPort) {
+                        exit 1
+                    }
+                    Set-WebPort $newPort
+                    Write-Info "Wybrano port $Port."
+                    continue
+                }
+                "Q" {
+                    exit 1
+                }
+                default {
+                    Write-Info "Nieznana decyzja."
+                    continue
+                }
+            }
+        }
+
+        Write-Info "Na porcie $Port dziala inna usluga. Nie zatrzymuje jej i nie otwieram firewall dla obcego procesu."
+        Write-Info "P = wybierz inny port, Q = przerwij"
+        $choice = (Read-Host "Decyzja [P/Q]").Trim().ToUpperInvariant()
+        if ($choice -eq "P") {
+            $newPort = Read-AlternatePort
+            if (-not $newPort) {
+                exit 1
+            }
+            Set-WebPort $newPort
+            Write-Info "Wybrano port $Port."
+            continue
+        }
+        exit 1
     }
 }
 
@@ -135,7 +241,8 @@ function Write-FirewallRuleSummary($Rule) {
     try {
         $portFilter = $Rule | Get-NetFirewallPortFilter
         $addressFilter = $Rule | Get-NetFirewallAddressFilter
-        Write-Info "Firewall: Enabled=$($Rule.Enabled), Profile=$($Rule.Profile), LocalPort=$($portFilter.LocalPort), RemoteAddress=$($addressFilter.RemoteAddress)."
+        $interfaceFilter = $Rule | Get-NetFirewallInterfaceFilter
+        Write-Info "Firewall: Enabled=$($Rule.Enabled), Profile=$($Rule.Profile), LocalPort=$($portFilter.LocalPort), RemoteAddress=$($addressFilter.RemoteAddress), InterfaceAlias=$($interfaceFilter.InterfaceAlias)."
     } catch {
         Write-Info "Nie udalo sie odczytac szczegolow reguly firewall: $($_.Exception.Message)"
     }
@@ -159,6 +266,10 @@ function Update-ExistingFirewallRule($Rule) {
             -LocalPort $Port
         $Rule | Get-NetFirewallAddressFilter | Set-NetFirewallAddressFilter `
             -RemoteAddress $FirewallRemoteAddress
+        if ($FirewallInterfaceAlias) {
+            $Rule | Get-NetFirewallInterfaceFilter | Set-NetFirewallInterfaceFilter `
+                -InterfaceAlias $FirewallInterfaceAlias
+        }
         Write-Info "Zaktualizowano regule firewall: $FirewallRuleName."
         Write-FirewallRuleSummary (Get-WebFirewallRule)
     } catch {
@@ -192,20 +303,29 @@ function Ensure-FirewallRule {
     if (-not (Test-Administrator)) {
         Write-Info "Brak uprawnien administratora, nie moge dodac reguly firewall."
         Write-Info "Uruchom START_WEB.bat jako administrator albo wykonaj:"
-        Write-Info "New-NetFirewallRule -DisplayName `"$FirewallRuleName`" -Direction Inbound -Protocol TCP -LocalPort $Port -Action Allow -Profile $($FirewallProfiles -join ',') -RemoteAddress $FirewallRemoteAddress"
+        $manualCommand = "New-NetFirewallRule -DisplayName `"$FirewallRuleName`" -Direction Inbound -Protocol TCP -LocalPort $Port -Action Allow -Profile $($FirewallProfiles -join ',') -RemoteAddress $FirewallRemoteAddress"
+        if ($FirewallInterfaceAlias) {
+            $manualCommand = "$manualCommand -InterfaceAlias `"$FirewallInterfaceAlias`""
+        }
+        Write-Info $manualCommand
         return $result
     }
     try {
-        New-NetFirewallRule `
-            -DisplayName $FirewallRuleName `
-            -Group "PicOrgFTP-SQL" `
-            -Direction Inbound `
-            -Protocol TCP `
-            -LocalPort $Port `
-            -Action Allow `
-            -Profile $FirewallProfiles `
-            -RemoteAddress $FirewallRemoteAddress `
-            -Description "Created by PicOrgFTP-SQL web start script. RemoveOnStop=$FirewallRemoveOnStop" | Out-Null
+        $ruleArgs = @{
+            DisplayName = $FirewallRuleName
+            Group = "PicOrgFTP-SQL"
+            Direction = "Inbound"
+            Protocol = "TCP"
+            LocalPort = $Port
+            Action = "Allow"
+            Profile = $FirewallProfiles
+            RemoteAddress = $FirewallRemoteAddress
+            Description = "Created by PicOrgFTP-SQL web start script. RemoveOnStop=$FirewallRemoveOnStop"
+        }
+        if ($FirewallInterfaceAlias) {
+            $ruleArgs.InterfaceAlias = $FirewallInterfaceAlias
+        }
+        New-NetFirewallRule @ruleArgs | Out-Null
         $result.created = $true
         $result.exists = $true
         Write-Info "Dodano regule firewall: $FirewallRuleName (RemoteAddress: $FirewallRemoteAddress)."
@@ -261,26 +381,7 @@ function Install-WebDeps {
     }
 }
 
-$listeners = @(Get-PortListeners)
-if ($listeners.Count -gt 0) {
-    Write-Info "Port $Port jest juz uzywany."
-    Write-PortListeners $listeners
-    $webListener = $listeners | Where-Object { $_.IsWebPanel } | Select-Object -First 1
-    if (-not $webListener) {
-        Write-Info "Na tym porcie dziala inna usluga. Nie otwieram firewall dla obcego procesu."
-        Write-Info "Zmien port, np.: `$env:PICORG_WEB_PORT=`"8080`"; .\START_WEB.bat"
-        exit 1
-    }
-    $firewallState = Ensure-FirewallRule
-    Write-RunMetadata $webListener.Pid $firewallState
-    Write-Info "Panel webowy juz dziala."
-    Write-Urls
-    Write-Info "Z drugiego PC uzyj adresu z aktywnej karty Ethernet/Wi-Fi, nie VPN."
-    if ($OpenBrowser) {
-        Start-Process $LocalUrl
-    }
-    exit 0
-}
+Resolve-PortConflict
 
 if (-not (Test-WebDeps)) {
     Install-WebDeps
