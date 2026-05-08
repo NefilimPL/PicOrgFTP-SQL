@@ -610,6 +610,30 @@ function Test-WebDeps {
     }
 }
 
+function Write-PythonInfo {
+    try {
+        $version = & $Python --version 2>&1
+        Write-Info "Python: $Python ($version)"
+    } catch {
+        Write-Info "Python: $Python"
+    }
+}
+
+function Test-WebAppImport {
+    Push-Location $Root
+    try {
+        $output = & $Python -c "import picorgftp_sql.web.app" 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            return $true
+        }
+        Write-Info "Backend nie importuje sie poprawnie pod aktualnym Pythonem:"
+        $output | Select-Object -Last 60 | ForEach-Object { Write-Host $_ }
+        return $false
+    } finally {
+        Pop-Location
+    }
+}
+
 function Install-WebDeps {
     Write-Info "Instaluje zaleznosci webowe z requirements-web.txt..."
     $process = Start-Process -FilePath $Python -ArgumentList @("-m", "pip", "install", "-r", "requirements-web.txt") -WorkingDirectory $Root -NoNewWindow -Wait -PassThru
@@ -620,8 +644,14 @@ function Install-WebDeps {
 
 Resolve-PortConflict
 
+Write-PythonInfo
+
 if (-not (Test-WebDeps)) {
     Install-WebDeps
+}
+
+if (-not (Test-WebAppImport)) {
+    exit 1
 }
 
 $firewallState = Ensure-FirewallRule
@@ -660,6 +690,7 @@ if ($process.HasExited) {
 if (-not (Wait-WebPortReady $process.Id)) {
     Write-Info "Proces wystartowal, ale port $Port nie przeszedl lokalnego testu TCP."
     Write-StartupDiagnostics
+    Remove-FirewallRuleIfNeeded $firewallState
     if (Test-Path $ErrLog) {
         Write-Info "Ostatnie wpisy z logu bledu:"
         Get-Content -Path $ErrLog -Tail 40

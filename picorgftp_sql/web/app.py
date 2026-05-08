@@ -14,7 +14,7 @@ import shutil
 import tempfile
 import time
 import traceback
-from typing import Any
+from typing import Any, Dict, List, Optional, Set
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -107,7 +107,7 @@ def _make_session_token(username: str) -> str:
     return base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii")
 
 
-def _read_session_token(token: str | None) -> str | None:
+def _read_session_token(token: Optional[str]) -> Optional[str]:
     if not token:
         return None
     try:
@@ -130,7 +130,7 @@ def _read_session_token(token: str | None) -> str | None:
     return username
 
 
-def _current_user(request: Request) -> str | None:
+def _current_user(request: Request) -> Optional[str]:
     if not _auth_enabled():
         return _admin_username()
     return _read_session_token(request.cookies.get(SESSION_COOKIE))
@@ -145,7 +145,7 @@ def _require_user(request: Request) -> str:
     return username
 
 
-def _current_user_payload(request: Request) -> dict[str, Any]:
+def _current_user_payload(request: Request) -> Dict[str, Any]:
     username = _require_user(request)
     user = find_user(username)
     if not user:
@@ -153,7 +153,7 @@ def _current_user_payload(request: Request) -> dict[str, Any]:
     return user
 
 
-def _require_admin(request: Request) -> dict[str, Any]:
+def _require_admin(request: Request) -> Dict[str, Any]:
     user = _current_user_payload(request)
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Wymagane konto administratora.")
@@ -164,7 +164,7 @@ def _static_file(name: str) -> FileResponse:
     return FileResponse(STATIC_DIR / name)
 
 
-def _safe_upload_name(filename: str | None, fallback: str) -> str:
+def _safe_upload_name(filename: Optional[str], fallback: str) -> str:
     name = Path(filename or "").name.strip()
     if not name:
         name = fallback
@@ -264,7 +264,7 @@ async def _save_upload(upload: UploadFile, temp_dir: str, prefix: str) -> str:
     return target_path
 
 
-def _result_payload(result: Any) -> dict[str, Any]:
+def _result_payload(result: Any) -> Dict[str, Any]:
     return {
         "output_dir": result.output_dir,
         "ean": result.ean,
@@ -290,7 +290,7 @@ def _remote_name_for_output(filename: str) -> str:
     return f"{parsed.ean}_{parsed.normalized_label}{parsed.extension}"
 
 
-def _sync_result_to_ftp(result: Any, delete_candidates: list[str] | None = None) -> dict[str, Any]:
+def _sync_result_to_ftp(result: Any, delete_candidates: Optional[List[str]] = None) -> Dict[str, Any]:
     if not bool(config.CONFIG.get(ft, True)):
         return {"enabled": False, "uploaded": 0, "deleted": 0, "elapsed_ms": 0, "error": ""}
     filenames = [item.filename for item in result.saved_files if getattr(item, "filename", "")]
@@ -325,8 +325,8 @@ def _safe_sql_identifier(value: object) -> str:
 def _sync_result_to_sql(
     result: Any,
     *,
-    clear_prefixes: set[str] | None = None,
-) -> dict[str, Any]:
+    clear_prefixes: Optional[Set[str]] = None,
+) -> Dict[str, Any]:
     if not bool(config.CONFIG.get(u, True)):
         return {"enabled": False, "updated": 0, "cleared": 0, "rows": 0, "elapsed_ms": 0, "error": ""}
     started = time.perf_counter()
@@ -396,7 +396,7 @@ def _sync_result_to_sql(
     return payload
 
 
-def _delete_local_files(delete_requests: list[dict[str, Any]], saved_paths: set[str]) -> dict[str, Any]:
+def _delete_local_files(delete_requests: List[Dict[str, Any]], saved_paths: Set[str]) -> Dict[str, Any]:
     payload = {"deleted": 0, "skipped": 0, "errors": []}
     for item in delete_requests:
         path = str(item.get("local_path") or "")
@@ -415,10 +415,10 @@ def _delete_local_files(delete_requests: list[dict[str, Any]], saved_paths: set[
     return payload
 
 
-def _read_log_tail(path: str, limit: int = 300) -> dict[str, Any]:
+def _read_log_tail(path: str, limit: int = 300) -> Dict[str, Any]:
     line_limit = max(1, min(2000, int(limit or 300)))
     log_path = Path(path)
-    payload: dict[str, Any] = {"path": str(log_path), "exists": log_path.exists(), "lines": []}
+    payload: Dict[str, Any] = {"path": str(log_path), "exists": log_path.exists(), "lines": []}
     if not log_path.exists():
         return payload
     try:
@@ -491,7 +491,7 @@ def create_app() -> FastAPI:
         return response
 
     @app.get("/api/bootstrap")
-    def bootstrap(request: Request) -> dict[str, Any]:
+    def bootstrap(request: Request) -> Dict[str, Any]:
         _require_user(request)
         runtime_info = getattr(app.state, "runtime_info", None) or initialize_application_runtime(
             interactive=False
@@ -509,22 +509,22 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/api/data")
-    def data(request: Request) -> dict[str, Any]:
+    def data(request: Request) -> Dict[str, Any]:
         _require_user(request)
         return load_web_data()
 
     @app.get("/api/file-index/status")
-    def file_index_status_api(request: Request) -> dict[str, Any]:
+    def file_index_status_api(request: Request) -> Dict[str, Any]:
         _require_user(request)
         return file_index_status(start=True)
 
     @app.get("/api/history")
-    def history_api(request: Request, user: str = "", limit: int = 200) -> dict[str, Any]:
+    def history_api(request: Request, user: str = "", limit: int = 200) -> Dict[str, Any]:
         _require_user(request)
         return history_snapshot(user=user, limit=limit)
 
     @app.get("/api/logs")
-    def logs_api(request: Request, limit: int = 300) -> dict[str, Any]:
+    def logs_api(request: Request, limit: int = 300) -> Dict[str, Any]:
         _require_admin(request)
         return {
             "logs": [
@@ -534,7 +534,7 @@ def create_app() -> FastAPI:
         }
 
     @app.post("/api/file-index/refresh")
-    def file_index_refresh_api(request: Request) -> dict[str, Any]:
+    def file_index_refresh_api(request: Request) -> Dict[str, Any]:
         _require_admin(request)
         return refresh_file_index()
 
@@ -549,7 +549,7 @@ def create_app() -> FastAPI:
         color2: str = "",
         color3: str = "",
         extra: str = "",
-    ) -> dict[str, Any]:
+    ) -> Dict[str, Any]:
         _require_user(request)
         values = field_suggestions(
             field,
@@ -566,7 +566,7 @@ def create_app() -> FastAPI:
         return {"values": values, "file_index": file_index_status(start=True)}
 
     @app.post("/api/ftp-preview")
-    async def ftp_preview_api(request: Request) -> dict[str, Any]:
+    async def ftp_preview_api(request: Request) -> Dict[str, Any]:
         _require_user(request)
         payload = await request.json()
         if not isinstance(payload, dict):
@@ -591,7 +591,7 @@ def create_app() -> FastAPI:
         type_name: str = "",
         model: str = "",
         query: str = "",
-    ) -> dict[str, Any]:
+    ) -> Dict[str, Any]:
         _require_user(request)
         return {
             "entries": search_entries(
@@ -705,7 +705,7 @@ def create_app() -> FastAPI:
         return JSONResponse(data_payload)
 
     @app.get("/api/settings")
-    def settings_api(request: Request) -> dict[str, Any]:
+    def settings_api(request: Request) -> Dict[str, Any]:
         user = _require_admin(request)
         payload = settings_snapshot()
         payload["current_user"] = user
@@ -725,7 +725,7 @@ def create_app() -> FastAPI:
         return JSONResponse(snapshot)
 
     @app.get("/api/users")
-    def users_get(request: Request) -> dict[str, Any]:
+    def users_get(request: Request) -> Dict[str, Any]:
         user = _require_admin(request)
         return {"users": load_users(), "current_user": user}
 
@@ -779,12 +779,12 @@ def create_app() -> FastAPI:
         slots = slot_definitions_from_config(config.CONFIG)
         slot_by_prefix = {slot["prefix"]: slot for slot in slots}
         temp_dir = tempfile.mkdtemp(prefix="picorg_web_upload_")
-        uploaded_slots: list[WebUploadedSlot] = []
-        delete_requests: list[dict[str, Any]] = []
+        uploaded_slots: List[WebUploadedSlot] = []
+        delete_requests: List[Dict[str, Any]] = []
         try:
             for prefix, slot in slot_by_prefix.items():
                 if str(form.get(f"delete_slot_{prefix}") or "") == "1":
-                    delete_item: dict[str, Any] = {
+                    delete_item: Dict[str, Any] = {
                         "prefix": prefix,
                         "label": slot["label"],
                         "local_path": "",
