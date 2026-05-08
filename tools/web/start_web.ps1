@@ -127,26 +127,91 @@ function Get-PyLauncherExecutable($Version) {
     return ""
 }
 
+function Get-RegistryPythonExecutables {
+    $items = @()
+    $roots = @(
+        "HKCU:\Software\Python\PythonCore",
+        "HKLM:\Software\Python\PythonCore",
+        "HKLM:\Software\WOW6432Node\Python\PythonCore"
+    )
+    foreach ($rootKey in $roots) {
+        if (-not (Test-Path $rootKey)) {
+            continue
+        }
+        try {
+            $versions = Get-ChildItem -Path $rootKey -ErrorAction SilentlyContinue |
+                Sort-Object -Property PSChildName -Descending
+            foreach ($versionKey in $versions) {
+                $installPath = Join-Path $versionKey.PSPath "InstallPath"
+                if (-not (Test-Path $installPath)) {
+                    continue
+                }
+                $installKey = Get-Item -Path $installPath -ErrorAction SilentlyContinue
+                if (-not $installKey) {
+                    continue
+                }
+                $exe = [string]$installKey.GetValue("ExecutablePath", "")
+                if (-not $exe) {
+                    $dir = [string]$installKey.GetValue("", "")
+                    if ($dir) {
+                        $exe = Join-Path $dir "python.exe"
+                    }
+                }
+                if ($exe) {
+                    $items += $exe
+                }
+            }
+        } catch {
+        }
+    }
+    return $items
+}
+
+function Get-PythonInstallExecutables {
+    $items = @()
+    $roots = @()
+    if ($env:LOCALAPPDATA) {
+        $roots += (Join-Path $env:LOCALAPPDATA "Programs\Python")
+    }
+    if ($env:ProgramFiles) {
+        $roots += $env:ProgramFiles
+    }
+    if (${env:ProgramFiles(x86)}) {
+        $roots += ${env:ProgramFiles(x86)}
+    }
+    foreach ($rootDir in ($roots | Select-Object -Unique)) {
+        if (-not (Test-Path $rootDir)) {
+            continue
+        }
+        try {
+            Get-ChildItem -LiteralPath $rootDir -Directory -Filter "Python*" -ErrorAction SilentlyContinue |
+                Sort-Object -Property Name -Descending |
+                ForEach-Object {
+                    $exe = Join-Path $_.FullName "python.exe"
+                    if (Test-Path $exe) {
+                        $items += $exe
+                    }
+                }
+        } catch {
+        }
+    }
+    return $items
+}
+
 function Select-WebPython {
     $candidates = @()
     Add-PythonCandidate ([ref]$candidates) $env:PICORG_WEB_PYTHON
     if (Test-Path $VenvPython) {
         Add-PythonCandidate ([ref]$candidates) $VenvPython
     }
-    foreach ($version in @("3.13", "3.12", "3.11", "3.10", "3")) {
+    foreach ($version in @("3.15", "3.14", "3.13", "3.12", "3.11", "3.10", "3")) {
         Add-PythonCandidate ([ref]$candidates) (Get-PyLauncherExecutable $version)
     }
-    foreach ($versionDir in @("Python313", "Python312", "Python311", "Python310")) {
-        foreach ($rootDir in @($env:LOCALAPPDATA, $env:ProgramFiles, ${env:ProgramFiles(x86)})) {
-            if ($rootDir) {
-                $relativePath = if ($rootDir -eq $env:LOCALAPPDATA) {
-                    "Programs\Python\$versionDir\python.exe"
-                } else {
-                    "$versionDir\python.exe"
-                }
-                Add-PythonCandidate ([ref]$candidates) (Join-Path $rootDir $relativePath)
-            }
-        }
+    foreach ($candidate in Get-RegistryPythonExecutables) {
+        Add-PythonCandidate ([ref]$candidates) $candidate
+    }
+    foreach ($candidate in Get-PythonInstallExecutables) {
+        Add-PythonCandidate ([ref]$candidates) $candidate
     }
     foreach ($commandName in @("python", "python3")) {
         $command = Get-Command $commandName -ErrorAction SilentlyContinue
