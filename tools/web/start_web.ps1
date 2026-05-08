@@ -106,6 +106,28 @@ function Get-PortListeners {
         }
     } catch {
     }
+    if ($items.Count -eq 0) {
+        try {
+            $lines = netstat -ano | Where-Object {
+                $_ -match ":$Port\s" -and $_ -match "\sLISTENING\s+(\d+)\s*$"
+            }
+            foreach ($line in $lines) {
+                if ($line -match "^\s*TCP\s+(\S+):$Port\s+\S+\s+LISTENING\s+(\d+)\s*$") {
+                    $pidValue = [int]$Matches[2]
+                    $process = Get-Process -Id $pidValue -ErrorAction SilentlyContinue
+                    $items += [pscustomobject]@{
+                        LocalAddress = [string]$Matches[1]
+                        LocalPort = [int]$Port
+                        Pid = $pidValue
+                        ProcessName = if ($process) { $process.ProcessName } else { "" }
+                        CommandLine = Get-ProcessCommandLine $pidValue
+                        IsWebPanel = Test-WebProcess $pidValue
+                    }
+                }
+            }
+        } catch {
+        }
+    }
     return $items
 }
 
@@ -154,6 +176,7 @@ function Resolve-PortConflict {
                     Write-RunMetadata $webListeners[0].Pid $firewallState
                     Write-Info "Panel webowy juz dziala."
                     Write-Urls
+                    Write-StartupDiagnostics
                     Write-Info "Z drugiego PC uzyj adresu z aktywnej karty Ethernet/Wi-Fi, nie VPN."
                     if ($OpenBrowser) {
                         Start-Process $LocalUrl
@@ -232,6 +255,69 @@ function Write-Urls {
     }
     if (-not $lanUrls -or $lanUrls.Count -eq 0) {
         Write-Info "Nie wykryto adresu IPv4 LAN. Sprawdz ipconfig."
+    }
+}
+
+function Test-LocalTcpPort {
+    try {
+        $client = [System.Net.Sockets.TcpClient]::new()
+        $async = $client.BeginConnect("127.0.0.1", $Port, $null, $null)
+        $success = $async.AsyncWaitHandle.WaitOne(1500)
+        if ($success -and $client.Connected) {
+            $client.EndConnect($async)
+            $client.Close()
+            return $true
+        }
+        $client.Close()
+    } catch {
+    }
+    return $false
+}
+
+function Write-NetstatForPort {
+    Write-Info "netstat dla portu ${Port}:"
+    try {
+        $lines = netstat -ano | Select-String ":$Port"
+        if ($lines) {
+            $lines | ForEach-Object { Write-Host $_.Line }
+        } else {
+            Write-Info "Brak wpisow netstat dla portu $Port."
+        }
+    } catch {
+        Write-Info "Nie udalo sie wykonac netstat: $($_.Exception.Message)"
+    }
+}
+
+function Wait-WebPortReady($PidValue) {
+    $deadline = (Get-Date).AddSeconds(20)
+    while ((Get-Date) -lt $deadline) {
+        $process = Get-Process -Id $PidValue -ErrorAction SilentlyContinue
+        if (-not $process -or $process.HasExited) {
+            return $false
+        }
+        if (Test-LocalTcpPort) {
+            return $true
+        }
+        Start-Sleep -Seconds 1
+    }
+    return $false
+}
+
+function Write-StartupDiagnostics {
+    Write-NetstatForPort
+    $listeners = @(Get-PortListeners)
+    if ($listeners.Count -gt 0) {
+        Write-PortListeners $listeners
+    } else {
+        Write-Info "Nie wykryto procesu LISTENING na porcie $Port."
+    }
+    $localTcp = Test-LocalTcpPort
+    Write-Info "Test TCP 127.0.0.1:$Port = $localTcp"
+    $rule = Get-WebFirewallRule
+    if ($rule) {
+        Write-FirewallRuleSummary $rule
+    } else {
+        Write-Info "Nie znaleziono reguly firewall: $FirewallRuleName."
     }
 }
 
@@ -439,7 +525,7 @@ try {
     exit 1
 }
 Write-RunMetadata $process.Id $firewallState
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 1
 
 if ($process.HasExited) {
     Remove-Item -Path $PidFile -Force -ErrorAction SilentlyContinue
@@ -451,8 +537,19 @@ if ($process.HasExited) {
     exit 1
 }
 
+if (-not (Wait-WebPortReady $process.Id)) {
+    Write-Info "Proces wystartowal, ale port $Port nie przeszedl lokalnego testu TCP."
+    Write-StartupDiagnostics
+    if (Test-Path $ErrLog) {
+        Write-Info "Ostatnie wpisy z logu bledu:"
+        Get-Content -Path $ErrLog -Tail 40
+    }
+    exit 1
+}
+
 Write-Info "Panel dziala."
 Write-Urls
+Write-StartupDiagnostics
 Write-Info "Port: $Port, host: $HostAddress"
 Write-Info "Logi: $OutLog oraz $ErrLog"
 Write-Info "Z drugiego PC uzyj adresu z aktywnej karty Ethernet/Wi-Fi, nie VPN."
