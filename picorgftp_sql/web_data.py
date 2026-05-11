@@ -13,6 +13,8 @@ from pathlib import Path
 import secrets
 import tempfile
 import time
+import unicodedata
+from urllib.parse import urlparse
 
 from . import common, config, settings
 from .common import (
@@ -73,6 +75,7 @@ from .workflow_utils import (
     select_remote_files_for_ean,
 )
 from .web_workflow import available_convert_formats
+from .version import get_display_version
 
 
 LIST_SHEETS = {
@@ -137,6 +140,11 @@ def _text(value: object) -> str:
 
 def _norm(value: object) -> str:
     return _text(value).upper()
+
+
+def _list_value_key(value: object) -> str:
+    text = unicodedata.normalize("NFKD", _text(value)).casefold()
+    return "".join(ch for ch in text if not unicodedata.combining(ch)).strip()
 
 
 def _hash_password(password: str) -> str:
@@ -766,6 +774,10 @@ def add_list_value(list_key: str, value: str) -> dict[str, object]:
         raise ValueError("Nieznana lista.")
     if not _text(value):
         raise ValueError("Wartosc nie moze byc pusta.")
+    lists = prepare_excel_lists()
+    normalized = _list_value_key(value)
+    if normalized and any(_list_value_key(item) == normalized for item in lists.get(sheet, [])):
+        raise ValueError("Taka wartosc juz istnieje na liscie.")
     if not add_to_list(sheet, value):
         raise ValueError("Nie udalo sie dodac wartosci do listy.")
     return load_web_data()
@@ -928,6 +940,7 @@ def settings_snapshot() -> dict[str, object]:
     slot_defs = cfg.get(SLOT_DEFS_KEY, []) or []
     sql_map = cfg.get(SQL_COLUMN_MAP_KEY, {}) or {}
     return {
+        "version": get_display_version(),
         "windows_admin": is_windows_admin_process(),
         "base_dir": settings.AC,
         "processed_dir": settings.l,
@@ -1044,8 +1057,14 @@ def test_sql_connection() -> dict[str, object]:
         return {"ok": False, "message": str(exc)}
 
 
-def find_product_photos(entry_payload: dict[str, object]) -> list[dict[str, object]]:
-    """Find local processed photos for a saved web entry."""
+def find_product_photos(
+    entry_payload: dict[str, object],
+    *,
+    include_local: bool = True,
+    include_ftp: bool = True,
+    include_sql: bool = True,
+) -> list[dict[str, object]]:
+    """Find processed photos and presence flags for a saved web entry."""
 
     entry = _entry_from_record(
         {
@@ -1070,21 +1089,29 @@ def find_product_photos(entry_payload: dict[str, object]) -> list[dict[str, obje
     )
     target_ean = _norm(entry.ean)
     results_by_prefix: dict[str, dict[str, object]] = {}
-    file_names: list[str] | None = None
-    index = _get_file_index(start=True)
-    if index is not None and index.has_snapshot():
-        indexed = index.get_product_files(
-            entry.name,
-            entry.type_name,
-            entry.model,
-            [entry.color1, entry.color2, entry.color3],
-            entry.extra,
-        )
-        if indexed is not None:
-            file_names = list(indexed)
-    if file_names is None and os.path.isdir(product_dir):
-        file_names = os.listdir(product_dir)
-    if file_names:
+    file_names: list[str] = []
+    if include_local:
+        seen_files = set()
+        index = _get_file_index(start=True)
+        if index is not None and index.has_snapshot():
+            indexed = index.get_product_files(
+                entry.name,
+                entry.type_name,
+                entry.model,
+                [entry.color1, entry.color2, entry.color3],
+                entry.extra,
+            )
+            if indexed is not None:
+                for filename in indexed:
+                    if filename not in seen_files:
+                        file_names.append(filename)
+                        seen_files.add(filename)
+        if os.path.isdir(product_dir):
+            for filename in os.listdir(product_dir):
+                if filename not in seen_files:
+                    file_names.append(filename)
+                    seen_files.add(filename)
+    if include_local and file_names:
         for filename in file_names:
             path = os.path.join(product_dir, filename)
             if not os.path.isfile(path):
@@ -1108,7 +1135,7 @@ def find_product_photos(entry_payload: dict[str, object]) -> list[dict[str, obje
                 "sql_value": "",
             }
     ean = entry.ean
-    if ean and bool(config.CONFIG.get(ft, True)):
+    if include_ftp and ean and bool(config.CONFIG.get(ft, True)):
         try:
             remote = list_remote_files_for_ean(config.CONFIG.get(H, {}), ean)
             for prefix, filename in remote.items():
@@ -1131,7 +1158,7 @@ def find_product_photos(entry_payload: dict[str, object]) -> list[dict[str, obje
                 item["is_image"] = bool(item.get("is_image")) or ext in IMAGE_PREVIEW_EXTENSIONS
         except Exception:
             pass
-    if ean and should_check_presence(config.CONFIG):
+    if include_sql and ean and should_check_presence(config.CONFIG):
         try:
             context = extract_presence_context(config.CONFIG, ean)
             if context:
@@ -1165,6 +1192,9 @@ def find_product_photos(entry_payload: dict[str, object]) -> list[dict[str, obje
                     )
                     item["sql"] = bool(present)
                     item["sql_value"] = values.get(prefix, "")
+                    sql_path = urlparse(str(item["sql_value"] or "")).path
+                    sql_ext = os.path.splitext(sql_path)[1].lower()
+                    item["is_image"] = bool(item.get("is_image")) or sql_ext in IMAGE_PREVIEW_EXTENSIONS
         except Exception:
             pass
     return sorted(results_by_prefix.values(), key=lambda item: str(item.get("prefix", "")))

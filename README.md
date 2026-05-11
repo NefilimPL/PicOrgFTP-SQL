@@ -89,12 +89,13 @@ The runtime automatically searches for translation files next to the executable,
 
 ### GitHub Actions (Windows EXE)
 
-This repository includes a Windows build workflow in `.github/workflows/build-exe.yml`. It builds the EXE with PyInstaller and uploads it as a workflow artifact.
+This repository includes a Windows build workflow in `.github/workflows/build-exe.yml`. It builds the EXE with PyInstaller, packages the web runtime as a separate ZIP and uploads both as workflow artifacts. When a GitHub release is published, the same workflow also attaches `PicOrgFTP-SQL-<tag>.exe` and `PicOrgFTP-SQL-web-<tag>.zip` to that release. The visible program version is taken from the release tag.
 
 1. Push the workflow file to your GitHub repository.
 2. Go to **Settings → Actions → General** and make sure Actions are enabled for the repository.
 3. Go to the **Actions** tab, open **Build Windows EXE**, and click **Run workflow** to build on demand (or push to `main`/`master` to run automatically).
-4. After the job finishes, download the artifact named **PicOrgFTP-SQL-windows** from the workflow summary.
+4. After the job finishes, download **PicOrgFTP-SQL-windows** or **PicOrgFTP-SQL-web** from the workflow summary.
+5. To publish release assets, create and publish a GitHub release from a tag such as `v1.2.3`; the workflow will build and attach the EXE and web ZIP automatically.
 
 If you need to tweak build dependencies, edit `requirements-build.txt`. The workflow uses Python 3.11 by default.
 
@@ -140,7 +141,7 @@ Zmiana tych wartości przed uruchomieniem skryptu umożliwia szybkie dostosowani
 
 Repozytorium zawiera także pierwszy lokalny panel webowy. Obecna aplikacja desktopowa zostaje bez zmian, a użytkownicy w tej samej sieci lokalnej mogą otworzyć stronę w przeglądarce, zalogować się i wgrać pliki do skonfigurowanych slotów zdjęć. Panel zapisuje uploady do tej samej struktury `_ZDJECIA PRZEROBIONE_`, której używa desktop, oraz potrafi pokazywać lokalne albo cache'owane podglądy FTP, gdy takie źródła są dostępne.
 
-Panel webowy obsługuje obecnie wczytywanie i wyszukiwanie wpisów po EAN, dopasowanie produktu po nazwie/typie/modelu z oknem wyboru wewnątrz strony, miniatury w slotach, per-slot FIT, wczytywanie istniejących zdjęć lokalnych/FTP do slotów, upload przez przeciąganie plików, przenoszenie zdjęć między slotami, czyszczenie pojedynczego slotu, znaczniki LOCAL/FTP/SQL z leniwym pobieraniem podglądu FTP, wysyłkę FTP po przetworzeniu, zapis nowego albo istniejącego wpisu Excel, historię webową pogrupowaną po EAN z filtrem użytkownika, kontekstowe customowe podpowiedzi, ostrzeżenia zmienionych pól z cofnięciem pojedynczego pola, edytor list, czyszczenie formularza, edycję ustawień w przeglądarce, status i odświeżanie indeksu lokalnych plików, dodawanie/edycję slotów z mapowaniem do kolumn SQL, testy folderów lokalnych/FTP/SQL oraz administrację użytkownikami z ustawianiem haseł. Logowanie jest domyślnie włączone. Pierwsze konto to `admin` / `admin`; zmień to hasło w **Ustawienia -> Użytkownicy** przed używaniem panelu poza zaufanym testem w LAN.
+Panel webowy obsługuje obecnie wczytywanie i wyszukiwanie wpisów po EAN, dopasowanie produktu po nazwie/typie/modelu z oknem wyboru wewnątrz strony, miniatury w slotach, per-slot FIT oraz globalny domyślny FIT w ustawieniach obróbki, wczytywanie istniejących zdjęć lokalnych/FTP do slotów, upload przez przeciąganie plików, przenoszenie zdjęć między slotami, czyszczenie pojedynczego slotu, znaczniki LOCAL/FTP/SQL z leniwym pobieraniem podglądu FTP, wysyłkę FTP po przetworzeniu, zapis nowego albo istniejącego wpisu Excel, historię webową pogrupowaną po EAN z filtrem użytkownika, kontekstowe customowe podpowiedzi, ostrzeżenia zmienionych pól z cofnięciem pojedynczego pola, edytor list, czyszczenie formularza, edycję ustawień w przeglądarce, status i odświeżanie indeksu lokalnych plików, dodawanie/edycję slotów z mapowaniem do kolumn SQL, testy folderów lokalnych/FTP/SQL oraz administrację użytkownikami z ustawianiem haseł. Logowanie jest domyślnie włączone. Pierwsze konto to `admin` / `admin`; zmień to hasło w **Ustawienia -> Użytkownicy** przed używaniem panelu poza zaufanym testem w LAN.
 
 Instalacja zależności webowych:
 
@@ -176,11 +177,12 @@ Podczas działania program wyszukuje pliki tłumaczeń obok pliku wykonywalnego,
 
 ### GitHub Actions (budowanie EXE na Windows)
 
-W repozytorium znajduje się workflow `.github/workflows/build-exe.yml`, który buduje EXE przez PyInstaller i publikuje je jako artefakt.
+W repozytorium znajduje się workflow `.github/workflows/build-exe.yml`, który buduje EXE przez PyInstaller, pakuje panel webowy do osobnego ZIP-a i publikuje oba pliki jako artefakty. Po opublikowaniu GitHub Release workflow dodatkowo podpina do release pliki `PicOrgFTP-SQL-<tag>.exe` oraz `PicOrgFTP-SQL-web-<tag>.zip`. Wersja widoczna w GUI i webie jest pobierana z taga release.
 
 1. Wypchnij pliki workflow do swojego repozytorium na GitHub.
 2. Wejdź w **Settings → Actions → General** i upewnij się, że Actions są włączone.
 3. Otwórz kartę **Actions**, wybierz **Build Windows EXE** i kliknij **Run workflow** (lub wypchnij zmiany na `main`/`master`, aby uruchomić automatycznie).
-4. Po zakończeniu joba pobierz artefakt **PicOrgFTP-SQL-windows** z podsumowania workflow.
+4. Po zakończeniu joba pobierz artefakt **PicOrgFTP-SQL-windows** albo **PicOrgFTP-SQL-web** z podsumowania workflow.
+5. Aby opublikować pliki przy wydaniu, utwórz i opublikuj release z tagiem, np. `v1.2.3`; workflow zbuduje pliki i automatycznie doda je do release.
 
 Jeśli chcesz zmienić zależności do budowania, edytuj `requirements-build.txt`. Workflow domyślnie używa Pythona 3.11.

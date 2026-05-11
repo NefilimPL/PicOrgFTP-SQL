@@ -6,6 +6,12 @@ on:
     branches:
       - main
       - master
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
 
 jobs:
   build-windows:
@@ -19,6 +25,24 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Set release/build version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "release") {
+            $version = "${{ github.event.release.tag_name }}"
+          } elseif ("${{ github.ref }}" -like "refs/tags/*") {
+            $version = "${{ github.ref_name }}"
+          } else {
+            $version = "dev-${{ github.run_number }}"
+          }
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            $version = "dev-${{ github.run_number }}"
+          }
+          $assetVersion = $version -replace '[^A-Za-z0-9_.-]', '-'
+          Set-Content -Path "picorgftp_sql/VERSION" -Value $version -Encoding utf8
+          "PICORGFTP_SQL_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PICORGFTP_SQL_ASSET_VERSION=$assetVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install dependencies (pinned packager)
         run: |
@@ -42,11 +66,51 @@ jobs:
             --collect-submodules mysql.connector `
             --collect-data mysql.connector `
             --collect-data certifi `
+            --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" `
+            --add-data "picorgftp_sql/VERSION;picorgftp_sql" `
             PicOrgFTP-SQL.pyw
           Copy-Item -Path "picorgftp_sql/Localization" -Destination "dist/output/Localization" -Recurse -Force
+          Copy-Item -Path "picorgftp_sql/VERSION" -Destination "dist/output/VERSION" -Force
 
-      - name: Upload artifact
+      - name: Package web runtime
+        shell: pwsh
+        run: |
+          $webRoot = "dist/web/PicOrgFTP-SQL-web"
+          Remove-Item -Path "dist/web" -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $webRoot -Force | Out-Null
+          Copy-Item -Path "picorgftp_sql" -Destination "$webRoot/picorgftp_sql" -Recurse -Force
+          Copy-Item -Path "tools" -Destination "$webRoot/tools" -Recurse -Force
+          Copy-Item -Path "requirements-web.txt", "START_WEB.bat", "STOP_WEB.bat", "README.md", "LICENSE", "PicOrgFTP-SQL.pyw" -Destination $webRoot -Force
+          $zipPath = "dist/web/PicOrgFTP-SQL-web-$env:PICORGFTP_SQL_ASSET_VERSION.zip"
+          Compress-Archive -Path "$webRoot/*" -DestinationPath $zipPath -Force
+
+      - name: Prepare release assets
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "dist/release" -Force | Out-Null
+          Copy-Item -Path "dist/output/PicOrgFTP-SQL.exe" -Destination "dist/release/PicOrgFTP-SQL-$env:PICORGFTP_SQL_ASSET_VERSION.exe" -Force
+          Copy-Item -Path "dist/web/PicOrgFTP-SQL-web-$env:PICORGFTP_SQL_ASSET_VERSION.zip" -Destination "dist/release/PicOrgFTP-SQL-web-$env:PICORGFTP_SQL_ASSET_VERSION.zip" -Force
+
+      - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: PicOrgFTP-SQL-windows
           path: dist/output
+
+      - name: Upload web artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PicOrgFTP-SQL-web
+          path: dist/web/*.zip
+
+      - name: Publish assets to release
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$env:PICORGFTP_SQL_VERSION" `
+            "dist/release/PicOrgFTP-SQL-$env:PICORGFTP_SQL_ASSET_VERSION.exe" `
+            "dist/release/PicOrgFTP-SQL-web-$env:PICORGFTP_SQL_ASSET_VERSION.zip" `
+            --clobber

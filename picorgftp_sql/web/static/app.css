@@ -194,6 +194,11 @@ h2 {
   font-size: 12px;
 }
 
+#versionInfo {
+  color: var(--accent);
+  font-weight: 650;
+}
+
 .ghost-button,
 .secondary-button {
   border-color: var(--line);
@@ -451,7 +456,19 @@ h2 {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) auto;
   gap: 10px;
-  margin-bottom: 14px;
+  margin-bottom: 8px;
+}
+
+.list-filter-info {
+  min-height: 18px;
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.list-filter-info.duplicate {
+  color: var(--error);
+  font-weight: 650;
 }
 
 .user-add-form {
@@ -684,6 +701,34 @@ h2 {
   box-shadow: inset 3px 0 0 var(--ftp);
 }
 
+.list-value-row.exact-match {
+  border-color: var(--error);
+  background: rgba(155, 44, 44, 0.08);
+}
+
+.list-value-row.partial-match {
+  border-color: var(--accent);
+  background: rgba(47, 111, 94, 0.08);
+}
+
+.list-value-row.similar-match {
+  border-color: var(--warn);
+  background: rgba(164, 95, 33, 0.08);
+}
+
+.list-empty-filter {
+  grid-column: 1 / -1;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  padding: 10px;
+}
+
+.slot-card[data-active-source="sql"] {
+  border-color: var(--sql);
+  box-shadow: inset 3px 0 0 var(--sql);
+}
+
 .slot-badges {
   display: flex;
   flex-wrap: wrap;
@@ -725,6 +770,10 @@ button.slot-badge:hover {
 
 .slot-badge-sql.on {
   background: var(--sql);
+}
+
+.slot-badge-link.on {
+  background: var(--accent);
 }
 
 .slot-badge.selected {
