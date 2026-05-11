@@ -448,6 +448,34 @@ def _optional_form_bool(form: Any, key: str) -> Optional[bool]:
     return str(value).strip() == "1"
 
 
+def _enrich_photo_payload(photos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    enriched: List[Dict[str, Any]] = []
+    for photo in photos:
+        item = dict(photo)
+        path = str(photo.get("path") or "")
+        ftp_path = str(photo.get("ftp_path") or "")
+        if path:
+            token = _file_token(path)
+            item["token"] = token
+            item["url"] = f"/api/file?token={token}"
+            item["thumb_url"] = f"/api/thumbnail?token={token}"
+        else:
+            item["token"] = ""
+            item["url"] = ""
+            item["thumb_url"] = ""
+        if ftp_path:
+            ftp_token = _file_token(ftp_path)
+            item["ftp_token"] = ftp_token
+            item["ftp_url"] = f"/api/file?token={ftp_token}"
+            item["ftp_thumb_url"] = f"/api/thumbnail?token={ftp_token}"
+        else:
+            item["ftp_token"] = ""
+            item["ftp_url"] = ""
+            item["ftp_thumb_url"] = ""
+        enriched.append(item)
+    return enriched
+
+
 def create_app() -> FastAPI:
     """Create the LAN web backend."""
 
@@ -660,35 +688,19 @@ def create_app() -> FastAPI:
         return JSONResponse({"ok": True, "entry": result})
 
     @app.post("/api/entries/photos")
-    async def entries_photos(request: Request) -> JSONResponse:
+    async def entries_photos(request: Request, source: str = "all") -> JSONResponse:
         _require_user(request)
         payload = await request.json()
-        photos = find_product_photos(payload if isinstance(payload, dict) else {})
-        enriched = []
-        for photo in photos:
-            item = dict(photo)
-            path = str(photo.get("path") or "")
-            ftp_path = str(photo.get("ftp_path") or "")
-            if path:
-                token = _file_token(path)
-                item["token"] = token
-                item["url"] = f"/api/file?token={token}"
-                item["thumb_url"] = f"/api/thumbnail?token={token}"
-            else:
-                item["token"] = ""
-                item["url"] = ""
-                item["thumb_url"] = ""
-            if ftp_path:
-                ftp_token = _file_token(ftp_path)
-                item["ftp_token"] = ftp_token
-                item["ftp_url"] = f"/api/file?token={ftp_token}"
-                item["ftp_thumb_url"] = f"/api/thumbnail?token={ftp_token}"
-            else:
-                item["ftp_token"] = ""
-                item["ftp_url"] = ""
-                item["ftp_thumb_url"] = ""
-            enriched.append(item)
-        return JSONResponse({"photos": enriched})
+        source_key = str(source or "all").strip().lower()
+        if source_key not in {"all", "local", "ftp", "sql"}:
+            raise HTTPException(status_code=400, detail="Nieznane zrodlo zdjec.")
+        photos = find_product_photos(
+            payload if isinstance(payload, dict) else {},
+            include_local=source_key in {"all", "local"},
+            include_ftp=source_key in {"all", "ftp"},
+            include_sql=source_key in {"all", "sql"},
+        )
+        return JSONResponse({"photos": _enrich_photo_payload(photos), "source": source_key})
 
     @app.get("/api/file")
     def file_preview(request: Request, token: str) -> FileResponse:

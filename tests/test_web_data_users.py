@@ -45,6 +45,61 @@ class WebDataUserTests(unittest.TestCase):
         operator = next(user for user in users if user["username"] == "operator")
         self.assertFalse(operator["enabled"])
 
+    def test_add_list_value_rejects_case_insensitive_duplicate(self) -> None:
+        with (
+            patch.object(web_data, "prepare_excel_lists", return_value={"NAZWY": ["Żyrandol"]}),
+            patch.object(web_data, "add_to_list") as add_to_list,
+        ):
+            with self.assertRaises(ValueError):
+                web_data.add_list_value("names", "zyrandol")
+
+        add_to_list.assert_not_called()
+
+    def test_find_product_photos_merges_live_files_when_index_is_stale(self) -> None:
+        class StaleIndex:
+            def has_snapshot(self) -> bool:
+                return True
+
+            def get_product_files(self, *_args, **_kwargs):
+                return []
+
+        temp_dir = _workspace_temp("web_data_live_photos")
+        try:
+            product_dir = Path(
+                web_data.build_product_directory(
+                    str(temp_dir / "processed"),
+                    "Maggiore",
+                    "komoda",
+                    "MA03",
+                    ["bialy", "", ""],
+                    "",
+                )
+            )
+            product_dir.mkdir(parents=True)
+            filename = "5901234567890_03_DETAIL_MAGGIORE_KOMODA_MA03_BIALY_NO-LED.jpg"
+            (product_dir / filename).write_bytes(b"fake")
+            with (
+                patch.object(web_data.settings, "l", str(temp_dir / "processed")),
+                patch.object(web_data, "_get_file_index", return_value=StaleIndex()),
+            ):
+                photos = web_data.find_product_photos(
+                    {
+                        "ean": "5901234567890",
+                        "name": "Maggiore",
+                        "type_name": "komoda",
+                        "model": "MA03",
+                        "color1": "bialy",
+                    },
+                    include_ftp=False,
+                    include_sql=False,
+                )
+        finally:
+            shutil.rmtree(temp_dir)
+
+        self.assertEqual(len(photos), 1)
+        self.assertEqual(photos[0]["prefix"], "03")
+        self.assertTrue(photos[0]["local"])
+
 
 if __name__ == "__main__":
     unittest.main()
