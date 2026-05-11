@@ -130,6 +130,103 @@ class WebAppFileTests(unittest.TestCase):
             self.assertEqual(uploaded_slots[0].source_path, str(photo_path))
             self.assertEqual(delete_requests[0]["local_path"], str(photo_path))
 
+    def test_ftp_only_photos_are_downloaded_when_local_file_is_missing(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            root = Path(temp_dir)
+            processed = root / "processed"
+            cache_file = root / "cache" / "5901234567890_03.jpg"
+            cache_file.parent.mkdir(parents=True)
+            cache_file.write_bytes(b"ftp")
+            uploaded_slots = []
+            delete_requests = []
+            existing_entry = {
+                "product_id": "PRD-1",
+                "ean": "5901234567890",
+                "name": "MAGGIORE",
+                "type_name": "KOMODA",
+                "model": "MA03",
+                "color1": "BIALY",
+                "extra": "NO-LED",
+            }
+            product = web_app.WebProductForm(
+                product_id="PRD-1",
+                ean="5901234567890",
+                name="MAGGIORE",
+                type_name="KOMODA",
+                model="MA03",
+                color1="BIALY",
+                extra="NO-LED",
+            )
+
+            with (
+                patch.object(web_app.settings, "l", str(processed)),
+                patch.object(
+                    web_app,
+                    "find_product_photos",
+                    return_value=[
+                        {
+                            "ean": "5901234567890",
+                            "prefix": "03",
+                            "path": "",
+                            "ftp_filename": "5901234567890_03.jpg",
+                        }
+                    ],
+                ),
+                patch.object(web_app, "cache_ftp_preview", return_value=str(cache_file)) as cache_ftp,
+            ):
+                appended = web_app._append_existing_photo_migrations(
+                    existing_entry=existing_entry,
+                    product=product,
+                    uploaded_slots=uploaded_slots,
+                    delete_requests=delete_requests,
+                    slot_by_prefix={"03": {"prefix": "03", "label": "DETAIL_pic"}},
+                )
+
+            self.assertEqual(appended, ["03"])
+            cache_ftp.assert_called_once_with("5901234567890", "5901234567890_03.jpg")
+            self.assertEqual(uploaded_slots[0].source_path, str(cache_file))
+            self.assertEqual(delete_requests[0]["local_path"], "")
+            self.assertEqual(delete_requests[0]["ftp_filename"], "5901234567890_03.jpg")
+            self.assertTrue(delete_requests[0]["ftp_backfill"])
+
+    def test_deleted_ftp_only_slot_is_not_downloaded_again(self) -> None:
+        product = web_app.WebProductForm(
+            product_id="PRD-1",
+            ean="5901234567890",
+            name="MAGGIORE",
+            type_name="KOMODA",
+            model="MA03",
+            color1="BIALY",
+        )
+        delete_requests = [{"prefix": "03", "ftp_filename": "5901234567890_03.jpg"}]
+
+        with (
+            patch.object(
+                web_app,
+                "find_product_photos",
+                return_value=[
+                    {
+                        "ean": "5901234567890",
+                        "prefix": "03",
+                        "path": "",
+                        "ftp_filename": "5901234567890_03.jpg",
+                    }
+                ],
+            ),
+            patch.object(web_app, "cache_ftp_preview") as cache_ftp,
+        ):
+            appended = web_app._append_existing_photo_migrations(
+                existing_entry={"ean": "5901234567890"},
+                product=product,
+                uploaded_slots=[],
+                delete_requests=delete_requests,
+                slot_by_prefix={"03": {"prefix": "03", "label": "DETAIL_pic"}},
+            )
+
+        self.assertEqual(appended, [])
+        cache_ftp.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

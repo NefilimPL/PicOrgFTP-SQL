@@ -1161,6 +1161,7 @@ def find_product_photos(
                 continue
             ext = os.path.splitext(filename)[1].lower()
             results_by_prefix[parsed.normalized_label] = {
+                "ean": entry.ean,
                 "prefix": parsed.normalized_label,
                 "filename": filename,
                 "path": path,
@@ -1180,6 +1181,7 @@ def find_product_photos(
                 item = results_by_prefix.setdefault(
                     prefix,
                     {
+                        "ean": entry.ean,
                         "prefix": prefix,
                         "filename": "",
                         "path": "",
@@ -1190,6 +1192,7 @@ def find_product_photos(
                     },
                 )
                 item["ftp"] = True
+                item["ean"] = entry.ean
                 item["ftp_filename"] = filename
                 item["ftp_path"] = ""
                 ext = os.path.splitext(filename)[1].lower()
@@ -1218,6 +1221,7 @@ def find_product_photos(
                     item = results_by_prefix.setdefault(
                         prefix,
                         {
+                            "ean": entry.ean,
                             "prefix": prefix,
                             "filename": "",
                             "path": "",
@@ -1229,6 +1233,7 @@ def find_product_photos(
                         },
                     )
                     item["sql"] = bool(present)
+                    item["ean"] = entry.ean
                     item["sql_value"] = values.get(prefix, "")
                     sql_path = urlparse(str(item["sql_value"] or "")).path
                     sql_ext = os.path.splitext(sql_path)[1].lower()

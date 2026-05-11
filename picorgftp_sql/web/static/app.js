@@ -30,6 +30,7 @@ const state = {
   declinedListPrompts: new Set(),
   activeListPromptKeys: new Set(),
   colorFieldLabels: {},
+  ftpPreviewLoading: new Set(),
 };
 
 const listLabels = {
@@ -930,23 +931,31 @@ function renderSlotBadges(container, photo, file, prefix) {
 
 async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestId) {
   if (!photo?.ftp_filename) return;
-  const payload = await requestJson("/api/ftp-preview", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ean: formValue("ean") || photo.ean || "", filename: photo.ftp_filename }),
-  });
-  const updated = {
-    ...photo,
-    ftp_token: payload.token || "",
-    ftp_url: payload.url || "",
-    ftp_thumb_url: payload.thumb_url || "",
-  };
-  if (requestId !== state.photoLoadRequestId) {
-    return;
-  }
-  state.loadedPhotos.set(prefix, updated);
-  state.slotSources.set(prefix, "ftp");
+  state.ftpPreviewLoading.add(prefix);
+  formStatus.textContent = `Pobieranie podgladu FTP dla slotu ${prefix}...`;
   updateSlotPreview(prefix);
+  try {
+    const payload = await requestJson("/api/ftp-preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ean: photo.ean || formValue("ean") || "", filename: photo.ftp_filename }),
+    });
+    const updated = {
+      ...photo,
+      ftp_token: payload.token || "",
+      ftp_url: payload.url || "",
+      ftp_thumb_url: payload.thumb_url || "",
+    };
+    if (requestId !== state.photoLoadRequestId) {
+      return;
+    }
+    state.loadedPhotos.set(prefix, updated);
+    state.slotSources.set(prefix, "ftp");
+    formStatus.textContent = `Pobrano podglad FTP dla slotu ${prefix}.`;
+  } finally {
+    state.ftpPreviewLoading.delete(prefix);
+    updateSlotPreview(prefix);
+  }
 }
 
 function isSlotFit(prefix) {
@@ -1070,6 +1079,11 @@ function updateSlotPreview(prefix) {
   }
   if (!loadedPhoto) return;
   preview.classList.add("loaded-photo");
+  if (state.ftpPreviewLoading.has(prefix)) {
+    empty.textContent = "Pobieranie z FTP...";
+    preview.classList.add("thumb-loading");
+    return;
+  }
   const thumb = thumbnailUrl(loadedPhoto, prefix);
   if (thumb && (loadedPhoto.is_image || selectedSlotSource(prefix, loadedPhoto) === "sql")) {
     preview.classList.add("thumb-loading");
@@ -1128,7 +1142,7 @@ function renderSlots(slots = state.slots) {
     previewImage.draggable = false;
     previewImage.loading = "lazy";
     previewImage.decoding = "async";
-    node.draggable = Boolean(selectedFile || loadedPhoto?.token || loadedPhoto?.ftp_token);
+    node.draggable = Boolean(selectedFile || loadedPhoto?.token || loadedPhoto?.ftp_token || loadedPhoto?.ftp_filename);
     renderSlotBadges(meta, loadedPhoto, selectedFile, slot.prefix);
     overlay.className = "slot-loading-overlay";
     overlay.innerHTML = `<span>${photoLoadingText()}</span><div class="progress-line"><i></i></div>`;
@@ -1197,7 +1211,10 @@ function renderSlots(slots = state.slots) {
     } else if (loadedPhoto) {
       preview.classList.add("loaded-photo");
       const thumb = thumbnailUrl(loadedPhoto, slot.prefix);
-      if (thumb && (loadedPhoto.is_image || selectedSlotSource(slot.prefix, loadedPhoto) === "sql")) {
+      if (state.ftpPreviewLoading.has(slot.prefix)) {
+        preview.classList.add("thumb-loading");
+        empty.textContent = "Pobieranie z FTP...";
+      } else if (thumb && (loadedPhoto.is_image || selectedSlotSource(slot.prefix, loadedPhoto) === "sql")) {
         preview.classList.add("thumb-loading");
         previewImage.addEventListener("load", () => {
           preview.classList.remove("thumb-loading");
@@ -1218,7 +1235,7 @@ function renderSlots(slots = state.slots) {
 
     node.addEventListener("dragstart", (event) => {
       const assignment = getSlotAssignment(slot.prefix);
-      if (!assignment || (assignment.type === "loaded" && !selectedPhotoToken(assignment.value, slot.prefix))) {
+      if (!assignment) {
         event.preventDefault();
         return;
       }
@@ -1776,6 +1793,7 @@ async function loadPhotosForEntry(entry, options = {}) {
   state.loadedPhotos.clear();
   state.deletedSlots.clear();
   state.slotSources.clear();
+  state.ftpPreviewLoading.clear();
   const sources = progressive ? ["local", "sql", "ftp"] : ["all"];
   state.photoSourceStatus.clear();
   for (const source of sources) {
@@ -1825,6 +1843,7 @@ function fillForm(entry, options = {}) {
   state.slotFits.clear();
   state.deletedSlots.clear();
   state.slotSources.clear();
+  state.ftpPreviewLoading.clear();
   productForm.elements.product_id.value = entry.product_id || "";
   productForm.elements.name.value = entry.name || "";
   productForm.elements.type_name.value = entry.type_name || "";
@@ -2669,9 +2688,18 @@ productForm.addEventListener("submit", async (event) => {
     }
     for (const [prefix, photo] of state.loadedPhotos.entries()) {
       const token = selectedPhotoToken(photo, prefix);
-      if (!state.files.has(prefix) && photo.dirty && token) {
-        data.set(`existing_slot_${prefix}`, token);
-        data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
+      if (!state.files.has(prefix) && photo.dirty) {
+        if (token) {
+          data.set(`existing_slot_${prefix}`, token);
+          data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
+        } else if (selectedSlotSource(prefix, photo) === "ftp" && photo.ftp_filename) {
+          data.set(`existing_ftp_slot_${prefix}`, photo.ftp_filename);
+          data.set(
+            `existing_ftp_ean_${prefix}`,
+            photo.ean || state.loadedEntryOriginal?.ean || productForm.elements.ean.value
+          );
+          data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
+        }
       }
     }
     for (const [prefix, item] of state.deletedSlots.entries()) {
@@ -2711,6 +2739,7 @@ clearButton.addEventListener("click", () => {
   state.deletedSlots.clear();
   state.slotSources.clear();
   state.photoSourceStatus.clear();
+  state.ftpPreviewLoading.clear();
   state.loadedEntryOriginal = null;
   state.lastAutoSearchKey = "";
   renderSlots();

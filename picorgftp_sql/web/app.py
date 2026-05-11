@@ -469,7 +469,18 @@ def _should_migrate_existing_photos(
     return _output_identity(_form_from_entry_payload(existing_entry)) != _output_identity(product)
 
 
-def _append_existing_photo_migrations(
+def _download_ftp_photo_source(photo: Dict[str, Any], fallback_ean: str) -> str:
+    ftp_filename = os.path.basename(str(photo.get("ftp_filename") or ""))
+    ftp_ean = str(photo.get("ean") or fallback_ean or "").strip()
+    if not ftp_filename or not ftp_ean:
+        return ""
+    try:
+        return cache_ftp_preview(ftp_ean, ftp_filename)
+    except ValueError as exc:
+        raise ValueError(f"Nie udalo sie pobrac pliku FTP {ftp_filename}: {exc}") from exc
+
+
+def _append_existing_photo_sources(
     *,
     existing_entry: Optional[Dict[str, Any]],
     product: WebProductForm,
@@ -477,13 +488,14 @@ def _append_existing_photo_migrations(
     delete_requests: List[Dict[str, Any]],
     slot_by_prefix: Dict[str, Dict[str, str]],
 ) -> List[str]:
-    """Add existing local photos when product identity changes in the web form."""
+    """Add existing local/FTP photos that need to be processed by the web form."""
 
-    if not _should_migrate_existing_photos(existing_entry, product):
+    if not existing_entry:
         return []
+    identity_changed = _should_migrate_existing_photos(existing_entry, product)
     occupied_prefixes = {slot.prefix for slot in uploaded_slots}
     delete_prefixes = {str(item.get("prefix") or "") for item in delete_requests}
-    migrated: List[str] = []
+    appended: List[str] = []
     photos = find_product_photos(
         existing_entry or {},
         include_local=True,
@@ -493,34 +505,82 @@ def _append_existing_photo_migrations(
     for photo in photos:
         prefix = str(photo.get("prefix") or "").strip()
         path = str(photo.get("path") or "").strip()
-        if not prefix or not path or not os.path.isfile(path):
+        ftp_filename = os.path.basename(str(photo.get("ftp_filename") or ""))
+        if not prefix or prefix in delete_prefixes:
             continue
         slot = slot_by_prefix.get(prefix, {"prefix": prefix, "label": prefix})
         label = str(slot.get("label") or prefix)
+        source_path = path if path and os.path.isfile(path) else ""
+        had_local_source = bool(source_path)
+        if prefix in occupied_prefixes:
+            if identity_changed:
+                delete_requests.append(
+                    {
+                        "prefix": prefix,
+                        "label": label,
+                        "local_path": source_path,
+                        "ftp_filename": ftp_filename,
+                        "sql": False,
+                        "migration": True,
+                    }
+                )
+                delete_prefixes.add(prefix)
+            continue
+        should_process = False
+        if identity_changed and source_path:
+            should_process = True
+        elif ftp_filename and not source_path:
+            source_path = _download_ftp_photo_source(
+                photo,
+                str(existing_entry.get("ean") or product.ean or ""),
+            )
+            should_process = bool(source_path and os.path.isfile(source_path))
+        if not should_process:
+            continue
         if prefix not in occupied_prefixes and prefix not in delete_prefixes:
             uploaded_slots.append(
                 WebUploadedSlot(
                     prefix=prefix,
                     label=label,
-                    source_path=path,
-                    original_filename=os.path.basename(path),
+                    source_path=source_path,
+                    original_filename=ftp_filename or os.path.basename(source_path),
                 )
             )
             occupied_prefixes.add(prefix)
-            migrated.append(prefix)
+            appended.append(prefix)
         if prefix not in delete_prefixes:
             delete_requests.append(
                 {
                     "prefix": prefix,
                     "label": label,
-                    "local_path": path,
-                    "ftp_filename": os.path.basename(str(photo.get("ftp_filename") or "")),
+                    "local_path": path if path and os.path.isfile(path) else "",
+                    "ftp_filename": ftp_filename,
                     "sql": False,
-                    "migration": True,
+                    "migration": identity_changed,
+                    "ftp_backfill": bool(ftp_filename and not had_local_source),
                 }
             )
             delete_prefixes.add(prefix)
-    return migrated
+    return appended
+
+
+def _append_existing_photo_migrations(
+    *,
+    existing_entry: Optional[Dict[str, Any]],
+    product: WebProductForm,
+    uploaded_slots: List[WebUploadedSlot],
+    delete_requests: List[Dict[str, Any]],
+    slot_by_prefix: Dict[str, Dict[str, str]],
+) -> List[str]:
+    """Backward-compatible wrapper for tests and older call sites."""
+
+    return _append_existing_photo_sources(
+        existing_entry=existing_entry,
+        product=product,
+        uploaded_slots=uploaded_slots,
+        delete_requests=delete_requests,
+        slot_by_prefix=slot_by_prefix,
+    )
 
 
 def _read_log_tail(path: str, limit: int = 300) -> Dict[str, Any]:
@@ -936,6 +996,7 @@ def create_app() -> FastAPI:
         temp_dir = tempfile.mkdtemp(prefix="picorg_web_upload_")
         uploaded_slots: List[WebUploadedSlot] = []
         delete_requests: List[Dict[str, Any]] = []
+        pending_ftp_slots: List[Dict[str, Any]] = []
         try:
             for prefix, slot in slot_by_prefix.items():
                 if str(form.get(f"delete_slot_{prefix}") or "") == "1":
@@ -967,6 +1028,19 @@ def create_app() -> FastAPI:
                                 content_fit=_optional_form_bool(form, f"slot_fit_{prefix}"),
                             )
                         )
+                        continue
+                    ftp_filename = os.path.basename(str(form.get(f"existing_ftp_slot_{prefix}") or ""))
+                    if ftp_filename:
+                        pending_ftp_slots.append(
+                            {
+                                "prefix": prefix,
+                                "label": slot["label"],
+                                "filename": ftp_filename,
+                                "ean": str(form.get(f"existing_ftp_ean_{prefix}") or ""),
+                                "content_fit": _optional_form_bool(form, f"slot_fit_{prefix}"),
+                            }
+                        )
+                        continue
                     continue
                 source_path = await _save_upload(value, temp_dir, prefix)
                 uploaded_slots.append(
@@ -1018,6 +1092,42 @@ def create_app() -> FastAPI:
                         ean=preserved_ean,
                         product_id=preserved_product_id,
                     )
+            delete_prefixes = {str(item.get("prefix") or "") for item in delete_requests}
+            occupied_prefixes = {slot.prefix for slot in uploaded_slots}
+            for item in pending_ftp_slots:
+                prefix = str(item.get("prefix") or "")
+                if not prefix or prefix in delete_prefixes or prefix in occupied_prefixes:
+                    continue
+                ftp_filename = os.path.basename(str(item.get("filename") or ""))
+                ftp_ean = str(item.get("ean") or product.ean or "").strip()
+                try:
+                    source_path = cache_ftp_preview(ftp_ean, ftp_filename)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Nie udalo sie pobrac pliku FTP {ftp_filename}: {exc}"
+                    ) from exc
+                uploaded_slots.append(
+                    WebUploadedSlot(
+                        prefix=prefix,
+                        label=str(item.get("label") or prefix),
+                        source_path=source_path,
+                        original_filename=ftp_filename,
+                        content_fit=item.get("content_fit"),
+                    )
+                )
+                occupied_prefixes.add(prefix)
+                if ftp_filename:
+                    delete_requests.append(
+                        {
+                            "prefix": prefix,
+                            "label": str(item.get("label") or prefix),
+                            "local_path": "",
+                            "ftp_filename": ftp_filename,
+                            "sql": False,
+                            "ftp_backfill": True,
+                        }
+                    )
+                    delete_prefixes.add(prefix)
             migrated_prefixes = _append_existing_photo_migrations(
                 existing_entry=existing_entry,
                 product=product,
