@@ -2149,11 +2149,22 @@ function renderSettingsApp() {
     inputField("color3", "Kolor 3", s.color_field_labels?.color3 || "")
   );
   colorGroup.append(colorTitle, colorGrid);
+  const secretGroup = document.createElement("div");
+  const secretTitle = document.createElement("h2");
+  const secretHint = document.createElement("p");
+  const secretGrid = document.createElement("div");
+  secretGroup.className = "settings-field-group wide-field";
+  secretTitle.textContent = "Sekret aplikacji";
+  secretHint.className = "settings-note";
+  secretHint.textContent = "Wpisz nowy APP_SECRET tylko wtedy, gdy chcesz zmienic klucz szyfrowania zapisanych danych.";
+  secretGrid.className = "settings-form nested-grid";
+  secretGrid.append(credentialField("app_secret", "APP_SECRET", s.app_secret_set, { type: "password" }));
+  secretGroup.append(secretTitle, secretHint, secretGrid);
   form.append(
     versionNote,
     configNote,
     inputField("base_dir", "Katalog bazowy", s.base_dir),
-    credentialField("app_secret", "APP_SECRET", s.app_secret_set, { type: "password" }),
+    secretGroup,
     checkField(
       "local_file_index",
       "Indeks plikow lokalnych",
