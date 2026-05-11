@@ -70,6 +70,66 @@ class WebAppFileTests(unittest.TestCase):
             self.assertFalse(delete_file.exists())
             self.assertTrue(saved_file.exists())
 
+    def test_existing_local_photos_are_migrated_when_product_path_changes(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            root = Path(temp_dir)
+            processed = root / "processed"
+            old_file = processed / "MAGGIORE" / "KOMODA" / "MA03" / "BIALY" / "NO-LED"
+            old_file.mkdir(parents=True)
+            photo_path = old_file / "5901234567890_03_DETAIL_MAGGIORE_KOMODA_MA03_BIALY_NO-LED.jpg"
+            photo_path.write_bytes(b"old")
+            uploaded_slots = []
+            delete_requests = []
+            existing_entry = {
+                "product_id": "PRD-1",
+                "ean": "5901234567890",
+                "name": "MAGGIORE",
+                "type_name": "KOMODA",
+                "model": "MA03",
+                "color1": "BIALY",
+                "color2": "",
+                "color3": "",
+                "extra": "NO-LED",
+            }
+            product = web_app.WebProductForm(
+                product_id="PRD-1",
+                ean="5901234567890",
+                name="MAGGIORE",
+                type_name="KOMODA",
+                model="MA03",
+                color1="BIALY",
+                color2="DAB",
+                extra="NO-LED",
+            )
+
+            with (
+                patch.object(web_app.settings, "l", str(processed)),
+                patch.object(
+                    web_app,
+                    "find_product_photos",
+                    return_value=[
+                        {
+                            "prefix": "03",
+                            "path": str(photo_path),
+                            "filename": photo_path.name,
+                        }
+                    ],
+                ),
+            ):
+                migrated = web_app._append_existing_photo_migrations(
+                    existing_entry=existing_entry,
+                    product=product,
+                    uploaded_slots=uploaded_slots,
+                    delete_requests=delete_requests,
+                    slot_by_prefix={"03": {"prefix": "03", "label": "DETAIL_pic"}},
+                )
+
+            self.assertEqual(migrated, ["03"])
+            self.assertEqual(uploaded_slots[0].prefix, "03")
+            self.assertEqual(uploaded_slots[0].source_path, str(photo_path))
+            self.assertEqual(delete_requests[0]["local_path"], str(photo_path))
+
 
 if __name__ == "__main__":
     unittest.main()

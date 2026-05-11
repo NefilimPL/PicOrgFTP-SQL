@@ -328,6 +328,12 @@ h2 {
   display: none;
 }
 
+.product-id-field input[readonly] {
+  border-style: dashed;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
 .autocomplete-host {
   position: relative;
 }

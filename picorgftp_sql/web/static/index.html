@@ -27,7 +27,10 @@
       <section class="product-section" aria-labelledby="productTitle">
         <h1 id="productTitle">Produkt</h1>
         <form id="productForm" class="product-form" autocomplete="off">
-          <input name="product_id" type="hidden">
+          <label class="product-id-field">
+            ID produktu
+            <input name="product_id" autocomplete="off" spellcheck="false" readonly placeholder="Nowy wpis">
+          </label>
           <label>
             Nazwa
             <input name="name" autocomplete="off" spellcheck="false" required>
@@ -41,15 +44,15 @@
             <input name="model" autocomplete="off" spellcheck="false" required>
           </label>
           <label>
-            Kolor 1
+            <span data-product-field-label="color1">Kolor 1</span>
             <input name="color1" autocomplete="off" spellcheck="false" required>
           </label>
           <label>
-            Kolor 2
+            <span data-product-field-label="color2">Kolor 2</span>
             <input name="color2" autocomplete="off" spellcheck="false">
           </label>
           <label>
-            Kolor 3
+            <span data-product-field-label="color3">Kolor 3</span>
             <input name="color3" autocomplete="off" spellcheck="false">
           </label>
           <label>

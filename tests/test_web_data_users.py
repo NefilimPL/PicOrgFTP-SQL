@@ -67,6 +67,34 @@ class WebDataUserTests(unittest.TestCase):
         self.assertEqual(caught.exception.used_by, used_by)
         remove_from_list.assert_not_called()
 
+    def test_save_web_entry_preserves_ean_for_existing_product_id_when_missing(self) -> None:
+        with (
+            patch.object(
+                web_data,
+                "find_entry_by_identity",
+                return_value={"product_id": "PRD-1", "ean": "5901234567890"},
+            ),
+            patch.object(
+                web_data,
+                "save_ean_entry",
+                return_value={"updated": True, "product_id": "PRD-1", "entry": {}},
+            ) as save_ean_entry,
+        ):
+            result = web_data.save_web_entry(
+                {
+                    "product_id": "PRD-1",
+                    "name": "Maggiore",
+                    "type_name": "Komoda",
+                    "model": "MA03",
+                    "color1": "Bialy",
+                }
+            )
+
+        self.assertEqual(result["product_id"], "PRD-1")
+        args, kwargs = save_ean_entry.call_args
+        self.assertEqual(args[0], "5901234567890")
+        self.assertEqual(kwargs["product_id"], "PRD-1")
+
     def test_find_product_photos_merges_live_files_when_index_is_stale(self) -> None:
         class StaleIndex:
             def has_snapshot(self) -> bool:

@@ -40,11 +40,12 @@ from ..image_utils import fit_image_to_content
 from ..logging_utils import log_error
 from ..services.ftp_service import sync_remote_files
 from ..services.sql_service import extract_presence_context
-from ..workflow_utils import parse_slot_filename
+from ..workflow_utils import build_product_directory, parse_slot_filename
 from ..web_workflow import (
     WebProductForm,
     WebUploadedSlot,
     process_web_uploads,
+    normalized_product_payload,
     processing_options_from_config,
     slot_definitions_from_config,
     validate_product_form,
@@ -55,6 +56,7 @@ from ..web_data import (
     authenticate_user,
     cache_ftp_preview,
     field_suggestions,
+    find_entry_by_identity,
     find_user,
     find_product_photos,
     file_index_status,
@@ -431,6 +433,96 @@ def _delete_local_files(delete_requests: List[Dict[str, Any]], saved_paths: Set[
     return payload
 
 
+def _form_from_entry_payload(entry: Dict[str, Any]) -> WebProductForm:
+    return WebProductForm(
+        name=str(entry.get("name") or ""),
+        type_name=str(entry.get("type_name") or ""),
+        model=str(entry.get("model") or ""),
+        color1=str(entry.get("color1") or ""),
+        color2=str(entry.get("color2") or ""),
+        color3=str(entry.get("color3") or ""),
+        extra=str(entry.get("extra") or ""),
+        ean=str(entry.get("ean") or ""),
+        product_id=str(entry.get("product_id") or ""),
+    )
+
+
+def _output_identity(form: WebProductForm) -> tuple[str, str]:
+    payload = normalized_product_payload(form)
+    output_dir = build_product_directory(
+        settings.l,
+        payload["name"],
+        payload["type_name"],
+        payload["model"],
+        payload["colors"],
+        payload["extra"],
+    )
+    return os.path.normcase(os.path.abspath(output_dir)), str(payload["ean"] or "").upper()
+
+
+def _should_migrate_existing_photos(
+    existing_entry: Optional[Dict[str, Any]],
+    product: WebProductForm,
+) -> bool:
+    if not existing_entry:
+        return False
+    return _output_identity(_form_from_entry_payload(existing_entry)) != _output_identity(product)
+
+
+def _append_existing_photo_migrations(
+    *,
+    existing_entry: Optional[Dict[str, Any]],
+    product: WebProductForm,
+    uploaded_slots: List[WebUploadedSlot],
+    delete_requests: List[Dict[str, Any]],
+    slot_by_prefix: Dict[str, Dict[str, str]],
+) -> List[str]:
+    """Add existing local photos when product identity changes in the web form."""
+
+    if not _should_migrate_existing_photos(existing_entry, product):
+        return []
+    occupied_prefixes = {slot.prefix for slot in uploaded_slots}
+    delete_prefixes = {str(item.get("prefix") or "") for item in delete_requests}
+    migrated: List[str] = []
+    photos = find_product_photos(
+        existing_entry or {},
+        include_local=True,
+        include_ftp=bool(config.CONFIG.get(ft, True)),
+        include_sql=False,
+    )
+    for photo in photos:
+        prefix = str(photo.get("prefix") or "").strip()
+        path = str(photo.get("path") or "").strip()
+        if not prefix or not path or not os.path.isfile(path):
+            continue
+        slot = slot_by_prefix.get(prefix, {"prefix": prefix, "label": prefix})
+        label = str(slot.get("label") or prefix)
+        if prefix not in occupied_prefixes and prefix not in delete_prefixes:
+            uploaded_slots.append(
+                WebUploadedSlot(
+                    prefix=prefix,
+                    label=label,
+                    source_path=path,
+                    original_filename=os.path.basename(path),
+                )
+            )
+            occupied_prefixes.add(prefix)
+            migrated.append(prefix)
+        if prefix not in delete_prefixes:
+            delete_requests.append(
+                {
+                    "prefix": prefix,
+                    "label": label,
+                    "local_path": path,
+                    "ftp_filename": os.path.basename(str(photo.get("ftp_filename") or "")),
+                    "sql": False,
+                    "migration": True,
+                }
+            )
+            delete_prefixes.add(prefix)
+    return migrated
+
+
 def _read_log_tail(path: str, limit: int = 300) -> Dict[str, Any]:
     line_limit = max(1, min(2000, int(limit or 300)))
     log_path = Path(path)
@@ -685,7 +777,7 @@ def create_app() -> FastAPI:
             record_history(
                 username=username,
                 action="entry_save",
-                ean=payload.get("ean") if isinstance(payload, dict) else "",
+                ean=(entry.get("EAN") or payload.get("ean")) if isinstance(payload, dict) else "",
                 product_id=result.get("product_id", "") if isinstance(result, dict) else "",
                 summary="Zapisano wpis produktu.",
                 details={
@@ -900,6 +992,39 @@ def create_app() -> FastAPI:
             errors = validate_product_form(product)
             if errors:
                 raise ValueError(" ".join(errors))
+            existing_entry = None
+            if product.product_id.strip():
+                existing_entry = find_entry_by_identity(product_id=product.product_id)
+            if (
+                existing_entry is None
+                and product.ean.strip()
+                and product.ean.strip().upper() != "BRAK-EAN"
+            ):
+                existing_entry = find_entry_by_identity(ean=product.ean)
+            if existing_entry:
+                preserved_product_id = product.product_id or str(
+                    existing_entry.get("product_id") or ""
+                )
+                preserved_ean = product.ean or str(existing_entry.get("ean") or "")
+                if preserved_product_id != product.product_id or preserved_ean != product.ean:
+                    product = WebProductForm(
+                        name=product.name,
+                        type_name=product.type_name,
+                        model=product.model,
+                        color1=product.color1,
+                        color2=product.color2,
+                        color3=product.color3,
+                        extra=product.extra,
+                        ean=preserved_ean,
+                        product_id=preserved_product_id,
+                    )
+            migrated_prefixes = _append_existing_photo_migrations(
+                existing_entry=existing_entry,
+                product=product,
+                uploaded_slots=uploaded_slots,
+                delete_requests=delete_requests,
+                slot_by_prefix=slot_by_prefix,
+            )
             entry_result = save_web_entry(
                 {
                     "product_id": product.product_id,
@@ -940,6 +1065,7 @@ def create_app() -> FastAPI:
             shutil.rmtree(temp_dir, ignore_errors=True)
         payload = _result_payload(result)
         payload["entry"] = entry_result
+        payload["migrated_slots"] = migrated_prefixes
         payload["ftp"] = ftp_result
         payload["sql"] = sql_result
         payload["local_delete"] = local_delete_result
@@ -956,6 +1082,7 @@ def create_app() -> FastAPI:
             details={
                 "saved_files": payload["saved_files"],
                 "deleted_slots": delete_requests,
+                "migrated_slots": migrated_prefixes,
                 "ftp": ftp_result,
                 "sql": sql_result,
                 "local_delete": local_delete_result,

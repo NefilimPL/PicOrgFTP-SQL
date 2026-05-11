@@ -29,6 +29,7 @@ const state = {
   listFilter: "",
   declinedListPrompts: new Set(),
   activeListPromptKeys: new Set(),
+  colorFieldLabels: {},
 };
 
 const listLabels = {
@@ -253,6 +254,35 @@ const fieldListLabels = {
   extra: "Dodatek",
 };
 
+const defaultColorFieldLabels = {
+  color1: "Kolor 1",
+  color2: "Kolor 2",
+  color3: "Kolor 3",
+};
+
+function cleanDisplayLabel(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[:*]+$/g, "")
+    .trim();
+}
+
+function productFieldLabel(fieldName) {
+  if (fieldName in defaultColorFieldLabels) {
+    return cleanDisplayLabel(state.colorFieldLabels?.[fieldName]) || defaultColorFieldLabels[fieldName];
+  }
+  return fieldListLabels[fieldName] || fieldName;
+}
+
+function applyProductFieldLabels() {
+  for (const fieldName of Object.keys(defaultColorFieldLabels)) {
+    const node = document.querySelector(`[data-product-field-label="${fieldName}"]`);
+    if (node) {
+      node.textContent = productFieldLabel(fieldName);
+    }
+  }
+}
+
 function listHasValue(listKey, value) {
   const normalized = normalizeListValue(value);
   if (!normalized) return true;
@@ -293,7 +323,7 @@ async function promptAddProductFieldToList(fieldName, { force = false } = {}) {
   }
   state.activeListPromptKeys.add(promptKey);
   try {
-    const label = fieldListLabels[fieldName] || fieldName;
+    const label = productFieldLabel(fieldName);
     const listLabel = listLabels[listKey] || listKey;
     const shouldAdd = window.confirm(
       `${label}: "${value}" nie istnieje na liscie ${listLabel}. Dodac ten wpis do listy?`
@@ -1406,6 +1436,9 @@ function showResult(payload) {
   if (payload.entry && payload.entry.product_id) {
     productForm.elements.product_id.value = payload.entry.product_id;
   }
+  if (!productForm.elements.ean.value && payload.ean && payload.ean !== "BRAK-EAN") {
+    productForm.elements.ean.value = payload.ean;
+  }
   const list = document.createElement("ul");
   list.className = "result-list";
   for (const file of payload.saved_files || []) {
@@ -1622,6 +1655,22 @@ function formPayload() {
   };
 }
 
+function normalizedIdentityValue(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function productFieldsChangedSinceLoad() {
+  if (!state.loadedEntryOriginal) {
+    return false;
+  }
+  const current = formPayload();
+  return trackedProductFields.some(
+    (fieldName) =>
+      normalizedIdentityValue(current[fieldName]) !==
+      normalizedIdentityValue(state.loadedEntryOriginal[fieldName])
+  );
+}
+
 function mergePhotoRecord(existing = {}, incoming = {}) {
   const merged = { ...existing, ...incoming };
   for (const key of ["local", "ftp", "sql", "is_image"]) {
@@ -1802,7 +1851,9 @@ async function refreshData() {
   state.lists = payload.lists || {};
   state.entries = payload.entries || [];
   state.fileIndex = payload.file_index || state.fileIndex;
+  state.colorFieldLabels = payload.color_field_labels || state.colorFieldLabels || {};
   renderDatalists();
+  applyProductFieldLabels();
   renderEntrySelect();
   renderListEditor();
   updateRuntimeMetrics();
@@ -1821,7 +1872,9 @@ async function loadBootstrap() {
   state.lists = payload.lists || {};
   state.entries = payload.entries || [];
   state.fileIndex = payload.file_index || null;
+  state.colorFieldLabels = payload.color_field_labels || {};
   renderDatalists();
+  applyProductFieldLabels();
   renderEntrySelect();
   renderSlots(payload.slots || []);
   renderListEditor();
@@ -1894,6 +1947,9 @@ async function saveEntryOnly() {
   const entry = payload.entry || {};
   if (entry.product_id) {
     productForm.elements.product_id.value = entry.product_id;
+  }
+  if (!productForm.elements.ean.value && entry.entry?.EAN && entry.entry.EAN !== "BRAK-EAN") {
+    productForm.elements.ean.value = entry.entry.EAN;
   }
   state.loadedEntryOriginal = { ...formPayload(), product_id: productForm.elements.product_id.value };
   updateFieldWarnings();
@@ -2117,10 +2173,12 @@ function settingsSaveButton(form, buildPayload) {
     });
     state.currentUser = state.settings.current_user || state.currentUser;
     state.defaultSlotFit = Boolean(state.settings.auto_content_fit);
+    state.colorFieldLabels = state.settings.color_field_labels || state.colorFieldLabels || {};
     updateAdminUi();
     if (Array.isArray(state.settings.slots)) {
       renderSlots(state.settings.slots);
     }
+    applyProductFieldLabels();
     settingsStatus.textContent = "Zapisano.";
     renderSettings();
   });
@@ -2525,7 +2583,9 @@ async function loadSettings() {
   state.settings = await requestJson("/api/settings");
   state.currentUser = state.settings.current_user || state.currentUser;
   state.defaultSlotFit = Boolean(state.settings.auto_content_fit);
+  state.colorFieldLabels = state.settings.color_field_labels || state.colorFieldLabels || {};
   updateAdminUi();
+  applyProductFieldLabels();
   renderSettings();
 }
 
@@ -2597,7 +2657,11 @@ productForm.addEventListener("submit", async (event) => {
   clearResult();
   try {
     await ensureProductListValues();
-    setBusy(true, "Przetwarzanie...");
+    const identityChanged = productFieldsChangedSinceLoad();
+    setBusy(
+      true,
+      identityChanged ? "Przetwarzanie i przenoszenie istniejacych zdjec..." : "Przetwarzanie..."
+    );
     const data = new FormData(productForm);
     for (const [prefix, file] of state.files.entries()) {
       data.set(`slot_${prefix}`, file, file.name);
@@ -2618,6 +2682,12 @@ productForm.addEventListener("submit", async (event) => {
     }
     const payload = await requestJson("/api/process", { method: "POST", body: data });
     showResult(payload);
+    const savedProductId = payload.entry?.product_id || productForm.elements.product_id.value;
+    if (savedProductId) {
+      productForm.elements.product_id.value = savedProductId;
+    }
+    state.loadedEntryOriginal = { ...formPayload(), product_id: savedProductId };
+    updateFieldWarnings();
     state.deletedSlots.clear();
     clearSelectedFiles();
     await refreshData();

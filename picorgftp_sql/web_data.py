@@ -241,6 +241,7 @@ def load_web_data() -> dict[str, object]:
         },
         "entries": [entry_to_payload(entry) for entry in entries],
         "file_index": file_index_status(start=True),
+        "color_field_labels": dict(config.CONFIG.get(COLOR_FIELD_LABELS_KEY, {}) or {}),
     }
 
 
@@ -755,15 +756,31 @@ def search_entries(
 def find_entry_by_identity(*, product_id: str = "", ean: str = "") -> dict[str, str] | None:
     """Return one saved entry by product id or EAN."""
 
-    matches = search_entries(product_id=product_id, ean=ean, limit=1)
-    return matches[0] if matches else None
+    if _text(product_id):
+        matches = search_entries(product_id=product_id, limit=1)
+        if matches:
+            return matches[0]
+    if _text(ean) and _text(ean).upper() != NO_EAN_PLACEHOLDER:
+        matches = search_entries(ean=ean, limit=1)
+        if matches:
+            return matches[0]
+    return None
 
 
 def save_web_entry(payload: dict[str, object]) -> dict[str, object]:
     """Create or update an Excel entry using the existing desktop helper."""
 
+    product_id = _text(payload.get("product_id"))
+    ean = _text(payload.get("ean"))
+    existing = find_entry_by_identity(product_id=product_id) if product_id else None
+    if existing is None and ean and ean.upper() != NO_EAN_PLACEHOLDER:
+        existing = find_entry_by_identity(ean=ean)
+    if existing:
+        product_id = product_id or _text(existing.get("product_id"))
+        if not ean and _text(existing.get("ean")):
+            ean = _text(existing.get("ean"))
     result = save_ean_entry(
-        _text(payload.get("ean")) or NO_EAN_PLACEHOLDER,
+        ean or NO_EAN_PLACEHOLDER,
         _text(payload.get("name")),
         _text(payload.get("type_name")),
         _text(payload.get("model")),
@@ -771,7 +788,7 @@ def save_web_entry(payload: dict[str, object]) -> dict[str, object]:
         _text(payload.get("color2")),
         _text(payload.get("color3")),
         _text(payload.get("extra")),
-        product_id=_text(payload.get("product_id")),
+        product_id=product_id,
     )
     if not result:
         raise ValueError("Nie udalo sie zapisac wpisu w Excelu.")
