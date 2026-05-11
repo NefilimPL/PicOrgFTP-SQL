@@ -16,7 +16,6 @@ const state = {
   slotFits: new Map(),
   defaultSlotFit: false,
   slotSources: new Map(),
-  ftpPreviewLoading: new Set(),
   draggedSlotPrefix: "",
   lastLookupMs: null,
   activeSettingsTab: "app",
@@ -26,6 +25,7 @@ const state = {
   suppressAutoSearch: false,
   lastAutoSearchKey: "",
   photoLoadRequestId: 0,
+  photoSourceStatus: new Map(),
   listFilter: "",
 };
 
@@ -35,6 +35,13 @@ const listLabels = {
   models: "Modele",
   colors: "Kolory",
   extras: "Dodatki",
+};
+
+const photoSourceLabels = {
+  local: "lokalne",
+  sql: "SQL",
+  ftp: "FTP",
+  all: "dane",
 };
 
 const slotGrid = document.querySelector("#slotGrid");
@@ -796,19 +803,6 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
   updateSlotPreview(prefix);
 }
 
-function scheduleFtpPreview(prefix, photo) {
-  if (!photo?.ftp_filename || photo.ftp_token || state.ftpPreviewLoading.has(prefix)) {
-    return;
-  }
-  const requestId = state.photoLoadRequestId;
-  state.ftpPreviewLoading.add(prefix);
-  loadFtpPreview(photo, prefix, requestId)
-    .catch(() => {})
-    .finally(() => {
-      state.ftpPreviewLoading.delete(prefix);
-    });
-}
-
 function isSlotFit(prefix) {
   if (state.slotFits.has(prefix)) {
     return Boolean(state.slotFits.get(prefix));
@@ -991,8 +985,8 @@ function renderSlots(slots = state.slots) {
     node.draggable = Boolean(selectedFile || loadedPhoto?.token || loadedPhoto?.ftp_token);
     renderSlotBadges(meta, loadedPhoto, selectedFile, slot.prefix);
     overlay.className = "slot-loading-overlay";
-    overlay.innerHTML = '<span>Wczytywanie</span><div class="progress-line"><i></i></div>';
-    if (state.photosLoading) {
+    overlay.innerHTML = `<span>${photoLoadingText()}</span><div class="progress-line"><i></i></div>`;
+    if (state.photosLoading && !selectedFile && !loadedPhoto) {
       preview.appendChild(overlay);
     }
     controls.className = "slot-controls";
@@ -1021,8 +1015,11 @@ function renderSlots(slots = state.slots) {
     clearButton.title = "Usun plik z tego slotu w formularzu";
     clearButton.addEventListener("click", (event) => {
       event.stopPropagation();
+      const hadSavedPhoto = Boolean(state.loadedPhotos.get(slot.prefix));
       clearSlotAssignment(slot.prefix);
-      formStatus.textContent = `Wyczyszczono slot ${slot.prefix}.`;
+      formStatus.textContent = hadSavedPhoto
+        ? `Oznaczono slot ${slot.prefix} do usuniecia przy zapisie.`
+        : `Wyczyszczono slot ${slot.prefix}.`;
       renderSlots();
     });
     if (selectedFile || loadedPhoto) {
@@ -1320,10 +1317,21 @@ function showResult(payload) {
       : `FTP: wyslano ${payload.ftp.uploaded || 0}, usunieto ${payload.ftp.deleted || 0}, ${payload.ftp.elapsed_ms || 0} ms`;
     resultOutput.appendChild(ftp);
   }
-  if (payload.local_delete?.deleted || payload.local_delete?.skipped) {
+  if (
+    payload.local_delete?.deleted ||
+    payload.local_delete?.skipped ||
+    (payload.local_delete?.errors || []).length
+  ) {
     const deletions = document.createElement("p");
-    deletions.className = "ok-text";
-    deletions.textContent = `Usunieto lokalnie: ${payload.local_delete.deleted || 0}`;
+    const deleteErrors = payload.local_delete?.errors || [];
+    deletions.className = deleteErrors.length ? "error-text" : "ok-text";
+    deletions.textContent = deleteErrors.length
+      ? `Usuwanie lokalne: ${payload.local_delete.deleted || 0}, pominieto: ${
+          payload.local_delete.skipped || 0
+        }, bledy: ${deleteErrors.join("; ")}`
+      : `Usunieto lokalnie: ${payload.local_delete.deleted || 0}, pominieto: ${
+          payload.local_delete.skipped || 0
+        }`;
     resultOutput.appendChild(deletions);
   }
   if (payload.sql?.enabled) {
@@ -1528,6 +1536,39 @@ function mergePhotoRecord(existing = {}, incoming = {}) {
   return merged;
 }
 
+function photoLoadingText() {
+  const loading = [];
+  for (const [source, status] of state.photoSourceStatus.entries()) {
+    if (status === "pending" || status === "loading") {
+      loading.push(photoSourceLabels[source] || source);
+    }
+  }
+  return loading.length ? `Wczytywanie: ${loading.join(", ")}` : "Wczytywanie";
+}
+
+function photoStatusSummary() {
+  const done = [];
+  const loading = [];
+  const failed = [];
+  for (const [source, status] of state.photoSourceStatus.entries()) {
+    if (status === "done") done.push(photoSourceLabels[source] || source);
+    if (status === "pending" || status === "loading") loading.push(photoSourceLabels[source] || source);
+    if (status === "failed") failed.push(photoSourceLabels[source] || source);
+  }
+  const parts = [];
+  if (done.length) parts.push(`gotowe: ${done.join(", ")}`);
+  if (loading.length) parts.push(`trwa: ${loading.join(", ")}`);
+  if (failed.length) parts.push(`blad: ${failed.join(", ")}`);
+  return parts.join(" | ");
+}
+
+function setPhotoSourceStatus(source, status, requestId) {
+  if (requestId !== state.photoLoadRequestId) return;
+  state.photoSourceStatus.set(source, status);
+  const summary = photoStatusSummary();
+  formStatus.textContent = summary || photoLoadingText();
+}
+
 function applyPhotoPayload(photos = []) {
   let changed = false;
   for (const photo of photos) {
@@ -1538,9 +1579,6 @@ function applyPhotoPayload(photos = []) {
     if (!state.slotSources.has(photo.prefix) || !selectedSlotSource(photo.prefix, merged)) {
       const source = defaultSlotSource(merged);
       if (source) state.slotSources.set(photo.prefix, source);
-    }
-    if (selectedSlotSource(photo.prefix, merged) === "ftp") {
-      scheduleFtpPreview(photo.prefix, merged);
     }
     changed = true;
   }
@@ -1573,15 +1611,26 @@ async function loadPhotosForEntry(entry, options = {}) {
   state.loadedPhotos.clear();
   state.deletedSlots.clear();
   state.slotSources.clear();
-  state.ftpPreviewLoading.clear();
-  renderSlots();
   const sources = progressive ? ["local", "sql", "ftp"] : ["all"];
+  state.photoSourceStatus.clear();
+  for (const source of sources) {
+    state.photoSourceStatus.set(source, "pending");
+  }
+  formStatus.textContent = photoLoadingText();
+  renderSlots();
   const tasks = sources.map(async (source) => {
-    const payload = await requestEntryPhotos(entry, source);
-    if (state.photoLoadRequestId === requestId) {
-      applyPhotoPayload(payload.photos || []);
+    setPhotoSourceStatus(source, "loading", requestId);
+    try {
+      const payload = await requestEntryPhotos(entry, source);
+      if (state.photoLoadRequestId === requestId) {
+        setPhotoSourceStatus(source, "done", requestId);
+        applyPhotoPayload(payload.photos || []);
+      }
+      return payload;
+    } catch (error) {
+      setPhotoSourceStatus(source, "failed", requestId);
+      throw error;
     }
-    return payload;
   });
   try {
     const settled = await Promise.allSettled(tasks);
@@ -1592,11 +1641,14 @@ async function loadPhotosForEntry(entry, options = {}) {
     }
     if (failures.length) {
       formStatus.textContent = "Czesc zrodel podgladu nie odpowiedziala.";
+    } else {
+      formStatus.textContent = photoStatusSummary() || "Wczytano podglady.";
     }
     state.lastLookupMs = performance.now() - started;
   } finally {
     if (state.photoLoadRequestId !== requestId) return;
     state.photosLoading = false;
+    state.photoSourceStatus.clear();
     updateRuntimeMetrics();
     renderSlots();
   }
@@ -2433,8 +2485,7 @@ clearButton.addEventListener("click", () => {
   state.slotFits.clear();
   state.deletedSlots.clear();
   state.slotSources.clear();
-  state.ftpPreviewLoading.clear();
-  state.ftpPreviewLoading.clear();
+  state.photoSourceStatus.clear();
   state.loadedEntryOriginal = null;
   state.lastAutoSearchKey = "";
   renderSlots();

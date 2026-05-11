@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Set
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
 from .. import config, settings
@@ -189,7 +190,7 @@ def _file_token(path: str) -> str:
     return base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii")
 
 
-def _path_from_file_token(token: str) -> str:
+def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
     try:
         decoded = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
         path, signature = decoded.rsplit("|", 1)
@@ -213,7 +214,7 @@ def _path_from_file_token(token: str) -> str:
             break
     if not allowed:
         raise HTTPException(status_code=403, detail="Plik poza katalogiem zdjec.")
-    if not os.path.isfile(abs_path):
+    if require_exists and not os.path.isfile(abs_path):
         raise HTTPException(status_code=404, detail="Nie znaleziono pliku.")
     return abs_path
 
@@ -410,18 +411,21 @@ def _sync_result_to_sql(
 
 def _delete_local_files(delete_requests: List[Dict[str, Any]], saved_paths: Set[str]) -> Dict[str, Any]:
     payload = {"deleted": 0, "skipped": 0, "errors": []}
+    normalized_saved_paths = {os.path.normcase(os.path.abspath(path)) for path in saved_paths}
     for item in delete_requests:
         path = str(item.get("local_path") or "")
         if not path:
             continue
         abs_path = os.path.abspath(path)
-        if abs_path in saved_paths:
+        if os.path.normcase(abs_path) in normalized_saved_paths:
             payload["skipped"] += 1
             continue
         try:
             if os.path.isfile(abs_path):
                 os.remove(abs_path)
                 payload["deleted"] += 1
+            else:
+                payload["skipped"] += 1
         except Exception as exc:
             payload["errors"].append(f"{os.path.basename(abs_path)}: {exc}")
     return payload
@@ -632,7 +636,11 @@ def create_app() -> FastAPI:
         if not isinstance(payload, dict):
             payload = {}
         try:
-            path = cache_ftp_preview(payload.get("ean"), payload.get("filename"))
+            path = await run_in_threadpool(
+                cache_ftp_preview,
+                payload.get("ean"),
+                payload.get("filename"),
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         token = _file_token(path)
@@ -694,7 +702,8 @@ def create_app() -> FastAPI:
         source_key = str(source or "all").strip().lower()
         if source_key not in {"all", "local", "ftp", "sql"}:
             raise HTTPException(status_code=400, detail="Nieznane zrodlo zdjec.")
-        photos = find_product_photos(
+        photos = await run_in_threadpool(
+            find_product_photos,
             payload if isinstance(payload, dict) else {},
             include_local=source_key in {"all", "local"},
             include_ftp=source_key in {"all", "ftp"},
@@ -837,7 +846,10 @@ def create_app() -> FastAPI:
                     }
                     local_token = str(form.get(f"delete_local_slot_{prefix}") or "").strip()
                     if local_token:
-                        delete_item["local_path"] = _path_from_file_token(local_token)
+                        delete_item["local_path"] = _path_from_file_token(
+                            local_token,
+                            require_exists=False,
+                        )
                     delete_requests.append(delete_item)
                 value = form.get(f"slot_{prefix}")
                 if not isinstance(value, UploadFile) or not value.filename:
