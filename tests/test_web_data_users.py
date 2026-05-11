@@ -55,6 +55,18 @@ class WebDataUserTests(unittest.TestCase):
 
         add_to_list.assert_not_called()
 
+    def test_remove_list_value_blocks_values_used_by_entries(self) -> None:
+        used_by = [{"product_id": "PRD-1", "ean": "5901234567890", "label": "MAGGIORE"}]
+        with (
+            patch.object(web_data, "find_list_value_usage", return_value=used_by),
+            patch.object(web_data, "remove_from_list") as remove_from_list,
+        ):
+            with self.assertRaises(web_data.ListValueInUseError) as caught:
+                web_data.remove_list_value("names", "MAGGIORE")
+
+        self.assertEqual(caught.exception.used_by, used_by)
+        remove_from_list.assert_not_called()
+
     def test_find_product_photos_merges_live_files_when_index_is_stale(self) -> None:
         class StaleIndex:
             def has_snapshot(self) -> bool:

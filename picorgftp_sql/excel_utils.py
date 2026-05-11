@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import unicodedata
 import uuid
 from typing import Dict
 
@@ -188,6 +189,44 @@ def _normalize_extra_value(extra: str) -> str:
     return extra_raw.replace(UNDERSCORE, HYPHEN).upper()
 
 
+def _normalize_list_usage_value(sheet_name: str, value: object) -> str:
+    """Normalize a list value for usage checks in the entries sheet."""
+
+    text = unicodedata.normalize("NFKD", _normalize_cell(value)).casefold()
+    text = "".join(ch for ch in text if not unicodedata.combining(ch)).upper()
+    if sheet_name == _excel_sheets().get(EXTRAS_SHEET, EXTRAS_SHEET):
+        text = text.replace(UNDERSCORE, HYPHEN)
+    return text
+
+
+def _entry_usage_label(payload: dict[str, str]) -> str:
+    """Return a compact product label for list usage dialogs."""
+
+    parts = [
+        payload.get(NAME_HEADER, EMPTY),
+        payload.get(TYPE_HEADER, EMPTY),
+        payload.get(MODEL_HEADER, EMPTY),
+    ]
+    colors = " / ".join(
+        item
+        for item in (
+            payload.get(COLOR1_HEADER, EMPTY),
+            payload.get(COLOR2_HEADER, EMPTY),
+            payload.get(COLOR3_HEADER, EMPTY),
+        )
+        if item
+    )
+    if colors:
+        parts.append(colors)
+    if payload.get(EXTRA_HEADER, EMPTY):
+        parts.append(payload[EXTRA_HEADER])
+    suffix = payload.get(EAN_HEADER, EMPTY) or payload.get(PRODUCT_ID_HEADER, EMPTY)
+    label = " | ".join(item for item in parts if item)
+    if suffix:
+        return f"{label} - {suffix}" if label else suffix
+    return label
+
+
 def _build_entry_payload(
     ean: str,
     name: str,
@@ -315,6 +354,87 @@ def prepare_excel_lists() -> Dict[str, Dict[str, dict] | list]:
     finally:
         workbook.close()
     return lists
+
+
+def find_list_value_usage(
+    sheet_name: str,
+    value: str,
+    *,
+    limit: int = 100,
+) -> list[dict[str, str]]:
+    """Return product entries from Excel that use ``value`` from a list sheet."""
+
+    field_map = {
+        _excel_sheets().get("NAZWY", "NAZWY"): [NAME_HEADER],
+        _excel_sheets().get("TYPY", "TYPY"): [TYPE_HEADER],
+        _excel_sheets().get("MODELE", "MODELE"): [MODEL_HEADER],
+        _excel_sheets().get("KOLORY", "KOLORY"): [
+            COLOR1_HEADER,
+            COLOR2_HEADER,
+            COLOR3_HEADER,
+        ],
+        _excel_sheets().get(EXTRAS_SHEET, EXTRAS_SHEET): [EXTRA_HEADER],
+    }
+    headers = field_map.get(sheet_name)
+    needle = _normalize_list_usage_value(sheet_name, value)
+    if not headers or not needle:
+        return []
+    workbook = _load_workbook_readonly()
+    try:
+        entries_sheet_name = _excel_sheets().get(ENTRY_SHEET, ENTRY_SHEET)
+        if entries_sheet_name not in workbook.sheetnames:
+            return []
+        sheet = workbook[entries_sheet_name]
+        header_map, _changed = _entry_header_map(sheet, ensure_missing=False)
+        max_items = max(1, int(limit or 100))
+        usage: list[dict[str, str]] = []
+        for row in sheet.iter_rows(min_row=2):
+            matched_fields = [
+                header
+                for header in headers
+                if _normalize_list_usage_value(
+                    sheet_name,
+                    _entry_row_value(row, header_map, header),
+                )
+                == needle
+            ]
+            if not matched_fields:
+                continue
+            payload = {
+                EAN_HEADER: _entry_row_value(row, header_map, EAN_HEADER),
+                NAME_HEADER: _entry_row_value(row, header_map, NAME_HEADER),
+                TYPE_HEADER: _entry_row_value(row, header_map, TYPE_HEADER),
+                MODEL_HEADER: _entry_row_value(row, header_map, MODEL_HEADER),
+                COLOR1_HEADER: _entry_row_value(row, header_map, COLOR1_HEADER),
+                COLOR2_HEADER: _entry_row_value(row, header_map, COLOR2_HEADER),
+                COLOR3_HEADER: _entry_row_value(row, header_map, COLOR3_HEADER),
+                EXTRA_HEADER: _entry_row_value(row, header_map, EXTRA_HEADER),
+                PRODUCT_ID_HEADER: _entry_row_value(
+                    row,
+                    header_map,
+                    PRODUCT_ID_HEADER,
+                ),
+            }
+            usage.append(
+                {
+                    "product_id": payload[PRODUCT_ID_HEADER],
+                    "ean": payload[EAN_HEADER],
+                    "name": payload[NAME_HEADER],
+                    "type_name": payload[TYPE_HEADER],
+                    "model": payload[MODEL_HEADER],
+                    "color1": payload[COLOR1_HEADER],
+                    "color2": payload[COLOR2_HEADER],
+                    "color3": payload[COLOR3_HEADER],
+                    "extra": payload[EXTRA_HEADER],
+                    "fields": ", ".join(matched_fields),
+                    "label": _entry_usage_label(payload),
+                }
+            )
+            if len(usage) >= max_items:
+                break
+        return usage
+    finally:
+        workbook.close()
 
 
 def _show_locked_dialog(reason: str) -> None:

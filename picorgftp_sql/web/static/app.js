@@ -27,6 +27,8 @@ const state = {
   photoLoadRequestId: 0,
   photoSourceStatus: new Map(),
   listFilter: "",
+  declinedListPrompts: new Set(),
+  activeListPromptKeys: new Set(),
 };
 
 const listLabels = {
@@ -68,6 +70,8 @@ const listValues = document.querySelector("#listValues");
 const listAddForm = document.querySelector("#listAddForm");
 const listAddInput = document.querySelector("#listAddInput");
 const listStatus = document.querySelector("#listStatus");
+const listUsageTitle = document.querySelector("#listUsageTitle");
+const listUsageOutput = document.querySelector("#listUsageOutput");
 const settingsOutput = document.querySelector("#settingsOutput");
 const settingsStatus = document.querySelector("#settingsStatus");
 const entryMatches = document.querySelector("#entryMatches");
@@ -95,7 +99,13 @@ async function requestJson(path, options = {}) {
     if (response.status === 401) {
       window.location.href = "/login";
     }
-    throw new Error(payload.detail || "Operacja nie powiodla sie.");
+    const detail = payload.detail;
+    const message =
+      typeof detail === "string" ? detail : detail?.message || "Operacja nie powiodla sie.";
+    const error = new Error(message);
+    error.status = response.status;
+    error.detail = detail;
+    throw error;
   }
   return payload;
 }
@@ -232,6 +242,84 @@ const fieldListKey = {
   color3: "colors",
   extra: "extras",
 };
+
+const fieldListLabels = {
+  name: "Nazwa",
+  type_name: "Typ",
+  model: "Model",
+  color1: "Kolor 1",
+  color2: "Kolor 2",
+  color3: "Kolor 3",
+  extra: "Dodatek",
+};
+
+function listHasValue(listKey, value) {
+  const normalized = normalizeListValue(value);
+  if (!normalized) return true;
+  return (state.lists[listKey] || []).some((item) => normalizeListValue(item) === normalized);
+}
+
+function canonicalListValue(listKey, value) {
+  const normalized = normalizeListValue(value);
+  return (state.lists[listKey] || []).find((item) => normalizeListValue(item) === normalized) || "";
+}
+
+async function addValueToList(listKey, value) {
+  const payload = await requestJson(`/api/lists/${listKey}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value }),
+  });
+  state.lists = payload.lists || {};
+  state.entries = payload.entries || state.entries;
+  renderDatalists();
+  renderListEditor();
+  return canonicalListValue(listKey, value);
+}
+
+async function promptAddProductFieldToList(fieldName, { force = false } = {}) {
+  const listKey = fieldListKey[fieldName];
+  const input = productForm.elements[fieldName];
+  const value = input?.value?.trim() || "";
+  if (!listKey || !value || listHasValue(listKey, value)) {
+    return false;
+  }
+  const promptKey = `${listKey}|${normalizeListValue(value)}`;
+  if (state.activeListPromptKeys.has(promptKey)) {
+    return false;
+  }
+  if (!force && state.declinedListPrompts.has(promptKey)) {
+    return false;
+  }
+  state.activeListPromptKeys.add(promptKey);
+  try {
+    const label = fieldListLabels[fieldName] || fieldName;
+    const listLabel = listLabels[listKey] || listKey;
+    const shouldAdd = window.confirm(
+      `${label}: "${value}" nie istnieje na liscie ${listLabel}. Dodac ten wpis do listy?`
+    );
+    if (!shouldAdd) {
+      state.declinedListPrompts.add(promptKey);
+      return false;
+    }
+    const canonical = await addValueToList(listKey, value);
+    if (canonical) {
+      input.value = canonical;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    state.declinedListPrompts.delete(promptKey);
+    formStatus.textContent = `Dodano "${canonical || value}" do listy ${listLabel}.`;
+    return true;
+  } finally {
+    state.activeListPromptKeys.delete(promptKey);
+  }
+}
+
+async function ensureProductListValues() {
+  for (const fieldName of Object.keys(fieldListKey)) {
+    await promptAddProductFieldToList(fieldName);
+  }
+}
 
 function entryMatchesContext(entry, fieldName) {
   const payload = currentFormPayload();
@@ -407,6 +495,34 @@ function renderEntryModal(entries) {
     entryMatches.appendChild(row);
   }
   document.querySelector("#entryModal").classList.add("active");
+}
+
+function renderListUsageModal(value, usedBy = []) {
+  if (!listUsageTitle || !listUsageOutput) {
+    return;
+  }
+  listUsageTitle.textContent = `Nie usunieto: ${value}`;
+  listUsageOutput.textContent = "";
+  if (!usedBy.length) {
+    listUsageOutput.textContent = "Backend nie zwrocil listy produktow.";
+    document.querySelector("#listUsageModal")?.classList.add("active");
+    return;
+  }
+  for (const item of usedBy) {
+    const row = document.createElement("article");
+    const text = document.createElement("div");
+    const title = document.createElement("strong");
+    const details = document.createElement("span");
+    row.className = "entry-match";
+    title.textContent = item.label || `${item.name || ""} ${item.type_name || ""} ${item.model || ""}`.trim();
+    details.textContent = `${item.product_id || "BRAK-ID"} | EAN ${item.ean || "BRAK-EAN"} | ${
+      item.fields || "pole"
+    }`;
+    text.append(title, details);
+    row.appendChild(text);
+    listUsageOutput.appendChild(row);
+  }
+  document.querySelector("#listUsageModal")?.classList.add("active");
 }
 
 const trackedProductFields = [
@@ -1769,6 +1885,7 @@ function scheduleProductAutoSearch() {
 }
 
 async function saveEntryOnly() {
+  await ensureProductListValues();
   const payload = await requestJson("/api/entries/save", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1814,11 +1931,26 @@ async function addListValue(event) {
 }
 
 async function removeListValue(value) {
-  const payload = await requestJson(`/api/lists/${state.selectedList}`, {
-    method: "DELETE",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ value }),
-  });
+  const listLabel = listLabels[state.selectedList] || state.selectedList;
+  if (!window.confirm(`Usunac "${value}" z listy ${listLabel}?`)) {
+    return;
+  }
+  let payload;
+  try {
+    payload = await requestJson(`/api/lists/${state.selectedList}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
+  } catch (error) {
+    const detail = error.detail || {};
+    if (error.status === 409 && Array.isArray(detail.used_by)) {
+      renderListUsageModal(detail.value || value, detail.used_by);
+      listStatus.textContent = error.message;
+      return;
+    }
+    throw error;
+  }
   state.lists = payload.lists || {};
   state.entries = payload.entries || state.entries;
   renderDatalists();
@@ -2021,6 +2153,7 @@ function renderSettingsApp() {
     versionNote,
     configNote,
     inputField("base_dir", "Katalog bazowy", s.base_dir),
+    credentialField("app_secret", "APP_SECRET", s.app_secret_set, { type: "password" }),
     checkField(
       "local_file_index",
       "Indeks plikow lokalnych",
@@ -2033,6 +2166,7 @@ function renderSettingsApp() {
   settingsSaveButton(form, (data) => ({
     app: {
       base_dir: data.get("base_dir"),
+      app_secret: data.get("app_secret"),
       local_file_index: data.has("local_file_index"),
       color_field_labels: {
         color1: data.get("color1"),
@@ -2438,29 +2572,39 @@ for (const name of ["name", "type_name", "model"]) {
   productForm.elements[name].addEventListener("input", scheduleProductAutoSearch);
 }
 
+for (const name of Object.keys(fieldListKey)) {
+  productForm.elements[name]?.addEventListener("change", () => {
+    promptAddProductFieldToList(name).catch((error) => {
+      formStatus.textContent = error.message;
+    });
+  });
+}
+
 productForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  setBusy(true, "Przetwarzanie...");
+  setBusy(true, "Sprawdzanie list...");
   clearResult();
-  const data = new FormData(productForm);
-  for (const [prefix, file] of state.files.entries()) {
-    data.set(`slot_${prefix}`, file, file.name);
-    data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
-  }
-  for (const [prefix, photo] of state.loadedPhotos.entries()) {
-    const token = selectedPhotoToken(photo, prefix);
-    if (!state.files.has(prefix) && photo.dirty && token) {
-      data.set(`existing_slot_${prefix}`, token);
+  try {
+    await ensureProductListValues();
+    setBusy(true, "Przetwarzanie...");
+    const data = new FormData(productForm);
+    for (const [prefix, file] of state.files.entries()) {
+      data.set(`slot_${prefix}`, file, file.name);
       data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
     }
-  }
-  for (const [prefix, item] of state.deletedSlots.entries()) {
-    data.set(`delete_slot_${prefix}`, "1");
-    if (item.token) data.set(`delete_local_slot_${prefix}`, item.token);
-    if (item.ftp_filename) data.set(`delete_ftp_slot_${prefix}`, item.ftp_filename);
-    if (item.sql) data.set(`delete_sql_slot_${prefix}`, "1");
-  }
-  try {
+    for (const [prefix, photo] of state.loadedPhotos.entries()) {
+      const token = selectedPhotoToken(photo, prefix);
+      if (!state.files.has(prefix) && photo.dirty && token) {
+        data.set(`existing_slot_${prefix}`, token);
+        data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
+      }
+    }
+    for (const [prefix, item] of state.deletedSlots.entries()) {
+      data.set(`delete_slot_${prefix}`, "1");
+      if (item.token) data.set(`delete_local_slot_${prefix}`, item.token);
+      if (item.ftp_filename) data.set(`delete_ftp_slot_${prefix}`, item.ftp_filename);
+      if (item.sql) data.set(`delete_sql_slot_${prefix}`, "1");
+    }
     const payload = await requestJson("/api/process", { method: "POST", body: data });
     showResult(payload);
     state.deletedSlots.clear();

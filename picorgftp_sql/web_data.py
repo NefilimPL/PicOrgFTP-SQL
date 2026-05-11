@@ -17,6 +17,7 @@ import unicodedata
 from urllib.parse import urlparse
 
 from . import common, config, settings
+from . import encryption
 from .common import (
     APP_SECRET_KEY,
     AUTO_CONTENT_FIT_KEY,
@@ -55,6 +56,7 @@ from .excel_utils import (
     PRODUCT_ID_HEADER,
     TYPE_HEADER,
     add_to_list,
+    find_list_value_usage,
     prepare_excel_lists,
     remove_from_list,
     save_ean_entry,
@@ -106,6 +108,16 @@ PASSWORD_ITERATIONS = 200_000
 _FILE_INDEX: LocalFileIndex | None = None
 _FILE_INDEX_KEY: tuple[str, str] | None = None
 _FILE_INDEX_REFRESH_STARTED = False
+
+
+class ListValueInUseError(ValueError):
+    """Raised when an Excel list value is still referenced by product entries."""
+
+    def __init__(self, list_key: str, value: str, used_by: list[dict[str, str]]):
+        self.list_key = list_key
+        self.value = value
+        self.used_by = used_by
+        super().__init__("Nie usunieto wartosci, bo jest uzywana przez produkty.")
 
 
 @dataclass(frozen=True)
@@ -789,6 +801,9 @@ def remove_list_value(list_key: str, value: str) -> dict[str, object]:
     sheet = LIST_SHEETS.get(list_key)
     if not sheet:
         raise ValueError("Nieznana lista.")
+    used_by = find_list_value_usage(sheet, value)
+    if used_by:
+        raise ListValueInUseError(list_key, value, used_by)
     remove_from_list(sheet, value)
     return load_web_data()
 
@@ -846,6 +861,11 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
         secret = _text(app_payload.get(APP_SECRET_KEY))
         if secret:
             _save_local_settings({APP_SECRET_KEY: common._encode_local_secret(secret)})
+            common.APP_SECRET = secret
+            common.BASE_DIR_SETTINGS_TEMPLATE[APP_SECRET_KEY] = common._encode_local_secret(
+                secret
+            )
+            encryption.APP_SECRET = secret
     if LOCAL_FILE_INDEX_KEY in app_payload:
         cfg[LOCAL_FILE_INDEX_KEY] = bool(app_payload.get(LOCAL_FILE_INDEX_KEY))
     if AUTO_CONTENT_FIT_KEY in app_payload:
@@ -947,6 +967,7 @@ def settings_snapshot() -> dict[str, object]:
         "config_path": config.CONFIG_PATH,
         "auth_enabled": True,
         "users": load_users(),
+        "app_secret_set": bool(_text(common.APP_SECRET)),
         "local_file_index": bool(cfg.get(LOCAL_FILE_INDEX_KEY, True)),
         "auto_content_fit": bool(cfg.get(AUTO_CONTENT_FIT_KEY, False)),
         "processing": config._normalize_processing_settings(

@@ -22,10 +22,9 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
-from .. import config, settings
+from .. import common, config, settings
 from ..bootstrap import initialize_application_runtime
 from ..common import (
-    APP_SECRET,
     AUTO_CONTENT_FIT_KEY,
     H,
     K,
@@ -62,6 +61,7 @@ from ..web_data import (
     load_web_data,
     load_users,
     history_snapshot,
+    ListValueInUseError,
     refresh_file_index,
     remove_list_value,
     record_history,
@@ -106,7 +106,7 @@ def _admin_password() -> str:
 
 
 def _session_secret() -> bytes:
-    value = os.environ.get("PICORG_WEB_SESSION_SECRET") or APP_SECRET
+    value = os.environ.get("PICORG_WEB_SESSION_SECRET") or common.APP_SECRET
     return value.encode("utf-8")
 
 
@@ -753,6 +753,16 @@ def create_app() -> FastAPI:
         value = str(payload.get("value") if isinstance(payload, dict) else "")
         try:
             data_payload = remove_list_value(list_key, value)
+        except ListValueInUseError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": str(exc),
+                    "list_key": exc.list_key,
+                    "value": exc.value,
+                    "used_by": exc.used_by,
+                },
+            ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(data_payload)
