@@ -84,6 +84,7 @@ const historyDetailTitle = document.querySelector("#historyDetailTitle");
 const historyDetailOutput = document.querySelector("#historyDetailOutput");
 const logsRefreshButton = document.querySelector("#logsRefreshButton");
 const logsOutput = document.querySelector("#logsOutput");
+const logsButton = document.querySelector('[data-modal="logs"]');
 
 async function requestJson(path, options = {}) {
   let response;
@@ -117,6 +118,9 @@ function updateAdminUi() {
   document.querySelectorAll(".admin-only").forEach((node) => {
     node.style.display = state.isAdmin ? "" : "none";
   });
+  if (!state.isAdmin) {
+    updateLogAlert({});
+  }
 }
 
 function setActiveModalNav(name = "") {
@@ -1623,39 +1627,113 @@ async function loadHistory() {
   renderHistory(payload);
 }
 
+function logReadStorageKey() {
+  const username = state.currentUser?.username || "anonymous";
+  return `picorg-log-read-${username}`;
+}
+
+function readLogMarker() {
+  try {
+    return JSON.parse(localStorage.getItem(logReadStorageKey()) || "{}");
+  } catch (_error) {
+    return {};
+  }
+}
+
+function writeLogMarker(summary = {}) {
+  const marker = {
+    critical: summary.latest_critical_id || "",
+    warning: summary.latest_warning_id || "",
+  };
+  localStorage.setItem(logReadStorageKey(), JSON.stringify(marker));
+  return marker;
+}
+
+function unreadLogSeverity(summary = {}) {
+  const marker = readLogMarker();
+  if (summary.latest_critical_id && summary.latest_critical_id !== marker.critical) {
+    return "critical";
+  }
+  if (summary.latest_warning_id && summary.latest_warning_id !== marker.warning) {
+    return "warning";
+  }
+  return "";
+}
+
+function updateLogAlert(summary = {}, { initialize = false } = {}) {
+  if (!logsButton || !state.isAdmin) {
+    logsButton?.classList.remove("log-alert-critical", "log-alert-warning");
+    return;
+  }
+  if (initialize && !localStorage.getItem(logReadStorageKey())) {
+    writeLogMarker(summary);
+  }
+  const severity = unreadLogSeverity(summary);
+  logsButton.classList.toggle("log-alert-critical", severity === "critical");
+  logsButton.classList.toggle("log-alert-warning", severity === "warning");
+  if (severity === "critical") {
+    logsButton.title = "Nowy krytyczny blad w logach.";
+  } else if (severity === "warning") {
+    logsButton.title = "Nowe ostrzezenie w logach.";
+  } else {
+    logsButton.title = "";
+  }
+}
+
+function markLogsRead(payload = {}) {
+  writeLogMarker(payload.summary || {});
+  updateLogAlert(payload.summary || {});
+}
+
 function renderLogs(payload) {
   state.logs = payload;
   logsOutput.textContent = "";
-  const logs = payload.logs || [];
-  if (!logs.length) {
+  const events = payload.events || [];
+  if (!events.length) {
     logsOutput.className = "logs-output empty-state";
-    logsOutput.textContent = "Brak dostepnych logow.";
+    logsOutput.textContent = "Brak zdarzen w logach.";
     return;
   }
   logsOutput.className = "logs-output";
-  for (const log of logs) {
+  for (const event of events) {
     const block = document.createElement("article");
-    const heading = document.createElement("div");
+    const meta = document.createElement("div");
     const title = document.createElement("strong");
-    const path = document.createElement("span");
+    const source = document.createElement("span");
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
     const lines = document.createElement("pre");
-    block.className = "log-block";
-    heading.className = "log-heading";
-    title.textContent = log.label || log.key || "Log";
-    path.textContent = log.path || "";
+    const severity = event.severity || "info";
+    block.className = `log-event log-event-${severity}`;
+    meta.className = "log-event-meta";
+    meta.textContent = [event.time || "", event.source_label || event.source || ""].filter(Boolean).join(" | ");
+    title.textContent = event.summary || "Zdarzenie";
+    source.textContent = event.path || "";
+    summary.textContent = "Szczegoly";
     lines.className = "log-lines";
-    lines.textContent =
-      (log.lines || []).join("\n") ||
-      (log.exists ? "Plik logu jest pusty." : "Plik logu jeszcze nie istnieje.");
-    heading.append(title, path);
-    block.append(heading, lines);
+    lines.textContent = (event.lines || []).join("\n");
+    details.append(summary, lines);
+    block.append(meta, title, source, details);
     logsOutput.appendChild(block);
   }
 }
 
-async function loadLogs() {
+async function loadLogs({ markRead = true } = {}) {
   const payload = await requestJson("/api/logs?limit=400");
+  updateLogAlert(payload.summary || {});
   renderLogs(payload);
+  if (markRead) {
+    markLogsRead(payload);
+  }
+}
+
+async function pollLogStatus({ initialize = false } = {}) {
+  if (!state.isAdmin) {
+    updateLogAlert({});
+    return;
+  }
+  const payload = await requestJson("/api/logs?limit=120");
+  updateLogAlert(payload.summary || {}, { initialize });
 }
 
 function formPayload() {
@@ -1888,6 +1966,7 @@ async function loadBootstrap() {
   logoutButton.style.display = payload.auth_enabled ? "" : "none";
   state.currentUser = payload.current_user || null;
   updateAdminUi();
+  pollLogStatus({ initialize: true }).catch(() => {});
   state.lists = payload.lists || {};
   state.entries = payload.entries || [];
   state.fileIndex = payload.file_index || null;
@@ -2793,3 +2872,6 @@ loadBootstrap().catch(showError);
 setInterval(() => {
   refreshFileIndexStatus().catch(() => {});
 }, 5000);
+setInterval(() => {
+  pollLogStatus().catch(() => {});
+}, 15000);

@@ -597,6 +597,82 @@ def _read_log_tail(path: str, limit: int = 300) -> Dict[str, Any]:
     return payload
 
 
+def _log_event_summary(line: str) -> str:
+    text = re.sub(r"^\[[^\]]+\]\s*", "", line)
+    text = re.sub(r"^\[[^\]]+\]\s*", "", text)
+    text = re.sub(r"^\[[^\]]+\]\s*", "", text)
+    text = re.sub(r"^(ERROR|WARNING|WARN|INFO):\s*", "", text, flags=re.IGNORECASE)
+    return text.strip() or line.strip()
+
+
+def _log_event_severity(source_key: str, lines: List[str]) -> str:
+    text = "\n".join(lines)
+    lowered = text.lower()
+    if source_key in {"web_err"} and text.strip():
+        return "critical"
+    if source_key == "errors":
+        if "traceback" in lowered or "exception" in lowered or "web " in lowered:
+            return "critical"
+        return "warning"
+    if any(marker in lowered for marker in (" error", "blad", "failed", "exception")):
+        return "warning"
+    return "info"
+
+
+def _parse_log_events(log_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    key = str(log_payload.get("key") or "")
+    label = str(log_payload.get("label") or key)
+    path = str(log_payload.get("path") or "")
+    events: List[Dict[str, Any]] = []
+    current: Optional[List[str]] = None
+
+    def _append_current() -> None:
+        nonlocal current
+        if not current:
+            return
+        first_line = current[0]
+        timestamp_match = re.match(r"^\[([^\]]+)\]", first_line)
+        timestamp = timestamp_match.group(1) if timestamp_match else ""
+        digest = hashlib.sha1(f"{key}|{first_line}|{len(current)}".encode("utf-8")).hexdigest()
+        severity = _log_event_severity(key, current)
+        events.append(
+            {
+                "id": digest,
+                "source": key,
+                "source_label": label,
+                "path": path,
+                "time": timestamp,
+                "severity": severity,
+                "summary": _log_event_summary(first_line),
+                "lines": list(current),
+            }
+        )
+        current = None
+
+    for raw_line in log_payload.get("lines", []) or []:
+        line = str(raw_line)
+        if re.match(r"^\[\d{4}-\d{2}-\d{2}", line):
+            _append_current()
+            current = [line]
+        elif current is not None:
+            current.append(line)
+        elif line.strip():
+            current = [line]
+    _append_current()
+    return events
+
+
+def _logs_summary(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    latest_critical = next((event for event in events if event.get("severity") == "critical"), None)
+    latest_warning = next((event for event in events if event.get("severity") == "warning"), None)
+    return {
+        "critical_count": sum(1 for event in events if event.get("severity") == "critical"),
+        "warning_count": sum(1 for event in events if event.get("severity") == "warning"),
+        "latest_critical_id": latest_critical.get("id") if latest_critical else "",
+        "latest_warning_id": latest_warning.get("id") if latest_warning else "",
+    }
+
+
 def _optional_form_bool(form: Any, key: str) -> Optional[bool]:
     value = form.get(key)
     if value is None:
@@ -732,22 +808,23 @@ def create_app() -> FastAPI:
     @app.get("/api/logs")
     def logs_api(request: Request, limit: int = 300) -> Dict[str, Any]:
         _require_admin(request)
-        return {
-            "logs": [
-                {"key": "errors", "label": "Bledy i exception", **_read_log_tail(settings.AM, limit)},
-                {"key": "changes", "label": "Zmiany", **_read_log_tail(settings.BM, limit)},
-                {
-                    "key": "web_out",
-                    "label": "Web stdout",
-                    **_read_log_tail(Path(settings.LOG_DIR) / "picorg_web_out.log", limit),
-                },
-                {
-                    "key": "web_err",
-                    "label": "Web stderr",
-                    **_read_log_tail(Path(settings.LOG_DIR) / "picorg_web_err.log", limit),
-                },
-            ]
-        }
+        logs = [
+            {"key": "errors", "label": "Bledy i exception", **_read_log_tail(settings.AM, limit)},
+            {"key": "changes", "label": "Zmiany", **_read_log_tail(settings.BM, limit)},
+            {
+                "key": "web_out",
+                "label": "Web stdout",
+                **_read_log_tail(Path(settings.LOG_DIR) / "picorg_web_out.log", limit),
+            },
+            {
+                "key": "web_err",
+                "label": "Web stderr",
+                **_read_log_tail(Path(settings.LOG_DIR) / "picorg_web_err.log", limit),
+            },
+        ]
+        events = [event for log in logs for event in _parse_log_events(log)]
+        events.sort(key=lambda item: str(item.get("time") or ""), reverse=True)
+        return {"logs": logs, "events": events, "summary": _logs_summary(events)}
 
     @app.post("/api/file-index/refresh")
     def file_index_refresh_api(request: Request) -> Dict[str, Any]:

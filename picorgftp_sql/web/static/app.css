@@ -187,6 +187,18 @@ h2 {
   color: #ffffff;
 }
 
+.nav-button.log-alert-critical {
+  border-color: var(--danger);
+  color: var(--danger);
+  animation: log-alert-critical 1s ease-in-out infinite;
+}
+
+.nav-button.log-alert-warning {
+  border-color: var(--warn);
+  color: var(--warn);
+  animation: log-alert-warning 1.4s ease-in-out infinite;
+}
+
 .topbar span {
   display: block;
   margin-top: 3px;
@@ -983,13 +995,26 @@ button.slot-badge.on:hover {
   font-size: 12px;
 }
 
-.log-block {
+.log-block,
+.log-event {
   display: grid;
   gap: 8px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
   padding: 12px;
+}
+
+.log-event-critical {
+  border-color: var(--danger);
+}
+
+.log-event-warning {
+  border-color: var(--warn);
+}
+
+.log-event-info {
+  opacity: 0.9;
 }
 
 .log-heading {
@@ -1003,6 +1028,24 @@ button.slot-badge.on:hover {
   overflow-wrap: anywhere;
 }
 
+.log-event > span,
+.log-event-meta {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.log-event details {
+  display: grid;
+  gap: 8px;
+}
+
+.log-event summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .log-lines {
   max-height: 360px;
   overflow: auto;
@@ -1014,6 +1057,28 @@ button.slot-badge.on:hover {
   padding: 10px;
   font: 12px/1.45 Consolas, "Courier New", monospace;
   white-space: pre-wrap;
+}
+
+@keyframes log-alert-critical {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(239, 119, 119, 0);
+  }
+  50% {
+    background: color-mix(in srgb, var(--danger) 18%, var(--surface));
+    box-shadow: 0 0 0 3px rgba(239, 119, 119, 0.22);
+  }
+}
+
+@keyframes log-alert-warning {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(164, 95, 33, 0);
+  }
+  50% {
+    background: color-mix(in srgb, var(--warn) 18%, var(--surface));
+    box-shadow: 0 0 0 3px rgba(164, 95, 33, 0.2);
+  }
 }
 
 @keyframes progress-slide {

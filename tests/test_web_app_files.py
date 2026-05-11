@@ -227,6 +227,27 @@ class WebAppFileTests(unittest.TestCase):
         self.assertEqual(appended, [])
         cache_ftp.assert_not_called()
 
+    def test_log_parser_groups_traceback_into_one_critical_event(self) -> None:
+        events = web_app._parse_log_events(
+            {
+                "key": "errors",
+                "label": "Bledy",
+                "path": "errors.log",
+                "lines": [
+                    "[2026-05-11 14:14:11] [USER: user] [PC: pc] ERROR: WEB POST /api/ftp-preview: boom",
+                    "Traceback (most recent call last):",
+                    "  File \"app.py\", line 1, in handler",
+                    "RuntimeError: boom",
+                    "[2026-05-11 14:15:00] [USER: user] [PC: pc] ERROR: Brak dostepu",
+                ],
+            }
+        )
+
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["severity"], "critical")
+        self.assertEqual(len(events[0]["lines"]), 4)
+        self.assertEqual(events[1]["severity"], "warning")
+
 
 if __name__ == "__main__":
     unittest.main()

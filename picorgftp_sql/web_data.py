@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import secrets
 import tempfile
+import threading
 import time
 import unicodedata
 from urllib.parse import urlparse
@@ -108,6 +109,8 @@ PASSWORD_ITERATIONS = 200_000
 _FILE_INDEX: LocalFileIndex | None = None
 _FILE_INDEX_KEY: tuple[str, str] | None = None
 _FILE_INDEX_REFRESH_STARTED = False
+_FTP_CACHE_LOCKS: dict[str, threading.Lock] = {}
+_FTP_CACHE_LOCKS_GUARD = threading.Lock()
 
 
 class ListValueInUseError(ValueError):
@@ -413,18 +416,7 @@ def _cached_ftp_previews(ean: object) -> tuple[dict[str, str], dict[str, str]]:
         preview_paths: dict[str, str] = {}
         for prefix, filename in remote_files.items():
             target_path = os.path.join(cache_dir, _ftp_cache_filename(filename))
-            if not os.path.isfile(target_path):
-                temp_path = f"{target_path}.download"
-                try:
-                    with open(temp_path, "wb") as handle:
-                        ftp.retrbinary(f"RETR {filename}", handle.write)
-                    os.replace(temp_path, target_path)
-                finally:
-                    if os.path.exists(temp_path):
-                        try:
-                            os.remove(temp_path)
-                        except OSError:
-                            pass
+            _download_ftp_to_cache(ftp, filename, target_path)
             if os.path.isfile(target_path):
                 preview_paths[prefix] = target_path
         return remote_files, preview_paths
@@ -451,24 +443,58 @@ def cache_ftp_preview(ean: object, filename: object) -> str:
         if filename_text not in allowed:
             raise ValueError("Plik FTP nie pasuje do wybranego EAN.")
         target_path = os.path.join(cache_dir, _ftp_cache_filename(filename_text))
-        if not os.path.isfile(target_path):
-            temp_path = f"{target_path}.download"
-            try:
-                with open(temp_path, "wb") as handle:
-                    ftp.retrbinary(f"RETR {filename_text}", handle.write)
-                os.replace(temp_path, target_path)
-            finally:
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except OSError:
-                        pass
+        _download_ftp_to_cache(ftp, filename_text, target_path)
         return target_path
     finally:
         try:
             ftp.quit()
         except Exception:
             pass
+
+
+def _ftp_cache_lock(target_path: str) -> threading.Lock:
+    key = os.path.abspath(target_path)
+    with _FTP_CACHE_LOCKS_GUARD:
+        lock = _FTP_CACHE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _FTP_CACHE_LOCKS[key] = lock
+        return lock
+
+
+def _download_ftp_to_cache(ftp, filename: str, target_path: str) -> str:
+    """Download an FTP file into cache without racing concurrent web requests."""
+
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    lock = _ftp_cache_lock(target_path)
+    with lock:
+        if os.path.isfile(target_path):
+            return target_path
+        temp_path = f"{target_path}.{secrets.token_hex(8)}.download"
+        try:
+            with open(temp_path, "wb") as handle:
+                ftp.retrbinary(f"RETR {filename}", handle.write)
+            last_error: OSError | None = None
+            for _attempt in range(5):
+                try:
+                    if os.path.isfile(target_path):
+                        return target_path
+                    os.replace(temp_path, target_path)
+                    return target_path
+                except OSError as exc:
+                    last_error = exc
+                    time.sleep(0.2)
+            if os.path.isfile(target_path):
+                return target_path
+            if last_error is not None:
+                raise last_error
+            return target_path
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
 
 
 def _dedupe(values: list[object], *, limit: int = 200) -> list[str]:
