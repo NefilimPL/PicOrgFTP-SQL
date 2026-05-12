@@ -33,6 +33,8 @@ const state = {
   ftpPreviewLoading: new Set(),
   backgroundFtpPreviewTimer: 0,
   backgroundFtpPreviewActive: false,
+  photoSourcesLoaded: new Set(),
+  ftpEnabled: true,
 };
 
 const listLabels = {
@@ -943,6 +945,8 @@ function renderSlotBadges(container, photo, file, prefix) {
 
 async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestId, options = {}) {
   if (!photo?.ftp_filename || state.ftpPreviewLoading.has(prefix)) return;
+  const sourceBefore = selectedSlotSource(prefix, photo);
+  const explicitSourceBefore = state.slotSources.get(prefix);
   state.ftpPreviewLoading.add(prefix);
   const background = Boolean(options.background);
   if (!background) {
@@ -965,7 +969,11 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
       return;
     }
     state.loadedPhotos.set(prefix, updated);
-    state.slotSources.set(prefix, "ftp");
+    if (!background || sourceBefore === "ftp") {
+      state.slotSources.set(prefix, "ftp");
+    } else if (explicitSourceBefore) {
+      state.slotSources.set(prefix, explicitSourceBefore);
+    }
     if (!background) {
       formStatus.textContent = `Pobrano podglad FTP dla slotu ${prefix}.`;
     }
@@ -983,7 +991,6 @@ function nextBackgroundFtpPreviewCandidate() {
       photo?.ftp &&
       photo.ftp_filename &&
       !photo.ftp_token &&
-      !photo.token &&
       !state.files.has(prefix) &&
       !state.deletedSlots.has(prefix) &&
       !state.ftpPreviewLoading.has(prefix)
@@ -1914,12 +1921,17 @@ function hasProductDraftData() {
   return trackedProductFields.some((fieldName) => String(current[fieldName] || "").trim());
 }
 
+function localPhotoNeedsFtpUpload(photo) {
+  const ftpChecked = state.photoSourcesLoaded.has("ftp") || state.photoSourcesLoaded.has("all");
+  return Boolean(state.ftpEnabled && ftpChecked && photo?.local && photo?.token && !photo?.ftp);
+}
+
 function hasPendingSlotChanges() {
   if (state.files.size || state.deletedSlots.size) {
     return true;
   }
   for (const photo of state.loadedPhotos.values()) {
-    if (photo?.dirty) {
+    if (photo?.dirty || localPhotoNeedsFtpUpload(photo)) {
       return true;
     }
   }
@@ -2053,6 +2065,7 @@ async function loadPhotosForEntry(entry, options = {}) {
   state.deletedSlots.clear();
   state.slotSources.clear();
   state.ftpPreviewLoading.clear();
+  state.photoSourcesLoaded.clear();
   window.clearTimeout(state.backgroundFtpPreviewTimer);
   const sources = progressive ? ["local", "sql", "ftp"] : ["all"];
   state.photoSourceStatus.clear();
@@ -2067,7 +2080,9 @@ async function loadPhotosForEntry(entry, options = {}) {
       const payload = await requestEntryPhotos(entry, source);
       if (state.photoLoadRequestId === requestId) {
         setPhotoSourceStatus(source, "done", requestId);
+        state.photoSourcesLoaded.add(payload.source || source);
         applyPhotoPayload(payload.photos || []);
+        updateSubmitButtonState();
       }
       return payload;
     } catch (error) {
@@ -2105,6 +2120,7 @@ function fillForm(entry, options = {}) {
   state.deletedSlots.clear();
   state.slotSources.clear();
   state.ftpPreviewLoading.clear();
+  state.photoSourcesLoaded.clear();
   productForm.elements.product_id.value = entry.product_id || "";
   productForm.elements.name.value = entry.name || "";
   productForm.elements.type_name.value = entry.type_name || "";
@@ -2131,6 +2147,7 @@ async function refreshData() {
   state.lists = payload.lists || {};
   state.entries = payload.entries || [];
   state.fileIndex = payload.file_index || state.fileIndex;
+  state.ftpEnabled = payload.ftp_enabled !== false;
   state.colorFieldLabels = payload.color_field_labels || state.colorFieldLabels || {};
   renderDatalists();
   applyProductFieldLabels();
@@ -2142,6 +2159,7 @@ async function refreshData() {
 async function loadBootstrap() {
   const payload = await requestJson("/api/bootstrap");
   state.defaultSlotFit = Boolean(payload.auto_content_fit);
+  state.ftpEnabled = payload.ftp_enabled !== false;
   if (versionInfo) {
     versionInfo.textContent = payload.version ? `Wersja ${payload.version}` : "";
   }
@@ -2153,6 +2171,7 @@ async function loadBootstrap() {
   state.lists = payload.lists || {};
   state.entries = payload.entries || [];
   state.fileIndex = payload.file_index || null;
+  state.ftpEnabled = payload.ftp_enabled !== false;
   state.colorFieldLabels = payload.color_field_labels || {};
   renderDatalists();
   applyProductFieldLabels();
@@ -2434,6 +2453,7 @@ function settingsSaveButton(form, buildPayload) {
     });
     state.currentUser = state.settings.current_user || state.currentUser;
     state.defaultSlotFit = Boolean(state.settings.auto_content_fit);
+    state.ftpEnabled = state.settings.ftp?.enabled !== false;
     state.colorFieldLabels = state.settings.color_field_labels || state.colorFieldLabels || {};
     updateAdminUi();
     if (Array.isArray(state.settings.slots)) {
@@ -2844,6 +2864,7 @@ async function loadSettings() {
   state.settings = await requestJson("/api/settings");
   state.currentUser = state.settings.current_user || state.currentUser;
   state.defaultSlotFit = Boolean(state.settings.auto_content_fit);
+  state.ftpEnabled = state.settings.ftp?.enabled !== false;
   state.colorFieldLabels = state.settings.color_field_labels || state.colorFieldLabels || {};
   updateAdminUi();
   applyProductFieldLabels();
@@ -2952,7 +2973,7 @@ productForm.addEventListener("submit", async (event) => {
     }
     for (const [prefix, photo] of state.loadedPhotos.entries()) {
       const token = selectedPhotoToken(photo, prefix);
-      if (!state.files.has(prefix) && photo.dirty) {
+      if (!state.files.has(prefix) && (photo.dirty || localPhotoNeedsFtpUpload(photo))) {
         if (token) {
           data.set(`existing_slot_${prefix}`, token);
           data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
@@ -3004,6 +3025,7 @@ clearButton.addEventListener("click", () => {
   state.slotSources.clear();
   state.photoSourceStatus.clear();
   state.ftpPreviewLoading.clear();
+  state.photoSourcesLoaded.clear();
   window.clearTimeout(state.backgroundFtpPreviewTimer);
   state.loadedEntryOriginal = null;
   state.lastAutoSearchKey = "";

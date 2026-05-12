@@ -245,6 +245,7 @@ def load_web_data() -> dict[str, object]:
         "entries": [entry_to_payload(entry) for entry in entries],
         "file_index": file_index_status(start=True),
         "color_field_labels": dict(config.CONFIG.get(COLOR_FIELD_LABELS_KEY, {}) or {}),
+        "ftp_enabled": bool(config.CONFIG.get(ft, True)),
     }
 
 

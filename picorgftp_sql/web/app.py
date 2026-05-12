@@ -641,6 +641,8 @@ def _append_existing_photo_sources(
         should_process = False
         if identity_changed and source_path:
             should_process = True
+        elif source_path and not ftp_filename and bool(config.CONFIG.get(ft, True)):
+            should_process = True
         elif ftp_filename and not source_path:
             source_path = _download_ftp_photo_source(
                 photo,
@@ -781,6 +783,7 @@ def _log_event_summary(line: str) -> str:
 def _log_event_severity(source_key: str, lines: List[str]) -> str:
     text = "\n".join(lines)
     lowered = text.lower()
+    first_line = lines[0] if lines else ""
     statuses = _http_statuses(lines)
     if statuses:
         max_status = max(statuses)
@@ -789,9 +792,15 @@ def _log_event_severity(source_key: str, lines: List[str]) -> str:
         if max_status >= 400:
             return "warning"
     if source_key == "web_events":
-        if re.search(r"\b(CRITICAL|ERROR)\b", text, re.IGNORECASE):
+        level_match = re.search(
+            r"\]\s*(DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL):\s*",
+            first_line,
+            re.IGNORECASE,
+        )
+        level = level_match.group(1).upper() if level_match else ""
+        if level in {"CRITICAL", "ERROR"}:
             return "critical"
-        if re.search(r"\b(WARNING|WARN)\b", text, re.IGNORECASE):
+        if level in {"WARNING", "WARN"}:
             return "warning"
         return "info"
     if source_key == "web_err" and re.search(

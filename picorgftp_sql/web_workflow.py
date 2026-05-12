@@ -398,7 +398,14 @@ def process_web_uploads(
             if upload.content_fit is not None
             else bool(options.auto_content_fit)
         )
-        _save_processed_file(source_path, target_path, options, content_fit=content_fit)
+        try:
+            same_target = os.path.samefile(source_path, target_path)
+        except OSError:
+            same_target = os.path.normcase(os.path.abspath(source_path)) == os.path.normcase(
+                os.path.abspath(target_path)
+            )
+        if not same_target:
+            _save_processed_file(source_path, target_path, options, content_fit=content_fit)
         saved_files.append(
             WebProcessedFile(
                 prefix=upload.prefix,
