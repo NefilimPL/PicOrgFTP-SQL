@@ -218,10 +218,21 @@ h2 {
   color: var(--text);
 }
 
+.danger-button {
+  border-color: var(--danger);
+  background: var(--surface);
+  color: var(--danger);
+}
+
 .ghost-button:hover,
 .secondary-button:hover {
   border-color: var(--accent);
   background: var(--surface-2);
+}
+
+.danger-button:hover {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface));
 }
 
 .workspace {
@@ -995,6 +1006,7 @@ button.slot-badge.on:hover {
   font-size: 12px;
 }
 
+.log-category,
 .log-block,
 .log-event {
   display: grid;
@@ -1003,6 +1015,30 @@ button.slot-badge.on:hover {
   border-radius: 8px;
   background: var(--surface);
   padding: 12px;
+}
+
+.log-category {
+  background: var(--surface-2);
+}
+
+.log-category .empty-state {
+  border: 0;
+  padding: 6px 0 0;
+}
+
+.log-category-heading {
+  display: grid;
+  gap: 4px;
+}
+
+.log-category-heading span {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.log-category .log-event {
+  background: var(--surface);
 }
 
 .log-event-critical {

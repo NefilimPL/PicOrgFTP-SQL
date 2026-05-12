@@ -177,10 +177,30 @@
           <h1>Logi</h1>
           <div class="heading-actions">
             <button id="logsRefreshButton" type="button" class="secondary-button">Odswiez</button>
+            <button id="logsClearButton" type="button" class="danger-button">Wyczysc logi</button>
             <button type="button" class="ghost-button modal-close" data-close-modal>Zamknij</button>
           </div>
         </div>
         <div id="logsOutput" class="logs-output empty-state">Logi sa dostepne tylko dla administratora.</div>
+      </section>
+    </div>
+
+    <div id="logsClearModal" class="modal-view">
+      <section class="modal-panel compact-modal">
+        <div class="section-heading">
+          <h1>Czyszczenie logow</h1>
+          <button type="button" class="ghost-button modal-close" data-close-logs-clear>Anuluj</button>
+        </div>
+        <form id="logsClearForm" class="settings-grid">
+          <label>
+            Haslo administratora
+            <input id="logsClearPassword" type="password" autocomplete="current-password" />
+          </label>
+          <div class="heading-actions">
+            <button type="submit" class="danger-button">Wyczysc logi</button>
+            <span id="logsClearStatus"></span>
+          </div>
+        </form>
       </section>
     </div>
 

@@ -83,6 +83,10 @@ const historyOutput = document.querySelector("#historyOutput");
 const historyDetailTitle = document.querySelector("#historyDetailTitle");
 const historyDetailOutput = document.querySelector("#historyDetailOutput");
 const logsRefreshButton = document.querySelector("#logsRefreshButton");
+const logsClearButton = document.querySelector("#logsClearButton");
+const logsClearForm = document.querySelector("#logsClearForm");
+const logsClearPassword = document.querySelector("#logsClearPassword");
+const logsClearStatus = document.querySelector("#logsClearStatus");
 const logsOutput = document.querySelector("#logsOutput");
 const logsButton = document.querySelector('[data-modal="logs"]');
 
@@ -168,6 +172,8 @@ function openModal(name) {
 
 function closeModals() {
   document.querySelectorAll(".modal-view").forEach((modal) => modal.classList.remove("active"));
+  if (logsClearPassword) logsClearPassword.value = "";
+  if (logsClearStatus) logsClearStatus.textContent = "";
   setActiveModalNav("");
 }
 
@@ -1685,36 +1691,68 @@ function markLogsRead(payload = {}) {
   updateLogAlert(payload.summary || {});
 }
 
+function logSeverityLabel(severity = "info") {
+  if (severity === "critical") return "Krytyczny";
+  if (severity === "warning") return "Ostrzezenie";
+  return "Info";
+}
+
+function renderLogEvent(event) {
+  const block = document.createElement("article");
+  const meta = document.createElement("div");
+  const title = document.createElement("strong");
+  const source = document.createElement("span");
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  const lines = document.createElement("pre");
+  const severity = event.severity || "info";
+  block.className = `log-event log-event-${severity}`;
+  meta.className = "log-event-meta";
+  meta.textContent = [event.time || "", logSeverityLabel(severity)].filter(Boolean).join(" | ");
+  title.textContent = event.summary || "Zdarzenie";
+  source.textContent = event.path || "";
+  summary.textContent = "Szczegoly";
+  lines.className = "log-lines";
+  lines.textContent = (event.lines || []).join("\n");
+  details.append(summary, lines);
+  block.append(meta, title, source, details);
+  return block;
+}
+
 function renderLogs(payload) {
   state.logs = payload;
   logsOutput.textContent = "";
-  const events = payload.events || [];
-  if (!events.length) {
+  const logs = payload.logs || [];
+  const hasEvents = logs.some((log) => (log.events || []).length);
+  if (!hasEvents) {
     logsOutput.className = "logs-output empty-state";
-    logsOutput.textContent = "Brak zdarzen w logach.";
+    logsOutput.textContent = "Brak zdarzen w logach systemowych.";
     return;
   }
   logsOutput.className = "logs-output";
-  for (const event of events) {
-    const block = document.createElement("article");
-    const meta = document.createElement("div");
+  for (const log of logs) {
+    const category = document.createElement("section");
+    const heading = document.createElement("div");
     const title = document.createElement("strong");
-    const source = document.createElement("span");
-    const details = document.createElement("details");
-    const summary = document.createElement("summary");
-    const lines = document.createElement("pre");
-    const severity = event.severity || "info";
-    block.className = `log-event log-event-${severity}`;
-    meta.className = "log-event-meta";
-    meta.textContent = [event.time || "", event.source_label || event.source || ""].filter(Boolean).join(" | ");
-    title.textContent = event.summary || "Zdarzenie";
-    source.textContent = event.path || "";
-    summary.textContent = "Szczegoly";
-    lines.className = "log-lines";
-    lines.textContent = (event.lines || []).join("\n");
-    details.append(summary, lines);
-    block.append(meta, title, source, details);
-    logsOutput.appendChild(block);
+    const path = document.createElement("span");
+    const events = log.events || [];
+    category.className = "log-category";
+    heading.className = "log-category-heading";
+    title.textContent = `${log.label || log.key || "Log"} (${events.length})`;
+    path.textContent = log.path || "";
+    heading.append(title, path);
+    category.appendChild(heading);
+    if (!events.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty-state";
+      empty.textContent = "Brak zdarzen w tej kategorii.";
+      category.appendChild(empty);
+    } else {
+      for (const event of events) {
+        category.appendChild(renderLogEvent(event));
+      }
+    }
+    logsOutput.appendChild(category);
   }
 }
 
@@ -1734,6 +1772,50 @@ async function pollLogStatus({ initialize = false } = {}) {
   }
   const payload = await requestJson("/api/logs?limit=120");
   updateLogAlert(payload.summary || {}, { initialize });
+}
+
+function openLogsClearModal() {
+  if (!logsClearPassword || !logsClearStatus) {
+    return;
+  }
+  logsClearStatus.textContent = "";
+  logsClearPassword.value = "";
+  document.querySelector("#logsClearModal")?.classList.add("active");
+  window.setTimeout(() => logsClearPassword?.focus(), 0);
+}
+
+function closeLogsClearModal() {
+  if (!logsClearPassword || !logsClearStatus) {
+    return;
+  }
+  logsClearPassword.value = "";
+  logsClearStatus.textContent = "";
+  document.querySelector("#logsClearModal")?.classList.remove("active");
+}
+
+async function clearLogs(password) {
+  if (!password) {
+    return;
+  }
+  if (logsClearStatus) {
+    logsClearStatus.textContent = "Czyszczenie...";
+  }
+  const payload = await requestJson("/api/logs/clear", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  renderLogs(payload);
+  markLogsRead(payload);
+  if ((payload.clear_errors || []).length) {
+    if (logsClearStatus) {
+      logsClearStatus.textContent = `Nie wyczyszczono wszystkich logow: ${(payload.clear_errors || []).join(
+        "; "
+      )}`;
+    }
+    return;
+  }
+  closeLogsClearModal();
 }
 
 function formPayload() {
@@ -2701,6 +2783,10 @@ document.querySelectorAll("[data-close-history-detail]").forEach((button) => {
   });
 });
 
+document.querySelectorAll("[data-close-logs-clear]").forEach((button) => {
+  button.addEventListener("click", closeLogsClearModal);
+});
+
 themeToggleButton?.addEventListener("click", () => {
   state.theme = state.theme === "dark" ? "light" : "dark";
   applyTheme();
@@ -2728,6 +2814,19 @@ historyRefreshButton?.addEventListener("click", () => {
 logsRefreshButton?.addEventListener("click", () => {
   loadLogs().catch((error) => {
     logsOutput.textContent = error.message;
+  });
+});
+
+logsClearButton?.addEventListener("click", () => {
+  openLogsClearModal();
+});
+
+logsClearForm?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  clearLogs(logsClearPassword.value).catch((error) => {
+    if (logsClearStatus) {
+      logsClearStatus.textContent = error.message;
+    }
   });
 });
 

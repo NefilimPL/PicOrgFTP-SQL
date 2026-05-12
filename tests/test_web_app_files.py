@@ -248,6 +248,44 @@ class WebAppFileTests(unittest.TestCase):
         self.assertEqual(len(events[0]["lines"]), 4)
         self.assertEqual(events[1]["severity"], "warning")
 
+    def test_system_change_filter_hides_product_and_photo_entries(self) -> None:
+        settings_event = {
+            "source": "changes",
+            "lines": ["[2026-05-12 10:00:00] [USER: user] Settings saved (images/FTP/SQL)."],
+        }
+        image_event = {
+            "source": "changes",
+            "lines": ["[2026-05-12 10:01:00] [USER: user] Added/modified image 123.jpg"],
+        }
+        entry_event = {
+            "source": "changes",
+            "lines": ["[2026-05-12 10:02:00] [USER: user] Updated Excel entry for EAN 5901234567890."],
+        }
+
+        self.assertTrue(web_app._is_system_change_event(settings_event))
+        self.assertFalse(web_app._is_system_change_event(image_event))
+        self.assertFalse(web_app._is_system_change_event(entry_event))
+
+    def test_clear_log_files_truncates_configured_targets(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            root = Path(temp_dir)
+            error_log = root / "error_log.txt"
+            changes_log = root / "changes_log.txt"
+            error_log.write_text("error\n", encoding="utf-8")
+            changes_log.write_text("change\n", encoding="utf-8")
+            targets = [
+                {"key": "errors", "label": "Bledy", "path": error_log},
+                {"key": "changes", "label": "Zmiany", "path": changes_log},
+            ]
+
+            with patch.object(web_app, "_log_targets", return_value=targets):
+                result = web_app._clear_log_files()
+
+            self.assertEqual(result["errors"], [])
+            self.assertEqual(error_log.read_text(encoding="utf-8"), "")
+            self.assertEqual(changes_log.read_text(encoding="utf-8"), "")
+
 
 if __name__ == "__main__":
     unittest.main()

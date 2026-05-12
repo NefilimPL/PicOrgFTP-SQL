@@ -14,6 +14,7 @@ import shutil
 import tempfile
 import time
 import traceback
+import unicodedata
 from typing import Any, Dict, List, Optional, Set
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -673,6 +674,104 @@ def _logs_summary(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _log_targets() -> List[Dict[str, Any]]:
+    return [
+        {"key": "errors", "label": "Bledy i exception", "path": settings.AM},
+        {"key": "changes", "label": "Zmiany systemowe", "path": settings.BM},
+        {"key": "web_out", "label": "Web stdout", "path": Path(settings.LOG_DIR) / "picorg_web_out.log"},
+        {"key": "web_err", "label": "Web stderr", "path": Path(settings.LOG_DIR) / "picorg_web_err.log"},
+    ]
+
+
+def _is_system_change_event(event: Dict[str, Any]) -> bool:
+    if event.get("source") != "changes":
+        return True
+    raw_text = "\n".join(str(line) for line in event.get("lines", [])).lower()
+    plain_text = unicodedata.normalize("NFKD", raw_text).encode("ascii", "ignore").decode("ascii")
+    text = f"{raw_text}\n{plain_text}"
+    product_markers = (
+        "excel entry",
+        "wpis ean",
+        " ean ",
+        "added value",
+        "removed value",
+        "dodano wartosc",
+        "usunieto wartosc",
+        "added/modified image",
+        "added/modified file",
+        "dodano/zmodyfikowano obraz",
+        "dodano/zmodyfikowano plik",
+        "renamed file",
+        "wysylanie pliku",
+        "wysylanie plikow",
+        "uploading file",
+        "sending files",
+    )
+    if any(marker in text for marker in product_markers):
+        return False
+    system_markers = (
+        "settings",
+        "ustawien",
+        "ustawienie",
+        "config",
+        "konfigur",
+        "sql",
+        "index",
+        "admin",
+        "administrator",
+        "slot_def",
+        "field definition",
+        "photo field",
+        "pola zdjec",
+        "pol zdjec",
+        "code_check",
+        "ui_check",
+        "connection",
+        "polaczenie",
+        "runtime",
+        "local_settings",
+    )
+    return any(marker in text for marker in system_markers)
+
+
+def _log_payloads(limit: int) -> List[Dict[str, Any]]:
+    logs: List[Dict[str, Any]] = []
+    for target in _log_targets():
+        payload = {
+            "key": target["key"],
+            "label": target["label"],
+            **_read_log_tail(target["path"], limit),
+        }
+        events = [event for event in _parse_log_events(payload) if _is_system_change_event(event)]
+        payload["events"] = events
+        payload["event_count"] = len(events)
+        payload["critical_count"] = sum(1 for event in events if event.get("severity") == "critical")
+        payload["warning_count"] = sum(1 for event in events if event.get("severity") == "warning")
+        logs.append(payload)
+    return logs
+
+
+def _clear_log_files() -> Dict[str, Any]:
+    cleared: List[str] = []
+    errors: List[str] = []
+    for target in _log_targets():
+        path = Path(target["path"])
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("", encoding="utf-8")
+            cleared.append(str(path))
+        except OSError as exc:
+            errors.append(f"{path}: {exc}")
+    return {"cleared": cleared, "errors": errors}
+
+
+def _logs_response(limit: int) -> Dict[str, Any]:
+    logs = _log_payloads(limit)
+    events = [event for log in logs for event in log.get("events", [])]
+    events.sort(key=lambda item: str(item.get("time") or ""), reverse=True)
+    return {"logs": logs, "events": events, "summary": _logs_summary(events)}
+
+
 def _optional_form_bool(form: Any, key: str) -> Optional[bool]:
     value = form.get(key)
     if value is None:
@@ -808,23 +907,22 @@ def create_app() -> FastAPI:
     @app.get("/api/logs")
     def logs_api(request: Request, limit: int = 300) -> Dict[str, Any]:
         _require_admin(request)
-        logs = [
-            {"key": "errors", "label": "Bledy i exception", **_read_log_tail(settings.AM, limit)},
-            {"key": "changes", "label": "Zmiany", **_read_log_tail(settings.BM, limit)},
-            {
-                "key": "web_out",
-                "label": "Web stdout",
-                **_read_log_tail(Path(settings.LOG_DIR) / "picorg_web_out.log", limit),
-            },
-            {
-                "key": "web_err",
-                "label": "Web stderr",
-                **_read_log_tail(Path(settings.LOG_DIR) / "picorg_web_err.log", limit),
-            },
-        ]
-        events = [event for log in logs for event in _parse_log_events(log)]
-        events.sort(key=lambda item: str(item.get("time") or ""), reverse=True)
-        return {"logs": logs, "events": events, "summary": _logs_summary(events)}
+        return _logs_response(limit)
+
+    @app.post("/api/logs/clear")
+    async def logs_clear_api(request: Request) -> JSONResponse:
+        current_user = _require_admin(request)
+        payload = await request.json()
+        password = str(payload.get("password") if isinstance(payload, dict) else "")
+        username = str(current_user.get("username") or "")
+        verified = authenticate_user(username, password)
+        if not verified or verified.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Niepoprawne haslo administratora.")
+        clear_result = _clear_log_files()
+        response = _logs_response(400)
+        response["cleared"] = clear_result["cleared"]
+        response["clear_errors"] = clear_result["errors"]
+        return JSONResponse(response)
 
     @app.post("/api/file-index/refresh")
     def file_index_refresh_api(request: Request) -> Dict[str, Any]:
