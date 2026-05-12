@@ -273,9 +273,9 @@ class WebAppFileTests(unittest.TestCase):
             log_path.write_text(
                 "\n".join(
                     [
-                        "INFO:     Application startup complete.",
+                        "INFO:     Custom maintenance event.",
                         'INFO:     127.0.0.1:1 - "GET /api/logs?limit=120 HTTP/1.1" 200 OK',
-                        'INFO:     127.0.0.1:2 - "GET /missing HTTP/1.1" 404 Not Found',
+                        'INFO:     127.0.0.1:2 - "GET /crash HTTP/1.1" 500 Internal Server Error',
                     ]
                 ),
                 encoding="utf-8",
@@ -287,8 +287,57 @@ class WebAppFileTests(unittest.TestCase):
 
             summaries = [event["summary"] for event in payload["events"]]
             self.assertEqual(len(summaries), 2)
-            self.assertIn("/missing", summaries[0])
-            self.assertEqual(summaries[1], "Application startup complete.")
+            self.assertIn("/crash", summaries[0])
+            self.assertEqual(summaries[1], "Custom maintenance event.")
+
+    def test_runtime_logs_hide_uvicorn_startup_and_400_access_noise(self) -> None:
+        startup_event = {
+            "source": "web_err",
+            "lines": ["INFO:     Uvicorn running on http://0.0.0.0:8010 (Press CTRL+C to quit)"],
+        }
+        bad_request_event = {
+            "source": "web_out",
+            "lines": ['INFO:     127.0.0.1:1 - "POST /api/process HTTP/1.1" 400 Bad Request'],
+        }
+        server_error_event = {
+            "source": "web_out",
+            "lines": ['INFO:     127.0.0.1:1 - "POST /api/process HTTP/1.1" 500 Internal Server Error'],
+        }
+
+        self.assertFalse(web_app._is_visible_log_event(startup_event))
+        self.assertFalse(web_app._is_visible_log_event(bad_request_event))
+        self.assertTrue(web_app._is_visible_log_event(server_error_event))
+
+    def test_existing_photo_conflicts_detect_unloaded_replacement(self) -> None:
+        upload = web_app.WebUploadedSlot(
+            prefix="03",
+            label="DETAIL_pic",
+            source_path="new.jpg",
+            original_filename="new.jpg",
+        )
+        conflicts = web_app._existing_photo_conflicts(
+            [{"prefix": "03", "local": True, "path": "old.jpg", "filename": "old.jpg"}],
+            [upload],
+            [],
+        )
+
+        self.assertEqual(conflicts[0]["prefix"], "03")
+        self.assertEqual(conflicts[0]["sources"], ["LOCAL"])
+
+    def test_existing_photo_conflicts_ignores_explicit_ftp_source(self) -> None:
+        upload = web_app.WebUploadedSlot(
+            prefix="03",
+            label="DETAIL_pic",
+            source_path="cache.jpg",
+            original_filename="5901234567890_03.jpg",
+        )
+        conflicts = web_app._existing_photo_conflicts(
+            [{"prefix": "03", "ftp": True, "ftp_filename": "5901234567890_03.jpg"}],
+            [upload],
+            [],
+        )
+
+        self.assertEqual(conflicts, [])
 
     def test_system_change_filter_hides_product_and_photo_entries(self) -> None:
         settings_event = {

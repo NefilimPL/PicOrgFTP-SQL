@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime
 import hashlib
 import hmac
 import io
+import json
 import os
 from pathlib import Path
 import re
@@ -434,6 +436,20 @@ def _delete_local_files(delete_requests: List[Dict[str, Any]], saved_paths: Set[
     return payload
 
 
+def _entry_payload_from_product(product: WebProductForm) -> Dict[str, Any]:
+    return {
+        "product_id": product.product_id,
+        "ean": product.ean,
+        "name": product.name,
+        "type_name": product.type_name,
+        "model": product.model,
+        "color1": product.color1,
+        "color2": product.color2,
+        "color3": product.color3,
+        "extra": product.extra,
+    }
+
+
 def _form_from_entry_payload(entry: Dict[str, Any]) -> WebProductForm:
     return WebProductForm(
         name=str(entry.get("name") or ""),
@@ -481,6 +497,90 @@ def _download_ftp_photo_source(photo: Dict[str, Any], fallback_ean: str) -> str:
         raise ValueError(f"Nie udalo sie pobrac pliku FTP {ftp_filename}: {exc}") from exc
 
 
+def _same_existing_source(source_path: str, upload: WebUploadedSlot, photo: Dict[str, Any]) -> bool:
+    upload_path = str(upload.source_path or "")
+    if source_path and upload_path:
+        try:
+            return os.path.samefile(source_path, upload_path)
+        except OSError:
+            return os.path.normcase(os.path.abspath(source_path)) == os.path.normcase(
+                os.path.abspath(upload_path)
+            )
+    ftp_filename = os.path.basename(str(photo.get("ftp_filename") or ""))
+    return bool(ftp_filename and ftp_filename == os.path.basename(str(upload.original_filename or "")))
+
+
+def _photo_source_labels(photo: Dict[str, Any]) -> List[str]:
+    labels: List[str] = []
+    if photo.get("local"):
+        labels.append("LOCAL")
+    if photo.get("ftp"):
+        labels.append("FTP")
+    if photo.get("sql"):
+        labels.append("SQL")
+    return labels or ["nieznane"]
+
+
+def _existing_photo_conflicts(
+    photos: List[Dict[str, Any]],
+    uploaded_slots: List[WebUploadedSlot],
+    delete_requests: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    uploaded_by_prefix = {str(slot.prefix): slot for slot in uploaded_slots}
+    delete_prefixes = {str(item.get("prefix") or "") for item in delete_requests}
+    conflicts: List[Dict[str, Any]] = []
+    for photo in photos:
+        prefix = str(photo.get("prefix") or "").strip()
+        if not prefix or prefix not in uploaded_by_prefix or prefix in delete_prefixes:
+            continue
+        source_path = str(photo.get("path") or "").strip()
+        source_path = source_path if source_path and os.path.isfile(source_path) else ""
+        upload = uploaded_by_prefix[prefix]
+        if _same_existing_source(source_path, upload, photo):
+            continue
+        conflicts.append(
+            {
+                "prefix": prefix,
+                "sources": _photo_source_labels(photo),
+                "filename": photo.get("filename") or photo.get("ftp_filename") or photo.get("sql_value") or "",
+            }
+        )
+    return conflicts
+
+
+def _format_existing_photo_conflicts(conflicts: List[Dict[str, Any]]) -> str:
+    parts = []
+    for item in conflicts:
+        sources = "/".join(str(source) for source in item.get("sources", []))
+        parts.append(f"{item.get('prefix')} ({sources})")
+    return (
+        "Znaleziono juz istniejace zdjecia dla wpisanych danych w slotach: "
+        f"{', '.join(parts)}. Wczytaj istniejace zdjecia albo usun wybrane sloty przed "
+        "ponownym przetworzeniem."
+    )
+
+
+def _process_event_details(
+    product: WebProductForm,
+    uploaded_slots: List[WebUploadedSlot],
+    delete_requests: List[Dict[str, Any]],
+    **extra: Any,
+) -> Dict[str, Any]:
+    details: Dict[str, Any] = {
+        "product_id": product.product_id,
+        "ean": product.ean,
+        "name": product.name,
+        "type": product.type_name,
+        "model": product.model,
+        "colors": [product.color1, product.color2, product.color3],
+        "extra": product.extra,
+        "uploaded_slots": [slot.prefix for slot in uploaded_slots],
+        "delete_slots": [str(item.get("prefix") or "") for item in delete_requests],
+    }
+    details.update(extra)
+    return details
+
+
 def _append_existing_photo_sources(
     *,
     existing_entry: Optional[Dict[str, Any]],
@@ -491,14 +591,15 @@ def _append_existing_photo_sources(
 ) -> List[str]:
     """Add existing local/FTP photos that need to be processed by the web form."""
 
-    if not existing_entry:
+    source_entry = existing_entry or _entry_payload_from_product(product)
+    if not source_entry:
         return []
-    identity_changed = _should_migrate_existing_photos(existing_entry, product)
+    identity_changed = bool(existing_entry) and _should_migrate_existing_photos(existing_entry, product)
     occupied_prefixes = {slot.prefix for slot in uploaded_slots}
     delete_prefixes = {str(item.get("prefix") or "") for item in delete_requests}
     appended: List[str] = []
     photos = find_product_photos(
-        existing_entry or {},
+        source_entry,
         include_local=True,
         include_ftp=bool(config.CONFIG.get(ft, True)),
         include_sql=False,
@@ -533,7 +634,7 @@ def _append_existing_photo_sources(
         elif ftp_filename and not source_path:
             source_path = _download_ftp_photo_source(
                 photo,
-                str(existing_entry.get("ean") or product.ean or ""),
+                str(source_entry.get("ean") or product.ean or ""),
             )
             should_process = bool(source_path and os.path.isfile(source_path))
         if not should_process:
@@ -621,6 +722,43 @@ def _http_statuses(lines: List[str]) -> List[int]:
     return statuses
 
 
+def _web_events_log_path() -> Path:
+    return Path(settings.LOG_DIR) / "picorg_web_events.log"
+
+
+def _safe_event_detail(value: Any) -> str:
+    text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    return re.sub(r"\s+", " ", text)
+
+
+def _write_web_event(
+    *,
+    level: str,
+    event: str,
+    username: str,
+    message: str,
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    log_path = _web_events_log_path()
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        level_text = str(level or "INFO").strip().upper()
+        event_text = _safe_event_detail(event).upper() or "WEB_EVENT"
+        user_text = _safe_event_detail(username) or "unknown"
+        message_text = _safe_event_detail(message)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{timestamp}] [USER: {user_text}] {level_text}: {event_text} - {message_text}\n")
+            if details:
+                handle.write(
+                    "details: "
+                    + json.dumps(details, ensure_ascii=False, sort_keys=True, default=str)
+                    + "\n"
+                )
+    except OSError:
+        pass
+
+
 def _log_event_summary(line: str) -> str:
     text = _clean_log_line(line)
     text = re.sub(r"^\[[^\]]+\]\s*", "", text)
@@ -640,7 +778,15 @@ def _log_event_severity(source_key: str, lines: List[str]) -> str:
             return "critical"
         if max_status >= 400:
             return "warning"
-    if source_key in {"web_err"} and text.strip():
+    if source_key == "web_events":
+        if re.search(r"\b(CRITICAL|ERROR)\b", text, re.IGNORECASE):
+            return "critical"
+        if re.search(r"\b(WARNING|WARN)\b", text, re.IGNORECASE):
+            return "warning"
+        return "info"
+    if source_key == "web_err" and re.search(
+        r"\b(CRITICAL|ERROR|Traceback|Exception|failed)\b", text, re.IGNORECASE
+    ):
         return "critical"
     if source_key == "errors":
         if "traceback" in lowered or "exception" in lowered or "web " in lowered:
@@ -710,6 +856,7 @@ def _logs_summary(events: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def _log_targets() -> List[Dict[str, Any]]:
     return [
+        {"key": "web_events", "label": "Zdarzenia web", "path": _web_events_log_path()},
         {"key": "errors", "label": "Bledy i exception", "path": settings.AM},
         {"key": "changes", "label": "Zmiany systemowe", "path": settings.BM},
         {"key": "web_out", "label": "Web stdout", "path": Path(settings.LOG_DIR) / "picorg_web_out.log"},
@@ -768,17 +915,27 @@ def _is_system_change_event(event: Dict[str, Any]) -> bool:
     return any(marker in text for marker in system_markers)
 
 
-def _is_relevant_web_stdout_event(event: Dict[str, Any]) -> bool:
-    if event.get("source") != "web_out":
+def _is_relevant_web_runtime_event(event: Dict[str, Any]) -> bool:
+    if event.get("source") not in {"web_out", "web_err"}:
         return True
+    text = "\n".join(str(line) for line in event.get("lines", [])).lower()
+    routine_markers = (
+        "started server process",
+        "waiting for application startup",
+        "application startup complete",
+        "uvicorn running on",
+        "press ctrl+c to quit",
+    )
+    if any(marker in text for marker in routine_markers):
+        return False
     statuses = _http_statuses([str(line) for line in event.get("lines", [])])
-    if statuses and max(statuses) < 400:
+    if statuses and max(statuses) < 500:
         return False
     return True
 
 
 def _is_visible_log_event(event: Dict[str, Any]) -> bool:
-    return _is_system_change_event(event) and _is_relevant_web_stdout_event(event)
+    return _is_system_change_event(event) and _is_relevant_web_runtime_event(event)
 
 
 def _log_payloads(limit: int) -> List[Dict[str, Any]]:
@@ -1223,6 +1380,7 @@ def create_app() -> FastAPI:
         uploaded_slots: List[WebUploadedSlot] = []
         delete_requests: List[Dict[str, Any]] = []
         pending_ftp_slots: List[Dict[str, Any]] = []
+        product: Optional[WebProductForm] = None
         try:
             for prefix, slot in slot_by_prefix.items():
                 if str(form.get(f"delete_slot_{prefix}") or "") == "1":
@@ -1354,6 +1512,21 @@ def create_app() -> FastAPI:
                         }
                     )
                     delete_prefixes.add(prefix)
+            photo_lookup_entry = existing_entry or _entry_payload_from_product(product)
+            existing_photos = find_product_photos(
+                photo_lookup_entry,
+                include_local=True,
+                include_ftp=bool(config.CONFIG.get(ft, True)),
+                include_sql=True,
+            )
+            if existing_entry is None:
+                conflicts = _existing_photo_conflicts(
+                    existing_photos,
+                    uploaded_slots,
+                    delete_requests,
+                )
+                if conflicts:
+                    raise ValueError(_format_existing_photo_conflicts(conflicts))
             migrated_prefixes = _append_existing_photo_migrations(
                 existing_entry=existing_entry,
                 product=product,
@@ -1361,6 +1534,18 @@ def create_app() -> FastAPI:
                 delete_requests=delete_requests,
                 slot_by_prefix=slot_by_prefix,
             )
+            if existing_entry is None and existing_photos and not uploaded_slots and not delete_requests:
+                raise ValueError(
+                    _format_existing_photo_conflicts(
+                        [
+                            {
+                                "prefix": photo.get("prefix"),
+                                "sources": _photo_source_labels(photo),
+                            }
+                            for photo in existing_photos
+                        ]
+                    )
+                )
             entry_result = save_web_entry(
                 {
                     "product_id": product.product_id,
@@ -1395,7 +1580,30 @@ def create_app() -> FastAPI:
                     if item.get("sql") or item.get("ftp_filename") or item.get("local_path")
                 },
             )
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+            details: Dict[str, Any] = {"status_code": exc.status_code}
+            if product is not None:
+                details.update(_process_event_details(product, uploaded_slots, delete_requests))
+            _write_web_event(
+                level="warning" if exc.status_code < 500 else "error",
+                event="PROCESS_REJECTED",
+                username=username,
+                message=detail,
+                details=details,
+            )
+            raise
         except ValueError as exc:
+            details = {}
+            if product is not None:
+                details = _process_event_details(product, uploaded_slots, delete_requests)
+            _write_web_event(
+                level="warning",
+                event="PROCESS_REJECTED",
+                username=username,
+                message=str(exc),
+                details=details,
+            )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1425,6 +1633,36 @@ def create_app() -> FastAPI:
                 "output_dir": payload["output_dir"],
                 "entry": entry_result.get("entry", {}) if isinstance(entry_result, dict) else {},
             },
+        )
+        event_level = "info"
+        event_name = "PROCESS_COMPLETED"
+        if (
+            ftp_result.get("error")
+            or sql_result.get("error")
+            or (local_delete_result.get("errors") if isinstance(local_delete_result, dict) else [])
+            or result.skipped_slots
+        ):
+            event_level = "warning"
+            event_name = "PROCESS_COMPLETED_WITH_WARNINGS"
+        _write_web_event(
+            level=event_level,
+            event=event_name,
+            username=username,
+            message=(
+                f"Zapisano {len(result.saved_files)} plikow, "
+                f"usunieto lokalnie {local_delete_result.get('deleted', 0)}."
+            ),
+            details=_process_event_details(
+                product,
+                uploaded_slots,
+                delete_requests,
+                saved_files=[item.filename for item in result.saved_files],
+                skipped_slots=result.skipped_slots,
+                migrated_slots=migrated_prefixes,
+                ftp=ftp_result,
+                sql=sql_result,
+                local_delete=local_delete_result,
+            ),
         )
         return JSONResponse(payload)
 
