@@ -308,10 +308,20 @@ def _remote_name_for_output(filename: str) -> str:
     return f"{parsed.ean}_{parsed.normalized_label}{parsed.extension}"
 
 
-def _sync_result_to_ftp(result: Any, delete_candidates: Optional[List[str]] = None) -> Dict[str, Any]:
+def _sync_result_to_ftp(
+    result: Any,
+    delete_candidates: Optional[List[str]] = None,
+    *,
+    skip_upload_prefixes: Optional[Set[str]] = None,
+) -> Dict[str, Any]:
     if not bool(config.CONFIG.get(ft, True)):
         return {"enabled": False, "uploaded": 0, "deleted": 0, "elapsed_ms": 0, "error": ""}
-    filenames = [item.filename for item in result.saved_files if getattr(item, "filename", "")]
+    skip_upload_prefixes = {str(prefix) for prefix in (skip_upload_prefixes or set())}
+    filenames = [
+        item.filename
+        for item in result.saved_files
+        if getattr(item, "filename", "") and str(getattr(item, "prefix", "")) not in skip_upload_prefixes
+    ]
     uploaded_remote_names = {_remote_name_for_output(filename) for filename in filenames}
     delete_set = {
         os.path.basename(str(item or ""))
@@ -1508,7 +1518,7 @@ def create_app() -> FastAPI:
                             "local_path": "",
                             "ftp_filename": ftp_filename,
                             "sql": False,
-                            "ftp_backfill": True,
+                            "ftp_backfill": False,
                         }
                     )
                     delete_prefixes.add(prefix)
@@ -1564,13 +1574,23 @@ def create_app() -> FastAPI:
                 form=product,
                 uploaded_slots=uploaded_slots,
                 options=processing_options_from_config(config.CONFIG),
-                allow_empty=bool(delete_requests),
+                allow_empty=True,
             )
             saved_paths = {os.path.abspath(item.path) for item in result.saved_files}
             local_delete_result = _delete_local_files(delete_requests, saved_paths)
+            ftp_backfill_prefixes = {
+                str(item.get("prefix") or "")
+                for item in delete_requests
+                if item.get("ftp_backfill")
+            }
             ftp_result = _sync_result_to_ftp(
                 result,
-                [item.get("ftp_filename", "") for item in delete_requests],
+                [
+                    item.get("ftp_filename", "")
+                    for item in delete_requests
+                    if not item.get("ftp_backfill")
+                ],
+                skip_upload_prefixes=ftp_backfill_prefixes,
             )
             sql_result = _sync_result_to_sql(
                 result,
@@ -1621,6 +1641,8 @@ def create_app() -> FastAPI:
             summary=(
                 "Zapisano usuniecia produktu."
                 if delete_requests and not result.saved_files
+                else "Zsynchronizowano produkt bez zmian w plikach."
+                if not delete_requests and not result.saved_files
                 else "Przetworzono pliki produktu."
             ),
             details={

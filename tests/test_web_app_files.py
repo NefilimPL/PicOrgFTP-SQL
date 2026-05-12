@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -69,6 +70,35 @@ class WebAppFileTests(unittest.TestCase):
             self.assertEqual(result["errors"], [])
             self.assertFalse(delete_file.exists())
             self.assertTrue(saved_file.exists())
+
+    def test_ftp_sync_skips_upload_for_backfilled_prefixes(self) -> None:
+        result = SimpleNamespace(
+            output_dir="processed",
+            saved_files=[
+                SimpleNamespace(
+                    prefix="03",
+                    filename="5901234567890_03_DETAIL_MAGGIORE.jpg",
+                )
+            ],
+        )
+
+        with (
+            patch.dict(web_app.config.CONFIG, {web_app.ft: True, web_app.H: {}}, clear=False),
+            patch.object(
+                web_app,
+                "sync_remote_files",
+                return_value={"uploaded": 0, "deleted": 0, "elapsed_ms": 1, "error": ""},
+            ) as sync_remote,
+        ):
+            payload = web_app._sync_result_to_ftp(
+                result,
+                [],
+                skip_upload_prefixes={"03"},
+            )
+
+        self.assertTrue(payload["enabled"])
+        self.assertEqual(payload["uploaded"], 0)
+        sync_remote.assert_not_called()
 
     def test_existing_local_photos_are_migrated_when_product_path_changes(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]

@@ -31,6 +31,8 @@ const state = {
   activeListPromptKeys: new Set(),
   colorFieldLabels: {},
   ftpPreviewLoading: new Set(),
+  backgroundFtpPreviewTimer: 0,
+  backgroundFtpPreviewActive: false,
 };
 
 const listLabels = {
@@ -66,7 +68,6 @@ const themeToggleButton = document.querySelector("#themeToggleButton");
 const entrySelect = document.querySelector("#entrySelect");
 const findByEanButton = document.querySelector("#findByEanButton");
 const findProductButton = document.querySelector("#findProductButton");
-const saveEntryButton = document.querySelector("#saveEntryButton");
 const listTabs = document.querySelector("#listTabs");
 const listValues = document.querySelector("#listValues");
 const listAddForm = document.querySelector("#listAddForm");
@@ -609,6 +610,7 @@ function updateFieldWarnings() {
       warning.append(text, undo);
     }
   }
+  updateSubmitButtonState();
 }
 
 function setupFieldChangeTracking() {
@@ -939,10 +941,13 @@ function renderSlotBadges(container, photo, file, prefix) {
   container.appendChild(badges);
 }
 
-async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestId) {
-  if (!photo?.ftp_filename) return;
+async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestId, options = {}) {
+  if (!photo?.ftp_filename || state.ftpPreviewLoading.has(prefix)) return;
   state.ftpPreviewLoading.add(prefix);
-  formStatus.textContent = `Pobieranie podgladu FTP dla slotu ${prefix}...`;
+  const background = Boolean(options.background);
+  if (!background) {
+    formStatus.textContent = `Pobieranie podgladu FTP dla slotu ${prefix}...`;
+  }
   updateSlotPreview(prefix);
   try {
     const payload = await requestJson("/api/ftp-preview", {
@@ -961,10 +966,64 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
     }
     state.loadedPhotos.set(prefix, updated);
     state.slotSources.set(prefix, "ftp");
-    formStatus.textContent = `Pobrano podglad FTP dla slotu ${prefix}.`;
+    if (!background) {
+      formStatus.textContent = `Pobrano podglad FTP dla slotu ${prefix}.`;
+    }
   } finally {
     state.ftpPreviewLoading.delete(prefix);
     updateSlotPreview(prefix);
+  }
+}
+
+function nextBackgroundFtpPreviewCandidate() {
+  for (const slot of state.slots || []) {
+    const prefix = slot.prefix;
+    const photo = state.loadedPhotos.get(prefix);
+    if (
+      photo?.ftp &&
+      photo.ftp_filename &&
+      !photo.ftp_token &&
+      !photo.token &&
+      !state.files.has(prefix) &&
+      !state.deletedSlots.has(prefix) &&
+      !state.ftpPreviewLoading.has(prefix)
+    ) {
+      return { prefix, photo };
+    }
+  }
+  return null;
+}
+
+function scheduleBackgroundFtpPreviewLoad(requestId = state.photoLoadRequestId, delayMs = 900) {
+  window.clearTimeout(state.backgroundFtpPreviewTimer);
+  state.backgroundFtpPreviewTimer = window.setTimeout(() => {
+    const run = () => loadNextBackgroundFtpPreview(requestId).catch(() => {});
+    if (window.requestIdleCallback) {
+      window.requestIdleCallback(run, { timeout: 2500 });
+    } else {
+      run();
+    }
+  }, delayMs);
+}
+
+async function loadNextBackgroundFtpPreview(requestId = state.photoLoadRequestId) {
+  if (state.backgroundFtpPreviewActive || requestId !== state.photoLoadRequestId) {
+    return;
+  }
+  const candidate = nextBackgroundFtpPreviewCandidate();
+  if (!candidate) {
+    return;
+  }
+  state.backgroundFtpPreviewActive = true;
+  try {
+    await loadFtpPreview(candidate.photo, candidate.prefix, requestId, { background: true });
+  } catch (_error) {
+    // Background preview loading must not block regular editing.
+  } finally {
+    state.backgroundFtpPreviewActive = false;
+  }
+  if (requestId === state.photoLoadRequestId && nextBackgroundFtpPreviewCandidate()) {
+    scheduleBackgroundFtpPreviewLoad(requestId, 1400);
   }
 }
 
@@ -1303,6 +1362,7 @@ function renderSlots(slots = state.slots) {
 
     slotGrid.appendChild(node);
   }
+  updateSubmitButtonState();
 }
 
 function renderListTabs() {
@@ -1438,6 +1498,7 @@ function renderListEditor() {
 function setBusy(isBusy, text = "") {
   submitButton.disabled = isBusy;
   formStatus.textContent = text;
+  updateSubmitButtonState();
 }
 
 function clearResult() {
@@ -1848,6 +1909,43 @@ function productFieldsChangedSinceLoad() {
   );
 }
 
+function hasProductDraftData() {
+  const current = formPayload();
+  return trackedProductFields.some((fieldName) => String(current[fieldName] || "").trim());
+}
+
+function hasPendingSlotChanges() {
+  if (state.files.size || state.deletedSlots.size) {
+    return true;
+  }
+  for (const photo of state.loadedPhotos.values()) {
+    if (photo?.dirty) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasPendingUserChanges() {
+  return (
+    hasPendingSlotChanges() ||
+    productFieldsChangedSinceLoad() ||
+    (!state.loadedEntryOriginal && hasProductDraftData())
+  );
+}
+
+function updateSubmitButtonState() {
+  if (!submitButton || submitButton.disabled) {
+    return;
+  }
+  const hasChanges = hasPendingUserChanges();
+  submitButton.textContent = hasChanges ? "Aktualizuj" : "Synchronizuj";
+  submitButton.title = hasChanges
+    ? "Zapisuje zmiany w danych i slotach oraz aktualizuje lokalne pliki, FTP i SQL."
+    : "Pobiera brakujace zdjecia z FTP i uzupelnia lokalne pliki.";
+  submitButton.setAttribute("aria-label", submitButton.textContent);
+}
+
 function mergePhotoRecord(existing = {}, incoming = {}) {
   const merged = { ...existing, ...incoming };
   for (const key of ["local", "ftp", "sql", "is_image"]) {
@@ -1926,6 +2024,7 @@ function applyPhotoPayload(photos = []) {
   }
   if (changed) {
     renderSlots();
+    scheduleBackgroundFtpPreviewLoad();
   }
 }
 
@@ -1954,6 +2053,7 @@ async function loadPhotosForEntry(entry, options = {}) {
   state.deletedSlots.clear();
   state.slotSources.clear();
   state.ftpPreviewLoading.clear();
+  window.clearTimeout(state.backgroundFtpPreviewTimer);
   const sources = progressive ? ["local", "sql", "ftp"] : ["all"];
   state.photoSourceStatus.clear();
   for (const source of sources) {
@@ -1994,6 +2094,7 @@ async function loadPhotosForEntry(entry, options = {}) {
     state.photoSourceStatus.clear();
     updateRuntimeMetrics();
     renderSlots();
+    scheduleBackgroundFtpPreviewLoad(requestId);
   }
 }
 
@@ -2115,26 +2216,6 @@ function scheduleProductAutoSearch() {
     state.lastAutoSearchKey = key;
     searchByProduct({ automatic: true }).catch(() => {});
   }, 500);
-}
-
-async function saveEntryOnly() {
-  await ensureProductListValues();
-  const payload = await requestJson("/api/entries/save", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(formPayload()),
-  });
-  const entry = payload.entry || {};
-  if (entry.product_id) {
-    productForm.elements.product_id.value = entry.product_id;
-  }
-  if (!productForm.elements.ean.value && entry.entry?.EAN && entry.entry.EAN !== "BRAK-EAN") {
-    productForm.elements.ean.value = entry.entry.EAN;
-  }
-  state.loadedEntryOriginal = { ...formPayload(), product_id: productForm.elements.product_id.value };
-  updateFieldWarnings();
-  formStatus.textContent = entry.updated ? "Zaktualizowano wpis." : "Dodano nowy wpis.";
-  await refreshData();
 }
 
 async function addListValue(event) {
@@ -2855,9 +2936,14 @@ productForm.addEventListener("submit", async (event) => {
   try {
     await ensureProductListValues();
     const identityChanged = productFieldsChangedSinceLoad();
+    const updateMode = hasPendingUserChanges();
     setBusy(
       true,
-      identityChanged ? "Przetwarzanie i przenoszenie istniejacych zdjec..." : "Przetwarzanie..."
+      updateMode
+        ? identityChanged
+          ? "Aktualizowanie i przenoszenie istniejacych zdjec..."
+          : "Aktualizowanie..."
+        : "Synchronizowanie brakujacych danych..."
     );
     const data = new FormData(productForm);
     for (const [prefix, file] of state.files.entries()) {
@@ -2918,6 +3004,7 @@ clearButton.addEventListener("click", () => {
   state.slotSources.clear();
   state.photoSourceStatus.clear();
   state.ftpPreviewLoading.clear();
+  window.clearTimeout(state.backgroundFtpPreviewTimer);
   state.loadedEntryOriginal = null;
   state.lastAutoSearchKey = "";
   renderSlots();
@@ -2935,12 +3022,6 @@ findByEanButton.addEventListener("click", () => {
 
 findProductButton.addEventListener("click", () => {
   searchByProduct().catch((error) => {
-    formStatus.textContent = error.message;
-  });
-});
-
-saveEntryButton.addEventListener("click", () => {
-  saveEntryOnly().catch((error) => {
     formStatus.textContent = error.message;
   });
 });
