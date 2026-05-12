@@ -1071,6 +1071,10 @@ button.slot-badge.on:hover {
   overflow-wrap: anywhere;
 }
 
+.log-event strong {
+  overflow-wrap: anywhere;
+}
+
 .log-event details {
   display: grid;
   gap: 8px;

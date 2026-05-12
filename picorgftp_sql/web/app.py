@@ -592,23 +592,54 @@ def _read_log_tail(path: str, limit: int = 300) -> Dict[str, Any]:
         return payload
     try:
         with log_path.open("r", encoding="utf-8", errors="replace") as handle:
-            payload["lines"] = [line.rstrip("\r\n") for line in handle.readlines()[-line_limit:]]
+            payload["lines"] = [_clean_log_line(line.rstrip("\r\n")) for line in handle.readlines()[-line_limit:]]
     except OSError as exc:
         payload["error"] = str(exc)
     return payload
 
 
+ANSI_ESCAPE_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+CONTROL_LOG_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+HTTP_ACCESS_RE = re.compile(r'"[A-Z]+ [^"]+ HTTP/[0-9.]+"\s+(\d{3})\s+\w+')
+PLAIN_LOG_START_RE = re.compile(r"^(DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL):\s+", re.IGNORECASE)
+TIMESTAMP_LOG_START_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2}")
+
+
+def _clean_log_line(line: str) -> str:
+    text = ANSI_ESCAPE_RE.sub("", str(line))
+    return CONTROL_LOG_RE.sub("", text)
+
+
+def _http_statuses(lines: List[str]) -> List[int]:
+    statuses: List[int] = []
+    for line in lines:
+        for match in HTTP_ACCESS_RE.finditer(line):
+            try:
+                statuses.append(int(match.group(1)))
+            except ValueError:
+                pass
+    return statuses
+
+
 def _log_event_summary(line: str) -> str:
-    text = re.sub(r"^\[[^\]]+\]\s*", "", line)
+    text = _clean_log_line(line)
     text = re.sub(r"^\[[^\]]+\]\s*", "", text)
     text = re.sub(r"^\[[^\]]+\]\s*", "", text)
-    text = re.sub(r"^(ERROR|WARNING|WARN|INFO):\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\[[^\]]+\]\s*", "", text)
+    text = re.sub(r"^(DEBUG|ERROR|WARNING|WARN|INFO|CRITICAL):\s*", "", text, flags=re.IGNORECASE)
     return text.strip() or line.strip()
 
 
 def _log_event_severity(source_key: str, lines: List[str]) -> str:
     text = "\n".join(lines)
     lowered = text.lower()
+    statuses = _http_statuses(lines)
+    if statuses:
+        max_status = max(statuses)
+        if max_status >= 500:
+            return "critical"
+        if max_status >= 400:
+            return "warning"
     if source_key in {"web_err"} and text.strip():
         return "critical"
     if source_key == "errors":
@@ -643,6 +674,7 @@ def _parse_log_events(log_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "source_label": label,
                 "path": path,
                 "time": timestamp,
+                "order": len(events),
                 "severity": severity,
                 "summary": _log_event_summary(first_line),
                 "lines": list(current),
@@ -651,13 +683,15 @@ def _parse_log_events(log_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         current = None
 
     for raw_line in log_payload.get("lines", []) or []:
-        line = str(raw_line)
-        if re.match(r"^\[\d{4}-\d{2}-\d{2}", line):
+        line = _clean_log_line(str(raw_line))
+        if not line.strip():
+            continue
+        if TIMESTAMP_LOG_START_RE.match(line) or PLAIN_LOG_START_RE.match(line):
             _append_current()
             current = [line]
         elif current is not None:
             current.append(line)
-        elif line.strip():
+        else:
             current = [line]
     _append_current()
     return events
@@ -734,6 +768,19 @@ def _is_system_change_event(event: Dict[str, Any]) -> bool:
     return any(marker in text for marker in system_markers)
 
 
+def _is_relevant_web_stdout_event(event: Dict[str, Any]) -> bool:
+    if event.get("source") != "web_out":
+        return True
+    statuses = _http_statuses([str(line) for line in event.get("lines", [])])
+    if statuses and max(statuses) < 400:
+        return False
+    return True
+
+
+def _is_visible_log_event(event: Dict[str, Any]) -> bool:
+    return _is_system_change_event(event) and _is_relevant_web_stdout_event(event)
+
+
 def _log_payloads(limit: int) -> List[Dict[str, Any]]:
     logs: List[Dict[str, Any]] = []
     for target in _log_targets():
@@ -742,7 +789,8 @@ def _log_payloads(limit: int) -> List[Dict[str, Any]]:
             "label": target["label"],
             **_read_log_tail(target["path"], limit),
         }
-        events = [event for event in _parse_log_events(payload) if _is_system_change_event(event)]
+        events = [event for event in _parse_log_events(payload) if _is_visible_log_event(event)]
+        events.reverse()
         payload["events"] = events
         payload["event_count"] = len(events)
         payload["critical_count"] = sum(1 for event in events if event.get("severity") == "critical")
@@ -768,7 +816,10 @@ def _clear_log_files() -> Dict[str, Any]:
 def _logs_response(limit: int) -> Dict[str, Any]:
     logs = _log_payloads(limit)
     events = [event for log in logs for event in log.get("events", [])]
-    events.sort(key=lambda item: str(item.get("time") or ""), reverse=True)
+    events.sort(
+        key=lambda item: (str(item.get("time") or ""), int(item.get("order") or 0)),
+        reverse=True,
+    )
     return {"logs": logs, "events": events, "summary": _logs_summary(events)}
 
 

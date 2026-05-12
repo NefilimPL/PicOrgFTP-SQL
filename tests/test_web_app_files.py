@@ -248,6 +248,48 @@ class WebAppFileTests(unittest.TestCase):
         self.assertEqual(len(events[0]["lines"]), 4)
         self.assertEqual(events[1]["severity"], "warning")
 
+    def test_log_parser_splits_plain_lines_and_strips_control_sequences(self) -> None:
+        events = web_app._parse_log_events(
+            {
+                "key": "web_out",
+                "label": "Web stdout",
+                "path": "out.log",
+                "lines": [
+                    '\x1b[32mINFO\x1b[0m:     127.0.0.1:1 - "GET /ok HTTP/1.1" 200 OK',
+                    'INFO:     127.0.0.1:2 - "GET /missing HTTP/1.1" 404 Not Found',
+                ],
+            }
+        )
+
+        self.assertEqual(len(events), 2)
+        self.assertNotIn("\x1b", events[0]["summary"])
+        self.assertEqual(events[0]["severity"], "info")
+        self.assertEqual(events[1]["severity"], "warning")
+
+    def test_log_payloads_are_newest_first_and_hide_successful_access_logs(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            log_path = Path(temp_dir) / "picorg_web_out.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "INFO:     Application startup complete.",
+                        'INFO:     127.0.0.1:1 - "GET /api/logs?limit=120 HTTP/1.1" 200 OK',
+                        'INFO:     127.0.0.1:2 - "GET /missing HTTP/1.1" 404 Not Found',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            targets = [{"key": "web_out", "label": "Web stdout", "path": log_path}]
+
+            with patch.object(web_app, "_log_targets", return_value=targets):
+                payload = web_app._log_payloads(20)[0]
+
+            summaries = [event["summary"] for event in payload["events"]]
+            self.assertEqual(len(summaries), 2)
+            self.assertIn("/missing", summaries[0])
+            self.assertEqual(summaries[1], "Application startup complete.")
+
     def test_system_change_filter_hides_product_and_photo_entries(self) -> None:
         settings_event = {
             "source": "changes",
