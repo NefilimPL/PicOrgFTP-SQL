@@ -32,10 +32,12 @@ const state = {
   colorFieldLabels: {},
   ftpPreviewLoading: new Set(),
   ftpPreviewBackgroundLoading: new Set(),
+  ftpPreviewCache: new Map(),
   backgroundFtpPreviewTimer: 0,
-  backgroundFtpPreviewActive: false,
+  backgroundFtpPreviewLimit: 3,
   photoSourcesLoaded: new Set(),
   ftpEnabled: true,
+  slotRevisions: new Map(),
 };
 
 const listLabels = {
@@ -991,10 +993,61 @@ function setFtpBadgeLoading(prefix, loading) {
   }
 }
 
+function slotRevision(prefix) {
+  return Number(state.slotRevisions.get(prefix) || 0);
+}
+
+function bumpSlotRevision(prefix) {
+  state.slotRevisions.set(prefix, slotRevision(prefix) + 1);
+}
+
+function ftpPreviewCacheKey(photo, fallbackEan = "") {
+  const filename = String(photo?.ftp_filename || "").trim();
+  const ean = String(photo?.ean || fallbackEan || "").trim();
+  return filename && ean ? `${ean}|${filename}` : "";
+}
+
+function applyCachedFtpPreview(photo, prefix, cached) {
+  if (!cached) return photo;
+  return {
+    ...photo,
+    ftp_token: cached.token || photo?.ftp_token || "",
+    ftp_url: cached.url || photo?.ftp_url || "",
+    ftp_thumb_url: cached.thumb_url || photo?.ftp_thumb_url || "",
+  };
+}
+
 async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestId, options = {}) {
   if (!photo?.ftp_filename || state.ftpPreviewLoading.has(prefix)) return;
+  const revision = slotRevision(prefix);
+  const cacheKey = ftpPreviewCacheKey(photo, formValue("ean") || "");
   const sourceBefore = selectedSlotSource(prefix, photo);
   const explicitSourceBefore = state.slotSources.get(prefix);
+  const cached = cacheKey ? state.ftpPreviewCache.get(cacheKey) : null;
+  if (cached) {
+    const currentPhoto = state.loadedPhotos.get(prefix);
+    if (
+      requestId !== state.photoLoadRequestId ||
+      revision !== slotRevision(prefix) ||
+      !currentPhoto ||
+      ftpPreviewCacheKey(currentPhoto, formValue("ean") || "") !== cacheKey
+    ) {
+      return;
+    }
+    const updated = applyCachedFtpPreview(currentPhoto, prefix, cached);
+    state.loadedPhotos.set(prefix, updated);
+    if (!options.background || sourceBefore === "ftp") {
+      state.slotSources.set(prefix, "ftp");
+    } else if (explicitSourceBefore) {
+      state.slotSources.set(prefix, explicitSourceBefore);
+    }
+    if (options.background && selectedSlotSource(prefix, updated) !== "ftp") {
+      setFtpBadgeLoading(prefix, false);
+    } else {
+      updateSlotPreview(prefix);
+    }
+    return;
+  }
   state.ftpPreviewLoading.add(prefix);
   const background = Boolean(options.background);
   if (background) {
@@ -1016,15 +1069,28 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ean: photo.ean || formValue("ean") || "", filename: photo.ftp_filename }),
     });
+    if (cacheKey) {
+      state.ftpPreviewCache.set(cacheKey, {
+        token: payload.token || "",
+        url: payload.url || "",
+        thumb_url: payload.thumb_url || "",
+      });
+    }
+    const currentPhoto = state.loadedPhotos.get(prefix);
+    if (
+      requestId !== state.photoLoadRequestId ||
+      revision !== slotRevision(prefix) ||
+      !currentPhoto ||
+      ftpPreviewCacheKey(currentPhoto, formValue("ean") || "") !== cacheKey
+    ) {
+      return;
+    }
     const updated = {
-      ...photo,
+      ...currentPhoto,
       ftp_token: payload.token || "",
       ftp_url: payload.url || "",
       ftp_thumb_url: payload.thumb_url || "",
     };
-    if (requestId !== state.photoLoadRequestId) {
-      return;
-    }
     state.loadedPhotos.set(prefix, updated);
     if (!background || sourceBefore === "ftp") {
       state.slotSources.set(prefix, "ftp");
@@ -1072,23 +1138,29 @@ function scheduleBackgroundFtpPreviewLoad(requestId = state.photoLoadRequestId, 
 }
 
 async function loadNextBackgroundFtpPreview(requestId = state.photoLoadRequestId) {
-  if (state.backgroundFtpPreviewActive || requestId !== state.photoLoadRequestId) {
+  if (requestId !== state.photoLoadRequestId) {
     return;
   }
-  const candidate = nextBackgroundFtpPreviewCandidate();
-  if (!candidate) {
-    return;
+  let launched = 0;
+  const limit = Math.max(1, Number(state.backgroundFtpPreviewLimit) || 3);
+  while (state.ftpPreviewBackgroundLoading.size < limit) {
+    const candidate = nextBackgroundFtpPreviewCandidate();
+    if (!candidate) {
+      break;
+    }
+    launched += 1;
+    loadFtpPreview(candidate.photo, candidate.prefix, requestId, { background: true })
+      .catch(() => {
+        // Background preview loading must not block regular editing.
+      })
+      .finally(() => {
+        if (requestId === state.photoLoadRequestId && nextBackgroundFtpPreviewCandidate()) {
+          scheduleBackgroundFtpPreviewLoad(requestId, 300);
+        }
+      });
   }
-  state.backgroundFtpPreviewActive = true;
-  try {
-    await loadFtpPreview(candidate.photo, candidate.prefix, requestId, { background: true });
-  } catch (_error) {
-    // Background preview loading must not block regular editing.
-  } finally {
-    state.backgroundFtpPreviewActive = false;
-  }
-  if (requestId === state.photoLoadRequestId && nextBackgroundFtpPreviewCandidate()) {
-    scheduleBackgroundFtpPreviewLoad(requestId, 1400);
+  if (launched && requestId === state.photoLoadRequestId && nextBackgroundFtpPreviewCandidate()) {
+    scheduleBackgroundFtpPreviewLoad(requestId, 300);
   }
 }
 
@@ -1114,6 +1186,7 @@ function thumbnailUrl(photo, prefix) {
 }
 
 function clearSlotAssignment(prefix, options = {}) {
+  bumpSlotRevision(prefix);
   const markDelete = options.markDelete !== false;
   if (markDelete) {
     markSlotDeletion(prefix, state.loadedPhotos.get(prefix));
@@ -1126,6 +1199,7 @@ function clearSlotAssignment(prefix, options = {}) {
 }
 
 function setSlotFile(prefix, file) {
+  bumpSlotRevision(prefix);
   markSlotDeletion(prefix, state.loadedPhotos.get(prefix));
   revokeFilePreviewUrl(prefix);
   state.files.set(prefix, file);
@@ -1442,6 +1516,7 @@ function renderSlots(slots = state.slots) {
     input.addEventListener("change", () => {
       const file = input.files && input.files[0] ? input.files[0] : null;
       if (!file) {
+        bumpSlotRevision(slot.prefix);
         state.files.delete(slot.prefix);
         renderSlots();
         return;
@@ -2068,6 +2143,12 @@ function mergePhotoRecord(existing = {}, incoming = {}) {
     }
   }
   merged.prefix = incoming.prefix || existing.prefix || "";
+  const cachedFtp = state.ftpPreviewCache.get(
+    ftpPreviewCacheKey(merged, formValue("ean") || state.loadedEntryOriginal?.ean || "")
+  );
+  if (cachedFtp) {
+    return applyCachedFtpPreview(merged, merged.prefix, cachedFtp);
+  }
   return merged;
 }
 
@@ -3101,6 +3182,7 @@ productForm.addEventListener("submit", async (event) => {
 });
 
 clearButton.addEventListener("click", () => {
+  state.photoLoadRequestId += 1;
   productForm.reset();
   productForm.elements.product_id.value = "";
   for (const prefix of Array.from(state.filePreviewUrls.keys())) {
