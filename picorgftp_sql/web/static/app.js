@@ -31,6 +31,7 @@ const state = {
   activeListPromptKeys: new Set(),
   colorFieldLabels: {},
   ftpPreviewLoading: new Set(),
+  ftpPreviewBackgroundLoading: new Set(),
   backgroundFtpPreviewTimer: 0,
   backgroundFtpPreviewActive: false,
   photoSourcesLoaded: new Set(),
@@ -902,22 +903,35 @@ function renderSlotBadges(container, photo, file, prefix) {
       (key === "sql" && sqlLinkFromPhoto(photo));
     const badge = document.createElement(canPreview ? "button" : "span");
     const selected = selectedSlotSource(prefix, photo) === key;
+    const loading = key === "ftp" && state.ftpPreviewLoading.has(prefix);
     badge.dataset.source = key;
     badge.className = `slot-badge slot-badge-${key} ${photo && photo[key] ? "on" : ""} ${
       selected ? "selected" : ""
-    }`;
-    badge.title = selected ? `${title} (aktywny podglad)` : title;
+    } ${loading ? "loading" : ""}`;
+    badge.title = loading
+      ? "Pobieranie miniatury FTP w tle"
+      : selected
+      ? `${title} (aktywny podglad)`
+      : title;
     badge.textContent = label;
     if (canPreview) {
       badge.type = "button";
       badge.setAttribute("aria-pressed", selected ? "true" : "false");
+      if (loading) {
+        badge.setAttribute("aria-busy", "true");
+      }
       badge.addEventListener("click", (event) => {
         event.stopPropagation();
         state.slotSources.set(prefix, key);
         if (key === "ftp" && !photo.ftp_token) {
-          loadFtpPreview(photo, prefix).catch((error) => {
-            formStatus.textContent = error.message;
-          });
+          if (state.ftpPreviewLoading.has(prefix)) {
+            state.ftpPreviewBackgroundLoading.delete(prefix);
+            updateSlotPreview(prefix);
+          } else {
+            loadFtpPreview(photo, prefix).catch((error) => {
+              formStatus.textContent = error.message;
+            });
+          }
         } else {
           updateSlotPreview(prefix);
         }
@@ -943,16 +957,40 @@ function renderSlotBadges(container, photo, file, prefix) {
   container.appendChild(badges);
 }
 
+function setFtpBadgeLoading(prefix, loading) {
+  const card = slotGrid.querySelector(`[data-slot-prefix="${prefix}"]`);
+  const badge = card?.querySelector('.slot-badge-ftp[data-source="ftp"]');
+  if (!badge) return;
+  const selected = badge.classList.contains("selected");
+  badge.classList.toggle("loading", Boolean(loading));
+  if (loading) {
+    badge.setAttribute("aria-busy", "true");
+    badge.title = "Pobieranie miniatury FTP w tle";
+  } else {
+    badge.removeAttribute("aria-busy");
+    badge.title = selected ? "Wpis dla slotu jest na FTP (aktywny podglad)" : "Wpis dla slotu jest na FTP";
+  }
+}
+
 async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestId, options = {}) {
   if (!photo?.ftp_filename || state.ftpPreviewLoading.has(prefix)) return;
   const sourceBefore = selectedSlotSource(prefix, photo);
   const explicitSourceBefore = state.slotSources.get(prefix);
   state.ftpPreviewLoading.add(prefix);
   const background = Boolean(options.background);
+  if (background) {
+    state.ftpPreviewBackgroundLoading.add(prefix);
+  } else {
+    state.ftpPreviewBackgroundLoading.delete(prefix);
+  }
   if (!background) {
     formStatus.textContent = `Pobieranie podgladu FTP dla slotu ${prefix}...`;
   }
-  updateSlotPreview(prefix);
+  if (background && sourceBefore !== "ftp") {
+    setFtpBadgeLoading(prefix, true);
+  } else {
+    updateSlotPreview(prefix);
+  }
   try {
     const payload = await requestJson("/api/ftp-preview", {
       method: "POST",
@@ -979,7 +1017,13 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
     }
   } finally {
     state.ftpPreviewLoading.delete(prefix);
-    updateSlotPreview(prefix);
+    state.ftpPreviewBackgroundLoading.delete(prefix);
+    const currentPhoto = state.loadedPhotos.get(prefix);
+    if (background && selectedSlotSource(prefix, currentPhoto) !== "ftp") {
+      setFtpBadgeLoading(prefix, false);
+    } else {
+      updateSlotPreview(prefix);
+    }
   }
 }
 
@@ -1136,8 +1180,23 @@ function updateSlotPreview(prefix) {
   detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, prefix);
   card.querySelectorAll(".slot-badge[data-source]").forEach((badge) => {
     const selected = selectedSlotSource(prefix, loadedPhoto) === badge.dataset.source;
+    const loading = badge.dataset.source === "ftp" && state.ftpPreviewLoading.has(prefix);
+    const titleBySource = {
+      local: "Plik jest w folderze backendu",
+      ftp: "Wpis dla slotu jest na FTP",
+      sql: "Wpis dla slotu jest w SQL",
+    };
     badge.classList.toggle("selected", selected);
+    badge.classList.toggle("loading", loading);
     badge.setAttribute("aria-pressed", selected ? "true" : "false");
+    if (loading) {
+      badge.setAttribute("aria-busy", "true");
+      badge.title = "Pobieranie miniatury FTP w tle";
+    } else {
+      badge.removeAttribute("aria-busy");
+      const baseTitle = titleBySource[badge.dataset.source] || "";
+      badge.title = selected ? `${baseTitle} (aktywny podglad)` : baseTitle;
+    }
   });
   if (fitButton) {
     fitButton.classList.toggle("active", isSlotFit(prefix));
@@ -1155,7 +1214,11 @@ function updateSlotPreview(prefix) {
   }
   if (!loadedPhoto) return;
   preview.classList.add("loaded-photo");
-  if (state.ftpPreviewLoading.has(prefix)) {
+  if (
+    state.ftpPreviewLoading.has(prefix) &&
+    !state.ftpPreviewBackgroundLoading.has(prefix) &&
+    selectedSlotSource(prefix, loadedPhoto) === "ftp"
+  ) {
     empty.textContent = "Pobieranie z FTP...";
     preview.classList.add("thumb-loading");
     return;
@@ -1287,7 +1350,11 @@ function renderSlots(slots = state.slots) {
     } else if (loadedPhoto) {
       preview.classList.add("loaded-photo");
       const thumb = thumbnailUrl(loadedPhoto, slot.prefix);
-      if (state.ftpPreviewLoading.has(slot.prefix)) {
+      if (
+        state.ftpPreviewLoading.has(slot.prefix) &&
+        !state.ftpPreviewBackgroundLoading.has(slot.prefix) &&
+        selectedSlotSource(slot.prefix, loadedPhoto) === "ftp"
+      ) {
         preview.classList.add("thumb-loading");
         empty.textContent = "Pobieranie z FTP...";
       } else if (thumb && (loadedPhoto.is_image || selectedSlotSource(slot.prefix, loadedPhoto) === "sql")) {
@@ -2065,6 +2132,7 @@ async function loadPhotosForEntry(entry, options = {}) {
   state.deletedSlots.clear();
   state.slotSources.clear();
   state.ftpPreviewLoading.clear();
+  state.ftpPreviewBackgroundLoading.clear();
   state.photoSourcesLoaded.clear();
   window.clearTimeout(state.backgroundFtpPreviewTimer);
   const sources = progressive ? ["local", "sql", "ftp"] : ["all"];
@@ -2120,6 +2188,7 @@ function fillForm(entry, options = {}) {
   state.deletedSlots.clear();
   state.slotSources.clear();
   state.ftpPreviewLoading.clear();
+  state.ftpPreviewBackgroundLoading.clear();
   state.photoSourcesLoaded.clear();
   productForm.elements.product_id.value = entry.product_id || "";
   productForm.elements.name.value = entry.name || "";
@@ -3025,6 +3094,7 @@ clearButton.addEventListener("click", () => {
   state.slotSources.clear();
   state.photoSourceStatus.clear();
   state.ftpPreviewLoading.clear();
+  state.ftpPreviewBackgroundLoading.clear();
   state.photoSourcesLoaded.clear();
   window.clearTimeout(state.backgroundFtpPreviewTimer);
   state.loadedEntryOriginal = null;
