@@ -903,13 +903,14 @@ function renderSlotBadges(container, photo, file, prefix) {
       (key === "sql" && sqlLinkFromPhoto(photo));
     const badge = document.createElement(canPreview ? "button" : "span");
     const selected = selectedSlotSource(prefix, photo) === key;
-    const loading = key === "ftp" && state.ftpPreviewLoading.has(prefix);
+    const loading =
+      isPhotoSourceLoading(key) || (key === "ftp" && state.ftpPreviewLoading.has(prefix));
     badge.dataset.source = key;
     badge.className = `slot-badge slot-badge-${key} ${photo && photo[key] ? "on" : ""} ${
       selected ? "selected" : ""
     } ${loading ? "loading" : ""}`;
     badge.title = loading
-      ? "Pobieranie miniatury FTP w tle"
+      ? sourceLoadingTitle(key)
       : selected
       ? `${title} (aktywny podglad)`
       : title;
@@ -957,6 +958,24 @@ function renderSlotBadges(container, photo, file, prefix) {
   container.appendChild(badges);
 }
 
+function isPhotoSourceLoading(source) {
+  const status = state.photoSourceStatus.get(source);
+  return status === "pending" || status === "loading";
+}
+
+function sourceLoadingTitle(source) {
+  if (source === "ftp") {
+    return "Wczytywanie FTP";
+  }
+  if (source === "local") {
+    return "Wczytywanie plikow lokalnych";
+  }
+  if (source === "sql") {
+    return "Wczytywanie SQL";
+  }
+  return "Wczytywanie danych";
+}
+
 function setFtpBadgeLoading(prefix, loading) {
   const card = slotGrid.querySelector(`[data-slot-prefix="${prefix}"]`);
   const badge = card?.querySelector('.slot-badge-ftp[data-source="ftp"]');
@@ -986,7 +1005,7 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
   if (!background) {
     formStatus.textContent = `Pobieranie podgladu FTP dla slotu ${prefix}...`;
   }
-  if (background && sourceBefore !== "ftp") {
+  if (background) {
     setFtpBadgeLoading(prefix, true);
   } else {
     updateSlotPreview(prefix);
@@ -1048,12 +1067,7 @@ function nextBackgroundFtpPreviewCandidate() {
 function scheduleBackgroundFtpPreviewLoad(requestId = state.photoLoadRequestId, delayMs = 900) {
   window.clearTimeout(state.backgroundFtpPreviewTimer);
   state.backgroundFtpPreviewTimer = window.setTimeout(() => {
-    const run = () => loadNextBackgroundFtpPreview(requestId).catch(() => {});
-    if (window.requestIdleCallback) {
-      window.requestIdleCallback(run, { timeout: 2500 });
-    } else {
-      run();
-    }
+    loadNextBackgroundFtpPreview(requestId).catch(() => {});
   }, delayMs);
 }
 
@@ -1180,7 +1194,9 @@ function updateSlotPreview(prefix) {
   detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, prefix);
   card.querySelectorAll(".slot-badge[data-source]").forEach((badge) => {
     const selected = selectedSlotSource(prefix, loadedPhoto) === badge.dataset.source;
-    const loading = badge.dataset.source === "ftp" && state.ftpPreviewLoading.has(prefix);
+    const loading =
+      isPhotoSourceLoading(badge.dataset.source) ||
+      (badge.dataset.source === "ftp" && state.ftpPreviewLoading.has(prefix));
     const titleBySource = {
       local: "Plik jest w folderze backendu",
       ftp: "Wpis dla slotu jest na FTP",
@@ -1191,7 +1207,7 @@ function updateSlotPreview(prefix) {
     badge.setAttribute("aria-pressed", selected ? "true" : "false");
     if (loading) {
       badge.setAttribute("aria-busy", "true");
-      badge.title = "Pobieranie miniatury FTP w tle";
+      badge.title = sourceLoadingTitle(badge.dataset.source);
     } else {
       badge.removeAttribute("aria-busy");
       const baseTitle = titleBySource[badge.dataset.source] || "";
@@ -2150,6 +2166,9 @@ async function loadPhotosForEntry(entry, options = {}) {
         setPhotoSourceStatus(source, "done", requestId);
         state.photoSourcesLoaded.add(payload.source || source);
         applyPhotoPayload(payload.photos || []);
+        if ((payload.source || source) === "ftp" || (payload.source || source) === "all") {
+          scheduleBackgroundFtpPreviewLoad(requestId, 160);
+        }
         updateSubmitButtonState();
       }
       return payload;
