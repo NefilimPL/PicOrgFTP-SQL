@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import threading
 import unittest
+from unittest.mock import patch
 
+from picorgftp_sql.common import Aa, AR, I, f
 from picorgftp_sql.product_state import ProductState
 
 try:
@@ -117,6 +121,50 @@ class _ClearSlotsHarness:
         self.dashboard_refreshes += 1
 
 
+class _RemoveFileHarness:
+    def __init__(self, *, working_path=None, local_path=None, ftp_path=None) -> None:
+        self.is_processing = False
+        self.pending_additions = {}
+        self.pending_deletions = {}
+        self.pending_ftp_deletions = {}
+        self.ftp_remote_only = {}
+        self.ftp_presence = {}
+        self.ftp_preview_files = {}
+        self.slots = [
+            {
+                Aa: "01",
+                f: working_path,
+                "local_path": local_path,
+                "ftp_path": ftp_path,
+                "preview_path": working_path or local_path or ftp_path,
+                "sql_presence_unknown": False,
+            }
+        ]
+        self.cleared_slots: list[int] = []
+        self.sql_refreshes: list[tuple[int, object]] = []
+        self.mark_calls: list[tuple[int, object]] = []
+        self.dashboard_refreshes = 0
+        self.focus_calls = 0
+
+    def _get_slot_preview_path(self, slot):
+        return slot.get("preview_path") or slot.get(f)
+
+    def _clear_slot_preview(self, idx: int) -> None:
+        self.cleared_slots.append(idx)
+
+    def _refresh_slot_sql_ui(self, idx: int, present=None, state=None) -> None:
+        self.sql_refreshes.append((idx, present))
+
+    def _mark_slot(self, idx: int, color) -> None:
+        self.mark_calls.append((idx, color))
+
+    def _queue_dashboard_refresh(self) -> None:
+        self.dashboard_refreshes += 1
+
+    def focus_force(self) -> None:
+        self.focus_calls += 1
+
+
 @unittest.skipIf(App is None, f"App import unavailable: {APP_IMPORT_ERROR}")
 class ExistingLookupStateTests(unittest.TestCase):
     def test_cancel_existing_lookup_invalidates_request_and_clears_busy_state(self) -> None:
@@ -183,6 +231,28 @@ class ExistingLookupStateTests(unittest.TestCase):
         self.assertIsNone(harness.slots[0]["marker"])
         self.assertEqual(harness.sync_calls, 1)
         self.assertEqual(harness.dashboard_refreshes, 1)
+
+    def test_remove_file_deletes_local_path_when_filepath_missing(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            processed_dir = Path(temp_dir) / "_ZDJECIA PRZEROBIONE_"
+            processed_dir.mkdir()
+            local_file = processed_dir / "5901234567890_01_MAIN.jpg"
+            local_file.write_bytes(b"image")
+            harness = _RemoveFileHarness(local_path=str(local_file))
+
+            with (
+                patch("picorgftp_sql.app.l", str(processed_dir)),
+                patch("picorgftp_sql.app.O.askyesno", return_value=True),
+            ):
+                App._remove_file(harness, 0)
+
+        self.assertEqual(harness.pending_deletions, {0: str(local_file)})
+        self.assertEqual(harness.pending_ftp_deletions, {})
+        self.assertEqual(harness.cleared_slots, [0])
+        self.assertEqual(harness.sql_refreshes, [(0, I)])
+        self.assertEqual(harness.mark_calls, [(0, AR)])
+        self.assertEqual(harness.dashboard_refreshes, 1)
+        self.assertEqual(harness.focus_calls, 1)
 
 
 if __name__ == "__main__":

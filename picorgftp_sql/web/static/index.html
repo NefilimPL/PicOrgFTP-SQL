@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicOrgFTP-SQL Web</title>
-    <link rel="stylesheet" href="/static/app.css">
+    <link rel="stylesheet" href="/static/app.css?v=20260511-app-secret">
   </head>
   <body class="app-screen">
     <header class="topbar">
@@ -27,7 +27,10 @@
       <section class="product-section" aria-labelledby="productTitle">
         <h1 id="productTitle">Produkt</h1>
         <form id="productForm" class="product-form" autocomplete="off">
-          <input name="product_id" type="hidden">
+          <label class="product-id-field">
+            ID produktu
+            <input name="product_id" autocomplete="off" spellcheck="false" readonly placeholder="Nowy wpis">
+          </label>
           <label>
             Nazwa
             <input name="name" autocomplete="off" spellcheck="false" required>
@@ -41,15 +44,15 @@
             <input name="model" autocomplete="off" spellcheck="false" required>
           </label>
           <label>
-            Kolor 1
+            <span data-product-field-label="color1">Kolor 1</span>
             <input name="color1" autocomplete="off" spellcheck="false" required>
           </label>
           <label>
-            Kolor 2
+            <span data-product-field-label="color2">Kolor 2</span>
             <input name="color2" autocomplete="off" spellcheck="false">
           </label>
           <label>
-            Kolor 3
+            <span data-product-field-label="color3">Kolor 3</span>
             <input name="color3" autocomplete="off" spellcheck="false">
           </label>
           <label>
@@ -63,7 +66,6 @@
           <div class="lookup-actions">
             <button id="findByEanButton" type="button" class="secondary-button">Szukaj EAN</button>
             <button id="findProductButton" type="button" class="secondary-button">Dopasuj produkt</button>
-            <button id="saveEntryButton" type="button" class="secondary-button" title="Zapisuje same dane produktu w Excelu, bez obrobki zdjec, FTP i SQL.">Zapisz wpis bez plikow</button>
           </div>
           <label class="entry-select-field">
             Istniejacy wpis
@@ -72,7 +74,7 @@
             </select>
           </label>
           <div class="form-actions">
-            <button id="submitButton" type="submit">Przetworz</button>
+            <button id="submitButton" type="submit" title="Pobiera brakujace zdjecia z FTP i uzupelnia lokalne pliki.">Synchronizuj</button>
             <button id="clearButton" type="button" class="secondary-button">Wyczysc dane</button>
             <span id="formStatus" role="status"></span>
           </div>
@@ -132,6 +134,16 @@
       </section>
     </div>
 
+    <div id="listUsageModal" class="modal-view">
+      <section class="modal-panel compact-modal">
+        <div class="section-heading">
+          <h1 id="listUsageTitle">Wpis uzywany przez produkty</h1>
+          <button type="button" class="ghost-button modal-close" data-close-modal>Zamknij</button>
+        </div>
+        <div id="listUsageOutput" class="entry-matches"></div>
+      </section>
+    </div>
+
     <div id="historyView" class="manager-view modal-view">
       <section class="manager-panel">
         <div class="section-heading">
@@ -164,10 +176,30 @@
           <h1>Logi</h1>
           <div class="heading-actions">
             <button id="logsRefreshButton" type="button" class="secondary-button">Odswiez</button>
+            <button id="logsClearButton" type="button" class="danger-button">Wyczysc logi</button>
             <button type="button" class="ghost-button modal-close" data-close-modal>Zamknij</button>
           </div>
         </div>
         <div id="logsOutput" class="logs-output empty-state">Logi sa dostepne tylko dla administratora.</div>
+      </section>
+    </div>
+
+    <div id="logsClearModal" class="modal-view">
+      <section class="modal-panel compact-modal">
+        <div class="section-heading">
+          <h1>Czyszczenie logow</h1>
+          <button type="button" class="ghost-button modal-close" data-close-logs-clear>Anuluj</button>
+        </div>
+        <form id="logsClearForm" class="settings-grid">
+          <label>
+            Haslo administratora
+            <input id="logsClearPassword" type="password" autocomplete="current-password" />
+          </label>
+          <div class="heading-actions">
+            <button type="submit" class="danger-button">Wyczysc logi</button>
+            <span id="logsClearStatus"></span>
+          </div>
+        </form>
       </section>
     </div>
 
@@ -215,6 +247,6 @@
       </article>
     </template>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260512-slot-safe-thumb-cache"></script>
   </body>
 </html>

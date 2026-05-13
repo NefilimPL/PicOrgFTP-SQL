@@ -12,11 +12,13 @@ import os
 from pathlib import Path
 import secrets
 import tempfile
+import threading
 import time
 import unicodedata
 from urllib.parse import urlparse
 
 from . import common, config, settings
+from . import encryption
 from .common import (
     APP_SECRET_KEY,
     AUTO_CONTENT_FIT_KEY,
@@ -55,6 +57,7 @@ from .excel_utils import (
     PRODUCT_ID_HEADER,
     TYPE_HEADER,
     add_to_list,
+    find_list_value_usage,
     prepare_excel_lists,
     remove_from_list,
     save_ean_entry,
@@ -77,6 +80,10 @@ from .workflow_utils import (
 from .web_workflow import available_convert_formats
 from .version import get_display_version
 
+
+WEB_FTP_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
+WEB_FTP_CACHE_CLEAN_INTERVAL_SECONDS = 60 * 60
+_FTP_CACHE_LAST_CLEANUP = 0.0
 
 LIST_SHEETS = {
     "names": "NAZWY",
@@ -106,6 +113,18 @@ PASSWORD_ITERATIONS = 200_000
 _FILE_INDEX: LocalFileIndex | None = None
 _FILE_INDEX_KEY: tuple[str, str] | None = None
 _FILE_INDEX_REFRESH_STARTED = False
+_FTP_CACHE_LOCKS: dict[str, threading.Lock] = {}
+_FTP_CACHE_LOCKS_GUARD = threading.Lock()
+
+
+class ListValueInUseError(ValueError):
+    """Raised when an Excel list value is still referenced by product entries."""
+
+    def __init__(self, list_key: str, value: str, used_by: list[dict[str, str]]):
+        self.list_key = list_key
+        self.value = value
+        self.used_by = used_by
+        super().__init__("Nie usunieto wartosci, bo jest uzywana przez produkty.")
 
 
 @dataclass(frozen=True)
@@ -229,6 +248,8 @@ def load_web_data() -> dict[str, object]:
         },
         "entries": [entry_to_payload(entry) for entry in entries],
         "file_index": file_index_status(start=True),
+        "color_field_labels": dict(config.CONFIG.get(COLOR_FIELD_LABELS_KEY, {}) or {}),
+        "ftp_enabled": bool(config.CONFIG.get(ft, True)),
     }
 
 
@@ -371,9 +392,71 @@ def history_snapshot(*, user: str = "", limit: int = 200) -> dict[str, object]:
     return {"groups": groups, "users": users, "count": len(records)}
 
 
-def _ftp_cache_dir(ean: object) -> str:
+def _ftp_cache_dir(ean: object, cache_scope: object = "") -> str:
     safe_ean = sanitize_path_segment(ean) or "NO-EAN"
+    safe_scope = sanitize_path_segment(cache_scope)
+    if safe_scope:
+        return os.path.join(settings.AC, "web_ftp_cache", safe_scope, safe_ean)
     return os.path.join(settings.AC, "web_ftp_cache", safe_ean)
+
+
+def _ftp_cache_root() -> str:
+    return os.path.join(settings.AC, "web_ftp_cache")
+
+
+def cleanup_web_ftp_cache(
+    *,
+    max_age_seconds: int = WEB_FTP_CACHE_MAX_AGE_SECONDS,
+    min_interval_seconds: int = WEB_FTP_CACHE_CLEAN_INTERVAL_SECONDS,
+    force: bool = False,
+) -> dict[str, object]:
+    """Remove stale browser FTP preview cache files."""
+
+    global _FTP_CACHE_LAST_CLEANUP
+    now = time.time()
+    if not force and now - _FTP_CACHE_LAST_CLEANUP < max(1, int(min_interval_seconds or 1)):
+        return {"deleted_files": 0, "deleted_dirs": 0, "skipped": True, "errors": []}
+    _FTP_CACHE_LAST_CLEANUP = now
+    root = os.path.abspath(_ftp_cache_root())
+    if not os.path.isdir(root):
+        return {"deleted_files": 0, "deleted_dirs": 0, "skipped": False, "errors": []}
+
+    cutoff = now - max(60, int(max_age_seconds or WEB_FTP_CACHE_MAX_AGE_SECONDS))
+    deleted_files = 0
+    deleted_dirs = 0
+    errors: list[str] = []
+    for current_root, dirs, files in os.walk(root, topdown=False):
+        try:
+            if os.path.commonpath([root, os.path.abspath(current_root)]) != root:
+                continue
+        except ValueError:
+            continue
+        for filename in files:
+            path = os.path.join(current_root, filename)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    deleted_files += 1
+            except OSError as exc:
+                errors.append(f"{path}: {exc}")
+        for dirname in dirs:
+            path = os.path.join(current_root, dirname)
+            try:
+                os.rmdir(path)
+                deleted_dirs += 1
+            except OSError:
+                pass
+    try:
+        os.rmdir(root)
+        deleted_dirs += 1
+    except OSError:
+        pass
+    return {
+        "deleted_files": deleted_files,
+        "deleted_dirs": deleted_dirs,
+        "skipped": False,
+        "errors": errors,
+    }
 
 
 def _ftp_cache_filename(filename: object) -> str:
@@ -400,18 +483,7 @@ def _cached_ftp_previews(ean: object) -> tuple[dict[str, str], dict[str, str]]:
         preview_paths: dict[str, str] = {}
         for prefix, filename in remote_files.items():
             target_path = os.path.join(cache_dir, _ftp_cache_filename(filename))
-            if not os.path.isfile(target_path):
-                temp_path = f"{target_path}.download"
-                try:
-                    with open(temp_path, "wb") as handle:
-                        ftp.retrbinary(f"RETR {filename}", handle.write)
-                    os.replace(temp_path, target_path)
-                finally:
-                    if os.path.exists(temp_path):
-                        try:
-                            os.remove(temp_path)
-                        except OSError:
-                            pass
+            _download_ftp_to_cache(ftp, filename, target_path)
             if os.path.isfile(target_path):
                 preview_paths[prefix] = target_path
         return remote_files, preview_paths
@@ -422,15 +494,16 @@ def _cached_ftp_previews(ean: object) -> tuple[dict[str, str], dict[str, str]]:
             pass
 
 
-def cache_ftp_preview(ean: object, filename: object) -> str:
+def cache_ftp_preview(ean: object, filename: object, cache_scope: object = "") -> str:
     """Download one FTP file to the web preview cache and return the local path."""
 
+    cleanup_web_ftp_cache()
     ean_text = _text(ean)
     filename_text = os.path.basename(_text(filename))
     if not ean_text or not filename_text:
         raise ValueError("Brakuje EAN albo nazwy pliku FTP.")
     ftp = connect_ftp(config.CONFIG.get(H, {}))
-    cache_dir = _ftp_cache_dir(ean_text)
+    cache_dir = _ftp_cache_dir(ean_text, cache_scope=cache_scope)
     os.makedirs(cache_dir, exist_ok=True)
     try:
         remote_files = select_remote_files_for_ean(ean_text, list_remote_filenames(ftp))
@@ -438,24 +511,58 @@ def cache_ftp_preview(ean: object, filename: object) -> str:
         if filename_text not in allowed:
             raise ValueError("Plik FTP nie pasuje do wybranego EAN.")
         target_path = os.path.join(cache_dir, _ftp_cache_filename(filename_text))
-        if not os.path.isfile(target_path):
-            temp_path = f"{target_path}.download"
-            try:
-                with open(temp_path, "wb") as handle:
-                    ftp.retrbinary(f"RETR {filename_text}", handle.write)
-                os.replace(temp_path, target_path)
-            finally:
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except OSError:
-                        pass
+        _download_ftp_to_cache(ftp, filename_text, target_path)
         return target_path
     finally:
         try:
             ftp.quit()
         except Exception:
             pass
+
+
+def _ftp_cache_lock(target_path: str) -> threading.Lock:
+    key = os.path.abspath(target_path)
+    with _FTP_CACHE_LOCKS_GUARD:
+        lock = _FTP_CACHE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _FTP_CACHE_LOCKS[key] = lock
+        return lock
+
+
+def _download_ftp_to_cache(ftp, filename: str, target_path: str) -> str:
+    """Download an FTP file into cache without racing concurrent web requests."""
+
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    lock = _ftp_cache_lock(target_path)
+    with lock:
+        if os.path.isfile(target_path):
+            return target_path
+        temp_path = f"{target_path}.{secrets.token_hex(8)}.download"
+        try:
+            with open(temp_path, "wb") as handle:
+                ftp.retrbinary(f"RETR {filename}", handle.write)
+            last_error: OSError | None = None
+            for _attempt in range(5):
+                try:
+                    if os.path.isfile(target_path):
+                        return target_path
+                    os.replace(temp_path, target_path)
+                    return target_path
+                except OSError as exc:
+                    last_error = exc
+                    time.sleep(0.2)
+            if os.path.isfile(target_path):
+                return target_path
+            if last_error is not None:
+                raise last_error
+            return target_path
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
 
 
 def _dedupe(values: list[object], *, limit: int = 200) -> list[str]:
@@ -743,15 +850,31 @@ def search_entries(
 def find_entry_by_identity(*, product_id: str = "", ean: str = "") -> dict[str, str] | None:
     """Return one saved entry by product id or EAN."""
 
-    matches = search_entries(product_id=product_id, ean=ean, limit=1)
-    return matches[0] if matches else None
+    if _text(product_id):
+        matches = search_entries(product_id=product_id, limit=1)
+        if matches:
+            return matches[0]
+    if _text(ean) and _text(ean).upper() != NO_EAN_PLACEHOLDER:
+        matches = search_entries(ean=ean, limit=1)
+        if matches:
+            return matches[0]
+    return None
 
 
 def save_web_entry(payload: dict[str, object]) -> dict[str, object]:
     """Create or update an Excel entry using the existing desktop helper."""
 
+    product_id = _text(payload.get("product_id"))
+    ean = _text(payload.get("ean"))
+    existing = find_entry_by_identity(product_id=product_id) if product_id else None
+    if existing is None and ean and ean.upper() != NO_EAN_PLACEHOLDER:
+        existing = find_entry_by_identity(ean=ean)
+    if existing:
+        product_id = product_id or _text(existing.get("product_id"))
+        if not ean and _text(existing.get("ean")):
+            ean = _text(existing.get("ean"))
     result = save_ean_entry(
-        _text(payload.get("ean")) or NO_EAN_PLACEHOLDER,
+        ean or NO_EAN_PLACEHOLDER,
         _text(payload.get("name")),
         _text(payload.get("type_name")),
         _text(payload.get("model")),
@@ -759,7 +882,7 @@ def save_web_entry(payload: dict[str, object]) -> dict[str, object]:
         _text(payload.get("color2")),
         _text(payload.get("color3")),
         _text(payload.get("extra")),
-        product_id=_text(payload.get("product_id")),
+        product_id=product_id,
     )
     if not result:
         raise ValueError("Nie udalo sie zapisac wpisu w Excelu.")
@@ -789,6 +912,9 @@ def remove_list_value(list_key: str, value: str) -> dict[str, object]:
     sheet = LIST_SHEETS.get(list_key)
     if not sheet:
         raise ValueError("Nieznana lista.")
+    used_by = find_list_value_usage(sheet, value)
+    if used_by:
+        raise ListValueInUseError(list_key, value, used_by)
     remove_from_list(sheet, value)
     return load_web_data()
 
@@ -846,6 +972,11 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
         secret = _text(app_payload.get(APP_SECRET_KEY))
         if secret:
             _save_local_settings({APP_SECRET_KEY: common._encode_local_secret(secret)})
+            common.APP_SECRET = secret
+            common.BASE_DIR_SETTINGS_TEMPLATE[APP_SECRET_KEY] = common._encode_local_secret(
+                secret
+            )
+            encryption.APP_SECRET = secret
     if LOCAL_FILE_INDEX_KEY in app_payload:
         cfg[LOCAL_FILE_INDEX_KEY] = bool(app_payload.get(LOCAL_FILE_INDEX_KEY))
     if AUTO_CONTENT_FIT_KEY in app_payload:
@@ -947,6 +1078,7 @@ def settings_snapshot() -> dict[str, object]:
         "config_path": config.CONFIG_PATH,
         "auth_enabled": True,
         "users": load_users(),
+        "app_secret_set": bool(_text(common.APP_SECRET)),
         "local_file_index": bool(cfg.get(LOCAL_FILE_INDEX_KEY, True)),
         "auto_content_fit": bool(cfg.get(AUTO_CONTENT_FIT_KEY, False)),
         "processing": config._normalize_processing_settings(
@@ -1123,6 +1255,7 @@ def find_product_photos(
                 continue
             ext = os.path.splitext(filename)[1].lower()
             results_by_prefix[parsed.normalized_label] = {
+                "ean": entry.ean,
                 "prefix": parsed.normalized_label,
                 "filename": filename,
                 "path": path,
@@ -1142,6 +1275,7 @@ def find_product_photos(
                 item = results_by_prefix.setdefault(
                     prefix,
                     {
+                        "ean": entry.ean,
                         "prefix": prefix,
                         "filename": "",
                         "path": "",
@@ -1152,6 +1286,7 @@ def find_product_photos(
                     },
                 )
                 item["ftp"] = True
+                item["ean"] = entry.ean
                 item["ftp_filename"] = filename
                 item["ftp_path"] = ""
                 ext = os.path.splitext(filename)[1].lower()
@@ -1180,6 +1315,7 @@ def find_product_photos(
                     item = results_by_prefix.setdefault(
                         prefix,
                         {
+                            "ean": entry.ean,
                             "prefix": prefix,
                             "filename": "",
                             "path": "",
@@ -1191,6 +1327,7 @@ def find_product_photos(
                         },
                     )
                     item["sql"] = bool(present)
+                    item["ean"] = entry.ean
                     item["sql_value"] = values.get(prefix, "")
                     sql_path = urlparse(str(item["sql_value"] or "")).path
                     sql_ext = os.path.splitext(sql_path)[1].lower()

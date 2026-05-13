@@ -12,11 +12,14 @@ from picorgftp_sql.web_workflow import (
     WebProductForm,
     WebUploadedSlot,
     WebProcessingOptions,
+    _slot_category,
     processing_options_from_config,
     process_web_uploads,
     slot_definitions_from_config,
+    normalized_product_payload,
     validate_product_form,
 )
+from picorgftp_sql.workflow_utils import build_product_directory, build_slot_filename
 
 
 class WebWorkflowTests(unittest.TestCase):
@@ -28,8 +31,8 @@ class WebWorkflowTests(unittest.TestCase):
     def test_process_web_uploads_saves_file_with_desktop_style_name(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
-            source = Path(temp_dir) / "source.txt"
-            source.write_text("not an image", encoding="utf-8")
+            source = Path(temp_dir) / "source.pdf"
+            source.write_bytes(b"%PDF-1.4\n")
             output_root = Path(temp_dir) / "processed"
 
             result = process_web_uploads(
@@ -48,7 +51,7 @@ class WebWorkflowTests(unittest.TestCase):
                         prefix="03",
                         label="DETAIL_pic",
                         source_path=str(source),
-                        original_filename="front.txt",
+                        original_filename="front.pdf",
                     )
                 ],
             )
@@ -58,10 +61,66 @@ class WebWorkflowTests(unittest.TestCase):
             saved = result.saved_files[0]
             self.assertEqual(
                 saved.filename,
-                "5901234567890_03_DETAIL_MAGGIORE_KOMODA_MA03_BIALY_DAB ARTISAN_LED-RGB.txt",
+                "5901234567890_03_DETAIL_MAGGIORE_KOMODA_MA03_BIALY_DAB ARTISAN_LED-RGB.pdf",
             )
             self.assertTrue(Path(saved.path).is_file())
             self.assertTrue(str(saved.path).startswith(str(output_root)))
+
+    def test_process_web_uploads_rejects_non_image_non_pdf(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            source = Path(temp_dir) / "source.txt"
+            source.write_text("not an image", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "Dozwolone sa pliki graficzne oraz PDF"):
+                process_web_uploads(
+                    base_output_dir=str(Path(temp_dir) / "processed"),
+                    form=WebProductForm(
+                        name="Maggiore",
+                        type_name="komoda",
+                        model="MA03",
+                        color1="bialy",
+                        ean="5901234567890",
+                    ),
+                    uploaded_slots=[
+                        WebUploadedSlot(
+                            prefix="03",
+                            label="DETAIL_pic",
+                            source_path=str(source),
+                            original_filename="front.txt",
+                        )
+                    ],
+                )
+
+    def test_process_web_uploads_normalizes_common_jpeg_extension_typo(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            source_jpg = Path(temp_dir) / "source.jpg"
+            source = Path(temp_dir) / "source.peg"
+            self._make_image(source_jpg)
+            source_jpg.rename(source)
+
+            result = process_web_uploads(
+                base_output_dir=str(Path(temp_dir) / "processed"),
+                form=WebProductForm(
+                    name="Maggiore",
+                    type_name="komoda",
+                    model="MA03",
+                    color1="bialy",
+                    ean="5901234567890",
+                ),
+                uploaded_slots=[
+                    WebUploadedSlot(
+                        prefix="03",
+                        label="DETAIL_pic",
+                        source_path=str(source),
+                        original_filename="front.peg",
+                    )
+                ],
+                options=WebProcessingOptions(resize_enabled=False),
+            )
+
+            self.assertTrue(result.saved_files[0].filename.endswith(".jpg"))
 
     def test_validate_product_form_rejects_invalid_ean(self) -> None:
         errors = validate_product_form(
@@ -95,6 +154,58 @@ class WebWorkflowTests(unittest.TestCase):
             self.assertEqual(result.ean, "5901234567890")
             self.assertEqual(result.saved_files, [])
             self.assertTrue(Path(result.output_dir).is_dir())
+
+    def test_process_web_uploads_allows_existing_file_at_target_path(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            output_root = Path(temp_dir) / "processed"
+            form = WebProductForm(
+                name="Maggiore",
+                type_name="komoda",
+                model="MA03",
+                color1="bialy",
+                extra="NO-LED",
+                ean="5901234567890",
+            )
+            payload = normalized_product_payload(form)
+            output_dir = build_product_directory(
+                str(output_root),
+                payload["name"],
+                payload["type_name"],
+                payload["model"],
+                payload["colors"],
+                payload["extra"],
+            )
+            filename = build_slot_filename(
+                payload["ean"],
+                "03",
+                _slot_category("DETAIL_pic"),
+                payload["name"],
+                payload["type_name"],
+                payload["model"],
+                payload["colors"],
+                payload["extra"],
+                ".pdf",
+            )
+            source = Path(output_dir) / filename
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"%PDF-1.4\n")
+
+            result = process_web_uploads(
+                base_output_dir=str(output_root),
+                form=form,
+                uploaded_slots=[
+                    WebUploadedSlot(
+                        prefix="03",
+                        label="DETAIL_pic",
+                        source_path=str(source),
+                        original_filename=filename,
+                    )
+                ],
+            )
+
+            self.assertEqual(result.saved_files[0].path, str(source))
+            self.assertEqual(source.read_bytes(), b"%PDF-1.4\n")
 
     def test_process_web_uploads_rejects_empty_change_by_default(self) -> None:
         with self.assertRaises(ValueError):

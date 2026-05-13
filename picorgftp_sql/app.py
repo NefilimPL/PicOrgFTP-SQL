@@ -21,6 +21,7 @@ from .excel_utils import (
     PRODUCT_ID_HEADER,
     TYPE_HEADER,
     add_to_list,
+    find_list_value_usage,
     label_category,
     prepare_excel_lists,
     remove_from_list,
@@ -6704,19 +6705,28 @@ class App(BU.Tk):
         D_ = idx
         E_ = C.slots[D_]
         F_ = E_[f]
-        if F_:
+        local_path = E_.get("local_path")
+        ftp_path = E_.get("ftp_path")
+        display_path = F_ or local_path or ftp_path or C._get_slot_preview_path(E_)
+        if display_path:
             if not O.askyesno(
-                "Usuń plik", f"Czy na pewno usunąć plik {A.path.basename(F_)}?"
+                "Usuń plik",
+                f"Czy na pewno usunąć plik {A.path.basename(display_path)}?",
             ):
                 return
             label = E_[Aa]
             G_ = h
+            local_delete_path = F_ or local_path
             if D_ in C.pending_additions:
                 C.pending_additions.pop(D_, I)
                 G_ = J
-            elif F_.startswith(l) and A.path.isfile(F_):
-                C.pending_deletions[D_] = F_
-            elif not F_.startswith(l):
+            elif (
+                local_delete_path
+                and local_delete_path.startswith(l)
+                and A.path.isfile(local_delete_path)
+            ):
+                C.pending_deletions[D_] = local_delete_path
+            else:
                 remote_name = I
                 info = C.ftp_remote_only.pop(label, I)
                 if info:
@@ -6917,6 +6927,26 @@ class App(BU.Tk):
         F_ = E_[0]
         C_ = D_.get(F_)
         G_ = LIST_EDITOR_TAB_LABELS.get(B_, B_)
+        usage = find_list_value_usage(EXCEL_SHEETS[B_], C_)
+        if usage:
+            lines = []
+            for item in usage[:30]:
+                product_id = item.get("product_id") or "BRAK-ID"
+                ean = item.get("ean") or "BRAK-EAN"
+                label = item.get("label") or "-"
+                fields = item.get("fields") or "-"
+                lines.append(f"{product_id} | EAN: {ean} | {fields} | {label}")
+            if len(usage) > 30:
+                lines.append(f"... oraz {len(usage) - 30} kolejnych wpisow")
+            O.showwarning(
+                LIST_REMOVE_DIALOG_TITLE,
+                (
+                    f"Nie usunieto '{C_}' z listy {G_}, bo wpis jest uzywany "
+                    "przez produkty z arkusza ENTRIES:\n\n"
+                    + "\n".join(lines)
+                ),
+            )
+            return
         if O.askyesno(
             LIST_REMOVE_DIALOG_TITLE,
             LIST_REMOVE_PROMPT_MSG.format(value=C_, list=G_),

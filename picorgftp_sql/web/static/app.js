@@ -27,6 +27,17 @@ const state = {
   photoLoadRequestId: 0,
   photoSourceStatus: new Map(),
   listFilter: "",
+  declinedListPrompts: new Set(),
+  activeListPromptKeys: new Set(),
+  colorFieldLabels: {},
+  ftpPreviewLoading: new Set(),
+  ftpPreviewBackgroundLoading: new Set(),
+  ftpPreviewCache: new Map(),
+  backgroundFtpPreviewTimer: 0,
+  backgroundFtpPreviewLimit: 3,
+  photoSourcesLoaded: new Set(),
+  ftpEnabled: true,
+  slotRevisions: new Map(),
 };
 
 const listLabels = {
@@ -62,12 +73,13 @@ const themeToggleButton = document.querySelector("#themeToggleButton");
 const entrySelect = document.querySelector("#entrySelect");
 const findByEanButton = document.querySelector("#findByEanButton");
 const findProductButton = document.querySelector("#findProductButton");
-const saveEntryButton = document.querySelector("#saveEntryButton");
 const listTabs = document.querySelector("#listTabs");
 const listValues = document.querySelector("#listValues");
 const listAddForm = document.querySelector("#listAddForm");
 const listAddInput = document.querySelector("#listAddInput");
 const listStatus = document.querySelector("#listStatus");
+const listUsageTitle = document.querySelector("#listUsageTitle");
+const listUsageOutput = document.querySelector("#listUsageOutput");
 const settingsOutput = document.querySelector("#settingsOutput");
 const settingsStatus = document.querySelector("#settingsStatus");
 const entryMatches = document.querySelector("#entryMatches");
@@ -77,7 +89,12 @@ const historyOutput = document.querySelector("#historyOutput");
 const historyDetailTitle = document.querySelector("#historyDetailTitle");
 const historyDetailOutput = document.querySelector("#historyDetailOutput");
 const logsRefreshButton = document.querySelector("#logsRefreshButton");
+const logsClearButton = document.querySelector("#logsClearButton");
+const logsClearForm = document.querySelector("#logsClearForm");
+const logsClearPassword = document.querySelector("#logsClearPassword");
+const logsClearStatus = document.querySelector("#logsClearStatus");
 const logsOutput = document.querySelector("#logsOutput");
+const logsButton = document.querySelector('[data-modal="logs"]');
 
 async function requestJson(path, options = {}) {
   let response;
@@ -95,7 +112,13 @@ async function requestJson(path, options = {}) {
     if (response.status === 401) {
       window.location.href = "/login";
     }
-    throw new Error(payload.detail || "Operacja nie powiodla sie.");
+    const detail = payload.detail;
+    const message =
+      typeof detail === "string" ? detail : detail?.message || "Operacja nie powiodla sie.";
+    const error = new Error(message);
+    error.status = response.status;
+    error.detail = detail;
+    throw error;
   }
   return payload;
 }
@@ -105,6 +128,9 @@ function updateAdminUi() {
   document.querySelectorAll(".admin-only").forEach((node) => {
     node.style.display = state.isAdmin ? "" : "none";
   });
+  if (!state.isAdmin) {
+    updateLogAlert({});
+  }
 }
 
 function setActiveModalNav(name = "") {
@@ -152,6 +178,8 @@ function openModal(name) {
 
 function closeModals() {
   document.querySelectorAll(".modal-view").forEach((modal) => modal.classList.remove("active"));
+  if (logsClearPassword) logsClearPassword.value = "";
+  if (logsClearStatus) logsClearStatus.textContent = "";
   setActiveModalNav("");
 }
 
@@ -232,6 +260,113 @@ const fieldListKey = {
   color3: "colors",
   extra: "extras",
 };
+
+const fieldListLabels = {
+  name: "Nazwa",
+  type_name: "Typ",
+  model: "Model",
+  color1: "Kolor 1",
+  color2: "Kolor 2",
+  color3: "Kolor 3",
+  extra: "Dodatek",
+};
+
+const defaultColorFieldLabels = {
+  color1: "Kolor 1",
+  color2: "Kolor 2",
+  color3: "Kolor 3",
+};
+
+function cleanDisplayLabel(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[:*]+$/g, "")
+    .trim();
+}
+
+function productFieldLabel(fieldName) {
+  if (fieldName in defaultColorFieldLabels) {
+    return cleanDisplayLabel(state.colorFieldLabels?.[fieldName]) || defaultColorFieldLabels[fieldName];
+  }
+  return fieldListLabels[fieldName] || fieldName;
+}
+
+function applyProductFieldLabels() {
+  for (const fieldName of Object.keys(defaultColorFieldLabels)) {
+    const node = document.querySelector(`[data-product-field-label="${fieldName}"]`);
+    if (node) {
+      node.textContent = productFieldLabel(fieldName);
+    }
+  }
+}
+
+function listHasValue(listKey, value) {
+  const normalized = normalizeListValue(value);
+  if (!normalized) return true;
+  return (state.lists[listKey] || []).some((item) => normalizeListValue(item) === normalized);
+}
+
+function canonicalListValue(listKey, value) {
+  const normalized = normalizeListValue(value);
+  return (state.lists[listKey] || []).find((item) => normalizeListValue(item) === normalized) || "";
+}
+
+async function addValueToList(listKey, value) {
+  const payload = await requestJson(`/api/lists/${listKey}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value }),
+  });
+  state.lists = payload.lists || {};
+  state.entries = payload.entries || state.entries;
+  renderDatalists();
+  renderListEditor();
+  return canonicalListValue(listKey, value);
+}
+
+async function promptAddProductFieldToList(fieldName, { force = false } = {}) {
+  const listKey = fieldListKey[fieldName];
+  const input = productForm.elements[fieldName];
+  const value = input?.value?.trim() || "";
+  if (!listKey || !value || listHasValue(listKey, value)) {
+    return false;
+  }
+  const promptKey = `${listKey}|${normalizeListValue(value)}`;
+  if (state.activeListPromptKeys.has(promptKey)) {
+    return false;
+  }
+  if (!force && state.declinedListPrompts.has(promptKey)) {
+    return false;
+  }
+  state.activeListPromptKeys.add(promptKey);
+  try {
+    const label = productFieldLabel(fieldName);
+    const listLabel = listLabels[listKey] || listKey;
+    const shouldAdd = window.confirm(
+      `${label}: "${value}" nie istnieje na liscie ${listLabel}. Dodac ten wpis do listy?`
+    );
+    if (!shouldAdd) {
+      state.declinedListPrompts.add(promptKey);
+      return false;
+    }
+    const canonical = await addValueToList(listKey, value);
+    if (canonical) {
+      input.value = canonical;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    state.declinedListPrompts.delete(promptKey);
+    formStatus.textContent = `Dodano "${canonical || value}" do listy ${listLabel}.`;
+    return true;
+  } finally {
+    state.activeListPromptKeys.delete(promptKey);
+  }
+}
+
+async function ensureProductListValues() {
+  for (const fieldName of Object.keys(fieldListKey)) {
+    await promptAddProductFieldToList(fieldName);
+  }
+}
 
 function entryMatchesContext(entry, fieldName) {
   const payload = currentFormPayload();
@@ -409,6 +544,34 @@ function renderEntryModal(entries) {
   document.querySelector("#entryModal").classList.add("active");
 }
 
+function renderListUsageModal(value, usedBy = []) {
+  if (!listUsageTitle || !listUsageOutput) {
+    return;
+  }
+  listUsageTitle.textContent = `Nie usunieto: ${value}`;
+  listUsageOutput.textContent = "";
+  if (!usedBy.length) {
+    listUsageOutput.textContent = "Backend nie zwrocil listy produktow.";
+    document.querySelector("#listUsageModal")?.classList.add("active");
+    return;
+  }
+  for (const item of usedBy) {
+    const row = document.createElement("article");
+    const text = document.createElement("div");
+    const title = document.createElement("strong");
+    const details = document.createElement("span");
+    row.className = "entry-match";
+    title.textContent = item.label || `${item.name || ""} ${item.type_name || ""} ${item.model || ""}`.trim();
+    details.textContent = `${item.product_id || "BRAK-ID"} | EAN ${item.ean || "BRAK-EAN"} | ${
+      item.fields || "pole"
+    }`;
+    text.append(title, details);
+    row.appendChild(text);
+    listUsageOutput.appendChild(row);
+  }
+  document.querySelector("#listUsageModal")?.classList.add("active");
+}
+
 const trackedProductFields = [
   "name",
   "type_name",
@@ -452,6 +615,7 @@ function updateFieldWarnings() {
       warning.append(text, undo);
     }
   }
+  updateSubmitButtonState();
 }
 
 function setupFieldChangeTracking() {
@@ -741,22 +905,36 @@ function renderSlotBadges(container, photo, file, prefix) {
       (key === "sql" && sqlLinkFromPhoto(photo));
     const badge = document.createElement(canPreview ? "button" : "span");
     const selected = selectedSlotSource(prefix, photo) === key;
+    const loading =
+      isPhotoSourceLoading(key) || (key === "ftp" && state.ftpPreviewLoading.has(prefix));
     badge.dataset.source = key;
     badge.className = `slot-badge slot-badge-${key} ${photo && photo[key] ? "on" : ""} ${
       selected ? "selected" : ""
-    }`;
-    badge.title = selected ? `${title} (aktywny podglad)` : title;
+    } ${loading ? "loading" : ""}`;
+    badge.title = loading
+      ? sourceLoadingTitle(key)
+      : selected
+      ? `${title} (aktywny podglad)`
+      : title;
     badge.textContent = label;
     if (canPreview) {
       badge.type = "button";
       badge.setAttribute("aria-pressed", selected ? "true" : "false");
+      if (loading) {
+        badge.setAttribute("aria-busy", "true");
+      }
       badge.addEventListener("click", (event) => {
         event.stopPropagation();
         state.slotSources.set(prefix, key);
         if (key === "ftp" && !photo.ftp_token) {
-          loadFtpPreview(photo, prefix).catch((error) => {
-            formStatus.textContent = error.message;
-          });
+          if (state.ftpPreviewLoading.has(prefix)) {
+            state.ftpPreviewBackgroundLoading.delete(prefix);
+            updateSlotPreview(prefix);
+          } else {
+            loadFtpPreview(photo, prefix).catch((error) => {
+              formStatus.textContent = error.message;
+            });
+          }
         } else {
           updateSlotPreview(prefix);
         }
@@ -782,25 +960,208 @@ function renderSlotBadges(container, photo, file, prefix) {
   container.appendChild(badges);
 }
 
-async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestId) {
-  if (!photo?.ftp_filename) return;
-  const payload = await requestJson("/api/ftp-preview", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ean: formValue("ean") || photo.ean || "", filename: photo.ftp_filename }),
-  });
-  const updated = {
+function isPhotoSourceLoading(source) {
+  const status = state.photoSourceStatus.get(source);
+  return status === "pending" || status === "loading";
+}
+
+function sourceLoadingTitle(source) {
+  if (source === "ftp") {
+    return "Wczytywanie FTP";
+  }
+  if (source === "local") {
+    return "Wczytywanie plikow lokalnych";
+  }
+  if (source === "sql") {
+    return "Wczytywanie SQL";
+  }
+  return "Wczytywanie danych";
+}
+
+function setFtpBadgeLoading(prefix, loading) {
+  const card = slotGrid.querySelector(`[data-slot-prefix="${prefix}"]`);
+  const badge = card?.querySelector('.slot-badge-ftp[data-source="ftp"]');
+  if (!badge) return;
+  const selected = badge.classList.contains("selected");
+  badge.classList.toggle("loading", Boolean(loading));
+  if (loading) {
+    badge.setAttribute("aria-busy", "true");
+    badge.title = "Pobieranie miniatury FTP w tle";
+  } else {
+    badge.removeAttribute("aria-busy");
+    badge.title = selected ? "Wpis dla slotu jest na FTP (aktywny podglad)" : "Wpis dla slotu jest na FTP";
+  }
+}
+
+function slotRevision(prefix) {
+  return Number(state.slotRevisions.get(prefix) || 0);
+}
+
+function bumpSlotRevision(prefix) {
+  state.slotRevisions.set(prefix, slotRevision(prefix) + 1);
+}
+
+function ftpPreviewCacheKey(photo, fallbackEan = "") {
+  const filename = String(photo?.ftp_filename || "").trim();
+  const ean = String(photo?.ean || fallbackEan || "").trim();
+  return filename && ean ? `${ean}|${filename}` : "";
+}
+
+function applyCachedFtpPreview(photo, prefix, cached) {
+  if (!cached) return photo;
+  return {
     ...photo,
-    ftp_token: payload.token || "",
-    ftp_url: payload.url || "",
-    ftp_thumb_url: payload.thumb_url || "",
+    ftp_token: cached.token || photo?.ftp_token || "",
+    ftp_url: cached.url || photo?.ftp_url || "",
+    ftp_thumb_url: cached.thumb_url || photo?.ftp_thumb_url || "",
   };
+}
+
+async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestId, options = {}) {
+  if (!photo?.ftp_filename || state.ftpPreviewLoading.has(prefix)) return;
+  const revision = slotRevision(prefix);
+  const cacheKey = ftpPreviewCacheKey(photo, formValue("ean") || "");
+  const sourceBefore = selectedSlotSource(prefix, photo);
+  const explicitSourceBefore = state.slotSources.get(prefix);
+  const cached = cacheKey ? state.ftpPreviewCache.get(cacheKey) : null;
+  if (cached) {
+    const currentPhoto = state.loadedPhotos.get(prefix);
+    if (
+      requestId !== state.photoLoadRequestId ||
+      revision !== slotRevision(prefix) ||
+      !currentPhoto ||
+      ftpPreviewCacheKey(currentPhoto, formValue("ean") || "") !== cacheKey
+    ) {
+      return;
+    }
+    const updated = applyCachedFtpPreview(currentPhoto, prefix, cached);
+    state.loadedPhotos.set(prefix, updated);
+    if (!options.background || sourceBefore === "ftp") {
+      state.slotSources.set(prefix, "ftp");
+    } else if (explicitSourceBefore) {
+      state.slotSources.set(prefix, explicitSourceBefore);
+    }
+    if (options.background && selectedSlotSource(prefix, updated) !== "ftp") {
+      setFtpBadgeLoading(prefix, false);
+    } else {
+      updateSlotPreview(prefix);
+    }
+    return;
+  }
+  state.ftpPreviewLoading.add(prefix);
+  const background = Boolean(options.background);
+  if (background) {
+    state.ftpPreviewBackgroundLoading.add(prefix);
+  } else {
+    state.ftpPreviewBackgroundLoading.delete(prefix);
+  }
+  if (!background) {
+    formStatus.textContent = `Pobieranie podgladu FTP dla slotu ${prefix}...`;
+  }
+  if (background) {
+    setFtpBadgeLoading(prefix, true);
+  } else {
+    updateSlotPreview(prefix);
+  }
+  try {
+    const payload = await requestJson("/api/ftp-preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ean: photo.ean || formValue("ean") || "", filename: photo.ftp_filename }),
+    });
+    if (cacheKey) {
+      state.ftpPreviewCache.set(cacheKey, {
+        token: payload.token || "",
+        url: payload.url || "",
+        thumb_url: payload.thumb_url || "",
+      });
+    }
+    const currentPhoto = state.loadedPhotos.get(prefix);
+    if (
+      requestId !== state.photoLoadRequestId ||
+      revision !== slotRevision(prefix) ||
+      !currentPhoto ||
+      ftpPreviewCacheKey(currentPhoto, formValue("ean") || "") !== cacheKey
+    ) {
+      return;
+    }
+    const updated = {
+      ...currentPhoto,
+      ftp_token: payload.token || "",
+      ftp_url: payload.url || "",
+      ftp_thumb_url: payload.thumb_url || "",
+    };
+    state.loadedPhotos.set(prefix, updated);
+    if (!background || sourceBefore === "ftp") {
+      state.slotSources.set(prefix, "ftp");
+    } else if (explicitSourceBefore) {
+      state.slotSources.set(prefix, explicitSourceBefore);
+    }
+    if (!background) {
+      formStatus.textContent = `Pobrano podglad FTP dla slotu ${prefix}.`;
+    }
+  } finally {
+    state.ftpPreviewLoading.delete(prefix);
+    state.ftpPreviewBackgroundLoading.delete(prefix);
+    const currentPhoto = state.loadedPhotos.get(prefix);
+    if (background && selectedSlotSource(prefix, currentPhoto) !== "ftp") {
+      setFtpBadgeLoading(prefix, false);
+    } else {
+      updateSlotPreview(prefix);
+    }
+  }
+}
+
+function nextBackgroundFtpPreviewCandidate() {
+  for (const slot of state.slots || []) {
+    const prefix = slot.prefix;
+    const photo = state.loadedPhotos.get(prefix);
+    if (
+      photo?.ftp &&
+      photo.ftp_filename &&
+      !photo.ftp_token &&
+      !state.files.has(prefix) &&
+      !state.deletedSlots.has(prefix) &&
+      !state.ftpPreviewLoading.has(prefix)
+    ) {
+      return { prefix, photo };
+    }
+  }
+  return null;
+}
+
+function scheduleBackgroundFtpPreviewLoad(requestId = state.photoLoadRequestId, delayMs = 900) {
+  window.clearTimeout(state.backgroundFtpPreviewTimer);
+  state.backgroundFtpPreviewTimer = window.setTimeout(() => {
+    loadNextBackgroundFtpPreview(requestId).catch(() => {});
+  }, delayMs);
+}
+
+async function loadNextBackgroundFtpPreview(requestId = state.photoLoadRequestId) {
   if (requestId !== state.photoLoadRequestId) {
     return;
   }
-  state.loadedPhotos.set(prefix, updated);
-  state.slotSources.set(prefix, "ftp");
-  updateSlotPreview(prefix);
+  let launched = 0;
+  const limit = Math.max(1, Number(state.backgroundFtpPreviewLimit) || 3);
+  while (state.ftpPreviewBackgroundLoading.size < limit) {
+    const candidate = nextBackgroundFtpPreviewCandidate();
+    if (!candidate) {
+      break;
+    }
+    launched += 1;
+    loadFtpPreview(candidate.photo, candidate.prefix, requestId, { background: true })
+      .catch(() => {
+        // Background preview loading must not block regular editing.
+      })
+      .finally(() => {
+        if (requestId === state.photoLoadRequestId && nextBackgroundFtpPreviewCandidate()) {
+          scheduleBackgroundFtpPreviewLoad(requestId, 300);
+        }
+      });
+  }
+  if (launched && requestId === state.photoLoadRequestId && nextBackgroundFtpPreviewCandidate()) {
+    scheduleBackgroundFtpPreviewLoad(requestId, 300);
+  }
 }
 
 function isSlotFit(prefix) {
@@ -825,6 +1186,7 @@ function thumbnailUrl(photo, prefix) {
 }
 
 function clearSlotAssignment(prefix, options = {}) {
+  bumpSlotRevision(prefix);
   const markDelete = options.markDelete !== false;
   if (markDelete) {
     markSlotDeletion(prefix, state.loadedPhotos.get(prefix));
@@ -837,6 +1199,7 @@ function clearSlotAssignment(prefix, options = {}) {
 }
 
 function setSlotFile(prefix, file) {
+  bumpSlotRevision(prefix);
   markSlotDeletion(prefix, state.loadedPhotos.get(prefix));
   revokeFilePreviewUrl(prefix);
   state.files.set(prefix, file);
@@ -854,10 +1217,10 @@ function getSlotAssignment(prefix) {
   return null;
 }
 
-function setSlotAssignment(prefix, assignment) {
+function setSlotAssignment(prefix, assignment, options = {}) {
   const sourceFit = assignment ? isSlotFit(assignment.prefix || prefix) : false;
   const sourceType = assignment?.source || "";
-  clearSlotAssignment(prefix);
+  clearSlotAssignment(prefix, { markDelete: options.markDelete !== false });
   if (!assignment) {
     return;
   }
@@ -882,8 +1245,10 @@ function moveSlotContent(sourcePrefix, targetPrefix) {
   if (!source) {
     return;
   }
-  setSlotAssignment(targetPrefix, source);
-  clearSlotAssignment(sourcePrefix);
+  markSlotDeletion(targetPrefix, state.loadedPhotos.get(targetPrefix));
+  markSlotDeletion(sourcePrefix, state.loadedPhotos.get(sourcePrefix));
+  setSlotAssignment(targetPrefix, source, { markDelete: false });
+  clearSlotAssignment(sourcePrefix, { markDelete: false });
   formStatus.textContent = `Przeniesiono slot ${sourcePrefix} -> ${targetPrefix}.`;
   renderSlots();
 }
@@ -905,8 +1270,25 @@ function updateSlotPreview(prefix) {
   detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, prefix);
   card.querySelectorAll(".slot-badge[data-source]").forEach((badge) => {
     const selected = selectedSlotSource(prefix, loadedPhoto) === badge.dataset.source;
+    const loading =
+      isPhotoSourceLoading(badge.dataset.source) ||
+      (badge.dataset.source === "ftp" && state.ftpPreviewLoading.has(prefix));
+    const titleBySource = {
+      local: "Plik jest w folderze backendu",
+      ftp: "Wpis dla slotu jest na FTP",
+      sql: "Wpis dla slotu jest w SQL",
+    };
     badge.classList.toggle("selected", selected);
+    badge.classList.toggle("loading", loading);
     badge.setAttribute("aria-pressed", selected ? "true" : "false");
+    if (loading) {
+      badge.setAttribute("aria-busy", "true");
+      badge.title = sourceLoadingTitle(badge.dataset.source);
+    } else {
+      badge.removeAttribute("aria-busy");
+      const baseTitle = titleBySource[badge.dataset.source] || "";
+      badge.title = selected ? `${baseTitle} (aktywny podglad)` : baseTitle;
+    }
   });
   if (fitButton) {
     fitButton.classList.toggle("active", isSlotFit(prefix));
@@ -924,6 +1306,15 @@ function updateSlotPreview(prefix) {
   }
   if (!loadedPhoto) return;
   preview.classList.add("loaded-photo");
+  if (
+    state.ftpPreviewLoading.has(prefix) &&
+    !state.ftpPreviewBackgroundLoading.has(prefix) &&
+    selectedSlotSource(prefix, loadedPhoto) === "ftp"
+  ) {
+    empty.textContent = "Pobieranie z FTP...";
+    preview.classList.add("thumb-loading");
+    return;
+  }
   const thumb = thumbnailUrl(loadedPhoto, prefix);
   if (thumb && (loadedPhoto.is_image || selectedSlotSource(prefix, loadedPhoto) === "sql")) {
     preview.classList.add("thumb-loading");
@@ -982,7 +1373,7 @@ function renderSlots(slots = state.slots) {
     previewImage.draggable = false;
     previewImage.loading = "lazy";
     previewImage.decoding = "async";
-    node.draggable = Boolean(selectedFile || loadedPhoto?.token || loadedPhoto?.ftp_token);
+    node.draggable = Boolean(selectedFile || loadedPhoto?.token || loadedPhoto?.ftp_token || loadedPhoto?.ftp_filename);
     renderSlotBadges(meta, loadedPhoto, selectedFile, slot.prefix);
     overlay.className = "slot-loading-overlay";
     overlay.innerHTML = `<span>${photoLoadingText()}</span><div class="progress-line"><i></i></div>`;
@@ -1051,7 +1442,14 @@ function renderSlots(slots = state.slots) {
     } else if (loadedPhoto) {
       preview.classList.add("loaded-photo");
       const thumb = thumbnailUrl(loadedPhoto, slot.prefix);
-      if (thumb && (loadedPhoto.is_image || selectedSlotSource(slot.prefix, loadedPhoto) === "sql")) {
+      if (
+        state.ftpPreviewLoading.has(slot.prefix) &&
+        !state.ftpPreviewBackgroundLoading.has(slot.prefix) &&
+        selectedSlotSource(slot.prefix, loadedPhoto) === "ftp"
+      ) {
+        preview.classList.add("thumb-loading");
+        empty.textContent = "Pobieranie z FTP...";
+      } else if (thumb && (loadedPhoto.is_image || selectedSlotSource(slot.prefix, loadedPhoto) === "sql")) {
         preview.classList.add("thumb-loading");
         previewImage.addEventListener("load", () => {
           preview.classList.remove("thumb-loading");
@@ -1072,7 +1470,7 @@ function renderSlots(slots = state.slots) {
 
     node.addEventListener("dragstart", (event) => {
       const assignment = getSlotAssignment(slot.prefix);
-      if (!assignment || (assignment.type === "loaded" && !selectedPhotoToken(assignment.value, slot.prefix))) {
+      if (!assignment) {
         event.preventDefault();
         return;
       }
@@ -1120,6 +1518,7 @@ function renderSlots(slots = state.slots) {
     input.addEventListener("change", () => {
       const file = input.files && input.files[0] ? input.files[0] : null;
       if (!file) {
+        bumpSlotRevision(slot.prefix);
         state.files.delete(slot.prefix);
         renderSlots();
         return;
@@ -1130,6 +1529,7 @@ function renderSlots(slots = state.slots) {
 
     slotGrid.appendChild(node);
   }
+  updateSubmitButtonState();
 }
 
 function renderListTabs() {
@@ -1265,6 +1665,7 @@ function renderListEditor() {
 function setBusy(isBusy, text = "") {
   submitButton.disabled = isBusy;
   formStatus.textContent = text;
+  updateSubmitButtonState();
 }
 
 function clearResult() {
@@ -1289,6 +1690,9 @@ function showResult(payload) {
   resultOutput.appendChild(dir);
   if (payload.entry && payload.entry.product_id) {
     productForm.elements.product_id.value = payload.entry.product_id;
+  }
+  if (!productForm.elements.ean.value && payload.ean && payload.ean !== "BRAK-EAN") {
+    productForm.elements.ean.value = payload.ean;
   }
   const list = document.createElement("ul");
   list.className = "result-list";
@@ -1457,39 +1861,189 @@ async function loadHistory() {
   renderHistory(payload);
 }
 
+function logReadStorageKey() {
+  const username = state.currentUser?.username || "anonymous";
+  return `picorg-log-read-${username}`;
+}
+
+function readLogMarker() {
+  try {
+    return JSON.parse(localStorage.getItem(logReadStorageKey()) || "{}");
+  } catch (_error) {
+    return {};
+  }
+}
+
+function writeLogMarker(summary = {}) {
+  const marker = {
+    critical: summary.latest_critical_id || "",
+    warning: summary.latest_warning_id || "",
+  };
+  localStorage.setItem(logReadStorageKey(), JSON.stringify(marker));
+  return marker;
+}
+
+function unreadLogSeverity(summary = {}) {
+  const marker = readLogMarker();
+  if (summary.latest_critical_id && summary.latest_critical_id !== marker.critical) {
+    return "critical";
+  }
+  if (summary.latest_warning_id && summary.latest_warning_id !== marker.warning) {
+    return "warning";
+  }
+  return "";
+}
+
+function updateLogAlert(summary = {}, { initialize = false } = {}) {
+  if (!logsButton || !state.isAdmin) {
+    logsButton?.classList.remove("log-alert-critical", "log-alert-warning");
+    return;
+  }
+  if (initialize && !localStorage.getItem(logReadStorageKey())) {
+    writeLogMarker(summary);
+  }
+  const severity = unreadLogSeverity(summary);
+  logsButton.classList.toggle("log-alert-critical", severity === "critical");
+  logsButton.classList.toggle("log-alert-warning", severity === "warning");
+  if (severity === "critical") {
+    logsButton.title = "Nowy krytyczny blad w logach.";
+  } else if (severity === "warning") {
+    logsButton.title = "Nowe ostrzezenie w logach.";
+  } else {
+    logsButton.title = "";
+  }
+}
+
+function markLogsRead(payload = {}) {
+  writeLogMarker(payload.summary || {});
+  updateLogAlert(payload.summary || {});
+}
+
+function logSeverityLabel(severity = "info") {
+  if (severity === "critical") return "Krytyczny";
+  if (severity === "warning") return "Ostrzezenie";
+  return "Info";
+}
+
+function renderLogEvent(event) {
+  const block = document.createElement("article");
+  const meta = document.createElement("div");
+  const title = document.createElement("strong");
+  const source = document.createElement("span");
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  const lines = document.createElement("pre");
+  const severity = event.severity || "info";
+  block.className = `log-event log-event-${severity}`;
+  meta.className = "log-event-meta";
+  meta.textContent = [event.time || "", logSeverityLabel(severity)].filter(Boolean).join(" | ");
+  title.textContent = event.summary || "Zdarzenie";
+  source.textContent = event.path || "";
+  summary.textContent = "Szczegoly";
+  lines.className = "log-lines";
+  lines.textContent = (event.lines || []).join("\n");
+  details.append(summary, lines);
+  block.append(meta, title, source, details);
+  return block;
+}
+
 function renderLogs(payload) {
   state.logs = payload;
   logsOutput.textContent = "";
   const logs = payload.logs || [];
-  if (!logs.length) {
+  const hasEvents = logs.some((log) => (log.events || []).length);
+  if (!hasEvents) {
     logsOutput.className = "logs-output empty-state";
-    logsOutput.textContent = "Brak dostepnych logow.";
+    logsOutput.textContent = "Brak zdarzen w logach systemowych.";
     return;
   }
   logsOutput.className = "logs-output";
   for (const log of logs) {
-    const block = document.createElement("article");
+    const category = document.createElement("section");
     const heading = document.createElement("div");
     const title = document.createElement("strong");
     const path = document.createElement("span");
-    const lines = document.createElement("pre");
-    block.className = "log-block";
-    heading.className = "log-heading";
-    title.textContent = log.label || log.key || "Log";
+    const events = log.events || [];
+    category.className = "log-category";
+    heading.className = "log-category-heading";
+    title.textContent = `${log.label || log.key || "Log"} (${events.length})`;
     path.textContent = log.path || "";
-    lines.className = "log-lines";
-    lines.textContent =
-      (log.lines || []).join("\n") ||
-      (log.exists ? "Plik logu jest pusty." : "Plik logu jeszcze nie istnieje.");
     heading.append(title, path);
-    block.append(heading, lines);
-    logsOutput.appendChild(block);
+    category.appendChild(heading);
+    if (!events.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty-state";
+      empty.textContent = "Brak zdarzen w tej kategorii.";
+      category.appendChild(empty);
+    } else {
+      for (const event of events) {
+        category.appendChild(renderLogEvent(event));
+      }
+    }
+    logsOutput.appendChild(category);
   }
 }
 
-async function loadLogs() {
+async function loadLogs({ markRead = true } = {}) {
   const payload = await requestJson("/api/logs?limit=400");
+  updateLogAlert(payload.summary || {});
   renderLogs(payload);
+  if (markRead) {
+    markLogsRead(payload);
+  }
+}
+
+async function pollLogStatus({ initialize = false } = {}) {
+  if (!state.isAdmin) {
+    updateLogAlert({});
+    return;
+  }
+  const payload = await requestJson("/api/logs?limit=120");
+  updateLogAlert(payload.summary || {}, { initialize });
+}
+
+function openLogsClearModal() {
+  if (!logsClearPassword || !logsClearStatus) {
+    return;
+  }
+  logsClearStatus.textContent = "";
+  logsClearPassword.value = "";
+  document.querySelector("#logsClearModal")?.classList.add("active");
+  window.setTimeout(() => logsClearPassword?.focus(), 0);
+}
+
+function closeLogsClearModal() {
+  if (!logsClearPassword || !logsClearStatus) {
+    return;
+  }
+  logsClearPassword.value = "";
+  logsClearStatus.textContent = "";
+  document.querySelector("#logsClearModal")?.classList.remove("active");
+}
+
+async function clearLogs(password) {
+  if (!password) {
+    return;
+  }
+  if (logsClearStatus) {
+    logsClearStatus.textContent = "Czyszczenie...";
+  }
+  const payload = await requestJson("/api/logs/clear", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  renderLogs(payload);
+  markLogsRead(payload);
+  if ((payload.clear_errors || []).length) {
+    if (logsClearStatus) {
+      logsClearStatus.textContent = `Nie wyczyszczono wszystkich logow: ${(payload.clear_errors || []).join(
+        "; "
+      )}`;
+    }
+    return;
+  }
+  closeLogsClearModal();
 }
 
 function formPayload() {
@@ -1504,6 +2058,64 @@ function formPayload() {
     extra: productForm.elements.extra.value,
     ean: productForm.elements.ean.value,
   };
+}
+
+function normalizedIdentityValue(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function productFieldsChangedSinceLoad() {
+  if (!state.loadedEntryOriginal) {
+    return false;
+  }
+  const current = formPayload();
+  return trackedProductFields.some(
+    (fieldName) =>
+      normalizedIdentityValue(current[fieldName]) !==
+      normalizedIdentityValue(state.loadedEntryOriginal[fieldName])
+  );
+}
+
+function hasProductDraftData() {
+  const current = formPayload();
+  return trackedProductFields.some((fieldName) => String(current[fieldName] || "").trim());
+}
+
+function localPhotoNeedsFtpUpload(photo) {
+  const ftpChecked = state.photoSourcesLoaded.has("ftp") || state.photoSourcesLoaded.has("all");
+  return Boolean(state.ftpEnabled && ftpChecked && photo?.local && photo?.token && !photo?.ftp);
+}
+
+function hasPendingSlotChanges() {
+  if (state.files.size || state.deletedSlots.size) {
+    return true;
+  }
+  for (const photo of state.loadedPhotos.values()) {
+    if (photo?.dirty || localPhotoNeedsFtpUpload(photo)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasPendingUserChanges() {
+  return (
+    hasPendingSlotChanges() ||
+    productFieldsChangedSinceLoad() ||
+    (!state.loadedEntryOriginal && hasProductDraftData())
+  );
+}
+
+function updateSubmitButtonState() {
+  if (!submitButton || submitButton.disabled) {
+    return;
+  }
+  const hasChanges = hasPendingUserChanges();
+  submitButton.textContent = hasChanges ? "Aktualizuj" : "Synchronizuj";
+  submitButton.title = hasChanges
+    ? "Zapisuje zmiany w danych i slotach oraz aktualizuje lokalne pliki, FTP i SQL."
+    : "Pobiera brakujace zdjecia z FTP i uzupelnia lokalne pliki.";
+  submitButton.setAttribute("aria-label", submitButton.textContent);
 }
 
 function mergePhotoRecord(existing = {}, incoming = {}) {
@@ -1533,6 +2145,12 @@ function mergePhotoRecord(existing = {}, incoming = {}) {
     }
   }
   merged.prefix = incoming.prefix || existing.prefix || "";
+  const cachedFtp = state.ftpPreviewCache.get(
+    ftpPreviewCacheKey(merged, formValue("ean") || state.loadedEntryOriginal?.ean || "")
+  );
+  if (cachedFtp) {
+    return applyCachedFtpPreview(merged, merged.prefix, cachedFtp);
+  }
   return merged;
 }
 
@@ -1584,6 +2202,7 @@ function applyPhotoPayload(photos = []) {
   }
   if (changed) {
     renderSlots();
+    scheduleBackgroundFtpPreviewLoad();
   }
 }
 
@@ -1611,6 +2230,10 @@ async function loadPhotosForEntry(entry, options = {}) {
   state.loadedPhotos.clear();
   state.deletedSlots.clear();
   state.slotSources.clear();
+  state.ftpPreviewLoading.clear();
+  state.ftpPreviewBackgroundLoading.clear();
+  state.photoSourcesLoaded.clear();
+  window.clearTimeout(state.backgroundFtpPreviewTimer);
   const sources = progressive ? ["local", "sql", "ftp"] : ["all"];
   state.photoSourceStatus.clear();
   for (const source of sources) {
@@ -1624,7 +2247,12 @@ async function loadPhotosForEntry(entry, options = {}) {
       const payload = await requestEntryPhotos(entry, source);
       if (state.photoLoadRequestId === requestId) {
         setPhotoSourceStatus(source, "done", requestId);
+        state.photoSourcesLoaded.add(payload.source || source);
         applyPhotoPayload(payload.photos || []);
+        if ((payload.source || source) === "ftp" || (payload.source || source) === "all") {
+          scheduleBackgroundFtpPreviewLoad(requestId, 160);
+        }
+        updateSubmitButtonState();
       }
       return payload;
     } catch (error) {
@@ -1651,6 +2279,7 @@ async function loadPhotosForEntry(entry, options = {}) {
     state.photoSourceStatus.clear();
     updateRuntimeMetrics();
     renderSlots();
+    scheduleBackgroundFtpPreviewLoad(requestId);
   }
 }
 
@@ -1660,6 +2289,9 @@ function fillForm(entry, options = {}) {
   state.slotFits.clear();
   state.deletedSlots.clear();
   state.slotSources.clear();
+  state.ftpPreviewLoading.clear();
+  state.ftpPreviewBackgroundLoading.clear();
+  state.photoSourcesLoaded.clear();
   productForm.elements.product_id.value = entry.product_id || "";
   productForm.elements.name.value = entry.name || "";
   productForm.elements.type_name.value = entry.type_name || "";
@@ -1686,7 +2318,10 @@ async function refreshData() {
   state.lists = payload.lists || {};
   state.entries = payload.entries || [];
   state.fileIndex = payload.file_index || state.fileIndex;
+  state.ftpEnabled = payload.ftp_enabled !== false;
+  state.colorFieldLabels = payload.color_field_labels || state.colorFieldLabels || {};
   renderDatalists();
+  applyProductFieldLabels();
   renderEntrySelect();
   renderListEditor();
   updateRuntimeMetrics();
@@ -1695,6 +2330,7 @@ async function refreshData() {
 async function loadBootstrap() {
   const payload = await requestJson("/api/bootstrap");
   state.defaultSlotFit = Boolean(payload.auto_content_fit);
+  state.ftpEnabled = payload.ftp_enabled !== false;
   if (versionInfo) {
     versionInfo.textContent = payload.version ? `Wersja ${payload.version}` : "";
   }
@@ -1702,10 +2338,14 @@ async function loadBootstrap() {
   logoutButton.style.display = payload.auth_enabled ? "" : "none";
   state.currentUser = payload.current_user || null;
   updateAdminUi();
+  pollLogStatus({ initialize: true }).catch(() => {});
   state.lists = payload.lists || {};
   state.entries = payload.entries || [];
   state.fileIndex = payload.file_index || null;
+  state.ftpEnabled = payload.ftp_enabled !== false;
+  state.colorFieldLabels = payload.color_field_labels || {};
   renderDatalists();
+  applyProductFieldLabels();
   renderEntrySelect();
   renderSlots(payload.slots || []);
   renderListEditor();
@@ -1768,22 +2408,6 @@ function scheduleProductAutoSearch() {
   }, 500);
 }
 
-async function saveEntryOnly() {
-  const payload = await requestJson("/api/entries/save", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(formPayload()),
-  });
-  const entry = payload.entry || {};
-  if (entry.product_id) {
-    productForm.elements.product_id.value = entry.product_id;
-  }
-  state.loadedEntryOriginal = { ...formPayload(), product_id: productForm.elements.product_id.value };
-  updateFieldWarnings();
-  formStatus.textContent = entry.updated ? "Zaktualizowano wpis." : "Dodano nowy wpis.";
-  await refreshData();
-}
-
 async function addListValue(event) {
   event.preventDefault();
   const value = listAddInput.value.trim();
@@ -1814,11 +2438,26 @@ async function addListValue(event) {
 }
 
 async function removeListValue(value) {
-  const payload = await requestJson(`/api/lists/${state.selectedList}`, {
-    method: "DELETE",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ value }),
-  });
+  const listLabel = listLabels[state.selectedList] || state.selectedList;
+  if (!window.confirm(`Usunac "${value}" z listy ${listLabel}?`)) {
+    return;
+  }
+  let payload;
+  try {
+    payload = await requestJson(`/api/lists/${state.selectedList}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
+  } catch (error) {
+    const detail = error.detail || {};
+    if (error.status === 409 && Array.isArray(detail.used_by)) {
+      renderListUsageModal(detail.value || value, detail.used_by);
+      listStatus.textContent = error.message;
+      return;
+    }
+    throw error;
+  }
   state.lists = payload.lists || {};
   state.entries = payload.entries || state.entries;
   renderDatalists();
@@ -1985,10 +2624,13 @@ function settingsSaveButton(form, buildPayload) {
     });
     state.currentUser = state.settings.current_user || state.currentUser;
     state.defaultSlotFit = Boolean(state.settings.auto_content_fit);
+    state.ftpEnabled = state.settings.ftp?.enabled !== false;
+    state.colorFieldLabels = state.settings.color_field_labels || state.colorFieldLabels || {};
     updateAdminUi();
     if (Array.isArray(state.settings.slots)) {
       renderSlots(state.settings.slots);
     }
+    applyProductFieldLabels();
     settingsStatus.textContent = "Zapisano.";
     renderSettings();
   });
@@ -2017,10 +2659,22 @@ function renderSettingsApp() {
     inputField("color3", "Kolor 3", s.color_field_labels?.color3 || "")
   );
   colorGroup.append(colorTitle, colorGrid);
+  const secretGroup = document.createElement("div");
+  const secretTitle = document.createElement("h2");
+  const secretHint = document.createElement("p");
+  const secretGrid = document.createElement("div");
+  secretGroup.className = "settings-field-group wide-field";
+  secretTitle.textContent = "Sekret aplikacji";
+  secretHint.className = "settings-note";
+  secretHint.textContent = "Wpisz nowy APP_SECRET tylko wtedy, gdy chcesz zmienic klucz szyfrowania zapisanych danych.";
+  secretGrid.className = "settings-form nested-grid";
+  secretGrid.append(credentialField("app_secret", "APP_SECRET", s.app_secret_set, { type: "password" }));
+  secretGroup.append(secretTitle, secretHint, secretGrid);
   form.append(
     versionNote,
     configNote,
     inputField("base_dir", "Katalog bazowy", s.base_dir),
+    secretGroup,
     checkField(
       "local_file_index",
       "Indeks plikow lokalnych",
@@ -2033,6 +2687,7 @@ function renderSettingsApp() {
   settingsSaveButton(form, (data) => ({
     app: {
       base_dir: data.get("base_dir"),
+      app_secret: data.get("app_secret"),
       local_file_index: data.has("local_file_index"),
       color_field_labels: {
         color1: data.get("color1"),
@@ -2380,7 +3035,10 @@ async function loadSettings() {
   state.settings = await requestJson("/api/settings");
   state.currentUser = state.settings.current_user || state.currentUser;
   state.defaultSlotFit = Boolean(state.settings.auto_content_fit);
+  state.ftpEnabled = state.settings.ftp?.enabled !== false;
+  state.colorFieldLabels = state.settings.color_field_labels || state.colorFieldLabels || {};
   updateAdminUi();
+  applyProductFieldLabels();
   renderSettings();
 }
 
@@ -2396,6 +3054,10 @@ document.querySelectorAll("[data-close-history-detail]").forEach((button) => {
   button.addEventListener("click", () => {
     document.querySelector("#historyDetailModal")?.classList.remove("active");
   });
+});
+
+document.querySelectorAll("[data-close-logs-clear]").forEach((button) => {
+  button.addEventListener("click", closeLogsClearModal);
 });
 
 themeToggleButton?.addEventListener("click", () => {
@@ -2428,6 +3090,19 @@ logsRefreshButton?.addEventListener("click", () => {
   });
 });
 
+logsClearButton?.addEventListener("click", () => {
+  openLogsClearModal();
+});
+
+logsClearForm?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  clearLogs(logsClearPassword.value).catch((error) => {
+    if (logsClearStatus) {
+      logsClearStatus.textContent = error.message;
+    }
+  });
+});
+
 entrySelect.addEventListener("change", () => {
   const option = entrySelect.selectedOptions[0];
   if (!option || !option.dataset.entry) return;
@@ -2438,31 +3113,65 @@ for (const name of ["name", "type_name", "model"]) {
   productForm.elements[name].addEventListener("input", scheduleProductAutoSearch);
 }
 
+for (const name of Object.keys(fieldListKey)) {
+  productForm.elements[name]?.addEventListener("change", () => {
+    promptAddProductFieldToList(name).catch((error) => {
+      formStatus.textContent = error.message;
+    });
+  });
+}
+
 productForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  setBusy(true, "Przetwarzanie...");
+  setBusy(true, "Sprawdzanie list...");
   clearResult();
-  const data = new FormData(productForm);
-  for (const [prefix, file] of state.files.entries()) {
-    data.set(`slot_${prefix}`, file, file.name);
-    data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
-  }
-  for (const [prefix, photo] of state.loadedPhotos.entries()) {
-    const token = selectedPhotoToken(photo, prefix);
-    if (!state.files.has(prefix) && photo.dirty && token) {
-      data.set(`existing_slot_${prefix}`, token);
+  try {
+    await ensureProductListValues();
+    const identityChanged = productFieldsChangedSinceLoad();
+    const updateMode = hasPendingUserChanges();
+    setBusy(
+      true,
+      updateMode
+        ? identityChanged
+          ? "Aktualizowanie i przenoszenie istniejacych zdjec..."
+          : "Aktualizowanie..."
+        : "Synchronizowanie brakujacych danych..."
+    );
+    const data = new FormData(productForm);
+    for (const [prefix, file] of state.files.entries()) {
+      data.set(`slot_${prefix}`, file, file.name);
       data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
     }
-  }
-  for (const [prefix, item] of state.deletedSlots.entries()) {
-    data.set(`delete_slot_${prefix}`, "1");
-    if (item.token) data.set(`delete_local_slot_${prefix}`, item.token);
-    if (item.ftp_filename) data.set(`delete_ftp_slot_${prefix}`, item.ftp_filename);
-    if (item.sql) data.set(`delete_sql_slot_${prefix}`, "1");
-  }
-  try {
+    for (const [prefix, photo] of state.loadedPhotos.entries()) {
+      const token = selectedPhotoToken(photo, prefix);
+      if (!state.files.has(prefix) && (photo.dirty || localPhotoNeedsFtpUpload(photo))) {
+        if (token) {
+          data.set(`existing_slot_${prefix}`, token);
+          data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
+        } else if (selectedSlotSource(prefix, photo) === "ftp" && photo.ftp_filename) {
+          data.set(`existing_ftp_slot_${prefix}`, photo.ftp_filename);
+          data.set(
+            `existing_ftp_ean_${prefix}`,
+            photo.ean || state.loadedEntryOriginal?.ean || productForm.elements.ean.value
+          );
+          data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
+        }
+      }
+    }
+    for (const [prefix, item] of state.deletedSlots.entries()) {
+      data.set(`delete_slot_${prefix}`, "1");
+      if (item.token) data.set(`delete_local_slot_${prefix}`, item.token);
+      if (item.ftp_filename) data.set(`delete_ftp_slot_${prefix}`, item.ftp_filename);
+      if (item.sql) data.set(`delete_sql_slot_${prefix}`, "1");
+    }
     const payload = await requestJson("/api/process", { method: "POST", body: data });
     showResult(payload);
+    const savedProductId = payload.entry?.product_id || productForm.elements.product_id.value;
+    if (savedProductId) {
+      productForm.elements.product_id.value = savedProductId;
+    }
+    state.loadedEntryOriginal = { ...formPayload(), product_id: savedProductId };
+    updateFieldWarnings();
     state.deletedSlots.clear();
     clearSelectedFiles();
     await refreshData();
@@ -2475,6 +3184,7 @@ productForm.addEventListener("submit", async (event) => {
 });
 
 clearButton.addEventListener("click", () => {
+  state.photoLoadRequestId += 1;
   productForm.reset();
   productForm.elements.product_id.value = "";
   for (const prefix of Array.from(state.filePreviewUrls.keys())) {
@@ -2486,6 +3196,10 @@ clearButton.addEventListener("click", () => {
   state.deletedSlots.clear();
   state.slotSources.clear();
   state.photoSourceStatus.clear();
+  state.ftpPreviewLoading.clear();
+  state.ftpPreviewBackgroundLoading.clear();
+  state.photoSourcesLoaded.clear();
+  window.clearTimeout(state.backgroundFtpPreviewTimer);
   state.loadedEntryOriginal = null;
   state.lastAutoSearchKey = "";
   renderSlots();
@@ -2503,12 +3217,6 @@ findByEanButton.addEventListener("click", () => {
 
 findProductButton.addEventListener("click", () => {
   searchByProduct().catch((error) => {
-    formStatus.textContent = error.message;
-  });
-});
-
-saveEntryButton.addEventListener("click", () => {
-  saveEntryOnly().catch((error) => {
     formStatus.textContent = error.message;
   });
 });
@@ -2539,3 +3247,6 @@ loadBootstrap().catch(showError);
 setInterval(() => {
   refreshFileIndexStatus().catch(() => {});
 }, 5000);
+setInterval(() => {
+  pollLogStatus().catch(() => {});
+}, 15000);

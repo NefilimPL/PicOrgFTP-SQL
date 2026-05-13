@@ -35,13 +35,19 @@ except Exception:  # pragma: no cover - handled when image processing is request
 IMAGE_EXTENSIONS = {
     ".bmp",
     ".gif",
-    ".jpeg",
     ".jpg",
+    ".jpeg",
     ".png",
     ".tif",
     ".tiff",
     ".webp",
 }
+IMAGE_EXTENSION_ALIASES = {
+    ".jpe": ".jpg",
+    ".jpeg": ".jpg",
+    ".peg": ".jpg",
+}
+ALLOWED_DOCUMENT_EXTENSIONS = {".pdf"}
 
 CONVERT_FORMATS = {
     "JPG": ("JPEG", ".jpg"),
@@ -220,8 +226,24 @@ def _target_format_info(options: WebProcessingOptions) -> tuple[str, str]:
     return CONVERT_FORMATS.get(target, CONVERT_FORMATS["PNG"])
 
 
+def normalize_upload_extension(extension: str) -> str:
+    """Return the canonical extension used for saved web uploads."""
+
+    ext = (extension or "").strip().lower()
+    if ext and not ext.startswith("."):
+        ext = f".{ext}"
+    return IMAGE_EXTENSION_ALIASES.get(ext, ext)
+
+
+def is_supported_upload_extension(extension: str) -> bool:
+    """Return True for image uploads and allowed document fallbacks."""
+
+    ext = normalize_upload_extension(extension)
+    return ext in IMAGE_EXTENSIONS or ext in ALLOWED_DOCUMENT_EXTENSIONS
+
+
 def _output_extension(source_extension: str, options: WebProcessingOptions) -> str:
-    source_extension = (source_extension or "").lower()
+    source_extension = normalize_upload_extension(source_extension)
     if options.convert_enabled and Image is not None and source_extension in IMAGE_EXTENSIONS:
         return _target_format_info(options)[1]
     return source_extension
@@ -282,7 +304,7 @@ def _save_processed_file(
 ) -> None:
     """Copy or lightly process a browser-uploaded file to its target path."""
 
-    ext = os.path.splitext(source_path)[1].lower()
+    ext = normalize_upload_extension(os.path.splitext(source_path)[1])
     if ext not in IMAGE_EXTENSIONS:
         shutil.copy2(source_path, target_path)
         return
@@ -352,6 +374,12 @@ def process_web_uploads(
         if not ext:
             skipped_slots.append(upload.prefix)
             continue
+        if not is_supported_upload_extension(ext):
+            source_name = os.path.basename(upload.original_filename or source_path)
+            raise ValueError(
+                f"Nieobslugiwany format pliku w slocie {upload.prefix}: {source_name}. "
+                "Dozwolone sa pliki graficzne oraz PDF."
+            )
         ext = _output_extension(ext, options)
         filename = build_slot_filename(
             payload["ean"],
@@ -370,7 +398,14 @@ def process_web_uploads(
             if upload.content_fit is not None
             else bool(options.auto_content_fit)
         )
-        _save_processed_file(source_path, target_path, options, content_fit=content_fit)
+        try:
+            same_target = os.path.samefile(source_path, target_path)
+        except OSError:
+            same_target = os.path.normcase(os.path.abspath(source_path)) == os.path.normcase(
+                os.path.abspath(target_path)
+            )
+        if not same_target:
+            _save_processed_file(source_path, target_path, options, content_fit=content_fit)
         saved_files.append(
             WebProcessedFile(
                 prefix=upload.prefix,
