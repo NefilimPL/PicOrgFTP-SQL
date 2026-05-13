@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import shutil
+import time
 import unittest
 from unittest.mock import patch
 
@@ -66,6 +68,43 @@ class WebDataUserTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.used_by, used_by)
         remove_from_list.assert_not_called()
+
+    def test_ftp_cache_dir_can_be_scoped_per_user_session(self) -> None:
+        temp_dir = _workspace_temp("web_data_ftp_cache_scope")
+        try:
+            with patch.object(web_data.settings, "AC", str(temp_dir)):
+                scoped = Path(web_data._ftp_cache_dir("5901234567890", cache_scope="admin-session"))
+                unscoped = Path(web_data._ftp_cache_dir("5901234567890"))
+        finally:
+            shutil.rmtree(temp_dir)
+
+        self.assertEqual(scoped, temp_dir / "web_ftp_cache" / "admin-session" / "5901234567890")
+        self.assertEqual(unscoped, temp_dir / "web_ftp_cache" / "5901234567890")
+
+    def test_cleanup_web_ftp_cache_removes_only_stale_files(self) -> None:
+        temp_dir = _workspace_temp("web_data_ftp_cache_cleanup")
+        try:
+            cache_dir = temp_dir / "web_ftp_cache" / "admin-session" / "5901234567890"
+            cache_dir.mkdir(parents=True)
+            old_file = cache_dir / "old.jpg"
+            new_file = cache_dir / "new.jpg"
+            old_file.write_bytes(b"old")
+            new_file.write_bytes(b"new")
+            old_time = time.time() - 3 * 24 * 60 * 60
+            os.utime(old_file, (old_time, old_time))
+
+            with patch.object(web_data.settings, "AC", str(temp_dir)):
+                result = web_data.cleanup_web_ftp_cache(
+                    max_age_seconds=24 * 60 * 60,
+                    min_interval_seconds=1,
+                    force=True,
+                )
+
+            self.assertEqual(result["deleted_files"], 1)
+            self.assertFalse(old_file.exists())
+            self.assertTrue(new_file.exists())
+        finally:
+            shutil.rmtree(temp_dir)
 
     def test_save_web_entry_preserves_ean_for_existing_product_id_when_missing(self) -> None:
         with (

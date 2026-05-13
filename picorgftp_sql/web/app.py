@@ -58,6 +58,7 @@ from ..web_data import (
     add_user,
     authenticate_user,
     cache_ftp_preview,
+    cleanup_web_ftp_cache,
     field_suggestions,
     find_entry_by_identity,
     find_user,
@@ -169,6 +170,21 @@ def _current_user_payload(request: Request) -> Dict[str, Any]:
     if not user:
         raise HTTPException(status_code=401, detail="Brak aktywnej sesji.")
     return user
+
+
+def _user_cache_scope(request: Request, username: str) -> str:
+    session_token = str(request.cookies.get(SESSION_COOKIE) or "")
+    if session_token:
+        scope_material = session_token
+    else:
+        client = getattr(request, "client", None)
+        client_host = str(getattr(client, "host", "") or "")
+        headers = getattr(request, "headers", {}) or {}
+        user_agent = str(headers.get("user-agent", "") if hasattr(headers, "get") else "")
+        scope_material = f"{client_host}|{user_agent}|no-session"
+    token_digest = hashlib.sha1(scope_material.encode("utf-8")).hexdigest()[:12]
+    raw_scope = f"{username}-{token_digest}"
+    return re.sub(r"[^0-9A-Za-z_.-]+", "_", raw_scope).strip("._-") or "user-session"
 
 
 def _require_admin(request: Request) -> Dict[str, Any]:
@@ -308,10 +324,20 @@ def _remote_name_for_output(filename: str) -> str:
     return f"{parsed.ean}_{parsed.normalized_label}{parsed.extension}"
 
 
-def _sync_result_to_ftp(result: Any, delete_candidates: Optional[List[str]] = None) -> Dict[str, Any]:
+def _sync_result_to_ftp(
+    result: Any,
+    delete_candidates: Optional[List[str]] = None,
+    *,
+    skip_upload_prefixes: Optional[Set[str]] = None,
+) -> Dict[str, Any]:
     if not bool(config.CONFIG.get(ft, True)):
         return {"enabled": False, "uploaded": 0, "deleted": 0, "elapsed_ms": 0, "error": ""}
-    filenames = [item.filename for item in result.saved_files if getattr(item, "filename", "")]
+    skip_upload_prefixes = {str(prefix) for prefix in (skip_upload_prefixes or set())}
+    filenames = [
+        item.filename
+        for item in result.saved_files
+        if getattr(item, "filename", "") and str(getattr(item, "prefix", "")) not in skip_upload_prefixes
+    ]
     uploaded_remote_names = {_remote_name_for_output(filename) for filename in filenames}
     delete_set = {
         os.path.basename(str(item or ""))
@@ -486,13 +512,18 @@ def _should_migrate_existing_photos(
     return _output_identity(_form_from_entry_payload(existing_entry)) != _output_identity(product)
 
 
-def _download_ftp_photo_source(photo: Dict[str, Any], fallback_ean: str) -> str:
+def _download_ftp_photo_source(
+    photo: Dict[str, Any],
+    fallback_ean: str,
+    *,
+    cache_scope: str = "",
+) -> str:
     ftp_filename = os.path.basename(str(photo.get("ftp_filename") or ""))
     ftp_ean = str(photo.get("ean") or fallback_ean or "").strip()
     if not ftp_filename or not ftp_ean:
         return ""
     try:
-        return cache_ftp_preview(ftp_ean, ftp_filename)
+        return cache_ftp_preview(ftp_ean, ftp_filename, cache_scope=cache_scope)
     except ValueError as exc:
         raise ValueError(f"Nie udalo sie pobrac pliku FTP {ftp_filename}: {exc}") from exc
 
@@ -588,6 +619,7 @@ def _append_existing_photo_sources(
     uploaded_slots: List[WebUploadedSlot],
     delete_requests: List[Dict[str, Any]],
     slot_by_prefix: Dict[str, Dict[str, str]],
+    cache_scope: str = "",
 ) -> List[str]:
     """Add existing local/FTP photos that need to be processed by the web form."""
 
@@ -631,10 +663,13 @@ def _append_existing_photo_sources(
         should_process = False
         if identity_changed and source_path:
             should_process = True
+        elif source_path and not ftp_filename and bool(config.CONFIG.get(ft, True)):
+            should_process = True
         elif ftp_filename and not source_path:
             source_path = _download_ftp_photo_source(
                 photo,
                 str(source_entry.get("ean") or product.ean or ""),
+                cache_scope=cache_scope,
             )
             should_process = bool(source_path and os.path.isfile(source_path))
         if not should_process:
@@ -673,6 +708,7 @@ def _append_existing_photo_migrations(
     uploaded_slots: List[WebUploadedSlot],
     delete_requests: List[Dict[str, Any]],
     slot_by_prefix: Dict[str, Dict[str, str]],
+    cache_scope: str = "",
 ) -> List[str]:
     """Backward-compatible wrapper for tests and older call sites."""
 
@@ -682,7 +718,57 @@ def _append_existing_photo_migrations(
         uploaded_slots=uploaded_slots,
         delete_requests=delete_requests,
         slot_by_prefix=slot_by_prefix,
+        cache_scope=cache_scope,
     )
+
+
+def _append_pending_ftp_slots(
+    *,
+    product: WebProductForm,
+    pending_ftp_slots: List[Dict[str, Any]],
+    uploaded_slots: List[WebUploadedSlot],
+    delete_requests: List[Dict[str, Any]],
+    cache_scope: str = "",
+) -> List[str]:
+    """Download FTP-only selected slots so they can be saved like uploaded files."""
+
+    occupied_prefixes = {slot.prefix for slot in uploaded_slots}
+    appended: List[str] = []
+    for item in pending_ftp_slots:
+        prefix = str(item.get("prefix") or "")
+        if not prefix or prefix in occupied_prefixes:
+            continue
+        ftp_filename = os.path.basename(str(item.get("filename") or ""))
+        ftp_ean = str(item.get("ean") or product.ean or "").strip()
+        try:
+            source_path = cache_ftp_preview(ftp_ean, ftp_filename, cache_scope=cache_scope)
+        except ValueError as exc:
+            raise ValueError(
+                f"Nie udalo sie pobrac pliku FTP {ftp_filename}: {exc}"
+            ) from exc
+        uploaded_slots.append(
+            WebUploadedSlot(
+                prefix=prefix,
+                label=str(item.get("label") or prefix),
+                source_path=source_path,
+                original_filename=ftp_filename,
+                content_fit=item.get("content_fit"),
+            )
+        )
+        occupied_prefixes.add(prefix)
+        appended.append(prefix)
+        if ftp_filename:
+            delete_requests.append(
+                {
+                    "prefix": prefix,
+                    "label": str(item.get("label") or prefix),
+                    "local_path": "",
+                    "ftp_filename": ftp_filename,
+                    "sql": False,
+                    "ftp_backfill": False,
+                }
+            )
+    return appended
 
 
 def _read_log_tail(path: str, limit: int = 300) -> Dict[str, Any]:
@@ -771,6 +857,7 @@ def _log_event_summary(line: str) -> str:
 def _log_event_severity(source_key: str, lines: List[str]) -> str:
     text = "\n".join(lines)
     lowered = text.lower()
+    first_line = lines[0] if lines else ""
     statuses = _http_statuses(lines)
     if statuses:
         max_status = max(statuses)
@@ -779,9 +866,15 @@ def _log_event_severity(source_key: str, lines: List[str]) -> str:
         if max_status >= 400:
             return "warning"
     if source_key == "web_events":
-        if re.search(r"\b(CRITICAL|ERROR)\b", text, re.IGNORECASE):
+        level_match = re.search(
+            r"\]\s*(DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL):\s*",
+            first_line,
+            re.IGNORECASE,
+        )
+        level = level_match.group(1).upper() if level_match else ""
+        if level in {"CRITICAL", "ERROR"}:
             return "critical"
-        if re.search(r"\b(WARNING|WARN)\b", text, re.IGNORECASE):
+        if level in {"WARNING", "WARN"}:
             return "warning"
         return "info"
     if source_key == "web_err" and re.search(
@@ -1036,6 +1129,7 @@ def create_app() -> FastAPI:
         os.environ.setdefault("PICORGFTP_SQL_HEADLESS", "1")
         runtime_info = initialize_application_runtime(interactive=False)
         app.state.runtime_info = runtime_info
+        cleanup_web_ftp_cache(force=True)
 
     @app.get("/")
     def index(request: Request) -> Response:
@@ -1166,7 +1260,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/ftp-preview")
     async def ftp_preview_api(request: Request) -> Dict[str, Any]:
-        _require_user(request)
+        username = _require_user(request)
         payload = await request.json()
         if not isinstance(payload, dict):
             payload = {}
@@ -1175,6 +1269,7 @@ def create_app() -> FastAPI:
                 cache_ftp_preview,
                 payload.get("ean"),
                 payload.get("filename"),
+                _user_cache_scope(request, username),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1250,7 +1345,7 @@ def create_app() -> FastAPI:
     def file_preview(request: Request, token: str) -> FileResponse:
         _require_user(request)
         path = _path_from_file_token(token)
-        return FileResponse(path)
+        return FileResponse(path, headers={"Cache-Control": "private, max-age=300"})
 
     @app.get("/api/thumbnail")
     def file_thumbnail(
@@ -1268,7 +1363,11 @@ def create_app() -> FastAPI:
             height=max(64, min(900, int(height or 260))),
             content_fit=bool(fit),
         )
-        return Response(content=content, media_type="image/jpeg")
+        return Response(
+            content=content,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "private, max-age=900"},
+        )
 
     @app.post("/api/lists/{list_key}")
     async def list_add(request: Request, list_key: str) -> JSONResponse:
@@ -1373,6 +1472,7 @@ def create_app() -> FastAPI:
     @app.post("/api/process")
     async def process_uploads(request: Request) -> JSONResponse:
         username = _require_user(request)
+        cache_scope = _user_cache_scope(request, username)
         form = await request.form()
         slots = slot_definitions_from_config(config.CONFIG)
         slot_by_prefix = {slot["prefix"]: slot for slot in slots}
@@ -1476,42 +1576,13 @@ def create_app() -> FastAPI:
                         ean=preserved_ean,
                         product_id=preserved_product_id,
                     )
-            delete_prefixes = {str(item.get("prefix") or "") for item in delete_requests}
-            occupied_prefixes = {slot.prefix for slot in uploaded_slots}
-            for item in pending_ftp_slots:
-                prefix = str(item.get("prefix") or "")
-                if not prefix or prefix in delete_prefixes or prefix in occupied_prefixes:
-                    continue
-                ftp_filename = os.path.basename(str(item.get("filename") or ""))
-                ftp_ean = str(item.get("ean") or product.ean or "").strip()
-                try:
-                    source_path = cache_ftp_preview(ftp_ean, ftp_filename)
-                except ValueError as exc:
-                    raise ValueError(
-                        f"Nie udalo sie pobrac pliku FTP {ftp_filename}: {exc}"
-                    ) from exc
-                uploaded_slots.append(
-                    WebUploadedSlot(
-                        prefix=prefix,
-                        label=str(item.get("label") or prefix),
-                        source_path=source_path,
-                        original_filename=ftp_filename,
-                        content_fit=item.get("content_fit"),
-                    )
-                )
-                occupied_prefixes.add(prefix)
-                if ftp_filename:
-                    delete_requests.append(
-                        {
-                            "prefix": prefix,
-                            "label": str(item.get("label") or prefix),
-                            "local_path": "",
-                            "ftp_filename": ftp_filename,
-                            "sql": False,
-                            "ftp_backfill": True,
-                        }
-                    )
-                    delete_prefixes.add(prefix)
+            _append_pending_ftp_slots(
+                product=product,
+                pending_ftp_slots=pending_ftp_slots,
+                uploaded_slots=uploaded_slots,
+                delete_requests=delete_requests,
+                cache_scope=cache_scope,
+            )
             photo_lookup_entry = existing_entry or _entry_payload_from_product(product)
             existing_photos = find_product_photos(
                 photo_lookup_entry,
@@ -1533,6 +1604,7 @@ def create_app() -> FastAPI:
                 uploaded_slots=uploaded_slots,
                 delete_requests=delete_requests,
                 slot_by_prefix=slot_by_prefix,
+                cache_scope=cache_scope,
             )
             if existing_entry is None and existing_photos and not uploaded_slots and not delete_requests:
                 raise ValueError(
@@ -1564,13 +1636,23 @@ def create_app() -> FastAPI:
                 form=product,
                 uploaded_slots=uploaded_slots,
                 options=processing_options_from_config(config.CONFIG),
-                allow_empty=bool(delete_requests),
+                allow_empty=True,
             )
             saved_paths = {os.path.abspath(item.path) for item in result.saved_files}
             local_delete_result = _delete_local_files(delete_requests, saved_paths)
+            ftp_backfill_prefixes = {
+                str(item.get("prefix") or "")
+                for item in delete_requests
+                if item.get("ftp_backfill")
+            }
             ftp_result = _sync_result_to_ftp(
                 result,
-                [item.get("ftp_filename", "") for item in delete_requests],
+                [
+                    item.get("ftp_filename", "")
+                    for item in delete_requests
+                    if not item.get("ftp_backfill")
+                ],
+                skip_upload_prefixes=ftp_backfill_prefixes,
             )
             sql_result = _sync_result_to_sql(
                 result,
@@ -1621,6 +1703,8 @@ def create_app() -> FastAPI:
             summary=(
                 "Zapisano usuniecia produktu."
                 if delete_requests and not result.saved_files
+                else "Zsynchronizowano produkt bez zmian w plikach."
+                if not delete_requests and not result.saved_files
                 else "Przetworzono pliki produktu."
             ),
             details={

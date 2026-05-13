@@ -66,7 +66,6 @@
           <div class="lookup-actions">
             <button id="findByEanButton" type="button" class="secondary-button">Szukaj EAN</button>
             <button id="findProductButton" type="button" class="secondary-button">Dopasuj produkt</button>
-            <button id="saveEntryButton" type="button" class="secondary-button" title="Zapisuje same dane produktu w Excelu, bez obrobki zdjec, FTP i SQL.">Zapisz wpis bez plikow</button>
           </div>
           <label class="entry-select-field">
             Istniejacy wpis
@@ -75,7 +74,7 @@
             </select>
           </label>
           <div class="form-actions">
-            <button id="submitButton" type="submit">Przetworz</button>
+            <button id="submitButton" type="submit" title="Pobiera brakujace zdjecia z FTP i uzupelnia lokalne pliki.">Synchronizuj</button>
             <button id="clearButton" type="button" class="secondary-button">Wyczysc dane</button>
             <span id="formStatus" role="status"></span>
           </div>
@@ -248,6 +247,6 @@
       </article>
     </template>
 
-    <script src="/static/app.js?v=20260511-app-secret"></script>
+    <script src="/static/app.js?v=20260512-slot-safe-thumb-cache"></script>
   </body>
 </html>

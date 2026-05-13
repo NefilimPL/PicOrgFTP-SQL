@@ -797,6 +797,11 @@ button.slot-badge:hover {
   background: var(--ftp);
 }
 
+.slot-badge.loading {
+  border-color: currentColor;
+  animation: ftp-badge-loading 1.15s ease-in-out infinite;
+}
+
 .slot-badge-sql.on {
   background: var(--sql);
 }
@@ -1121,6 +1126,18 @@ button.slot-badge.on:hover {
   }
 }
 
+@keyframes ftp-badge-loading {
+  0%,
+  100% {
+    filter: brightness(1);
+    box-shadow: 0 0 0 0 rgba(31, 98, 208, 0);
+  }
+  50% {
+    filter: brightness(1.2);
+    box-shadow: 0 0 0 3px rgba(31, 98, 208, 0.22);
+  }
+}
+
 @keyframes progress-slide {
   0% {
     transform: translateX(-100%);
@@ -1132,8 +1149,10 @@ button.slot-badge.on:hover {
 
 .slot-empty {
   max-width: 100%;
+  max-height: 100%;
   overflow: hidden;
   overflow-wrap: anywhere;
+  word-break: break-word;
   color: var(--muted);
   font-size: 13px;
   line-height: 1.35;
@@ -1143,11 +1162,13 @@ button.slot-badge.on:hover {
 
 .slot-meta {
   min-width: 0;
+  overflow: hidden;
 }
 
 .slot-meta strong,
 .slot-meta span {
   display: block;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1161,6 +1182,7 @@ button.slot-badge.on:hover {
   margin-top: 2px;
   color: var(--muted);
   font-size: 12px;
+  min-width: 0;
 }
 
 .file-picker {

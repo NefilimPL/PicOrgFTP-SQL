@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -69,6 +70,35 @@ class WebAppFileTests(unittest.TestCase):
             self.assertEqual(result["errors"], [])
             self.assertFalse(delete_file.exists())
             self.assertTrue(saved_file.exists())
+
+    def test_ftp_sync_skips_upload_for_backfilled_prefixes(self) -> None:
+        result = SimpleNamespace(
+            output_dir="processed",
+            saved_files=[
+                SimpleNamespace(
+                    prefix="03",
+                    filename="5901234567890_03_DETAIL_MAGGIORE.jpg",
+                )
+            ],
+        )
+
+        with (
+            patch.dict(web_app.config.CONFIG, {web_app.ft: True, web_app.H: {}}, clear=False),
+            patch.object(
+                web_app,
+                "sync_remote_files",
+                return_value={"uploaded": 0, "deleted": 0, "elapsed_ms": 1, "error": ""},
+            ) as sync_remote,
+        ):
+            payload = web_app._sync_result_to_ftp(
+                result,
+                [],
+                skip_upload_prefixes={"03"},
+            )
+
+        self.assertTrue(payload["enabled"])
+        self.assertEqual(payload["uploaded"], 0)
+        sync_remote.assert_not_called()
 
     def test_existing_local_photos_are_migrated_when_product_path_changes(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]
@@ -184,11 +214,66 @@ class WebAppFileTests(unittest.TestCase):
                 )
 
             self.assertEqual(appended, ["03"])
-            cache_ftp.assert_called_once_with("5901234567890", "5901234567890_03.jpg")
+            cache_ftp.assert_called_once_with(
+                "5901234567890",
+                "5901234567890_03.jpg",
+                cache_scope="",
+            )
             self.assertEqual(uploaded_slots[0].source_path, str(cache_file))
             self.assertEqual(delete_requests[0]["local_path"], "")
             self.assertEqual(delete_requests[0]["ftp_filename"], "5901234567890_03.jpg")
             self.assertTrue(delete_requests[0]["ftp_backfill"])
+
+    def test_local_only_photos_are_appended_for_missing_ftp_upload(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            root = Path(temp_dir)
+            processed = root / "processed"
+            local_dir = processed / "MAGGIORE" / "KOMODA" / "MA03" / "BIALY" / "NO-LED"
+            local_dir.mkdir(parents=True)
+            photo_path = local_dir / "5901234567890_03_DETAIL_MAGGIORE_KOMODA_MA03_BIALY_NO-LED.jpg"
+            photo_path.write_bytes(b"local")
+            uploaded_slots = []
+            delete_requests = []
+            product = web_app.WebProductForm(
+                product_id="PRD-1",
+                ean="5901234567890",
+                name="MAGGIORE",
+                type_name="KOMODA",
+                model="MA03",
+                color1="BIALY",
+                extra="NO-LED",
+            )
+
+            with (
+                patch.object(web_app.settings, "l", str(processed)),
+                patch.dict(web_app.config.CONFIG, {web_app.ft: True}, clear=False),
+                patch.object(
+                    web_app,
+                    "find_product_photos",
+                    return_value=[
+                        {
+                            "ean": "5901234567890",
+                            "prefix": "03",
+                            "path": str(photo_path),
+                            "filename": photo_path.name,
+                            "ftp_filename": "",
+                        }
+                    ],
+                ),
+            ):
+                appended = web_app._append_existing_photo_migrations(
+                    existing_entry={"ean": "5901234567890"},
+                    product=product,
+                    uploaded_slots=uploaded_slots,
+                    delete_requests=delete_requests,
+                    slot_by_prefix={"03": {"prefix": "03", "label": "DETAIL_pic"}},
+                )
+
+            self.assertEqual(appended, ["03"])
+            self.assertEqual(uploaded_slots[0].source_path, str(photo_path))
+            self.assertEqual(delete_requests[0]["ftp_filename"], "")
+            self.assertFalse(delete_requests[0]["ftp_backfill"])
 
     def test_deleted_ftp_only_slot_is_not_downloaded_again(self) -> None:
         product = web_app.WebProductForm(
@@ -226,6 +311,61 @@ class WebAppFileTests(unittest.TestCase):
 
         self.assertEqual(appended, [])
         cache_ftp.assert_not_called()
+
+    def test_pending_ftp_slot_can_replace_deleted_target_prefix(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            cache_file = Path(temp_dir) / "5901234567890_02.jpg"
+            cache_file.write_bytes(b"ftp")
+            product = web_app.WebProductForm(
+                product_id="PRD-1",
+                ean="5901234567890",
+                name="MAGGIORE",
+                type_name="KOMODA",
+                model="MA03",
+                color1="BIALY",
+            )
+            uploaded_slots = []
+            delete_requests = [
+                {
+                    "prefix": "03",
+                    "label": "DETAIL_pic",
+                    "local_path": "",
+                    "ftp_filename": "5901234567890_03.jpg",
+                    "sql": False,
+                }
+            ]
+            pending_ftp_slots = [
+                {
+                    "prefix": "03",
+                    "label": "DETAIL_pic",
+                    "filename": "5901234567890_02.jpg",
+                    "ean": "5901234567890",
+                    "content_fit": True,
+                }
+            ]
+
+            with patch.object(web_app, "cache_ftp_preview", return_value=str(cache_file)) as cache_ftp:
+                appended = web_app._append_pending_ftp_slots(
+                    product=product,
+                    pending_ftp_slots=pending_ftp_slots,
+                    uploaded_slots=uploaded_slots,
+                    delete_requests=delete_requests,
+                )
+
+            self.assertEqual(appended, ["03"])
+            cache_ftp.assert_called_once_with(
+                "5901234567890",
+                "5901234567890_02.jpg",
+                cache_scope="",
+            )
+            self.assertEqual(uploaded_slots[0].prefix, "03")
+            self.assertEqual(uploaded_slots[0].source_path, str(cache_file))
+            self.assertTrue(uploaded_slots[0].content_fit)
+            self.assertEqual(
+                [item["ftp_filename"] for item in delete_requests],
+                ["5901234567890_03.jpg", "5901234567890_02.jpg"],
+            )
 
     def test_log_parser_groups_traceback_into_one_critical_event(self) -> None:
         events = web_app._parse_log_events(
@@ -265,6 +405,60 @@ class WebAppFileTests(unittest.TestCase):
         self.assertNotIn("\x1b", events[0]["summary"])
         self.assertEqual(events[0]["severity"], "info")
         self.assertEqual(events[1]["severity"], "warning")
+
+    def test_web_event_info_details_with_error_keys_stay_info(self) -> None:
+        events = web_app._parse_log_events(
+            {
+                "key": "web_events",
+                "label": "Zdarzenia web",
+                "path": "events.log",
+                "lines": [
+                    "[2026-05-12 12:54:30] [USER: admin] INFO: PROCESS_COMPLETED - Zapisano 0 plikow, usunieto lokalnie 0.",
+                    'details: {"ftp": {"error": ""}, "sql": {"error": ""}}',
+                ],
+            }
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["severity"], "info")
+
+    def test_user_cache_scope_is_session_specific(self) -> None:
+        first = web_app._user_cache_scope(
+            SimpleNamespace(cookies={web_app.SESSION_COOKIE: "session-one"}),
+            "admin",
+        )
+        second = web_app._user_cache_scope(
+            SimpleNamespace(cookies={web_app.SESSION_COOKIE: "session-two"}),
+            "admin",
+        )
+        other_user = web_app._user_cache_scope(
+            SimpleNamespace(cookies={web_app.SESSION_COOKIE: "session-one"}),
+            "operator",
+        )
+
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(first, other_user)
+        self.assertTrue(first.startswith("admin-"))
+
+    def test_user_cache_scope_without_session_uses_client_context(self) -> None:
+        first = web_app._user_cache_scope(
+            SimpleNamespace(
+                cookies={},
+                client=SimpleNamespace(host="192.0.2.10"),
+                headers={"user-agent": "browser-a"},
+            ),
+            "admin",
+        )
+        second = web_app._user_cache_scope(
+            SimpleNamespace(
+                cookies={},
+                client=SimpleNamespace(host="192.0.2.11"),
+                headers={"user-agent": "browser-a"},
+            ),
+            "admin",
+        )
+
+        self.assertNotEqual(first, second)
 
     def test_log_payloads_are_newest_first_and_hide_successful_access_logs(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]

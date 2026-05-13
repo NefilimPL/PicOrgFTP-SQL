@@ -12,11 +12,14 @@ from picorgftp_sql.web_workflow import (
     WebProductForm,
     WebUploadedSlot,
     WebProcessingOptions,
+    _slot_category,
     processing_options_from_config,
     process_web_uploads,
     slot_definitions_from_config,
+    normalized_product_payload,
     validate_product_form,
 )
+from picorgftp_sql.workflow_utils import build_product_directory, build_slot_filename
 
 
 class WebWorkflowTests(unittest.TestCase):
@@ -151,6 +154,58 @@ class WebWorkflowTests(unittest.TestCase):
             self.assertEqual(result.ean, "5901234567890")
             self.assertEqual(result.saved_files, [])
             self.assertTrue(Path(result.output_dir).is_dir())
+
+    def test_process_web_uploads_allows_existing_file_at_target_path(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            output_root = Path(temp_dir) / "processed"
+            form = WebProductForm(
+                name="Maggiore",
+                type_name="komoda",
+                model="MA03",
+                color1="bialy",
+                extra="NO-LED",
+                ean="5901234567890",
+            )
+            payload = normalized_product_payload(form)
+            output_dir = build_product_directory(
+                str(output_root),
+                payload["name"],
+                payload["type_name"],
+                payload["model"],
+                payload["colors"],
+                payload["extra"],
+            )
+            filename = build_slot_filename(
+                payload["ean"],
+                "03",
+                _slot_category("DETAIL_pic"),
+                payload["name"],
+                payload["type_name"],
+                payload["model"],
+                payload["colors"],
+                payload["extra"],
+                ".pdf",
+            )
+            source = Path(output_dir) / filename
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"%PDF-1.4\n")
+
+            result = process_web_uploads(
+                base_output_dir=str(output_root),
+                form=form,
+                uploaded_slots=[
+                    WebUploadedSlot(
+                        prefix="03",
+                        label="DETAIL_pic",
+                        source_path=str(source),
+                        original_filename=filename,
+                    )
+                ],
+            )
+
+            self.assertEqual(result.saved_files[0].path, str(source))
+            self.assertEqual(source.read_bytes(), b"%PDF-1.4\n")
 
     def test_process_web_uploads_rejects_empty_change_by_default(self) -> None:
         with self.assertRaises(ValueError):
