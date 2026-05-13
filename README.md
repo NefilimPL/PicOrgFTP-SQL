@@ -5,9 +5,10 @@ Python picture organiser with ability to send to FTP and SQL
 
 Project roadmap / plan rozwoju: [PLAN_ROZWOJU.md](PLAN_ROZWOJU.md)
 
-<img width="965" height="1040" alt="image" src="https://github.com/user-attachments/assets/9f646441-23a5-497b-bd4b-32ecf9373ca0" />
-<img width="1043" height="557" alt="image" src="https://github.com/user-attachments/assets/3f6849c9-2b9a-4c1f-a570-00e2348b11fa" />
-<img width="1043" height="557" alt="image" src="https://github.com/user-attachments/assets/1e76653b-6366-4aef-8b74-a571cce6e2d0" />
+<img width="1920" height="1040" alt="PicOrgFTP-SQL-v0 3 9_i14o8ovPc3" src="https://github.com/user-attachments/assets/8d2f9c31-1103-4368-bea2-7b6899d92761" />
+<img width="1082" height="812" alt="image" src="https://github.com/user-attachments/assets/48f3f87e-b4bd-402b-bcbf-16d5a160ed0d" />
+<img width="838" height="419" alt="image" src="https://github.com/user-attachments/assets/f5ff136e-213e-4a43-baca-518905c447c6" />
+
 
 
 
@@ -99,6 +100,14 @@ This repository includes a Windows build workflow in `.github/workflows/build-ex
 
 If you need to tweak build dependencies, edit `requirements-build.txt`. The workflow uses Python 3.11 by default.
 
+
+<img width="1080" height="780" alt="image" src="https://github.com/user-attachments/assets/953f09d3-e6f2-4c14-96a0-7193689fe16a" />
+<img width="1082" height="812" alt="PicOrgFTP-SQL-v0 3 9_9jAs7Fw19f" src="https://github.com/user-attachments/assets/0b5cbd68-d42e-49ed-b912-7542d6f965b8" />
+<img width="842" height="417" alt="image" src="https://github.com/user-attachments/assets/4ee9558d-6ebf-4d57-84fc-004e2d2c9c8e" />
+
+
+
+
 ## Polski
 
 ### Działanie
@@ -186,3 +195,15 @@ W repozytorium znajduje się workflow `.github/workflows/build-exe.yml`, który 
 5. Aby opublikować pliki przy wydaniu, utwórz i opublikuj release z tagiem, np. `v1.2.3`; workflow zbuduje pliki i automatycznie doda je do release.
 
 Jeśli chcesz zmienić zależności do budowania, edytuj `requirements-build.txt`. Workflow domyślnie używa Pythona 3.11.
+
+
+Web:
+<img width="1912" height="922" alt="msedge_lQaWA3VIoF" src="https://github.com/user-attachments/assets/1cdeae0d-db34-488f-9565-ad791805cf83" />
+<img width="1912" height="922" alt="msedge_RxPXrvqZlJ" src="https://github.com/user-attachments/assets/6f66ecca-6e23-40c5-a46e-63693d1eea40" />
+<img width="1283" height="631" alt="msedge_NsL6SP5i0C" src="https://github.com/user-attachments/assets/e7a44084-5694-4968-a632-6465818b65f2" />
+<img width="1275" height="864" alt="image" src="https://github.com/user-attachments/assets/613d7141-305a-436c-a7fd-32f72fbdd50e" />
+<img width="1272" height="307" alt="image" src="https://github.com/user-attachments/assets/24eabef8-57e5-431a-9945-52e14d0eb63b" />
+<img width="1249" height="362" alt="image" src="https://github.com/user-attachments/assets/16118148-3323-4868-8038-75825fbfa1ca" />
+
+
+
