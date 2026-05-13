@@ -214,7 +214,11 @@ class WebAppFileTests(unittest.TestCase):
                 )
 
             self.assertEqual(appended, ["03"])
-            cache_ftp.assert_called_once_with("5901234567890", "5901234567890_03.jpg")
+            cache_ftp.assert_called_once_with(
+                "5901234567890",
+                "5901234567890_03.jpg",
+                cache_scope="",
+            )
             self.assertEqual(uploaded_slots[0].source_path, str(cache_file))
             self.assertEqual(delete_requests[0]["local_path"], "")
             self.assertEqual(delete_requests[0]["ftp_filename"], "5901234567890_03.jpg")
@@ -362,6 +366,44 @@ class WebAppFileTests(unittest.TestCase):
 
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["severity"], "info")
+
+    def test_user_cache_scope_is_session_specific(self) -> None:
+        first = web_app._user_cache_scope(
+            SimpleNamespace(cookies={web_app.SESSION_COOKIE: "session-one"}),
+            "admin",
+        )
+        second = web_app._user_cache_scope(
+            SimpleNamespace(cookies={web_app.SESSION_COOKIE: "session-two"}),
+            "admin",
+        )
+        other_user = web_app._user_cache_scope(
+            SimpleNamespace(cookies={web_app.SESSION_COOKIE: "session-one"}),
+            "operator",
+        )
+
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(first, other_user)
+        self.assertTrue(first.startswith("admin-"))
+
+    def test_user_cache_scope_without_session_uses_client_context(self) -> None:
+        first = web_app._user_cache_scope(
+            SimpleNamespace(
+                cookies={},
+                client=SimpleNamespace(host="192.0.2.10"),
+                headers={"user-agent": "browser-a"},
+            ),
+            "admin",
+        )
+        second = web_app._user_cache_scope(
+            SimpleNamespace(
+                cookies={},
+                client=SimpleNamespace(host="192.0.2.11"),
+                headers={"user-agent": "browser-a"},
+            ),
+            "admin",
+        )
+
+        self.assertNotEqual(first, second)
 
     def test_log_payloads_are_newest_first_and_hide_successful_access_logs(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]

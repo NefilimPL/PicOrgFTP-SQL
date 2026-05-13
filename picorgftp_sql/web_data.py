@@ -81,6 +81,10 @@ from .web_workflow import available_convert_formats
 from .version import get_display_version
 
 
+WEB_FTP_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
+WEB_FTP_CACHE_CLEAN_INTERVAL_SECONDS = 60 * 60
+_FTP_CACHE_LAST_CLEANUP = 0.0
+
 LIST_SHEETS = {
     "names": "NAZWY",
     "types": "TYPY",
@@ -388,9 +392,71 @@ def history_snapshot(*, user: str = "", limit: int = 200) -> dict[str, object]:
     return {"groups": groups, "users": users, "count": len(records)}
 
 
-def _ftp_cache_dir(ean: object) -> str:
+def _ftp_cache_dir(ean: object, cache_scope: object = "") -> str:
     safe_ean = sanitize_path_segment(ean) or "NO-EAN"
+    safe_scope = sanitize_path_segment(cache_scope)
+    if safe_scope:
+        return os.path.join(settings.AC, "web_ftp_cache", safe_scope, safe_ean)
     return os.path.join(settings.AC, "web_ftp_cache", safe_ean)
+
+
+def _ftp_cache_root() -> str:
+    return os.path.join(settings.AC, "web_ftp_cache")
+
+
+def cleanup_web_ftp_cache(
+    *,
+    max_age_seconds: int = WEB_FTP_CACHE_MAX_AGE_SECONDS,
+    min_interval_seconds: int = WEB_FTP_CACHE_CLEAN_INTERVAL_SECONDS,
+    force: bool = False,
+) -> dict[str, object]:
+    """Remove stale browser FTP preview cache files."""
+
+    global _FTP_CACHE_LAST_CLEANUP
+    now = time.time()
+    if not force and now - _FTP_CACHE_LAST_CLEANUP < max(1, int(min_interval_seconds or 1)):
+        return {"deleted_files": 0, "deleted_dirs": 0, "skipped": True, "errors": []}
+    _FTP_CACHE_LAST_CLEANUP = now
+    root = os.path.abspath(_ftp_cache_root())
+    if not os.path.isdir(root):
+        return {"deleted_files": 0, "deleted_dirs": 0, "skipped": False, "errors": []}
+
+    cutoff = now - max(60, int(max_age_seconds or WEB_FTP_CACHE_MAX_AGE_SECONDS))
+    deleted_files = 0
+    deleted_dirs = 0
+    errors: list[str] = []
+    for current_root, dirs, files in os.walk(root, topdown=False):
+        try:
+            if os.path.commonpath([root, os.path.abspath(current_root)]) != root:
+                continue
+        except ValueError:
+            continue
+        for filename in files:
+            path = os.path.join(current_root, filename)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    deleted_files += 1
+            except OSError as exc:
+                errors.append(f"{path}: {exc}")
+        for dirname in dirs:
+            path = os.path.join(current_root, dirname)
+            try:
+                os.rmdir(path)
+                deleted_dirs += 1
+            except OSError:
+                pass
+    try:
+        os.rmdir(root)
+        deleted_dirs += 1
+    except OSError:
+        pass
+    return {
+        "deleted_files": deleted_files,
+        "deleted_dirs": deleted_dirs,
+        "skipped": False,
+        "errors": errors,
+    }
 
 
 def _ftp_cache_filename(filename: object) -> str:
@@ -428,15 +494,16 @@ def _cached_ftp_previews(ean: object) -> tuple[dict[str, str], dict[str, str]]:
             pass
 
 
-def cache_ftp_preview(ean: object, filename: object) -> str:
+def cache_ftp_preview(ean: object, filename: object, cache_scope: object = "") -> str:
     """Download one FTP file to the web preview cache and return the local path."""
 
+    cleanup_web_ftp_cache()
     ean_text = _text(ean)
     filename_text = os.path.basename(_text(filename))
     if not ean_text or not filename_text:
         raise ValueError("Brakuje EAN albo nazwy pliku FTP.")
     ftp = connect_ftp(config.CONFIG.get(H, {}))
-    cache_dir = _ftp_cache_dir(ean_text)
+    cache_dir = _ftp_cache_dir(ean_text, cache_scope=cache_scope)
     os.makedirs(cache_dir, exist_ok=True)
     try:
         remote_files = select_remote_files_for_ean(ean_text, list_remote_filenames(ftp))

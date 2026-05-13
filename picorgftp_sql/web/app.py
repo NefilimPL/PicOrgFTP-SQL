@@ -58,6 +58,7 @@ from ..web_data import (
     add_user,
     authenticate_user,
     cache_ftp_preview,
+    cleanup_web_ftp_cache,
     field_suggestions,
     find_entry_by_identity,
     find_user,
@@ -169,6 +170,21 @@ def _current_user_payload(request: Request) -> Dict[str, Any]:
     if not user:
         raise HTTPException(status_code=401, detail="Brak aktywnej sesji.")
     return user
+
+
+def _user_cache_scope(request: Request, username: str) -> str:
+    session_token = str(request.cookies.get(SESSION_COOKIE) or "")
+    if session_token:
+        scope_material = session_token
+    else:
+        client = getattr(request, "client", None)
+        client_host = str(getattr(client, "host", "") or "")
+        headers = getattr(request, "headers", {}) or {}
+        user_agent = str(headers.get("user-agent", "") if hasattr(headers, "get") else "")
+        scope_material = f"{client_host}|{user_agent}|no-session"
+    token_digest = hashlib.sha1(scope_material.encode("utf-8")).hexdigest()[:12]
+    raw_scope = f"{username}-{token_digest}"
+    return re.sub(r"[^0-9A-Za-z_.-]+", "_", raw_scope).strip("._-") or "user-session"
 
 
 def _require_admin(request: Request) -> Dict[str, Any]:
@@ -496,13 +512,18 @@ def _should_migrate_existing_photos(
     return _output_identity(_form_from_entry_payload(existing_entry)) != _output_identity(product)
 
 
-def _download_ftp_photo_source(photo: Dict[str, Any], fallback_ean: str) -> str:
+def _download_ftp_photo_source(
+    photo: Dict[str, Any],
+    fallback_ean: str,
+    *,
+    cache_scope: str = "",
+) -> str:
     ftp_filename = os.path.basename(str(photo.get("ftp_filename") or ""))
     ftp_ean = str(photo.get("ean") or fallback_ean or "").strip()
     if not ftp_filename or not ftp_ean:
         return ""
     try:
-        return cache_ftp_preview(ftp_ean, ftp_filename)
+        return cache_ftp_preview(ftp_ean, ftp_filename, cache_scope=cache_scope)
     except ValueError as exc:
         raise ValueError(f"Nie udalo sie pobrac pliku FTP {ftp_filename}: {exc}") from exc
 
@@ -598,6 +619,7 @@ def _append_existing_photo_sources(
     uploaded_slots: List[WebUploadedSlot],
     delete_requests: List[Dict[str, Any]],
     slot_by_prefix: Dict[str, Dict[str, str]],
+    cache_scope: str = "",
 ) -> List[str]:
     """Add existing local/FTP photos that need to be processed by the web form."""
 
@@ -647,6 +669,7 @@ def _append_existing_photo_sources(
             source_path = _download_ftp_photo_source(
                 photo,
                 str(source_entry.get("ean") or product.ean or ""),
+                cache_scope=cache_scope,
             )
             should_process = bool(source_path and os.path.isfile(source_path))
         if not should_process:
@@ -685,6 +708,7 @@ def _append_existing_photo_migrations(
     uploaded_slots: List[WebUploadedSlot],
     delete_requests: List[Dict[str, Any]],
     slot_by_prefix: Dict[str, Dict[str, str]],
+    cache_scope: str = "",
 ) -> List[str]:
     """Backward-compatible wrapper for tests and older call sites."""
 
@@ -694,6 +718,7 @@ def _append_existing_photo_migrations(
         uploaded_slots=uploaded_slots,
         delete_requests=delete_requests,
         slot_by_prefix=slot_by_prefix,
+        cache_scope=cache_scope,
     )
 
 
@@ -1055,6 +1080,7 @@ def create_app() -> FastAPI:
         os.environ.setdefault("PICORGFTP_SQL_HEADLESS", "1")
         runtime_info = initialize_application_runtime(interactive=False)
         app.state.runtime_info = runtime_info
+        cleanup_web_ftp_cache(force=True)
 
     @app.get("/")
     def index(request: Request) -> Response:
@@ -1185,7 +1211,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/ftp-preview")
     async def ftp_preview_api(request: Request) -> Dict[str, Any]:
-        _require_user(request)
+        username = _require_user(request)
         payload = await request.json()
         if not isinstance(payload, dict):
             payload = {}
@@ -1194,6 +1220,7 @@ def create_app() -> FastAPI:
                 cache_ftp_preview,
                 payload.get("ean"),
                 payload.get("filename"),
+                _user_cache_scope(request, username),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1396,6 +1423,7 @@ def create_app() -> FastAPI:
     @app.post("/api/process")
     async def process_uploads(request: Request) -> JSONResponse:
         username = _require_user(request)
+        cache_scope = _user_cache_scope(request, username)
         form = await request.form()
         slots = slot_definitions_from_config(config.CONFIG)
         slot_by_prefix = {slot["prefix"]: slot for slot in slots}
@@ -1508,7 +1536,7 @@ def create_app() -> FastAPI:
                 ftp_filename = os.path.basename(str(item.get("filename") or ""))
                 ftp_ean = str(item.get("ean") or product.ean or "").strip()
                 try:
-                    source_path = cache_ftp_preview(ftp_ean, ftp_filename)
+                    source_path = cache_ftp_preview(ftp_ean, ftp_filename, cache_scope=cache_scope)
                 except ValueError as exc:
                     raise ValueError(
                         f"Nie udalo sie pobrac pliku FTP {ftp_filename}: {exc}"
@@ -1556,6 +1584,7 @@ def create_app() -> FastAPI:
                 uploaded_slots=uploaded_slots,
                 delete_requests=delete_requests,
                 slot_by_prefix=slot_by_prefix,
+                cache_scope=cache_scope,
             )
             if existing_entry is None and existing_photos and not uploaded_slots and not delete_requests:
                 raise ValueError(
