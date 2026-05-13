@@ -312,6 +312,61 @@ class WebAppFileTests(unittest.TestCase):
         self.assertEqual(appended, [])
         cache_ftp.assert_not_called()
 
+    def test_pending_ftp_slot_can_replace_deleted_target_prefix(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            cache_file = Path(temp_dir) / "5901234567890_02.jpg"
+            cache_file.write_bytes(b"ftp")
+            product = web_app.WebProductForm(
+                product_id="PRD-1",
+                ean="5901234567890",
+                name="MAGGIORE",
+                type_name="KOMODA",
+                model="MA03",
+                color1="BIALY",
+            )
+            uploaded_slots = []
+            delete_requests = [
+                {
+                    "prefix": "03",
+                    "label": "DETAIL_pic",
+                    "local_path": "",
+                    "ftp_filename": "5901234567890_03.jpg",
+                    "sql": False,
+                }
+            ]
+            pending_ftp_slots = [
+                {
+                    "prefix": "03",
+                    "label": "DETAIL_pic",
+                    "filename": "5901234567890_02.jpg",
+                    "ean": "5901234567890",
+                    "content_fit": True,
+                }
+            ]
+
+            with patch.object(web_app, "cache_ftp_preview", return_value=str(cache_file)) as cache_ftp:
+                appended = web_app._append_pending_ftp_slots(
+                    product=product,
+                    pending_ftp_slots=pending_ftp_slots,
+                    uploaded_slots=uploaded_slots,
+                    delete_requests=delete_requests,
+                )
+
+            self.assertEqual(appended, ["03"])
+            cache_ftp.assert_called_once_with(
+                "5901234567890",
+                "5901234567890_02.jpg",
+                cache_scope="",
+            )
+            self.assertEqual(uploaded_slots[0].prefix, "03")
+            self.assertEqual(uploaded_slots[0].source_path, str(cache_file))
+            self.assertTrue(uploaded_slots[0].content_fit)
+            self.assertEqual(
+                [item["ftp_filename"] for item in delete_requests],
+                ["5901234567890_03.jpg", "5901234567890_02.jpg"],
+            )
+
     def test_log_parser_groups_traceback_into_one_critical_event(self) -> None:
         events = web_app._parse_log_events(
             {

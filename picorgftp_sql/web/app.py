@@ -722,6 +722,55 @@ def _append_existing_photo_migrations(
     )
 
 
+def _append_pending_ftp_slots(
+    *,
+    product: WebProductForm,
+    pending_ftp_slots: List[Dict[str, Any]],
+    uploaded_slots: List[WebUploadedSlot],
+    delete_requests: List[Dict[str, Any]],
+    cache_scope: str = "",
+) -> List[str]:
+    """Download FTP-only selected slots so they can be saved like uploaded files."""
+
+    occupied_prefixes = {slot.prefix for slot in uploaded_slots}
+    appended: List[str] = []
+    for item in pending_ftp_slots:
+        prefix = str(item.get("prefix") or "")
+        if not prefix or prefix in occupied_prefixes:
+            continue
+        ftp_filename = os.path.basename(str(item.get("filename") or ""))
+        ftp_ean = str(item.get("ean") or product.ean or "").strip()
+        try:
+            source_path = cache_ftp_preview(ftp_ean, ftp_filename, cache_scope=cache_scope)
+        except ValueError as exc:
+            raise ValueError(
+                f"Nie udalo sie pobrac pliku FTP {ftp_filename}: {exc}"
+            ) from exc
+        uploaded_slots.append(
+            WebUploadedSlot(
+                prefix=prefix,
+                label=str(item.get("label") or prefix),
+                source_path=source_path,
+                original_filename=ftp_filename,
+                content_fit=item.get("content_fit"),
+            )
+        )
+        occupied_prefixes.add(prefix)
+        appended.append(prefix)
+        if ftp_filename:
+            delete_requests.append(
+                {
+                    "prefix": prefix,
+                    "label": str(item.get("label") or prefix),
+                    "local_path": "",
+                    "ftp_filename": ftp_filename,
+                    "sql": False,
+                    "ftp_backfill": False,
+                }
+            )
+    return appended
+
+
 def _read_log_tail(path: str, limit: int = 300) -> Dict[str, Any]:
     line_limit = max(1, min(2000, int(limit or 300)))
     log_path = Path(path)
@@ -1527,42 +1576,13 @@ def create_app() -> FastAPI:
                         ean=preserved_ean,
                         product_id=preserved_product_id,
                     )
-            delete_prefixes = {str(item.get("prefix") or "") for item in delete_requests}
-            occupied_prefixes = {slot.prefix for slot in uploaded_slots}
-            for item in pending_ftp_slots:
-                prefix = str(item.get("prefix") or "")
-                if not prefix or prefix in delete_prefixes or prefix in occupied_prefixes:
-                    continue
-                ftp_filename = os.path.basename(str(item.get("filename") or ""))
-                ftp_ean = str(item.get("ean") or product.ean or "").strip()
-                try:
-                    source_path = cache_ftp_preview(ftp_ean, ftp_filename, cache_scope=cache_scope)
-                except ValueError as exc:
-                    raise ValueError(
-                        f"Nie udalo sie pobrac pliku FTP {ftp_filename}: {exc}"
-                    ) from exc
-                uploaded_slots.append(
-                    WebUploadedSlot(
-                        prefix=prefix,
-                        label=str(item.get("label") or prefix),
-                        source_path=source_path,
-                        original_filename=ftp_filename,
-                        content_fit=item.get("content_fit"),
-                    )
-                )
-                occupied_prefixes.add(prefix)
-                if ftp_filename:
-                    delete_requests.append(
-                        {
-                            "prefix": prefix,
-                            "label": str(item.get("label") or prefix),
-                            "local_path": "",
-                            "ftp_filename": ftp_filename,
-                            "sql": False,
-                            "ftp_backfill": False,
-                        }
-                    )
-                    delete_prefixes.add(prefix)
+            _append_pending_ftp_slots(
+                product=product,
+                pending_ftp_slots=pending_ftp_slots,
+                uploaded_slots=uploaded_slots,
+                delete_requests=delete_requests,
+                cache_scope=cache_scope,
+            )
             photo_lookup_entry = existing_entry or _entry_payload_from_product(product)
             existing_photos = find_product_photos(
                 photo_lookup_entry,

@@ -1217,10 +1217,10 @@ function getSlotAssignment(prefix) {
   return null;
 }
 
-function setSlotAssignment(prefix, assignment) {
+function setSlotAssignment(prefix, assignment, options = {}) {
   const sourceFit = assignment ? isSlotFit(assignment.prefix || prefix) : false;
   const sourceType = assignment?.source || "";
-  clearSlotAssignment(prefix);
+  clearSlotAssignment(prefix, { markDelete: options.markDelete !== false });
   if (!assignment) {
     return;
   }
@@ -1245,8 +1245,10 @@ function moveSlotContent(sourcePrefix, targetPrefix) {
   if (!source) {
     return;
   }
-  setSlotAssignment(targetPrefix, source);
-  clearSlotAssignment(sourcePrefix);
+  markSlotDeletion(targetPrefix, state.loadedPhotos.get(targetPrefix));
+  markSlotDeletion(sourcePrefix, state.loadedPhotos.get(sourcePrefix));
+  setSlotAssignment(targetPrefix, source, { markDelete: false });
+  clearSlotAssignment(sourcePrefix, { markDelete: false });
   formStatus.textContent = `Przeniesiono slot ${sourcePrefix} -> ${targetPrefix}.`;
   renderSlots();
 }
