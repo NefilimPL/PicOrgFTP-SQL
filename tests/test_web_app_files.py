@@ -377,6 +377,42 @@ class WebAppFileTests(unittest.TestCase):
 
         self.assertEqual(skipped, set())
 
+    def test_explicit_slot_replacement_deletes_old_remote_when_extension_changes(self) -> None:
+        result = SimpleNamespace(
+            saved_files=[
+                SimpleNamespace(
+                    prefix="03",
+                    filename="5901234567890_03_DETAIL_MAGGIORE.png",
+                )
+            ],
+        )
+
+        deletes = web_app._ftp_replacement_delete_candidates(
+            result,
+            [{"prefix": "03", "ftp_filename": "5901234567890_03.jpg"}],
+            explicit_prefixes={"03"},
+        )
+
+        self.assertEqual(deletes, ["5901234567890_03.jpg"])
+
+    def test_explicit_slot_replacement_keeps_same_remote_name_for_overwrite(self) -> None:
+        result = SimpleNamespace(
+            saved_files=[
+                SimpleNamespace(
+                    prefix="03",
+                    filename="5901234567890_03_DETAIL_MAGGIORE.jpg",
+                )
+            ],
+        )
+
+        deletes = web_app._ftp_replacement_delete_candidates(
+            result,
+            [{"prefix": "03", "ftp_filename": "5901234567890_03.jpg"}],
+            explicit_prefixes={"03"},
+        )
+
+        self.assertEqual(deletes, [])
+
     def test_deleted_ftp_only_slot_is_not_downloaded_again(self) -> None:
         product = web_app.WebProductForm(
             product_id="PRD-1",

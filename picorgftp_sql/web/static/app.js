@@ -1160,6 +1160,7 @@ function nextBackgroundFtpPreviewCandidate() {
       !photo.ftp_token &&
       !state.files.has(prefix) &&
       !state.deletedSlots.has(prefix) &&
+      !photo?.dirty &&
       !state.ftpPreviewLoading.has(prefix)
     ) {
       return { prefix, photo };
@@ -2155,6 +2156,40 @@ function hasPendingSlotChanges() {
   return false;
 }
 
+function slotHasPendingUserEdit(prefix) {
+  return Boolean(
+    state.files.has(prefix) ||
+      state.deletedSlots.has(prefix) ||
+      state.loadedPhotos.get(prefix)?.dirty
+  );
+}
+
+function pendingChangedSlotPrefixes() {
+  const prefixes = new Set();
+  for (const prefix of state.files.keys()) prefixes.add(prefix);
+  for (const prefix of state.deletedSlots.keys()) prefixes.add(prefix);
+  for (const [prefix, photo] of state.loadedPhotos.entries()) {
+    if (photo?.dirty || photoNeedsRepair(photo)) {
+      prefixes.add(prefix);
+    }
+  }
+  return prefixes;
+}
+
+function clearSavedSlotMarkers(prefixes) {
+  for (const prefix of prefixes || []) {
+    const photo = state.loadedPhotos.get(prefix);
+    if (photo?.dirty) {
+      const clean = { ...photo };
+      delete clean.dirty;
+      state.loadedPhotos.set(prefix, clean);
+    }
+    state.deletedSlots.delete(prefix);
+    state.files.delete(prefix);
+    state.userSelectedSlotSources.delete(prefix);
+  }
+}
+
 function hasPendingUserChanges() {
   return (
     hasPendingSlotChanges() ||
@@ -2249,12 +2284,18 @@ function setPhotoSourceStatus(source, status, requestId) {
   formStatus.textContent = summary || photoLoadingText();
 }
 
-function applyPhotoPayload(photos = []) {
+function applyPhotoPayload(photos = [], options = {}) {
   let changed = false;
+  const allowedPrefixes = options.prefixes instanceof Set ? options.prefixes : null;
   for (const photo of photos) {
     if (!photo?.prefix) continue;
+    if (allowedPrefixes && !allowedPrefixes.has(photo.prefix)) continue;
+    if (!options.force && slotHasPendingUserEdit(photo.prefix)) continue;
     const existing = state.loadedPhotos.get(photo.prefix) || {};
     const merged = mergePhotoRecord(existing, photo);
+    if (options.clearDirty) {
+      delete merged.dirty;
+    }
     state.loadedPhotos.set(photo.prefix, merged);
     const source = defaultSlotSource(merged);
     if (!state.userSelectedSlotSources.has(photo.prefix)) {
@@ -2279,8 +2320,12 @@ function applyPhotoPayload(photos = []) {
   }
 }
 
-async function requestEntryPhotos(entry, source) {
-  return requestJson(`/api/entries/photos?source=${encodeURIComponent(source)}`, {
+async function requestEntryPhotos(entry, source, prefixes = null) {
+  const params = new URLSearchParams({ source });
+  if (prefixes && prefixes.size) {
+    params.set("prefixes", [...prefixes].join(","));
+  }
+  return requestJson(`/api/entries/photos?${params.toString()}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(entry),
@@ -2297,16 +2342,27 @@ function clearSelectedFiles() {
 async function loadPhotosForEntry(entry, options = {}) {
   const started = performance.now();
   const progressive = options.progressive !== false;
+  const targetPrefixes = new Set((options.prefixes || []).map((prefix) => String(prefix || "").trim()).filter(Boolean));
+  const partial = targetPrefixes.size > 0;
   const requestId = state.photoLoadRequestId + 1;
   state.photoLoadRequestId = requestId;
   state.photosLoading = true;
-  state.loadedPhotos.clear();
-  state.deletedSlots.clear();
-  state.slotSources.clear();
-  state.userSelectedSlotSources.clear();
-  state.ftpPreviewLoading.clear();
-  state.ftpPreviewBackgroundLoading.clear();
-  state.photoSourcesLoaded.clear();
+  const collectedPrefixes = new Set();
+  if (!partial) {
+    state.loadedPhotos.clear();
+    state.deletedSlots.clear();
+    state.slotSources.clear();
+    state.userSelectedSlotSources.clear();
+    state.ftpPreviewLoading.clear();
+    state.ftpPreviewBackgroundLoading.clear();
+    state.photoSourcesLoaded.clear();
+  } else {
+    for (const prefix of targetPrefixes) {
+      state.ftpPreviewLoading.delete(prefix);
+      state.ftpPreviewBackgroundLoading.delete(prefix);
+      state.userSelectedSlotSources.delete(prefix);
+    }
+  }
   window.clearTimeout(state.backgroundFtpPreviewTimer);
   const sources = progressive ? ["local", "sql", "ftp"] : ["all"];
   state.photoSourceStatus.clear();
@@ -2314,15 +2370,27 @@ async function loadPhotosForEntry(entry, options = {}) {
     state.photoSourceStatus.set(source, "pending");
   }
   formStatus.textContent = photoLoadingText();
-  renderSlots();
+  if (!partial) {
+    renderSlots();
+  }
   const tasks = sources.map(async (source) => {
     setPhotoSourceStatus(source, "loading", requestId);
     try {
-      const payload = await requestEntryPhotos(entry, source);
+      const payload = await requestEntryPhotos(entry, source, partial ? targetPrefixes : null);
       if (state.photoLoadRequestId === requestId) {
         setPhotoSourceStatus(source, "done", requestId);
         state.photoSourcesLoaded.add(payload.source || source);
-        applyPhotoPayload(payload.photos || []);
+        const payloadPhotos = partial
+          ? (payload.photos || []).filter((photo) => targetPrefixes.has(photo?.prefix))
+          : payload.photos || [];
+        for (const photo of payloadPhotos) {
+          if (photo?.prefix) collectedPrefixes.add(photo.prefix);
+        }
+        applyPhotoPayload(payloadPhotos, {
+          prefixes: partial ? targetPrefixes : null,
+          force: Boolean(options.force),
+          clearDirty: Boolean(options.clearDirty),
+        });
         if ((payload.source || source) === "ftp" || (payload.source || source) === "all") {
           scheduleBackgroundFtpPreviewLoad(requestId, 160);
         }
@@ -2351,6 +2419,17 @@ async function loadPhotosForEntry(entry, options = {}) {
     if (state.photoLoadRequestId !== requestId) return;
     state.photosLoading = false;
     state.photoSourceStatus.clear();
+    if (partial) {
+      for (const prefix of targetPrefixes) {
+        if (!collectedPrefixes.has(prefix) && !slotHasPendingUserEdit(prefix)) {
+          state.loadedPhotos.delete(prefix);
+          state.slotSources.delete(prefix);
+          state.userSelectedSlotSources.delete(prefix);
+          state.slotFits.delete(prefix);
+          bumpSlotRevision(prefix);
+        }
+      }
+    }
     updateRuntimeMetrics();
     renderSlots();
     scheduleBackgroundFtpPreviewLoad(requestId);
@@ -3342,6 +3421,7 @@ productForm.addEventListener("submit", async (event) => {
           : "Aktualizowanie..."
         : "Synchronizowanie brakujacych danych..."
     );
+    const changedPrefixes = pendingChangedSlotPrefixes();
     const data = new FormData(productForm);
     for (const [prefix, file] of state.files.entries()) {
       data.set(`slot_${prefix}`, file, file.name);
@@ -3383,7 +3463,29 @@ productForm.addEventListener("submit", async (event) => {
     state.deletedSlots.clear();
     clearSelectedFiles();
     await refreshData();
-    await loadPhotosForEntry({ ...formPayload(), product_id: payload.entry?.product_id || productForm.elements.product_id.value });
+    for (const item of payload.saved_files || []) {
+      if (item.prefix) changedPrefixes.add(item.prefix);
+    }
+    for (const item of payload.deleted_slots || []) {
+      if (item.prefix) changedPrefixes.add(item.prefix);
+    }
+    for (const prefix of payload.migrated_slots || []) {
+      if (prefix) changedPrefixes.add(prefix);
+    }
+    clearSavedSlotMarkers(changedPrefixes);
+    const entryToReload = {
+      ...formPayload(),
+      product_id: payload.entry?.product_id || productForm.elements.product_id.value,
+    };
+    if (identityChanged || !changedPrefixes.size) {
+      await loadPhotosForEntry(entryToReload);
+    } else {
+      await loadPhotosForEntry(entryToReload, {
+        prefixes: [...changedPrefixes],
+        force: true,
+        clearDirty: true,
+      });
+    }
     setBusy(false, "Zakonczono.");
   } catch (error) {
     showError(error);

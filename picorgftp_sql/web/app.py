@@ -469,6 +469,36 @@ def _ftp_skip_upload_prefixes(
     return skip
 
 
+def _ftp_replacement_delete_candidates(
+    result: Any,
+    existing_photos: List[Dict[str, Any]],
+    *,
+    explicit_prefixes: Set[str],
+) -> List[str]:
+    """Return old remote files replaced by explicit slot changes."""
+
+    explicit = {str(prefix) for prefix in explicit_prefixes if str(prefix)}
+    photos_by_prefix = {
+        str(photo.get("prefix") or ""): photo
+        for photo in existing_photos
+        if str(photo.get("prefix") or "")
+    }
+    delete_candidates: List[str] = []
+    for item in getattr(result, "saved_files", []) or []:
+        prefix = str(getattr(item, "prefix", "") or "")
+        if not prefix or prefix not in explicit:
+            continue
+        current_remote = os.path.basename(
+            str(photos_by_prefix.get(prefix, {}).get("ftp_filename") or "")
+        )
+        if not current_remote:
+            continue
+        expected_remote = _remote_name_for_output(str(getattr(item, "filename", "") or ""))
+        if expected_remote and current_remote != expected_remote:
+            delete_candidates.append(current_remote)
+    return delete_candidates
+
+
 def _delete_local_files(delete_requests: List[Dict[str, Any]], saved_paths: Set[str]) -> Dict[str, Any]:
     payload = {"deleted": 0, "skipped": 0, "errors": []}
     normalized_saved_paths = {os.path.normcase(os.path.abspath(path)) for path in saved_paths}
@@ -1463,7 +1493,11 @@ def create_app() -> FastAPI:
         return JSONResponse({"ok": True, "entry": result})
 
     @app.post("/api/entries/photos")
-    async def entries_photos(request: Request, source: str = "all") -> JSONResponse:
+    async def entries_photos(
+        request: Request,
+        source: str = "all",
+        prefixes: str = "",
+    ) -> JSONResponse:
         _require_user(request)
         payload = await request.json()
         source_key = str(source or "all").strip().lower()
@@ -1476,6 +1510,17 @@ def create_app() -> FastAPI:
             include_ftp=source_key in {"all", "ftp"},
             include_sql=source_key in {"all", "sql"},
         )
+        requested_prefixes = {
+            item.strip()
+            for item in str(prefixes or "").split(",")
+            if item.strip()
+        }
+        if requested_prefixes:
+            photos = [
+                photo
+                for photo in photos
+                if str(photo.get("prefix") or "") in requested_prefixes
+            ]
         return JSONResponse({"photos": _enrich_photo_payload(photos), "source": source_key})
 
     @app.get("/api/file")
@@ -1812,13 +1857,21 @@ def create_app() -> FastAPI:
                 ),
                 ftp_backfill_prefixes=ftp_backfill_prefixes,
             )
+            ftp_delete_candidates = [
+                item.get("ftp_filename", "")
+                for item in delete_requests
+                if not item.get("ftp_backfill")
+            ]
+            ftp_delete_candidates.extend(
+                _ftp_replacement_delete_candidates(
+                    result,
+                    existing_photos,
+                    explicit_prefixes=explicit_slot_prefixes,
+                )
+            )
             ftp_result = _sync_result_to_ftp(
                 result,
-                [
-                    item.get("ftp_filename", "")
-                    for item in delete_requests
-                    if not item.get("ftp_backfill")
-                ],
+                ftp_delete_candidates,
                 skip_upload_prefixes=skip_upload_prefixes,
             )
             sql_result = _sync_result_to_sql(
@@ -1859,6 +1912,7 @@ def create_app() -> FastAPI:
         payload = _result_payload(result)
         payload["entry"] = entry_result
         payload["migrated_slots"] = migrated_prefixes
+        payload["deleted_slots"] = delete_requests
         payload["ftp"] = ftp_result
         payload["sql"] = sql_result
         payload["local_delete"] = local_delete_result
