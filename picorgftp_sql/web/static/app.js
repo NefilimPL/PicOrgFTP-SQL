@@ -39,6 +39,7 @@ const state = {
   photoSourcesLoaded: new Set(),
   ftpEnabled: true,
   slotRevisions: new Map(),
+  userSelectedSlotSources: new Set(),
 };
 
 const listLabels = {
@@ -646,8 +647,8 @@ function setupFieldChangeTracking() {
 
 function defaultSlotSource(photo) {
   if (photo?.local && photo?.token) return "local";
-  if (photo?.sql && sqlLinkFromPhoto(photo)) return "sql";
   if (photo?.ftp && (photo?.ftp_token || photo?.ftp_filename)) return "ftp";
+  if (photo?.sql && sqlLinkFromPhoto(photo)) return "sql";
   return "";
 }
 
@@ -962,6 +963,7 @@ function renderSlotBadges(container, photo, file, prefix) {
       badge.addEventListener("click", (event) => {
         event.stopPropagation();
         state.slotSources.set(prefix, key);
+        state.userSelectedSlotSources.add(prefix);
         if (key === "ftp" && !photo.ftp_token) {
           if (state.ftpPreviewLoading.has(prefix)) {
             state.ftpPreviewBackgroundLoading.delete(prefix);
@@ -1232,6 +1234,7 @@ function clearSlotAssignment(prefix, options = {}) {
   state.loadedPhotos.delete(prefix);
   state.slotFits.delete(prefix);
   state.slotSources.delete(prefix);
+  state.userSelectedSlotSources.delete(prefix);
 }
 
 function setSlotFile(prefix, file) {
@@ -1241,14 +1244,16 @@ function setSlotFile(prefix, file) {
   state.files.set(prefix, file);
   state.loadedPhotos.delete(prefix);
   state.slotSources.delete(prefix);
+  state.userSelectedSlotSources.delete(prefix);
 }
 
 function getSlotAssignment(prefix) {
   if (state.files.has(prefix)) {
-    return { type: "file", prefix, value: state.files.get(prefix), source: state.slotSources.get(prefix) || "" };
+    return { type: "file", prefix, value: state.files.get(prefix), source: "" };
   }
   if (state.loadedPhotos.has(prefix)) {
-    return { type: "loaded", prefix, value: state.loadedPhotos.get(prefix), source: state.slotSources.get(prefix) || "" };
+    const photo = state.loadedPhotos.get(prefix);
+    return { type: "loaded", prefix, value: photo, source: transferableSlotSource(prefix, photo) };
   }
   return null;
 }
@@ -1264,12 +1269,14 @@ function setSlotAssignment(prefix, assignment, options = {}) {
     state.files.set(prefix, assignment.value);
     state.slotFits.set(prefix, sourceFit);
     if (sourceType) state.slotSources.set(prefix, sourceType);
+    state.userSelectedSlotSources.delete(prefix);
     return;
   }
   if (assignment.type === "loaded") {
     state.loadedPhotos.set(prefix, { ...assignment.value, prefix, dirty: true });
     state.slotFits.set(prefix, sourceFit);
     if (sourceType) state.slotSources.set(prefix, sourceType);
+    state.userSelectedSlotSources.delete(prefix);
   }
 }
 
@@ -2194,6 +2201,11 @@ function mergePhotoRecord(existing = {}, incoming = {}) {
       merged[key] = "";
     }
   }
+  if (incoming.sql_checked) {
+    merged.sql = Boolean(incoming.sql);
+    merged.sql_checked = true;
+    merged.sql_value = incoming.sql_value || "";
+  }
   merged.prefix = incoming.prefix || existing.prefix || "";
   const cachedFtp = state.ftpPreviewCache.get(
     ftpPreviewCacheKey(merged, formValue("ean") || state.loadedEntryOriginal?.ean || "")
@@ -2244,9 +2256,20 @@ function applyPhotoPayload(photos = []) {
     const existing = state.loadedPhotos.get(photo.prefix) || {};
     const merged = mergePhotoRecord(existing, photo);
     state.loadedPhotos.set(photo.prefix, merged);
-    if (!state.slotSources.has(photo.prefix) || !selectedSlotSource(photo.prefix, merged)) {
-      const source = defaultSlotSource(merged);
-      if (source) state.slotSources.set(photo.prefix, source);
+    const source = defaultSlotSource(merged);
+    if (!state.userSelectedSlotSources.has(photo.prefix)) {
+      if (source) {
+        state.slotSources.set(photo.prefix, source);
+      } else {
+        state.slotSources.delete(photo.prefix);
+      }
+    } else if (!selectedSlotSource(photo.prefix, merged)) {
+      if (source) {
+        state.slotSources.set(photo.prefix, source);
+      } else {
+        state.slotSources.delete(photo.prefix);
+      }
+      state.userSelectedSlotSources.delete(photo.prefix);
     }
     changed = true;
   }
@@ -2280,6 +2303,7 @@ async function loadPhotosForEntry(entry, options = {}) {
   state.loadedPhotos.clear();
   state.deletedSlots.clear();
   state.slotSources.clear();
+  state.userSelectedSlotSources.clear();
   state.ftpPreviewLoading.clear();
   state.ftpPreviewBackgroundLoading.clear();
   state.photoSourcesLoaded.clear();
@@ -2339,6 +2363,7 @@ function fillForm(entry, options = {}) {
   state.slotFits.clear();
   state.deletedSlots.clear();
   state.slotSources.clear();
+  state.userSelectedSlotSources.clear();
   state.ftpPreviewLoading.clear();
   state.ftpPreviewBackgroundLoading.clear();
   state.photoSourcesLoaded.clear();
@@ -3378,6 +3403,7 @@ clearButton.addEventListener("click", () => {
   state.slotFits.clear();
   state.deletedSlots.clear();
   state.slotSources.clear();
+  state.userSelectedSlotSources.clear();
   state.photoSourceStatus.clear();
   state.ftpPreviewLoading.clear();
   state.ftpPreviewBackgroundLoading.clear();
