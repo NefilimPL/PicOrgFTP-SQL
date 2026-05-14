@@ -666,6 +666,22 @@ function selectedPhotoToken(photo, prefix) {
   return photo?.token || "";
 }
 
+function transferableSlotSource(prefix, photo) {
+  const selected = state.slotSources.get(prefix);
+  if (selected === "local" && photo?.token) return "local";
+  if (selected === "ftp" && (photo?.ftp_token || photo?.ftp_filename)) return "ftp";
+  if (photo?.token) return "local";
+  if (photo?.ftp_token || photo?.ftp_filename) return "ftp";
+  return "";
+}
+
+function transferablePhotoToken(photo, prefix) {
+  const source = transferableSlotSource(prefix, photo);
+  if (source === "ftp") return photo?.ftp_token || "";
+  if (source === "local") return photo?.token || "";
+  return "";
+}
+
 function isHttpUrl(value) {
   try {
     const url = new URL(String(value || "").trim());
@@ -2106,12 +2122,26 @@ function localPhotoNeedsFtpUpload(photo) {
   return Boolean(state.ftpEnabled && ftpChecked && photo?.local && photo?.token && !photo?.ftp);
 }
 
+function photoNeedsRepair(photo) {
+  const localChecked = state.photoSourcesLoaded.has("local") || state.photoSourcesLoaded.has("all");
+  const sqlChecked =
+    Boolean(photo?.sql_checked) ||
+    state.photoSourcesLoaded.has("sql") ||
+    state.photoSourcesLoaded.has("all");
+  const hasTransferSource = Boolean(photo?.token || photo?.ftp_token || photo?.ftp_filename);
+  return Boolean(
+    localPhotoNeedsFtpUpload(photo) ||
+      (localChecked && photo?.ftp && !photo?.local) ||
+      (sqlChecked && hasTransferSource && !photo?.sql)
+  );
+}
+
 function hasPendingSlotChanges() {
   if (state.files.size || state.deletedSlots.size) {
     return true;
   }
   for (const photo of state.loadedPhotos.values()) {
-    if (photo?.dirty || localPhotoNeedsFtpUpload(photo)) {
+    if (photo?.dirty || photoNeedsRepair(photo)) {
       return true;
     }
   }
@@ -2140,7 +2170,7 @@ function updateSubmitButtonState() {
 
 function mergePhotoRecord(existing = {}, incoming = {}) {
   const merged = { ...existing, ...incoming };
-  for (const key of ["local", "ftp", "sql", "is_image"]) {
+  for (const key of ["local", "ftp", "sql", "is_image", "sql_checked"]) {
     merged[key] = Boolean(existing[key] || incoming[key]);
   }
   for (const key of [
@@ -3293,18 +3323,21 @@ productForm.addEventListener("submit", async (event) => {
       data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
     }
     for (const [prefix, photo] of state.loadedPhotos.entries()) {
-      const token = selectedPhotoToken(photo, prefix);
       if (!state.files.has(prefix) && (photo.dirty || localPhotoNeedsFtpUpload(photo))) {
+        const transferSource = transferableSlotSource(prefix, photo);
+        const token = transferablePhotoToken(photo, prefix);
         if (token) {
           data.set(`existing_slot_${prefix}`, token);
           data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
-        } else if (selectedSlotSource(prefix, photo) === "ftp" && photo.ftp_filename) {
+        } else if (transferSource === "ftp" && photo.ftp_filename) {
           data.set(`existing_ftp_slot_${prefix}`, photo.ftp_filename);
           data.set(
             `existing_ftp_ean_${prefix}`,
             photo.ean || state.loadedEntryOriginal?.ean || productForm.elements.ean.value
           );
           data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
+        } else if (photo.dirty) {
+          throw new Error(`Slot ${prefix} nie ma lokalnego ani FTP zrodla do przeniesienia.`);
         }
       }
     }

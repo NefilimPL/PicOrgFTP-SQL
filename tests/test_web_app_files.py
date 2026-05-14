@@ -275,6 +275,108 @@ class WebAppFileTests(unittest.TestCase):
             self.assertEqual(delete_requests[0]["ftp_filename"], "")
             self.assertFalse(delete_requests[0]["ftp_backfill"])
 
+    def test_local_photo_is_appended_for_missing_sql_without_delete_request(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            root = Path(temp_dir)
+            processed = root / "processed"
+            local_dir = processed / "MAGGIORE" / "KOMODA" / "MA03" / "BIALY" / "NO-LED"
+            local_dir.mkdir(parents=True)
+            photo_path = local_dir / "5901234567890_03_DETAIL_MAGGIORE_KOMODA_MA03_BIALY_NO-LED.jpg"
+            photo_path.write_bytes(b"local")
+            uploaded_slots = []
+            delete_requests = []
+            product = web_app.WebProductForm(
+                product_id="PRD-1",
+                ean="5901234567890",
+                name="MAGGIORE",
+                type_name="KOMODA",
+                model="MA03",
+                color1="BIALY",
+                extra="NO-LED",
+            )
+
+            with (
+                patch.object(web_app.settings, "l", str(processed)),
+                patch.object(
+                    web_app,
+                    "find_product_photos",
+                    return_value=[
+                        {
+                            "ean": "5901234567890",
+                            "prefix": "03",
+                            "path": str(photo_path),
+                            "filename": photo_path.name,
+                            "ftp": True,
+                            "ftp_filename": "5901234567890_03.jpg",
+                            "sql": False,
+                            "sql_checked": True,
+                        }
+                    ],
+                ),
+            ):
+                appended = web_app._append_existing_photo_migrations(
+                    existing_entry={
+                        "product_id": "PRD-1",
+                        "ean": "5901234567890",
+                        "name": "MAGGIORE",
+                        "type_name": "KOMODA",
+                        "model": "MA03",
+                        "color1": "BIALY",
+                        "color2": "",
+                        "color3": "",
+                        "extra": "NO-LED",
+                    },
+                    product=product,
+                    uploaded_slots=uploaded_slots,
+                    delete_requests=delete_requests,
+                    slot_by_prefix={"03": {"prefix": "03", "label": "DETAIL_pic"}},
+                )
+
+            self.assertEqual(appended, ["03"])
+            self.assertEqual(uploaded_slots[0].source_path, str(photo_path))
+            self.assertEqual(delete_requests, [])
+
+    def test_ftp_upload_is_skipped_for_sql_only_repair_with_existing_remote(self) -> None:
+        result = SimpleNamespace(
+            saved_files=[
+                SimpleNamespace(
+                    prefix="03",
+                    filename="5901234567890_03_DETAIL_MAGGIORE.jpg",
+                )
+            ],
+        )
+
+        skipped = web_app._ftp_skip_upload_prefixes(
+            result,
+            [{"prefix": "03", "ftp": True}],
+            explicit_prefixes=set(),
+            migrated_prefixes=set(),
+            ftp_backfill_prefixes=set(),
+        )
+
+        self.assertEqual(skipped, {"03"})
+
+    def test_ftp_upload_is_kept_for_explicitly_changed_slot(self) -> None:
+        result = SimpleNamespace(
+            saved_files=[
+                SimpleNamespace(
+                    prefix="03",
+                    filename="5901234567890_03_DETAIL_MAGGIORE.jpg",
+                )
+            ],
+        )
+
+        skipped = web_app._ftp_skip_upload_prefixes(
+            result,
+            [{"prefix": "03", "ftp": True}],
+            explicit_prefixes={"03"},
+            migrated_prefixes=set(),
+            ftp_backfill_prefixes=set(),
+        )
+
+        self.assertEqual(skipped, set())
+
     def test_deleted_ftp_only_slot_is_not_downloaded_again(self) -> None:
         product = web_app.WebProductForm(
             product_id="PRD-1",

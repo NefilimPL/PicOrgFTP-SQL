@@ -442,6 +442,33 @@ def _sync_result_to_sql(
     return payload
 
 
+def _ftp_skip_upload_prefixes(
+    result: Any,
+    existing_photos: List[Dict[str, Any]],
+    *,
+    explicit_prefixes: Set[str],
+    migrated_prefixes: Set[str],
+    ftp_backfill_prefixes: Set[str],
+) -> Set[str]:
+    """Return saved prefixes that do not need a remote upload."""
+
+    skip = {str(prefix) for prefix in ftp_backfill_prefixes if str(prefix)}
+    explicit = {str(prefix) for prefix in explicit_prefixes if str(prefix)}
+    migrated = {str(prefix) for prefix in migrated_prefixes if str(prefix)}
+    photos_by_prefix = {
+        str(photo.get("prefix") or ""): photo
+        for photo in existing_photos
+        if str(photo.get("prefix") or "")
+    }
+    for item in getattr(result, "saved_files", []) or []:
+        prefix = str(getattr(item, "prefix", "") or "")
+        if not prefix or prefix in skip or prefix in explicit or prefix in migrated:
+            continue
+        if photos_by_prefix.get(prefix, {}).get("ftp"):
+            skip.add(prefix)
+    return skip
+
+
 def _delete_local_files(delete_requests: List[Dict[str, Any]], saved_paths: Set[str]) -> Dict[str, Any]:
     payload = {"deleted": 0, "skipped": 0, "errors": []}
     normalized_saved_paths = {os.path.normcase(os.path.abspath(path)) for path in saved_paths}
@@ -648,6 +675,8 @@ def _append_existing_photo_sources(
         label = str(slot.get("label") or prefix)
         source_path = path if path and os.path.isfile(path) else ""
         had_local_source = bool(source_path)
+        needs_sql_update = bool(photo.get("sql_checked")) and not bool(photo.get("sql"))
+        append_delete_request = False
         if prefix in occupied_prefixes:
             if identity_changed:
                 delete_requests.append(
@@ -667,6 +696,7 @@ def _append_existing_photo_sources(
             should_process = True
         elif source_path and not ftp_filename and bool(config.CONFIG.get(ft, True)):
             should_process = True
+            append_delete_request = True
         elif ftp_filename and not source_path:
             source_path = _download_ftp_photo_source(
                 photo,
@@ -674,6 +704,9 @@ def _append_existing_photo_sources(
                 cache_scope=cache_scope,
             )
             should_process = bool(source_path and os.path.isfile(source_path))
+            append_delete_request = should_process
+        elif source_path and needs_sql_update:
+            should_process = True
         if not should_process:
             continue
         if prefix not in occupied_prefixes and prefix not in delete_prefixes:
@@ -687,7 +720,7 @@ def _append_existing_photo_sources(
             )
             occupied_prefixes.add(prefix)
             appended.append(prefix)
-        if prefix not in delete_prefixes:
+        if prefix not in delete_prefixes and (identity_changed or append_delete_request):
             delete_requests.append(
                 {
                     "prefix": prefix,
@@ -1599,6 +1632,7 @@ def create_app() -> FastAPI:
         uploaded_slots: List[WebUploadedSlot] = []
         delete_requests: List[Dict[str, Any]] = []
         pending_ftp_slots: List[Dict[str, Any]] = []
+        explicit_slot_prefixes: Set[str] = set()
         product: Optional[WebProductForm] = None
         try:
             for prefix, slot in slot_by_prefix.items():
@@ -1622,6 +1656,7 @@ def create_app() -> FastAPI:
                     token = str(form.get(f"existing_slot_{prefix}") or "").strip()
                     if token:
                         source_path = _path_from_file_token(token)
+                        explicit_slot_prefixes.add(prefix)
                         uploaded_slots.append(
                             WebUploadedSlot(
                                 prefix=prefix,
@@ -1634,6 +1669,7 @@ def create_app() -> FastAPI:
                         continue
                     ftp_filename = os.path.basename(str(form.get(f"existing_ftp_slot_{prefix}") or ""))
                     if ftp_filename:
+                        explicit_slot_prefixes.add(prefix)
                         pending_ftp_slots.append(
                             {
                                 "prefix": prefix,
@@ -1646,6 +1682,7 @@ def create_app() -> FastAPI:
                         continue
                     continue
                 source_path = await _save_upload(value, temp_dir, prefix)
+                explicit_slot_prefixes.add(prefix)
                 uploaded_slots.append(
                     WebUploadedSlot(
                         prefix=prefix,
@@ -1764,6 +1801,17 @@ def create_app() -> FastAPI:
                 for item in delete_requests
                 if item.get("ftp_backfill")
             }
+            skip_upload_prefixes = _ftp_skip_upload_prefixes(
+                result,
+                existing_photos,
+                explicit_prefixes=explicit_slot_prefixes,
+                migrated_prefixes=(
+                    set(migrated_prefixes)
+                    if _should_migrate_existing_photos(existing_entry, product)
+                    else set()
+                ),
+                ftp_backfill_prefixes=ftp_backfill_prefixes,
+            )
             ftp_result = _sync_result_to_ftp(
                 result,
                 [
@@ -1771,7 +1819,7 @@ def create_app() -> FastAPI:
                     for item in delete_requests
                     if not item.get("ftp_backfill")
                 ],
-                skip_upload_prefixes=ftp_backfill_prefixes,
+                skip_upload_prefixes=skip_upload_prefixes,
             )
             sql_result = _sync_result_to_sql(
                 result,

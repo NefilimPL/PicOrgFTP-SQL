@@ -1392,6 +1392,7 @@ def find_product_photos(
                 "ftp_path": "",
                 "ftp_filename": "",
                 "sql_value": "",
+                "sql_checked": False,
             }
     ean = entry.ean
     if include_ftp and ean and bool(config.CONFIG.get(ft, True)):
@@ -1409,6 +1410,7 @@ def find_product_photos(
                         "local": False,
                         "sql": False,
                         "sql_value": "",
+                        "sql_checked": False,
                     },
                 )
                 item["ftp"] = True
@@ -1450,9 +1452,11 @@ def find_product_photos(
                             "ftp": False,
                             "ftp_path": "",
                             "ftp_filename": "",
+                            "sql_checked": False,
                         },
                     )
                     item["sql"] = bool(present)
+                    item["sql_checked"] = present is not None
                     item["ean"] = entry.ean
                     item["sql_value"] = values.get(prefix, "")
                     sql_path = urlparse(str(item["sql_value"] or "")).path
