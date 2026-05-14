@@ -648,7 +648,6 @@ function setupFieldChangeTracking() {
 function defaultSlotSource(photo) {
   if (photo?.local && photo?.token) return "local";
   if (photo?.ftp && (photo?.ftp_token || photo?.ftp_filename)) return "ftp";
-  if (photo?.sql && sqlLinkFromPhoto(photo)) return "sql";
   return "";
 }
 
@@ -656,14 +655,12 @@ function selectedSlotSource(prefix, photo) {
   const selected = state.slotSources.get(prefix);
   if (selected === "local" && photo?.token) return "local";
   if (selected === "ftp" && (photo?.ftp_token || photo?.ftp_filename)) return "ftp";
-  if (selected === "sql" && sqlLinkFromPhoto(photo)) return "sql";
   return defaultSlotSource(photo);
 }
 
 function selectedPhotoToken(photo, prefix) {
   const source = selectedSlotSource(prefix, photo);
   if (source === "ftp") return photo?.ftp_token || "";
-  if (source === "sql") return "";
   return photo?.token || "";
 }
 
@@ -681,20 +678,6 @@ function transferablePhotoToken(photo, prefix) {
   if (source === "ftp") return photo?.ftp_token || "";
   if (source === "local") return photo?.token || "";
   return "";
-}
-
-function isHttpUrl(value) {
-  try {
-    const url = new URL(String(value || "").trim());
-    return url.protocol === "http:" || url.protocol === "https:";
-  } catch (_error) {
-    return false;
-  }
-}
-
-function sqlLinkFromPhoto(photo) {
-  const value = String(photo?.sql_value || "").trim();
-  return isHttpUrl(value) ? value : "";
 }
 
 function revokeFilePreviewUrl(prefix) {
@@ -845,9 +828,6 @@ async function renderSelectedFilePreview(prefix, file, preview, previewImage, em
 }
 
 function loadedFileUrl(photo, prefix) {
-  if (selectedSlotSource(prefix, photo) === "sql") {
-    return sqlLinkFromPhoto(photo);
-  }
   const token = selectedPhotoToken(photo, prefix);
   return token ? `/api/file?token=${encodeURIComponent(token)}` : "";
 }
@@ -892,9 +872,6 @@ function slotStatusText(photo, prefix = "") {
   if (photo.ftp_filename) {
     return `FTP: ${photo.ftp_filename}`;
   }
-  if (photo.sql_value) {
-    return `SQL: ${photo.sql_value}`;
-  }
   const parts = [];
   if (photo.local) parts.push("LOCAL");
   if (photo.ftp) parts.push("FTP");
@@ -938,8 +915,7 @@ function renderSlotBadges(container, photo, file, prefix) {
   for (const [key, label, title] of statuses) {
     const canPreview =
       (key === "local" && photo?.token) ||
-      (key === "ftp" && photo?.ftp_filename) ||
-      (key === "sql" && sqlLinkFromPhoto(photo));
+      (key === "ftp" && photo?.ftp_filename);
     const badge = document.createElement(canPreview ? "button" : "span");
     const selected = selectedSlotSource(prefix, photo) === key;
     const loading =
@@ -979,21 +955,6 @@ function renderSlotBadges(container, photo, file, prefix) {
       });
     }
     badges.appendChild(badge);
-  }
-  const sqlLink = sqlLinkFromPhoto(photo);
-  if (sqlLink) {
-    const copy = document.createElement("button");
-    copy.type = "button";
-    copy.className = "slot-badge slot-badge-link on";
-    copy.textContent = "LINK";
-    copy.title = "Kopiuj link www z SQL";
-    copy.addEventListener("click", (event) => {
-      event.stopPropagation();
-      copyTextToClipboard(sqlLink, "Skopiowano link SQL.").catch((error) => {
-        formStatus.textContent = error.message || "Nie udalo sie skopiowac linku.";
-      });
-    });
-    badges.appendChild(copy);
   }
   container.appendChild(badges);
 }
@@ -1212,9 +1173,6 @@ function isSlotFit(prefix) {
 
 function thumbnailUrl(photo, prefix) {
   const source = selectedSlotSource(prefix, photo);
-  if (source === "sql") {
-    return sqlLinkFromPhoto(photo);
-  }
   const url =
     source === "ftp"
       ? photo?.ftp_thumb_url || photo?.ftp_url || ""
@@ -1360,7 +1318,7 @@ function updateSlotPreview(prefix) {
     return;
   }
   const thumb = thumbnailUrl(loadedPhoto, prefix);
-  if (thumb && (loadedPhoto.is_image || selectedSlotSource(prefix, loadedPhoto) === "sql")) {
+  if (thumb && loadedPhoto.is_image) {
     preview.classList.add("thumb-loading");
     previewImage.addEventListener(
       "load",
@@ -1461,12 +1419,10 @@ function renderSlots(slots = state.slots) {
       const hasOpenableFile =
         Boolean(selectedFile) ||
         Boolean(selectedPhotoToken(loadedPhoto, slot.prefix)) ||
-        Boolean(loadedPhoto?.ftp_filename) ||
-        Boolean(sqlLinkFromPhoto(loadedPhoto));
+        Boolean(loadedPhoto?.ftp_filename);
       const hasFittablePreview =
         (selectedFile && isFileImageLike(selectedFile)) ||
-        (loadedPhoto?.is_image && (selectedPhotoToken(loadedPhoto, slot.prefix) || loadedPhoto?.ftp_filename)) ||
-        Boolean(sqlLinkFromPhoto(loadedPhoto));
+        (loadedPhoto?.is_image && (selectedPhotoToken(loadedPhoto, slot.prefix) || loadedPhoto?.ftp_filename));
       if (hasFittablePreview) {
         controls.appendChild(fitButton);
       }
@@ -1493,7 +1449,7 @@ function renderSlots(slots = state.slots) {
       ) {
         preview.classList.add("thumb-loading");
         empty.textContent = "Pobieranie z FTP...";
-      } else if (thumb && (loadedPhoto.is_image || selectedSlotSource(slot.prefix, loadedPhoto) === "sql")) {
+      } else if (thumb && loadedPhoto.is_image) {
         preview.classList.add("thumb-loading");
         previewImage.addEventListener("load", () => {
           preview.classList.remove("thumb-loading");

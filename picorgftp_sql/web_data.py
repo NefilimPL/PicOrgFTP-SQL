@@ -15,7 +15,6 @@ import tempfile
 import threading
 import time
 import unicodedata
-from urllib.parse import urlparse
 
 from . import common, config, settings
 from . import encryption
@@ -68,7 +67,7 @@ from .excel_utils import (
 from .services.ftp_service import connect_ftp, list_remote_files_for_ean, list_remote_filenames
 from .services.sql_service import (
     extract_presence_context,
-    query_presence_details,
+    query_presence_map,
     should_check_presence,
 )
 from .file_index import LocalFileIndex
@@ -1433,13 +1432,15 @@ def find_product_photos(
                     for slot in slots
                     if sql_map.get(slot.get("prefix", ""), "")
                 ]
-                presence, values = query_presence_details(
+                presence = query_presence_map(
                     columns,
                     table,
                     where_clause,
                     config.CONFIG.get(p, K),
                 )
                 for prefix, present in presence.items():
+                    if present is None:
+                        continue
                     item = results_by_prefix.setdefault(
                         prefix,
                         {
@@ -1455,13 +1456,13 @@ def find_product_photos(
                             "sql_checked": False,
                         },
                     )
+                    if not present and not (item.get("local") or item.get("ftp")):
+                        results_by_prefix.pop(prefix, None)
+                        continue
                     item["sql"] = bool(present)
-                    item["sql_checked"] = present is not None
+                    item["sql_checked"] = True
                     item["ean"] = entry.ean
-                    item["sql_value"] = values.get(prefix, "")
-                    sql_path = urlparse(str(item["sql_value"] or "")).path
-                    sql_ext = os.path.splitext(sql_path)[1].lower()
-                    item["is_image"] = bool(item.get("is_image")) or sql_ext in IMAGE_PREVIEW_EXTENSIONS
+                    item["sql_value"] = ""
         except Exception:
             pass
     return sorted(results_by_prefix.values(), key=lambda item: str(item.get("prefix", "")))

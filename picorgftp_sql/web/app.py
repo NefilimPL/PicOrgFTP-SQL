@@ -611,6 +611,15 @@ def _photo_source_labels(photo: Dict[str, Any]) -> List[str]:
     return labels or ["nieznane"]
 
 
+def _photo_has_file_source(photo: Dict[str, Any]) -> bool:
+    return bool(
+        photo.get("path")
+        or photo.get("filename")
+        or photo.get("ftp_path")
+        or photo.get("ftp_filename")
+    )
+
+
 def _existing_photo_conflicts(
     photos: List[Dict[str, Any]],
     uploaded_slots: List[WebUploadedSlot],
@@ -620,6 +629,8 @@ def _existing_photo_conflicts(
     delete_prefixes = {str(item.get("prefix") or "") for item in delete_requests}
     conflicts: List[Dict[str, Any]] = []
     for photo in photos:
+        if not _photo_has_file_source(photo):
+            continue
         prefix = str(photo.get("prefix") or "").strip()
         if not prefix or prefix not in uploaded_by_prefix or prefix in delete_prefixes:
             continue
@@ -1791,9 +1802,12 @@ def create_app() -> FastAPI:
                 include_ftp=bool(config.CONFIG.get(ft, True)),
                 include_sql=True,
             )
+            existing_file_photos = [
+                photo for photo in existing_photos if _photo_has_file_source(photo)
+            ]
             if existing_entry is None:
                 conflicts = _existing_photo_conflicts(
-                    existing_photos,
+                    existing_file_photos,
                     uploaded_slots,
                     delete_requests,
                 )
@@ -1807,7 +1821,7 @@ def create_app() -> FastAPI:
                 slot_by_prefix=slot_by_prefix,
                 cache_scope=cache_scope,
             )
-            if existing_entry is None and existing_photos and not uploaded_slots and not delete_requests:
+            if existing_entry is None and existing_file_photos and not uploaded_slots and not delete_requests:
                 raise ValueError(
                     _format_existing_photo_conflicts(
                         [
@@ -1815,7 +1829,7 @@ def create_app() -> FastAPI:
                                 "prefix": photo.get("prefix"),
                                 "sources": _photo_source_labels(photo),
                             }
-                            for photo in existing_photos
+                            for photo in existing_file_photos
                         ]
                     )
                 )
@@ -1848,7 +1862,7 @@ def create_app() -> FastAPI:
             }
             skip_upload_prefixes = _ftp_skip_upload_prefixes(
                 result,
-                existing_photos,
+                existing_file_photos,
                 explicit_prefixes=explicit_slot_prefixes,
                 migrated_prefixes=(
                     set(migrated_prefixes)
@@ -1865,7 +1879,7 @@ def create_app() -> FastAPI:
             ftp_delete_candidates.extend(
                 _ftp_replacement_delete_candidates(
                     result,
-                    existing_photos,
+                    existing_file_photos,
                     explicit_prefixes=explicit_slot_prefixes,
                 )
             )

@@ -671,6 +671,21 @@ class WebAppFileTests(unittest.TestCase):
 
         self.assertEqual(conflicts, [])
 
+    def test_existing_photo_conflicts_ignore_sql_only_presence(self) -> None:
+        upload = web_app.WebUploadedSlot(
+            prefix="03",
+            label="DETAIL_pic",
+            source_path="new.jpg",
+            original_filename="new.jpg",
+        )
+        conflicts = web_app._existing_photo_conflicts(
+            [{"prefix": "03", "sql": True, "sql_checked": True, "sql_value": ""}],
+            [upload],
+            [],
+        )
+
+        self.assertEqual(conflicts, [])
+
     def test_system_change_filter_hides_product_and_photo_entries(self) -> None:
         settings_event = {
             "source": "changes",
