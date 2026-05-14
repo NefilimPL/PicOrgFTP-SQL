@@ -233,6 +233,51 @@ class WebDataUserTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_update_settings_reloads_target_config_after_base_dir_change(self) -> None:
+        old_config = {"old_only": True, web_data.LOCAL_FILE_INDEX_KEY: False}
+        target_config = {"target_only": True, web_data.LOCAL_FILE_INDEX_KEY: False}
+        saved_configs = []
+
+        def reload_target_config(*_args, **_kwargs):
+            web_data.config.CONFIG.clear()
+            web_data.config.CONFIG.update(target_config)
+            return web_data.config.CONFIG
+
+        def capture_save_config(config_payload, *_args, **_kwargs):
+            saved_configs.append(dict(config_payload))
+
+        with (
+            patch.object(web_data.config, "CONFIG", old_config),
+            patch.object(web_data, "_apply_base_dir_from_web", return_value=True),
+            patch.object(web_data.config, "initialize_config", side_effect=reload_target_config),
+            patch.object(web_data, "save_config", side_effect=capture_save_config),
+            patch.object(web_data, "settings_snapshot", return_value={}),
+        ):
+            web_data.update_settings(
+                {"app": {"base_dir": "C:\\PicOrgFTP-SQL", web_data.LOCAL_FILE_INDEX_KEY: True}}
+            )
+
+        self.assertEqual(len(saved_configs), 1)
+        saved_config = saved_configs[0]
+        self.assertNotIn("old_only", saved_config)
+        self.assertTrue(saved_config["target_only"])
+        self.assertTrue(saved_config[web_data.LOCAL_FILE_INDEX_KEY])
+
+    def test_update_settings_preserves_unsubmitted_encrypted_secrets(self) -> None:
+        preserve = web_data._preserve_unsubmitted_config_secrets(
+            {
+                "ftp": {"host": "ftp.example.com", "user": "", "password": ""},
+                "database": {
+                    "mssql": {"server": "sql", "user": "", "password": ""},
+                    "mysql": {"server": "mysql", "user": "new-user", "password": ""},
+                },
+            }
+        )
+
+        self.assertEqual(preserve[web_data.H], {web_data.N, web_data.M})
+        self.assertEqual(preserve[web_data.P], {web_data.N, web_data.M})
+        self.assertEqual(preserve[web_data.K], {web_data.M})
+
 
 if __name__ == "__main__":
     unittest.main()

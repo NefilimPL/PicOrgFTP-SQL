@@ -33,6 +33,8 @@ from .common import (
     SQL_AVAILABLE_COLUMNS_KEY,
     SQL_COLUMN_MAP_KEY,
     SLOT_DEFS_KEY,
+    TRANSLATION_API_KEY,
+    TRANSLATION_SETTINGS_KEY,
     b,
     c,
     ft,
@@ -115,6 +117,12 @@ _FILE_INDEX_KEY: tuple[str, str] | None = None
 _FILE_INDEX_REFRESH_STARTED = False
 _FTP_CACHE_LOCKS: dict[str, threading.Lock] = {}
 _FTP_CACHE_LOCKS_GUARD = threading.Lock()
+_CONFIG_SECRET_FIELDS = {
+    H: {N, M},
+    P: {N, M},
+    K: {N, M},
+    TRANSLATION_SETTINGS_KEY: {TRANSLATION_API_KEY},
+}
 
 
 class ListValueInUseError(ValueError):
@@ -1018,27 +1026,57 @@ def _apply_base_dir_from_web(value: object) -> bool:
     return not _same_path(previous, settings.AC)
 
 
+def _apply_app_secret_from_web(value: object) -> bool:
+    secret = _text(value)
+    if not secret:
+        return False
+    _save_local_settings({APP_SECRET_KEY: common._encode_local_secret(secret)})
+    if secret == common.APP_SECRET:
+        return False
+    common.APP_SECRET = secret
+    common.BASE_DIR_SETTINGS_TEMPLATE[APP_SECRET_KEY] = common._encode_local_secret(secret)
+    encryption.APP_SECRET = secret
+    return True
+
+
+def _preserve_unsubmitted_config_secrets(payload: dict[str, object]) -> dict[str, set[str]]:
+    preserve = {section: set(keys) for section, keys in _CONFIG_SECRET_FIELDS.items()}
+    ftp_payload = payload.get("ftp") if isinstance(payload.get("ftp"), dict) else {}
+    if _text(ftp_payload.get("user")):
+        preserve[H].discard(N)
+    if _text(ftp_payload.get("password")):
+        preserve[H].discard(M)
+
+    db_payload = payload.get("database") if isinstance(payload.get("database"), dict) else {}
+    for section_key, section_name in ((P, "mssql"), (K, "mysql")):
+        section_payload = db_payload.get(section_name)
+        if not isinstance(section_payload, dict):
+            continue
+        if _text(section_payload.get("user")):
+            preserve[section_key].discard(N)
+        if _text(section_payload.get("password")):
+            preserve[section_key].discard(M)
+    return {section: keys for section, keys in preserve.items() if keys}
+
+
 def update_settings(payload: dict[str, object]) -> dict[str, object]:
     """Update editable settings from the web UI."""
 
-    cfg = config.CONFIG
     app_payload = payload.get("app") if isinstance(payload.get("app"), dict) else {}
     ftp_payload = payload.get("ftp") if isinstance(payload.get("ftp"), dict) else {}
     db_payload = payload.get("database") if isinstance(payload.get("database"), dict) else {}
     processing_payload = payload.get("processing") if isinstance(payload.get("processing"), dict) else {}
     slots_payload = payload.get("slots") if isinstance(payload.get("slots"), list) else None
+    runtime_reloaded = False
 
     if "base_dir" in app_payload:
-        _apply_base_dir_from_web(app_payload.get("base_dir"))
+        runtime_reloaded = _apply_base_dir_from_web(app_payload.get("base_dir")) or runtime_reloaded
     if APP_SECRET_KEY in app_payload:
-        secret = _text(app_payload.get(APP_SECRET_KEY))
-        if secret:
-            _save_local_settings({APP_SECRET_KEY: common._encode_local_secret(secret)})
-            common.APP_SECRET = secret
-            common.BASE_DIR_SETTINGS_TEMPLATE[APP_SECRET_KEY] = common._encode_local_secret(
-                secret
-            )
-            encryption.APP_SECRET = secret
+        runtime_reloaded = _apply_app_secret_from_web(app_payload.get(APP_SECRET_KEY)) or runtime_reloaded
+    if runtime_reloaded:
+        config.initialize_config(interactive=False)
+    cfg = config.CONFIG
+
     if LOCAL_FILE_INDEX_KEY in app_payload:
         cfg[LOCAL_FILE_INDEX_KEY] = bool(app_payload.get(LOCAL_FILE_INDEX_KEY))
     if AUTO_CONTENT_FIT_KEY in app_payload:
@@ -1116,7 +1154,7 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
         cfg[SLOT_DEFS_KEY] = slot_defs
         cfg[SQL_COLUMN_MAP_KEY] = sql_map
 
-    save_config(cfg)
+    save_config(cfg, preserve_secrets=_preserve_unsubmitted_config_secrets(payload))
     config.initialize_config(interactive=False)
     return settings_snapshot()
 

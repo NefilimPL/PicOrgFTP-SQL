@@ -2716,7 +2716,9 @@ function renderSettingsApp() {
   secretGroup.className = "settings-field-group wide-field";
   secretTitle.textContent = "Sekret aplikacji";
   secretHint.className = "settings-note";
-  secretHint.textContent = "Wpisz nowy APP_SECRET tylko wtedy, gdy chcesz zmienic klucz szyfrowania zapisanych danych.";
+  secretHint.textContent =
+    "APP_SECRET sluzy do odczytu zaszyfrowanych hasel z config.json. " +
+    "Przy podpinaniu istniejacego katalogu wpisz sekret uzyty przy jego konfiguracji; puste pole niczego nie zmienia.";
   secretGrid.className = "settings-form nested-grid";
   secretGrid.append(credentialField("app_secret", "APP_SECRET", s.app_secret_set, { type: "password" }));
   secretGroup.append(secretTitle, secretHint, secretGrid);
