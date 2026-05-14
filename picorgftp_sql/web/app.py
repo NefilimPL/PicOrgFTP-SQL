@@ -64,6 +64,7 @@ from ..web_data import (
     find_user,
     find_product_photos,
     file_index_status,
+    invalidate_ftp_preview_cache,
     load_web_data,
     load_users,
     history_snapshot,
@@ -211,6 +212,22 @@ def _file_token(path: str) -> str:
     payload = os.path.abspath(path)
     token = f"{payload}|{_sign(payload)}"
     return base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii")
+
+
+def _file_version(path: str) -> str:
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return ""
+    return f"{int(stat.st_mtime_ns)}-{int(stat.st_size)}"
+
+
+def _versioned_file_url(path: str, endpoint: str, token: str) -> str:
+    url = f"{endpoint}?token={token}"
+    version = _file_version(path)
+    if version:
+        url = f"{url}&v={version}"
+    return url
 
 
 def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
@@ -464,7 +481,7 @@ def _ftp_skip_upload_prefixes(
         prefix = str(getattr(item, "prefix", "") or "")
         if not prefix or prefix in skip or prefix in explicit or prefix in migrated:
             continue
-        if photos_by_prefix.get(prefix, {}).get("ftp"):
+        if photos_by_prefix.get(prefix, {}).get("ftp") and not photos_by_prefix.get(prefix, {}).get("local"):
             skip.add(prefix)
     return skip
 
@@ -735,7 +752,7 @@ def _append_existing_photo_sources(
         should_process = False
         if identity_changed and source_path:
             should_process = True
-        elif source_path and not ftp_filename and bool(config.CONFIG.get(ft, True)):
+        elif source_path and bool(config.CONFIG.get(ft, True)):
             should_process = True
             append_delete_request = True
         elif ftp_filename and not source_path:
@@ -1242,19 +1259,23 @@ def _enrich_photo_payload(photos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if path:
             token = _file_token(path)
             item["token"] = token
-            item["url"] = f"/api/file?token={token}"
-            item["thumb_url"] = f"/api/thumbnail?token={token}"
+            item["file_version"] = _file_version(path)
+            item["url"] = _versioned_file_url(path, "/api/file", token)
+            item["thumb_url"] = _versioned_file_url(path, "/api/thumbnail", token)
         else:
             item["token"] = ""
+            item["file_version"] = ""
             item["url"] = ""
             item["thumb_url"] = ""
         if ftp_path:
             ftp_token = _file_token(ftp_path)
             item["ftp_token"] = ftp_token
-            item["ftp_url"] = f"/api/file?token={ftp_token}"
-            item["ftp_thumb_url"] = f"/api/thumbnail?token={ftp_token}"
+            item["ftp_file_version"] = _file_version(ftp_path)
+            item["ftp_url"] = _versioned_file_url(ftp_path, "/api/file", ftp_token)
+            item["ftp_thumb_url"] = _versioned_file_url(ftp_path, "/api/thumbnail", ftp_token)
         else:
             item["ftp_token"] = ""
+            item["ftp_file_version"] = ""
             item["ftp_url"] = ""
             item["ftp_thumb_url"] = ""
         enriched.append(item)
@@ -1452,10 +1473,12 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         token = _file_token(path)
+        version = _file_version(path)
         return {
             "token": token,
-            "url": f"/api/file?token={token}",
-            "thumb_url": f"/api/thumbnail?token={token}",
+            "file_version": version,
+            "url": _versioned_file_url(path, "/api/file", token),
+            "thumb_url": _versioned_file_url(path, "/api/thumbnail", token),
         }
 
     @app.get("/api/entries/search")
@@ -1538,7 +1561,7 @@ def create_app() -> FastAPI:
     def file_preview(request: Request, token: str) -> FileResponse:
         _require_user(request)
         path = _path_from_file_token(token)
-        return FileResponse(path, headers={"Cache-Control": "private, max-age=300"})
+        return FileResponse(path, headers={"Cache-Control": "private, no-cache, max-age=0"})
 
     @app.get("/api/thumbnail")
     def file_thumbnail(
@@ -1559,7 +1582,7 @@ def create_app() -> FastAPI:
         return Response(
             content=content,
             media_type="image/jpeg",
-            headers={"Cache-Control": "private, max-age=900"},
+            headers={"Cache-Control": "private, no-cache, max-age=0"},
         )
 
     @app.post("/api/lists/{list_key}")
@@ -1888,6 +1911,22 @@ def create_app() -> FastAPI:
                 ftp_delete_candidates,
                 skip_upload_prefixes=skip_upload_prefixes,
             )
+            changed_ftp_names = {
+                _remote_name_for_output(str(item.filename or ""))
+                for item in result.saved_files
+                if getattr(item, "filename", "")
+            }
+            changed_ftp_names.update(
+                os.path.basename(str(name or ""))
+                for name in ftp_delete_candidates
+                if os.path.basename(str(name or ""))
+            )
+            changed_ftp_names.discard("")
+            ftp_cache_result = invalidate_ftp_preview_cache(
+                result.ean,
+                changed_ftp_names,
+                cache_scope=cache_scope,
+            )
             sql_result = _sync_result_to_sql(
                 result,
                 clear_prefixes={
@@ -1928,8 +1967,10 @@ def create_app() -> FastAPI:
         payload["migrated_slots"] = migrated_prefixes
         payload["deleted_slots"] = delete_requests
         payload["ftp"] = ftp_result
+        payload["ftp_cache"] = ftp_cache_result
         payload["sql"] = sql_result
         payload["local_delete"] = local_delete_result
+        refresh_file_index()
         record_history(
             username=username,
             action="process",
@@ -1947,6 +1988,7 @@ def create_app() -> FastAPI:
                 "deleted_slots": delete_requests,
                 "migrated_slots": migrated_prefixes,
                 "ftp": ftp_result,
+                "ftp_cache": ftp_cache_result,
                 "sql": sql_result,
                 "local_delete": local_delete_result,
                 "output_dir": payload["output_dir"],
@@ -1979,6 +2021,7 @@ def create_app() -> FastAPI:
                 skipped_slots=result.skipped_slots,
                 migrated_slots=migrated_prefixes,
                 ftp=ftp_result,
+                ftp_cache=ftp_cache_result,
                 sql=sql_result,
                 local_delete=local_delete_result,
             ),

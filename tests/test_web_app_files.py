@@ -275,7 +275,7 @@ class WebAppFileTests(unittest.TestCase):
             self.assertEqual(delete_requests[0]["ftp_filename"], "")
             self.assertFalse(delete_requests[0]["ftp_backfill"])
 
-    def test_local_photo_is_appended_for_missing_sql_without_delete_request(self) -> None:
+    def test_local_photo_is_appended_for_missing_sql_and_reuploads_ftp(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
             root = Path(temp_dir)
@@ -335,7 +335,9 @@ class WebAppFileTests(unittest.TestCase):
 
             self.assertEqual(appended, ["03"])
             self.assertEqual(uploaded_slots[0].source_path, str(photo_path))
-            self.assertEqual(delete_requests, [])
+            self.assertEqual(delete_requests[0]["local_path"], str(photo_path))
+            self.assertEqual(delete_requests[0]["ftp_filename"], "5901234567890_03.jpg")
+            self.assertFalse(delete_requests[0]["ftp_backfill"])
 
     def test_ftp_upload_is_skipped_for_sql_only_repair_with_existing_remote(self) -> None:
         result = SimpleNamespace(
@@ -356,6 +358,41 @@ class WebAppFileTests(unittest.TestCase):
         )
 
         self.assertEqual(skipped, {"03"})
+
+    def test_ftp_upload_is_not_skipped_when_local_file_exists(self) -> None:
+        result = SimpleNamespace(
+            saved_files=[
+                SimpleNamespace(
+                    prefix="03",
+                    filename="5901234567890_03_DETAIL_MAGGIORE.jpg",
+                )
+            ],
+        )
+
+        skipped = web_app._ftp_skip_upload_prefixes(
+            result,
+            [{"prefix": "03", "local": True, "ftp": True}],
+            explicit_prefixes=set(),
+            migrated_prefixes=set(),
+            ftp_backfill_prefixes=set(),
+        )
+
+        self.assertEqual(skipped, set())
+
+    def test_enriched_local_photo_urls_include_file_version(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            photo_path = Path(temp_dir) / "5901234567890_03.jpg"
+            photo_path.write_bytes(b"first")
+
+            first = web_app._enrich_photo_payload([{"prefix": "03", "path": str(photo_path)}])[0]
+            photo_path.write_bytes(b"changed-content")
+            second = web_app._enrich_photo_payload([{"prefix": "03", "path": str(photo_path)}])[0]
+
+        self.assertIn("&v=", first["url"])
+        self.assertIn("&v=", first["thumb_url"])
+        self.assertNotEqual(first["file_version"], second["file_version"])
+        self.assertNotEqual(first["thumb_url"], second["thumb_url"])
 
     def test_ftp_upload_is_kept_for_explicitly_changed_slot(self) -> None:
         result = SimpleNamespace(

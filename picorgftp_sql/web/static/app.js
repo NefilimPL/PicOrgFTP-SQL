@@ -37,6 +37,7 @@ const state = {
   backgroundFtpPreviewTimer: 0,
   backgroundFtpPreviewLimit: 3,
   photoSourcesLoaded: new Set(),
+  localFtpSyncVersions: new Map(),
   ftpEnabled: true,
   slotRevisions: new Map(),
   userSelectedSlotSources: new Set(),
@@ -828,6 +829,9 @@ async function renderSelectedFilePreview(prefix, file, preview, previewImage, em
 }
 
 function loadedFileUrl(photo, prefix) {
+  const source = selectedSlotSource(prefix, photo);
+  if (source === "ftp" && photo?.ftp_url) return photo.ftp_url;
+  if (source === "local" && photo?.url) return photo.url;
   const token = selectedPhotoToken(photo, prefix);
   return token ? `/api/file?token=${encodeURIComponent(token)}` : "";
 }
@@ -1006,13 +1010,42 @@ function ftpPreviewCacheKey(photo, fallbackEan = "") {
   return filename && ean ? `${ean}|${filename}` : "";
 }
 
+function clearFtpPreviewCacheForPrefixes(prefixes, fallbackEan = "") {
+  const prefixSet = new Set(
+    [...(prefixes || [])].map((prefix) => String(prefix || "").trim()).filter(Boolean)
+  );
+  if (!prefixSet.size) return;
+  const ean = String(fallbackEan || formValue("ean") || state.loadedEntryOriginal?.ean || "").trim();
+  for (const prefix of prefixSet) {
+    const photo = state.loadedPhotos.get(prefix);
+    const directKey = ftpPreviewCacheKey(photo, ean);
+    if (directKey) {
+      state.ftpPreviewCache.delete(directKey);
+    }
+  }
+  for (const key of Array.from(state.ftpPreviewCache.keys())) {
+    const [keyEan, filename] = String(key).split("|", 2);
+    if (ean && keyEan && keyEan !== ean) continue;
+    for (const prefix of prefixSet) {
+      if (filename?.startsWith(`${keyEan}_${prefix}.`) || filename?.includes(`_${prefix}.`)) {
+        state.ftpPreviewCache.delete(key);
+        break;
+      }
+    }
+  }
+}
+
 function applyCachedFtpPreview(photo, prefix, cached) {
   if (!cached) return photo;
+  if (cached.file_version && photo?.ftp_file_version && cached.file_version !== photo.ftp_file_version) {
+    return photo;
+  }
   return {
     ...photo,
     ftp_token: cached.token || photo?.ftp_token || "",
     ftp_url: cached.url || photo?.ftp_url || "",
     ftp_thumb_url: cached.thumb_url || photo?.ftp_thumb_url || "",
+    ftp_file_version: cached.file_version || photo?.ftp_file_version || "",
   };
 }
 
@@ -1073,6 +1106,7 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
         token: payload.token || "",
         url: payload.url || "",
         thumb_url: payload.thumb_url || "",
+        file_version: payload.file_version || "",
       });
     }
     const currentPhoto = state.loadedPhotos.get(prefix);
@@ -1089,6 +1123,7 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
       ftp_token: payload.token || "",
       ftp_url: payload.url || "",
       ftp_thumb_url: payload.thumb_url || "",
+      ftp_file_version: payload.file_version || "",
     };
     state.loadedPhotos.set(prefix, updated);
     if (!background || sourceBefore === "ftp") {
@@ -2081,12 +2116,22 @@ function hasProductDraftData() {
   return trackedProductFields.some((fieldName) => String(current[fieldName] || "").trim());
 }
 
-function localPhotoNeedsFtpUpload(photo) {
-  const ftpChecked = state.photoSourcesLoaded.has("ftp") || state.photoSourcesLoaded.has("all");
-  return Boolean(state.ftpEnabled && ftpChecked && photo?.local && photo?.token && !photo?.ftp);
+function localFtpSyncKey(prefix, photo = null) {
+  const ean = String(photo?.ean || formValue("ean") || state.loadedEntryOriginal?.ean || "").trim();
+  return ean && prefix ? `${ean}|${prefix}` : String(prefix || "");
 }
 
-function photoNeedsRepair(photo) {
+function localPhotoNeedsFtpUpload(photo, prefix = "") {
+  const ftpChecked = state.photoSourcesLoaded.has("ftp") || state.photoSourcesLoaded.has("all");
+  if (!state.ftpEnabled || !ftpChecked || !photo?.local || !photo?.token) {
+    return false;
+  }
+  const version = String(photo.file_version || photo.filename || photo.path || photo.token || "");
+  const syncKey = localFtpSyncKey(prefix, photo);
+  return !syncKey || !version || state.localFtpSyncVersions.get(syncKey) !== version;
+}
+
+function photoNeedsRepair(photo, prefix = "") {
   const localChecked = state.photoSourcesLoaded.has("local") || state.photoSourcesLoaded.has("all");
   const sqlChecked =
     Boolean(photo?.sql_checked) ||
@@ -2094,7 +2139,7 @@ function photoNeedsRepair(photo) {
     state.photoSourcesLoaded.has("all");
   const hasTransferSource = Boolean(photo?.token || photo?.ftp_token || photo?.ftp_filename);
   return Boolean(
-    localPhotoNeedsFtpUpload(photo) ||
+    localPhotoNeedsFtpUpload(photo, prefix) ||
       (localChecked && photo?.ftp && !photo?.local) ||
       (sqlChecked && hasTransferSource && !photo?.sql)
   );
@@ -2104,8 +2149,8 @@ function hasPendingSlotChanges() {
   if (state.files.size || state.deletedSlots.size) {
     return true;
   }
-  for (const photo of state.loadedPhotos.values()) {
-    if (photo?.dirty || photoNeedsRepair(photo)) {
+  for (const [prefix, photo] of state.loadedPhotos.entries()) {
+    if (photo?.dirty || photoNeedsRepair(photo, prefix)) {
       return true;
     }
   }
@@ -2125,7 +2170,7 @@ function pendingChangedSlotPrefixes() {
   for (const prefix of state.files.keys()) prefixes.add(prefix);
   for (const prefix of state.deletedSlots.keys()) prefixes.add(prefix);
   for (const [prefix, photo] of state.loadedPhotos.entries()) {
-    if (photo?.dirty || photoNeedsRepair(photo)) {
+    if (photo?.dirty || photoNeedsRepair(photo, prefix)) {
       prefixes.add(prefix);
     }
   }
@@ -2143,6 +2188,18 @@ function clearSavedSlotMarkers(prefixes) {
     state.deletedSlots.delete(prefix);
     state.files.delete(prefix);
     state.userSelectedSlotSources.delete(prefix);
+  }
+}
+
+function markLocalFtpSynced(prefixes) {
+  for (const prefix of prefixes || []) {
+    const photo = state.loadedPhotos.get(prefix);
+    if (!photo?.local || !photo?.token) continue;
+    const version = String(photo.file_version || photo.filename || photo.path || photo.token || "");
+    const syncKey = localFtpSyncKey(prefix, photo);
+    if (syncKey && version) {
+      state.localFtpSyncVersions.set(syncKey, version);
+    }
   }
 }
 
@@ -2177,11 +2234,13 @@ function mergePhotoRecord(existing = {}, incoming = {}) {
     "token",
     "url",
     "thumb_url",
+    "file_version",
     "ftp_filename",
     "ftp_path",
     "ftp_token",
     "ftp_url",
     "ftp_thumb_url",
+    "ftp_file_version",
     "sql_value",
   ]) {
     if (incoming[key]) {
@@ -2312,6 +2371,7 @@ async function loadPhotosForEntry(entry, options = {}) {
     state.ftpPreviewLoading.clear();
     state.ftpPreviewBackgroundLoading.clear();
     state.photoSourcesLoaded.clear();
+    state.localFtpSyncVersions.clear();
   } else {
     for (const prefix of targetPrefixes) {
       state.ftpPreviewLoading.delete(prefix);
@@ -2402,6 +2462,7 @@ function fillForm(entry, options = {}) {
   state.ftpPreviewLoading.clear();
   state.ftpPreviewBackgroundLoading.clear();
   state.photoSourcesLoaded.clear();
+  state.localFtpSyncVersions.clear();
   productForm.elements.product_id.value = entry.product_id || "";
   productForm.elements.name.value = entry.name || "";
   productForm.elements.type_name.value = entry.type_name || "";
@@ -3384,7 +3445,7 @@ productForm.addEventListener("submit", async (event) => {
       data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
     }
     for (const [prefix, photo] of state.loadedPhotos.entries()) {
-      if (!state.files.has(prefix) && (photo.dirty || localPhotoNeedsFtpUpload(photo))) {
+      if (!state.files.has(prefix) && (photo.dirty || localPhotoNeedsFtpUpload(photo, prefix))) {
         const transferSource = transferableSlotSource(prefix, photo);
         const token = transferablePhotoToken(photo, prefix);
         if (token) {
@@ -3428,11 +3489,12 @@ productForm.addEventListener("submit", async (event) => {
     for (const prefix of payload.migrated_slots || []) {
       if (prefix) changedPrefixes.add(prefix);
     }
-    clearSavedSlotMarkers(changedPrefixes);
     const entryToReload = {
       ...formPayload(),
       product_id: payload.entry?.product_id || productForm.elements.product_id.value,
     };
+    clearFtpPreviewCacheForPrefixes(changedPrefixes, entryToReload.ean);
+    clearSavedSlotMarkers(changedPrefixes);
     if (identityChanged || !changedPrefixes.size) {
       await loadPhotosForEntry(entryToReload);
     } else {
@@ -3442,6 +3504,8 @@ productForm.addEventListener("submit", async (event) => {
         clearDirty: true,
       });
     }
+    markLocalFtpSynced(changedPrefixes);
+    updateSubmitButtonState();
     setBusy(false, "Zakonczono.");
   } catch (error) {
     showError(error);
@@ -3461,6 +3525,7 @@ clearButton.addEventListener("click", () => {
   state.slotFits.clear();
   state.deletedSlots.clear();
   state.slotSources.clear();
+  state.localFtpSyncVersions.clear();
   state.userSelectedSlotSources.clear();
   state.photoSourceStatus.clear();
   state.ftpPreviewLoading.clear();

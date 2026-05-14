@@ -107,6 +107,27 @@ class WebDataUserTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_invalidate_ftp_preview_cache_removes_changed_slot_file(self) -> None:
+        temp_dir = _workspace_temp("web_data_ftp_cache_invalidate")
+        try:
+            with patch.object(web_data.settings, "AC", str(temp_dir)):
+                cache_dir = Path(web_data._ftp_cache_dir("5901234567890", cache_scope="admin-session"))
+                cache_dir.mkdir(parents=True)
+                cached = cache_dir / web_data._ftp_cache_filename("5901234567890_03.jpg")
+                cached.write_bytes(b"old")
+
+                result = web_data.invalidate_ftp_preview_cache(
+                    "5901234567890",
+                    {"5901234567890_03.jpg"},
+                    cache_scope="admin-session",
+                )
+        finally:
+            shutil.rmtree(temp_dir)
+
+        self.assertEqual(result["deleted"], 1)
+        self.assertEqual(result["errors"], [])
+        self.assertFalse(cached.exists())
+
     def test_save_web_entry_preserves_ean_for_existing_product_id_when_missing(self) -> None:
         with (
             patch.object(

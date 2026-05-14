@@ -527,6 +527,33 @@ def cache_ftp_preview(ean: object, filename: object, cache_scope: object = "") -
             pass
 
 
+def invalidate_ftp_preview_cache(
+    ean: object,
+    filenames: list[object] | set[object] | tuple[object, ...],
+    cache_scope: object = "",
+) -> dict[str, object]:
+    """Remove cached FTP previews for remote files that were changed."""
+
+    ean_text = _text(ean)
+    if not ean_text:
+        return {"deleted": 0, "errors": []}
+    cache_dir = _ftp_cache_dir(ean_text, cache_scope=cache_scope)
+    deleted = 0
+    errors: list[str] = []
+    for filename in filenames or []:
+        filename_text = os.path.basename(_text(filename))
+        if not filename_text:
+            continue
+        target_path = os.path.join(cache_dir, _ftp_cache_filename(filename_text))
+        try:
+            if os.path.isfile(target_path):
+                os.remove(target_path)
+                deleted += 1
+        except OSError as exc:
+            errors.append(f"{filename_text}: {exc}")
+    return {"deleted": deleted, "errors": errors}
+
+
 def _ftp_cache_lock(target_path: str) -> threading.Lock:
     key = os.path.abspath(target_path)
     with _FTP_CACHE_LOCKS_GUARD:

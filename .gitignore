@@ -15,3 +15,12 @@ tmp[a-z0-9_]*/
 logs/
 picorg_web_*.log
 picorg_web_uvicorn.*.log
+
+# PyInstaller / EXE build artifacts
+build/
+dist/
+*.spec
+*.manifest
+Generator exe/.icons/
+Generator exe/*.exe
+Generator exe/Nowy folder/
