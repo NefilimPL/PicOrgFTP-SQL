@@ -97,15 +97,34 @@ const logsOutput = document.querySelector("#logsOutput");
 const logsButton = document.querySelector('[data-modal="logs"]');
 
 async function requestJson(path, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || 0);
+  const fetchOptions = { ...options };
+  delete fetchOptions.timeoutMs;
+  let timeoutId = 0;
+  if (timeoutMs > 0 && !fetchOptions.signal) {
+    const controller = new AbortController();
+    fetchOptions.signal = controller.signal;
+    timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  }
   let response;
   try {
-    response = await fetch(path, options);
+    response = await fetch(path, fetchOptions);
   } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(
+        `Backend nie odpowiedzial w ciagu ${Math.round(timeoutMs / 1000)} s (${path}). ` +
+          "Jesli podales folder sieciowy albo dysk mapowany, sprawdz dostep backendu do tej lokalizacji."
+      );
+    }
     throw new Error(
       `Nie udalo sie polaczyc z backendem (${path}). Sprawdz, czy serwer web dziala. Szczegoly: ${
         error.message || error
       }`
     );
+  } finally {
+    if (timeoutId) {
+      window.clearTimeout(timeoutId);
+    }
   }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -2327,8 +2346,8 @@ async function refreshData() {
   updateRuntimeMetrics();
 }
 
-async function loadBootstrap() {
-  const payload = await requestJson("/api/bootstrap");
+async function loadBootstrap(options = {}) {
+  const payload = await requestJson("/api/bootstrap", options);
   state.defaultSlotFit = Boolean(payload.auto_content_fit);
   state.ftpEnabled = payload.ftp_enabled !== false;
   if (versionInfo) {
@@ -2475,6 +2494,7 @@ function inputField(name, label, value = "", attrs = {}) {
   if (attrs.min !== undefined) input.min = attrs.min;
   if (attrs.max !== undefined) input.max = attrs.max;
   if (attrs.step !== undefined) input.step = attrs.step;
+  if (attrs.placeholder !== undefined) input.placeholder = attrs.placeholder;
   if (attrs.checked !== undefined) input.checked = Boolean(attrs.checked);
   if (attrs.type === "checkbox") {
     input.value = "1";
@@ -2482,6 +2502,11 @@ function inputField(name, label, value = "", attrs = {}) {
     input.value = value || "";
   }
   wrapper.appendChild(input);
+  if (attrs.description) {
+    const small = document.createElement("small");
+    small.textContent = attrs.description;
+    wrapper.appendChild(small);
+  }
   return wrapper;
 }
 
@@ -2617,28 +2642,42 @@ function settingsSaveButton(form, buildPayload) {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const previousBaseDir = state.settings?.base_dir || "";
+    button.disabled = true;
     settingsStatus.textContent = "Zapisywanie...";
-    state.settings = await requestJson("/api/settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(buildPayload(new FormData(form))),
-    });
-    state.currentUser = state.settings.current_user || state.currentUser;
-    state.defaultSlotFit = Boolean(state.settings.auto_content_fit);
-    state.ftpEnabled = state.settings.ftp?.enabled !== false;
-    state.colorFieldLabels = state.settings.color_field_labels || state.colorFieldLabels || {};
-    updateAdminUi();
-    if (Array.isArray(state.settings.slots)) {
-      renderSlots(state.settings.slots);
+    try {
+      state.settings = await requestJson("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildPayload(new FormData(form))),
+        timeoutMs: 60000,
+      });
+      state.currentUser = state.settings.current_user || state.currentUser;
+      state.defaultSlotFit = Boolean(state.settings.auto_content_fit);
+      state.ftpEnabled = state.settings.ftp?.enabled !== false;
+      state.colorFieldLabels = state.settings.color_field_labels || state.colorFieldLabels || {};
+      updateAdminUi();
+      if (Array.isArray(state.settings.slots)) {
+        renderSlots(state.settings.slots);
+      }
+      applyProductFieldLabels();
+      let saveMessage = "Zapisano.";
+      if (previousBaseDir && state.settings.base_dir !== previousBaseDir) {
+        try {
+          await loadBootstrap({ timeoutMs: 60000 });
+          saveMessage = `Zapisano. Aktywny katalog bazowy: ${state.settings.base_dir}`;
+        } catch (error) {
+          saveMessage =
+            `Zapisano katalog bazowy: ${state.settings.base_dir}. ` +
+            `Nie udalo sie odswiezyc danych po zapisie: ${error.message || error}`;
+        }
+      }
+      renderSettings();
+      settingsStatus.textContent = saveMessage;
+    } catch (error) {
+      settingsStatus.textContent = error.message || "Nie udalo sie zapisac ustawien.";
+    } finally {
+      button.disabled = false;
     }
-    applyProductFieldLabels();
-    let saveMessage = "Zapisano.";
-    if (previousBaseDir && state.settings.base_dir !== previousBaseDir) {
-      await loadBootstrap();
-      saveMessage = `Zapisano. Aktywny katalog bazowy: ${state.settings.base_dir}`;
-    }
-    renderSettings();
-    settingsStatus.textContent = saveMessage;
   });
 }
 
@@ -2685,7 +2724,12 @@ function renderSettingsApp() {
     versionNote,
     configNote,
     runtimeWarning,
-    inputField("base_dir", "Katalog bazowy", s.base_dir),
+    inputField("base_dir", "Katalog bazowy", s.base_dir, {
+      placeholder: "np. C:\\PicOrgFTP-SQL albo \\\\SERWER\\Udzial\\PicOrgFTP-SQL",
+      description:
+        "Folder, w ktorym backend trzyma config.json, lists.xlsx i katalog zdjec. " +
+        "Dla uslugi Windows najlepiej uzywac pelnej sciezki lokalnej albo UNC; dyski mapowane typu Z:\\ moga nie byc widoczne.",
+    }),
     secretGroup,
     checkField(
       "local_file_index",

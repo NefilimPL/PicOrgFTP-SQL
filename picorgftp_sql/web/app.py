@@ -1518,9 +1518,15 @@ def create_app() -> FastAPI:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Niepoprawne ustawienia.")
         try:
-            snapshot = update_settings(payload)
+            snapshot = await run_in_threadpool(update_settings, payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            log_error(f"WEB settings save failed: {exc}\n{traceback.format_exc()}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Nie udalo sie zapisac ustawien: {exc}",
+            ) from exc
         app.state.runtime_info = _runtime_info()
         snapshot["current_user"] = _current_user_payload(request)
         return JSONResponse(snapshot)
