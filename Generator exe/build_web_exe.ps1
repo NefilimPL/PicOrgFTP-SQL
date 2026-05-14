@@ -42,11 +42,14 @@ $env:PYINSTALLER_BUILD = "1"
     --distpath $ScriptDir `
     --workpath $WorkPath `
     --icon $IconPath `
+    --collect-submodules picorgftp_sql `
     --collect-submodules mysql.connector `
     --collect-submodules uvicorn `
     --collect-submodules fastapi `
     --collect-submodules starlette `
     --collect-submodules multipart `
+    --collect-submodules pystray `
+    --collect-submodules PIL `
     --collect-data mysql.connector `
     --collect-data certifi `
     --add-data "picorgftp_sql\web\static;picorgftp_sql\web\static" `

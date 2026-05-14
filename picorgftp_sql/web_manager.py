@@ -21,6 +21,7 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 from .assets import set_tk_window_icon
+from .assets import pic_asset_path
 from .version import get_display_version
 
 
@@ -76,6 +77,31 @@ def _run_command(args: list[str], *, timeout: int = 20) -> subprocess.CompletedP
         timeout=timeout,
         creationflags=_creationflags(),
     )
+
+
+def _tail_text(path: Path, *, line_count: int = 8, max_chars: int = 1200) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    relevant = [line.strip() for line in lines if line.strip()]
+    text = "\n".join(relevant[-line_count:]).strip()
+    if len(text) > max_chars:
+        return text[-max_chars:].strip()
+    return text
+
+
+def _startup_error_hint(root: Path) -> str:
+    error_tail = _tail_text(err_log_path(root))
+    if not error_tail:
+        return f"Sprawdz log: {err_log_path(root)}"
+    if "Could not import module" in error_tail:
+        return (
+            "Backend webowy nie zostal zaladowany z pliku EXE. "
+            "Przebuduj PicOrgFTP-SQL-WEB.exe aktualnym generatorem albo GitHub Actions. "
+            f"Ostatni blad: {error_tail}"
+        )
+    return f"Ostatni blad: {error_tail}"
 
 
 def _powershell_json(script: str, *, timeout: int = 8) -> Any:
@@ -473,7 +499,7 @@ def start_user_web(port: int, host: str) -> ActionResult:
     out_handle = out_log_path(root).open("a", encoding="utf-8", buffering=1)
     err_handle = err_log_path(root).open("a", encoding="utf-8", buffering=1)
     try:
-        subprocess.Popen(
+        process = subprocess.Popen(
             args,
             cwd=str(root),
             env=env,
@@ -493,7 +519,16 @@ def start_user_web(port: int, host: str) -> ActionResult:
             pass
     if wait_web_ready(port):
         return ActionResult(True, "Panel webowy zostal uruchomiony.")
-    return ActionResult(False, "Proces wystartowal, ale strona nie odpowiedziala w limicie czasu.")
+    exit_code = process.poll()
+    if exit_code is not None:
+        return ActionResult(
+            False,
+            f"Panel zamknal sie przy starcie (kod {exit_code}). {_startup_error_hint(root)}",
+        )
+    return ActionResult(
+        False,
+        f"Proces dziala, ale strona nie odpowiedziala w limicie czasu. {_startup_error_hint(root)}",
+    )
 
 
 def start_web(port: int, host: str, *, prefer_system_service: bool = True) -> ActionResult:
@@ -589,7 +624,7 @@ def current_status(port: int) -> dict[str, Any]:
         "listeners": listeners,
         "web_listeners": web_listeners,
         "health": health,
-        "running": bool(web_listeners) and bool(health.get("ok")),
+        "running": bool(health.get("ok")),
         "urls": [local_url(port), *lan_urls(port)],
         "task_exists": task_exists(),
         "task_enabled": task_enabled(),
@@ -636,9 +671,10 @@ def run_service_mode(port: int, host: str) -> int:
         pass
     try:
         import uvicorn
+        from picorgftp_sql.web.app import app as web_app
 
         uvicorn.run(
-            "picorgftp_sql.web.app:app",
+            web_app,
             host=host,
             port=int(port),
             log_level="info",
@@ -647,6 +683,54 @@ def run_service_mode(port: int, host: str) -> int:
         return 0
     finally:
         remove_metadata_for_current_process()
+
+
+class Tooltip:
+    def __init__(self, widget: object, text: str) -> None:
+        self.widget = widget
+        self.text = text
+        self.window = None
+        try:
+            widget.bind("<Enter>", self.show)
+            widget.bind("<Leave>", self.hide)
+            widget.bind("<ButtonPress>", self.hide)
+        except Exception:
+            pass
+
+    def show(self, _event=None) -> None:
+        if self.window or not self.text:
+            return
+        try:
+            import tkinter as tk
+
+            x = self.widget.winfo_rootx() + 16
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+            self.window = tk.Toplevel(self.widget)
+            self.window.wm_overrideredirect(True)
+            self.window.wm_geometry(f"+{x}+{y}")
+            label = tk.Label(
+                self.window,
+                text=self.text,
+                justify="left",
+                background="#ffffe8",
+                relief="solid",
+                borderwidth=1,
+                padx=8,
+                pady=6,
+                wraplength=420,
+            )
+            label.pack()
+        except Exception:
+            self.window = None
+
+    def hide(self, _event=None) -> None:
+        window = self.window
+        self.window = None
+        if window is not None:
+            try:
+                window.destroy()
+            except Exception:
+                pass
 
 
 class WebManagerApp:
@@ -658,8 +742,9 @@ class WebManagerApp:
         self.ttk = ttk
         self.root = tk.Tk()
         self.root.title(f"PicOrgFTP-SQL WEB {get_display_version()}")
-        self.root.geometry("920x650")
-        self.root.minsize(760, 520)
+        self.root.geometry("1040x760")
+        self.root.minsize(860, 620)
+        self.root.protocol("WM_DELETE_WINDOW", self.close_window)
         set_tk_window_icon(self.root, "PIC_WEB.png")
         self.port_var = tk.StringVar(value=str(DEFAULT_PORT))
         self.host_var = tk.StringVar(value=DEFAULT_HOST)
@@ -667,9 +752,13 @@ class WebManagerApp:
         self.service_var = tk.StringVar(value="Usluga: sprawdzam...")
         self.autostart_var = tk.BooleanVar(value=False)
         self.busy = False
+        self.refreshing = False
+        self.pending_refresh = False
+        self.status_override_until = 0.0
+        self.tray_icon = None
         self._build()
-        self.refresh()
-        self.root.after(5000, self._auto_refresh)
+        self.request_refresh(clear_status=True)
+        self.root.after(10000, self._auto_refresh)
 
     def _build(self) -> None:
         tk = self.tk
@@ -686,29 +775,63 @@ class WebManagerApp:
         controls.pack(fill="x", pady=(12, 8))
         ttk.Label(controls, text="Port").pack(side="left")
         ttk.Entry(controls, textvariable=self.port_var, width=8).pack(side="left", padx=(6, 14))
-        ttk.Label(controls, text="Host").pack(side="left")
-        ttk.Entry(controls, textvariable=self.host_var, width=13).pack(side="left", padx=(6, 14))
-        ttk.Button(controls, text="Start", command=self.start).pack(side="left", padx=3)
-        ttk.Button(controls, text="Stop", command=self.stop).pack(side="left", padx=3)
-        ttk.Button(controls, text="Restart", command=self.restart).pack(side="left", padx=3)
-        ttk.Button(controls, text="Otworz WWW", command=self.open_web).pack(side="left", padx=3)
-        ttk.Button(controls, text="Odswiez", command=self.refresh).pack(side="left", padx=3)
-        ttk.Button(controls, text="Minimalizuj", command=self.root.iconify).pack(side="right")
+        ttk.Label(controls, text="Host nasluchu").pack(side="left")
+        host_entry = ttk.Entry(controls, textvariable=self.host_var, width=13)
+        host_entry.pack(side="left", padx=(6, 14))
+        Tooltip(host_entry, "Zwykle zostaw 0.0.0.0. To oznacza nasluch na wszystkich kartach sieciowych. 127.0.0.1 ogranicza panel tylko do tego komputera.")
+        start_btn = ttk.Button(controls, text="Uruchom panel", command=self.start)
+        start_btn.pack(side="left", padx=3)
+        Tooltip(start_btn, "Startuje panel webowy w tle. Jezeli usluga SYSTEM jest zainstalowana, uruchomi ja; w przeciwnym razie startuje zwykly proces tego uzytkownika.")
+        stop_btn = ttk.Button(controls, text="Zatrzymaj", command=self.stop)
+        stop_btn.pack(side="left", padx=3)
+        Tooltip(stop_btn, "Zatrzymuje proces panelu webowego albo zadanie SYSTEM, jezeli jest uruchomione.")
+        restart_btn = ttk.Button(controls, text="Restart", command=self.restart)
+        restart_btn.pack(side="left", padx=3)
+        Tooltip(restart_btn, "Zatrzymuje panel i uruchamia go ponownie na wybranym porcie i hoscie.")
+        open_btn = ttk.Button(controls, text="Otworz strone", command=self.open_web)
+        open_btn.pack(side="left", padx=3)
+        Tooltip(open_btn, "Otwiera lokalny adres panelu w przegladarce.")
+        refresh_btn = ttk.Button(controls, text="Odswiez status", command=lambda: self.request_refresh(clear_status=True))
+        refresh_btn.pack(side="left", padx=3)
+        Tooltip(refresh_btn, "Ponownie sprawdza port, adresy, stan strony i aktywne polaczenia. Dziala w tle, bez blokowania okna.")
+        tray_btn = ttk.Button(controls, text="Do zasobnika", command=self.minimize_to_tray)
+        tray_btn.pack(side="right")
+        Tooltip(tray_btn, "Chowa to okno do obszaru powiadomien Windows obok zegara. Sam panel webowy nadal dziala.")
+
+        ttk.Label(
+            main,
+            text="Host 0.0.0.0 = dostep z innych komputerow w LAN. Host 127.0.0.1 = tylko ten komputer.",
+            foreground="#555555",
+        ).pack(anchor="w", pady=(0, 6))
 
         service = ttk.LabelFrame(main, text="Usluga systemowa")
         service.pack(fill="x", pady=(2, 8))
+        ttk.Label(
+            service,
+            text="Bez instalacji przycisk uruchamia panel jako proces aktualnego uzytkownika. Instalacja SYSTEM tworzy zadanie Harmonogramu zadan uruchamiane dla calego komputera, takze przed zalogowaniem uzytkownika.",
+            foreground="#555555",
+            wraplength=980,
+        ).pack(fill="x", padx=8, pady=(8, 0))
         service_row = ttk.Frame(service, padding=8)
         service_row.pack(fill="x")
         ttk.Label(service_row, textvariable=self.service_var).pack(side="left")
-        ttk.Button(service_row, text="Instaluj SYSTEM", command=self.install_service).pack(side="right", padx=3)
-        ttk.Button(service_row, text="Usun", command=self.remove_service).pack(side="right", padx=3)
-        ttk.Button(service_row, text="Jako admin", command=self.run_as_admin).pack(side="right", padx=3)
-        ttk.Checkbutton(
+        install_btn = ttk.Button(service_row, text="Zainstaluj usluge SYSTEM", command=self.install_service)
+        install_btn.pack(side="right", padx=3)
+        Tooltip(install_btn, "Tworzy zadanie Harmonogramu zadan Windows uruchamiane jako SYSTEM. Wymaga administratora. Dzieki temu panel moze startowac dla calego komputera, nie tylko dla obecnego uzytkownika.")
+        remove_btn = ttk.Button(service_row, text="Usun usluge", command=self.remove_service)
+        remove_btn.pack(side="right", padx=3)
+        Tooltip(remove_btn, "Usuwa zadanie SYSTEM z Harmonogramu zadan. Nie usuwa programu ani danych.")
+        admin_btn = ttk.Button(service_row, text="Otworz jako administrator", command=self.run_as_admin)
+        admin_btn.pack(side="right", padx=3)
+        Tooltip(admin_btn, "Otwiera drugie okno tego menedzera z uprawnieniami administratora. Jest potrzebne do instalacji/usuniecia uslugi SYSTEM i reguly firewall.")
+        autostart = ttk.Checkbutton(
             service_row,
             text="Autostart przy starcie systemu",
             variable=self.autostart_var,
             command=self.toggle_autostart,
-        ).pack(side="right", padx=12)
+        )
+        autostart.pack(side="right", padx=12)
+        Tooltip(autostart, "Wlacza albo wylacza automatyczne uruchamianie zadania SYSTEM przy starcie Windows. Dziala dopiero po zainstalowaniu uslugi.")
 
         content = ttk.PanedWindow(main, orient="vertical")
         content.pack(fill="both", expand=True)
@@ -718,13 +841,25 @@ class WebManagerApp:
         content.add(upper, weight=1)
         content.add(lower, weight=2)
 
-        addresses = ttk.LabelFrame(upper, text="Adresy i port")
+        addresses = ttk.LabelFrame(upper, text="Adresy do otwarcia strony")
         addresses.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        ttk.Label(
+            addresses,
+            text="Uzyj 127.0.0.1 na tym komputerze albo adresu LAN z innego komputera.",
+            foreground="#555555",
+            wraplength=360,
+        ).pack(anchor="w", padx=8, pady=(8, 0))
         self.urls_list = tk.Listbox(addresses, height=6)
         self.urls_list.pack(fill="both", expand=True, padx=8, pady=8)
 
-        ports = ttk.LabelFrame(upper, text="Nasluch portu")
+        ports = ttk.LabelFrame(upper, text="Proces nasluchujacy na porcie")
         ports.pack(side="right", fill="both", expand=True, padx=(6, 0))
+        ttk.Label(
+            ports,
+            text="To jest techniczny widok procesu, ktory otworzyl port. Pomaga wykryc konflikt portu.",
+            foreground="#555555",
+            wraplength=560,
+        ).pack(anchor="w", padx=8, pady=(8, 0))
         self.listeners_tree = ttk.Treeview(ports, columns=("addr", "pid", "process"), show="headings", height=6)
         self.listeners_tree.heading("addr", text="Adres")
         self.listeners_tree.heading("pid", text="PID")
@@ -734,8 +869,14 @@ class WebManagerApp:
         self.listeners_tree.column("process", width=190)
         self.listeners_tree.pack(fill="both", expand=True, padx=8, pady=8)
 
-        users = ttk.LabelFrame(lower, text="Aktywni uzytkownicy i polaczenia TCP")
+        users = ttk.LabelFrame(lower, text="Aktywni uzytkownicy strony i polaczenia TCP")
         users.pack(fill="both", expand=True)
+        ttk.Label(
+            users,
+            text="Tu widac ostatnie przegladarki odwiedzajace panel. Dodatkowe wpisy TCP bez uzytkownika oznaczaja samo polaczenie sieciowe, zanim backend rozpozna zalogowanego uzytkownika.",
+            foreground="#555555",
+            wraplength=980,
+        ).pack(anchor="w", padx=8, pady=(8, 0))
         self.users_tree = ttk.Treeview(
             users,
             columns=("user", "remote", "seen", "path"),
@@ -778,25 +919,34 @@ class WebManagerApp:
 
     def _finish_action(self, result: ActionResult) -> None:
         self.busy = False
+        self.status_override_until = time.time() + 18
         self.status_var.set(result.message)
-        self.refresh()
+        self.request_refresh()
 
     def start(self) -> None:
-        self._run_action(lambda: start_web(self._port(), self._host(), prefer_system_service=True))
+        port = self._port()
+        host = self._host()
+        self._run_action(lambda: start_web(port, host, prefer_system_service=True))
 
     def stop(self) -> None:
-        self._run_action(lambda: stop_web(self._port()))
+        port = self._port()
+        self._run_action(lambda: stop_web(port))
 
     def restart(self) -> None:
+        port = self._port()
+        host = self._host()
+
         def action() -> ActionResult:
-            stop_web(self._port())
+            stop_web(port)
             time.sleep(1)
-            return start_web(self._port(), self._host(), prefer_system_service=True)
+            return start_web(port, host, prefer_system_service=True)
 
         self._run_action(action)
 
     def install_service(self) -> None:
-        self._run_action(lambda: install_system_service(self._port(), self._host()))
+        port = self._port()
+        host = self._host()
+        self._run_action(lambda: install_system_service(port, host))
 
     def remove_service(self) -> None:
         self._run_action(remove_system_service)
@@ -807,6 +957,7 @@ class WebManagerApp:
 
     def run_as_admin(self) -> None:
         result = open_as_admin()
+        self.status_override_until = time.time() + 12
         self.status_var.set(result.message)
 
     def open_web(self) -> None:
@@ -819,13 +970,43 @@ class WebManagerApp:
             tree.insert("", "end", values=row)
 
     def refresh(self) -> None:
-        status = current_status(self._port())
-        if status["running"]:
-            self.status_var.set("Status: dziala")
-        elif status["listeners"]:
-            self.status_var.set("Status: port zajety przez inny proces")
-        else:
-            self.status_var.set("Status: zatrzymany")
+        self.request_refresh(clear_status=True)
+
+    def request_refresh(self, *, clear_status: bool = False) -> None:
+        if clear_status:
+            self.status_override_until = 0.0
+        if self.refreshing:
+            self.pending_refresh = True
+            return
+        self.refreshing = True
+        port = self._port()
+
+        def worker() -> None:
+            try:
+                status = current_status(port)
+            except Exception as exc:
+                status = {"error": str(exc)}
+            self.root.after(0, lambda: self._apply_status(status))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_status(self, status: dict[str, Any]) -> None:
+        self.refreshing = False
+        if status.get("error"):
+            if time.time() >= self.status_override_until:
+                self.status_var.set(f"Status: blad odswiezania: {status['error']}")
+            if self.pending_refresh:
+                self.pending_refresh = False
+                self.request_refresh()
+            return
+
+        if time.time() >= self.status_override_until:
+            if status["running"]:
+                self.status_var.set("Status: dziala")
+            elif status["listeners"]:
+                self.status_var.set("Status: port zajety przez inny proces")
+            else:
+                self.status_var.set("Status: zatrzymany")
 
         service_parts = []
         service_parts.append("SYSTEM: zainstalowana" if status["task_exists"] else "SYSTEM: brak")
@@ -886,11 +1067,52 @@ class WebManagerApp:
         if not user_rows:
             user_rows.append(("brak", "", "", ""))
         self._set_rows(self.users_tree, user_rows)
+        if self.pending_refresh:
+            self.pending_refresh = False
+            self.request_refresh()
 
     def _auto_refresh(self) -> None:
         if not self.busy:
-            self.refresh()
-        self.root.after(5000, self._auto_refresh)
+            self.request_refresh()
+        self.root.after(10000, self._auto_refresh)
+
+    def minimize_to_tray(self) -> None:
+        try:
+            import pystray
+            from PIL import Image
+
+            image = Image.open(pic_asset_path("PIC_WEB.png"))
+            if self.tray_icon is None:
+                self.tray_icon = pystray.Icon(
+                    "PicOrgFTP-SQL WEB",
+                    image,
+                    "PicOrgFTP-SQL WEB",
+                    menu=pystray.Menu(
+                        pystray.MenuItem("Pokaz okno", lambda _icon, _item: self.root.after(0, self.show_from_tray)),
+                        pystray.MenuItem("Zamknij menedzer", lambda _icon, _item: self.root.after(0, self.close_window)),
+                    ),
+                )
+                self.tray_icon.run_detached()
+            self.root.withdraw()
+        except Exception as exc:
+            self.status_override_until = time.time() + 12
+            self.status_var.set(f"Nie udalo sie schowac do zasobnika: {exc}. Minimalizuje do paska zadan.")
+            self.root.iconify()
+
+    def show_from_tray(self) -> None:
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def close_window(self) -> None:
+        icon = self.tray_icon
+        self.tray_icon = None
+        if icon is not None:
+            try:
+                icon.stop()
+            except Exception:
+                pass
+        self.root.destroy()
 
     def run(self) -> None:
         self.root.mainloop()
