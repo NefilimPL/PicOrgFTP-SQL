@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import shutil
 import time
@@ -178,6 +179,59 @@ class WebDataUserTests(unittest.TestCase):
         self.assertEqual(len(photos), 1)
         self.assertEqual(photos[0]["prefix"], "03")
         self.assertTrue(photos[0]["local"])
+
+    def test_web_base_dir_change_updates_local_settings_and_runtime(self) -> None:
+        temp_dir = _workspace_temp("web_data_base_dir_change")
+        old_values = {
+            name: getattr(web_data.settings, name, None)
+            for name in (
+                "AC",
+                "l",
+                "LISTS_WORKBOOK_PATH",
+                "AD",
+                "AM",
+                "BM",
+                "AN",
+                "BASE_DIR_OVERRIDE",
+                "BASE_DIR_OVERRIDE_WARNING",
+                "BASE_DIR_SETTINGS_PATH",
+                "_RUNTIME_INITIALIZED",
+            )
+        }
+        try:
+            settings_path = temp_dir / "settings-root" / "local_settings.json"
+            requested = temp_dir / "new-base"
+            with patch.object(web_data.settings, "BASE_DIR_SETTINGS_PATH", str(settings_path)):
+                changed = web_data._apply_base_dir_from_web(f'"{requested}"')
+
+            self.assertTrue(changed)
+            payload = json.loads(settings_path.read_text(encoding="utf-8"))
+            self.assertEqual(Path(payload["base_dir_override"]), requested.resolve())
+            self.assertEqual(Path(web_data.settings.AC), requested.resolve())
+        finally:
+            for name, value in old_values.items():
+                setattr(web_data.settings, name, value)
+            shutil.rmtree(temp_dir)
+
+    def test_web_base_dir_change_reports_inaccessible_path(self) -> None:
+        temp_dir = _workspace_temp("web_data_base_dir_invalid")
+        try:
+            settings_path = temp_dir / "local_settings.json"
+            with (
+                patch.object(web_data.settings, "BASE_DIR_SETTINGS_PATH", str(settings_path)),
+                patch.object(
+                    web_data.settings,
+                    "_ensure_directory_access",
+                    return_value=(False, PermissionError("denied")),
+                ),
+            ):
+                with self.assertRaises(ValueError) as caught:
+                    web_data._apply_base_dir_from_web(str(temp_dir / "denied"))
+
+            self.assertIn("Nie mozna uzyc katalogu bazowego", str(caught.exception))
+            self.assertFalse(settings_path.exists())
+        finally:
+            shutil.rmtree(temp_dir)
 
 
 if __name__ == "__main__":

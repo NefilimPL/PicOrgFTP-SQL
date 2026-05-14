@@ -2616,6 +2616,7 @@ function settingsSaveButton(form, buildPayload) {
   form.appendChild(actions);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const previousBaseDir = state.settings?.base_dir || "";
     settingsStatus.textContent = "Zapisywanie...";
     state.settings = await requestJson("/api/settings", {
       method: "POST",
@@ -2631,8 +2632,13 @@ function settingsSaveButton(form, buildPayload) {
       renderSlots(state.settings.slots);
     }
     applyProductFieldLabels();
-    settingsStatus.textContent = "Zapisano.";
+    let saveMessage = "Zapisano.";
+    if (previousBaseDir && state.settings.base_dir !== previousBaseDir) {
+      await loadBootstrap();
+      saveMessage = `Zapisano. Aktywny katalog bazowy: ${state.settings.base_dir}`;
+    }
     renderSettings();
+    settingsStatus.textContent = saveMessage;
   });
 }
 
@@ -2643,7 +2649,12 @@ function renderSettingsApp() {
   const configNote = document.createElement("p");
   configNote.className = "settings-note wide-field";
   configNote.textContent =
-    "Panel webowy uzywa tej samej lokalizacji, config.json i APP_SECRET co lokalna aplikacja uruchomiona na backendzie.";
+    `Panel webowy uzywa tej samej lokalizacji, config.json i APP_SECRET co lokalna aplikacja uruchomiona na backendzie. local_settings.json: ${
+      s.local_settings_path || "nieznany"
+    }`;
+  const runtimeWarning = document.createElement("p");
+  runtimeWarning.className = "settings-note wide-field";
+  runtimeWarning.textContent = s.runtime_warning ? `Ostrzezenie runtime: ${s.runtime_warning}` : "";
   const versionNote = document.createElement("p");
   versionNote.className = "settings-note wide-field";
   versionNote.textContent = `Wersja programu: ${s.version || "dev"}`;
@@ -2673,6 +2684,7 @@ function renderSettingsApp() {
   form.append(
     versionNote,
     configNote,
+    runtimeWarning,
     inputField("base_dir", "Katalog bazowy", s.base_dir),
     secretGroup,
     checkField(

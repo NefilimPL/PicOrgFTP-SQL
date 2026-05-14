@@ -1192,6 +1192,14 @@ def create_app() -> FastAPI:
     app = FastAPI(title="PicOrgFTP-SQL Web", version=get_app_version())
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+    def _runtime_info() -> Dict[str, Any]:
+        return {
+            "base_dir": settings.AC,
+            "processed_dir": settings.l,
+            "config_path": config.CONFIG_PATH,
+            "warning": settings.BASE_DIR_OVERRIDE_WARNING,
+        }
+
     @app.middleware("http")
     async def _log_unhandled_web_errors(request: Request, call_next):
         try:
@@ -1265,9 +1273,7 @@ def create_app() -> FastAPI:
     @app.get("/api/bootstrap")
     def bootstrap(request: Request) -> Dict[str, Any]:
         _require_user(request)
-        runtime_info = getattr(app.state, "runtime_info", None) or initialize_application_runtime(
-            interactive=False
-        )
+        runtime_info = _runtime_info()
         slots = slot_definitions_from_config(config.CONFIG)
         return {
             "base_dir": runtime_info["base_dir"],
@@ -1515,6 +1521,7 @@ def create_app() -> FastAPI:
             snapshot = update_settings(payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        app.state.runtime_info = _runtime_info()
         snapshot["current_user"] = _current_user_payload(request)
         return JSONResponse(snapshot)
 

@@ -934,6 +934,40 @@ def _local_settings_path() -> Path:
     return Path(settings.BASE_DIR_SETTINGS_PATH)
 
 
+def _normalize_base_dir(value: object) -> str:
+    text = _text(value).strip("\"'")
+    if not text:
+        return ""
+    expanded = os.path.expandvars(os.path.expanduser(text))
+    return os.path.abspath(expanded)
+
+
+def _same_path(left: object, right: object) -> bool:
+    try:
+        return os.path.normcase(os.path.abspath(str(left))) == os.path.normcase(
+            os.path.abspath(str(right))
+        )
+    except Exception:
+        return str(left or "") == str(right or "")
+
+
+def _ensure_base_dir_web_access(path: str) -> None:
+    ok, error = settings._ensure_directory_access(path)
+    if not ok:
+        details = f" Szczegoly: {error}" if error else ""
+        raise ValueError(f"Nie mozna uzyc katalogu bazowego: {path}.{details}")
+    try:
+        fd, probe_path = tempfile.mkstemp(
+            prefix="picorg_base_dir_check_",
+            suffix=".tmp",
+            dir=path,
+        )
+        os.close(fd)
+        os.remove(probe_path)
+    except OSError as exc:
+        raise ValueError(f"Brak zapisu w katalogu bazowym: {path}. Szczegoly: {exc}") from exc
+
+
 def _load_local_settings() -> dict[str, object]:
     path = _local_settings_path()
     if not path.exists():
@@ -949,14 +983,45 @@ def _save_local_settings(payload: dict[str, object]) -> None:
     path = _local_settings_path()
     existing = _load_local_settings()
     existing.update(payload)
-    path.write_text(json.dumps(existing, indent=4, ensure_ascii=False), encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(
+        prefix="local_settings_",
+        suffix=".json.tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(existing, handle, indent=4, ensure_ascii=False)
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
+def _apply_base_dir_from_web(value: object) -> bool:
+    requested = _normalize_base_dir(value)
+    if not requested:
+        return False
+    _ensure_base_dir_web_access(requested)
+    previous = settings.AC
+    _save_local_settings({"base_dir_override": requested})
+    settings.initialize_runtime(interactive=False)
+    if not _same_path(settings.AC, requested):
+        warning = settings.BASE_DIR_OVERRIDE_WARNING or "runtime pozostal przy poprzednim katalogu"
+        raise ValueError(
+            "Zapisano local_settings.json, ale backend nie przelaczyl sie na nowy "
+            f"katalog. Wybrany: {requested}. Aktywny: {settings.AC}. {warning}"
+        )
+    return not _same_path(previous, settings.AC)
 
 
 def update_settings(payload: dict[str, object]) -> dict[str, object]:
     """Update editable settings from the web UI."""
 
     cfg = config.CONFIG
-    runtime_needs_reload = False
     app_payload = payload.get("app") if isinstance(payload.get("app"), dict) else {}
     ftp_payload = payload.get("ftp") if isinstance(payload.get("ftp"), dict) else {}
     db_payload = payload.get("database") if isinstance(payload.get("database"), dict) else {}
@@ -964,10 +1029,7 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
     slots_payload = payload.get("slots") if isinstance(payload.get("slots"), list) else None
 
     if "base_dir" in app_payload:
-        base_dir = _text(app_payload.get("base_dir"))
-        if base_dir:
-            _save_local_settings({"base_dir_override": base_dir})
-            runtime_needs_reload = True
+        _apply_base_dir_from_web(app_payload.get("base_dir"))
     if APP_SECRET_KEY in app_payload:
         secret = _text(app_payload.get(APP_SECRET_KEY))
         if secret:
@@ -1054,8 +1116,6 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
         cfg[SLOT_DEFS_KEY] = slot_defs
         cfg[SQL_COLUMN_MAP_KEY] = sql_map
 
-    if runtime_needs_reload:
-        settings.initialize_runtime(interactive=False)
     save_config(cfg)
     config.initialize_config(interactive=False)
     return settings_snapshot()
@@ -1076,6 +1136,8 @@ def settings_snapshot() -> dict[str, object]:
         "base_dir": settings.AC,
         "processed_dir": settings.l,
         "config_path": config.CONFIG_PATH,
+        "local_settings_path": str(_local_settings_path()),
+        "runtime_warning": settings.BASE_DIR_OVERRIDE_WARNING,
         "auth_enabled": True,
         "users": load_users(),
         "app_secret_set": bool(_text(common.APP_SECRET)),
