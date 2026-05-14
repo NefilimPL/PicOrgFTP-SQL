@@ -2,6 +2,7 @@ local_settings
 local_settings.json
 config.json
 .venv
+.venv-build
 .vscode
 \__pycache__/
 .pytest_cache/
