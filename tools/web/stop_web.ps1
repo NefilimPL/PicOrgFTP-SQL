@@ -27,11 +27,16 @@ function Test-WebProcess($PidValue) {
         $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $PidValue"
         $cmd = [string]$proc.CommandLine
         if ($cmd) {
-            return $cmd -like "*uvicorn*" -and $cmd -like "*picorgftp_sql.web.app*"
+            return (
+                ($cmd -like "*uvicorn*" -and $cmd -like "*picorgftp_sql.web.app*") -or
+                $cmd -like "*picorgftp_sql.web_manager*" -or
+                $cmd -like "*PicOrgFTP-SQL-WEB*" -or
+                $cmd -like "*--service-run*"
+            )
         }
     } catch {
     }
-    return $process.ProcessName -in @("python", "pythonw")
+    return $process.ProcessName -in @("python", "pythonw", "PicOrgFTP-SQL-WEB")
 }
 
 function Get-PortListenerPids {

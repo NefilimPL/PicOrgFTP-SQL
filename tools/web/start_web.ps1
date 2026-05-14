@@ -268,9 +268,14 @@ function Test-WebProcess($PidValue) {
     }
     $cmd = Get-ProcessCommandLine $PidValue
     if ($cmd) {
-        return $cmd -like "*uvicorn*" -and $cmd -like "*picorgftp_sql.web.app*"
+        return (
+            ($cmd -like "*uvicorn*" -and $cmd -like "*picorgftp_sql.web.app*") -or
+            $cmd -like "*picorgftp_sql.web_manager*" -or
+            $cmd -like "*PicOrgFTP-SQL-WEB*" -or
+            $cmd -like "*--service-run*"
+        )
     }
-    return $process.ProcessName -in @("python", "pythonw")
+    return $process.ProcessName -in @("python", "pythonw", "PicOrgFTP-SQL-WEB")
 }
 
 function Stop-WebProcessIfSafe($PidValue) {

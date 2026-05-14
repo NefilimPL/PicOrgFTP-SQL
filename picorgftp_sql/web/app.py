@@ -94,6 +94,7 @@ SESSION_COOKIE = "picorg_web_session"
 SESSION_MAX_AGE_SECONDS = 12 * 60 * 60
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "admin"
+ACTIVE_CLIENT_MAX_AGE_SECONDS = 180
 
 
 def _auth_enabled() -> bool:
@@ -1073,6 +1074,83 @@ def _logs_response(limit: int) -> Dict[str, Any]:
     return {"logs": logs, "events": events, "summary": _logs_summary(events)}
 
 
+def _active_clients_log_path() -> Path:
+    return Path(settings.LOG_DIR) / "web_active_clients.json"
+
+
+def _active_client_key(item: Dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(item.get("username") or ""),
+            str(item.get("remote_address") or ""),
+            str(item.get("user_agent") or ""),
+        ]
+    )
+
+
+def _active_clients_snapshot(now: Optional[float] = None) -> List[Dict[str, Any]]:
+    now_value = time.time() if now is None else float(now)
+    path = _active_clients_log_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    clients: List[Dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        try:
+            last_seen = float(item.get("last_seen_epoch") or 0)
+        except (TypeError, ValueError):
+            continue
+        if last_seen and now_value - last_seen <= ACTIVE_CLIENT_MAX_AGE_SECONDS:
+            clients.append(item)
+    clients.sort(key=lambda item: float(item.get("last_seen_epoch") or 0), reverse=True)
+    return clients
+
+
+def _record_active_client(request: Request, status_code: int) -> None:
+    path_text = str(request.url.path or "")
+    if path_text.startswith("/static/") or path_text == "/api/health":
+        return
+    try:
+        username = _current_user(request) or ""
+    except Exception:
+        username = ""
+    client = getattr(request, "client", None)
+    headers = getattr(request, "headers", {}) or {}
+    now_value = time.time()
+    item = {
+        "username": username or "niezalogowany",
+        "remote_address": str(getattr(client, "host", "") or ""),
+        "remote_port": int(getattr(client, "port", 0) or 0),
+        "user_agent": str(headers.get("user-agent", "") if hasattr(headers, "get") else ""),
+        "method": str(request.method or ""),
+        "path": path_text,
+        "status_code": int(status_code or 0),
+        "last_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "last_seen_epoch": now_value,
+    }
+    clients = _active_clients_snapshot(now_value)
+    by_key = {_active_client_key(existing): existing for existing in clients}
+    by_key[_active_client_key(item)] = item
+    payload = sorted(
+        by_key.values(),
+        key=lambda existing: float(existing.get("last_seen_epoch") or 0),
+        reverse=True,
+    )[:100]
+    try:
+        path = _active_clients_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(".json.tmp")
+        temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temp_path, path)
+    except OSError:
+        pass
+
+
 def _optional_form_bool(form: Any, key: str) -> Optional[bool]:
     value = form.get(key)
     if value is None:
@@ -1124,12 +1202,26 @@ def create_app() -> FastAPI:
             )
             raise
 
+    @app.middleware("http")
+    async def _track_active_clients(request: Request, call_next):
+        response = await call_next(request)
+        _record_active_client(request, getattr(response, "status_code", 0))
+        return response
+
     @app.on_event("startup")
     def _startup() -> None:
         os.environ.setdefault("PICORGFTP_SQL_HEADLESS", "1")
         runtime_info = initialize_application_runtime(interactive=False)
         app.state.runtime_info = runtime_info
         cleanup_web_ftp_cache(force=True)
+
+    @app.get("/api/health")
+    def health() -> Dict[str, Any]:
+        return {
+            "ok": True,
+            "version": get_display_version(),
+            "time": datetime.now().isoformat(timespec="seconds"),
+        }
 
     @app.get("/")
     def index(request: Request) -> Response:
@@ -1210,6 +1302,11 @@ def create_app() -> FastAPI:
     def logs_api(request: Request, limit: int = 300) -> Dict[str, Any]:
         _require_admin(request)
         return _logs_response(limit)
+
+    @app.get("/api/server/active-users")
+    def active_users_api(request: Request) -> Dict[str, Any]:
+        _require_admin(request)
+        return {"clients": _active_clients_snapshot()}
 
     @app.post("/api/logs/clear")
     async def logs_clear_api(request: Request) -> JSONResponse:
