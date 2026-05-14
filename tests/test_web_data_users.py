@@ -278,6 +278,24 @@ class WebDataUserTests(unittest.TestCase):
         self.assertEqual(preserve[web_data.P], {web_data.N, web_data.M})
         self.assertEqual(preserve[web_data.K], {web_data.M})
 
+    def test_settings_secret_values_returns_current_decrypted_config(self) -> None:
+        config_payload = {
+            web_data.H: {web_data.N: "ftp-user", web_data.M: "ftp-pass"},
+            web_data.P: {web_data.N: "mssql-user", web_data.M: "mssql-pass"},
+            web_data.K: {web_data.N: "mysql-user", web_data.M: "mysql-pass"},
+        }
+        with (
+            patch.object(web_data.config, "CONFIG", config_payload),
+            patch.object(web_data.common, "APP_SECRET", "secret-from-local-settings"),
+        ):
+            payload = web_data.settings_secret_values()
+
+        self.assertEqual(payload["app_secret"], "secret-from-local-settings")
+        self.assertEqual(payload["ftp"]["user"], "ftp-user")
+        self.assertEqual(payload["ftp"]["password"], "ftp-pass")
+        self.assertEqual(payload["database"]["mssql"]["password"], "mssql-pass")
+        self.assertEqual(payload["database"]["mysql"]["user"], "mysql-user")
+
 
 if __name__ == "__main__":
     unittest.main()

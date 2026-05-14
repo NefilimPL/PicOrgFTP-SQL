@@ -1226,6 +1226,32 @@ def settings_snapshot() -> dict[str, object]:
     }
 
 
+def settings_secret_values() -> dict[str, object]:
+    """Return decrypted settings secrets for the explicit admin reveal action."""
+
+    cfg = config.CONFIG
+    ftp = cfg.get(H, {}) if isinstance(cfg.get(H), dict) else {}
+    mssql_cfg = cfg.get(P, {}) if isinstance(cfg.get(P), dict) else {}
+    mysql_cfg = cfg.get(K, {}) if isinstance(cfg.get(K), dict) else {}
+    return {
+        "app_secret": _text(common.APP_SECRET),
+        "ftp": {
+            "user": _text(ftp.get(N)),
+            "password": _text(ftp.get(M)),
+        },
+        "database": {
+            "mssql": {
+                "user": _text(mssql_cfg.get(N)),
+                "password": _text(mssql_cfg.get(M)),
+            },
+            "mysql": {
+                "user": _text(mysql_cfg.get(N)),
+                "password": _text(mysql_cfg.get(M)),
+            },
+        },
+    }
+
+
 def test_local_paths() -> dict[str, object]:
     """Check backend access to local working folders."""
 

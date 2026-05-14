@@ -21,6 +21,7 @@ const state = {
   activeSettingsTab: "app",
   history: null,
   logs: null,
+  settingsSecrets: null,
   theme: localStorage.getItem("picorg-theme") || "light",
   suppressAutoSearch: false,
   lastAutoSearchKey: "",
@@ -2532,10 +2533,81 @@ function checkField(name, label, checked = false, description = "") {
 }
 
 function credentialField(name, label, isSet = false, attrs = {}) {
-  const field = inputField(name, label, "", attrs);
-  const input = field.querySelector("input");
+  const field = document.createElement("label");
+  const title = document.createElement("span");
+  const row = document.createElement("span");
+  const input = document.createElement("input");
+  const originalType = attrs.type || "text";
+  field.className = attrs.className ? `credential-field ${attrs.className}` : "credential-field";
+  title.textContent = label;
+  row.className = "credential-actions";
+  input.name = name;
+  input.type = originalType;
   input.placeholder = isSet ? "Zapisane - wpisz nowe, zeby zmienic" : "Nie ustawiono";
+  row.appendChild(input);
+  if (attrs.secretPath && isSet) {
+    const reveal = document.createElement("button");
+    reveal.type = "button";
+    reveal.className = "secondary-button";
+    reveal.textContent = "Pokaz zapisane";
+    reveal.title = "Wczytuje zapisana wartosc tylko do tego pola.";
+    reveal.addEventListener("click", () => {
+      toggleCredentialReveal(input, reveal, attrs.secretPath, originalType);
+    });
+    row.appendChild(reveal);
+  }
+  field.append(title, row);
   return field;
+}
+
+function secretValueByPath(payload, path) {
+  let value = payload;
+  for (const part of String(path || "").split(".")) {
+    if (!part) continue;
+    value = value?.[part];
+  }
+  return value === undefined || value === null ? "" : String(value);
+}
+
+async function loadSettingsSecrets() {
+  if (!state.settingsSecrets) {
+    state.settingsSecrets = await requestJson("/api/settings/secrets", { timeoutMs: 10000 });
+  }
+  return state.settingsSecrets;
+}
+
+async function toggleCredentialReveal(input, button, secretPath, originalType) {
+  if (input.dataset.secretVisible === "1") {
+    input.value = "";
+    input.type = originalType;
+    input.dataset.secretVisible = "";
+    button.textContent = "Pokaz zapisane";
+    return;
+  }
+  const previousLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = "Wczytywanie...";
+  try {
+    const payload = await loadSettingsSecrets();
+    const value = secretValueByPath(payload, secretPath);
+    if (!value) {
+      settingsStatus.textContent = "Brak zapisanej wartosci albo nie mozna jej odczytac aktualnym APP_SECRET.";
+      button.textContent = previousLabel;
+      return;
+    }
+    input.value = value;
+    if (originalType === "password") {
+      input.type = "text";
+    }
+    input.dataset.secretVisible = "1";
+    button.textContent = "Ukryj";
+    settingsStatus.textContent = "Wczytano zapisana wartosc do pola. Zapisz tylko wtedy, gdy chcesz ja utrwalic.";
+  } catch (error) {
+    settingsStatus.textContent = error.message || "Nie udalo sie wczytac zapisanej wartosci.";
+    button.textContent = previousLabel;
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function selectField(name, label, value, choices) {
@@ -2645,6 +2717,7 @@ function settingsSaveButton(form, buildPayload) {
     button.disabled = true;
     settingsStatus.textContent = "Zapisywanie...";
     try {
+      state.settingsSecrets = null;
       state.settings = await requestJson("/api/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2720,7 +2793,12 @@ function renderSettingsApp() {
     "APP_SECRET sluzy do odczytu zaszyfrowanych hasel z config.json. " +
     "Przy podpinaniu istniejacego katalogu wpisz sekret uzyty przy jego konfiguracji; puste pole niczego nie zmienia.";
   secretGrid.className = "settings-form nested-grid";
-  secretGrid.append(credentialField("app_secret", "APP_SECRET", s.app_secret_set, { type: "password" }));
+  secretGrid.append(
+    credentialField("app_secret", "APP_SECRET", s.app_secret_set, {
+      type: "password",
+      secretPath: "app_secret",
+    })
+  );
   secretGroup.append(secretTitle, secretHint, secretGrid);
   form.append(
     versionNote,
@@ -2854,8 +2932,11 @@ function renderSettingsFtp() {
     inputField("host", "Host", ftp.host),
     inputField("port", "Port", ftp.port, { type: "number" }),
     inputField("path", "Sciezka", ftp.path),
-    credentialField("user", "Uzytkownik", ftp.user_set),
-    credentialField("password", "Haslo", ftp.password_set, { type: "password" }),
+    credentialField("user", "Uzytkownik", ftp.user_set, { secretPath: "ftp.user" }),
+    credentialField("password", "Haslo", ftp.password_set, {
+      type: "password",
+      secretPath: "ftp.password",
+    }),
     actionRow(diagnosticButton("ftp", "Test FTP"))
   );
   settingsSaveButton(form, (data) => ({
@@ -2886,12 +2967,22 @@ function renderSettingsSql() {
     inputField("query", "Zapytanie SQL", db.query, { textarea: true, className: "wide-field" }),
     inputField("mssql_server", "MS SQL server", db.mssql.server),
     inputField("mssql_database", "MS SQL database", db.mssql.database),
-    credentialField("mssql_user", "MS SQL user", db.mssql.user_set),
-    credentialField("mssql_password", "MS SQL haslo", db.mssql.password_set, { type: "password" }),
+    credentialField("mssql_user", "MS SQL user", db.mssql.user_set, {
+      secretPath: "database.mssql.user",
+    }),
+    credentialField("mssql_password", "MS SQL haslo", db.mssql.password_set, {
+      type: "password",
+      secretPath: "database.mssql.password",
+    }),
     inputField("mysql_server", "MySQL server", db.mysql.server),
     inputField("mysql_database", "MySQL database", db.mysql.database),
-    credentialField("mysql_user", "MySQL user", db.mysql.user_set),
-    credentialField("mysql_password", "MySQL haslo", db.mysql.password_set, { type: "password" }),
+    credentialField("mysql_user", "MySQL user", db.mysql.user_set, {
+      secretPath: "database.mysql.user",
+    }),
+    credentialField("mysql_password", "MySQL haslo", db.mysql.password_set, {
+      type: "password",
+      secretPath: "database.mysql.password",
+    }),
     actionRow(diagnosticButton("sql", "Test SQL"))
   );
   settingsSaveButton(form, (data) => ({
@@ -3091,6 +3182,7 @@ function renderSettings() {
 
 async function loadSettings() {
   state.settings = await requestJson("/api/settings");
+  state.settingsSecrets = null;
   state.currentUser = state.settings.current_user || state.currentUser;
   state.defaultSlotFit = Boolean(state.settings.auto_content_fit);
   state.ftpEnabled = state.settings.ftp?.enabled !== false;

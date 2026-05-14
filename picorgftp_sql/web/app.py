@@ -74,6 +74,7 @@ from ..web_data import (
     save_web_entry,
     search_entries,
     settings_snapshot,
+    settings_secret_values,
     test_ftp_connection,
     test_local_paths,
     test_sql_connection,
@@ -1530,6 +1531,14 @@ def create_app() -> FastAPI:
         app.state.runtime_info = _runtime_info()
         snapshot["current_user"] = _current_user_payload(request)
         return JSONResponse(snapshot)
+
+    @app.get("/api/settings/secrets")
+    def settings_secrets(request: Request) -> JSONResponse:
+        _require_admin(request)
+        return JSONResponse(
+            settings_secret_values(),
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/api/users")
     def users_get(request: Request) -> Dict[str, Any]:
