@@ -529,16 +529,52 @@ def _safe_sql_identifier(value: object) -> str:
     return text if re.fullmatch(r"[0-9A-Za-z_\.]+", text) else ""
 
 
+def _sql_row_exists_query(table: str, where_clause: str, db_type: str) -> str:
+    if not table:
+        return ""
+    if str(db_type or "").lower() == str(K).lower():
+        query = f"SELECT 1 FROM {table}{where_clause}".rstrip(";\n\r\t ")
+        if " limit " not in query.lower():
+            query = f"{query} LIMIT 1"
+        return query
+    return f"SELECT TOP 1 1 FROM {table}{where_clause}".rstrip(";\n\r\t ")
+
+
+def _cursor_rowcount(cur: Any) -> int:
+    try:
+        return int(getattr(cur, "rowcount", -1))
+    except (TypeError, ValueError):
+        return -1
+
+
 def _sync_result_to_sql(
     result: Any,
     *,
     clear_prefixes: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
     if not bool(config.CONFIG.get(u, True)):
-        return {"enabled": False, "updated": 0, "cleared": 0, "rows": 0, "elapsed_ms": 0, "error": ""}
+        return {
+            "enabled": False,
+            "updated": 0,
+            "cleared": 0,
+            "rows": 0,
+            "elapsed_ms": 0,
+            "error": "",
+            "skipped": False,
+            "reason": "",
+        }
     started = time.perf_counter()
     ean = str(getattr(result, "ean", "") or "").strip()
-    payload = {"enabled": True, "updated": 0, "cleared": 0, "rows": 0, "elapsed_ms": 0, "error": ""}
+    payload = {
+        "enabled": True,
+        "updated": 0,
+        "cleared": 0,
+        "rows": 0,
+        "elapsed_ms": 0,
+        "error": "",
+        "skipped": False,
+        "reason": "",
+    }
     if not (ean and len(ean) == 13 and ean.isdigit()):
         payload["error"] = "SQL pominiety: brak poprawnego EAN-13."
         return payload
@@ -557,6 +593,13 @@ def _sync_result_to_sql(
     try:
         conn = connect_db()
         cur = conn.cursor()
+        row_exists_query = _sql_row_exists_query(table, where_clause, config.CONFIG.get(p, K))
+        if row_exists_query:
+            cur.execute(row_exists_query)
+            if not cur.fetchone():
+                payload["skipped"] = True
+                payload["reason"] = "nie znaleziono wiersza produktu dla tego EAN"
+                return payload
         template = config.CONFIG.get(w, SQL_UPDATE_TEMPLATE) or SQL_UPDATE_TEMPLATE
         for prefix, filename in saved_by_prefix.items():
             column = _safe_sql_identifier(sql_map.get(prefix, ""))
@@ -568,17 +611,21 @@ def _sync_result_to_sql(
             short_name = f"{ean}_{prefix}{parsed.extension}"
             query = template.format(col=column, filename=short_name, ean=ean)
             cur.execute(query)
-            payload["updated"] += 1
-            if getattr(cur, "rowcount", -1) >= 0:
-                payload["rows"] += int(cur.rowcount)
+            rowcount = _cursor_rowcount(cur)
+            if rowcount != 0:
+                payload["updated"] += 1
+            if rowcount > 0:
+                payload["rows"] += rowcount
         for prefix in clear_prefixes:
             column = _safe_sql_identifier(sql_map.get(prefix, ""))
             if not column:
                 continue
             cur.execute(f"UPDATE {table} SET {column} = ''{where_clause}")
-            payload["cleared"] += 1
-            if getattr(cur, "rowcount", -1) >= 0:
-                payload["rows"] += int(cur.rowcount)
+            rowcount = _cursor_rowcount(cur)
+            if rowcount != 0:
+                payload["cleared"] += 1
+            if rowcount > 0:
+                payload["rows"] += rowcount
         if payload["updated"] or payload["cleared"]:
             conn.commit()
     except Exception as exc:
@@ -865,7 +912,7 @@ def _append_existing_photo_sources(
         source_entry,
         include_local=True,
         include_ftp=bool(config.CONFIG.get(ft, True)),
-        include_sql=False,
+        include_sql=True,
     )
     for photo in photos:
         prefix = str(photo.get("prefix") or "").strip()

@@ -355,7 +355,7 @@ class WebAppFileTests(unittest.TestCase):
                             "sql_checked": True,
                         }
                     ],
-                ),
+                ) as find_photos,
             ):
                 appended = web_app._append_existing_photo_migrations(
                     existing_entry={
@@ -378,6 +378,7 @@ class WebAppFileTests(unittest.TestCase):
             self.assertEqual(appended, ["03"])
             self.assertEqual(uploaded_slots[0].source_path, str(photo_path))
             self.assertEqual(delete_requests, [])
+            self.assertTrue(find_photos.call_args.kwargs["include_sql"])
 
     def test_ftp_upload_is_skipped_for_sql_only_repair_with_existing_remote(self) -> None:
         result = SimpleNamespace(
@@ -418,6 +419,138 @@ class WebAppFileTests(unittest.TestCase):
         )
 
         self.assertEqual(skipped, {"03"})
+
+    def test_sql_sync_skips_updates_when_product_row_is_missing(self) -> None:
+        result = SimpleNamespace(
+            ean="5901234567890",
+            saved_files=[
+                SimpleNamespace(
+                    prefix="03",
+                    filename="5901234567890_03_DETAIL_MAGGIORE.jpg",
+                )
+            ],
+        )
+
+        class Cursor:
+            rowcount = -1
+
+            def __init__(self) -> None:
+                self.queries = []
+
+            def execute(self, query):
+                self.queries.append(query)
+
+            def fetchone(self):
+                return None
+
+            def close(self):
+                return None
+
+        class Connection:
+            def __init__(self) -> None:
+                self.cursor_obj = Cursor()
+                self.committed = False
+
+            def cursor(self):
+                return self.cursor_obj
+
+            def commit(self):
+                self.committed = True
+
+            def rollback(self):
+                return None
+
+            def close(self):
+                return None
+
+        conn = Connection()
+        with (
+            patch.dict(
+                web_app.config.CONFIG,
+                {
+                    web_app.u: True,
+                    web_app.p: web_app.K,
+                    web_app.w: "UPDATE object_query_1 SET {col} = '{filename}' WHERE EAN = '{ean}'",
+                    web_app.SQL_COLUMN_MAP_KEY: {"03": "img_03"},
+                },
+                clear=False,
+            ),
+            patch.object(web_app, "connect_db", return_value=conn),
+        ):
+            payload = web_app._sync_result_to_sql(result)
+
+        self.assertTrue(payload["skipped"])
+        self.assertEqual(payload["updated"], 0)
+        self.assertEqual(payload["rows"], 0)
+        self.assertEqual(len(conn.cursor_obj.queries), 1)
+        self.assertIn("SELECT 1", conn.cursor_obj.queries[0])
+        self.assertFalse(conn.committed)
+
+    def test_sql_sync_does_not_count_zero_row_updates(self) -> None:
+        result = SimpleNamespace(
+            ean="5901234567890",
+            saved_files=[
+                SimpleNamespace(
+                    prefix="03",
+                    filename="5901234567890_03_DETAIL_MAGGIORE.jpg",
+                )
+            ],
+        )
+
+        class Cursor:
+            rowcount = -1
+
+            def __init__(self) -> None:
+                self.queries = []
+
+            def execute(self, query):
+                self.queries.append(query)
+                self.rowcount = 0 if str(query).lstrip().upper().startswith("UPDATE") else -1
+
+            def fetchone(self):
+                return (1,)
+
+            def close(self):
+                return None
+
+        class Connection:
+            def __init__(self) -> None:
+                self.cursor_obj = Cursor()
+                self.committed = False
+
+            def cursor(self):
+                return self.cursor_obj
+
+            def commit(self):
+                self.committed = True
+
+            def rollback(self):
+                return None
+
+            def close(self):
+                return None
+
+        conn = Connection()
+        with (
+            patch.dict(
+                web_app.config.CONFIG,
+                {
+                    web_app.u: True,
+                    web_app.p: web_app.K,
+                    web_app.w: "UPDATE object_query_1 SET {col} = '{filename}' WHERE EAN = '{ean}'",
+                    web_app.SQL_COLUMN_MAP_KEY: {"03": "img_03"},
+                },
+                clear=False,
+            ),
+            patch.object(web_app, "connect_db", return_value=conn),
+        ):
+            payload = web_app._sync_result_to_sql(result)
+
+        self.assertFalse(payload["skipped"])
+        self.assertEqual(payload["updated"], 0)
+        self.assertEqual(payload["rows"], 0)
+        self.assertEqual(len(conn.cursor_obj.queries), 2)
+        self.assertFalse(conn.committed)
 
     def test_complete_existing_photo_is_not_appended_without_missing_sources(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]

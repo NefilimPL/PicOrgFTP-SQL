@@ -2066,7 +2066,9 @@ function showResult(payload) {
     sql.className = payload.sql.error ? "error-text" : "ok-text";
     sql.textContent = payload.sql.error
       ? `SQL: blad - ${payload.sql.error}`
-      : `SQL: aktualizacje ${payload.sql.updated || 0}, czyszczenia ${payload.sql.cleared || 0}`;
+      : payload.sql.skipped
+        ? `SQL: pominieto - ${payload.sql.reason || "brak wiersza do aktualizacji"}`
+        : `SQL: aktualizacje ${payload.sql.updated || 0}, czyszczenia ${payload.sql.cleared || 0}`;
     resultOutput.appendChild(sql);
   }
 }
@@ -2404,30 +2406,12 @@ function hasProductDraftData() {
   return trackedProductFields.some((fieldName) => String(current[fieldName] || "").trim());
 }
 
-function localPhotoCanSyncToFtp(photo) {
-  const ftpChecked = state.photoSourcesLoaded.has("ftp") || state.photoSourcesLoaded.has("all");
-  return Boolean(state.ftpEnabled && ftpChecked && photo?.local && photo?.token);
-}
-
-function photoNeedsRepair(photo, prefix = "") {
-  const localChecked = state.photoSourcesLoaded.has("local") || state.photoSourcesLoaded.has("all");
-  const sqlChecked =
-    Boolean(photo?.sql_checked) ||
-    state.photoSourcesLoaded.has("sql") ||
-    state.photoSourcesLoaded.has("all");
-  const hasTransferSource = Boolean(photo?.token || photo?.ftp_token || photo?.ftp_filename);
-  return Boolean(
-    (localChecked && photo?.ftp && !photo?.local) ||
-      (sqlChecked && hasTransferSource && !photo?.sql)
-  );
-}
-
 function hasPendingSlotChanges() {
   if (state.files.size || state.deletedSlots.size) {
     return true;
   }
   for (const [prefix, photo] of state.loadedPhotos.entries()) {
-    if (photo?.dirty || photoNeedsRepair(photo, prefix)) {
+    if (photo?.dirty) {
       return true;
     }
   }
@@ -2447,7 +2431,7 @@ function pendingChangedSlotPrefixes() {
   for (const prefix of state.files.keys()) prefixes.add(prefix);
   for (const prefix of state.deletedSlots.keys()) prefixes.add(prefix);
   for (const [prefix, photo] of state.loadedPhotos.entries()) {
-    if (photo?.dirty || photoNeedsRepair(photo, prefix)) {
+    if (photo?.dirty) {
       prefixes.add(prefix);
     }
   }
@@ -3758,9 +3742,7 @@ productForm.addEventListener("submit", async (event) => {
       data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
     }
     for (const [prefix, photo] of state.loadedPhotos.entries()) {
-      const shouldSyncLocal = !updateMode && localPhotoCanSyncToFtp(photo);
-      const shouldRepair = photoNeedsRepair(photo, prefix);
-      if (!state.files.has(prefix) && (photo.dirty || shouldSyncLocal || shouldRepair)) {
+      if (!state.files.has(prefix) && photo.dirty) {
         const transferSource = transferableSlotSource(prefix, photo);
         const token = transferablePhotoToken(photo, prefix);
         if (token) {

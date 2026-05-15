@@ -259,9 +259,6 @@ def query_presence_details(columns, table, where_clause, db_type):
                 batch_failed = True
             else:
                 if not row:
-                    for prefix, column_name, _ in columns:
-                        if column_name:
-                            presence_map[prefix] = False
                     return presence_map, value_map
                 try:
                     values = list(row)
@@ -298,7 +295,6 @@ def query_presence_details(columns, table, where_clause, db_type):
                 presence_map[prefix] = I
                 continue
             if not row:
-                presence_map[prefix] = False
                 continue
             try:
                 value = row[0]

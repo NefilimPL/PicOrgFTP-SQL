@@ -306,6 +306,64 @@ class WebDataUserTests(unittest.TestCase):
         self.assertTrue(photos[0]["sql_checked"])
         self.assertEqual(photos[0]["sql_value"], "")
 
+    def test_find_product_photos_leaves_sql_unchecked_when_sql_row_missing(self) -> None:
+        temp_dir = _workspace_temp("web_data_local_sql_row_missing")
+        try:
+            product_dir = Path(
+                web_data.build_product_directory(
+                    str(temp_dir / "processed"),
+                    "Maggiore",
+                    "komoda",
+                    "MA03",
+                    ["bialy", "", ""],
+                    "",
+                )
+            )
+            product_dir.mkdir(parents=True)
+            filename = "5901234567890_03_DETAIL_MAGGIORE_KOMODA_MA03_BIALY_NO-LED.jpg"
+            (product_dir / filename).write_bytes(b"fake")
+            config_payload = {
+                web_data.SLOT_DEFS_KEY: [{"prefix": "03", "label": "DETAIL_pic"}],
+                web_data.SQL_COLUMN_MAP_KEY: {"03": "img_03"},
+            }
+            with (
+                patch.object(web_data.settings, "l", str(temp_dir / "processed")),
+                patch.object(web_data.config, "CONFIG", config_payload),
+                patch.object(web_data, "_get_file_index", return_value=None),
+                patch.object(web_data, "should_check_presence", return_value=True),
+                patch.object(
+                    web_data,
+                    "extract_presence_context",
+                    return_value=("object_query_1", " WHERE EAN = '5901234567890'"),
+                ),
+                patch.object(
+                    web_data,
+                    "query_presence_details",
+                    return_value=({"03": None}, {"03": ""}),
+                ),
+            ):
+                photos = web_data.find_product_photos(
+                    {
+                        "ean": "5901234567890",
+                        "name": "Maggiore",
+                        "type_name": "komoda",
+                        "model": "MA03",
+                        "color1": "bialy",
+                    },
+                    include_local=True,
+                    include_ftp=False,
+                    include_sql=True,
+                )
+        finally:
+            shutil.rmtree(temp_dir)
+
+        self.assertEqual(len(photos), 1)
+        self.assertEqual(photos[0]["prefix"], "03")
+        self.assertTrue(photos[0]["local"])
+        self.assertFalse(photos[0]["sql"])
+        self.assertFalse(photos[0]["sql_checked"])
+        self.assertEqual(photos[0]["sql_value"], "")
+
     def test_web_base_dir_change_updates_local_settings_and_runtime(self) -> None:
         temp_dir = _workspace_temp("web_data_base_dir_change")
         old_values = {
