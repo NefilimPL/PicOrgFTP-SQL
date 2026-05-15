@@ -7,10 +7,11 @@ $Python = Join-Path $VenvDir "Scripts\python.exe"
 $IconDir = Join-Path $ScriptDir ".icons"
 $IconPath = Join-Path $IconDir "PIC_WEB.ico"
 $WorkPath = Join-Path $RepoRoot "build\web-exe"
+$VersionInfoPath = Join-Path $WorkPath "PicOrgFTP-SQL-WEB.version.txt"
 
 Set-Location $RepoRoot
 
-if (-not (Test-Path $VenvDir)) {
+if (-not (Test-Path $Python)) {
     if (Get-Command py -ErrorAction SilentlyContinue) {
         py -3.11 -m venv $VenvDir
     } elseif (Get-Command python -ErrorAction SilentlyContinue) {
@@ -30,7 +31,13 @@ if (-not (Test-Path $Python)) {
 & $Python -m pip install -r requirements-web.txt
 
 New-Item -ItemType Directory -Path $IconDir -Force | Out-Null
+New-Item -ItemType Directory -Path $WorkPath -Force | Out-Null
 & $Python -c "from PIL import Image; Image.open(r'pic\PIC_WEB.png').save(r'$IconPath', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)])"
+& $Python "tools\generate_windows_version_info.py" `
+    --output $VersionInfoPath `
+    --file-description "PicOrgFTP-SQL web manager" `
+    --internal-name "PicOrgFTP-SQL-WEB" `
+    --original-filename "PicOrgFTP-SQL-WEB.exe"
 
 $env:PICORGFTP_SQL_HEADLESS = "1"
 $env:PYINSTALLER_BUILD = "1"
@@ -42,6 +49,7 @@ $env:PYINSTALLER_BUILD = "1"
     --distpath $ScriptDir `
     --workpath $WorkPath `
     --icon $IconPath `
+    --version-file $VersionInfoPath `
     --collect-submodules picorgftp_sql `
     --collect-submodules mysql.connector `
     --collect-submodules uvicorn `

@@ -58,6 +58,20 @@ jobs:
           New-Item -ItemType Directory -Path "build/icons" -Force | Out-Null
           python -c "from PIL import Image; Image.open(r'pic/PIC_LOCAL.png').save(r'build/icons/PIC_LOCAL.ico', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)]); Image.open(r'pic/PIC_WEB.png').save(r'build/icons/PIC_WEB.ico', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)])"
 
+      - name: Prepare Windows version metadata
+        shell: pwsh
+        run: |
+          python tools/generate_windows_version_info.py `
+            --output "build/version-info/PicOrgFTP-SQL.version.txt" `
+            --file-description "PicOrgFTP-SQL desktop application" `
+            --internal-name "PicOrgFTP-SQL" `
+            --original-filename "PicOrgFTP-SQL.exe"
+          python tools/generate_windows_version_info.py `
+            --output "build/version-info/PicOrgFTP-SQL-WEB.version.txt" `
+            --file-description "PicOrgFTP-SQL web manager" `
+            --internal-name "PicOrgFTP-SQL-WEB" `
+            --original-filename "PicOrgFTP-SQL-WEB.exe"
+
       - name: Build local EXE with PyInstaller
         shell: pwsh
         env:
@@ -71,6 +85,7 @@ jobs:
             --distpath "dist/output" `
             --workpath "build/output-local" `
             --icon "build/icons/PIC_LOCAL.ico" `
+            --version-file "build/version-info/PicOrgFTP-SQL.version.txt" `
             --collect-submodules mysql.connector `
             --collect-data mysql.connector `
             --collect-data certifi `
@@ -94,6 +109,7 @@ jobs:
             --distpath "dist/output" `
             --workpath "build/output-web" `
             --icon "build/icons/PIC_WEB.ico" `
+            --version-file "build/version-info/PicOrgFTP-SQL-WEB.version.txt" `
             --collect-submodules picorgftp_sql `
             --collect-submodules mysql.connector `
             --collect-submodules uvicorn `
