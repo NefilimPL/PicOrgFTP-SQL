@@ -16,6 +16,7 @@ web_users.json
 web_history.json
 web_active_clients.json
 web_ftp_cache/
+web_upload_cache/
 temp_backup/
 _ZDJECIA PRZEROBIONE_/
 .venv

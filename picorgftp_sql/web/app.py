@@ -43,7 +43,7 @@ from ..image_utils import fit_image_to_content
 from ..logging_utils import log_error
 from ..services.ftp_service import sync_remote_files
 from ..services.sql_service import extract_presence_context
-from ..workflow_utils import build_product_directory, parse_slot_filename
+from ..workflow_utils import build_product_directory, parse_slot_filename, sanitize_path_segment
 from ..web_workflow import (
     WebProductForm,
     WebUploadedSlot,
@@ -97,6 +97,9 @@ SESSION_MAX_AGE_SECONDS = 12 * 60 * 60
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "admin"
 ACTIVE_CLIENT_MAX_AGE_SECONDS = 180
+WEB_UPLOAD_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
+WEB_UPLOAD_CACHE_CLEAN_INTERVAL_SECONDS = 30 * 60
+_UPLOAD_CACHE_LAST_CLEANUP = 0.0
 
 
 def _auth_enabled() -> bool:
@@ -208,6 +211,77 @@ def _safe_upload_name(filename: Optional[str], fallback: str) -> str:
     return name
 
 
+def _safe_file_suffix(filename: str) -> str:
+    suffix = Path(filename or "").suffix.strip().lower()
+    if suffix and len(suffix) <= 12 and re.fullmatch(r"\.[a-z0-9]+", suffix):
+        return suffix
+    return ""
+
+
+def _upload_cache_root() -> str:
+    return os.path.join(settings.AC, "web_upload_cache")
+
+
+def _upload_cache_dir(cache_scope: object = "") -> str:
+    safe_scope = sanitize_path_segment(cache_scope) or "user-session"
+    return os.path.join(_upload_cache_root(), safe_scope)
+
+
+def cleanup_web_upload_cache(
+    *,
+    max_age_seconds: int = WEB_UPLOAD_CACHE_MAX_AGE_SECONDS,
+    min_interval_seconds: int = WEB_UPLOAD_CACHE_CLEAN_INTERVAL_SECONDS,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """Remove stale browser upload cache files."""
+
+    global _UPLOAD_CACHE_LAST_CLEANUP
+    now = time.time()
+    if not force and now - _UPLOAD_CACHE_LAST_CLEANUP < max(1, int(min_interval_seconds or 1)):
+        return {"deleted_files": 0, "deleted_dirs": 0, "skipped": True, "errors": []}
+    _UPLOAD_CACHE_LAST_CLEANUP = now
+    root = os.path.abspath(_upload_cache_root())
+    if not os.path.isdir(root):
+        return {"deleted_files": 0, "deleted_dirs": 0, "skipped": False, "errors": []}
+
+    cutoff = now - max(60, int(max_age_seconds or WEB_UPLOAD_CACHE_MAX_AGE_SECONDS))
+    deleted_files = 0
+    deleted_dirs = 0
+    errors: List[str] = []
+    for current_root, dirs, files in os.walk(root, topdown=False):
+        try:
+            if os.path.commonpath([root, os.path.abspath(current_root)]) != root:
+                continue
+        except ValueError:
+            continue
+        for filename in files:
+            path = os.path.join(current_root, filename)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    deleted_files += 1
+            except OSError as exc:
+                errors.append(f"{path}: {exc}")
+        for dirname in dirs:
+            path = os.path.join(current_root, dirname)
+            try:
+                os.rmdir(path)
+                deleted_dirs += 1
+            except OSError:
+                pass
+    try:
+        os.rmdir(root)
+        deleted_dirs += 1
+    except OSError:
+        pass
+    return {
+        "deleted_files": deleted_files,
+        "deleted_dirs": deleted_dirs,
+        "skipped": False,
+        "errors": errors,
+    }
+
+
 def _file_token(path: str) -> str:
     payload = os.path.abspath(path)
     token = f"{payload}|{_sign(payload)}"
@@ -242,6 +316,7 @@ def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
     roots = [
         os.path.abspath(settings.l),
         os.path.abspath(os.path.join(settings.AC, "web_ftp_cache")),
+        os.path.abspath(_upload_cache_root()),
     ]
     allowed = False
     for root in roots:
@@ -253,7 +328,7 @@ def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
             allowed = True
             break
     if not allowed:
-        raise HTTPException(status_code=403, detail="Plik poza katalogiem zdjec.")
+        raise HTTPException(status_code=403, detail="Plik poza katalogiem zdjec lub cache.")
     if require_exists and not os.path.isfile(abs_path):
         raise HTTPException(status_code=404, detail="Nie znaleziono pliku.")
     return abs_path
@@ -305,7 +380,7 @@ def _thumbnail_bytes(path: str, *, width: int = 360, height: int = 260, content_
 
 async def _save_upload(upload: UploadFile, temp_dir: str, prefix: str) -> str:
     safe_name = _safe_upload_name(upload.filename, f"{prefix}.upload")
-    suffix = Path(safe_name).suffix
+    suffix = _safe_file_suffix(safe_name)
     target_path = os.path.join(temp_dir, f"{prefix}_{secrets.token_hex(8)}{suffix}")
     with open(target_path, "wb") as handle:
         while True:
@@ -315,6 +390,31 @@ async def _save_upload(upload: UploadFile, temp_dir: str, prefix: str) -> str:
             handle.write(chunk)
     await upload.close()
     return target_path
+
+
+async def _save_upload_cache(upload: UploadFile, cache_scope: str, prefix: str) -> tuple[str, int]:
+    safe_name = _safe_upload_name(upload.filename, f"{prefix}.upload")
+    stem = Path(safe_name).stem
+    suffix = _safe_file_suffix(safe_name)
+    safe_prefix = sanitize_path_segment(prefix) or "slot"
+    safe_stem = sanitize_path_segment(stem) or "upload"
+    safe_stem = safe_stem[:80].strip(" .-_") or "upload"
+    cache_dir = _upload_cache_dir(cache_scope)
+    os.makedirs(cache_dir, exist_ok=True)
+    target_path = os.path.join(
+        cache_dir,
+        f"{safe_prefix}_{secrets.token_hex(12)}_{safe_stem}{suffix}",
+    )
+    size = 0
+    with open(target_path, "wb") as handle:
+        while True:
+            chunk = await upload.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            handle.write(chunk)
+    await upload.close()
+    return target_path, size
 
 
 def _result_payload(result: Any) -> Dict[str, Any]:
@@ -1322,6 +1422,7 @@ def create_app() -> FastAPI:
         runtime_info = initialize_application_runtime(interactive=False)
         app.state.runtime_info = runtime_info
         cleanup_web_ftp_cache(force=True)
+        cleanup_web_upload_cache(force=True)
 
     @app.get("/api/health")
     def health() -> Dict[str, Any]:
@@ -1481,6 +1582,26 @@ def create_app() -> FastAPI:
         return {
             "token": token,
             "file_version": version,
+            "url": _versioned_file_url(path, "/api/file", token),
+            "thumb_url": _versioned_file_url(path, "/api/thumbnail", token),
+        }
+
+    @app.post("/api/upload-cache")
+    async def upload_cache_api(request: Request) -> Dict[str, Any]:
+        username = _require_user(request)
+        form = await request.form()
+        upload = form.get("file")
+        if not isinstance(upload, UploadFile) or not upload.filename:
+            raise HTTPException(status_code=400, detail="Brak pliku do wyslania.")
+        prefix = str(form.get("prefix") or "slot").strip() or "slot"
+        cleanup_web_upload_cache()
+        path, size = await _save_upload_cache(upload, _user_cache_scope(request, username), prefix)
+        token = _file_token(path)
+        return {
+            "token": token,
+            "name": _safe_upload_name(upload.filename, os.path.basename(path)),
+            "size_bytes": size,
+            "file_version": _file_version(path),
             "url": _versioned_file_url(path, "/api/file", token),
             "thumb_url": _versioned_file_url(path, "/api/thumbnail", token),
         }
@@ -1739,6 +1860,10 @@ def create_app() -> FastAPI:
                     token = str(form.get(f"existing_slot_{prefix}") or "").strip()
                     if token:
                         source_path = _path_from_file_token(token)
+                        original_filename = _safe_upload_name(
+                            str(form.get(f"existing_slot_name_{prefix}") or ""),
+                            os.path.basename(source_path),
+                        )
                         explicit_slot_prefixes.add(prefix)
                         uploaded_slots.append(
                             WebUploadedSlot(
@@ -1746,7 +1871,7 @@ def create_app() -> FastAPI:
                                 label=slot["label"],
                                 filename_label=slot.get("filename_label", ""),
                                 source_path=source_path,
-                                original_filename=os.path.basename(source_path),
+                                original_filename=original_filename,
                                 content_fit=_optional_form_bool(form, f"slot_fit_{prefix}"),
                             )
                         )

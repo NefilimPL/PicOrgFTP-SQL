@@ -46,6 +46,25 @@ class WebAppFileTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_upload_cache_token_can_be_resolved(self) -> None:
+        temp_dir = _workspace_temp("web_app_upload_cache_token")
+        try:
+            processed = temp_dir / "processed"
+            upload_cache = temp_dir / "web_upload_cache" / "session"
+            processed.mkdir()
+            upload_cache.mkdir(parents=True)
+            target = upload_cache / "01_cached.jpg"
+            target.write_bytes(b"cached")
+            token = web_app._file_token(str(target))
+
+            with (
+                patch.object(web_app.settings, "l", str(processed)),
+                patch.object(web_app.settings, "AC", str(temp_dir)),
+            ):
+                self.assertEqual(Path(web_app._path_from_file_token(token)), target)
+        finally:
+            shutil.rmtree(temp_dir)
+
     def test_delete_local_files_is_idempotent_and_preserves_saved_paths(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:

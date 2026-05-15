@@ -40,6 +40,7 @@ const state = {
   ftpEnabled: true,
   slotRevisions: new Map(),
   userSelectedSlotSources: new Set(),
+  slotUploadRequestId: 0,
 };
 
 const listLabels = {
@@ -204,12 +205,71 @@ function closeModals() {
   setActiveModalNav("");
 }
 
+function slotFileItem(value) {
+  if (!value) return null;
+  if (value.file || value.token || value.uploading || value.error) return value;
+  return {
+    file: value,
+    name: value.name || "",
+    size: Number(value.size || 0),
+    type: value.type || "",
+    token: "",
+    url: "",
+    thumb_url: "",
+    file_version: "",
+    progress: 0,
+    uploading: false,
+    error: "",
+  };
+}
+
+function slotFileObject(value) {
+  return slotFileItem(value)?.file || null;
+}
+
+function slotFileName(value) {
+  const item = slotFileItem(value);
+  return item?.name || item?.file?.name || "plik";
+}
+
+function slotFileSize(value) {
+  const item = slotFileItem(value);
+  return Number(item?.size || item?.file?.size || 0);
+}
+
+function slotFileType(value) {
+  const item = slotFileItem(value);
+  return item?.type || item?.file?.type || "";
+}
+
+function slotFileToken(value) {
+  return String(slotFileItem(value)?.token || "").trim();
+}
+
+function slotUploadProgress(value) {
+  const progress = Number(slotFileItem(value)?.progress || 0);
+  return Math.max(0, Math.min(100, Math.round(progress)));
+}
+
+function isSlotUploadActive(value) {
+  return Boolean(slotFileItem(value)?.uploading);
+}
+
+function slotUploadError(value) {
+  return String(slotFileItem(value)?.error || "").trim();
+}
+
 function fileLabel(file) {
-  if (!file) {
+  const item = slotFileItem(file);
+  if (!item) {
     return "Brak pliku";
   }
-  const kb = Math.max(1, Math.round(file.size / 1024));
-  return `${file.name} (${kb} KB)`;
+  const kb = Math.max(1, Math.round(slotFileSize(item) / 1024));
+  const base = `${slotFileName(item)} (${kb} KB)`;
+  if (slotUploadError(item)) return `${base} - blad uploadu`;
+  if (isSlotUploadActive(item)) return `${base} - wysylanie ${slotUploadProgress(item)}%`;
+  if (slotFileToken(item)) return `${base} - w cache`;
+  return base;
 }
 
 function updateRuntimeMetrics() {
@@ -687,17 +747,22 @@ function revokeFilePreviewUrl(prefix) {
 }
 
 function filePreviewUrl(prefix, file) {
+  const item = slotFileItem(file);
+  const rawFile = slotFileObject(item);
+  if (!rawFile) {
+    return item?.url || item?.thumb_url || "";
+  }
   const current = state.filePreviewUrls.get(prefix);
   if (current) return current;
-  const url = URL.createObjectURL(file);
+  const url = URL.createObjectURL(rawFile);
   state.filePreviewUrls.set(prefix, url);
   return url;
 }
 
 function isFileImageLike(file) {
-  const name = String(file?.name || "").toLowerCase();
+  const name = String(slotFileName(file) || "").toLowerCase();
   return (
-    String(file?.type || "").startsWith("image/") ||
+    String(slotFileType(file) || "").startsWith("image/") ||
     [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".psd", ".eps", ".ai"].some((ext) =>
       name.endsWith(ext)
     )
@@ -812,6 +877,11 @@ function fittedImageDataUrl(image) {
 
 async function renderSelectedFilePreview(prefix, file, preview, previewImage, empty) {
   const url = filePreviewUrl(prefix, file);
+  if (!url) {
+    preview.classList.remove("thumb-loading", "has-image");
+    empty.textContent = slotFileName(file);
+    return;
+  }
   preview.classList.add("thumb-loading");
   try {
     const image = await loadImage(url);
@@ -993,6 +1063,162 @@ function sourceLoadingTitle(source) {
     return "Wczytywanie SQL";
   }
   return "Wczytywanie danych";
+}
+
+function createSlotFileUpload(prefix, file) {
+  return {
+    id: ++state.slotUploadRequestId,
+    prefix,
+    file,
+    name: file?.name || "",
+    size: Number(file?.size || 0),
+    type: file?.type || "",
+    token: "",
+    url: "",
+    thumb_url: "",
+    file_version: "",
+    progress: 0,
+    uploading: false,
+    error: "",
+    xhr: null,
+  };
+}
+
+function uploadCacheErrorMessage(payload, fallback = "Nie udalo sie wyslac pliku do cache.") {
+  const detail = payload?.detail;
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (detail?.message) return detail.message;
+  return fallback;
+}
+
+function fileItemPrefixes(item) {
+  const prefixes = [];
+  for (const [prefix, current] of state.files.entries()) {
+    if (current === item) prefixes.push(prefix);
+  }
+  return prefixes;
+}
+
+function refreshFileItemSlots(item) {
+  for (const prefix of fileItemPrefixes(item)) {
+    updateSlotPreview(prefix);
+  }
+  updateSubmitButtonState();
+}
+
+function uploadSlotFile(prefix, item) {
+  const file = slotFileObject(item);
+  if (!file) return;
+  item.uploading = true;
+  item.progress = 0;
+  item.error = "";
+  item.token = "";
+  item.url = "";
+  item.thumb_url = "";
+  item.file_version = "";
+  const data = new FormData();
+  data.set("prefix", prefix);
+  data.set("file", file, slotFileName(item));
+  const xhr = new XMLHttpRequest();
+  item.xhr = xhr;
+  xhr.upload.addEventListener("progress", (event) => {
+    if (!event.lengthComputable) return;
+    const nextProgress = Math.max(1, Math.min(99, Math.round((event.loaded / event.total) * 100)));
+    if (nextProgress === item.progress) return;
+    item.progress = nextProgress;
+    formStatus.textContent = `Wysylanie pliku dla slotu ${prefix}: ${nextProgress}%`;
+    refreshFileItemSlots(item);
+  });
+  xhr.addEventListener("load", () => {
+    const payload = xhr.response || {};
+    if (xhr.status === 401) {
+      window.location.href = "/login";
+      return;
+    }
+    if (xhr.status < 200 || xhr.status >= 300) {
+      item.uploading = false;
+      item.error = uploadCacheErrorMessage(payload);
+      item.xhr = null;
+      formStatus.textContent = `Blad uploadu slotu ${prefix}: ${item.error}`;
+      refreshFileItemSlots(item);
+      return;
+    }
+    if (!payload.token) {
+      item.uploading = false;
+      item.error = "Backend nie zwrocil tokenu cache.";
+      item.xhr = null;
+      formStatus.textContent = `Blad uploadu slotu ${prefix}: ${item.error}`;
+      refreshFileItemSlots(item);
+      return;
+    }
+    item.token = payload.token || "";
+    item.url = payload.url || "";
+    item.thumb_url = payload.thumb_url || "";
+    item.file_version = payload.file_version || "";
+    item.name = payload.name || item.name;
+    item.size = Number(payload.size_bytes || item.size || 0);
+    item.progress = 100;
+    item.uploading = false;
+    item.error = "";
+    item.xhr = null;
+    formStatus.textContent = `Plik dla slotu ${prefix} jest w cache.`;
+    refreshFileItemSlots(item);
+  });
+  xhr.addEventListener("error", () => {
+    item.uploading = false;
+    item.error = "Nie udalo sie polaczyc z backendem podczas uploadu.";
+    item.xhr = null;
+    formStatus.textContent = `Blad uploadu slotu ${prefix}: ${item.error}`;
+    refreshFileItemSlots(item);
+  });
+  xhr.addEventListener("abort", () => {
+    item.uploading = false;
+    item.error = "Upload przerwany.";
+    item.xhr = null;
+    refreshFileItemSlots(item);
+  });
+  xhr.open("POST", "/api/upload-cache");
+  xhr.responseType = "json";
+  xhr.send(data);
+  updateSubmitButtonState();
+}
+
+function activeSlotUploads() {
+  return [...state.files.entries()].filter(([, item]) => isSlotUploadActive(item));
+}
+
+function failedSlotUploads() {
+  return [...state.files.entries()].filter(([, item]) => Boolean(slotUploadError(item)));
+}
+
+function ensureSlotUploadsReady() {
+  const pending = activeSlotUploads();
+  if (pending.length) {
+    throw new Error("Poczekaj na zakonczenie wysylania plikow do cache.");
+  }
+  const failed = failedSlotUploads();
+  if (failed.length) {
+    const [prefix, item] = failed[0];
+    throw new Error(`Upload slotu ${prefix} nie powiodl sie: ${slotUploadError(item)}`);
+  }
+}
+
+function renderSlotUploadOverlay(preview, item) {
+  preview.querySelector(".slot-upload-overlay")?.remove();
+  const error = slotUploadError(item);
+  if (!isSlotUploadActive(item) && !error) return;
+  const overlay = document.createElement("div");
+  const label = document.createElement("span");
+  const line = document.createElement("div");
+  const bar = document.createElement("i");
+  const progress = slotUploadProgress(item);
+  overlay.className = `slot-upload-overlay ${error ? "error" : ""}`;
+  label.textContent = error ? "Upload nieudany" : `Wysylanie ${progress}%`;
+  line.className = "progress-line upload-progress-line";
+  line.style.setProperty("--upload-progress", `${progress}%`);
+  line.appendChild(bar);
+  overlay.append(label, line);
+  preview.appendChild(overlay);
 }
 
 function setFtpBadgeLoading(prefix, loading) {
@@ -1249,10 +1475,12 @@ function setSlotFile(prefix, file) {
   bumpSlotRevision(prefix);
   markSlotDeletion(prefix, state.loadedPhotos.get(prefix));
   revokeFilePreviewUrl(prefix);
-  state.files.set(prefix, file);
+  const item = createSlotFileUpload(prefix, file);
+  state.files.set(prefix, item);
   state.loadedPhotos.delete(prefix);
   state.slotSources.delete(prefix);
   state.userSelectedSlotSources.delete(prefix);
+  uploadSlotFile(prefix, item);
 }
 
 function getSlotAssignment(prefix) {
@@ -1274,10 +1502,14 @@ function setSlotAssignment(prefix, assignment, options = {}) {
     return;
   }
   if (assignment.type === "file") {
-    state.files.set(prefix, assignment.value);
+    const item = slotFileItem(assignment.value);
+    state.files.set(prefix, item);
     state.slotFits.set(prefix, sourceFit);
     if (sourceType) state.slotSources.set(prefix, sourceType);
     state.userSelectedSlotSources.delete(prefix);
+    if (item?.file && !item.token && !item.uploading && !item.error) {
+      uploadSlotFile(prefix, item);
+    }
     return;
   }
   if (assignment.type === "loaded") {
@@ -1349,14 +1581,16 @@ function updateSlotPreview(prefix) {
     fitButton.classList.toggle("active", isSlotFit(prefix));
   }
   preview.classList.remove("has-image", "thumb-loading", "loaded-photo");
+  preview.querySelector(".slot-upload-overlay")?.remove();
   previewImage.removeAttribute("src");
   empty.textContent = "Brak pliku";
   if (selectedFile) {
     if (isFileImageLike(selectedFile)) {
       renderSelectedFilePreview(prefix, selectedFile, preview, previewImage, empty);
     } else {
-      empty.textContent = selectedFile.name;
+      empty.textContent = slotFileName(selectedFile);
     }
+    renderSlotUploadOverlay(preview, selectedFile);
     return;
   }
   if (!loadedPhoto) return;
@@ -1490,8 +1724,9 @@ function renderSlots(slots = state.slots) {
       if (isFileImageLike(selectedFile)) {
         renderSelectedFilePreview(slot.prefix, selectedFile, preview, previewImage, empty);
       } else {
-        empty.textContent = selectedFile.name;
+        empty.textContent = slotFileName(selectedFile);
       }
+      renderSlotUploadOverlay(preview, selectedFile);
     } else if (loadedPhoto) {
       preview.classList.add("loaded-photo");
       const thumb = thumbnailUrl(loadedPhoto, slot.prefix);
@@ -1572,6 +1807,7 @@ function renderSlots(slots = state.slots) {
       const file = input.files && input.files[0] ? input.files[0] : null;
       if (!file) {
         bumpSlotRevision(slot.prefix);
+        revokeFilePreviewUrl(slot.prefix);
         state.files.delete(slot.prefix);
         renderSlots();
         return;
@@ -1716,7 +1952,10 @@ function renderListEditor() {
 }
 
 function setBusy(isBusy, text = "") {
-  submitButton.disabled = isBusy;
+  if (submitButton) {
+    submitButton.dataset.busy = isBusy ? "1" : "";
+    submitButton.disabled = Boolean(isBusy);
+  }
   formStatus.textContent = text;
   updateSubmitButtonState();
 }
@@ -2207,9 +2446,26 @@ function hasPendingUserChanges() {
 }
 
 function updateSubmitButtonState() {
-  if (!submitButton || submitButton.disabled) {
+  if (!submitButton || submitButton.dataset.busy === "1") {
     return;
   }
+  const pendingUploads = activeSlotUploads();
+  if (pendingUploads.length) {
+    submitButton.disabled = true;
+    submitButton.textContent = `Wysylanie ${pendingUploads.length}`;
+    submitButton.title = "Poczekaj, az nowe pliki trafia do cache backendu.";
+    submitButton.setAttribute("aria-label", submitButton.textContent);
+    return;
+  }
+  const failedUploads = failedSlotUploads();
+  if (failedUploads.length) {
+    submitButton.disabled = true;
+    submitButton.textContent = "Upload nieudany";
+    submitButton.title = "Popraw slot z nieudanym uploadem albo wybierz plik ponownie.";
+    submitButton.setAttribute("aria-label", submitButton.textContent);
+    return;
+  }
+  submitButton.disabled = false;
   const hasChanges = hasPendingUserChanges();
   submitButton.textContent = hasChanges ? "Aktualizuj" : "Synchronizuj";
   submitButton.title = hasChanges
@@ -3439,9 +3695,10 @@ for (const name of Object.keys(fieldListKey)) {
 
 productForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  setBusy(true, "Sprawdzanie list...");
   clearResult();
   try {
+    ensureSlotUploadsReady();
+    setBusy(true, "Sprawdzanie list...");
     await ensureProductListValues();
     const identityChanged = productFieldsChangedSinceLoad();
     const updateMode = hasPendingUserChanges();
@@ -3455,8 +3712,18 @@ productForm.addEventListener("submit", async (event) => {
     );
     const changedPrefixes = pendingChangedSlotPrefixes();
     const data = new FormData(productForm);
-    for (const [prefix, file] of state.files.entries()) {
-      data.set(`slot_${prefix}`, file, file.name);
+    for (const [prefix, item] of state.files.entries()) {
+      const token = slotFileToken(item);
+      if (token) {
+        data.set(`existing_slot_${prefix}`, token);
+        data.set(`existing_slot_name_${prefix}`, slotFileName(item));
+      } else {
+        const file = slotFileObject(item);
+        if (!file) {
+          throw new Error(`Slot ${prefix} nie ma pliku ani tokenu cache.`);
+        }
+        data.set(`slot_${prefix}`, file, file.name);
+      }
       data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
     }
     for (const [prefix, photo] of state.loadedPhotos.entries()) {
