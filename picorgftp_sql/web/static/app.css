@@ -660,7 +660,7 @@ h2 {
 }
 
 .slot-settings-row {
-  grid-template-columns: 90px minmax(140px, 1fr) minmax(180px, 1fr) auto;
+  grid-template-columns: minmax(140px, 1fr) 82px minmax(140px, 1fr) minmax(180px, 1fr) auto;
 }
 
 .user-row {

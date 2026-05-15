@@ -1,6 +1,23 @@
 local_settings
 local_settings.json
+local_settings_*.json.tmp
 config.json
+config_*.json.tmp
+lists.xlsx
+list.xlsx
+~$lists.xlsx
+~$list.xlsx
+file_index.json
+file_index_*.json.tmp
+directory_index.json
+directory_index_*.json.tmp
+local_file_index_*.json.tmp
+web_users.json
+web_history.json
+web_active_clients.json
+web_ftp_cache/
+temp_backup/
+_ZDJECIA PRZEROBIONE_/
 .venv
 .venv-build/
 .vscode

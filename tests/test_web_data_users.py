@@ -219,8 +219,11 @@ class WebDataUserTests(unittest.TestCase):
             ),
             patch.object(
                 web_data,
-                "query_presence_map",
-                return_value={"03": True, "04": False},
+                "query_presence_details",
+                return_value=(
+                    {"03": True, "04": False},
+                    {"03": "https://xml.wipmebgroup.pl/img/5901234567890_03.jpg", "04": ""},
+                ),
             ),
         ):
             photos = web_data.find_product_photos(
@@ -239,7 +242,10 @@ class WebDataUserTests(unittest.TestCase):
         self.assertEqual([photo["prefix"] for photo in photos], ["03"])
         self.assertTrue(photos[0]["sql"])
         self.assertTrue(photos[0]["sql_checked"])
-        self.assertEqual(photos[0]["sql_value"], "")
+        self.assertEqual(
+            photos[0]["sql_value"],
+            "https://xml.wipmebgroup.pl/img/5901234567890_03.jpg",
+        )
         self.assertFalse(photos[0]["is_image"])
 
     def test_find_product_photos_keeps_local_slot_when_sql_is_empty(self) -> None:
@@ -272,7 +278,11 @@ class WebDataUserTests(unittest.TestCase):
                     "extract_presence_context",
                     return_value=("object_query_1", " WHERE EAN = '5901234567890'"),
                 ),
-                patch.object(web_data, "query_presence_map", return_value={"03": False}),
+                patch.object(
+                    web_data,
+                    "query_presence_details",
+                    return_value=({"03": False}, {"03": ""}),
+                ),
             ):
                 photos = web_data.find_product_photos(
                     {

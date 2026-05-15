@@ -67,7 +67,7 @@ from .excel_utils import (
 from .services.ftp_service import connect_ftp, list_remote_files_for_ean, list_remote_filenames
 from .services.sql_service import (
     extract_presence_context,
-    query_presence_map,
+    query_presence_details,
     should_check_presence,
 )
 from .file_index import LocalFileIndex
@@ -1245,6 +1245,7 @@ def settings_snapshot() -> dict[str, object]:
             {
                 "prefix": slot.get("prefix", ""),
                 "label": slot.get("label", ""),
+                "filename_label": slot.get("filename_label", slot.get("label", "")),
                 "sql_column": sql_map.get(slot.get("prefix", ""), ""),
             }
             for slot in slot_defs
@@ -1459,7 +1460,7 @@ def find_product_photos(
                     for slot in slots
                     if sql_map.get(slot.get("prefix", ""), "")
                 ]
-                presence = query_presence_map(
+                presence, values = query_presence_details(
                     columns,
                     table,
                     where_clause,
@@ -1489,7 +1490,7 @@ def find_product_photos(
                     item["sql"] = bool(present)
                     item["sql_checked"] = True
                     item["ean"] = entry.ean
-                    item["sql_value"] = ""
+                    item["sql_value"] = values.get(prefix, "")
         except Exception:
             pass
     return sorted(results_by_prefix.values(), key=lambda item: str(item.get("prefix", "")))

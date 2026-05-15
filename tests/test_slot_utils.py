@@ -36,11 +36,22 @@ class SlotUtilsTests(unittest.TestCase):
         self.assertEqual(
             slot_defs,
             [
-                {"prefix": "01", "label": "Main"},
-                {"prefix": "02", "label": "Detail"},
+                {"prefix": "01", "label": "Main", "filename_label": "Main"},
+                {"prefix": "02", "label": "Detail", "filename_label": "Detail"},
             ],
         )
         self.assertIn({"type": "slot_def_duplicate", "prefix": "01"}, issues)
+
+    def test_normalize_slot_definitions_keeps_display_and_filename_labels_separate(self) -> None:
+        slot_defs, issues = normalize_slot_definitions(
+            [{"prefix": "3", "label": "Front web", "filename_label": "DETAIL_pic"}]
+        )
+
+        self.assertEqual(
+            slot_defs,
+            [{"prefix": "03", "label": "Front web", "filename_label": "DETAIL_pic"}],
+        )
+        self.assertEqual(issues, [])
 
     def test_normalize_sql_column_map_keeps_mapping_after_prefix_normalization(self) -> None:
         slot_defs, _issues = normalize_slot_definitions(

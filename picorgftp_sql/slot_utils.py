@@ -41,12 +41,22 @@ def normalize_slot_definitions(raw_defs) -> Tuple[List[Dict[str, str]], List[dic
         for entry in raw_defs:
             prefix = ""
             label = ""
+            filename_label = ""
             if isinstance(entry, dict):
-                prefix = _as_text(entry.get("prefix") or entry.get("id"))
-                label = _as_text(entry.get("label"))
+                prefix = _as_text(
+                    entry.get("prefix") or entry.get("filename_id") or entry.get("id")
+                )
+                label = _as_text(entry.get("label") or entry.get("slot_label"))
+                filename_label = _as_text(
+                    entry.get("filename_label")
+                    or entry.get("file_label")
+                    or entry.get("filename")
+                )
             elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
                 prefix = _as_text(entry[0])
                 label = _as_text(entry[1])
+                if len(entry) >= 3:
+                    filename_label = _as_text(entry[2])
             if not prefix or not label:
                 if entry:
                     issues.append({"type": "slot_def_invalid", "entry": entry})
@@ -56,10 +66,24 @@ def normalize_slot_definitions(raw_defs) -> Tuple[List[Dict[str, str]], List[dic
             if prefix_key in seen:
                 issues.append({"type": "slot_def_duplicate", "prefix": prefix})
                 continue
-            slot_defs.append({"prefix": normalized_prefix, "label": label})
+            slot_defs.append(
+                {
+                    "prefix": normalized_prefix,
+                    "label": label,
+                    "filename_label": filename_label or label,
+                }
+            )
             seen.add(prefix_key)
     if not slot_defs:
-        slot_defs = [dict(item) for item in DEFAULT_SLOT_DEFS]
+        slot_defs = [
+            {
+                "prefix": _as_text(item.get("prefix")),
+                "label": _as_text(item.get("label")),
+                "filename_label": _as_text(item.get("filename_label"))
+                or _as_text(item.get("label")),
+            }
+            for item in DEFAULT_SLOT_DEFS
+        ]
         if raw_defs:
             issues.append({"type": "slot_def_fallback"})
     return slot_defs, issues

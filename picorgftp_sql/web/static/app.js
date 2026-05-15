@@ -885,18 +885,23 @@ function slotStatusText(photo, prefix = "") {
 async function copyTextToClipboard(text, successMessage = "Skopiowano.") {
   if (!text) return;
   if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-  } else {
-    const field = document.createElement("textarea");
-    field.value = text;
-    field.style.position = "fixed";
-    field.style.left = "-9999px";
-    document.body.appendChild(field);
-    field.focus();
-    field.select();
-    document.execCommand("copy");
-    field.remove();
+    try {
+      await navigator.clipboard.writeText(text);
+      formStatus.textContent = successMessage;
+      return;
+    } catch (_error) {
+      // Older LAN/browser contexts can expose clipboard but still reject writes.
+    }
   }
+  const field = document.createElement("textarea");
+  field.value = text;
+  field.style.position = "fixed";
+  field.style.left = "-9999px";
+  document.body.appendChild(field);
+  field.focus();
+  field.select();
+  document.execCommand("copy");
+  field.remove();
   formStatus.textContent = successMessage;
 }
 
@@ -916,11 +921,13 @@ function renderSlotBadges(container, photo, file, prefix) {
     badges.appendChild(badge);
   }
   for (const [key, label, title] of statuses) {
+    const sqlValue = String(photo?.sql_value || "").trim();
     const canPreview =
       (key === "local" && photo?.token) ||
       (key === "ftp" && photo?.ftp_filename);
-    const badge = document.createElement(canPreview ? "button" : "span");
-    const selected = selectedSlotSource(prefix, photo) === key;
+    const canCopySql = key === "sql" && Boolean(sqlValue);
+    const badge = document.createElement(canPreview || canCopySql ? "button" : "span");
+    const selected = key !== "sql" && selectedSlotSource(prefix, photo) === key;
     const loading =
       isPhotoSourceLoading(key) || (key === "ftp" && state.ftpPreviewLoading.has(prefix));
     badge.dataset.source = key;
@@ -929,11 +936,13 @@ function renderSlotBadges(container, photo, file, prefix) {
     } ${loading ? "loading" : ""}`;
     badge.title = loading
       ? sourceLoadingTitle(key)
+      : canCopySql
+      ? "Kliknij, aby skopiowac link z SQL"
       : selected
       ? `${title} (aktywny podglad)`
       : title;
     badge.textContent = label;
-    if (canPreview) {
+    if (canPreview || canCopySql) {
       badge.type = "button";
       badge.setAttribute("aria-pressed", selected ? "true" : "false");
       if (loading) {
@@ -941,6 +950,12 @@ function renderSlotBadges(container, photo, file, prefix) {
       }
       badge.addEventListener("click", (event) => {
         event.stopPropagation();
+        if (canCopySql) {
+          copyTextToClipboard(sqlValue, `Skopiowano link SQL dla slotu ${prefix}.`).catch((error) => {
+            formStatus.textContent = error.message;
+          });
+          return;
+        }
         state.slotSources.set(prefix, key);
         state.userSelectedSlotSources.add(prefix);
         if (key === "ftp" && !photo.ftp_token) {
@@ -1314,6 +1329,7 @@ function updateSlotPreview(prefix) {
       ftp: "Wpis dla slotu jest na FTP",
       sql: "Wpis dla slotu jest w SQL",
     };
+    const sqlValue = String(loadedPhoto?.sql_value || "").trim();
     badge.classList.toggle("selected", selected);
     badge.classList.toggle("loading", loading);
     badge.setAttribute("aria-pressed", selected ? "true" : "false");
@@ -1322,7 +1338,10 @@ function updateSlotPreview(prefix) {
       badge.title = sourceLoadingTitle(badge.dataset.source);
     } else {
       badge.removeAttribute("aria-busy");
-      const baseTitle = titleBySource[badge.dataset.source] || "";
+      const baseTitle =
+        badge.dataset.source === "sql" && sqlValue
+          ? "Kliknij, aby skopiowac link z SQL"
+          : titleBySource[badge.dataset.source] || "";
       badge.title = selected ? `${baseTitle} (aktywny podglad)` : baseTitle;
     }
   });
@@ -3138,7 +3157,8 @@ function renderSettingsSlots() {
   form.className = "settings-form";
   const note = document.createElement("p");
   note.className = "settings-note wide-field";
-  note.textContent = "Kazdy slot moze miec przypisane pole SQL uzywane przy sprawdzaniu i aktualizacji wpisu.";
+  note.textContent =
+    "Nazwa w web jest tylko etykieta slotu. ID trafia do EAN_ID, nazwa w pliku do lokalnej nazwy, a pole SQL do aktualizacji bazy.";
   const list = document.createElement("div");
   const addButton = document.createElement("button");
   list.className = "slot-settings-list";
@@ -3160,8 +3180,9 @@ function renderSettingsSlots() {
     remove.textContent = "Usun";
     remove.addEventListener("click", () => row.remove());
     row.append(
+      inputField("label", "Nazwa w web", slot.label),
       inputField("prefix", "ID", slot.prefix),
-      inputField("label", "Nazwa", slot.label),
+      inputField("filename_label", "Nazwa w pliku", slot.filename_label || slot.label),
       column,
       remove
     );
@@ -3174,13 +3195,15 @@ function renderSettingsSlots() {
   addButton.className = "secondary-button";
   addButton.textContent = "Dodaj slot";
   addButton.addEventListener("click", () => {
-    addSlotRow({ prefix: nextPrefix(), label: `Slot ${nextPrefix()}`, sql_column: "" });
+    const prefix = nextPrefix();
+    addSlotRow({ prefix, label: `Slot ${prefix}`, filename_label: `Slot ${prefix}`, sql_column: "" });
   });
   form.append(note, list, actionRow(addButton));
   settingsSaveButton(form, () => {
     const slots = [...form.querySelectorAll(".slot-settings-row")].map((row) => ({
       prefix: row.querySelector('[name="prefix"]').value,
       label: row.querySelector('[name="label"]').value,
+      filename_label: row.querySelector('[name="filename_label"]').value,
       sql_column: row.querySelector('[name="sql_column"]').value,
     }));
     return { slots };

@@ -102,6 +102,7 @@ class WebUploadedSlot:
     label: str
     source_path: str
     original_filename: str = ""
+    filename_label: str = ""
     content_fit: bool | None = None
 
 
@@ -126,6 +127,7 @@ class WebProcessedFile:
 
     prefix: str
     label: str
+    filename_label: str
     source_name: str
     filename: str
     path: str
@@ -384,7 +386,7 @@ def process_web_uploads(
         filename = build_slot_filename(
             payload["ean"],
             upload.prefix,
-            _slot_category(upload.label),
+            _slot_category(upload.filename_label or upload.label),
             payload["name"],
             payload["type_name"],
             payload["model"],
@@ -410,6 +412,7 @@ def process_web_uploads(
             WebProcessedFile(
                 prefix=upload.prefix,
                 label=upload.label,
+                filename_label=upload.filename_label or upload.label,
                 source_name=os.path.basename(upload.original_filename or source_path),
                 filename=filename,
                 path=target_path,
