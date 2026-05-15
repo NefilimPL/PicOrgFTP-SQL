@@ -176,6 +176,15 @@ def _slot_category(label: str) -> str:
     return base.replace("_", "-").upper()
 
 
+def _slot_filename_segment(label: str, filename_label: str = "") -> str:
+    """Return the filename segment for a slot, preserving explicit web settings."""
+
+    explicit = _clean(filename_label)
+    if explicit:
+        return explicit
+    return _slot_category(label)
+
+
 def slot_definitions_from_config(config_dict: dict) -> list[dict[str, str]]:
     """Return normalized slot definitions from a runtime config dict."""
 
@@ -386,7 +395,7 @@ def process_web_uploads(
         filename = build_slot_filename(
             payload["ean"],
             upload.prefix,
-            _slot_category(upload.filename_label or upload.label),
+            _slot_filename_segment(upload.label, upload.filename_label),
             payload["name"],
             payload["type_name"],
             payload["model"],
@@ -412,7 +421,7 @@ def process_web_uploads(
             WebProcessedFile(
                 prefix=upload.prefix,
                 label=upload.label,
-                filename_label=upload.filename_label or upload.label,
+                filename_label=upload.filename_label or _slot_category(upload.label),
                 source_name=os.path.basename(upload.original_filename or source_path),
                 filename=filename,
                 path=target_path,

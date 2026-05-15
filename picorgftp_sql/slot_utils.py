@@ -66,24 +66,22 @@ def normalize_slot_definitions(raw_defs) -> Tuple[List[Dict[str, str]], List[dic
             if prefix_key in seen:
                 issues.append({"type": "slot_def_duplicate", "prefix": prefix})
                 continue
-            slot_defs.append(
-                {
-                    "prefix": normalized_prefix,
-                    "label": label,
-                    "filename_label": filename_label or label,
-                }
-            )
+            slot = {"prefix": normalized_prefix, "label": label}
+            if filename_label:
+                slot["filename_label"] = filename_label
+            slot_defs.append(slot)
             seen.add(prefix_key)
     if not slot_defs:
-        slot_defs = [
-            {
+        slot_defs = []
+        for item in DEFAULT_SLOT_DEFS:
+            slot = {
                 "prefix": _as_text(item.get("prefix")),
                 "label": _as_text(item.get("label")),
-                "filename_label": _as_text(item.get("filename_label"))
-                or _as_text(item.get("label")),
             }
-            for item in DEFAULT_SLOT_DEFS
-        ]
+            filename_label = _as_text(item.get("filename_label"))
+            if filename_label:
+                slot["filename_label"] = filename_label
+            slot_defs.append(slot)
         if raw_defs:
             issues.append({"type": "slot_def_fallback"})
     return slot_defs, issues

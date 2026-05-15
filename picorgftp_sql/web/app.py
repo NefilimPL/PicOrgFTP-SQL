@@ -732,7 +732,7 @@ def _append_existing_photo_sources(
             continue
         slot = slot_by_prefix.get(prefix, {"prefix": prefix, "label": prefix})
         label = str(slot.get("label") or prefix)
-        filename_label = str(slot.get("filename_label") or label)
+        filename_label = str(slot.get("filename_label") or "")
         source_path = path if path and os.path.isfile(path) else ""
         had_local_source = bool(source_path)
         needs_sql_update = bool(photo.get("sql_checked")) and not bool(photo.get("sql"))
@@ -846,7 +846,7 @@ def _append_pending_ftp_slots(
             WebUploadedSlot(
                 prefix=prefix,
                 label=str(item.get("label") or prefix),
-                filename_label=str(item.get("filename_label") or item.get("label") or prefix),
+                filename_label=str(item.get("filename_label") or ""),
                 source_path=source_path,
                 original_filename=ftp_filename,
                 content_fit=item.get("content_fit"),
@@ -1744,7 +1744,7 @@ def create_app() -> FastAPI:
                             WebUploadedSlot(
                                 prefix=prefix,
                                 label=slot["label"],
-                                filename_label=slot.get("filename_label", slot["label"]),
+                                filename_label=slot.get("filename_label", ""),
                                 source_path=source_path,
                                 original_filename=os.path.basename(source_path),
                                 content_fit=_optional_form_bool(form, f"slot_fit_{prefix}"),
@@ -1758,7 +1758,7 @@ def create_app() -> FastAPI:
                             {
                                 "prefix": prefix,
                                 "label": slot["label"],
-                                "filename_label": slot.get("filename_label", slot["label"]),
+                                "filename_label": slot.get("filename_label", ""),
                                 "filename": ftp_filename,
                                 "ean": str(form.get(f"existing_ftp_ean_{prefix}") or ""),
                                 "content_fit": _optional_form_bool(form, f"slot_fit_{prefix}"),
@@ -1772,7 +1772,7 @@ def create_app() -> FastAPI:
                     WebUploadedSlot(
                         prefix=prefix,
                         label=slot["label"],
-                        filename_label=slot.get("filename_label", slot["label"]),
+                        filename_label=slot.get("filename_label", ""),
                         source_path=source_path,
                         original_filename=value.filename or "",
                         content_fit=_optional_form_bool(form, f"slot_fit_{prefix}"),

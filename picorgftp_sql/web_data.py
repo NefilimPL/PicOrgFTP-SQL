@@ -1246,6 +1246,7 @@ def settings_snapshot() -> dict[str, object]:
                 "prefix": slot.get("prefix", ""),
                 "label": slot.get("label", ""),
                 "filename_label": slot.get("filename_label", slot.get("label", "")),
+                "filename_label_explicit": bool(slot.get("filename_label")),
                 "sql_column": sql_map.get(slot.get("prefix", ""), ""),
             }
             for slot in slot_defs

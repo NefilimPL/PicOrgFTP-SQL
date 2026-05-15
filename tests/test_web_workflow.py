@@ -111,7 +111,7 @@ class WebWorkflowTests(unittest.TestCase):
                     WebUploadedSlot(
                         prefix="03",
                         label="Front web",
-                        filename_label="DETAIL_pic",
+                        filename_label="Front-2",
                         source_path=str(source),
                         original_filename="front.pdf",
                     )
@@ -120,8 +120,8 @@ class WebWorkflowTests(unittest.TestCase):
 
             saved = result.saved_files[0]
             self.assertEqual(saved.label, "Front web")
-            self.assertEqual(saved.filename_label, "DETAIL_pic")
-            self.assertIn("_03_DETAIL_", saved.filename)
+            self.assertEqual(saved.filename_label, "Front-2")
+            self.assertIn("_03_FRONT-2_", saved.filename)
             self.assertNotIn("FRONT WEB", saved.filename)
 
     def test_process_web_uploads_normalizes_common_jpeg_extension_typo(self) -> None:

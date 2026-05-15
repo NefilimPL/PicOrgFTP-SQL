@@ -3158,7 +3158,7 @@ function renderSettingsSlots() {
   const note = document.createElement("p");
   note.className = "settings-note wide-field";
   note.textContent =
-    "Nazwa w web jest tylko etykieta slotu. ID trafia do EAN_ID, nazwa w pliku do lokalnej nazwy, a pole SQL do aktualizacji bazy.";
+    "Nazwa w web jest tylko etykieta slotu. ID trafia do EAN_ID, nazwa w pliku jest zapisywana literalnie po usunieciu znakow niedozwolonych, a pole SQL sluzy do aktualizacji bazy.";
   const list = document.createElement("div");
   const addButton = document.createElement("button");
   list.className = "slot-settings-list";
@@ -3173,6 +3173,9 @@ function renderSettingsSlots() {
     const row = document.createElement("div");
     const remove = document.createElement("button");
     row.className = "slot-settings-row";
+    row.dataset.filenameLabelExplicit = slot.filename_label_explicit ? "1" : "0";
+    row.dataset.originalLabel = slot.label || "";
+    row.dataset.originalFilenameLabel = slot.filename_label || slot.label || "";
     const column = inputField("sql_column", "Pole SQL", slot.sql_column || "");
     column.querySelector("input").setAttribute("list", "sqlColumnsList");
     remove.type = "button";
@@ -3196,16 +3199,31 @@ function renderSettingsSlots() {
   addButton.textContent = "Dodaj slot";
   addButton.addEventListener("click", () => {
     const prefix = nextPrefix();
-    addSlotRow({ prefix, label: `Slot ${prefix}`, filename_label: `Slot ${prefix}`, sql_column: "" });
+    addSlotRow({
+      prefix,
+      label: `Slot ${prefix}`,
+      filename_label: `Slot ${prefix}`,
+      filename_label_explicit: true,
+      sql_column: "",
+    });
   });
   form.append(note, list, actionRow(addButton));
   settingsSaveButton(form, () => {
-    const slots = [...form.querySelectorAll(".slot-settings-row")].map((row) => ({
-      prefix: row.querySelector('[name="prefix"]').value,
-      label: row.querySelector('[name="label"]').value,
-      filename_label: row.querySelector('[name="filename_label"]').value,
-      sql_column: row.querySelector('[name="sql_column"]').value,
-    }));
+    const slots = [...form.querySelectorAll(".slot-settings-row")].map((row) => {
+      const label = row.querySelector('[name="label"]').value;
+      const filenameLabel = row.querySelector('[name="filename_label"]').value;
+      const wasExplicit = row.dataset.filenameLabelExplicit === "1";
+      const originalLabel = row.dataset.originalLabel || "";
+      const originalFilenameLabel = row.dataset.originalFilenameLabel || "";
+      const unchangedLegacyFilename =
+        !wasExplicit && label === originalLabel && filenameLabel === originalFilenameLabel;
+      return {
+        prefix: row.querySelector('[name="prefix"]').value,
+        label,
+        filename_label: unchangedLegacyFilename ? "" : filenameLabel,
+        sql_column: row.querySelector('[name="sql_column"]').value,
+      };
+    });
     return { slots };
   });
   settingsOutput.appendChild(form);

@@ -36,8 +36,8 @@ class SlotUtilsTests(unittest.TestCase):
         self.assertEqual(
             slot_defs,
             [
-                {"prefix": "01", "label": "Main", "filename_label": "Main"},
-                {"prefix": "02", "label": "Detail", "filename_label": "Detail"},
+                {"prefix": "01", "label": "Main"},
+                {"prefix": "02", "label": "Detail"},
             ],
         )
         self.assertIn({"type": "slot_def_duplicate", "prefix": "01"}, issues)
