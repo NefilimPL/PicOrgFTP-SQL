@@ -1561,7 +1561,7 @@ def create_app() -> FastAPI:
     def file_preview(request: Request, token: str) -> FileResponse:
         _require_user(request)
         path = _path_from_file_token(token)
-        return FileResponse(path, headers={"Cache-Control": "private, no-cache, max-age=0"})
+        return FileResponse(path, headers={"Cache-Control": "private, max-age=300"})
 
     @app.get("/api/thumbnail")
     def file_thumbnail(
@@ -1582,7 +1582,7 @@ def create_app() -> FastAPI:
         return Response(
             content=content,
             media_type="image/jpeg",
-            headers={"Cache-Control": "private, no-cache, max-age=0"},
+            headers={"Cache-Control": "private, max-age=900"},
         )
 
     @app.post("/api/lists/{list_key}")

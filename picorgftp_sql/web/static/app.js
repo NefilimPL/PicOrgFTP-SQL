@@ -35,9 +35,8 @@ const state = {
   ftpPreviewBackgroundLoading: new Set(),
   ftpPreviewCache: new Map(),
   backgroundFtpPreviewTimer: 0,
-  backgroundFtpPreviewLimit: 3,
+  backgroundFtpPreviewLimit: 1,
   photoSourcesLoaded: new Set(),
-  localFtpSyncVersions: new Map(),
   ftpEnabled: true,
   slotRevisions: new Map(),
   userSelectedSlotSources: new Set(),
@@ -1177,7 +1176,7 @@ async function loadNextBackgroundFtpPreview(requestId = state.photoLoadRequestId
     return;
   }
   let launched = 0;
-  const limit = Math.max(1, Number(state.backgroundFtpPreviewLimit) || 3);
+  const limit = Math.max(1, Number(state.backgroundFtpPreviewLimit) || 1);
   while (state.ftpPreviewBackgroundLoading.size < limit) {
     const candidate = nextBackgroundFtpPreviewCandidate();
     if (!candidate) {
@@ -1190,12 +1189,12 @@ async function loadNextBackgroundFtpPreview(requestId = state.photoLoadRequestId
       })
       .finally(() => {
         if (requestId === state.photoLoadRequestId && nextBackgroundFtpPreviewCandidate()) {
-          scheduleBackgroundFtpPreviewLoad(requestId, 300);
+          scheduleBackgroundFtpPreviewLoad(requestId, 900);
         }
       });
   }
   if (launched && requestId === state.photoLoadRequestId && nextBackgroundFtpPreviewCandidate()) {
-    scheduleBackgroundFtpPreviewLoad(requestId, 300);
+    scheduleBackgroundFtpPreviewLoad(requestId, 900);
   }
 }
 
@@ -2116,19 +2115,9 @@ function hasProductDraftData() {
   return trackedProductFields.some((fieldName) => String(current[fieldName] || "").trim());
 }
 
-function localFtpSyncKey(prefix, photo = null) {
-  const ean = String(photo?.ean || formValue("ean") || state.loadedEntryOriginal?.ean || "").trim();
-  return ean && prefix ? `${ean}|${prefix}` : String(prefix || "");
-}
-
-function localPhotoNeedsFtpUpload(photo, prefix = "") {
+function localPhotoCanSyncToFtp(photo) {
   const ftpChecked = state.photoSourcesLoaded.has("ftp") || state.photoSourcesLoaded.has("all");
-  if (!state.ftpEnabled || !ftpChecked || !photo?.local || !photo?.token) {
-    return false;
-  }
-  const version = String(photo.file_version || photo.filename || photo.path || photo.token || "");
-  const syncKey = localFtpSyncKey(prefix, photo);
-  return !syncKey || !version || state.localFtpSyncVersions.get(syncKey) !== version;
+  return Boolean(state.ftpEnabled && ftpChecked && photo?.local && photo?.token);
 }
 
 function photoNeedsRepair(photo, prefix = "") {
@@ -2139,8 +2128,7 @@ function photoNeedsRepair(photo, prefix = "") {
     state.photoSourcesLoaded.has("all");
   const hasTransferSource = Boolean(photo?.token || photo?.ftp_token || photo?.ftp_filename);
   return Boolean(
-    localPhotoNeedsFtpUpload(photo, prefix) ||
-      (localChecked && photo?.ftp && !photo?.local) ||
+    (localChecked && photo?.ftp && !photo?.local) ||
       (sqlChecked && hasTransferSource && !photo?.sql)
   );
 }
@@ -2188,18 +2176,6 @@ function clearSavedSlotMarkers(prefixes) {
     state.deletedSlots.delete(prefix);
     state.files.delete(prefix);
     state.userSelectedSlotSources.delete(prefix);
-  }
-}
-
-function markLocalFtpSynced(prefixes) {
-  for (const prefix of prefixes || []) {
-    const photo = state.loadedPhotos.get(prefix);
-    if (!photo?.local || !photo?.token) continue;
-    const version = String(photo.file_version || photo.filename || photo.path || photo.token || "");
-    const syncKey = localFtpSyncKey(prefix, photo);
-    if (syncKey && version) {
-      state.localFtpSyncVersions.set(syncKey, version);
-    }
   }
 }
 
@@ -2331,7 +2307,7 @@ function applyPhotoPayload(photos = [], options = {}) {
   }
   if (changed) {
     renderSlots();
-    scheduleBackgroundFtpPreviewLoad();
+    scheduleBackgroundFtpPreviewLoad(undefined, 1500);
   }
 }
 
@@ -2371,7 +2347,6 @@ async function loadPhotosForEntry(entry, options = {}) {
     state.ftpPreviewLoading.clear();
     state.ftpPreviewBackgroundLoading.clear();
     state.photoSourcesLoaded.clear();
-    state.localFtpSyncVersions.clear();
   } else {
     for (const prefix of targetPrefixes) {
       state.ftpPreviewLoading.delete(prefix);
@@ -2408,7 +2383,7 @@ async function loadPhotosForEntry(entry, options = {}) {
           clearDirty: Boolean(options.clearDirty),
         });
         if ((payload.source || source) === "ftp" || (payload.source || source) === "all") {
-          scheduleBackgroundFtpPreviewLoad(requestId, 160);
+          scheduleBackgroundFtpPreviewLoad(requestId, 1200);
         }
         updateSubmitButtonState();
       }
@@ -2448,7 +2423,7 @@ async function loadPhotosForEntry(entry, options = {}) {
     }
     updateRuntimeMetrics();
     renderSlots();
-    scheduleBackgroundFtpPreviewLoad(requestId);
+    scheduleBackgroundFtpPreviewLoad(requestId, 1500);
   }
 }
 
@@ -2462,7 +2437,6 @@ function fillForm(entry, options = {}) {
   state.ftpPreviewLoading.clear();
   state.ftpPreviewBackgroundLoading.clear();
   state.photoSourcesLoaded.clear();
-  state.localFtpSyncVersions.clear();
   productForm.elements.product_id.value = entry.product_id || "";
   productForm.elements.name.value = entry.name || "";
   productForm.elements.type_name.value = entry.type_name || "";
@@ -3445,12 +3419,15 @@ productForm.addEventListener("submit", async (event) => {
       data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
     }
     for (const [prefix, photo] of state.loadedPhotos.entries()) {
-      if (!state.files.has(prefix) && (photo.dirty || localPhotoNeedsFtpUpload(photo, prefix))) {
+      const shouldSyncLocal = !updateMode && localPhotoCanSyncToFtp(photo);
+      const shouldRepair = photoNeedsRepair(photo, prefix);
+      if (!state.files.has(prefix) && (photo.dirty || shouldSyncLocal || shouldRepair)) {
         const transferSource = transferableSlotSource(prefix, photo);
         const token = transferablePhotoToken(photo, prefix);
         if (token) {
           data.set(`existing_slot_${prefix}`, token);
           data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
+          changedPrefixes.add(prefix);
         } else if (transferSource === "ftp" && photo.ftp_filename) {
           data.set(`existing_ftp_slot_${prefix}`, photo.ftp_filename);
           data.set(
@@ -3458,6 +3435,7 @@ productForm.addEventListener("submit", async (event) => {
             photo.ean || state.loadedEntryOriginal?.ean || productForm.elements.ean.value
           );
           data.set(`slot_fit_${prefix}`, isSlotFit(prefix) ? "1" : "0");
+          changedPrefixes.add(prefix);
         } else if (photo.dirty) {
           throw new Error(`Slot ${prefix} nie ma lokalnego ani FTP zrodla do przeniesienia.`);
         }
@@ -3504,7 +3482,6 @@ productForm.addEventListener("submit", async (event) => {
         clearDirty: true,
       });
     }
-    markLocalFtpSynced(changedPrefixes);
     updateSubmitButtonState();
     setBusy(false, "Zakonczono.");
   } catch (error) {
@@ -3525,7 +3502,6 @@ clearButton.addEventListener("click", () => {
   state.slotFits.clear();
   state.deletedSlots.clear();
   state.slotSources.clear();
-  state.localFtpSyncVersions.clear();
   state.userSelectedSlotSources.clear();
   state.photoSourceStatus.clear();
   state.ftpPreviewLoading.clear();
