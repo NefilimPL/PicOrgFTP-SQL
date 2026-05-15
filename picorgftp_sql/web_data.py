@@ -15,7 +15,6 @@ import tempfile
 import threading
 import time
 import unicodedata
-from urllib.parse import urlparse
 
 from . import common, config, settings
 from . import encryption
@@ -33,6 +32,8 @@ from .common import (
     SQL_AVAILABLE_COLUMNS_KEY,
     SQL_COLUMN_MAP_KEY,
     SLOT_DEFS_KEY,
+    TRANSLATION_API_KEY,
+    TRANSLATION_SETTINGS_KEY,
     b,
     c,
     ft,
@@ -115,6 +116,12 @@ _FILE_INDEX_KEY: tuple[str, str] | None = None
 _FILE_INDEX_REFRESH_STARTED = False
 _FTP_CACHE_LOCKS: dict[str, threading.Lock] = {}
 _FTP_CACHE_LOCKS_GUARD = threading.Lock()
+_CONFIG_SECRET_FIELDS = {
+    H: {N, M},
+    P: {N, M},
+    K: {N, M},
+    TRANSLATION_SETTINGS_KEY: {TRANSLATION_API_KEY},
+}
 
 
 class ListValueInUseError(ValueError):
@@ -518,6 +525,33 @@ def cache_ftp_preview(ean: object, filename: object, cache_scope: object = "") -
             ftp.quit()
         except Exception:
             pass
+
+
+def invalidate_ftp_preview_cache(
+    ean: object,
+    filenames: list[object] | set[object] | tuple[object, ...],
+    cache_scope: object = "",
+) -> dict[str, object]:
+    """Remove cached FTP previews for remote files that were changed."""
+
+    ean_text = _text(ean)
+    if not ean_text:
+        return {"deleted": 0, "errors": []}
+    cache_dir = _ftp_cache_dir(ean_text, cache_scope=cache_scope)
+    deleted = 0
+    errors: list[str] = []
+    for filename in filenames or []:
+        filename_text = os.path.basename(_text(filename))
+        if not filename_text:
+            continue
+        target_path = os.path.join(cache_dir, _ftp_cache_filename(filename_text))
+        try:
+            if os.path.isfile(target_path):
+                os.remove(target_path)
+                deleted += 1
+        except OSError as exc:
+            errors.append(f"{filename_text}: {exc}")
+    return {"deleted": deleted, "errors": errors}
 
 
 def _ftp_cache_lock(target_path: str) -> threading.Lock:
@@ -934,6 +968,40 @@ def _local_settings_path() -> Path:
     return Path(settings.BASE_DIR_SETTINGS_PATH)
 
 
+def _normalize_base_dir(value: object) -> str:
+    text = _text(value).strip("\"'")
+    if not text:
+        return ""
+    expanded = os.path.expandvars(os.path.expanduser(text))
+    return os.path.abspath(expanded)
+
+
+def _same_path(left: object, right: object) -> bool:
+    try:
+        return os.path.normcase(os.path.abspath(str(left))) == os.path.normcase(
+            os.path.abspath(str(right))
+        )
+    except Exception:
+        return str(left or "") == str(right or "")
+
+
+def _ensure_base_dir_web_access(path: str) -> None:
+    ok, error = settings._ensure_directory_access(path)
+    if not ok:
+        details = f" Szczegoly: {error}" if error else ""
+        raise ValueError(f"Nie mozna uzyc katalogu bazowego: {path}.{details}")
+    try:
+        fd, probe_path = tempfile.mkstemp(
+            prefix="picorg_base_dir_check_",
+            suffix=".tmp",
+            dir=path,
+        )
+        os.close(fd)
+        os.remove(probe_path)
+    except OSError as exc:
+        raise ValueError(f"Brak zapisu w katalogu bazowym: {path}. Szczegoly: {exc}") from exc
+
+
 def _load_local_settings() -> dict[str, object]:
     path = _local_settings_path()
     if not path.exists():
@@ -949,34 +1017,92 @@ def _save_local_settings(payload: dict[str, object]) -> None:
     path = _local_settings_path()
     existing = _load_local_settings()
     existing.update(payload)
-    path.write_text(json.dumps(existing, indent=4, ensure_ascii=False), encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(
+        prefix="local_settings_",
+        suffix=".json.tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(existing, handle, indent=4, ensure_ascii=False)
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
+def _apply_base_dir_from_web(value: object) -> bool:
+    requested = _normalize_base_dir(value)
+    if not requested:
+        return False
+    _ensure_base_dir_web_access(requested)
+    previous = settings.AC
+    _save_local_settings({"base_dir_override": requested})
+    settings.initialize_runtime(interactive=False)
+    if not _same_path(settings.AC, requested):
+        warning = settings.BASE_DIR_OVERRIDE_WARNING or "runtime pozostal przy poprzednim katalogu"
+        raise ValueError(
+            "Zapisano local_settings.json, ale backend nie przelaczyl sie na nowy "
+            f"katalog. Wybrany: {requested}. Aktywny: {settings.AC}. {warning}"
+        )
+    return not _same_path(previous, settings.AC)
+
+
+def _apply_app_secret_from_web(value: object) -> bool:
+    secret = _text(value)
+    if not secret:
+        return False
+    _save_local_settings({APP_SECRET_KEY: common._encode_local_secret(secret)})
+    if secret == common.APP_SECRET:
+        return False
+    common.APP_SECRET = secret
+    common.BASE_DIR_SETTINGS_TEMPLATE[APP_SECRET_KEY] = common._encode_local_secret(secret)
+    encryption.APP_SECRET = secret
+    return True
+
+
+def _preserve_unsubmitted_config_secrets(payload: dict[str, object]) -> dict[str, set[str]]:
+    preserve = {section: set(keys) for section, keys in _CONFIG_SECRET_FIELDS.items()}
+    ftp_payload = payload.get("ftp") if isinstance(payload.get("ftp"), dict) else {}
+    if _text(ftp_payload.get("user")):
+        preserve[H].discard(N)
+    if _text(ftp_payload.get("password")):
+        preserve[H].discard(M)
+
+    db_payload = payload.get("database") if isinstance(payload.get("database"), dict) else {}
+    for section_key, section_name in ((P, "mssql"), (K, "mysql")):
+        section_payload = db_payload.get(section_name)
+        if not isinstance(section_payload, dict):
+            continue
+        if _text(section_payload.get("user")):
+            preserve[section_key].discard(N)
+        if _text(section_payload.get("password")):
+            preserve[section_key].discard(M)
+    return {section: keys for section, keys in preserve.items() if keys}
 
 
 def update_settings(payload: dict[str, object]) -> dict[str, object]:
     """Update editable settings from the web UI."""
 
-    cfg = config.CONFIG
-    runtime_needs_reload = False
     app_payload = payload.get("app") if isinstance(payload.get("app"), dict) else {}
     ftp_payload = payload.get("ftp") if isinstance(payload.get("ftp"), dict) else {}
     db_payload = payload.get("database") if isinstance(payload.get("database"), dict) else {}
     processing_payload = payload.get("processing") if isinstance(payload.get("processing"), dict) else {}
     slots_payload = payload.get("slots") if isinstance(payload.get("slots"), list) else None
+    runtime_reloaded = False
 
     if "base_dir" in app_payload:
-        base_dir = _text(app_payload.get("base_dir"))
-        if base_dir:
-            _save_local_settings({"base_dir_override": base_dir})
-            runtime_needs_reload = True
+        runtime_reloaded = _apply_base_dir_from_web(app_payload.get("base_dir")) or runtime_reloaded
     if APP_SECRET_KEY in app_payload:
-        secret = _text(app_payload.get(APP_SECRET_KEY))
-        if secret:
-            _save_local_settings({APP_SECRET_KEY: common._encode_local_secret(secret)})
-            common.APP_SECRET = secret
-            common.BASE_DIR_SETTINGS_TEMPLATE[APP_SECRET_KEY] = common._encode_local_secret(
-                secret
-            )
-            encryption.APP_SECRET = secret
+        runtime_reloaded = _apply_app_secret_from_web(app_payload.get(APP_SECRET_KEY)) or runtime_reloaded
+    if runtime_reloaded:
+        config.initialize_config(interactive=False)
+    cfg = config.CONFIG
+
     if LOCAL_FILE_INDEX_KEY in app_payload:
         cfg[LOCAL_FILE_INDEX_KEY] = bool(app_payload.get(LOCAL_FILE_INDEX_KEY))
     if AUTO_CONTENT_FIT_KEY in app_payload:
@@ -1054,9 +1180,7 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
         cfg[SLOT_DEFS_KEY] = slot_defs
         cfg[SQL_COLUMN_MAP_KEY] = sql_map
 
-    if runtime_needs_reload:
-        settings.initialize_runtime(interactive=False)
-    save_config(cfg)
+    save_config(cfg, preserve_secrets=_preserve_unsubmitted_config_secrets(payload))
     config.initialize_config(interactive=False)
     return settings_snapshot()
 
@@ -1076,6 +1200,8 @@ def settings_snapshot() -> dict[str, object]:
         "base_dir": settings.AC,
         "processed_dir": settings.l,
         "config_path": config.CONFIG_PATH,
+        "local_settings_path": str(_local_settings_path()),
+        "runtime_warning": settings.BASE_DIR_OVERRIDE_WARNING,
         "auth_enabled": True,
         "users": load_users(),
         "app_secret_set": bool(_text(common.APP_SECRET)),
@@ -1119,10 +1245,38 @@ def settings_snapshot() -> dict[str, object]:
             {
                 "prefix": slot.get("prefix", ""),
                 "label": slot.get("label", ""),
+                "filename_label": slot.get("filename_label", slot.get("label", "")),
+                "filename_label_explicit": bool(slot.get("filename_label")),
                 "sql_column": sql_map.get(slot.get("prefix", ""), ""),
             }
             for slot in slot_defs
         ],
+    }
+
+
+def settings_secret_values() -> dict[str, object]:
+    """Return decrypted settings secrets for the explicit admin reveal action."""
+
+    cfg = config.CONFIG
+    ftp = cfg.get(H, {}) if isinstance(cfg.get(H), dict) else {}
+    mssql_cfg = cfg.get(P, {}) if isinstance(cfg.get(P), dict) else {}
+    mysql_cfg = cfg.get(K, {}) if isinstance(cfg.get(K), dict) else {}
+    return {
+        "app_secret": _text(common.APP_SECRET),
+        "ftp": {
+            "user": _text(ftp.get(N)),
+            "password": _text(ftp.get(M)),
+        },
+        "database": {
+            "mssql": {
+                "user": _text(mssql_cfg.get(N)),
+                "password": _text(mssql_cfg.get(M)),
+            },
+            "mysql": {
+                "user": _text(mysql_cfg.get(N)),
+                "password": _text(mysql_cfg.get(M)),
+            },
+        },
     }
 
 
@@ -1266,6 +1420,7 @@ def find_product_photos(
                 "ftp_path": "",
                 "ftp_filename": "",
                 "sql_value": "",
+                "sql_checked": False,
             }
     ean = entry.ean
     if include_ftp and ean and bool(config.CONFIG.get(ft, True)):
@@ -1283,6 +1438,7 @@ def find_product_photos(
                         "local": False,
                         "sql": False,
                         "sql_value": "",
+                        "sql_checked": False,
                     },
                 )
                 item["ftp"] = True
@@ -1312,6 +1468,8 @@ def find_product_photos(
                     config.CONFIG.get(p, K),
                 )
                 for prefix, present in presence.items():
+                    if present is None:
+                        continue
                     item = results_by_prefix.setdefault(
                         prefix,
                         {
@@ -1324,14 +1482,16 @@ def find_product_photos(
                             "ftp": False,
                             "ftp_path": "",
                             "ftp_filename": "",
+                            "sql_checked": False,
                         },
                     )
+                    if not present and not (item.get("local") or item.get("ftp")):
+                        results_by_prefix.pop(prefix, None)
+                        continue
                     item["sql"] = bool(present)
+                    item["sql_checked"] = True
                     item["ean"] = entry.ean
                     item["sql_value"] = values.get(prefix, "")
-                    sql_path = urlparse(str(item["sql_value"] or "")).path
-                    sql_ext = os.path.splitext(sql_path)[1].lower()
-                    item["is_image"] = bool(item.get("is_image")) or sql_ext in IMAGE_PREVIEW_EXTENSIONS
         except Exception:
             pass
     return sorted(results_by_prefix.values(), key=lambda item: str(item.get("prefix", "")))

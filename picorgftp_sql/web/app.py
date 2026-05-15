@@ -43,7 +43,7 @@ from ..image_utils import fit_image_to_content
 from ..logging_utils import log_error
 from ..services.ftp_service import sync_remote_files
 from ..services.sql_service import extract_presence_context
-from ..workflow_utils import build_product_directory, parse_slot_filename
+from ..workflow_utils import build_product_directory, parse_slot_filename, sanitize_path_segment
 from ..web_workflow import (
     WebProductForm,
     WebUploadedSlot,
@@ -64,6 +64,7 @@ from ..web_data import (
     find_user,
     find_product_photos,
     file_index_status,
+    invalidate_ftp_preview_cache,
     load_web_data,
     load_users,
     history_snapshot,
@@ -74,6 +75,7 @@ from ..web_data import (
     save_web_entry,
     search_entries,
     settings_snapshot,
+    settings_secret_values,
     test_ftp_connection,
     test_local_paths,
     test_sql_connection,
@@ -94,6 +96,10 @@ SESSION_COOKIE = "picorg_web_session"
 SESSION_MAX_AGE_SECONDS = 12 * 60 * 60
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "admin"
+ACTIVE_CLIENT_MAX_AGE_SECONDS = 180
+WEB_UPLOAD_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
+WEB_UPLOAD_CACHE_CLEAN_INTERVAL_SECONDS = 30 * 60
+_UPLOAD_CACHE_LAST_CLEANUP = 0.0
 
 
 def _auth_enabled() -> bool:
@@ -205,10 +211,140 @@ def _safe_upload_name(filename: Optional[str], fallback: str) -> str:
     return name
 
 
+def _safe_file_suffix(filename: str) -> str:
+    suffix = Path(filename or "").suffix.strip().lower()
+    if suffix and len(suffix) <= 12 and re.fullmatch(r"\.[a-z0-9]+", suffix):
+        return suffix
+    return ""
+
+
+def _upload_cache_root() -> str:
+    return os.path.join(settings.AC, "web_upload_cache")
+
+
+def _upload_cache_dir(cache_scope: object = "") -> str:
+    safe_scope = sanitize_path_segment(cache_scope) or "user-session"
+    return os.path.join(_upload_cache_root(), safe_scope)
+
+
+def _path_is_under_root(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([os.path.abspath(path), os.path.abspath(root)]) == os.path.abspath(root)
+    except ValueError:
+        return False
+
+
+def _is_upload_cache_path(path: str) -> bool:
+    return bool(path and _path_is_under_root(path, _upload_cache_root()))
+
+
+def _delete_upload_cache_files(paths: List[str]) -> Dict[str, Any]:
+    root = os.path.abspath(_upload_cache_root())
+    deleted = 0
+    skipped = 0
+    errors: List[str] = []
+    for raw_path in sorted({os.path.abspath(path) for path in paths if path}):
+        if not _path_is_under_root(raw_path, root):
+            skipped += 1
+            continue
+        try:
+            if os.path.isfile(raw_path):
+                os.remove(raw_path)
+                deleted += 1
+            else:
+                skipped += 1
+        except OSError as exc:
+            errors.append(f"{raw_path}: {exc}")
+    if os.path.isdir(root):
+        for current_root, dirs, _files in os.walk(root, topdown=False):
+            for dirname in dirs:
+                path = os.path.join(current_root, dirname)
+                try:
+                    os.rmdir(path)
+                except OSError:
+                    pass
+        try:
+            os.rmdir(root)
+        except OSError:
+            pass
+    return {"deleted": deleted, "skipped": skipped, "errors": errors}
+
+
+def cleanup_web_upload_cache(
+    *,
+    max_age_seconds: int = WEB_UPLOAD_CACHE_MAX_AGE_SECONDS,
+    min_interval_seconds: int = WEB_UPLOAD_CACHE_CLEAN_INTERVAL_SECONDS,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """Remove stale browser upload cache files."""
+
+    global _UPLOAD_CACHE_LAST_CLEANUP
+    now = time.time()
+    if not force and now - _UPLOAD_CACHE_LAST_CLEANUP < max(1, int(min_interval_seconds or 1)):
+        return {"deleted_files": 0, "deleted_dirs": 0, "skipped": True, "errors": []}
+    _UPLOAD_CACHE_LAST_CLEANUP = now
+    root = os.path.abspath(_upload_cache_root())
+    if not os.path.isdir(root):
+        return {"deleted_files": 0, "deleted_dirs": 0, "skipped": False, "errors": []}
+
+    cutoff = now - max(60, int(max_age_seconds or WEB_UPLOAD_CACHE_MAX_AGE_SECONDS))
+    deleted_files = 0
+    deleted_dirs = 0
+    errors: List[str] = []
+    for current_root, dirs, files in os.walk(root, topdown=False):
+        try:
+            if os.path.commonpath([root, os.path.abspath(current_root)]) != root:
+                continue
+        except ValueError:
+            continue
+        for filename in files:
+            path = os.path.join(current_root, filename)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    deleted_files += 1
+            except OSError as exc:
+                errors.append(f"{path}: {exc}")
+        for dirname in dirs:
+            path = os.path.join(current_root, dirname)
+            try:
+                os.rmdir(path)
+                deleted_dirs += 1
+            except OSError:
+                pass
+    try:
+        os.rmdir(root)
+        deleted_dirs += 1
+    except OSError:
+        pass
+    return {
+        "deleted_files": deleted_files,
+        "deleted_dirs": deleted_dirs,
+        "skipped": False,
+        "errors": errors,
+    }
+
+
 def _file_token(path: str) -> str:
     payload = os.path.abspath(path)
     token = f"{payload}|{_sign(payload)}"
     return base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii")
+
+
+def _file_version(path: str) -> str:
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return ""
+    return f"{int(stat.st_mtime_ns)}-{int(stat.st_size)}"
+
+
+def _versioned_file_url(path: str, endpoint: str, token: str) -> str:
+    url = f"{endpoint}?token={token}"
+    version = _file_version(path)
+    if version:
+        url = f"{url}&v={version}"
+    return url
 
 
 def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
@@ -223,6 +359,7 @@ def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
     roots = [
         os.path.abspath(settings.l),
         os.path.abspath(os.path.join(settings.AC, "web_ftp_cache")),
+        os.path.abspath(_upload_cache_root()),
     ]
     allowed = False
     for root in roots:
@@ -234,7 +371,7 @@ def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
             allowed = True
             break
     if not allowed:
-        raise HTTPException(status_code=403, detail="Plik poza katalogiem zdjec.")
+        raise HTTPException(status_code=403, detail="Plik poza katalogiem zdjec lub cache.")
     if require_exists and not os.path.isfile(abs_path):
         raise HTTPException(status_code=404, detail="Nie znaleziono pliku.")
     return abs_path
@@ -286,7 +423,7 @@ def _thumbnail_bytes(path: str, *, width: int = 360, height: int = 260, content_
 
 async def _save_upload(upload: UploadFile, temp_dir: str, prefix: str) -> str:
     safe_name = _safe_upload_name(upload.filename, f"{prefix}.upload")
-    suffix = Path(safe_name).suffix
+    suffix = _safe_file_suffix(safe_name)
     target_path = os.path.join(temp_dir, f"{prefix}_{secrets.token_hex(8)}{suffix}")
     with open(target_path, "wb") as handle:
         while True:
@@ -298,6 +435,31 @@ async def _save_upload(upload: UploadFile, temp_dir: str, prefix: str) -> str:
     return target_path
 
 
+async def _save_upload_cache(upload: UploadFile, cache_scope: str, prefix: str) -> tuple[str, int]:
+    safe_name = _safe_upload_name(upload.filename, f"{prefix}.upload")
+    stem = Path(safe_name).stem
+    suffix = _safe_file_suffix(safe_name)
+    safe_prefix = sanitize_path_segment(prefix) or "slot"
+    safe_stem = sanitize_path_segment(stem) or "upload"
+    safe_stem = safe_stem[:80].strip(" .-_") or "upload"
+    cache_dir = _upload_cache_dir(cache_scope)
+    os.makedirs(cache_dir, exist_ok=True)
+    target_path = os.path.join(
+        cache_dir,
+        f"{safe_prefix}_{secrets.token_hex(12)}_{safe_stem}{suffix}",
+    )
+    size = 0
+    with open(target_path, "wb") as handle:
+        while True:
+            chunk = await upload.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            handle.write(chunk)
+    await upload.close()
+    return target_path, size
+
+
 def _result_payload(result: Any) -> Dict[str, Any]:
     return {
         "output_dir": result.output_dir,
@@ -306,6 +468,7 @@ def _result_payload(result: Any) -> Dict[str, Any]:
             {
                 "prefix": item.prefix,
                 "label": item.label,
+                "filename_label": item.filename_label,
                 "source_name": item.source_name,
                 "filename": item.filename,
                 "path": item.path,
@@ -366,16 +529,52 @@ def _safe_sql_identifier(value: object) -> str:
     return text if re.fullmatch(r"[0-9A-Za-z_\.]+", text) else ""
 
 
+def _sql_row_exists_query(table: str, where_clause: str, db_type: str) -> str:
+    if not table:
+        return ""
+    if str(db_type or "").lower() == str(K).lower():
+        query = f"SELECT 1 FROM {table}{where_clause}".rstrip(";\n\r\t ")
+        if " limit " not in query.lower():
+            query = f"{query} LIMIT 1"
+        return query
+    return f"SELECT TOP 1 1 FROM {table}{where_clause}".rstrip(";\n\r\t ")
+
+
+def _cursor_rowcount(cur: Any) -> int:
+    try:
+        return int(getattr(cur, "rowcount", -1))
+    except (TypeError, ValueError):
+        return -1
+
+
 def _sync_result_to_sql(
     result: Any,
     *,
     clear_prefixes: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
     if not bool(config.CONFIG.get(u, True)):
-        return {"enabled": False, "updated": 0, "cleared": 0, "rows": 0, "elapsed_ms": 0, "error": ""}
+        return {
+            "enabled": False,
+            "updated": 0,
+            "cleared": 0,
+            "rows": 0,
+            "elapsed_ms": 0,
+            "error": "",
+            "skipped": False,
+            "reason": "",
+        }
     started = time.perf_counter()
     ean = str(getattr(result, "ean", "") or "").strip()
-    payload = {"enabled": True, "updated": 0, "cleared": 0, "rows": 0, "elapsed_ms": 0, "error": ""}
+    payload = {
+        "enabled": True,
+        "updated": 0,
+        "cleared": 0,
+        "rows": 0,
+        "elapsed_ms": 0,
+        "error": "",
+        "skipped": False,
+        "reason": "",
+    }
     if not (ean and len(ean) == 13 and ean.isdigit()):
         payload["error"] = "SQL pominiety: brak poprawnego EAN-13."
         return payload
@@ -394,6 +593,13 @@ def _sync_result_to_sql(
     try:
         conn = connect_db()
         cur = conn.cursor()
+        row_exists_query = _sql_row_exists_query(table, where_clause, config.CONFIG.get(p, K))
+        if row_exists_query:
+            cur.execute(row_exists_query)
+            if not cur.fetchone():
+                payload["skipped"] = True
+                payload["reason"] = "nie znaleziono wiersza produktu dla tego EAN"
+                return payload
         template = config.CONFIG.get(w, SQL_UPDATE_TEMPLATE) or SQL_UPDATE_TEMPLATE
         for prefix, filename in saved_by_prefix.items():
             column = _safe_sql_identifier(sql_map.get(prefix, ""))
@@ -405,17 +611,21 @@ def _sync_result_to_sql(
             short_name = f"{ean}_{prefix}{parsed.extension}"
             query = template.format(col=column, filename=short_name, ean=ean)
             cur.execute(query)
-            payload["updated"] += 1
-            if getattr(cur, "rowcount", -1) >= 0:
-                payload["rows"] += int(cur.rowcount)
+            rowcount = _cursor_rowcount(cur)
+            if rowcount != 0:
+                payload["updated"] += 1
+            if rowcount > 0:
+                payload["rows"] += rowcount
         for prefix in clear_prefixes:
             column = _safe_sql_identifier(sql_map.get(prefix, ""))
             if not column:
                 continue
             cur.execute(f"UPDATE {table} SET {column} = ''{where_clause}")
-            payload["cleared"] += 1
-            if getattr(cur, "rowcount", -1) >= 0:
-                payload["rows"] += int(cur.rowcount)
+            rowcount = _cursor_rowcount(cur)
+            if rowcount != 0:
+                payload["cleared"] += 1
+            if rowcount > 0:
+                payload["rows"] += rowcount
         if payload["updated"] or payload["cleared"]:
             conn.commit()
     except Exception as exc:
@@ -438,6 +648,63 @@ def _sync_result_to_sql(
             except Exception:
                 pass
     return payload
+
+
+def _ftp_skip_upload_prefixes(
+    result: Any,
+    existing_photos: List[Dict[str, Any]],
+    *,
+    explicit_prefixes: Set[str],
+    migrated_prefixes: Set[str],
+    ftp_backfill_prefixes: Set[str],
+) -> Set[str]:
+    """Return saved prefixes that do not need a remote upload."""
+
+    skip = {str(prefix) for prefix in ftp_backfill_prefixes if str(prefix)}
+    explicit = {str(prefix) for prefix in explicit_prefixes if str(prefix)}
+    migrated = {str(prefix) for prefix in migrated_prefixes if str(prefix)}
+    photos_by_prefix = {
+        str(photo.get("prefix") or ""): photo
+        for photo in existing_photos
+        if str(photo.get("prefix") or "")
+    }
+    for item in getattr(result, "saved_files", []) or []:
+        prefix = str(getattr(item, "prefix", "") or "")
+        if not prefix or prefix in skip or prefix in explicit or prefix in migrated:
+            continue
+        if photos_by_prefix.get(prefix, {}).get("ftp"):
+            skip.add(prefix)
+    return skip
+
+
+def _ftp_replacement_delete_candidates(
+    result: Any,
+    existing_photos: List[Dict[str, Any]],
+    *,
+    explicit_prefixes: Set[str],
+) -> List[str]:
+    """Return old remote files replaced by explicit slot changes."""
+
+    explicit = {str(prefix) for prefix in explicit_prefixes if str(prefix)}
+    photos_by_prefix = {
+        str(photo.get("prefix") or ""): photo
+        for photo in existing_photos
+        if str(photo.get("prefix") or "")
+    }
+    delete_candidates: List[str] = []
+    for item in getattr(result, "saved_files", []) or []:
+        prefix = str(getattr(item, "prefix", "") or "")
+        if not prefix or prefix not in explicit:
+            continue
+        current_remote = os.path.basename(
+            str(photos_by_prefix.get(prefix, {}).get("ftp_filename") or "")
+        )
+        if not current_remote:
+            continue
+        expected_remote = _remote_name_for_output(str(getattr(item, "filename", "") or ""))
+        if expected_remote and current_remote != expected_remote:
+            delete_candidates.append(current_remote)
+    return delete_candidates
 
 
 def _delete_local_files(delete_requests: List[Dict[str, Any]], saved_paths: Set[str]) -> Dict[str, Any]:
@@ -552,6 +819,15 @@ def _photo_source_labels(photo: Dict[str, Any]) -> List[str]:
     return labels or ["nieznane"]
 
 
+def _photo_has_file_source(photo: Dict[str, Any]) -> bool:
+    return bool(
+        photo.get("path")
+        or photo.get("filename")
+        or photo.get("ftp_path")
+        or photo.get("ftp_filename")
+    )
+
+
 def _existing_photo_conflicts(
     photos: List[Dict[str, Any]],
     uploaded_slots: List[WebUploadedSlot],
@@ -561,6 +837,8 @@ def _existing_photo_conflicts(
     delete_prefixes = {str(item.get("prefix") or "") for item in delete_requests}
     conflicts: List[Dict[str, Any]] = []
     for photo in photos:
+        if not _photo_has_file_source(photo):
+            continue
         prefix = str(photo.get("prefix") or "").strip()
         if not prefix or prefix not in uploaded_by_prefix or prefix in delete_prefixes:
             continue
@@ -634,7 +912,7 @@ def _append_existing_photo_sources(
         source_entry,
         include_local=True,
         include_ftp=bool(config.CONFIG.get(ft, True)),
-        include_sql=False,
+        include_sql=True,
     )
     for photo in photos:
         prefix = str(photo.get("prefix") or "").strip()
@@ -644,8 +922,11 @@ def _append_existing_photo_sources(
             continue
         slot = slot_by_prefix.get(prefix, {"prefix": prefix, "label": prefix})
         label = str(slot.get("label") or prefix)
+        filename_label = str(slot.get("filename_label") or "")
         source_path = path if path and os.path.isfile(path) else ""
         had_local_source = bool(source_path)
+        needs_sql_update = bool(photo.get("sql_checked")) and not bool(photo.get("sql"))
+        append_delete_request = False
         if prefix in occupied_prefixes:
             if identity_changed:
                 delete_requests.append(
@@ -663,8 +944,9 @@ def _append_existing_photo_sources(
         should_process = False
         if identity_changed and source_path:
             should_process = True
-        elif source_path and not ftp_filename and bool(config.CONFIG.get(ft, True)):
+        elif source_path and bool(config.CONFIG.get(ft, True)) and not bool(photo.get("ftp")):
             should_process = True
+            append_delete_request = True
         elif ftp_filename and not source_path:
             source_path = _download_ftp_photo_source(
                 photo,
@@ -672,6 +954,9 @@ def _append_existing_photo_sources(
                 cache_scope=cache_scope,
             )
             should_process = bool(source_path and os.path.isfile(source_path))
+            append_delete_request = should_process
+        elif source_path and needs_sql_update:
+            should_process = True
         if not should_process:
             continue
         if prefix not in occupied_prefixes and prefix not in delete_prefixes:
@@ -679,13 +964,14 @@ def _append_existing_photo_sources(
                 WebUploadedSlot(
                     prefix=prefix,
                     label=label,
+                    filename_label=filename_label,
                     source_path=source_path,
                     original_filename=ftp_filename or os.path.basename(source_path),
                 )
             )
             occupied_prefixes.add(prefix)
             appended.append(prefix)
-        if prefix not in delete_prefixes:
+        if prefix not in delete_prefixes and (identity_changed or append_delete_request):
             delete_requests.append(
                 {
                     "prefix": prefix,
@@ -750,6 +1036,7 @@ def _append_pending_ftp_slots(
             WebUploadedSlot(
                 prefix=prefix,
                 label=str(item.get("label") or prefix),
+                filename_label=str(item.get("filename_label") or ""),
                 source_path=source_path,
                 original_filename=ftp_filename,
                 content_fit=item.get("content_fit"),
@@ -1073,6 +1360,83 @@ def _logs_response(limit: int) -> Dict[str, Any]:
     return {"logs": logs, "events": events, "summary": _logs_summary(events)}
 
 
+def _active_clients_log_path() -> Path:
+    return Path(settings.LOG_DIR) / "web_active_clients.json"
+
+
+def _active_client_key(item: Dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(item.get("username") or ""),
+            str(item.get("remote_address") or ""),
+            str(item.get("user_agent") or ""),
+        ]
+    )
+
+
+def _active_clients_snapshot(now: Optional[float] = None) -> List[Dict[str, Any]]:
+    now_value = time.time() if now is None else float(now)
+    path = _active_clients_log_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    clients: List[Dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        try:
+            last_seen = float(item.get("last_seen_epoch") or 0)
+        except (TypeError, ValueError):
+            continue
+        if last_seen and now_value - last_seen <= ACTIVE_CLIENT_MAX_AGE_SECONDS:
+            clients.append(item)
+    clients.sort(key=lambda item: float(item.get("last_seen_epoch") or 0), reverse=True)
+    return clients
+
+
+def _record_active_client(request: Request, status_code: int) -> None:
+    path_text = str(request.url.path or "")
+    if path_text.startswith("/static/") or path_text == "/api/health":
+        return
+    try:
+        username = _current_user(request) or ""
+    except Exception:
+        username = ""
+    client = getattr(request, "client", None)
+    headers = getattr(request, "headers", {}) or {}
+    now_value = time.time()
+    item = {
+        "username": username or "niezalogowany",
+        "remote_address": str(getattr(client, "host", "") or ""),
+        "remote_port": int(getattr(client, "port", 0) or 0),
+        "user_agent": str(headers.get("user-agent", "") if hasattr(headers, "get") else ""),
+        "method": str(request.method or ""),
+        "path": path_text,
+        "status_code": int(status_code or 0),
+        "last_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "last_seen_epoch": now_value,
+    }
+    clients = _active_clients_snapshot(now_value)
+    by_key = {_active_client_key(existing): existing for existing in clients}
+    by_key[_active_client_key(item)] = item
+    payload = sorted(
+        by_key.values(),
+        key=lambda existing: float(existing.get("last_seen_epoch") or 0),
+        reverse=True,
+    )[:100]
+    try:
+        path = _active_clients_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(".json.tmp")
+        temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temp_path, path)
+    except OSError:
+        pass
+
+
 def _optional_form_bool(form: Any, key: str) -> Optional[bool]:
     value = form.get(key)
     if value is None:
@@ -1089,19 +1453,23 @@ def _enrich_photo_payload(photos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if path:
             token = _file_token(path)
             item["token"] = token
-            item["url"] = f"/api/file?token={token}"
-            item["thumb_url"] = f"/api/thumbnail?token={token}"
+            item["file_version"] = _file_version(path)
+            item["url"] = _versioned_file_url(path, "/api/file", token)
+            item["thumb_url"] = _versioned_file_url(path, "/api/thumbnail", token)
         else:
             item["token"] = ""
+            item["file_version"] = ""
             item["url"] = ""
             item["thumb_url"] = ""
         if ftp_path:
             ftp_token = _file_token(ftp_path)
             item["ftp_token"] = ftp_token
-            item["ftp_url"] = f"/api/file?token={ftp_token}"
-            item["ftp_thumb_url"] = f"/api/thumbnail?token={ftp_token}"
+            item["ftp_file_version"] = _file_version(ftp_path)
+            item["ftp_url"] = _versioned_file_url(ftp_path, "/api/file", ftp_token)
+            item["ftp_thumb_url"] = _versioned_file_url(ftp_path, "/api/thumbnail", ftp_token)
         else:
             item["ftp_token"] = ""
+            item["ftp_file_version"] = ""
             item["ftp_url"] = ""
             item["ftp_thumb_url"] = ""
         enriched.append(item)
@@ -1114,6 +1482,14 @@ def create_app() -> FastAPI:
     app = FastAPI(title="PicOrgFTP-SQL Web", version=get_app_version())
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+    def _runtime_info() -> Dict[str, Any]:
+        return {
+            "base_dir": settings.AC,
+            "processed_dir": settings.l,
+            "config_path": config.CONFIG_PATH,
+            "warning": settings.BASE_DIR_OVERRIDE_WARNING,
+        }
+
     @app.middleware("http")
     async def _log_unhandled_web_errors(request: Request, call_next):
         try:
@@ -1124,12 +1500,27 @@ def create_app() -> FastAPI:
             )
             raise
 
+    @app.middleware("http")
+    async def _track_active_clients(request: Request, call_next):
+        response = await call_next(request)
+        _record_active_client(request, getattr(response, "status_code", 0))
+        return response
+
     @app.on_event("startup")
     def _startup() -> None:
         os.environ.setdefault("PICORGFTP_SQL_HEADLESS", "1")
         runtime_info = initialize_application_runtime(interactive=False)
         app.state.runtime_info = runtime_info
         cleanup_web_ftp_cache(force=True)
+        cleanup_web_upload_cache(force=True)
+
+    @app.get("/api/health")
+    def health() -> Dict[str, Any]:
+        return {
+            "ok": True,
+            "version": get_display_version(),
+            "time": datetime.now().isoformat(timespec="seconds"),
+        }
 
     @app.get("/")
     def index(request: Request) -> Response:
@@ -1173,9 +1564,7 @@ def create_app() -> FastAPI:
     @app.get("/api/bootstrap")
     def bootstrap(request: Request) -> Dict[str, Any]:
         _require_user(request)
-        runtime_info = getattr(app.state, "runtime_info", None) or initialize_application_runtime(
-            interactive=False
-        )
+        runtime_info = _runtime_info()
         slots = slot_definitions_from_config(config.CONFIG)
         return {
             "base_dir": runtime_info["base_dir"],
@@ -1210,6 +1599,11 @@ def create_app() -> FastAPI:
     def logs_api(request: Request, limit: int = 300) -> Dict[str, Any]:
         _require_admin(request)
         return _logs_response(limit)
+
+    @app.get("/api/server/active-users")
+    def active_users_api(request: Request) -> Dict[str, Any]:
+        _require_admin(request)
+        return {"clients": _active_clients_snapshot()}
 
     @app.post("/api/logs/clear")
     async def logs_clear_api(request: Request) -> JSONResponse:
@@ -1274,10 +1668,32 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         token = _file_token(path)
+        version = _file_version(path)
         return {
             "token": token,
-            "url": f"/api/file?token={token}",
-            "thumb_url": f"/api/thumbnail?token={token}",
+            "file_version": version,
+            "url": _versioned_file_url(path, "/api/file", token),
+            "thumb_url": _versioned_file_url(path, "/api/thumbnail", token),
+        }
+
+    @app.post("/api/upload-cache")
+    async def upload_cache_api(request: Request) -> Dict[str, Any]:
+        username = _require_user(request)
+        form = await request.form()
+        upload = form.get("file")
+        if not isinstance(upload, UploadFile) or not upload.filename:
+            raise HTTPException(status_code=400, detail="Brak pliku do wyslania.")
+        prefix = str(form.get("prefix") or "slot").strip() or "slot"
+        cleanup_web_upload_cache()
+        path, size = await _save_upload_cache(upload, _user_cache_scope(request, username), prefix)
+        token = _file_token(path)
+        return {
+            "token": token,
+            "name": _safe_upload_name(upload.filename, os.path.basename(path)),
+            "size_bytes": size,
+            "file_version": _file_version(path),
+            "url": _versioned_file_url(path, "/api/file", token),
+            "thumb_url": _versioned_file_url(path, "/api/thumbnail", token),
         }
 
     @app.get("/api/entries/search")
@@ -1326,7 +1742,11 @@ def create_app() -> FastAPI:
         return JSONResponse({"ok": True, "entry": result})
 
     @app.post("/api/entries/photos")
-    async def entries_photos(request: Request, source: str = "all") -> JSONResponse:
+    async def entries_photos(
+        request: Request,
+        source: str = "all",
+        prefixes: str = "",
+    ) -> JSONResponse:
         _require_user(request)
         payload = await request.json()
         source_key = str(source or "all").strip().lower()
@@ -1339,6 +1759,17 @@ def create_app() -> FastAPI:
             include_ftp=source_key in {"all", "ftp"},
             include_sql=source_key in {"all", "sql"},
         )
+        requested_prefixes = {
+            item.strip()
+            for item in str(prefixes or "").split(",")
+            if item.strip()
+        }
+        if requested_prefixes:
+            photos = [
+                photo
+                for photo in photos
+                if str(photo.get("prefix") or "") in requested_prefixes
+            ]
         return JSONResponse({"photos": _enrich_photo_payload(photos), "source": source_key})
 
     @app.get("/api/file")
@@ -1415,11 +1846,26 @@ def create_app() -> FastAPI:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Niepoprawne ustawienia.")
         try:
-            snapshot = update_settings(payload)
+            snapshot = await run_in_threadpool(update_settings, payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            log_error(f"WEB settings save failed: {exc}\n{traceback.format_exc()}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Nie udalo sie zapisac ustawien: {exc}",
+            ) from exc
+        app.state.runtime_info = _runtime_info()
         snapshot["current_user"] = _current_user_payload(request)
         return JSONResponse(snapshot)
+
+    @app.get("/api/settings/secrets")
+    def settings_secrets(request: Request) -> JSONResponse:
+        _require_admin(request)
+        return JSONResponse(
+            settings_secret_values(),
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/api/users")
     def users_get(request: Request) -> Dict[str, Any]:
@@ -1480,6 +1926,7 @@ def create_app() -> FastAPI:
         uploaded_slots: List[WebUploadedSlot] = []
         delete_requests: List[Dict[str, Any]] = []
         pending_ftp_slots: List[Dict[str, Any]] = []
+        explicit_slot_prefixes: Set[str] = set()
         product: Optional[WebProductForm] = None
         try:
             for prefix, slot in slot_by_prefix.items():
@@ -1503,22 +1950,30 @@ def create_app() -> FastAPI:
                     token = str(form.get(f"existing_slot_{prefix}") or "").strip()
                     if token:
                         source_path = _path_from_file_token(token)
+                        original_filename = _safe_upload_name(
+                            str(form.get(f"existing_slot_name_{prefix}") or ""),
+                            os.path.basename(source_path),
+                        )
+                        explicit_slot_prefixes.add(prefix)
                         uploaded_slots.append(
                             WebUploadedSlot(
                                 prefix=prefix,
                                 label=slot["label"],
+                                filename_label=slot.get("filename_label", ""),
                                 source_path=source_path,
-                                original_filename=os.path.basename(source_path),
+                                original_filename=original_filename,
                                 content_fit=_optional_form_bool(form, f"slot_fit_{prefix}"),
                             )
                         )
                         continue
                     ftp_filename = os.path.basename(str(form.get(f"existing_ftp_slot_{prefix}") or ""))
                     if ftp_filename:
+                        explicit_slot_prefixes.add(prefix)
                         pending_ftp_slots.append(
                             {
                                 "prefix": prefix,
                                 "label": slot["label"],
+                                "filename_label": slot.get("filename_label", ""),
                                 "filename": ftp_filename,
                                 "ean": str(form.get(f"existing_ftp_ean_{prefix}") or ""),
                                 "content_fit": _optional_form_bool(form, f"slot_fit_{prefix}"),
@@ -1527,10 +1982,12 @@ def create_app() -> FastAPI:
                         continue
                     continue
                 source_path = await _save_upload(value, temp_dir, prefix)
+                explicit_slot_prefixes.add(prefix)
                 uploaded_slots.append(
                     WebUploadedSlot(
                         prefix=prefix,
                         label=slot["label"],
+                        filename_label=slot.get("filename_label", ""),
                         source_path=source_path,
                         original_filename=value.filename or "",
                         content_fit=_optional_form_bool(form, f"slot_fit_{prefix}"),
@@ -1590,9 +2047,12 @@ def create_app() -> FastAPI:
                 include_ftp=bool(config.CONFIG.get(ft, True)),
                 include_sql=True,
             )
+            existing_file_photos = [
+                photo for photo in existing_photos if _photo_has_file_source(photo)
+            ]
             if existing_entry is None:
                 conflicts = _existing_photo_conflicts(
-                    existing_photos,
+                    existing_file_photos,
                     uploaded_slots,
                     delete_requests,
                 )
@@ -1606,7 +2066,7 @@ def create_app() -> FastAPI:
                 slot_by_prefix=slot_by_prefix,
                 cache_scope=cache_scope,
             )
-            if existing_entry is None and existing_photos and not uploaded_slots and not delete_requests:
+            if existing_entry is None and existing_file_photos and not uploaded_slots and not delete_requests:
                 raise ValueError(
                     _format_existing_photo_conflicts(
                         [
@@ -1614,7 +2074,7 @@ def create_app() -> FastAPI:
                                 "prefix": photo.get("prefix"),
                                 "sources": _photo_source_labels(photo),
                             }
-                            for photo in existing_photos
+                            for photo in existing_file_photos
                         ]
                     )
                 )
@@ -1645,14 +2105,49 @@ def create_app() -> FastAPI:
                 for item in delete_requests
                 if item.get("ftp_backfill")
             }
+            skip_upload_prefixes = _ftp_skip_upload_prefixes(
+                result,
+                existing_file_photos,
+                explicit_prefixes=explicit_slot_prefixes,
+                migrated_prefixes=(
+                    set(migrated_prefixes)
+                    if _should_migrate_existing_photos(existing_entry, product)
+                    else set()
+                ),
+                ftp_backfill_prefixes=ftp_backfill_prefixes,
+            )
+            ftp_delete_candidates = [
+                item.get("ftp_filename", "")
+                for item in delete_requests
+                if not item.get("ftp_backfill")
+            ]
+            ftp_delete_candidates.extend(
+                _ftp_replacement_delete_candidates(
+                    result,
+                    existing_file_photos,
+                    explicit_prefixes=explicit_slot_prefixes,
+                )
+            )
             ftp_result = _sync_result_to_ftp(
                 result,
-                [
-                    item.get("ftp_filename", "")
-                    for item in delete_requests
-                    if not item.get("ftp_backfill")
-                ],
-                skip_upload_prefixes=ftp_backfill_prefixes,
+                ftp_delete_candidates,
+                skip_upload_prefixes=skip_upload_prefixes,
+            )
+            changed_ftp_names = {
+                _remote_name_for_output(str(item.filename or ""))
+                for item in result.saved_files
+                if getattr(item, "filename", "")
+            }
+            changed_ftp_names.update(
+                os.path.basename(str(name or ""))
+                for name in ftp_delete_candidates
+                if os.path.basename(str(name or ""))
+            )
+            changed_ftp_names.discard("")
+            ftp_cache_result = invalidate_ftp_preview_cache(
+                result.ean,
+                changed_ftp_names,
+                cache_scope=cache_scope,
             )
             sql_result = _sync_result_to_sql(
                 result,
@@ -1661,6 +2156,13 @@ def create_app() -> FastAPI:
                     for item in delete_requests
                     if item.get("sql") or item.get("ftp_filename") or item.get("local_path")
                 },
+            )
+            upload_cache_result = _delete_upload_cache_files(
+                [
+                    str(slot.source_path or "")
+                    for slot in uploaded_slots
+                    if _is_upload_cache_path(str(slot.source_path or ""))
+                ]
             )
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
@@ -1692,9 +2194,13 @@ def create_app() -> FastAPI:
         payload = _result_payload(result)
         payload["entry"] = entry_result
         payload["migrated_slots"] = migrated_prefixes
+        payload["deleted_slots"] = delete_requests
         payload["ftp"] = ftp_result
+        payload["ftp_cache"] = ftp_cache_result
+        payload["upload_cache"] = upload_cache_result
         payload["sql"] = sql_result
         payload["local_delete"] = local_delete_result
+        refresh_file_index()
         record_history(
             username=username,
             action="process",
@@ -1712,6 +2218,8 @@ def create_app() -> FastAPI:
                 "deleted_slots": delete_requests,
                 "migrated_slots": migrated_prefixes,
                 "ftp": ftp_result,
+                "ftp_cache": ftp_cache_result,
+                "upload_cache": upload_cache_result,
                 "sql": sql_result,
                 "local_delete": local_delete_result,
                 "output_dir": payload["output_dir"],
@@ -1744,6 +2252,8 @@ def create_app() -> FastAPI:
                 skipped_slots=result.skipped_slots,
                 migrated_slots=migrated_prefixes,
                 ftp=ftp_result,
+                ftp_cache=ftp_cache_result,
+                upload_cache=upload_cache_result,
                 sql=sql_result,
                 local_delete=local_delete_result,
             ),

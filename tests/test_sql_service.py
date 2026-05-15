@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from picorgftp_sql.services.sql_service import (
     build_column_detection_query,
     extract_presence_context,
+    query_presence_details,
 )
 
 
@@ -77,6 +79,35 @@ class SqlServiceTests(unittest.TestCase):
                 " WHERE EAN = '5901234567890'",
             ),
         )
+
+    def test_query_presence_details_leaves_presence_unknown_when_row_missing(self) -> None:
+        class Cursor:
+            def execute(self, _query):
+                return None
+
+            def fetchone(self):
+                return None
+
+            def close(self):
+                return None
+
+        class Connection:
+            def cursor(self):
+                return Cursor()
+
+            def close(self):
+                return None
+
+        with patch("picorgftp_sql.services.sql_service.connect_db", return_value=Connection()):
+            presence, values = query_presence_details(
+                [("03", "img_03", "DETAIL_pic")],
+                "object_query_1",
+                " WHERE EAN = '5901234567890'",
+                "mysql",
+            )
+
+        self.assertIsNone(presence["03"])
+        self.assertEqual(values["03"], "")
 
 
 if __name__ == "__main__":

@@ -622,6 +622,22 @@ h2 {
   font: inherit;
 }
 
+.credential-field {
+  min-width: 0;
+}
+
+.credential-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.credential-actions button {
+  min-height: 38px;
+  white-space: nowrap;
+}
+
 .settings-actions {
   grid-column: 1 / -1;
   display: flex;
@@ -644,7 +660,7 @@ h2 {
 }
 
 .slot-settings-row {
-  grid-template-columns: 90px minmax(140px, 1fr) minmax(180px, 1fr) auto;
+  grid-template-columns: minmax(140px, 1fr) 82px minmax(140px, 1fr) minmax(180px, 1fr) auto;
 }
 
 .user-row {
@@ -886,6 +902,27 @@ button.slot-badge.on:hover {
   align-self: end;
 }
 
+.slot-upload-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  background: rgba(238, 242, 239, 0.9);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.slot-upload-overlay.error {
+  color: var(--danger);
+}
+
+.slot-upload-overlay span {
+  align-self: end;
+  font-weight: 700;
+}
+
 .progress-line {
   width: min(120px, 70%);
   height: 4px;
@@ -902,6 +939,11 @@ button.slot-badge.on:hover {
   border-radius: inherit;
   background: var(--accent);
   animation: progress-slide 1.1s ease-in-out infinite;
+}
+
+.upload-progress-line i {
+  width: var(--upload-progress, 0%);
+  animation: none;
 }
 
 .slot-fit-button {

@@ -5,3 +5,4 @@ openpyxl
 mysql-connector-python
 pyodbc
 certifi
+pystray>=0.19

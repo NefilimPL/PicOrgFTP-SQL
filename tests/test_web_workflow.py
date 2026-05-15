@@ -92,6 +92,38 @@ class WebWorkflowTests(unittest.TestCase):
                     ],
                 )
 
+    def test_process_web_uploads_uses_filename_label_independent_from_display_label(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            source = Path(temp_dir) / "source.pdf"
+            source.write_bytes(b"%PDF-1.4\n")
+
+            result = process_web_uploads(
+                base_output_dir=str(Path(temp_dir) / "processed"),
+                form=WebProductForm(
+                    name="Maggiore",
+                    type_name="komoda",
+                    model="MA03",
+                    color1="bialy",
+                    ean="5901234567890",
+                ),
+                uploaded_slots=[
+                    WebUploadedSlot(
+                        prefix="03",
+                        label="Front web",
+                        filename_label="Front-2",
+                        source_path=str(source),
+                        original_filename="front.pdf",
+                    )
+                ],
+            )
+
+            saved = result.saved_files[0]
+            self.assertEqual(saved.label, "Front web")
+            self.assertEqual(saved.filename_label, "Front-2")
+            self.assertIn("_03_FRONT-2_", saved.filename)
+            self.assertNotIn("FRONT WEB", saved.filename)
+
     def test_process_web_uploads_normalizes_common_jpeg_extension_typo(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:

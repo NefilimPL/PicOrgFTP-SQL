@@ -162,6 +162,12 @@ def main():
 
         try:
             app = App()
+            try:
+                from picorgftp_sql.assets import set_tk_window_icon
+
+                set_tk_window_icon(app, "PIC_LOCAL.png")
+            except Exception:
+                pass
             if BASE_DIR_OVERRIDE_WARNING:
                 O.showwarning(SETTINGS_LABEL, BASE_DIR_OVERRIDE_WARNING)
             for combo in (

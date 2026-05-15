@@ -46,6 +46,48 @@ class WebAppFileTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_upload_cache_token_can_be_resolved(self) -> None:
+        temp_dir = _workspace_temp("web_app_upload_cache_token")
+        try:
+            processed = temp_dir / "processed"
+            upload_cache = temp_dir / "web_upload_cache" / "session"
+            processed.mkdir()
+            upload_cache.mkdir(parents=True)
+            target = upload_cache / "01_cached.jpg"
+            target.write_bytes(b"cached")
+            token = web_app._file_token(str(target))
+
+            with (
+                patch.object(web_app.settings, "l", str(processed)),
+                patch.object(web_app.settings, "AC", str(temp_dir)),
+            ):
+                self.assertEqual(Path(web_app._path_from_file_token(token)), target)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_delete_upload_cache_files_only_removes_upload_cache_paths(self) -> None:
+        temp_dir = _workspace_temp("web_app_upload_cache_cleanup")
+        try:
+            upload_cache = temp_dir / "web_upload_cache" / "session"
+            processed = temp_dir / "processed"
+            upload_cache.mkdir(parents=True)
+            processed.mkdir()
+            cached = upload_cache / "01_cached.jpg"
+            processed_file = processed / "keep.jpg"
+            cached.write_bytes(b"cached")
+            processed_file.write_bytes(b"keep")
+
+            with patch.object(web_app.settings, "AC", str(temp_dir)):
+                result = web_app._delete_upload_cache_files([str(cached), str(processed_file)])
+
+            self.assertEqual(result["deleted"], 1)
+            self.assertEqual(result["skipped"], 1)
+            self.assertEqual(result["errors"], [])
+            self.assertFalse(cached.exists())
+            self.assertTrue(processed_file.exists())
+        finally:
+            shutil.rmtree(temp_dir)
+
     def test_delete_local_files_is_idempotent_and_preserves_saved_paths(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
@@ -274,6 +316,376 @@ class WebAppFileTests(unittest.TestCase):
             self.assertEqual(uploaded_slots[0].source_path, str(photo_path))
             self.assertEqual(delete_requests[0]["ftp_filename"], "")
             self.assertFalse(delete_requests[0]["ftp_backfill"])
+
+    def test_local_photo_is_appended_for_missing_sql_without_delete_request(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            root = Path(temp_dir)
+            processed = root / "processed"
+            local_dir = processed / "MAGGIORE" / "KOMODA" / "MA03" / "BIALY" / "NO-LED"
+            local_dir.mkdir(parents=True)
+            photo_path = local_dir / "5901234567890_03_DETAIL_MAGGIORE_KOMODA_MA03_BIALY_NO-LED.jpg"
+            photo_path.write_bytes(b"local")
+            uploaded_slots = []
+            delete_requests = []
+            product = web_app.WebProductForm(
+                product_id="PRD-1",
+                ean="5901234567890",
+                name="MAGGIORE",
+                type_name="KOMODA",
+                model="MA03",
+                color1="BIALY",
+                extra="NO-LED",
+            )
+
+            with (
+                patch.object(web_app.settings, "l", str(processed)),
+                patch.object(
+                    web_app,
+                    "find_product_photos",
+                    return_value=[
+                        {
+                            "ean": "5901234567890",
+                            "prefix": "03",
+                            "path": str(photo_path),
+                            "filename": photo_path.name,
+                            "ftp": True,
+                            "ftp_filename": "5901234567890_03.jpg",
+                            "sql": False,
+                            "sql_checked": True,
+                        }
+                    ],
+                ) as find_photos,
+            ):
+                appended = web_app._append_existing_photo_migrations(
+                    existing_entry={
+                        "product_id": "PRD-1",
+                        "ean": "5901234567890",
+                        "name": "MAGGIORE",
+                        "type_name": "KOMODA",
+                        "model": "MA03",
+                        "color1": "BIALY",
+                        "color2": "",
+                        "color3": "",
+                        "extra": "NO-LED",
+                    },
+                    product=product,
+                    uploaded_slots=uploaded_slots,
+                    delete_requests=delete_requests,
+                    slot_by_prefix={"03": {"prefix": "03", "label": "DETAIL_pic"}},
+                )
+
+            self.assertEqual(appended, ["03"])
+            self.assertEqual(uploaded_slots[0].source_path, str(photo_path))
+            self.assertEqual(delete_requests, [])
+            self.assertTrue(find_photos.call_args.kwargs["include_sql"])
+
+    def test_ftp_upload_is_skipped_for_sql_only_repair_with_existing_remote(self) -> None:
+        result = SimpleNamespace(
+            saved_files=[
+                SimpleNamespace(
+                    prefix="03",
+                    filename="5901234567890_03_DETAIL_MAGGIORE.jpg",
+                )
+            ],
+        )
+
+        skipped = web_app._ftp_skip_upload_prefixes(
+            result,
+            [{"prefix": "03", "ftp": True}],
+            explicit_prefixes=set(),
+            migrated_prefixes=set(),
+            ftp_backfill_prefixes=set(),
+        )
+
+        self.assertEqual(skipped, {"03"})
+
+    def test_ftp_upload_is_skipped_for_existing_remote_even_when_local_file_exists(self) -> None:
+        result = SimpleNamespace(
+            saved_files=[
+                SimpleNamespace(
+                    prefix="03",
+                    filename="5901234567890_03_DETAIL_MAGGIORE.jpg",
+                )
+            ],
+        )
+
+        skipped = web_app._ftp_skip_upload_prefixes(
+            result,
+            [{"prefix": "03", "local": True, "ftp": True}],
+            explicit_prefixes=set(),
+            migrated_prefixes=set(),
+            ftp_backfill_prefixes=set(),
+        )
+
+        self.assertEqual(skipped, {"03"})
+
+    def test_sql_sync_skips_updates_when_product_row_is_missing(self) -> None:
+        result = SimpleNamespace(
+            ean="5901234567890",
+            saved_files=[
+                SimpleNamespace(
+                    prefix="03",
+                    filename="5901234567890_03_DETAIL_MAGGIORE.jpg",
+                )
+            ],
+        )
+
+        class Cursor:
+            rowcount = -1
+
+            def __init__(self) -> None:
+                self.queries = []
+
+            def execute(self, query):
+                self.queries.append(query)
+
+            def fetchone(self):
+                return None
+
+            def close(self):
+                return None
+
+        class Connection:
+            def __init__(self) -> None:
+                self.cursor_obj = Cursor()
+                self.committed = False
+
+            def cursor(self):
+                return self.cursor_obj
+
+            def commit(self):
+                self.committed = True
+
+            def rollback(self):
+                return None
+
+            def close(self):
+                return None
+
+        conn = Connection()
+        with (
+            patch.dict(
+                web_app.config.CONFIG,
+                {
+                    web_app.u: True,
+                    web_app.p: web_app.K,
+                    web_app.w: "UPDATE object_query_1 SET {col} = '{filename}' WHERE EAN = '{ean}'",
+                    web_app.SQL_COLUMN_MAP_KEY: {"03": "img_03"},
+                },
+                clear=False,
+            ),
+            patch.object(web_app, "connect_db", return_value=conn),
+        ):
+            payload = web_app._sync_result_to_sql(result)
+
+        self.assertTrue(payload["skipped"])
+        self.assertEqual(payload["updated"], 0)
+        self.assertEqual(payload["rows"], 0)
+        self.assertEqual(len(conn.cursor_obj.queries), 1)
+        self.assertIn("SELECT 1", conn.cursor_obj.queries[0])
+        self.assertFalse(conn.committed)
+
+    def test_sql_sync_does_not_count_zero_row_updates(self) -> None:
+        result = SimpleNamespace(
+            ean="5901234567890",
+            saved_files=[
+                SimpleNamespace(
+                    prefix="03",
+                    filename="5901234567890_03_DETAIL_MAGGIORE.jpg",
+                )
+            ],
+        )
+
+        class Cursor:
+            rowcount = -1
+
+            def __init__(self) -> None:
+                self.queries = []
+
+            def execute(self, query):
+                self.queries.append(query)
+                self.rowcount = 0 if str(query).lstrip().upper().startswith("UPDATE") else -1
+
+            def fetchone(self):
+                return (1,)
+
+            def close(self):
+                return None
+
+        class Connection:
+            def __init__(self) -> None:
+                self.cursor_obj = Cursor()
+                self.committed = False
+
+            def cursor(self):
+                return self.cursor_obj
+
+            def commit(self):
+                self.committed = True
+
+            def rollback(self):
+                return None
+
+            def close(self):
+                return None
+
+        conn = Connection()
+        with (
+            patch.dict(
+                web_app.config.CONFIG,
+                {
+                    web_app.u: True,
+                    web_app.p: web_app.K,
+                    web_app.w: "UPDATE object_query_1 SET {col} = '{filename}' WHERE EAN = '{ean}'",
+                    web_app.SQL_COLUMN_MAP_KEY: {"03": "img_03"},
+                },
+                clear=False,
+            ),
+            patch.object(web_app, "connect_db", return_value=conn),
+        ):
+            payload = web_app._sync_result_to_sql(result)
+
+        self.assertFalse(payload["skipped"])
+        self.assertEqual(payload["updated"], 0)
+        self.assertEqual(payload["rows"], 0)
+        self.assertEqual(len(conn.cursor_obj.queries), 2)
+        self.assertFalse(conn.committed)
+
+    def test_complete_existing_photo_is_not_appended_without_missing_sources(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            root = Path(temp_dir)
+            processed = root / "processed"
+            local_dir = processed / "MAGGIORE" / "KOMODA" / "MA03" / "BIALY" / "NO-LED"
+            local_dir.mkdir(parents=True)
+            photo_path = local_dir / "5901234567890_03_DETAIL_MAGGIORE_KOMODA_MA03_BIALY_NO-LED.jpg"
+            photo_path.write_bytes(b"local")
+            uploaded_slots = []
+            delete_requests = []
+            product = web_app.WebProductForm(
+                product_id="PRD-1",
+                ean="5901234567890",
+                name="MAGGIORE",
+                type_name="KOMODA",
+                model="MA03",
+                color1="BIALY",
+                extra="NO-LED",
+            )
+
+            with (
+                patch.object(web_app.settings, "l", str(processed)),
+                patch.dict(web_app.config.CONFIG, {web_app.ft: True}, clear=False),
+                patch.object(
+                    web_app,
+                    "find_product_photos",
+                    return_value=[
+                        {
+                            "ean": "5901234567890",
+                            "prefix": "03",
+                            "path": str(photo_path),
+                            "filename": photo_path.name,
+                            "local": True,
+                            "ftp": True,
+                            "ftp_filename": "5901234567890_03.jpg",
+                            "sql": True,
+                            "sql_checked": True,
+                        }
+                    ],
+                ),
+            ):
+                appended = web_app._append_existing_photo_migrations(
+                    existing_entry={
+                        "product_id": "PRD-1",
+                        "ean": "5901234567890",
+                        "name": "MAGGIORE",
+                        "type_name": "KOMODA",
+                        "model": "MA03",
+                        "color1": "BIALY",
+                        "color2": "",
+                        "color3": "",
+                        "extra": "NO-LED",
+                    },
+                    product=product,
+                    uploaded_slots=uploaded_slots,
+                    delete_requests=delete_requests,
+                    slot_by_prefix={"03": {"prefix": "03", "label": "DETAIL_pic"}},
+                )
+
+            self.assertEqual(appended, [])
+            self.assertEqual(uploaded_slots, [])
+            self.assertEqual(delete_requests, [])
+
+    def test_enriched_local_photo_urls_include_file_version(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            photo_path = Path(temp_dir) / "5901234567890_03.jpg"
+            photo_path.write_bytes(b"first")
+
+            first = web_app._enrich_photo_payload([{"prefix": "03", "path": str(photo_path)}])[0]
+            photo_path.write_bytes(b"changed-content")
+            second = web_app._enrich_photo_payload([{"prefix": "03", "path": str(photo_path)}])[0]
+
+        self.assertIn("&v=", first["url"])
+        self.assertIn("&v=", first["thumb_url"])
+        self.assertNotEqual(first["file_version"], second["file_version"])
+        self.assertNotEqual(first["thumb_url"], second["thumb_url"])
+
+    def test_ftp_upload_is_kept_for_explicitly_changed_slot(self) -> None:
+        result = SimpleNamespace(
+            saved_files=[
+                SimpleNamespace(
+                    prefix="03",
+                    filename="5901234567890_03_DETAIL_MAGGIORE.jpg",
+                )
+            ],
+        )
+
+        skipped = web_app._ftp_skip_upload_prefixes(
+            result,
+            [{"prefix": "03", "ftp": True}],
+            explicit_prefixes={"03"},
+            migrated_prefixes=set(),
+            ftp_backfill_prefixes=set(),
+        )
+
+        self.assertEqual(skipped, set())
+
+    def test_explicit_slot_replacement_deletes_old_remote_when_extension_changes(self) -> None:
+        result = SimpleNamespace(
+            saved_files=[
+                SimpleNamespace(
+                    prefix="03",
+                    filename="5901234567890_03_DETAIL_MAGGIORE.png",
+                )
+            ],
+        )
+
+        deletes = web_app._ftp_replacement_delete_candidates(
+            result,
+            [{"prefix": "03", "ftp_filename": "5901234567890_03.jpg"}],
+            explicit_prefixes={"03"},
+        )
+
+        self.assertEqual(deletes, ["5901234567890_03.jpg"])
+
+    def test_explicit_slot_replacement_keeps_same_remote_name_for_overwrite(self) -> None:
+        result = SimpleNamespace(
+            saved_files=[
+                SimpleNamespace(
+                    prefix="03",
+                    filename="5901234567890_03_DETAIL_MAGGIORE.jpg",
+                )
+            ],
+        )
+
+        deletes = web_app._ftp_replacement_delete_candidates(
+            result,
+            [{"prefix": "03", "ftp_filename": "5901234567890_03.jpg"}],
+            explicit_prefixes={"03"},
+        )
+
+        self.assertEqual(deletes, [])
 
     def test_deleted_ftp_only_slot_is_not_downloaded_again(self) -> None:
         product = web_app.WebProductForm(
@@ -527,6 +939,21 @@ class WebAppFileTests(unittest.TestCase):
         )
         conflicts = web_app._existing_photo_conflicts(
             [{"prefix": "03", "ftp": True, "ftp_filename": "5901234567890_03.jpg"}],
+            [upload],
+            [],
+        )
+
+        self.assertEqual(conflicts, [])
+
+    def test_existing_photo_conflicts_ignore_sql_only_presence(self) -> None:
+        upload = web_app.WebUploadedSlot(
+            prefix="03",
+            label="DETAIL_pic",
+            source_path="new.jpg",
+            original_filename="new.jpg",
+        )
+        conflicts = web_app._existing_photo_conflicts(
+            [{"prefix": "03", "sql": True, "sql_checked": True, "sql_value": ""}],
             [upload],
             [],
         )

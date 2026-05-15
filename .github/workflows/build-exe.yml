@@ -50,8 +50,15 @@ jobs:
           # Pin PyInstaller to avoid known Windows CI weirdness and keep builds reproducible
           python -m pip install "pyinstaller>=6.6,<7"
           python -m pip install -r requirements-build.txt
+          python -m pip install -r requirements-web.txt
 
-      - name: Build EXE with PyInstaller (recommended onedir + minimal collection)
+      - name: Prepare Windows icons
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "build/icons" -Force | Out-Null
+          python -c "from PIL import Image; Image.open(r'pic/PIC_LOCAL.png').save(r'build/icons/PIC_LOCAL.ico', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)]); Image.open(r'pic/PIC_WEB.png').save(r'build/icons/PIC_WEB.ico', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)])"
+
+      - name: Build local EXE with PyInstaller
         shell: pwsh
         env:
           PICORGFTP_SQL_HEADLESS: "1"
@@ -62,15 +69,46 @@ jobs:
             --noconsole `
             --onefile `
             --distpath "dist/output" `
-            --workpath "build/output" `
+            --workpath "build/output-local" `
+            --icon "build/icons/PIC_LOCAL.ico" `
             --collect-submodules mysql.connector `
             --collect-data mysql.connector `
             --collect-data certifi `
             --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" `
             --add-data "picorgftp_sql/VERSION;picorgftp_sql" `
+            --add-data "pic/PIC_LOCAL.png;pic" `
             PicOrgFTP-SQL.pyw
           Copy-Item -Path "picorgftp_sql/Localization" -Destination "dist/output/Localization" -Recurse -Force
           Copy-Item -Path "picorgftp_sql/VERSION" -Destination "dist/output/VERSION" -Force
+
+      - name: Build web manager EXE with PyInstaller
+        shell: pwsh
+        env:
+          PICORGFTP_SQL_HEADLESS: "1"
+          PYINSTALLER_BUILD: "1"
+        run: |
+          pyinstaller --noconfirm --clean --log-level=WARN `
+            --name PicOrgFTP-SQL-WEB `
+            --noconsole `
+            --onefile `
+            --distpath "dist/output" `
+            --workpath "build/output-web" `
+            --icon "build/icons/PIC_WEB.ico" `
+            --collect-submodules picorgftp_sql `
+            --collect-submodules mysql.connector `
+            --collect-submodules uvicorn `
+            --collect-submodules fastapi `
+            --collect-submodules starlette `
+            --collect-submodules multipart `
+            --collect-submodules pystray `
+            --collect-submodules PIL `
+            --collect-data mysql.connector `
+            --collect-data certifi `
+            --add-data "picorgftp_sql/web/static;picorgftp_sql/web/static" `
+            --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" `
+            --add-data "picorgftp_sql/VERSION;picorgftp_sql" `
+            --add-data "pic/PIC_WEB.png;pic" `
+            PicOrgFTP-SQL-WEB.pyw
 
       - name: Package web runtime
         shell: pwsh
@@ -78,9 +116,11 @@ jobs:
           $webRoot = "dist/web/PicOrgFTP-SQL-web"
           Remove-Item -Path "dist/web" -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $webRoot -Force | Out-Null
+          Copy-Item -Path "dist/output/PicOrgFTP-SQL-WEB.exe" -Destination "$webRoot/PicOrgFTP-SQL-WEB.exe" -Force
           Copy-Item -Path "picorgftp_sql" -Destination "$webRoot/picorgftp_sql" -Recurse -Force
+          Copy-Item -Path "pic" -Destination "$webRoot/pic" -Recurse -Force
           Copy-Item -Path "tools" -Destination "$webRoot/tools" -Recurse -Force
-          Copy-Item -Path "requirements-web.txt", "START_WEB.bat", "STOP_WEB.bat", "README.md", "LICENSE", "PicOrgFTP-SQL.pyw" -Destination $webRoot -Force
+          Copy-Item -Path "requirements-web.txt", "START_WEB.bat", "STOP_WEB.bat", "README.md", "LICENSE", "PicOrgFTP-SQL-WEB.pyw" -Destination $webRoot -Force
           $zipPath = "dist/web/PicOrgFTP-SQL-web-$env:PICORGFTP_SQL_ASSET_VERSION.zip"
           Compress-Archive -Path "$webRoot/*" -DestinationPath $zipPath -Force
 
@@ -90,13 +130,20 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path "dist/release" -Force | Out-Null
           Copy-Item -Path "dist/output/PicOrgFTP-SQL.exe" -Destination "dist/release/PicOrgFTP-SQL-$env:PICORGFTP_SQL_ASSET_VERSION.exe" -Force
+          Copy-Item -Path "dist/output/PicOrgFTP-SQL-WEB.exe" -Destination "dist/release/PicOrgFTP-SQL-WEB-$env:PICORGFTP_SQL_ASSET_VERSION.exe" -Force
           Copy-Item -Path "dist/web/PicOrgFTP-SQL-web-$env:PICORGFTP_SQL_ASSET_VERSION.zip" -Destination "dist/release/PicOrgFTP-SQL-web-$env:PICORGFTP_SQL_ASSET_VERSION.zip" -Force
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: PicOrgFTP-SQL-windows
-          path: dist/output
+          path: dist/output/PicOrgFTP-SQL.exe
+
+      - name: Upload web EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PicOrgFTP-SQL-web-exe
+          path: dist/output/PicOrgFTP-SQL-WEB.exe
 
       - name: Upload web artifact
         uses: actions/upload-artifact@v4
@@ -112,5 +159,6 @@ jobs:
         run: |
           gh release upload "$env:PICORGFTP_SQL_VERSION" `
             "dist/release/PicOrgFTP-SQL-$env:PICORGFTP_SQL_ASSET_VERSION.exe" `
+            "dist/release/PicOrgFTP-SQL-WEB-$env:PICORGFTP_SQL_ASSET_VERSION.exe" `
             "dist/release/PicOrgFTP-SQL-web-$env:PICORGFTP_SQL_ASSET_VERSION.zip" `
             --clobber

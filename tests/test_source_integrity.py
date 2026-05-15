@@ -44,6 +44,20 @@ class SourceIntegrityTests(unittest.TestCase):
         )
         self.assertEqual(missing, [])
 
+    def test_web_submit_only_marks_explicit_slot_changes_as_pending(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        self.assertIn("if (!state.files.has(prefix) && photo.dirty)", source)
+        self.assertNotIn("shouldRepair = photoNeedsRepair", source)
+        self.assertNotIn("shouldSyncLocal = !updateMode", source)
+
 
 if __name__ == "__main__":
     unittest.main()
