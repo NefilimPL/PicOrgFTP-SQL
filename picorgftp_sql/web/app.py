@@ -227,6 +227,49 @@ def _upload_cache_dir(cache_scope: object = "") -> str:
     return os.path.join(_upload_cache_root(), safe_scope)
 
 
+def _path_is_under_root(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([os.path.abspath(path), os.path.abspath(root)]) == os.path.abspath(root)
+    except ValueError:
+        return False
+
+
+def _is_upload_cache_path(path: str) -> bool:
+    return bool(path and _path_is_under_root(path, _upload_cache_root()))
+
+
+def _delete_upload_cache_files(paths: List[str]) -> Dict[str, Any]:
+    root = os.path.abspath(_upload_cache_root())
+    deleted = 0
+    skipped = 0
+    errors: List[str] = []
+    for raw_path in sorted({os.path.abspath(path) for path in paths if path}):
+        if not _path_is_under_root(raw_path, root):
+            skipped += 1
+            continue
+        try:
+            if os.path.isfile(raw_path):
+                os.remove(raw_path)
+                deleted += 1
+            else:
+                skipped += 1
+        except OSError as exc:
+            errors.append(f"{raw_path}: {exc}")
+    if os.path.isdir(root):
+        for current_root, dirs, _files in os.walk(root, topdown=False):
+            for dirname in dirs:
+                path = os.path.join(current_root, dirname)
+                try:
+                    os.rmdir(path)
+                except OSError:
+                    pass
+        try:
+            os.rmdir(root)
+        except OSError:
+            pass
+    return {"deleted": deleted, "skipped": skipped, "errors": errors}
+
+
 def cleanup_web_upload_cache(
     *,
     max_age_seconds: int = WEB_UPLOAD_CACHE_MAX_AGE_SECONDS,
@@ -582,7 +625,7 @@ def _ftp_skip_upload_prefixes(
         prefix = str(getattr(item, "prefix", "") or "")
         if not prefix or prefix in skip or prefix in explicit or prefix in migrated:
             continue
-        if photos_by_prefix.get(prefix, {}).get("ftp") and not photos_by_prefix.get(prefix, {}).get("local"):
+        if photos_by_prefix.get(prefix, {}).get("ftp"):
             skip.add(prefix)
     return skip
 
@@ -854,7 +897,7 @@ def _append_existing_photo_sources(
         should_process = False
         if identity_changed and source_path:
             should_process = True
-        elif source_path and bool(config.CONFIG.get(ft, True)):
+        elif source_path and bool(config.CONFIG.get(ft, True)) and not bool(photo.get("ftp")):
             should_process = True
             append_delete_request = True
         elif ftp_filename and not source_path:
@@ -2067,6 +2110,13 @@ def create_app() -> FastAPI:
                     if item.get("sql") or item.get("ftp_filename") or item.get("local_path")
                 },
             )
+            upload_cache_result = _delete_upload_cache_files(
+                [
+                    str(slot.source_path or "")
+                    for slot in uploaded_slots
+                    if _is_upload_cache_path(str(slot.source_path or ""))
+                ]
+            )
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
             details: Dict[str, Any] = {"status_code": exc.status_code}
@@ -2100,6 +2150,7 @@ def create_app() -> FastAPI:
         payload["deleted_slots"] = delete_requests
         payload["ftp"] = ftp_result
         payload["ftp_cache"] = ftp_cache_result
+        payload["upload_cache"] = upload_cache_result
         payload["sql"] = sql_result
         payload["local_delete"] = local_delete_result
         refresh_file_index()
@@ -2121,6 +2172,7 @@ def create_app() -> FastAPI:
                 "migrated_slots": migrated_prefixes,
                 "ftp": ftp_result,
                 "ftp_cache": ftp_cache_result,
+                "upload_cache": upload_cache_result,
                 "sql": sql_result,
                 "local_delete": local_delete_result,
                 "output_dir": payload["output_dir"],
@@ -2154,6 +2206,7 @@ def create_app() -> FastAPI:
                 migrated_slots=migrated_prefixes,
                 ftp=ftp_result,
                 ftp_cache=ftp_cache_result,
+                upload_cache=upload_cache_result,
                 sql=sql_result,
                 local_delete=local_delete_result,
             ),

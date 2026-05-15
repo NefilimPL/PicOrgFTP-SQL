@@ -41,6 +41,8 @@ const state = {
   slotRevisions: new Map(),
   userSelectedSlotSources: new Set(),
   slotUploadRequestId: 0,
+  processStatusTimer: 0,
+  processStatusStartedAt: 0,
 };
 
 const listLabels = {
@@ -1960,6 +1962,35 @@ function setBusy(isBusy, text = "") {
   updateSubmitButtonState();
 }
 
+function stopProcessStatusTicker(text = "") {
+  window.clearInterval(state.processStatusTimer);
+  state.processStatusTimer = 0;
+  state.processStatusStartedAt = 0;
+  if (text) formStatus.textContent = text;
+}
+
+function startProcessStatusTicker(label, prefixes = new Set()) {
+  stopProcessStatusTicker();
+  const phaseTexts = [
+    "backend zapisuje lokalne zmiany",
+    "backend sprawdza brakujace zrodla",
+    "backend synchronizuje FTP/SQL",
+    "czekam na odpowiedz backendu",
+  ];
+  const changed = [...prefixes].filter(Boolean).sort();
+  const slotText = changed.length ? ` Sloty: ${changed.join(", ")}.` : "";
+  let step = 0;
+  state.processStatusStartedAt = performance.now();
+  const render = () => {
+    const elapsed = Math.max(1, Math.round((performance.now() - state.processStatusStartedAt) / 1000));
+    const phase = phaseTexts[Math.min(step, phaseTexts.length - 1)];
+    formStatus.textContent = `${label}: ${phase} (${elapsed} s).${slotText}`;
+    step += 1;
+  };
+  render();
+  state.processStatusTimer = window.setInterval(render, 5000);
+}
+
 function clearResult() {
   resultMeta.textContent = "";
   resultOutput.className = "result-output empty-state";
@@ -3755,7 +3786,9 @@ productForm.addEventListener("submit", async (event) => {
       if (item.ftp_filename) data.set(`delete_ftp_slot_${prefix}`, item.ftp_filename);
       if (item.sql) data.set(`delete_sql_slot_${prefix}`, "1");
     }
+    startProcessStatusTicker(updateMode ? "Aktualizacja" : "Synchronizacja", changedPrefixes);
     const payload = await requestJson("/api/process", { method: "POST", body: data });
+    stopProcessStatusTicker("Backend zakonczyl operacje. Odswiezanie widoku...");
     showResult(payload);
     const savedProductId = payload.entry?.product_id || productForm.elements.product_id.value;
     if (savedProductId) {
@@ -3765,6 +3798,7 @@ productForm.addEventListener("submit", async (event) => {
     updateFieldWarnings();
     state.deletedSlots.clear();
     clearSelectedFiles();
+    setBusy(true, "Odswiezanie list i wpisow...");
     await refreshData();
     for (const item of payload.saved_files || []) {
       if (item.prefix) changedPrefixes.add(item.prefix);
@@ -3781,6 +3815,7 @@ productForm.addEventListener("submit", async (event) => {
     };
     clearFtpPreviewCacheForPrefixes(changedPrefixes, entryToReload.ean);
     clearSavedSlotMarkers(changedPrefixes);
+    setBusy(true, "Odswiezanie podgladow zmienionych slotow...");
     if (identityChanged || !changedPrefixes.size) {
       await loadPhotosForEntry(entryToReload);
     } else {
@@ -3793,6 +3828,7 @@ productForm.addEventListener("submit", async (event) => {
     updateSubmitButtonState();
     setBusy(false, "Zakonczono.");
   } catch (error) {
+    stopProcessStatusTicker();
     showError(error);
     setBusy(false, "");
   }
