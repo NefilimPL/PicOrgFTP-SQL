@@ -10,30 +10,18 @@ $WorkPath = Join-Path $RepoRoot "build\web-exe"
 $VersionInfoPath = Join-Path $WorkPath "PicOrgFTP-SQL-WEB.version.txt"
 
 Set-Location $RepoRoot
+. (Join-Path $ScriptDir "build_common.ps1")
 
-if (-not (Test-Path $Python)) {
-    if (Get-Command py -ErrorAction SilentlyContinue) {
-        py -3.11 -m venv $VenvDir
-    } elseif (Get-Command python -ErrorAction SilentlyContinue) {
-        python -m venv $VenvDir
-    } else {
-        throw "Nie znaleziono Pythona. Zainstaluj Python 3.11+ albo dodaj go do PATH."
-    }
-}
-
-if (-not (Test-Path $Python)) {
-    throw "Nie udalo sie utworzyc srodowiska build: $Python"
-}
-
-& $Python -m pip install --upgrade pip
-& $Python -m pip install "pyinstaller>=6.6,<7"
-& $Python -m pip install -r requirements-build.txt
-& $Python -m pip install -r requirements-web.txt
+Initialize-BuildEnvironment `
+    -RepoRoot $RepoRoot `
+    -VenvDir $VenvDir `
+    -Python $Python `
+    -IncludeWebDependencies
 
 New-Item -ItemType Directory -Path $IconDir -Force | Out-Null
 New-Item -ItemType Directory -Path $WorkPath -Force | Out-Null
-& $Python -c "from PIL import Image; Image.open(r'pic\PIC_WEB.png').save(r'$IconPath', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)])"
-& $Python "tools\generate_windows_version_info.py" `
+Invoke-Native $Python "-c" "from PIL import Image; Image.open(r'pic\PIC_WEB.png').save(r'$IconPath', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)])"
+Invoke-Native $Python "tools\generate_windows_version_info.py" `
     --output $VersionInfoPath `
     --file-description "PicOrgFTP-SQL web manager" `
     --internal-name "PicOrgFTP-SQL-WEB" `
@@ -42,7 +30,7 @@ New-Item -ItemType Directory -Path $WorkPath -Force | Out-Null
 $env:PICORGFTP_SQL_HEADLESS = "1"
 $env:PYINSTALLER_BUILD = "1"
 
-& $Python -m PyInstaller --noconfirm --clean --log-level=WARN `
+Invoke-Native $Python "-m" "PyInstaller" "--noconfirm" "--clean" "--log-level=WARN" `
     --name PicOrgFTP-SQL-WEB `
     --noconsole `
     --onefile `

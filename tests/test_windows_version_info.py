@@ -63,6 +63,49 @@ class WindowsVersionInfoTests(unittest.TestCase):
                     "v2.0.0",
                 )
 
+    def test_github_metadata_uses_repository_context(self) -> None:
+        metadata = version_info.resolve_build_metadata(
+            metadata_source="github",
+            env={
+                "GITHUB_ACTIONS": "true",
+                "GITHUB_REPOSITORY": "NefilimPL/PicOrgFTP-SQL",
+                "GITHUB_REPOSITORY_OWNER": "NefilimPL",
+            },
+        )
+
+        self.assertEqual(metadata.source, "github")
+        self.assertEqual(metadata.product_name, "PicOrgFTP-SQL")
+        self.assertEqual(metadata.company_name, "NefilimPL")
+        self.assertIn("NefilimPL", metadata.legal_copyright)
+
+    def test_windows_metadata_prefers_registered_organization(self) -> None:
+        with patch.object(
+            version_info,
+            "_read_windows_registered_values",
+            return_value=("Example Org", "Example Owner"),
+        ):
+            metadata = version_info.resolve_build_metadata(
+                metadata_source="windows",
+                env={"USERNAME": "kbober"},
+            )
+
+        self.assertEqual(metadata.source, "windows")
+        self.assertEqual(metadata.product_name, "PicOrgFTP-SQL")
+        self.assertEqual(metadata.company_name, "Example Org")
+
+    def test_windows_metadata_falls_back_to_username(self) -> None:
+        with patch.object(
+            version_info,
+            "_read_windows_registered_values",
+            return_value=("", ""),
+        ):
+            metadata = version_info.resolve_build_metadata(
+                metadata_source="windows",
+                env={"USERNAME": "kbober"},
+            )
+
+        self.assertEqual(metadata.company_name, "kbober")
+
 
 if __name__ == "__main__":
     unittest.main()
