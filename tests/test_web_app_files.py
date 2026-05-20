@@ -380,6 +380,55 @@ class WebAppFileTests(unittest.TestCase):
             self.assertEqual(delete_requests, [])
             self.assertTrue(find_photos.call_args.kwargs["include_sql"])
 
+    def test_existing_photo_migration_uses_preloaded_photos(self) -> None:
+        uploaded_slots = []
+        delete_requests = []
+        product = web_app.WebProductForm(
+            product_id="PRD-1",
+            ean="5901234567890",
+            name="MAGGIORE",
+            type_name="KOMODA",
+            model="MA03",
+            color1="BIALY",
+            extra="NO-LED",
+        )
+        existing_photos = [
+            {
+                "ean": "5901234567890",
+                "prefix": "03",
+                "path": str(Path(__file__)),
+                "filename": Path(__file__).name,
+                "local": True,
+                "ftp": True,
+                "ftp_filename": "5901234567890_03.jpg",
+                "sql": True,
+                "sql_checked": True,
+            }
+        ]
+
+        with patch.object(web_app, "find_product_photos") as find_photos:
+            appended = web_app._append_existing_photo_migrations(
+                existing_entry={
+                    "product_id": "PRD-1",
+                    "ean": "5901234567890",
+                    "name": "MAGGIORE",
+                    "type_name": "KOMODA",
+                    "model": "MA03",
+                    "color1": "BIALY",
+                    "color2": "",
+                    "color3": "",
+                    "extra": "NO-LED",
+                },
+                product=product,
+                uploaded_slots=uploaded_slots,
+                delete_requests=delete_requests,
+                slot_by_prefix={"03": {"prefix": "03", "label": "DETAIL_pic"}},
+                existing_photos=existing_photos,
+            )
+
+        self.assertEqual(appended, [])
+        find_photos.assert_not_called()
+
     def test_ftp_upload_is_skipped_for_sql_only_repair_with_existing_remote(self) -> None:
         result = SimpleNamespace(
             saved_files=[

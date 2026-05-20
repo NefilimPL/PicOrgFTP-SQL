@@ -2389,6 +2389,50 @@ function normalizedIdentityValue(value) {
   return String(value || "").trim().toUpperCase();
 }
 
+function productEntryLabel(entry = {}) {
+  const colors = [entry.color1, entry.color2, entry.color3].filter(Boolean).join(" / ");
+  const parts = [entry.name, entry.type_name, entry.model, colors, entry.extra].filter(Boolean);
+  const suffix = entry.ean ? `EAN ${entry.ean}` : entry.product_id || "";
+  return parts.join(" | ") + (suffix ? ` - ${suffix}` : "");
+}
+
+function entryFromProcessPayload(payload = {}, fallback = {}) {
+  const result = payload.entry || {};
+  const raw = result.entry || {};
+  const entry = {
+    product_id: result.product_id || raw.PRODUCT_ID || fallback.product_id || "",
+    ean: raw.EAN || fallback.ean || payload.ean || "",
+    name: raw.NAZWA || fallback.name || "",
+    type_name: raw.TYP || fallback.type_name || "",
+    model: raw.MODEL || fallback.model || "",
+    color1: raw.KOLOR1 || fallback.color1 || "",
+    color2: raw.KOLOR2 || fallback.color2 || "",
+    color3: raw.KOLOR3 || fallback.color3 || "",
+    extra: raw.DODATKI || fallback.extra || "",
+  };
+  entry.label = productEntryLabel(entry);
+  return entry;
+}
+
+function upsertProductEntry(entry = {}) {
+  if (!entry.product_id && !entry.ean) return;
+  const productId = normalizedIdentityValue(entry.product_id);
+  const ean = normalizedIdentityValue(entry.ean);
+  const entries = [...(state.entries || [])];
+  const index = entries.findIndex((item) => {
+    const itemProductId = normalizedIdentityValue(item.product_id);
+    const itemEan = normalizedIdentityValue(item.ean);
+    return (productId && itemProductId === productId) || (ean && itemEan === ean);
+  });
+  if (index >= 0) {
+    entries[index] = { ...entries[index], ...entry, label: entry.label || entries[index].label };
+  } else {
+    entries.unshift(entry);
+  }
+  state.entries = entries;
+  renderEntrySelect();
+}
+
 function productFieldsChangedSinceLoad() {
   if (!state.loadedEntryOriginal) {
     return false;
@@ -3780,8 +3824,14 @@ productForm.addEventListener("submit", async (event) => {
     updateFieldWarnings();
     state.deletedSlots.clear();
     clearSelectedFiles();
-    setBusy(true, "Odswiezanie list i wpisow...");
-    await refreshData();
+    setBusy(true, "Aktualizowanie listy wpisow...");
+    upsertProductEntry(entryFromProcessPayload(payload, state.loadedEntryOriginal));
+    if (payload.file_index) {
+      state.fileIndex = payload.file_index;
+    }
+    renderDatalists();
+    renderListEditor();
+    updateRuntimeMetrics();
     for (const item of payload.saved_files || []) {
       if (item.prefix) changedPrefixes.add(item.prefix);
     }

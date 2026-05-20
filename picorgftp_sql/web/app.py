@@ -897,6 +897,7 @@ def _append_existing_photo_sources(
     uploaded_slots: List[WebUploadedSlot],
     delete_requests: List[Dict[str, Any]],
     slot_by_prefix: Dict[str, Dict[str, str]],
+    existing_photos: Optional[List[Dict[str, Any]]] = None,
     cache_scope: str = "",
 ) -> List[str]:
     """Add existing local/FTP photos that need to be processed by the web form."""
@@ -908,12 +909,14 @@ def _append_existing_photo_sources(
     occupied_prefixes = {slot.prefix for slot in uploaded_slots}
     delete_prefixes = {str(item.get("prefix") or "") for item in delete_requests}
     appended: List[str] = []
-    photos = find_product_photos(
-        source_entry,
-        include_local=True,
-        include_ftp=bool(config.CONFIG.get(ft, True)),
-        include_sql=True,
-    )
+    photos = existing_photos
+    if photos is None:
+        photos = find_product_photos(
+            source_entry,
+            include_local=True,
+            include_ftp=bool(config.CONFIG.get(ft, True)),
+            include_sql=True,
+        )
     for photo in photos:
         prefix = str(photo.get("prefix") or "").strip()
         path = str(photo.get("path") or "").strip()
@@ -994,6 +997,7 @@ def _append_existing_photo_migrations(
     uploaded_slots: List[WebUploadedSlot],
     delete_requests: List[Dict[str, Any]],
     slot_by_prefix: Dict[str, Dict[str, str]],
+    existing_photos: Optional[List[Dict[str, Any]]] = None,
     cache_scope: str = "",
 ) -> List[str]:
     """Backward-compatible wrapper for tests and older call sites."""
@@ -1004,6 +1008,7 @@ def _append_existing_photo_migrations(
         uploaded_slots=uploaded_slots,
         delete_requests=delete_requests,
         slot_by_prefix=slot_by_prefix,
+        existing_photos=existing_photos,
         cache_scope=cache_scope,
     )
 
@@ -2041,11 +2046,12 @@ def create_app() -> FastAPI:
                 cache_scope=cache_scope,
             )
             photo_lookup_entry = existing_entry or _entry_payload_from_product(product)
+            include_sql_in_existing_photo_scan = existing_entry is not None
             existing_photos = find_product_photos(
                 photo_lookup_entry,
                 include_local=True,
                 include_ftp=bool(config.CONFIG.get(ft, True)),
-                include_sql=True,
+                include_sql=include_sql_in_existing_photo_scan,
             )
             existing_file_photos = [
                 photo for photo in existing_photos if _photo_has_file_source(photo)
@@ -2064,6 +2070,7 @@ def create_app() -> FastAPI:
                 uploaded_slots=uploaded_slots,
                 delete_requests=delete_requests,
                 slot_by_prefix=slot_by_prefix,
+                existing_photos=existing_photos,
                 cache_scope=cache_scope,
             )
             if existing_entry is None and existing_file_photos and not uploaded_slots and not delete_requests:
@@ -2200,7 +2207,7 @@ def create_app() -> FastAPI:
         payload["upload_cache"] = upload_cache_result
         payload["sql"] = sql_result
         payload["local_delete"] = local_delete_result
-        refresh_file_index()
+        payload["file_index"] = refresh_file_index()
         record_history(
             username=username,
             action="process",
