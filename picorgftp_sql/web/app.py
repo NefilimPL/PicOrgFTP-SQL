@@ -31,6 +31,7 @@ from ..common import (
     AUTO_CONTENT_FIT_KEY,
     H,
     K,
+    PROCESSING_SETTINGS_KEY,
     SQL_COLUMN_MAP_KEY,
     SQL_UPDATE_TEMPLATE,
     ft,
@@ -47,6 +48,7 @@ from ..workflow_utils import build_product_directory, parse_slot_filename, sanit
 from ..web_workflow import (
     WebProductForm,
     WebUploadedSlot,
+    preprocess_cached_upload,
     process_web_uploads,
     normalized_product_payload,
     processing_options_from_config,
@@ -100,6 +102,39 @@ ACTIVE_CLIENT_MAX_AGE_SECONDS = 180
 WEB_UPLOAD_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
 WEB_UPLOAD_CACHE_CLEAN_INTERVAL_SECONDS = 30 * 60
 _UPLOAD_CACHE_LAST_CLEANUP = 0.0
+
+
+def _elapsed_ms(started: float) -> int:
+    return int((time.perf_counter() - started) * 1000)
+
+
+def _timing_item(key: str, label: str, started: float, **details: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "key": key,
+        "label": label,
+        "elapsed_ms": _elapsed_ms(started),
+    }
+    if details:
+        payload["details"] = details
+    return payload
+
+
+def _timing_payload(stages: List[Dict[str, Any]], started: float) -> Dict[str, Any]:
+    return {"total_ms": _elapsed_ms(started), "stages": stages}
+
+
+def _processing_settings() -> Dict[str, Any]:
+    return config._normalize_processing_settings(
+        config.CONFIG.get(PROCESSING_SETTINGS_KEY, {})
+    )
+
+
+def _upload_processing_mode() -> str:
+    return str(_processing_settings().get("upload_processing_mode") or "save")
+
+
+def _show_timing_details() -> bool:
+    return bool(_processing_settings().get("show_timing_details", False))
 
 
 def _auth_enabled() -> bool:
@@ -1577,6 +1612,7 @@ def create_app() -> FastAPI:
             "config_path": runtime_info["config_path"],
             "version": get_display_version(),
             "auto_content_fit": bool(config.CONFIG.get(AUTO_CONTENT_FIT_KEY, False)),
+            "processing": _processing_settings(),
             "runtime_warning": runtime_info.get("warning"),
             "slots": slots,
             "admin_user": _admin_username(),
@@ -1683,22 +1719,49 @@ def create_app() -> FastAPI:
 
     @app.post("/api/upload-cache")
     async def upload_cache_api(request: Request) -> Dict[str, Any]:
+        started = time.perf_counter()
         username = _require_user(request)
         form = await request.form()
         upload = form.get("file")
         if not isinstance(upload, UploadFile) or not upload.filename:
             raise HTTPException(status_code=400, detail="Brak pliku do wyslania.")
+        original_name = upload.filename
         prefix = str(form.get("prefix") or "slot").strip() or "slot"
         cleanup_web_upload_cache()
+        save_started = time.perf_counter()
         path, size = await _save_upload_cache(upload, _user_cache_scope(request, username), prefix)
+        save_ms = _elapsed_ms(save_started)
+        preprocess_ms = 0
+        preprocessed = False
+        display_name = _safe_upload_name(original_name, os.path.basename(path))
+        if _upload_processing_mode() == "host":
+            preprocess_started = time.perf_counter()
+            path, display_name, preprocessed = await run_in_threadpool(
+                preprocess_cached_upload,
+                path,
+                original_name,
+                processing_options_from_config(config.CONFIG),
+            )
+            preprocess_ms = _elapsed_ms(preprocess_started)
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = 0
         token = _file_token(path)
         return {
             "token": token,
-            "name": _safe_upload_name(upload.filename, os.path.basename(path)),
+            "name": _safe_upload_name(display_name, os.path.basename(path)),
             "size_bytes": size,
+            "preprocessed": preprocessed,
             "file_version": _file_version(path),
             "url": _versioned_file_url(path, "/api/file", token),
             "thumb_url": _versioned_file_url(path, "/api/thumbnail", token),
+            "timing": {
+                "total_ms": _elapsed_ms(started),
+                "save_ms": save_ms,
+                "preprocess_ms": preprocess_ms,
+                "mode": _upload_processing_mode(),
+            },
         }
 
     @app.get("/api/entries/search")
@@ -1922,9 +1985,14 @@ def create_app() -> FastAPI:
 
     @app.post("/api/process")
     async def process_uploads(request: Request) -> JSONResponse:
+        process_started = time.perf_counter()
+        timings: List[Dict[str, Any]] = []
         username = _require_user(request)
         cache_scope = _user_cache_scope(request, username)
+        stage_started = time.perf_counter()
         form = await request.form()
+        timings.append(_timing_item("form", "Odczyt formularza", stage_started))
+        stage_started = time.perf_counter()
         slots = slot_definitions_from_config(config.CONFIG)
         slot_by_prefix = {slot["prefix"]: slot for slot in slots}
         temp_dir = tempfile.mkdtemp(prefix="picorg_web_upload_")
@@ -1959,6 +2027,10 @@ def create_app() -> FastAPI:
                             str(form.get(f"existing_slot_name_{prefix}") or ""),
                             os.path.basename(source_path),
                         )
+                        preprocessed = (
+                            str(form.get(f"existing_slot_preprocessed_{prefix}") or "")
+                            == "1"
+                        )
                         explicit_slot_prefixes.add(prefix)
                         uploaded_slots.append(
                             WebUploadedSlot(
@@ -1968,6 +2040,7 @@ def create_app() -> FastAPI:
                                 source_path=source_path,
                                 original_filename=original_filename,
                                 content_fit=_optional_form_bool(form, f"slot_fit_{prefix}"),
+                                preprocessed=preprocessed,
                             )
                         )
                         continue
@@ -2012,6 +2085,17 @@ def create_app() -> FastAPI:
             errors = validate_product_form(product)
             if errors:
                 raise ValueError(" ".join(errors))
+            timings.append(
+                _timing_item(
+                    "prepare",
+                    "Przygotowanie danych i slotow",
+                    stage_started,
+                    uploaded=len(uploaded_slots),
+                    deleted=len(delete_requests),
+                    ftp_pending=len(pending_ftp_slots),
+                )
+            )
+            stage_started = time.perf_counter()
             existing_entry = None
             if product.product_id.strip():
                 existing_entry = find_entry_by_identity(product_id=product.product_id)
@@ -2038,6 +2122,15 @@ def create_app() -> FastAPI:
                         ean=preserved_ean,
                         product_id=preserved_product_id,
                     )
+            timings.append(
+                _timing_item(
+                    "entry_lookup",
+                    "Wyszukanie istniejacego wpisu",
+                    stage_started,
+                    found=bool(existing_entry),
+                )
+            )
+            stage_started = time.perf_counter()
             _append_pending_ftp_slots(
                 product=product,
                 pending_ftp_slots=pending_ftp_slots,
@@ -2085,6 +2178,16 @@ def create_app() -> FastAPI:
                         ]
                     )
                 )
+            timings.append(
+                _timing_item(
+                    "photo_scan",
+                    "Sprawdzenie istniejacych zdjec",
+                    stage_started,
+                    found=len(existing_photos),
+                    migrated=len(migrated_prefixes),
+                )
+            )
+            stage_started = time.perf_counter()
             entry_result = save_web_entry(
                 {
                     "product_id": product.product_id,
@@ -2098,6 +2201,10 @@ def create_app() -> FastAPI:
                     "extra": product.extra,
                 }
             )
+            timings.append(
+                _timing_item("entry_save", "Zapis wpisu produktu", stage_started)
+            )
+            stage_started = time.perf_counter()
             result = process_web_uploads(
                 base_output_dir=settings.l,
                 form=product,
@@ -2105,8 +2212,27 @@ def create_app() -> FastAPI:
                 options=processing_options_from_config(config.CONFIG),
                 allow_empty=True,
             )
+            timings.append(
+                _timing_item(
+                    "local_files",
+                    "Zapis/przetwarzanie plikow lokalnych",
+                    stage_started,
+                    saved=len(result.saved_files),
+                )
+            )
+            stage_started = time.perf_counter()
             saved_paths = {os.path.abspath(item.path) for item in result.saved_files}
             local_delete_result = _delete_local_files(delete_requests, saved_paths)
+            timings.append(
+                _timing_item(
+                    "local_delete",
+                    "Usuwanie lokalne",
+                    stage_started,
+                    deleted=local_delete_result.get("deleted", 0),
+                    skipped=local_delete_result.get("skipped", 0),
+                )
+            )
+            stage_started = time.perf_counter()
             ftp_backfill_prefixes = {
                 str(item.get("prefix") or "")
                 for item in delete_requests
@@ -2140,6 +2266,17 @@ def create_app() -> FastAPI:
                 ftp_delete_candidates,
                 skip_upload_prefixes=skip_upload_prefixes,
             )
+            timings.append(
+                _timing_item(
+                    "ftp",
+                    "Synchronizacja FTP",
+                    stage_started,
+                    uploaded=ftp_result.get("uploaded", 0),
+                    deleted=ftp_result.get("deleted", 0),
+                    skipped=len(skip_upload_prefixes),
+                )
+            )
+            stage_started = time.perf_counter()
             changed_ftp_names = {
                 _remote_name_for_output(str(item.filename or ""))
                 for item in result.saved_files
@@ -2156,6 +2293,15 @@ def create_app() -> FastAPI:
                 changed_ftp_names,
                 cache_scope=cache_scope,
             )
+            timings.append(
+                _timing_item(
+                    "ftp_cache",
+                    "Czyszczenie cache FTP",
+                    stage_started,
+                    deleted=ftp_cache_result.get("deleted", 0),
+                )
+            )
+            stage_started = time.perf_counter()
             sql_result = _sync_result_to_sql(
                 result,
                 clear_prefixes={
@@ -2164,12 +2310,32 @@ def create_app() -> FastAPI:
                     if item.get("sql") or item.get("ftp_filename") or item.get("local_path")
                 },
             )
+            timings.append(
+                _timing_item(
+                    "sql",
+                    "Aktualizacja SQL",
+                    stage_started,
+                    updated=sql_result.get("updated", 0),
+                    cleared=sql_result.get("cleared", 0),
+                    skipped=bool(sql_result.get("skipped")),
+                )
+            )
+            stage_started = time.perf_counter()
             upload_cache_result = _delete_upload_cache_files(
                 [
                     str(slot.source_path or "")
                     for slot in uploaded_slots
                     if _is_upload_cache_path(str(slot.source_path or ""))
                 ]
+            )
+            timings.append(
+                _timing_item(
+                    "upload_cache",
+                    "Sprzatanie cache uploadu",
+                    stage_started,
+                    deleted=upload_cache_result.get("deleted", 0),
+                    skipped=upload_cache_result.get("skipped", 0),
+                )
             )
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
@@ -2207,7 +2373,13 @@ def create_app() -> FastAPI:
         payload["upload_cache"] = upload_cache_result
         payload["sql"] = sql_result
         payload["local_delete"] = local_delete_result
+        stage_started = time.perf_counter()
         payload["file_index"] = refresh_file_index()
+        timings.append(
+            _timing_item("file_index", "Odswiezenie indeksu lokalnego", stage_started)
+        )
+        payload["timing"] = _timing_payload(timings, process_started)
+        payload["show_timing_details"] = _show_timing_details()
         record_history(
             username=username,
             action="process",

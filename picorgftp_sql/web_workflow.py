@@ -104,6 +104,7 @@ class WebUploadedSlot:
     original_filename: str = ""
     filename_label: str = ""
     content_fit: bool | None = None
+    preprocessed: bool = False
 
 
 @dataclass(frozen=True)
@@ -312,9 +313,13 @@ def _save_processed_file(
     options: WebProcessingOptions,
     *,
     content_fit: bool = False,
+    already_processed: bool = False,
 ) -> None:
     """Copy or lightly process a browser-uploaded file to its target path."""
 
+    if already_processed and not content_fit:
+        shutil.copy2(source_path, target_path)
+        return
     ext = normalize_upload_extension(os.path.splitext(source_path)[1])
     if ext not in IMAGE_EXTENSIONS:
         shutil.copy2(source_path, target_path)
@@ -416,7 +421,13 @@ def process_web_uploads(
                 os.path.abspath(target_path)
             )
         if not same_target:
-            _save_processed_file(source_path, target_path, options, content_fit=content_fit)
+            _save_processed_file(
+                source_path,
+                target_path,
+                options,
+                content_fit=content_fit,
+                already_processed=bool(upload.preprocessed),
+            )
         saved_files.append(
             WebProcessedFile(
                 prefix=upload.prefix,
@@ -437,6 +448,40 @@ def process_web_uploads(
         saved_files=saved_files,
         skipped_slots=skipped_slots,
     )
+
+
+def _processing_changes_enabled(options: WebProcessingOptions) -> bool:
+    return bool(
+        options.resize_enabled
+        or options.compress_enabled
+        or options.max_size_enabled
+        or options.convert_enabled
+    )
+
+
+def preprocess_cached_upload(
+    source_path: str,
+    original_filename: str,
+    options: WebProcessingOptions | None = None,
+) -> tuple[str, str, bool]:
+    """Pre-process a cached browser upload and return path, display name and flag."""
+
+    options = options or WebProcessingOptions()
+    ext = os.path.splitext(original_filename or source_path)[1] or os.path.splitext(source_path)[1]
+    ext = normalize_upload_extension(ext)
+    if ext not in IMAGE_EXTENSIONS or Image is None or not _processing_changes_enabled(options):
+        return source_path, os.path.basename(original_filename or source_path), False
+    target_ext = _output_extension(ext, options)
+    target_path = f"{os.path.splitext(source_path)[0]}_processed{target_ext}"
+    _save_processed_file(source_path, target_path, options, content_fit=False)
+    try:
+        if os.path.abspath(target_path) != os.path.abspath(source_path):
+            os.remove(source_path)
+    except OSError:
+        pass
+    source_name = os.path.basename(original_filename or source_path)
+    display_name = f"{os.path.splitext(source_name)[0]}{target_ext}"
+    return target_path, display_name, True
 
 
 def processing_options_from_config(config_dict: dict) -> WebProcessingOptions:
