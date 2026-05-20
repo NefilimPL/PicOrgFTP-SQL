@@ -1319,6 +1319,15 @@ button.slot-badge.on:hover {
   color: var(--muted);
 }
 
+.timing-list .timing-section {
+  display: block;
+  margin-top: 4px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
 .error-text {
   color: var(--error);
 }

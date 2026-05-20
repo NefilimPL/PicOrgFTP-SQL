@@ -278,10 +278,12 @@ def _delete_upload_cache_files(paths: List[str]) -> Dict[str, Any]:
     deleted = 0
     skipped = 0
     errors: List[str] = []
+    touched_dirs: Set[str] = set()
     for raw_path in sorted({os.path.abspath(path) for path in paths if path}):
         if not _path_is_under_root(raw_path, root):
             skipped += 1
             continue
+        touched_dirs.add(os.path.dirname(raw_path))
         try:
             if os.path.isfile(raw_path):
                 os.remove(raw_path)
@@ -290,18 +292,18 @@ def _delete_upload_cache_files(paths: List[str]) -> Dict[str, Any]:
                 skipped += 1
         except OSError as exc:
             errors.append(f"{raw_path}: {exc}")
-    if os.path.isdir(root):
-        for current_root, dirs, _files in os.walk(root, topdown=False):
-            for dirname in dirs:
-                path = os.path.join(current_root, dirname)
-                try:
-                    os.rmdir(path)
-                except OSError:
-                    pass
-        try:
-            os.rmdir(root)
-        except OSError:
-            pass
+    for directory in sorted(touched_dirs, key=len, reverse=True):
+        current = os.path.abspath(directory)
+        while _path_is_under_root(current, root) and current != root:
+            try:
+                os.rmdir(current)
+            except OSError:
+                break
+            current = os.path.dirname(current)
+    try:
+        os.rmdir(root)
+    except OSError:
+        pass
     return {"deleted": deleted, "skipped": skipped, "errors": errors}
 
 
@@ -508,6 +510,11 @@ def _result_payload(result: Any) -> Dict[str, Any]:
                 "filename": item.filename,
                 "path": item.path,
                 "size_bytes": item.size_bytes,
+                "source_size_bytes": getattr(item, "source_size_bytes", 0),
+                "elapsed_ms": getattr(item, "elapsed_ms", 0),
+                "operation": getattr(item, "operation", ""),
+                "preprocessed": bool(getattr(item, "preprocessed", False)),
+                "content_fit": bool(getattr(item, "content_fit", False)),
             }
             for item in result.saved_files
         ],
@@ -2018,46 +2025,46 @@ def create_app() -> FastAPI:
                             require_exists=False,
                         )
                     delete_requests.append(delete_item)
+                token = str(form.get(f"existing_slot_{prefix}") or "").strip()
+                if token:
+                    source_path = _path_from_file_token(token)
+                    original_filename = _safe_upload_name(
+                        str(form.get(f"existing_slot_name_{prefix}") or ""),
+                        os.path.basename(source_path),
+                    )
+                    preprocessed = (
+                        str(form.get(f"existing_slot_preprocessed_{prefix}") or "")
+                        == "1"
+                    )
+                    explicit_slot_prefixes.add(prefix)
+                    uploaded_slots.append(
+                        WebUploadedSlot(
+                            prefix=prefix,
+                            label=slot["label"],
+                            filename_label=slot.get("filename_label", ""),
+                            source_path=source_path,
+                            original_filename=original_filename,
+                            content_fit=_optional_form_bool(form, f"slot_fit_{prefix}"),
+                            preprocessed=preprocessed,
+                        )
+                    )
+                    continue
+                ftp_filename = os.path.basename(str(form.get(f"existing_ftp_slot_{prefix}") or ""))
+                if ftp_filename:
+                    explicit_slot_prefixes.add(prefix)
+                    pending_ftp_slots.append(
+                        {
+                            "prefix": prefix,
+                            "label": slot["label"],
+                            "filename_label": slot.get("filename_label", ""),
+                            "filename": ftp_filename,
+                            "ean": str(form.get(f"existing_ftp_ean_{prefix}") or ""),
+                            "content_fit": _optional_form_bool(form, f"slot_fit_{prefix}"),
+                        }
+                    )
+                    continue
                 value = form.get(f"slot_{prefix}")
                 if not isinstance(value, UploadFile) or not value.filename:
-                    token = str(form.get(f"existing_slot_{prefix}") or "").strip()
-                    if token:
-                        source_path = _path_from_file_token(token)
-                        original_filename = _safe_upload_name(
-                            str(form.get(f"existing_slot_name_{prefix}") or ""),
-                            os.path.basename(source_path),
-                        )
-                        preprocessed = (
-                            str(form.get(f"existing_slot_preprocessed_{prefix}") or "")
-                            == "1"
-                        )
-                        explicit_slot_prefixes.add(prefix)
-                        uploaded_slots.append(
-                            WebUploadedSlot(
-                                prefix=prefix,
-                                label=slot["label"],
-                                filename_label=slot.get("filename_label", ""),
-                                source_path=source_path,
-                                original_filename=original_filename,
-                                content_fit=_optional_form_bool(form, f"slot_fit_{prefix}"),
-                                preprocessed=preprocessed,
-                            )
-                        )
-                        continue
-                    ftp_filename = os.path.basename(str(form.get(f"existing_ftp_slot_{prefix}") or ""))
-                    if ftp_filename:
-                        explicit_slot_prefixes.add(prefix)
-                        pending_ftp_slots.append(
-                            {
-                                "prefix": prefix,
-                                "label": slot["label"],
-                                "filename_label": slot.get("filename_label", ""),
-                                "filename": ftp_filename,
-                                "ean": str(form.get(f"existing_ftp_ean_{prefix}") or ""),
-                                "content_fit": _optional_form_bool(form, f"slot_fit_{prefix}"),
-                            }
-                        )
-                        continue
                     continue
                 source_path = await _save_upload(value, temp_dir, prefix)
                 explicit_slot_prefixes.add(prefix)

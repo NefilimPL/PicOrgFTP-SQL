@@ -58,6 +58,20 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertNotIn("shouldRepair = photoNeedsRepair", source)
         self.assertNotIn("shouldSyncLocal = !updateMode", source)
 
+    def test_web_submit_removes_cached_slot_file_inputs(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        delete_index = source.index("data.delete(`slot_${slot.prefix}`);")
+        cache_index = source.index("data.set(`existing_slot_${prefix}`, token);")
+        self.assertLess(delete_index, cache_index)
+
 
 if __name__ == "__main__":
     unittest.main()

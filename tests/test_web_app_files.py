@@ -78,7 +78,8 @@ class WebAppFileTests(unittest.TestCase):
             processed_file.write_bytes(b"keep")
 
             with patch.object(web_app.settings, "AC", str(temp_dir)):
-                result = web_app._delete_upload_cache_files([str(cached), str(processed_file)])
+                with patch.object(web_app.os, "walk", side_effect=AssertionError("os.walk")):
+                    result = web_app._delete_upload_cache_files([str(cached), str(processed_file)])
 
             self.assertEqual(result["deleted"], 1)
             self.assertEqual(result["skipped"], 1)

@@ -285,6 +285,13 @@ function formatDuration(ms) {
   return `${(value / 1000).toFixed(1)} s`;
 }
 
+function formatFileSize(bytes) {
+  const value = Math.max(0, Number(bytes || 0));
+  if (value < 1024) return `${Math.round(value)} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function currentProcessingSettings() {
   return state.settings?.processing || state.processing || {};
 }
@@ -2192,20 +2199,59 @@ function showError(error) {
   resultOutput.textContent = error.message || String(error);
 }
 
-function renderTimingDetails(timing) {
-  if (!timing?.stages?.length) return null;
+function processingOperationLabel(operation) {
+  const labels = {
+    copy_preprocessed: "kopiowanie po obrobce",
+    copy_without_processing: "kopiowanie bez obrobki",
+    copy_document: "kopiowanie dokumentu",
+    copy_unsupported_image: "kopiowanie formatu bez obrobki",
+    copy_no_pillow: "kopiowanie bez Pillow",
+    process_image: "resize/kompresja",
+    same_target: "bez kopiowania",
+  };
+  return labels[operation] || operation || "plik";
+}
+
+function renderTimingDetails(timing, savedFiles = []) {
+  const stages = timing?.stages || [];
+  const files = savedFiles || [];
+  if (!stages.length && !files.length) return null;
   const box = document.createElement("details");
   const summary = document.createElement("summary");
   const list = document.createElement("div");
   box.className = "timing-details";
-  summary.textContent = `Czas operacji: ${formatDuration(timing.total_ms)}`;
+  summary.textContent = `Czas operacji: ${formatDuration(timing?.total_ms)}`;
   list.className = "timing-list";
-  for (const stage of timing.stages || []) {
+  for (const stage of stages) {
     const row = document.createElement("div");
     const label = document.createElement("span");
     const value = document.createElement("strong");
     label.textContent = stage.label || stage.key || "Etap";
     value.textContent = formatDuration(stage.elapsed_ms);
+    row.append(label, value);
+    list.appendChild(row);
+  }
+  if (files.length) {
+    const section = document.createElement("div");
+    section.className = "timing-section";
+    section.textContent = "Pliki";
+    list.appendChild(section);
+  }
+  for (const file of files) {
+    const row = document.createElement("div");
+    const label = document.createElement("span");
+    const value = document.createElement("strong");
+    const flags = [];
+    if (file.preprocessed) flags.push("preprocessed");
+    if (file.content_fit) flags.push("FIT");
+    const sizes =
+      file.source_size_bytes || file.size_bytes
+        ? ` (${formatFileSize(file.source_size_bytes)} -> ${formatFileSize(file.size_bytes)})`
+        : "";
+    const suffix = flags.length ? `, ${flags.join(", ")}` : "";
+    const operation = processingOperationLabel(file.operation);
+    label.textContent = `${file.prefix || "Slot"} - ${operation}${suffix}${sizes}`;
+    value.textContent = formatDuration(file.elapsed_ms);
     row.append(label, value);
     list.appendChild(row);
   }
@@ -2286,7 +2332,7 @@ function showResult(payload) {
     resultOutput.appendChild(sql);
   }
   if (payload.show_timing_details) {
-    const timing = renderTimingDetails(payload.timing);
+    const timing = renderTimingDetails(payload.timing, payload.saved_files || []);
     if (timing) resultOutput.appendChild(timing);
   }
 }
@@ -4011,6 +4057,9 @@ productForm.addEventListener("submit", async (event) => {
     );
     const changedPrefixes = pendingChangedSlotPrefixes();
     const data = new FormData(productForm);
+    for (const slot of state.slots || []) {
+      data.delete(`slot_${slot.prefix}`);
+    }
     for (const [prefix, item] of state.files.entries()) {
       const token = slotFileToken(item);
       if (token) {

@@ -383,6 +383,9 @@ class WebWorkflowTests(unittest.TestCase):
 
             image_open.assert_not_called()
             self.assertTrue(Path(result.saved_files[0].path).is_file())
+            self.assertEqual(result.saved_files[0].operation, "copy_preprocessed")
+            self.assertTrue(result.saved_files[0].preprocessed)
+            self.assertGreaterEqual(result.saved_files[0].elapsed_ms, 0)
 
     def test_preprocess_cached_upload_converts_cache_file_once(self) -> None:
         if Image is None:
