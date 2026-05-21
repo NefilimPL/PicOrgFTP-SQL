@@ -2011,6 +2011,21 @@ function renderSlot(prefix) {
   updateSubmitButtonState();
 }
 
+function renderChangedSlots(prefixes, options = {}) {
+  const uniquePrefixes = [...new Set([...(prefixes || [])].map((prefix) => String(prefix || "")).filter(Boolean))];
+  for (const prefix of uniquePrefixes) {
+    if (options.skipPendingUserEdits && slotHasPendingUserEdit(prefix)) continue;
+    renderSlot(prefix);
+  }
+}
+
+function renderSlotsExceptPendingUserEdits(prefixes = null) {
+  const targetPrefixes = prefixes
+    ? [...prefixes]
+    : (state.slots || []).map((slot) => slot.prefix);
+  renderChangedSlots(targetPrefixes, { skipPendingUserEdits: true });
+}
+
 function renderSlots(slots = state.slots) {
   slotGrid.textContent = "";
   state.slots = slots;
@@ -2877,11 +2892,16 @@ function setPhotoSourceStatus(source, status, requestId) {
 }
 
 function applyPhotoPayload(photos = [], options = {}) {
-  let changed = false;
+  const changedPrefixes = new Set();
   const allowedPrefixes = options.prefixes instanceof Set ? options.prefixes : null;
   for (const photo of photos) {
     if (!photo?.prefix) continue;
     if (allowedPrefixes && !allowedPrefixes.has(photo.prefix)) continue;
+    if (!options.force && state.files.has(photo.prefix)) {
+      const existing = state.loadedPhotos.get(photo.prefix) || {};
+      state.loadedPhotos.set(photo.prefix, mergePhotoRecord(existing, photo));
+      continue;
+    }
     if (!options.force && slotHasPendingUserEdit(photo.prefix)) continue;
     const existing = state.loadedPhotos.get(photo.prefix) || {};
     const merged = mergePhotoRecord(existing, photo);
@@ -2904,15 +2924,22 @@ function applyPhotoPayload(photos = [], options = {}) {
       }
       state.userSelectedSlotSources.delete(photo.prefix);
     }
-    changed = true;
+    changedPrefixes.add(photo.prefix);
   }
-  if (changed) {
-    renderSlots();
+  if (changedPrefixes.size) {
+    renderChangedSlots(changedPrefixes);
     scheduleBackgroundFtpPreviewLoad(undefined, 1500);
   }
+  return changedPrefixes;
 }
 
-async function requestEntryPhotos(entry, source, prefixes = null) {
+function photoRequestTimeoutMs(source) {
+  if (source === "ftp") return 15000;
+  if (source === "all") return 25000;
+  return 20000;
+}
+
+async function requestEntryPhotos(entry, source, prefixes = null, options = {}) {
   const params = new URLSearchParams({ source });
   if (prefixes && prefixes.size) {
     params.set("prefixes", [...prefixes].join(","));
@@ -2921,6 +2948,7 @@ async function requestEntryPhotos(entry, source, prefixes = null) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(entry),
+    timeoutMs: Number(options.timeoutMs || photoRequestTimeoutMs(source)),
   });
 }
 
@@ -2951,10 +2979,9 @@ function clearStaleBackgroundFtpPhotos(activeKey) {
     state.slotSources.delete(prefix);
     state.userSelectedSlotSources.delete(prefix);
     changed = true;
+    renderSlot(prefix);
   }
-  if (changed) {
-    renderSlots();
-  }
+  if (changed) updateSubmitButtonState();
 }
 
 async function loadBackgroundFtpPhotosForCurrentForm() {
@@ -2971,7 +2998,7 @@ async function loadBackgroundFtpPhotosForCurrentForm() {
   const requestId = state.backgroundFtpLookupRequestId + 1;
   state.backgroundFtpLookupRequestId = requestId;
   try {
-    const payload = await requestEntryPhotos(entry, "ftp");
+    const payload = await requestEntryPhotos(entry, "ftp", null, { timeoutMs: 15000 });
     if (state.backgroundFtpLookupRequestId !== requestId) return;
     if (backgroundFtpLookupKey() !== key) return;
     const photos = (payload.photos || []).map((photo) => ({
@@ -3039,7 +3066,7 @@ async function loadPhotosForEntry(entry, options = {}) {
   }
   formStatus.textContent = photoLoadingText();
   if (!partial) {
-    renderSlots();
+    renderSlotsExceptPendingUserEdits();
   }
   const tasks = sources.map(async (source) => {
     setPhotoSourceStatus(source, "loading", requestId);
@@ -3099,7 +3126,7 @@ async function loadPhotosForEntry(entry, options = {}) {
       }
     }
     updateRuntimeMetrics();
-    renderSlots();
+    renderSlotsExceptPendingUserEdits(partial ? targetPrefixes : null);
     scheduleBackgroundFtpPreviewLoad(requestId, 1500);
   }
 }
