@@ -38,6 +38,9 @@ const state = {
   backgroundFtpPreviewLimit: 1,
   photoSourcesLoaded: new Set(),
   ftpEnabled: true,
+  backgroundFtpLookupTimer: 0,
+  backgroundFtpLookupKey: "",
+  backgroundFtpLookupRequestId: 0,
   processing: {},
   slotRevisions: new Map(),
   userSelectedSlotSources: new Set(),
@@ -2921,6 +2924,79 @@ async function requestEntryPhotos(entry, source, prefixes = null) {
   });
 }
 
+function backgroundFtpLookupKey(fields = formPayload()) {
+  const ean = normalizedIdentityValue(fields.ean);
+  if (!state.ftpEnabled || !/^\d{13}$/.test(ean)) return "";
+  for (const fieldName of ["name", "type_name", "model", "color1"]) {
+    if (!String(fields[fieldName] || "").trim()) return "";
+  }
+  return [
+    ean,
+    normalizedIdentityValue(fields.name),
+    normalizedIdentityValue(fields.type_name),
+    normalizedIdentityValue(fields.model),
+    normalizedIdentityValue(fields.color1),
+    normalizedIdentityValue(fields.color2),
+    normalizedIdentityValue(fields.color3),
+    normalizedIdentityValue(fields.extra),
+  ].join("|");
+}
+
+function clearStaleBackgroundFtpPhotos(activeKey) {
+  let changed = false;
+  for (const [prefix, photo] of Array.from(state.loadedPhotos.entries())) {
+    if (!photo?.background_ftp_key || photo.background_ftp_key === activeKey) continue;
+    if (slotHasPendingUserEdit(prefix)) continue;
+    state.loadedPhotos.delete(prefix);
+    state.slotSources.delete(prefix);
+    state.userSelectedSlotSources.delete(prefix);
+    changed = true;
+  }
+  if (changed) {
+    renderSlots();
+  }
+}
+
+async function loadBackgroundFtpPhotosForCurrentForm() {
+  const entry = formPayload();
+  const key = backgroundFtpLookupKey(entry);
+  if (!key) {
+    state.backgroundFtpLookupKey = "";
+    clearStaleBackgroundFtpPhotos("");
+    return;
+  }
+  clearStaleBackgroundFtpPhotos(key);
+  if (state.backgroundFtpLookupKey === key) return;
+  state.backgroundFtpLookupKey = key;
+  const requestId = state.backgroundFtpLookupRequestId + 1;
+  state.backgroundFtpLookupRequestId = requestId;
+  try {
+    const payload = await requestEntryPhotos(entry, "ftp");
+    if (state.backgroundFtpLookupRequestId !== requestId) return;
+    if (backgroundFtpLookupKey() !== key) return;
+    const photos = (payload.photos || []).map((photo) => ({
+      ...photo,
+      background_ftp_key: key,
+    }));
+    applyPhotoPayload(photos, { force: false });
+    if (photos.length) {
+      formStatus.textContent = `Znaleziono zdjecia FTP: ${photos.length}.`;
+    }
+    updateSubmitButtonState();
+  } catch (error) {
+    if (state.backgroundFtpLookupRequestId === requestId && showTimingDetails()) {
+      formStatus.textContent = `Nie udalo sie sprawdzic FTP w tle: ${error.message}`;
+    }
+  }
+}
+
+function scheduleBackgroundFtpLookup(delay = 900) {
+  window.clearTimeout(state.backgroundFtpLookupTimer);
+  state.backgroundFtpLookupTimer = window.setTimeout(() => {
+    loadBackgroundFtpPhotosForCurrentForm().catch(() => {});
+  }, delay);
+}
+
 function clearSelectedFiles() {
   for (const prefix of Array.from(state.filePreviewUrls.keys())) {
     revokeFilePreviewUrl(prefix);
@@ -2945,6 +3021,9 @@ async function loadPhotosForEntry(entry, options = {}) {
     state.ftpPreviewLoading.clear();
     state.ftpPreviewBackgroundLoading.clear();
     state.photoSourcesLoaded.clear();
+    state.backgroundFtpLookupKey = "";
+    state.backgroundFtpLookupRequestId += 1;
+    window.clearTimeout(state.backgroundFtpLookupTimer);
   } else {
     for (const prefix of targetPrefixes) {
       state.ftpPreviewLoading.delete(prefix);
@@ -3035,6 +3114,9 @@ function fillForm(entry, options = {}) {
   state.ftpPreviewLoading.clear();
   state.ftpPreviewBackgroundLoading.clear();
   state.photoSourcesLoaded.clear();
+  state.backgroundFtpLookupKey = "";
+  state.backgroundFtpLookupRequestId += 1;
+  window.clearTimeout(state.backgroundFtpLookupTimer);
   productForm.elements.product_id.value = entry.product_id || "";
   productForm.elements.name.value = entry.name || "";
   productForm.elements.type_name.value = entry.type_name || "";
@@ -4030,6 +4112,10 @@ for (const name of ["name", "type_name", "model"]) {
   productForm.elements[name].addEventListener("input", scheduleProductAutoSearch);
 }
 
+for (const name of trackedProductFields) {
+  productForm.elements[name]?.addEventListener("input", () => scheduleBackgroundFtpLookup());
+}
+
 for (const name of Object.keys(fieldListKey)) {
   productForm.elements[name]?.addEventListener("change", () => {
     promptAddProductFieldToList(name).catch((error) => {
@@ -4175,6 +4261,9 @@ clearButton.addEventListener("click", () => {
   state.ftpPreviewLoading.clear();
   state.ftpPreviewBackgroundLoading.clear();
   state.photoSourcesLoaded.clear();
+  state.backgroundFtpLookupKey = "";
+  state.backgroundFtpLookupRequestId += 1;
+  window.clearTimeout(state.backgroundFtpLookupTimer);
   window.clearTimeout(state.backgroundFtpPreviewTimer);
   state.loadedEntryOriginal = null;
   state.lastAutoSearchKey = "";

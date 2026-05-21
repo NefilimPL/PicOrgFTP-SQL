@@ -72,6 +72,21 @@ class SourceIntegrityTests(unittest.TestCase):
         cache_index = source.index("data.set(`existing_slot_${prefix}`, token);")
         self.assertLess(delete_index, cache_index)
 
+    def test_web_has_background_ftp_lookup_without_forcing_slot_edits(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        self.assertIn('requestEntryPhotos(entry, "ftp")', source)
+        self.assertIn("background_ftp_key", source)
+        self.assertIn("applyPhotoPayload(photos, { force: false })", source)
+        self.assertIn("scheduleBackgroundFtpLookup", source)
+
 
 if __name__ == "__main__":
     unittest.main()

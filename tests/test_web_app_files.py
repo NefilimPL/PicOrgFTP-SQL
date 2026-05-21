@@ -829,6 +829,59 @@ class WebAppFileTests(unittest.TestCase):
                 ["5901234567890_03.jpg", "5901234567890_02.jpg"],
             )
 
+    def test_ftp_only_existing_photos_backfill_unoccupied_slots(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            uploaded_source = Path(temp_dir) / "new-14.jpg"
+            cache_file = Path(temp_dir) / "5901234567890_15.jpg"
+            uploaded_source.write_bytes(b"new")
+            cache_file.write_bytes(b"ftp")
+            product = web_app.WebProductForm(
+                ean="5901234567890",
+                name="MAGGIORE",
+                type_name="KOMODA",
+                model="MA03",
+                color1="BIALY",
+            )
+            uploaded_slots = [
+                web_app.WebUploadedSlot(
+                    prefix="14",
+                    label="DETAIL_pic",
+                    source_path=str(uploaded_source),
+                    original_filename="new-14.jpg",
+                )
+            ]
+            delete_requests = []
+            existing_photos = [
+                {"ean": "5901234567890", "prefix": "14", "ftp": True, "ftp_filename": "5901234567890_14.jpg"},
+                {"ean": "5901234567890", "prefix": "15", "ftp": True, "ftp_filename": "5901234567890_15.jpg"},
+            ]
+
+            with patch.object(web_app, "cache_ftp_preview", return_value=str(cache_file)) as cache_ftp:
+                appended = web_app._append_existing_photo_migrations(
+                    existing_entry=None,
+                    product=product,
+                    uploaded_slots=uploaded_slots,
+                    delete_requests=delete_requests,
+                    slot_by_prefix={
+                        "14": {"prefix": "14", "label": "DETAIL_pic"},
+                        "15": {"prefix": "15", "label": "DETAIL_pic"},
+                    },
+                    existing_photos=existing_photos,
+                )
+
+            self.assertEqual(appended, ["15"])
+            self.assertEqual([slot.prefix for slot in uploaded_slots], ["14", "15"])
+            self.assertEqual(uploaded_slots[0].source_path, str(uploaded_source))
+            self.assertEqual(uploaded_slots[1].source_path, str(cache_file))
+            self.assertEqual(delete_requests[0]["prefix"], "15")
+            self.assertTrue(delete_requests[0]["ftp_backfill"])
+            cache_ftp.assert_called_once_with(
+                "5901234567890",
+                "5901234567890_15.jpg",
+                cache_scope="",
+            )
+
     def test_log_parser_groups_traceback_into_one_critical_event(self) -> None:
         events = web_app._parse_log_events(
             {
@@ -986,6 +1039,21 @@ class WebAppFileTests(unittest.TestCase):
             label="DETAIL_pic",
             source_path="cache.jpg",
             original_filename="5901234567890_03.jpg",
+        )
+        conflicts = web_app._existing_photo_conflicts(
+            [{"prefix": "03", "ftp": True, "ftp_filename": "5901234567890_03.jpg"}],
+            [upload],
+            [],
+        )
+
+        self.assertEqual(conflicts, [])
+
+    def test_existing_photo_conflicts_allows_upload_to_replace_ftp_only_slot(self) -> None:
+        upload = web_app.WebUploadedSlot(
+            prefix="03",
+            label="DETAIL_pic",
+            source_path="new.jpg",
+            original_filename="new.jpg",
         )
         conflicts = web_app._existing_photo_conflicts(
             [{"prefix": "03", "ftp": True, "ftp_filename": "5901234567890_03.jpg"}],

@@ -884,6 +884,8 @@ def _existing_photo_conflicts(
         prefix = str(photo.get("prefix") or "").strip()
         if not prefix or prefix not in uploaded_by_prefix or prefix in delete_prefixes:
             continue
+        if photo.get("ftp") and not photo.get("local"):
+            continue
         source_path = str(photo.get("path") or "").strip()
         source_path = source_path if source_path and os.path.isfile(source_path) else ""
         upload = uploaded_by_prefix[prefix]
