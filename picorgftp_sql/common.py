@@ -274,6 +274,8 @@ DEFAULT_CONFIG.setdefault(
         "max_file_kb": 500,
         "convert_enabled": False,
         "target_format": "PNG",
+        "upload_processing_mode": "save",
+        "show_timing_details": False,
     },
 )
 DEFAULT_CONFIG.setdefault(COLOR_FIELD_LABELS_KEY, {})

@@ -38,6 +38,10 @@ const state = {
   backgroundFtpPreviewLimit: 1,
   photoSourcesLoaded: new Set(),
   ftpEnabled: true,
+  backgroundFtpLookupTimer: 0,
+  backgroundFtpLookupKey: "",
+  backgroundFtpLookupRequestId: 0,
+  processing: {},
   slotRevisions: new Map(),
   userSelectedSlotSources: new Set(),
   slotUploadRequestId: 0,
@@ -219,6 +223,9 @@ function slotFileItem(value) {
     url: "",
     thumb_url: "",
     file_version: "",
+    preprocessed: false,
+    cache_timing: null,
+    client_preprocess_ms: 0,
     progress: 0,
     uploading: false,
     error: "",
@@ -272,6 +279,32 @@ function fileLabel(file) {
   if (isSlotUploadActive(item)) return `${base} - wysylanie ${slotUploadProgress(item)}%`;
   if (slotFileToken(item)) return `${base} - w cache`;
   return base;
+}
+
+function formatDuration(ms) {
+  const value = Math.max(0, Number(ms || 0));
+  if (value < 1000) return `${Math.round(value)} ms`;
+  if (value < 10000) return `${(value / 1000).toFixed(2)} s`;
+  return `${(value / 1000).toFixed(1)} s`;
+}
+
+function formatFileSize(bytes) {
+  const value = Math.max(0, Number(bytes || 0));
+  if (value < 1024) return `${Math.round(value)} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function currentProcessingSettings() {
+  return state.settings?.processing || state.processing || {};
+}
+
+function uploadProcessingMode() {
+  return currentProcessingSettings().upload_processing_mode || "save";
+}
+
+function showTimingDetails() {
+  return Boolean(currentProcessingSettings().show_timing_details);
 }
 
 function updateRuntimeMetrics() {
@@ -1079,6 +1112,9 @@ function createSlotFileUpload(prefix, file) {
     url: "",
     thumb_url: "",
     file_version: "",
+    preprocessed: false,
+    cache_timing: null,
+    client_preprocess_ms: 0,
     progress: 0,
     uploading: false,
     error: "",
@@ -1108,9 +1144,124 @@ function refreshFileItemSlots(item) {
   updateSubmitButtonState();
 }
 
+function clientTargetFormatInfo(file) {
+  const settings = currentProcessingSettings();
+  const sourceType = String(file?.type || "").toLowerCase();
+  const sourceName = String(file?.name || "");
+  const sourceExt = sourceName.split(".").pop()?.toLowerCase() || "";
+  if (settings.convert_enabled) {
+    const target = String(settings.target_format || "PNG").toUpperCase();
+    if (target === "JPG" || target === "JPEG") return { type: "image/jpeg", ext: "jpg" };
+    if (target === "PNG") return { type: "image/png", ext: "png" };
+    if (target === "WEBP") return { type: "image/webp", ext: "webp" };
+  }
+  if (sourceType === "image/jpeg" || sourceExt === "jpg" || sourceExt === "jpeg") {
+    return { type: "image/jpeg", ext: "jpg" };
+  }
+  if (sourceType === "image/png" || sourceExt === "png") return { type: "image/png", ext: "png" };
+  if (sourceType === "image/webp" || sourceExt === "webp") return { type: "image/webp", ext: "webp" };
+  return null;
+}
+
+function canvasToBlob(canvas, type, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (blob) {
+          resolve(blob);
+        } else {
+          reject(new Error("Przegladarka nie utworzyla przetworzonego obrazu."));
+        }
+      },
+      type,
+      quality
+    );
+  });
+}
+
+function loadImageForProcessing(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Nie udalo sie odczytac obrazu po stronie klienta."));
+    };
+    image.src = url;
+  });
+}
+
+async function preprocessFileOnClient(file) {
+  const settings = currentProcessingSettings();
+  if (uploadProcessingMode() !== "client") {
+    return { file, preprocessed: false, elapsed_ms: 0 };
+  }
+  if (
+    !settings.resize_enabled &&
+    !settings.compress_enabled &&
+    !settings.max_size_enabled &&
+    !settings.convert_enabled
+  ) {
+    return { file, preprocessed: false, elapsed_ms: 0 };
+  }
+  const format = clientTargetFormatInfo(file);
+  if (!format) {
+    return { file, preprocessed: false, elapsed_ms: 0 };
+  }
+  const started = performance.now();
+  const image = await loadImageForProcessing(file);
+  const maxDim = Math.max(64, Math.min(20000, Number(settings.max_dim || 2000)));
+  let width = image.naturalWidth || image.width;
+  let height = image.naturalHeight || image.height;
+  if (settings.resize_enabled && Math.max(width, height) > maxDim) {
+    const scale = maxDim / Math.max(width, height);
+    width = Math.max(1, Math.round(width * scale));
+    height = Math.max(1, Math.round(height * scale));
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d", { alpha: format.type !== "image/jpeg" });
+  if (!ctx) {
+    return { file, preprocessed: false, elapsed_ms: performance.now() - started };
+  }
+  if (format.type === "image/jpeg") {
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+  }
+  ctx.drawImage(image, 0, 0, width, height);
+  const qualityBase = Math.max(1, Math.min(100, Number(settings.compress_quality || 85))) / 100;
+  let quality = settings.compress_enabled ? qualityBase : 0.95;
+  let blob = await canvasToBlob(canvas, format.type, quality);
+  if (settings.max_size_enabled && ["image/jpeg", "image/webp"].includes(format.type)) {
+    const maxBytes = Math.max(1, Number(settings.max_file_kb || 500)) * 1024;
+    while (blob.size > maxBytes && quality > 0.1) {
+      quality = Math.max(0.1, quality - 0.05);
+      blob = await canvasToBlob(canvas, format.type, quality);
+    }
+  }
+  const sourceName = String(file.name || "upload");
+  const stem = sourceName.includes(".") ? sourceName.replace(/\.[^.]+$/, "") : sourceName;
+  const processed = new File([blob], `${stem}.${format.ext}`, {
+    type: format.type,
+    lastModified: Date.now(),
+  });
+  return {
+    file: processed,
+    preprocessed: true,
+    elapsed_ms: performance.now() - started,
+    original_size: file.size || 0,
+  };
+}
+
 function uploadSlotFile(prefix, item) {
   const file = slotFileObject(item);
   if (!file) return;
+  const requestId = item.id;
   item.uploading = true;
   item.progress = 0;
   item.error = "";
@@ -1118,9 +1269,15 @@ function uploadSlotFile(prefix, item) {
   item.url = "";
   item.thumb_url = "";
   item.file_version = "";
-  const data = new FormData();
-  data.set("prefix", prefix);
-  data.set("file", file, slotFileName(item));
+  item.preprocessed = false;
+  item.client_preprocess_ms = 0;
+  item.original_size = Number(file.size || item.size || 0);
+  refreshFileItemSlots(item);
+  const sendUpload = (uploadFile, clientPreprocessed = false) => {
+    if (item.id !== requestId) return;
+    const data = new FormData();
+    data.set("prefix", prefix);
+    data.set("file", uploadFile, uploadFile.name || slotFileName(item));
   const xhr = new XMLHttpRequest();
   item.xhr = xhr;
   xhr.upload.addEventListener("progress", (event) => {
@@ -1157,13 +1314,20 @@ function uploadSlotFile(prefix, item) {
     item.url = payload.url || "";
     item.thumb_url = payload.thumb_url || "";
     item.file_version = payload.file_version || "";
+    item.preprocessed = Boolean(payload.preprocessed || clientPreprocessed);
+    item.client_preprocess_ms = item.client_preprocess_ms || 0;
+    item.cache_timing = payload.timing || null;
     item.name = payload.name || item.name;
     item.size = Number(payload.size_bytes || item.size || 0);
     item.progress = 100;
     item.uploading = false;
     item.error = "";
     item.xhr = null;
-    formStatus.textContent = `Plik dla slotu ${prefix} jest w cache.`;
+    const timingText =
+      showTimingDetails() && payload.timing?.total_ms
+        ? ` (${formatDuration(payload.timing.total_ms)})`
+        : "";
+    formStatus.textContent = `Plik dla slotu ${prefix} jest w cache${timingText}.`;
     refreshFileItemSlots(item);
   });
   xhr.addEventListener("error", () => {
@@ -1182,6 +1346,25 @@ function uploadSlotFile(prefix, item) {
   xhr.open("POST", "/api/upload-cache");
   xhr.responseType = "json";
   xhr.send(data);
+  };
+  preprocessFileOnClient(file)
+    .then((prepared) => {
+      if (item.id !== requestId) return;
+      item.client_preprocess_ms = Math.round(prepared.elapsed_ms || 0);
+      if (prepared.preprocessed) {
+        item.file = prepared.file;
+        item.name = prepared.file.name || item.name;
+        item.size = Number(prepared.file.size || item.size || 0);
+      }
+      sendUpload(prepared.file, prepared.preprocessed);
+    })
+    .catch((error) => {
+      item.uploading = false;
+      item.error = error.message || "Nie udalo sie przygotowac obrazu po stronie klienta.";
+      item.xhr = null;
+      formStatus.textContent = `Blad uploadu slotu ${prefix}: ${item.error}`;
+      refreshFileItemSlots(item);
+    });
   updateSubmitButtonState();
 }
 
@@ -1535,7 +1718,8 @@ function moveSlotContent(sourcePrefix, targetPrefix) {
   setSlotAssignment(targetPrefix, source, { markDelete: false });
   clearSlotAssignment(sourcePrefix, { markDelete: false });
   formStatus.textContent = `Przeniesiono slot ${sourcePrefix} -> ${targetPrefix}.`;
-  renderSlots();
+  renderSlot(targetPrefix);
+  renderSlot(sourcePrefix);
 }
 
 function updateSlotPreview(prefix) {
@@ -1634,12 +1818,7 @@ function updateSlotPreview(prefix) {
       : slotStatusText(loadedPhoto, prefix);
 }
 
-function renderSlots(slots = state.slots) {
-  slotGrid.textContent = "";
-  state.slots = slots;
-  slotCount.textContent = `${slots.length} pol`;
-
-  for (const slot of slots) {
+function createSlotNode(slot) {
     const node = slotTemplate.content.firstElementChild.cloneNode(true);
     const title = node.querySelector(".slot-meta strong");
     const detail = node.querySelector(".slot-meta span");
@@ -1702,7 +1881,7 @@ function renderSlots(slots = state.slots) {
       formStatus.textContent = hadSavedPhoto
         ? `Oznaczono slot ${slot.prefix} do usuniecia przy zapisie.`
         : `Wyczyszczono slot ${slot.prefix}.`;
-      renderSlots();
+      renderSlot(slot.prefix);
     });
     if (selectedFile || loadedPhoto) {
       const hasOpenableFile =
@@ -1801,7 +1980,7 @@ function renderSlots(slots = state.slots) {
       if (file) {
         state.draggedSlotPrefix = "";
         setSlotFile(slot.prefix, file);
-        renderSlots();
+        renderSlot(slot.prefix);
       }
     });
 
@@ -1811,14 +1990,49 @@ function renderSlots(slots = state.slots) {
         bumpSlotRevision(slot.prefix);
         revokeFilePreviewUrl(slot.prefix);
         state.files.delete(slot.prefix);
-        renderSlots();
+        renderSlot(slot.prefix);
         return;
       }
       setSlotFile(slot.prefix, file);
-      renderSlots();
+      renderSlot(slot.prefix);
     });
 
-    slotGrid.appendChild(node);
+    return node;
+}
+
+function renderSlot(prefix) {
+  const slot = (state.slots || []).find((item) => String(item.prefix) === String(prefix));
+  const existing = slotGrid.querySelector(`[data-slot-prefix="${prefix}"]`);
+  if (!slot || !existing) {
+    renderSlots();
+    return;
+  }
+  existing.replaceWith(createSlotNode(slot));
+  updateSubmitButtonState();
+}
+
+function renderChangedSlots(prefixes, options = {}) {
+  const uniquePrefixes = [...new Set([...(prefixes || [])].map((prefix) => String(prefix || "")).filter(Boolean))];
+  for (const prefix of uniquePrefixes) {
+    if (options.skipPendingUserEdits && slotHasPendingUserEdit(prefix)) continue;
+    renderSlot(prefix);
+  }
+}
+
+function renderSlotsExceptPendingUserEdits(prefixes = null) {
+  const targetPrefixes = prefixes
+    ? [...prefixes]
+    : (state.slots || []).map((slot) => slot.prefix);
+  renderChangedSlots(targetPrefixes, { skipPendingUserEdits: true });
+}
+
+function renderSlots(slots = state.slots) {
+  slotGrid.textContent = "";
+  state.slots = slots;
+  slotCount.textContent = `${slots.length} pol`;
+
+  for (const slot of slots) {
+    slotGrid.appendChild(createSlotNode(slot));
   }
   updateSubmitButtonState();
 }
@@ -2003,6 +2217,66 @@ function showError(error) {
   resultOutput.textContent = error.message || String(error);
 }
 
+function processingOperationLabel(operation) {
+  const labels = {
+    copy_preprocessed: "kopiowanie po obrobce",
+    copy_without_processing: "kopiowanie bez obrobki",
+    copy_document: "kopiowanie dokumentu",
+    copy_unsupported_image: "kopiowanie formatu bez obrobki",
+    copy_no_pillow: "kopiowanie bez Pillow",
+    process_image: "resize/kompresja",
+    same_target: "bez kopiowania",
+  };
+  return labels[operation] || operation || "plik";
+}
+
+function renderTimingDetails(timing, savedFiles = []) {
+  const stages = timing?.stages || [];
+  const files = savedFiles || [];
+  if (!stages.length && !files.length) return null;
+  const box = document.createElement("details");
+  const summary = document.createElement("summary");
+  const list = document.createElement("div");
+  box.className = "timing-details";
+  summary.textContent = `Czas operacji: ${formatDuration(timing?.total_ms)}`;
+  list.className = "timing-list";
+  for (const stage of stages) {
+    const row = document.createElement("div");
+    const label = document.createElement("span");
+    const value = document.createElement("strong");
+    label.textContent = stage.label || stage.key || "Etap";
+    value.textContent = formatDuration(stage.elapsed_ms);
+    row.append(label, value);
+    list.appendChild(row);
+  }
+  if (files.length) {
+    const section = document.createElement("div");
+    section.className = "timing-section";
+    section.textContent = "Pliki";
+    list.appendChild(section);
+  }
+  for (const file of files) {
+    const row = document.createElement("div");
+    const label = document.createElement("span");
+    const value = document.createElement("strong");
+    const flags = [];
+    if (file.preprocessed) flags.push("preprocessed");
+    if (file.content_fit) flags.push("FIT");
+    const sizes =
+      file.source_size_bytes || file.size_bytes
+        ? ` (${formatFileSize(file.source_size_bytes)} -> ${formatFileSize(file.size_bytes)})`
+        : "";
+    const suffix = flags.length ? `, ${flags.join(", ")}` : "";
+    const operation = processingOperationLabel(file.operation);
+    label.textContent = `${file.prefix || "Slot"} - ${operation}${suffix}${sizes}`;
+    value.textContent = formatDuration(file.elapsed_ms);
+    row.append(label, value);
+    list.appendChild(row);
+  }
+  box.append(summary, list);
+  return box;
+}
+
 function showResult(payload) {
   resultOutput.className = "result-output";
   resultOutput.textContent = "";
@@ -2041,7 +2315,9 @@ function showResult(payload) {
     ftp.className = payload.ftp.error ? "error-text" : "ok-text";
     ftp.textContent = payload.ftp.error
       ? `FTP: blad - ${payload.ftp.error}`
-      : `FTP: wyslano ${payload.ftp.uploaded || 0}, usunieto ${payload.ftp.deleted || 0}, ${payload.ftp.elapsed_ms || 0} ms`;
+      : `FTP: wyslano ${payload.ftp.uploaded || 0}, usunieto ${
+          payload.ftp.deleted || 0
+        }. Czas: ${formatDuration(payload.ftp.elapsed_ms)}.`;
     resultOutput.appendChild(ftp);
   }
   if (
@@ -2068,8 +2344,14 @@ function showResult(payload) {
       ? `SQL: blad - ${payload.sql.error}`
       : payload.sql.skipped
         ? `SQL: pominieto - ${payload.sql.reason || "brak wiersza do aktualizacji"}`
-        : `SQL: aktualizacje ${payload.sql.updated || 0}, czyszczenia ${payload.sql.cleared || 0}`;
+        : `SQL: aktualizacje ${payload.sql.updated || 0}, czyszczenia ${
+            payload.sql.cleared || 0
+          }. Czas: ${formatDuration(payload.sql.elapsed_ms)}.`;
     resultOutput.appendChild(sql);
+  }
+  if (payload.show_timing_details) {
+    const timing = renderTimingDetails(payload.timing, payload.saved_files || []);
+    if (timing) resultOutput.appendChild(timing);
   }
 }
 
@@ -2389,6 +2671,50 @@ function normalizedIdentityValue(value) {
   return String(value || "").trim().toUpperCase();
 }
 
+function productEntryLabel(entry = {}) {
+  const colors = [entry.color1, entry.color2, entry.color3].filter(Boolean).join(" / ");
+  const parts = [entry.name, entry.type_name, entry.model, colors, entry.extra].filter(Boolean);
+  const suffix = entry.ean ? `EAN ${entry.ean}` : entry.product_id || "";
+  return parts.join(" | ") + (suffix ? ` - ${suffix}` : "");
+}
+
+function entryFromProcessPayload(payload = {}, fallback = {}) {
+  const result = payload.entry || {};
+  const raw = result.entry || {};
+  const entry = {
+    product_id: result.product_id || raw.PRODUCT_ID || fallback.product_id || "",
+    ean: raw.EAN || fallback.ean || payload.ean || "",
+    name: raw.NAZWA || fallback.name || "",
+    type_name: raw.TYP || fallback.type_name || "",
+    model: raw.MODEL || fallback.model || "",
+    color1: raw.KOLOR1 || fallback.color1 || "",
+    color2: raw.KOLOR2 || fallback.color2 || "",
+    color3: raw.KOLOR3 || fallback.color3 || "",
+    extra: raw.DODATKI || fallback.extra || "",
+  };
+  entry.label = productEntryLabel(entry);
+  return entry;
+}
+
+function upsertProductEntry(entry = {}) {
+  if (!entry.product_id && !entry.ean) return;
+  const productId = normalizedIdentityValue(entry.product_id);
+  const ean = normalizedIdentityValue(entry.ean);
+  const entries = [...(state.entries || [])];
+  const index = entries.findIndex((item) => {
+    const itemProductId = normalizedIdentityValue(item.product_id);
+    const itemEan = normalizedIdentityValue(item.ean);
+    return (productId && itemProductId === productId) || (ean && itemEan === ean);
+  });
+  if (index >= 0) {
+    entries[index] = { ...entries[index], ...entry, label: entry.label || entries[index].label };
+  } else {
+    entries.unshift(entry);
+  }
+  state.entries = entries;
+  renderEntrySelect();
+}
+
 function productFieldsChangedSinceLoad() {
   if (!state.loadedEntryOriginal) {
     return false;
@@ -2566,11 +2892,16 @@ function setPhotoSourceStatus(source, status, requestId) {
 }
 
 function applyPhotoPayload(photos = [], options = {}) {
-  let changed = false;
+  const changedPrefixes = new Set();
   const allowedPrefixes = options.prefixes instanceof Set ? options.prefixes : null;
   for (const photo of photos) {
     if (!photo?.prefix) continue;
     if (allowedPrefixes && !allowedPrefixes.has(photo.prefix)) continue;
+    if (!options.force && state.files.has(photo.prefix)) {
+      const existing = state.loadedPhotos.get(photo.prefix) || {};
+      state.loadedPhotos.set(photo.prefix, mergePhotoRecord(existing, photo));
+      continue;
+    }
     if (!options.force && slotHasPendingUserEdit(photo.prefix)) continue;
     const existing = state.loadedPhotos.get(photo.prefix) || {};
     const merged = mergePhotoRecord(existing, photo);
@@ -2593,15 +2924,22 @@ function applyPhotoPayload(photos = [], options = {}) {
       }
       state.userSelectedSlotSources.delete(photo.prefix);
     }
-    changed = true;
+    changedPrefixes.add(photo.prefix);
   }
-  if (changed) {
-    renderSlots();
+  if (changedPrefixes.size) {
+    renderChangedSlots(changedPrefixes);
     scheduleBackgroundFtpPreviewLoad(undefined, 1500);
   }
+  return changedPrefixes;
 }
 
-async function requestEntryPhotos(entry, source, prefixes = null) {
+function photoRequestTimeoutMs(source) {
+  if (source === "ftp") return 15000;
+  if (source === "all") return 25000;
+  return 20000;
+}
+
+async function requestEntryPhotos(entry, source, prefixes = null, options = {}) {
   const params = new URLSearchParams({ source });
   if (prefixes && prefixes.size) {
     params.set("prefixes", [...prefixes].join(","));
@@ -2610,7 +2948,80 @@ async function requestEntryPhotos(entry, source, prefixes = null) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(entry),
+    timeoutMs: Number(options.timeoutMs || photoRequestTimeoutMs(source)),
   });
+}
+
+function backgroundFtpLookupKey(fields = formPayload()) {
+  const ean = normalizedIdentityValue(fields.ean);
+  if (!state.ftpEnabled || !/^\d{13}$/.test(ean)) return "";
+  for (const fieldName of ["name", "type_name", "model", "color1"]) {
+    if (!String(fields[fieldName] || "").trim()) return "";
+  }
+  return [
+    ean,
+    normalizedIdentityValue(fields.name),
+    normalizedIdentityValue(fields.type_name),
+    normalizedIdentityValue(fields.model),
+    normalizedIdentityValue(fields.color1),
+    normalizedIdentityValue(fields.color2),
+    normalizedIdentityValue(fields.color3),
+    normalizedIdentityValue(fields.extra),
+  ].join("|");
+}
+
+function clearStaleBackgroundFtpPhotos(activeKey) {
+  let changed = false;
+  for (const [prefix, photo] of Array.from(state.loadedPhotos.entries())) {
+    if (!photo?.background_ftp_key || photo.background_ftp_key === activeKey) continue;
+    if (slotHasPendingUserEdit(prefix)) continue;
+    state.loadedPhotos.delete(prefix);
+    state.slotSources.delete(prefix);
+    state.userSelectedSlotSources.delete(prefix);
+    changed = true;
+    renderSlot(prefix);
+  }
+  if (changed) updateSubmitButtonState();
+}
+
+async function loadBackgroundFtpPhotosForCurrentForm() {
+  const entry = formPayload();
+  const key = backgroundFtpLookupKey(entry);
+  if (!key) {
+    state.backgroundFtpLookupKey = "";
+    clearStaleBackgroundFtpPhotos("");
+    return;
+  }
+  clearStaleBackgroundFtpPhotos(key);
+  if (state.backgroundFtpLookupKey === key) return;
+  state.backgroundFtpLookupKey = key;
+  const requestId = state.backgroundFtpLookupRequestId + 1;
+  state.backgroundFtpLookupRequestId = requestId;
+  try {
+    const payload = await requestEntryPhotos(entry, "ftp", null, { timeoutMs: 15000 });
+    if (state.backgroundFtpLookupRequestId !== requestId) return;
+    if (backgroundFtpLookupKey() !== key) return;
+    const photos = (payload.photos || []).map((photo) => ({
+      ...photo,
+      background_ftp_key: key,
+    }));
+    applyPhotoPayload(photos, { force: false });
+    if (photos.length) {
+      formStatus.textContent = `Znaleziono zdjecia FTP: ${photos.length}.`;
+    }
+    updateSubmitButtonState();
+  } catch (error) {
+    if (state.backgroundFtpLookupRequestId === requestId && showTimingDetails()) {
+      formStatus.textContent = `Nie udalo sie sprawdzic FTP w tle: ${error.message}`;
+    }
+  }
+}
+
+function scheduleBackgroundFtpLookup(delay = 900) {
+  window.clearTimeout(state.backgroundFtpLookupTimer);
+  state.backgroundFtpLookupTimer = window.setTimeout(() => {
+    loadBackgroundFtpPhotosForCurrentForm().catch(() => {});
+  }, delay);
 }
 
 function clearSelectedFiles() {
@@ -2637,6 +3048,9 @@ async function loadPhotosForEntry(entry, options = {}) {
     state.ftpPreviewLoading.clear();
     state.ftpPreviewBackgroundLoading.clear();
     state.photoSourcesLoaded.clear();
+    state.backgroundFtpLookupKey = "";
+    state.backgroundFtpLookupRequestId += 1;
+    window.clearTimeout(state.backgroundFtpLookupTimer);
   } else {
     for (const prefix of targetPrefixes) {
       state.ftpPreviewLoading.delete(prefix);
@@ -2652,7 +3066,7 @@ async function loadPhotosForEntry(entry, options = {}) {
   }
   formStatus.textContent = photoLoadingText();
   if (!partial) {
-    renderSlots();
+    renderSlotsExceptPendingUserEdits();
   }
   const tasks = sources.map(async (source) => {
     setPhotoSourceStatus(source, "loading", requestId);
@@ -2712,7 +3126,7 @@ async function loadPhotosForEntry(entry, options = {}) {
       }
     }
     updateRuntimeMetrics();
-    renderSlots();
+    renderSlotsExceptPendingUserEdits(partial ? targetPrefixes : null);
     scheduleBackgroundFtpPreviewLoad(requestId, 1500);
   }
 }
@@ -2727,6 +3141,9 @@ function fillForm(entry, options = {}) {
   state.ftpPreviewLoading.clear();
   state.ftpPreviewBackgroundLoading.clear();
   state.photoSourcesLoaded.clear();
+  state.backgroundFtpLookupKey = "";
+  state.backgroundFtpLookupRequestId += 1;
+  window.clearTimeout(state.backgroundFtpLookupTimer);
   productForm.elements.product_id.value = entry.product_id || "";
   productForm.elements.name.value = entry.name || "";
   productForm.elements.type_name.value = entry.type_name || "";
@@ -2765,6 +3182,7 @@ async function refreshData() {
 async function loadBootstrap(options = {}) {
   const payload = await requestJson("/api/bootstrap", options);
   state.defaultSlotFit = Boolean(payload.auto_content_fit);
+  state.processing = payload.processing || state.processing || {};
   state.ftpEnabled = payload.ftp_enabled !== false;
   if (versionInfo) {
     versionInfo.textContent = payload.version ? `Wersja ${payload.version}` : "";
@@ -2779,6 +3197,7 @@ async function loadBootstrap(options = {}) {
   state.fileIndex = payload.file_index || null;
   state.ftpEnabled = payload.ftp_enabled !== false;
   state.colorFieldLabels = payload.color_field_labels || {};
+  state.processing = payload.processing || state.processing || {};
   renderDatalists();
   applyProductFieldLabels();
   renderEntrySelect();
@@ -3142,6 +3561,7 @@ function settingsSaveButton(form, buildPayload) {
       state.currentUser = state.settings.current_user || state.currentUser;
       state.defaultSlotFit = Boolean(state.settings.auto_content_fit);
       state.ftpEnabled = state.settings.ftp?.enabled !== false;
+      state.processing = state.settings.processing || state.processing || {};
       state.colorFieldLabels = state.settings.color_field_labels || state.colorFieldLabels || {};
       updateAdminUi();
       if (Array.isArray(state.settings.slots)) {
@@ -3269,6 +3689,22 @@ function renderSettingsProcessing() {
       state.settings.auto_content_fit,
       "Nowe i wczytane sloty startuja z wlaczonym FIT, ale pojedynczy slot nadal mozna przelaczyc."
     ),
+    selectField(
+      "upload_processing_mode",
+      "Kiedy przetwarzac obrazy",
+      p.upload_processing_mode || "save",
+      [
+        ["save", "Host przy zapisie"],
+        ["host", "Host przy uploadzie do cache"],
+        ["client", "Klient przed uploadem"],
+      ]
+    ),
+    checkField(
+      "show_timing_details",
+      "Pokazuj szczegolowe czasy operacji",
+      p.show_timing_details,
+      "Po zapisie pokazuje czytelny rozklad czasu dla lokalnych plikow, FTP, SQL i cache."
+    ),
     checkField(
       "resize_enabled",
       "Zmniejszanie obrazu",
@@ -3328,6 +3764,8 @@ function renderSettingsProcessing() {
       max_file_kb: data.get("max_file_kb"),
       convert_enabled: data.has("convert_enabled"),
       target_format: data.get("target_format"),
+      upload_processing_mode: data.get("upload_processing_mode"),
+      show_timing_details: data.has("show_timing_details"),
     },
   }));
   settingsOutput.appendChild(form);
@@ -3623,6 +4061,7 @@ async function loadSettings() {
   state.currentUser = state.settings.current_user || state.currentUser;
   state.defaultSlotFit = Boolean(state.settings.auto_content_fit);
   state.ftpEnabled = state.settings.ftp?.enabled !== false;
+  state.processing = state.settings.processing || state.processing || {};
   state.colorFieldLabels = state.settings.color_field_labels || state.colorFieldLabels || {};
   updateAdminUi();
   applyProductFieldLabels();
@@ -3700,6 +4139,10 @@ for (const name of ["name", "type_name", "model"]) {
   productForm.elements[name].addEventListener("input", scheduleProductAutoSearch);
 }
 
+for (const name of trackedProductFields) {
+  productForm.elements[name]?.addEventListener("input", () => scheduleBackgroundFtpLookup());
+}
+
 for (const name of Object.keys(fieldListKey)) {
   productForm.elements[name]?.addEventListener("change", () => {
     promptAddProductFieldToList(name).catch((error) => {
@@ -3727,11 +4170,17 @@ productForm.addEventListener("submit", async (event) => {
     );
     const changedPrefixes = pendingChangedSlotPrefixes();
     const data = new FormData(productForm);
+    for (const slot of state.slots || []) {
+      data.delete(`slot_${slot.prefix}`);
+    }
     for (const [prefix, item] of state.files.entries()) {
       const token = slotFileToken(item);
       if (token) {
         data.set(`existing_slot_${prefix}`, token);
         data.set(`existing_slot_name_${prefix}`, slotFileName(item));
+        if (item.preprocessed) {
+          data.set(`existing_slot_preprocessed_${prefix}`, "1");
+        }
       } else {
         const file = slotFileObject(item);
         if (!file) {
@@ -3780,8 +4229,14 @@ productForm.addEventListener("submit", async (event) => {
     updateFieldWarnings();
     state.deletedSlots.clear();
     clearSelectedFiles();
-    setBusy(true, "Odswiezanie list i wpisow...");
-    await refreshData();
+    setBusy(true, "Aktualizowanie listy wpisow...");
+    upsertProductEntry(entryFromProcessPayload(payload, state.loadedEntryOriginal));
+    if (payload.file_index) {
+      state.fileIndex = payload.file_index;
+    }
+    renderDatalists();
+    renderListEditor();
+    updateRuntimeMetrics();
     for (const item of payload.saved_files || []) {
       if (item.prefix) changedPrefixes.add(item.prefix);
     }
@@ -3833,6 +4288,9 @@ clearButton.addEventListener("click", () => {
   state.ftpPreviewLoading.clear();
   state.ftpPreviewBackgroundLoading.clear();
   state.photoSourcesLoaded.clear();
+  state.backgroundFtpLookupKey = "";
+  state.backgroundFtpLookupRequestId += 1;
+  window.clearTimeout(state.backgroundFtpLookupTimer);
   window.clearTimeout(state.backgroundFtpPreviewTimer);
   state.loadedEntryOriginal = null;
   state.lastAutoSearchKey = "";
