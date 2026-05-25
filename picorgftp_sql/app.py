@@ -22,10 +22,10 @@ from .excel_utils import (
     TYPE_HEADER,
     add_to_list,
     find_list_value_usage,
-    label_category,
     prepare_excel_lists,
     remove_from_list,
     save_ean_entry,
+    slot_filename_label,
 )
 from .logging_utils import log_error, log_error_loc, log_info, log_info_loc, set_app
 from .system_utils import get_file_lock_user, is_admin
@@ -1273,6 +1273,7 @@ class App(BU.Tk):
                 {
                     Aa: slot[Aa],
                     "label": slot["label"],
+                    "filename_label": slot.get("filename_label", B),
                     f: slot.get(f),
                     B0: slot.get(B0),
                     "content_fit": bool(slot.get("content_fit", h)),
@@ -4750,6 +4751,7 @@ class App(BU.Tk):
                 {
                     Aa: V_,
                     "label": W_,
+                    "filename_label": slot_def.get("filename_label", B),
                     "title_label": title_label,
                     y: D_,
                     A7: K_,
@@ -4859,13 +4861,17 @@ class App(BU.Tk):
         }
 
     def _update_slot_titles(B, slot_defs):
-        label_map = {slot["prefix"]: slot["label"] for slot in slot_defs}
+        slot_map = {slot["prefix"]: slot for slot in slot_defs}
         for slot in B.slots:
             prefix = slot.get(Aa)
-            new_label = label_map.get(prefix)
+            new_def = slot_map.get(prefix)
+            if not new_def:
+                continue
+            new_label = new_def.get("label")
             if not new_label:
                 continue
             slot["label"] = new_label
+            slot["filename_label"] = G(new_def.get("filename_label") or B).strip()
             if slot.get("canvas_items"):
                 B._redraw_canvas_slot(Aj(B, "_slot_index_by_prefix", {}).get(prefix, -1))
                 continue
@@ -7150,7 +7156,7 @@ class App(BU.Tk):
                         for idx, slot in A0(worker_slots):
                             if slot[Aa] == label:
                                 Az_ = slot[Aa]
-                                Be_ = label_category(slot["label"])
+                                Be_ = slot_filename_label(slot)
                                 ext = A.path.splitext(info["filename"])[1]
                                 c_ = build_slot_filename(
                                     K_,
@@ -9073,12 +9079,17 @@ class App(BU.Tk):
             title = SLOT_TITLE_FORMAT.format(
                 index=slot["prefix"], label=get_slot_label(slot["label"])
             )
+            filename_text = G(slot_filename_label(slot) or B).strip()
+            if filename_text:
+                filename_line = f"{LANG.get('field_filename_short_label', 'Plik')}: {filename_text}"
+            else:
+                filename_line = f"{LANG.get('field_filename_short_label', 'Plik')}: -"
             column = G(sql_column_map.get(slot["prefix"], B) or B).strip()
             if column:
                 column_text = f"SQL: {column}"
             else:
                 column_text = SQL_MAPPING_EMPTY_LABEL
-            return f"{title}\n{column_text}"
+            return f"{title}\n{filename_line}\n{column_text}"
 
         def _find_slot(prefix):
             for slot in slot_defs:
@@ -9361,7 +9372,9 @@ class App(BU.Tk):
                 )
                 return
             prefix = next_slot_prefix(slot_defs)
-            slot_defs.append({"prefix": prefix, "label": label})
+            slot_defs.append(
+                {"prefix": prefix, "label": label, "filename_label": label}
+            )
             sql_column_map.setdefault(prefix, B)
             _refresh_fields_grid()
 
@@ -9373,6 +9386,9 @@ class App(BU.Tk):
             except E:
                 pass
             editor.grab_set()
+            original_label = G(slot.get("label") or B).strip()
+            filename_label_explicit = bool(G(slot.get("filename_label") or B).strip())
+            original_filename_label = G(slot_filename_label(slot) or B).strip()
             C.Label(editor, text=FIELD_NAME_LABEL).grid(
                 row=0, column=0, padx=5, pady=5, sticky=R
             )
@@ -9380,14 +9396,25 @@ class App(BU.Tk):
             name_entry = C.Entry(editor, textvariable=name_var, width=30)
             name_entry.grid(row=0, column=1, padx=5, pady=5, sticky="w")
             name_entry.focus_set()
-            C.Label(editor, text=FIELD_ID_LABEL).grid(
+            C.Label(
+                editor,
+                text=LANG.get("field_filename_label", "Nazwa w pliku:"),
+            ).grid(
                 row=1, column=0, padx=5, pady=5, sticky=R
+            )
+            filename_label_var = F.StringVar(value=original_filename_label)
+            filename_label_entry = C.Entry(
+                editor, textvariable=filename_label_var, width=30
+            )
+            filename_label_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+            C.Label(editor, text=FIELD_ID_LABEL).grid(
+                row=2, column=0, padx=5, pady=5, sticky=R
             )
             prefix_var = F.StringVar(value=slot["prefix"])
             prefix_entry = C.Entry(editor, textvariable=prefix_var, width=10)
-            prefix_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+            prefix_entry.grid(row=2, column=1, padx=5, pady=5, sticky="w")
             C.Label(editor, text=SQL_MAPPING_COLUMN_LABEL).grid(
-                row=2, column=0, padx=5, pady=5, sticky=R
+                row=3, column=0, padx=5, pady=5, sticky=R
             )
             column_var = F.StringVar(value=sql_column_map.get(slot["prefix"], B))
             column_entry = C.Combobox(
@@ -9397,7 +9424,7 @@ class App(BU.Tk):
                 state=X,
                 width=30,
             )
-            column_entry.grid(row=2, column=1, padx=5, pady=5, sticky="w")
+            column_entry.grid(row=3, column=1, padx=5, pady=5, sticky="w")
             if hasattr(column_entry, "drop_target_register") and hasattr(
                 column_entry, "dnd_bind"
             ):
@@ -9464,6 +9491,16 @@ class App(BU.Tk):
                         return
                 old_prefix = slot["prefix"]
                 slot["label"] = new_label
+                new_filename_label = G(filename_label_var.get() or B).strip()
+                unchanged_legacy_filename = (
+                    not filename_label_explicit
+                    and new_label == original_label
+                    and new_filename_label == original_filename_label
+                )
+                if new_filename_label and not unchanged_legacy_filename:
+                    slot["filename_label"] = new_filename_label
+                else:
+                    slot.pop("filename_label", I)
                 new_column = G(column_var.get() or B).strip()
                 if new_prefix != old_prefix:
                     old_column = sql_column_map.pop(old_prefix, B)
@@ -9798,14 +9835,14 @@ class App(BU.Tk):
                         )
 
             translate_row = C.Frame(editor)
-            translate_row.grid(row=3, column=0, columnspan=2, pady=(0, 5))
+            translate_row.grid(row=4, column=0, columnspan=2, pady=(0, 5))
             C.Button(
                 translate_row,
                 text=FIELD_TRANSLATE_LABEL,
                 command=_open_translation_dialog,
             ).grid(row=0, column=0, padx=5)
             button_row = C.Frame(editor)
-            button_row.grid(row=4, column=0, columnspan=2, pady=5)
+            button_row.grid(row=5, column=0, columnspan=2, pady=5)
 
             C.Button(button_row, text=SAVE_LABEL, command=_save_field).grid(
                 row=0, column=0, padx=5

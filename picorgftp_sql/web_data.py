@@ -509,15 +509,16 @@ def cache_ftp_preview(ean: object, filename: object, cache_scope: object = "") -
     filename_text = os.path.basename(_text(filename))
     if not ean_text or not filename_text:
         raise ValueError("Brakuje EAN albo nazwy pliku FTP.")
-    ftp = connect_ftp(config.CONFIG.get(H, {}))
+    parsed = parse_slot_filename(filename_text)
+    if not parsed or _norm(parsed.ean) != _norm(ean_text):
+        raise ValueError("Plik FTP nie pasuje do wybranego EAN.")
     cache_dir = _ftp_cache_dir(ean_text, cache_scope=cache_scope)
     os.makedirs(cache_dir, exist_ok=True)
+    target_path = os.path.join(cache_dir, _ftp_cache_filename(filename_text))
+    if os.path.isfile(target_path):
+        return target_path
+    ftp = connect_ftp(config.CONFIG.get(H, {}))
     try:
-        remote_files = select_remote_files_for_ean(ean_text, list_remote_filenames(ftp))
-        allowed = {os.path.basename(value) for value in remote_files.values()}
-        if filename_text not in allowed:
-            raise ValueError("Plik FTP nie pasuje do wybranego EAN.")
-        target_path = os.path.join(cache_dir, _ftp_cache_filename(filename_text))
         _download_ftp_to_cache(ftp, filename_text, target_path)
         return target_path
     finally:

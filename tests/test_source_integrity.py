@@ -58,6 +58,53 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertNotIn("shouldRepair = photoNeedsRepair", source)
         self.assertNotIn("shouldSyncLocal = !updateMode", source)
 
+    def test_web_submit_removes_cached_slot_file_inputs(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        delete_index = source.index("data.delete(`slot_${slot.prefix}`);")
+        cache_index = source.index("data.set(`existing_slot_${prefix}`, token);")
+        self.assertLess(delete_index, cache_index)
+
+    def test_web_has_background_ftp_lookup_without_forcing_slot_edits(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        self.assertIn('requestEntryPhotos(entry, "ftp", null, { timeoutMs: 15000 })', source)
+        self.assertIn("background_ftp_key", source)
+        self.assertIn("applyPhotoPayload(photos, { force: false })", source)
+        self.assertIn("scheduleBackgroundFtpLookup", source)
+
+    def test_web_photo_loading_renders_only_changed_slots(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+        apply_start = source.index("function applyPhotoPayload")
+        apply_end = source.index("async function requestEntryPhotos", apply_start)
+        body = source[apply_start:apply_end]
+
+        self.assertIn("state.files.has(photo.prefix)", body)
+        self.assertIn("renderChangedSlots(changedPrefixes);", body)
+        self.assertNotIn("renderSlots();", body)
+        self.assertIn("timeoutMs: Number(options.timeoutMs || photoRequestTimeoutMs(source))", source)
+
 
 if __name__ == "__main__":
     unittest.main()

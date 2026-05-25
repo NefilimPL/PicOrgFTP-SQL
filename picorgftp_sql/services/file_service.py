@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 from ..common import E, I
-from ..excel_utils import label_category
+from ..excel_utils import slot_filename_label
 from ..workflow_utils import build_remote_slot_filename, build_slot_filename, parse_slot_filename
 
 
@@ -37,7 +37,7 @@ def build_slot_target_filename(
     return build_slot_filename(
         ean,
         slot["prefix"],
-        label_category(slot["label"]),
+        slot_filename_label(slot),
         name,
         type_value,
         model,

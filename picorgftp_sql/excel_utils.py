@@ -90,6 +90,19 @@ def label_category(label: str) -> str:
     return base.replace(UNDERSCORE, HYPHEN).upper()
 
 
+def slot_filename_label(slot) -> str:
+    """Return the filename segment configured for a photo slot."""
+
+    if isinstance(slot, dict):
+        explicit = str(slot.get("filename_label") or "").strip()
+        if explicit:
+            return explicit
+        label = str(slot.get("label") or "")
+    else:
+        label = str(slot or "")
+    return label_category(label)
+
+
 def _normalize_cell(value: object) -> str:
     """Normalize a worksheet cell value into a stripped string."""
 

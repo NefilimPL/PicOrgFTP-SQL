@@ -37,6 +37,8 @@ class ConfigTests(unittest.TestCase):
                 "compress_quality": "0",
                 "max_file_kb": "-5",
                 "target_format": "jpeg",
+                "upload_processing_mode": "client",
+                "show_timing_details": True,
             }
         )
 
@@ -45,6 +47,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings["compress_quality"], 1)
         self.assertEqual(settings["max_file_kb"], 1)
         self.assertEqual(settings["target_format"], "JPG")
+        self.assertEqual(settings["upload_processing_mode"], "client")
+        self.assertTrue(settings["show_timing_details"])
 
 
 if __name__ == "__main__":

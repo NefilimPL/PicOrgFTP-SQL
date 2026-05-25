@@ -14,6 +14,7 @@ from picorgftp_sql.web_workflow import (
     WebProcessingOptions,
     _slot_category,
     processing_options_from_config,
+    preprocess_cached_upload,
     process_web_uploads,
     slot_definitions_from_config,
     normalized_product_payload,
@@ -350,6 +351,65 @@ class WebWorkflowTests(unittest.TestCase):
         self.assertTrue(options.convert_enabled)
         self.assertEqual(options.target_format, "WEBP")
         self.assertTrue(options.auto_content_fit)
+
+    def test_preprocessed_upload_is_copied_without_second_resize(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            source = Path(temp_dir) / "source.jpg"
+            output_root = Path(temp_dir) / "processed"
+            self._make_image(source)
+
+            with patch("picorgftp_sql.web_workflow.Image.open") as image_open:
+                result = process_web_uploads(
+                    base_output_dir=str(output_root),
+                    form=WebProductForm(
+                        name="Maggiore",
+                        type_name="komoda",
+                        model="MA03",
+                        color1="bialy",
+                        ean="5901234567890",
+                    ),
+                    uploaded_slots=[
+                        WebUploadedSlot(
+                            prefix="03",
+                            label="DETAIL_pic",
+                            source_path=str(source),
+                            original_filename="front.jpg",
+                            preprocessed=True,
+                        )
+                    ],
+                    options=WebProcessingOptions(resize_enabled=True),
+                )
+
+            image_open.assert_not_called()
+            self.assertTrue(Path(result.saved_files[0].path).is_file())
+            self.assertEqual(result.saved_files[0].operation, "copy_preprocessed")
+            self.assertTrue(result.saved_files[0].preprocessed)
+            self.assertGreaterEqual(result.saved_files[0].elapsed_ms, 0)
+
+    def test_preprocess_cached_upload_converts_cache_file_once(self) -> None:
+        if Image is None:
+            self.skipTest("Pillow is not available")
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            source = Path(temp_dir) / "cache.jpg"
+            self._make_image(source)
+
+            path, name, processed = preprocess_cached_upload(
+                str(source),
+                "front.jpg",
+                WebProcessingOptions(
+                    resize_enabled=False,
+                    convert_enabled=True,
+                    target_format="PNG",
+                ),
+            )
+
+            self.assertTrue(processed)
+            self.assertTrue(path.endswith(".png"))
+            self.assertEqual(name, "front.png")
+            self.assertFalse(source.exists())
+            self.assertTrue(Path(path).is_file())
 
     def test_slot_definitions_from_config_uses_defaults_when_missing(self) -> None:
         slots = slot_definitions_from_config({})

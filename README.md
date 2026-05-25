@@ -92,6 +92,8 @@ The runtime automatically searches for translation files next to the executable,
 
 This repository includes a Windows build workflow in `.github/workflows/build-exe.yml`. It builds the EXE with PyInstaller, packages the web runtime as a separate ZIP and uploads both as workflow artifacts. When a GitHub release is published, the same workflow also attaches `PicOrgFTP-SQL-<tag>.exe` and `PicOrgFTP-SQL-web-<tag>.zip` to that release. The visible program version is taken from the release tag.
 
+The local scripts in `Generator exe/` and the GitHub Actions workflow also generate a PyInstaller `--version-file`, so Windows file properties show `File description`, `File version`, `Product name`, `Product version`, `Company name`, `Copyright`, `Internal name` and `Original filename` for both EXE files. In GitHub Actions, product/company metadata is taken from the GitHub repository context; local builds use Windows registration data (`RegisteredOrganization` / `RegisteredOwner`) and then the current Windows user as a fallback.
+
 1. Push the workflow file to your GitHub repository.
 2. Go to **Settings → Actions → General** and make sure Actions are enabled for the repository.
 3. Go to the **Actions** tab, open **Build Windows EXE**, and click **Run workflow** to build on demand (or push to `main`/`master` to run automatically).
@@ -187,6 +189,8 @@ Podczas działania program wyszukuje pliki tłumaczeń obok pliku wykonywalnego,
 ### GitHub Actions (budowanie EXE na Windows)
 
 W repozytorium znajduje się workflow `.github/workflows/build-exe.yml`, który buduje EXE przez PyInstaller, pakuje panel webowy do osobnego ZIP-a i publikuje oba pliki jako artefakty. Po opublikowaniu GitHub Release workflow dodatkowo podpina do release pliki `PicOrgFTP-SQL-<tag>.exe` oraz `PicOrgFTP-SQL-web-<tag>.zip`. Wersja widoczna w GUI i webie jest pobierana z taga release.
+
+Lokalne skrypty z `Generator exe/` i workflow GitHub Actions generują też plik PyInstaller `--version-file`, dlatego we właściwościach Windows dla obu EXE są uzupełniane: opis pliku, wersja pliku, nazwa produktu, wersja produktu, firma, prawa autorskie, nazwa wewnętrzna i oryginalna nazwa pliku. W GitHub Actions dane produktu/firmy są pobierane z kontekstu repozytorium GitHub, a lokalne buildy używają danych rejestracji Windows (`RegisteredOrganization` / `RegisteredOwner`) i awaryjnie bieżącego użytkownika Windows.
 
 1. Wypchnij pliki workflow do swojego repozytorium na GitHub.
 2. Wejdź w **Settings → Actions → General** i upewnij się, że Actions są włączone.

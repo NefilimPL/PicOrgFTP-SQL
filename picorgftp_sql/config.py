@@ -137,6 +137,12 @@ def _normalize_processing_settings(raw_settings):
         target_format = "JPG"
     if target_format not in {"JPG", "PNG", "WEBP", "BMP", "GIF", "TIFF"}:
         target_format = "PNG"
+    upload_processing_mode = str(
+        raw.get("upload_processing_mode", defaults.get("upload_processing_mode", "save"))
+        or "save"
+    ).strip().lower()
+    if upload_processing_mode not in {"save", "host", "client"}:
+        upload_processing_mode = "save"
     return {
         "resize_enabled": bool(raw.get("resize_enabled", defaults.get("resize_enabled", True))),
         "max_dim": _int_value("max_dim", 64, 20000),
@@ -146,6 +152,10 @@ def _normalize_processing_settings(raw_settings):
         "max_file_kb": _int_value("max_file_kb", 1, 102400),
         "convert_enabled": bool(raw.get("convert_enabled", defaults.get("convert_enabled", False))),
         "target_format": target_format,
+        "upload_processing_mode": upload_processing_mode,
+        "show_timing_details": bool(
+            raw.get("show_timing_details", defaults.get("show_timing_details", False))
+        ),
     }
 
 

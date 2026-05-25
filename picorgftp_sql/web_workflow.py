@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import shutil
+import time
 from typing import Sequence
 
 from .common import (
@@ -104,6 +105,7 @@ class WebUploadedSlot:
     original_filename: str = ""
     filename_label: str = ""
     content_fit: bool | None = None
+    preprocessed: bool = False
 
 
 @dataclass(frozen=True)
@@ -132,6 +134,11 @@ class WebProcessedFile:
     filename: str
     path: str
     size_bytes: int
+    source_size_bytes: int = 0
+    elapsed_ms: int = 0
+    operation: str = ""
+    preprocessed: bool = False
+    content_fit: bool = False
 
 
 @dataclass(frozen=True)
@@ -312,23 +319,30 @@ def _save_processed_file(
     options: WebProcessingOptions,
     *,
     content_fit: bool = False,
-) -> None:
+    already_processed: bool = False,
+) -> str:
     """Copy or lightly process a browser-uploaded file to its target path."""
 
+    if already_processed and not content_fit:
+        shutil.copy2(source_path, target_path)
+        return "copy_preprocessed"
     ext = normalize_upload_extension(os.path.splitext(source_path)[1])
     if ext not in IMAGE_EXTENSIONS:
         shutil.copy2(source_path, target_path)
-        return
+        return "copy_document"
+    if not content_fit and not _processing_changes_enabled(options):
+        shutil.copy2(source_path, target_path)
+        return "copy_without_processing"
     if (
         not options.convert_enabled
         and ext not in {".jpg", ".jpeg", ".png", ".bmp", ".gif"}
         and not content_fit
     ):
         shutil.copy2(source_path, target_path)
-        return
+        return "copy_unsupported_image"
     if Image is None:
         shutil.copy2(source_path, target_path)
-        return
+        return "copy_no_pillow"
 
     with Image.open(source_path) as image:
         work = image.copy()
@@ -342,6 +356,7 @@ def _save_processed_file(
             target_format, _target_ext = _target_format_info(options)
         work = _prepare_for_format(work, target_format or image.format or "")
         _save_image_with_options(work, target_path, target_format, options)
+    return "process_image"
 
 
 def process_web_uploads(
@@ -415,8 +430,21 @@ def process_web_uploads(
             same_target = os.path.normcase(os.path.abspath(source_path)) == os.path.normcase(
                 os.path.abspath(target_path)
             )
+        try:
+            source_size_bytes = os.path.getsize(source_path)
+        except OSError:
+            source_size_bytes = 0
+        slot_started = time.perf_counter()
+        operation = "same_target"
         if not same_target:
-            _save_processed_file(source_path, target_path, options, content_fit=content_fit)
+            operation = _save_processed_file(
+                source_path,
+                target_path,
+                options,
+                content_fit=content_fit,
+                already_processed=bool(upload.preprocessed),
+            )
+        elapsed_ms = int(round((time.perf_counter() - slot_started) * 1000))
         saved_files.append(
             WebProcessedFile(
                 prefix=upload.prefix,
@@ -426,6 +454,11 @@ def process_web_uploads(
                 filename=filename,
                 path=target_path,
                 size_bytes=os.path.getsize(target_path),
+                source_size_bytes=source_size_bytes,
+                elapsed_ms=elapsed_ms,
+                operation=operation,
+                preprocessed=bool(upload.preprocessed),
+                content_fit=content_fit,
             )
         )
 
@@ -437,6 +470,40 @@ def process_web_uploads(
         saved_files=saved_files,
         skipped_slots=skipped_slots,
     )
+
+
+def _processing_changes_enabled(options: WebProcessingOptions) -> bool:
+    return bool(
+        options.resize_enabled
+        or options.compress_enabled
+        or options.max_size_enabled
+        or options.convert_enabled
+    )
+
+
+def preprocess_cached_upload(
+    source_path: str,
+    original_filename: str,
+    options: WebProcessingOptions | None = None,
+) -> tuple[str, str, bool]:
+    """Pre-process a cached browser upload and return path, display name and flag."""
+
+    options = options or WebProcessingOptions()
+    ext = os.path.splitext(original_filename or source_path)[1] or os.path.splitext(source_path)[1]
+    ext = normalize_upload_extension(ext)
+    if ext not in IMAGE_EXTENSIONS or Image is None or not _processing_changes_enabled(options):
+        return source_path, os.path.basename(original_filename or source_path), False
+    target_ext = _output_extension(ext, options)
+    target_path = f"{os.path.splitext(source_path)[0]}_processed{target_ext}"
+    _save_processed_file(source_path, target_path, options, content_fit=False)
+    try:
+        if os.path.abspath(target_path) != os.path.abspath(source_path):
+            os.remove(source_path)
+    except OSError:
+        pass
+    source_name = os.path.basename(original_filename or source_path)
+    display_name = f"{os.path.splitext(source_name)[0]}{target_ext}"
+    return target_path, display_name, True
 
 
 def processing_options_from_config(config_dict: dict) -> WebProcessingOptions:

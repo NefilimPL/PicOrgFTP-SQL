@@ -5,6 +5,40 @@ from __future__ import annotations
 import unittest
 
 from picorgftp_sql.product_state import ProductState, merge_lookup_state
+from picorgftp_sql.services.file_service import build_slot_target_filename
+
+
+class FileWorkflowTests(unittest.TestCase):
+    def test_build_slot_target_filename_uses_explicit_filename_label(self) -> None:
+        filename = build_slot_target_filename(
+            [{"prefix": "05", "label": "Display name", "filename_label": "Front-2"}],
+            0,
+            "5901234567890",
+            "Maggiore",
+            "Komoda",
+            "MA03",
+            ["Bialy"],
+            "",
+            "source.pdf",
+        )
+
+        self.assertIn("_05_FRONT-2_", filename)
+        self.assertNotIn("DISPLAY NAME", filename)
+
+    def test_build_slot_target_filename_keeps_legacy_category_fallback(self) -> None:
+        filename = build_slot_target_filename(
+            [{"prefix": "03", "label": "DETAIL_pic"}],
+            0,
+            "5901234567890",
+            "Maggiore",
+            "Komoda",
+            "MA03",
+            ["Bialy"],
+            "",
+            "source.jpg",
+        )
+
+        self.assertIn("_03_DETAIL_", filename)
 
 
 class MergeLookupStateTests(unittest.TestCase):

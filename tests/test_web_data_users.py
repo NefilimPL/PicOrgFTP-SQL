@@ -128,6 +128,57 @@ class WebDataUserTests(unittest.TestCase):
         self.assertEqual(result["errors"], [])
         self.assertFalse(cached.exists())
 
+    def test_cache_ftp_preview_returns_existing_cache_without_ftp(self) -> None:
+        temp_dir = _workspace_temp("web_data_ftp_cache_hit")
+        try:
+            with patch.object(web_data.settings, "AC", str(temp_dir)):
+                cache_dir = Path(web_data._ftp_cache_dir("5901234567890", cache_scope="admin-session"))
+                cached = cache_dir / web_data._ftp_cache_filename("5901234567890_03.jpg")
+                cache_dir.mkdir(parents=True)
+                cached.write_bytes(b"cached")
+
+                with patch.object(web_data, "connect_ftp") as connect_ftp:
+                    result = web_data.cache_ftp_preview(
+                        "5901234567890",
+                        "5901234567890_03.jpg",
+                        cache_scope="admin-session",
+                    )
+
+                self.assertEqual(Path(result), cached)
+                connect_ftp.assert_not_called()
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_cache_ftp_preview_downloads_directly_without_remote_listing(self) -> None:
+        temp_dir = _workspace_temp("web_data_ftp_direct_download")
+
+        class FakeFtp:
+            def retrbinary(self, command, callback):
+                self.command = command
+                callback(b"ftp-bytes")
+
+            def quit(self):
+                return None
+
+        ftp = FakeFtp()
+        try:
+            with (
+                patch.object(web_data.settings, "AC", str(temp_dir)),
+                patch.object(web_data, "connect_ftp", return_value=ftp),
+                patch.object(web_data, "list_remote_filenames") as list_remote,
+            ):
+                result = web_data.cache_ftp_preview(
+                    "5901234567890",
+                    "5901234567890_03.jpg",
+                    cache_scope="admin-session",
+                )
+
+            self.assertEqual(Path(result).read_bytes(), b"ftp-bytes")
+            self.assertEqual(ftp.command, "RETR 5901234567890_03.jpg")
+            list_remote.assert_not_called()
+        finally:
+            shutil.rmtree(temp_dir)
+
     def test_save_web_entry_preserves_ean_for_existing_product_id_when_missing(self) -> None:
         with (
             patch.object(
