@@ -47,6 +47,7 @@ const state = {
   slotUploadRequestId: 0,
   processStatusTimer: 0,
   processStatusStartedAt: 0,
+  navigationGuardBypass: false,
 };
 
 const listLabels = {
@@ -1100,7 +1101,29 @@ function sourceLoadingTitle(source) {
   return "Wczytywanie danych";
 }
 
-function createSlotFileUpload(prefix, file) {
+function photoHasUsableContent(photo) {
+  if (!photo) return false;
+  return Boolean(
+    photo.token ||
+      photo.url ||
+      photo.thumb_url ||
+      photo.filename ||
+      photo.ftp_token ||
+      photo.ftp_filename ||
+      photo.ftp_url ||
+      photo.ftp_thumb_url ||
+      photo.sql_value ||
+      photo.local ||
+      photo.ftp ||
+      photo.sql
+  );
+}
+
+function isProvisionalSlotPlacement(prefix) {
+  return Boolean(state.photosLoading && !photoHasUsableContent(state.loadedPhotos.get(prefix)));
+}
+
+function createSlotFileUpload(prefix, file, options = {}) {
   return {
     id: ++state.slotUploadRequestId,
     prefix,
@@ -1119,6 +1142,8 @@ function createSlotFileUpload(prefix, file) {
     uploading: false,
     error: "",
     xhr: null,
+    provisional: Boolean(options.provisional),
+    placementBlocked: false,
   };
 }
 
@@ -1656,11 +1681,13 @@ function clearSlotAssignment(prefix, options = {}) {
   state.userSelectedSlotSources.delete(prefix);
 }
 
-function setSlotFile(prefix, file) {
+function setSlotFile(prefix, file, options = {}) {
   bumpSlotRevision(prefix);
   markSlotDeletion(prefix, state.loadedPhotos.get(prefix));
   revokeFilePreviewUrl(prefix);
-  const item = createSlotFileUpload(prefix, file);
+  const item = createSlotFileUpload(prefix, file, {
+    provisional: options.provisional ?? isProvisionalSlotPlacement(prefix),
+  });
   state.files.set(prefix, item);
   state.loadedPhotos.delete(prefix);
   state.slotSources.delete(prefix);
@@ -1720,6 +1747,129 @@ function moveSlotContent(sourcePrefix, targetPrefix) {
   formStatus.textContent = `Przeniesiono slot ${sourcePrefix} -> ${targetPrefix}.`;
   renderSlot(targetPrefix);
   renderSlot(sourcePrefix);
+}
+
+function slotIndex(prefix) {
+  return (state.slots || []).findIndex((slot) => String(slot.prefix) === String(prefix));
+}
+
+function slotPrefixAt(index) {
+  return state.slots?.[index]?.prefix || "";
+}
+
+function isSlotFreeForNewFile(prefix) {
+  return Boolean(prefix && !state.files.has(prefix) && !photoHasUsableContent(state.loadedPhotos.get(prefix)));
+}
+
+function nextFreeSlotPrefix(startPrefix, options = {}) {
+  const start = slotIndex(startPrefix);
+  if (start < 0) return "";
+  const from = start + (options.after ? 1 : 0);
+  for (let index = from; index < (state.slots || []).length; index += 1) {
+    const prefix = slotPrefixAt(index);
+    if (isSlotFreeForNewFile(prefix)) {
+      return prefix;
+    }
+  }
+  return "";
+}
+
+function warnNoFreeSlots(files, context = "") {
+  const names = [...(files || [])]
+    .map((file) => (typeof file === "string" ? file : file?.name || slotFileName(file)))
+    .filter(Boolean);
+  if (!names.length) return;
+  const message =
+    names.length === 1
+      ? `Brak wolnego slotu dla pliku: ${names[0]}.`
+      : `Brak wolnych slotow dla plikow: ${names.join(", ")}.`;
+  formStatus.textContent = context ? `${message} ${context}` : message;
+  window.alert(formStatus.textContent);
+}
+
+function fileListFromInput(files) {
+  return Array.from(files || []).filter(Boolean);
+}
+
+function assignFilesFromSlot(startPrefix, files, options = {}) {
+  const incoming = fileListFromInput(files);
+  if (!incoming.length) return;
+  const assigned = [];
+  const unassigned = [];
+  let searchPrefix = startPrefix;
+  if (options.replaceStart && incoming.length === 1) {
+    setSlotFile(startPrefix, incoming[0], { provisional: isProvisionalSlotPlacement(startPrefix) });
+    renderSlot(startPrefix);
+    formStatus.textContent = `Dodano plik do slotu ${startPrefix}.`;
+    return;
+  }
+  for (const file of incoming) {
+    const targetPrefix = nextFreeSlotPrefix(searchPrefix, { after: false });
+    if (!targetPrefix) {
+      unassigned.push(file);
+      continue;
+    }
+    setSlotFile(targetPrefix, file, { provisional: isProvisionalSlotPlacement(targetPrefix) });
+    assigned.push({ prefix: targetPrefix, file });
+    searchPrefix = slotPrefixAt(slotIndex(targetPrefix) + 1) || targetPrefix;
+  }
+  for (const item of assigned) {
+    renderSlot(item.prefix);
+  }
+  if (assigned.length) {
+    const targetText = assigned.map((item) => item.prefix).join(", ");
+    formStatus.textContent =
+      assigned.length === 1
+        ? `Dodano plik do slotu ${targetText}.`
+        : `Dodano ${assigned.length} plikow do slotow: ${targetText}.`;
+  }
+  if (unassigned.length) {
+    warnNoFreeSlots(unassigned);
+  }
+}
+
+function applyDefaultSlotSource(prefix, photo) {
+  const source = defaultSlotSource(photo);
+  if (!state.userSelectedSlotSources.has(prefix)) {
+    if (source) {
+      state.slotSources.set(prefix, source);
+    } else {
+      state.slotSources.delete(prefix);
+    }
+  } else if (!selectedSlotSource(prefix, photo)) {
+    if (source) {
+      state.slotSources.set(prefix, source);
+    } else {
+      state.slotSources.delete(prefix);
+    }
+    state.userSelectedSlotSources.delete(prefix);
+  }
+}
+
+function relocateProvisionalSlotFile(prefix) {
+  const item = state.files.get(prefix);
+  if (!item?.provisional) {
+    return [];
+  }
+  const targetPrefix = nextFreeSlotPrefix(prefix, { after: true });
+  if (!targetPrefix) {
+    if (!item.placementBlocked) {
+      warnNoFreeSlots([slotFileName(item)], `Slot ${prefix} ma juz dane.`);
+    }
+    item.placementBlocked = true;
+    return [prefix];
+  }
+  const sourceFit = isSlotFit(prefix);
+  state.files.delete(prefix);
+  revokeFilePreviewUrl(prefix);
+  item.prefix = targetPrefix;
+  item.provisional = isProvisionalSlotPlacement(targetPrefix);
+  item.placementBlocked = false;
+  state.files.set(targetPrefix, item);
+  state.slotFits.delete(prefix);
+  state.slotFits.set(targetPrefix, sourceFit);
+  formStatus.textContent = `Slot ${prefix} ma juz dane. Przeniesiono ${slotFileName(item)} do slotu ${targetPrefix}.`;
+  return [prefix, targetPrefix];
 }
 
 function updateSlotPreview(prefix) {
@@ -1840,6 +1990,7 @@ function createSlotNode(slot) {
     title.textContent = `${slot.prefix} - ${slot.label}`;
     detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, slot.prefix);
     input.name = `slot_${slot.prefix}`;
+    input.multiple = true;
     previewImage.draggable = false;
     previewImage.loading = "lazy";
     previewImage.decoding = "async";
@@ -1976,25 +2127,24 @@ function createSlotNode(slot) {
         moveSlotContent(sourcePrefix, slot.prefix);
         return;
       }
-      const file = event.dataTransfer.files && event.dataTransfer.files[0] ? event.dataTransfer.files[0] : null;
-      if (file) {
+      const files = fileListFromInput(event.dataTransfer.files);
+      if (files.length) {
         state.draggedSlotPrefix = "";
-        setSlotFile(slot.prefix, file);
-        renderSlot(slot.prefix);
+        assignFilesFromSlot(slot.prefix, files);
       }
     });
 
     input.addEventListener("change", () => {
-      const file = input.files && input.files[0] ? input.files[0] : null;
-      if (!file) {
+      const files = fileListFromInput(input.files);
+      if (!files.length) {
         bumpSlotRevision(slot.prefix);
         revokeFilePreviewUrl(slot.prefix);
         state.files.delete(slot.prefix);
         renderSlot(slot.prefix);
         return;
       }
-      setSlotFile(slot.prefix, file);
-      renderSlot(slot.prefix);
+      assignFilesFromSlot(slot.prefix, files, { replaceStart: true });
+      input.value = "";
     });
 
     return node;
@@ -2815,6 +2965,63 @@ function updateSubmitButtonState() {
   submitButton.setAttribute("aria-label", submitButton.textContent);
 }
 
+function pageExitWarningText() {
+  const reasons = [];
+  if (hasPendingUserChanges()) reasons.push("sa niezapisane zmiany");
+  if (activeSlotUploads().length) reasons.push("trwa wysylanie plikow");
+  if (state.photosLoading) reasons.push("trwa wczytywanie danych");
+  if (submitButton?.dataset.busy === "1") reasons.push("trwa zapisywanie");
+  const detail = reasons.length ? ` (${reasons.join(", ")})` : "";
+  return `Opuscic strone${detail}?`;
+}
+
+function shouldConfirmPageExit() {
+  if (state.navigationGuardBypass) return false;
+  return Boolean(
+    hasPendingUserChanges() ||
+      activeSlotUploads().length ||
+      state.photosLoading ||
+      submitButton?.dataset.busy === "1"
+  );
+}
+
+function confirmPageExit() {
+  if (!shouldConfirmPageExit()) return true;
+  return window.confirm(pageExitWarningText());
+}
+
+function continueBrowserBackNavigation() {
+  state.navigationGuardBypass = true;
+  window.history.back();
+  window.setTimeout(() => {
+    state.navigationGuardBypass = false;
+    if (!window.history.state?.picorgLeaveGuard) {
+      window.history.pushState({ picorgLeaveGuard: true }, "", window.location.href);
+    }
+  }, 600);
+}
+
+function setupPageExitGuards() {
+  window.addEventListener("beforeunload", (event) => {
+    if (!shouldConfirmPageExit()) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
+  if (!window.history?.pushState) {
+    return;
+  }
+  window.history.replaceState({ ...(window.history.state || {}), picorgBase: true }, "", window.location.href);
+  window.history.pushState({ picorgLeaveGuard: true }, "", window.location.href);
+  window.addEventListener("popstate", () => {
+    if (state.navigationGuardBypass) return;
+    if (!confirmPageExit()) {
+      window.history.pushState({ picorgLeaveGuard: true }, "", window.location.href);
+      return;
+    }
+    continueBrowserBackNavigation();
+  });
+}
+
 function mergePhotoRecord(existing = {}, incoming = {}) {
   const merged = { ...existing, ...incoming };
   for (const key of ["local", "ftp", "sql", "is_image", "sql_checked"]) {
@@ -2899,7 +3106,14 @@ function applyPhotoPayload(photos = [], options = {}) {
     if (allowedPrefixes && !allowedPrefixes.has(photo.prefix)) continue;
     if (!options.force && state.files.has(photo.prefix)) {
       const existing = state.loadedPhotos.get(photo.prefix) || {};
-      state.loadedPhotos.set(photo.prefix, mergePhotoRecord(existing, photo));
+      const merged = mergePhotoRecord(existing, photo);
+      state.loadedPhotos.set(photo.prefix, merged);
+      applyDefaultSlotSource(photo.prefix, merged);
+      if (photoHasUsableContent(photo)) {
+        for (const changedPrefix of relocateProvisionalSlotFile(photo.prefix)) {
+          changedPrefixes.add(changedPrefix);
+        }
+      }
       continue;
     }
     if (!options.force && slotHasPendingUserEdit(photo.prefix)) continue;
@@ -2909,21 +3123,7 @@ function applyPhotoPayload(photos = [], options = {}) {
       delete merged.dirty;
     }
     state.loadedPhotos.set(photo.prefix, merged);
-    const source = defaultSlotSource(merged);
-    if (!state.userSelectedSlotSources.has(photo.prefix)) {
-      if (source) {
-        state.slotSources.set(photo.prefix, source);
-      } else {
-        state.slotSources.delete(photo.prefix);
-      }
-    } else if (!selectedSlotSource(photo.prefix, merged)) {
-      if (source) {
-        state.slotSources.set(photo.prefix, source);
-      } else {
-        state.slotSources.delete(photo.prefix);
-      }
-      state.userSelectedSlotSources.delete(photo.prefix);
-    }
+    applyDefaultSlotSource(photo.prefix, merged);
     changedPrefixes.add(photo.prefix);
   }
   if (changedPrefixes.size) {
@@ -4328,12 +4528,17 @@ listAddInput.addEventListener("input", () => {
 });
 
 logoutButton.addEventListener("click", async () => {
+  if (!confirmPageExit()) {
+    return;
+  }
+  state.navigationGuardBypass = true;
   await fetch("/api/logout", { method: "POST" }).catch(() => {});
   window.location.href = "/";
 });
 
 setupAutocomplete();
 setupFieldChangeTracking();
+setupPageExitGuards();
 applyTheme();
 loadBootstrap().catch(showError);
 setInterval(() => {
