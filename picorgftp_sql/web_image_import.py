@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import html as html_lib
 from html.parser import HTMLParser
 import io
 import ipaddress
 import mimetypes
 import os
 import re
+import shutil
 import socket
+import subprocess
 from typing import Callable, Iterable
 from urllib.parse import unquote, urldefrag, urljoin, urlparse
 from urllib.error import HTTPError
@@ -37,6 +40,7 @@ IMAGE_EXTENSIONS = {
 MAX_PAGE_BYTES = 5 * 1024 * 1024
 MAX_IMAGE_BYTES = 30 * 1024 * 1024
 MAX_CANDIDATES = 140
+CURL_META_MARKER = b"\n---PICORGFTP-CURL-META-0b57754a---\n"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
@@ -79,6 +83,10 @@ IMAGE_URL_RE = re.compile(
 )
 BACKGROUND_URL_RE = re.compile(
     r"""url\(\s*['"]?(?P<url>[^'")]+)['"]?\s*\)""",
+    re.IGNORECASE,
+)
+QUOTED_IMAGE_URL_RE = re.compile(
+    r"""["'](?P<url>(?:https?:)?//[^"'<>\s\\]+?\.(?:jpe?g|png|webp|gif|bmp|tiff?|avif)(?:\?[^"'<>\s\\]*)?|/[^"'<>\s\\]+?\.(?:jpe?g|png|webp|gif|bmp|tiff?|avif)(?:\?[^"'<>\s\\]*)?)["']""",
     re.IGNORECASE,
 )
 
@@ -173,6 +181,119 @@ def _page_request_headers(url: str, *, retry: bool = False) -> dict[str, str]:
     return {key: value for key, value in headers.items() if value}
 
 
+def _challenge_error() -> ImageImportError:
+    return ImageImportError(
+        "Strona blokuje automatyczne pobieranie (Cloudflare/challenge 403). "
+        "Backend nie moze pobrac HTML-a tej strony bez sesji przegladarki."
+    )
+
+
+def _is_cloudflare_challenge(
+    status_code: int,
+    headers: object = None,
+    body: bytes = b"",
+) -> bool:
+    if status_code != 403:
+        return False
+    header_getter = getattr(headers, "get", None)
+    if callable(header_getter):
+        mitigated = str(header_getter("cf-mitigated", "") or "").lower()
+        server = str(header_getter("server", "") or "").lower()
+        if mitigated == "challenge":
+            return True
+        if "cloudflare" in server and mitigated:
+            return True
+    lowered = body[:20_000].lower()
+    return b"challenges.cloudflare.com" in lowered or b"cf-mitigated" in lowered
+
+
+def _decode_html_bytes(data: bytes, content_type: str = "", charset: str = "") -> str:
+    encoding = charset.strip()
+    if not encoding and content_type:
+        match = re.search(r"charset=([^;\s]+)", content_type, re.IGNORECASE)
+        if match:
+            encoding = match.group(1).strip("\"'")
+    return data.decode(encoding or "utf-8", errors="replace")
+
+
+def _curl_executable() -> str:
+    return shutil.which("curl.exe") or shutil.which("curl") or ""
+
+
+def _fetch_page_html_with_curl(url: str) -> str:
+    executable = _curl_executable()
+    if not executable:
+        raise ImageImportError("Nie udalo sie pobrac strony: curl nie jest dostepny.")
+    write_out = (
+        CURL_META_MARKER.decode("ascii")
+        + "%{http_code}\n%{content_type}\n"
+    )
+    command = [
+        executable,
+        "-L",
+        "--silent",
+        "--show-error",
+        "--compressed",
+        "--connect-timeout",
+        "8",
+        "--max-time",
+        "24",
+        "-A",
+        USER_AGENT,
+        "-H",
+        "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "-H",
+        "Accept-Language: pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+        "-H",
+        "Cache-Control: no-cache",
+        "-H",
+        "Pragma: no-cache",
+        "-H",
+        f"Referer: {_page_referer(url)}",
+        "--write-out",
+        write_out,
+        url,
+    ]
+    run_kwargs = {}
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            check=False,
+            timeout=28,
+            **run_kwargs,
+        )
+    except Exception as exc:
+        raise ImageImportError(f"Nie udalo sie pobrac strony: {exc}") from exc
+    output = completed.stdout or b""
+    body, separator, meta = output.rpartition(CURL_META_MARKER)
+    if not separator:
+        body = output
+        meta = b""
+    if len(body) > MAX_PAGE_BYTES:
+        raise ImageImportError("Pobrany plik jest zbyt duzy.")
+    meta_lines = _decode_html_bytes(meta, "text/plain").splitlines()
+    status_code = 0
+    if meta_lines:
+        try:
+            status_code = int(meta_lines[0].strip())
+        except ValueError:
+            status_code = 0
+    content_type = meta_lines[1].strip() if len(meta_lines) > 1 else ""
+    if completed.returncode != 0:
+        message = _decode_html_bytes(completed.stderr or b"", "text/plain").strip()
+        raise ImageImportError(f"Nie udalo sie pobrac strony: {message or completed.returncode}")
+    if _is_cloudflare_challenge(status_code, body=body):
+        raise _challenge_error()
+    if status_code >= 400:
+        raise ImageImportError(f"Nie udalo sie pobrac strony: HTTP Error {status_code}")
+    if "html" not in content_type and "xml" not in content_type and content_type:
+        raise ImageImportError("Podany adres nie zwrocil strony HTML.")
+    return _decode_html_bytes(body, content_type)
+
+
 def fetch_page_html(
     url: object,
     *,
@@ -194,11 +315,22 @@ def fetch_page_html(
                 data = _read_limited(response, MAX_PAGE_BYTES)
                 charset_getter = getattr(headers, "get_content_charset", None)
                 charset = charset_getter() if charset_getter else None
-                return data.decode(charset or "utf-8", errors="replace")
+                return _decode_html_bytes(data, content_type, charset or "")
         except HTTPError as exc:
             last_error = exc
             if exc.code == 403 and not retry:
                 continue
+            if _is_cloudflare_challenge(exc.code, exc.headers):
+                try:
+                    return _fetch_page_html_with_curl(cleaned_url)
+                except ImageImportError as curl_exc:
+                    if "Cloudflare/challenge" in str(curl_exc):
+                        raise curl_exc from exc
+            if exc.code == 403:
+                try:
+                    return _fetch_page_html_with_curl(cleaned_url)
+                except ImageImportError as curl_exc:
+                    last_error = curl_exc
             raise ImageImportError(f"Nie udalo sie pobrac strony: HTTP Error {exc.code}: {exc.reason}") from exc
         except ImageImportError:
             raise
@@ -355,10 +487,20 @@ class _ImageCandidateParser(HTMLParser):
 def _html_url_candidates(base_url: str, html: str) -> list[dict[str, object]]:
     parser = _ImageCandidateParser(base_url)
     parser.feed(html)
-    for match in BACKGROUND_URL_RE.finditer(html):
-        parser._add(match.group("url"), "style.background")
-    for match in IMAGE_URL_RE.finditer(html):
-        parser._add(match.group("url"), "html.url")
+    texts = [html]
+    unescaped = html_lib.unescape(html)
+    if unescaped != html:
+        texts.append(unescaped)
+    slash_unescaped = unescaped.replace("\\/", "/")
+    if slash_unescaped not in texts:
+        texts.append(slash_unescaped)
+    for text in texts:
+        for match in BACKGROUND_URL_RE.finditer(text):
+            parser._add(match.group("url"), "style.background")
+        for match in IMAGE_URL_RE.finditer(text):
+            parser._add(match.group("url"), "html.url")
+        for match in QUOTED_IMAGE_URL_RE.finditer(text):
+            parser._add(match.group("url"), "html.quoted-url")
     return parser.candidates
 
 
@@ -467,8 +609,7 @@ def discover_image_candidates(
             size_bytes = probed_size
             mime_type = probed_mime or mime_type
         except Exception:
-            if not width and not height:
-                continue
+            pass
         item = {
             "url": url,
             "filename": filename_from_url(url),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 from urllib.error import HTTPError
 
+import picorgftp_sql.web_image_import as web_image_import
 from picorgftp_sql.web_image_import import discover_image_candidates
 from picorgftp_sql.web_image_import import fetch_page_html
 
@@ -73,6 +74,57 @@ def test_discover_image_candidates_ignores_non_image_links() -> None:
     ]
 
 
+def test_discover_image_candidates_keeps_html_urls_when_probe_fails() -> None:
+    html = """
+    <html>
+      <body>
+        <img src="/gallery/product-front.jpg">
+      </body>
+    </html>
+    """
+
+    candidates = discover_image_candidates(
+        "https://shop.example/product.html",
+        html,
+        image_probe=lambda _url, _referer: (_ for _ in ()).throw(RuntimeError("blocked")),
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["url"] == "https://shop.example/gallery/product-front.jpg"
+    assert candidates[0]["width"] == 0
+    assert candidates[0]["height"] == 0
+    assert candidates[0]["size_bytes"] == 0
+    assert candidates[0]["mime_type"] == "image/jpeg"
+
+
+def test_discover_image_candidates_reads_escaped_script_urls() -> None:
+    html = r"""
+    <html>
+      <body>
+        <script>
+          window.productImages = [
+            "https:\/\/cdn.example\/products\/front.webp",
+            "\/products\/relative-detail.jpg"
+          ];
+        </script>
+      </body>
+    </html>
+    """
+
+    candidates = discover_image_candidates(
+        "https://shop.example/product.html",
+        html,
+        image_probe=lambda url, _referer: (900, 700, 100_000, "image/webp")
+        if url.endswith(".webp")
+        else (800, 600, 90_000, "image/jpeg"),
+    )
+
+    assert [item["url"] for item in candidates] == [
+        "https://cdn.example/products/front.webp",
+        "https://shop.example/products/relative-detail.jpg",
+    ]
+
+
 def test_fetch_page_html_retries_forbidden_page_with_browser_headers() -> None:
     calls = []
 
@@ -117,3 +169,32 @@ def test_fetch_page_html_retries_forbidden_page_with_browser_headers() -> None:
     assert "Referer" not in calls[0]
     assert calls[1]["Referer"] == "https://shop.example/"
     assert "pl-PL" in calls[1]["Accept-language"]
+
+
+def test_fetch_page_html_uses_curl_fallback_after_repeated_forbidden(monkeypatch) -> None:
+    calls = []
+
+    def fake_open(request, _timeout=12):
+        calls.append(dict(request.header_items()))
+        raise HTTPError(
+            request.full_url,
+            403,
+            "Forbidden",
+            hdrs=None,
+            fp=io.BytesIO(b"blocked"),
+        )
+
+    monkeypatch.setattr(
+        web_image_import,
+        "_fetch_page_html_with_curl",
+        lambda url: f"<html>curl:{url}</html>",
+    )
+
+    html = fetch_page_html(
+        "https://shop.example/product.html",
+        opener=fake_open,
+        validator=lambda url: str(url),
+    )
+
+    assert html == "<html>curl:https://shop.example/product.html</html>"
+    assert len(calls) == 2
