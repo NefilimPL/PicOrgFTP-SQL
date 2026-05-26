@@ -118,6 +118,7 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("webImageMinKb", html.ids)
         self.assertIn("webImageHideThumbnails", html.ids)
         self.assertIn("browserExtensionDownload", html.ids)
+        self.assertIn("browserExtensionDownload", html.button_ids)
         self.assertIn("browserExtensionHelpButton", html.button_ids)
         self.assertIn("browserExtensionReceiveButton", html.button_ids)
         self.assertIn("browserExtensionHelp", html.ids)
@@ -173,7 +174,9 @@ class WebUiIntegrityTests(unittest.TestCase):
         source = APP_JS.read_text(encoding="utf-8")
 
         self.assertIn("/api/browser-extension/imports", source)
+        self.assertIn("/api/browser-extension/download", source)
         self.assertIn("receiveBrowserExtensionImages", source)
+        self.assertIn("downloadBrowserExtension", source)
         self.assertIn("Odbierz z rozszerzenia", source)
 
     def test_login_page_keeps_accessible_login_form(self) -> None:

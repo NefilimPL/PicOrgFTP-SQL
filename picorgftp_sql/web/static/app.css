@@ -609,12 +609,6 @@ h2 {
   margin-bottom: 12px;
 }
 
-.browser-extension-download {
-  display: inline-flex;
-  align-items: center;
-  text-decoration: none;
-}
-
 .browser-extension-help {
   margin-bottom: 12px;
   border: 1px solid var(--line);

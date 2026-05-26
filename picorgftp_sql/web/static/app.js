@@ -107,6 +107,7 @@ const webImageMinWidth = document.querySelector("#webImageMinWidth");
 const webImageMinHeight = document.querySelector("#webImageMinHeight");
 const webImageMinKb = document.querySelector("#webImageMinKb");
 const webImageHideThumbnails = document.querySelector("#webImageHideThumbnails");
+const browserExtensionDownload = document.querySelector("#browserExtensionDownload");
 const browserExtensionHelpButton = document.querySelector("#browserExtensionHelpButton");
 const browserExtensionHelp = document.querySelector("#browserExtensionHelp");
 const browserExtensionReceiveButton = document.querySelector("#browserExtensionReceiveButton");
@@ -798,6 +799,40 @@ async function receiveBrowserExtensionImages() {
   } finally {
     browserExtensionReceiveButton.disabled = false;
     browserExtensionReceiveButton.textContent = "Odbierz z rozszerzenia";
+  }
+}
+
+async function downloadBrowserExtension() {
+  if (!browserExtensionDownload) return;
+  browserExtensionDownload.disabled = true;
+  browserExtensionDownload.textContent = "Pobieranie...";
+  try {
+    const response = await fetch("/api/browser-extension/download", {
+      cache: "no-store",
+    });
+    const contentType = response.headers.get("content-type") || "";
+    if (!response.ok || !contentType.includes("application/zip")) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(
+        payload.detail ||
+          "Backend nie zwrocil paczki ZIP rozszerzenia. Sprawdz, czy EXE zawiera folder browser_extension."
+      );
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "picorgftp-sql-browser-extension.zip";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    formStatus.textContent = "Pobrano paczke rozszerzenia.";
+  } catch (error) {
+    formStatus.textContent = error.message;
+  } finally {
+    browserExtensionDownload.disabled = false;
+    browserExtensionDownload.textContent = "Pobierz rozszerzenie";
   }
 }
 
@@ -5083,6 +5118,12 @@ webImageScanMode?.addEventListener("change", () => {
 browserExtensionHelpButton?.addEventListener("click", () => {
   if (!browserExtensionHelp) return;
   browserExtensionHelp.hidden = !browserExtensionHelp.hidden;
+});
+
+browserExtensionDownload?.addEventListener("click", () => {
+  downloadBrowserExtension().catch((error) => {
+    formStatus.textContent = error.message;
+  });
 });
 
 browserExtensionReceiveButton?.addEventListener("click", () => {

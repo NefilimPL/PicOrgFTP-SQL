@@ -49,6 +49,7 @@ Invoke-Native $Python "-m" "PyInstaller" "--noconfirm" "--clean" "--log-level=WA
     --collect-data mysql.connector `
     --collect-data certifi `
     --add-data "picorgftp_sql\web\static;picorgftp_sql\web\static" `
+    --add-data "picorgftp_sql\browser_extension;picorgftp_sql\browser_extension" `
     --add-data "picorgftp_sql\Localization;picorgftp_sql\Localization" `
     --add-data "picorgftp_sql\VERSION;picorgftp_sql" `
     --add-data "pic\PIC_WEB.png;pic" `

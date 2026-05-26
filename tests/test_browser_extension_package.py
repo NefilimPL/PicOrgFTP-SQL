@@ -54,3 +54,11 @@ def test_browser_extension_download_endpoint_returns_zip() -> None:
         defaults = archive.read("picorgftp-sql-browser-extension/defaults.js").decode("utf-8")
     assert "window.PICORG_EXTENSION_DEFAULTS" in defaults
     assert "apiToken" in defaults
+
+
+def test_web_exe_build_includes_browser_extension_assets() -> None:
+    build_script = (ROOT / "Generator exe" / "build_web_exe.ps1").read_text(encoding="utf-8")
+    workflow = (ROOT / ".github" / "workflows" / "build-exe.yml").read_text(encoding="utf-8")
+
+    assert "picorgftp_sql\\browser_extension;picorgftp_sql\\browser_extension" in build_script
+    assert "picorgftp_sql/browser_extension;picorgftp_sql/browser_extension" in workflow
