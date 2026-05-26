@@ -11,6 +11,7 @@ import re
 import socket
 from typing import Callable, Iterable
 from urllib.parse import unquote, urldefrag, urljoin, urlparse
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from .common import SSL_CONTEXT
@@ -143,29 +144,68 @@ def _read_limited(response, max_bytes: int) -> bytes:
     return b"".join(chunks)
 
 
-def fetch_page_html(url: object) -> str:
+def _page_referer(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}/"
+
+
+def _page_request_headers(url: str, *, retry: bool = False) -> dict[str, str]:
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Upgrade-Insecure-Requests": "1",
+    }
+    if retry:
+        headers.update(
+            {
+                "Referer": _page_referer(url),
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+            }
+        )
+    return {key: value for key, value in headers.items() if value}
+
+
+def fetch_page_html(
+    url: object,
+    *,
+    opener: Callable[[Request, int], object] = _urlopen,
+    validator: Callable[[object], str] = validate_public_http_url,
+) -> str:
     """Download a page as HTML."""
 
-    cleaned_url = validate_public_http_url(url)
-    request = Request(
-        cleaned_url,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        },
-    )
-    try:
-        with _urlopen(request) as response:
-            content_type = response.headers.get("content-type", "")
-            if "html" not in content_type and "xml" not in content_type and content_type:
-                raise ImageImportError("Podany adres nie zwrocil strony HTML.")
-            data = _read_limited(response, MAX_PAGE_BYTES)
-            charset = response.headers.get_content_charset() or "utf-8"
-    except ImageImportError:
-        raise
-    except Exception as exc:
-        raise ImageImportError(f"Nie udalo sie pobrac strony: {exc}") from exc
-    return data.decode(charset, errors="replace")
+    cleaned_url = validator(url)
+    last_error: Exception | None = None
+    for retry in (False, True):
+        request = Request(cleaned_url, headers=_page_request_headers(cleaned_url, retry=retry))
+        try:
+            with opener(request, 12) as response:
+                headers = response.headers
+                content_type = headers.get("content-type", "")
+                if "html" not in content_type and "xml" not in content_type and content_type:
+                    raise ImageImportError("Podany adres nie zwrocil strony HTML.")
+                data = _read_limited(response, MAX_PAGE_BYTES)
+                charset_getter = getattr(headers, "get_content_charset", None)
+                charset = charset_getter() if charset_getter else None
+                return data.decode(charset or "utf-8", errors="replace")
+        except HTTPError as exc:
+            last_error = exc
+            if exc.code == 403 and not retry:
+                continue
+            raise ImageImportError(f"Nie udalo sie pobrac strony: HTTP Error {exc.code}: {exc.reason}") from exc
+        except ImageImportError:
+            raise
+        except Exception as exc:
+            last_error = exc
+            raise ImageImportError(f"Nie udalo sie pobrac strony: {exc}") from exc
+    raise ImageImportError(f"Nie udalo sie pobrac strony: {last_error}")
 
 
 def _without_fragment(url: str) -> str:

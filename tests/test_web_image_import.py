@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import io
+from urllib.error import HTTPError
+
 from picorgftp_sql.web_image_import import discover_image_candidates
+from picorgftp_sql.web_image_import import fetch_page_html
 
 
 def test_discover_image_candidates_collects_gallery_sources_and_dimensions() -> None:
@@ -67,3 +71,49 @@ def test_discover_image_candidates_ignores_non_image_links() -> None:
         "https://shop.example/photo-small.webp",
         "https://shop.example/photo-big.webp",
     ]
+
+
+def test_fetch_page_html_retries_forbidden_page_with_browser_headers() -> None:
+    calls = []
+
+    class FakeResponse:
+        headers = {"content-type": "text/html; charset=utf-8"}
+
+        def __init__(self) -> None:
+            self._sent = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size=-1):
+            if self._sent:
+                return b""
+            self._sent = True
+            return b"<html>ok</html>"
+
+    def fake_open(request, _timeout=12):
+        calls.append(dict(request.header_items()))
+        if len(calls) == 1:
+            raise HTTPError(
+                request.full_url,
+                403,
+                "Forbidden",
+                hdrs=None,
+                fp=io.BytesIO(b"blocked"),
+            )
+        return FakeResponse()
+
+    html = fetch_page_html(
+        "https://shop.example/product.html",
+        opener=fake_open,
+        validator=lambda url: str(url),
+    )
+
+    assert html == "<html>ok</html>"
+    assert len(calls) == 2
+    assert "Referer" not in calls[0]
+    assert calls[1]["Referer"] == "https://shop.example/"
+    assert "pl-PL" in calls[1]["Accept-language"]

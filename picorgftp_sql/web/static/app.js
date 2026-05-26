@@ -86,6 +86,7 @@ const themeToggleButton = document.querySelector("#themeToggleButton");
 const entrySelect = document.querySelector("#entrySelect");
 const findByEanButton = document.querySelector("#findByEanButton");
 const findProductButton = document.querySelector("#findProductButton");
+const webImagesButton = document.querySelector("#webImagesButton");
 const webImageUrl = document.querySelector("#webImageUrl");
 const scanWebImagesButton = document.querySelector("#scanWebImagesButton");
 const webImagesModal = document.querySelector("#webImagesModal");
@@ -352,6 +353,7 @@ function visibleWebImageEntries() {
 
 function openWebImagesModal() {
   webImagesModal?.classList.add("active");
+  webImageUrl?.focus();
 }
 
 function closeWebImagesModal() {
@@ -382,6 +384,7 @@ function renderWebImagesPicker() {
     const title = document.createElement("strong");
     const dimensions = document.createElement("span");
     const size = document.createElement("span");
+    const format = document.createElement("span");
     const source = document.createElement("span");
     checkbox.type = "checkbox";
     checkbox.checked = state.webImageSelected.has(index);
@@ -395,9 +398,10 @@ function renderWebImagesPicker() {
     title.textContent = image.filename || `Obraz ${index + 1}`;
     dimensions.textContent = webImageDimensions(image);
     size.textContent = formatFileSize(image.size_bytes || 0);
+    format.textContent = image.mime_type || "format nieznany";
     source.textContent = isThumbnailWebImage(image) ? "miniatura" : image.source || "obraz";
     meta.className = "web-image-meta";
-    meta.append(title, dimensions, size, source);
+    meta.append(title, dimensions, format, size, source);
     card.className = `web-image-card ${checkbox.checked ? "selected" : ""}`;
     card.title = image.url;
     card.append(preview, meta);
@@ -4795,6 +4799,11 @@ scanWebImagesButton?.addEventListener("click", () => {
   scanWebImages().catch((error) => {
     formStatus.textContent = error.message;
   });
+});
+
+webImagesButton?.addEventListener("click", () => {
+  openWebImagesModal();
+  renderWebImagesPicker();
 });
 
 webImageUrl?.addEventListener("keydown", (event) => {

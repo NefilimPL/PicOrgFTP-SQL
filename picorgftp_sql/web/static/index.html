@@ -14,6 +14,7 @@
         <span id="serverInfo"></span>
       </div>
       <nav class="topnav" aria-label="Widoki">
+        <button id="webImagesButton" type="button" class="nav-button">Zdjecia WWW</button>
         <button type="button" class="nav-button" data-modal="history">Historia</button>
         <button type="button" class="nav-button admin-only" data-modal="logs" style="display: none">Logi</button>
         <button type="button" class="nav-button" data-modal="lists">Listy</button>
@@ -63,14 +64,9 @@
             EAN
             <input name="ean" inputmode="numeric" maxlength="13" autocomplete="new-password" spellcheck="false">
           </label>
-          <label class="web-image-url-field">
-            Link do strony ze zdjeciami
-            <input id="webImageUrl" type="url" autocomplete="off" spellcheck="false" placeholder="https://sklep.pl/produkt.html">
-          </label>
           <div class="lookup-actions">
             <button id="findByEanButton" type="button" class="secondary-button">Szukaj EAN</button>
             <button id="findProductButton" type="button" class="secondary-button">Dopasuj produkt</button>
-            <button id="scanWebImagesButton" type="button" class="secondary-button">Pobierz zdjecia</button>
           </div>
           <label class="entry-select-field">
             Istniejacy wpis
@@ -125,6 +121,13 @@
             <span id="webImagesStatus"></span>
             <button type="button" class="ghost-button modal-close" data-close-web-images>Zamknij</button>
           </div>
+        </div>
+        <div class="web-image-url-row">
+          <label>
+            Link do strony ze zdjeciami
+            <input id="webImageUrl" type="url" autocomplete="off" spellcheck="false" placeholder="https://sklep.pl/produkt.html">
+          </label>
+          <button id="scanWebImagesButton" type="button">Pobierz zdjecia</button>
         </div>
         <div class="web-image-filters">
           <label>

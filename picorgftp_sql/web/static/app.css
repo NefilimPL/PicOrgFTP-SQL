@@ -351,10 +351,6 @@ h2 {
   gap: 8px;
 }
 
-.web-image-url-field {
-  grid-column: 1 / -1;
-}
-
 .entry-select-field {
   display: none;
 }
@@ -584,6 +580,14 @@ h2 {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 12px;
+}
+
+.web-image-url-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 12px;
 }
 
 .web-image-filters {
@@ -1459,6 +1463,7 @@ button.slot-badge.on:hover {
 
   .topnav button,
   .lookup-actions,
+  .web-image-url-row,
   .inline-form,
   .user-add-form {
     grid-template-columns: 1fr;

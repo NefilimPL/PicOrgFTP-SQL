@@ -91,9 +91,9 @@ class WebUiIntegrityTests(unittest.TestCase):
             "ean",
         }
         required_buttons = {
+            "webImagesButton",
             "findByEanButton",
             "findProductButton",
-            "scanWebImagesButton",
             "submitButton",
             "clearButton",
             "logoutButton",
@@ -104,9 +104,20 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertEqual(required_inputs - html.input_names, set())
         self.assertEqual(required_buttons - html.button_ids, set())
         self.assertIn("entrySelect", html.ids)
-        self.assertIn("webImageUrl", html.ids)
-        self.assertIn("webImagesModal", html.ids)
         self.assertIn("formStatus", html.ids)
+
+    def test_web_images_modal_contains_url_input_filters_and_actions(self) -> None:
+        html = _parse(INDEX_HTML)
+
+        self.assertIn("webImagesModal", html.ids)
+        self.assertIn("webImageUrl", html.ids)
+        self.assertIn("scanWebImagesButton", html.button_ids)
+        self.assertIn("webImageMinWidth", html.ids)
+        self.assertIn("webImageMinHeight", html.ids)
+        self.assertIn("webImageMinKb", html.ids)
+        self.assertIn("webImageHideThumbnails", html.ids)
+        self.assertIn("webImagesOutput", html.ids)
+        self.assertTrue(html.has_tag("button", id="webImagesButton", type="button"))
 
     def test_modal_navigation_targets_have_matching_panels(self) -> None:
         html = _parse(INDEX_HTML)
