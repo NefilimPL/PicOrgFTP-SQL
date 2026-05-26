@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicOrgFTP-SQL Web</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260525-drop-guard">
+    <link rel="stylesheet" href="/static/app.css?v=20260526-web-images">
   </head>
   <body class="app-screen">
     <header class="topbar">
@@ -63,9 +63,14 @@
             EAN
             <input name="ean" inputmode="numeric" maxlength="13" autocomplete="new-password" spellcheck="false">
           </label>
+          <label class="web-image-url-field">
+            Link do strony ze zdjeciami
+            <input id="webImageUrl" type="url" autocomplete="off" spellcheck="false" placeholder="https://sklep.pl/produkt.html">
+          </label>
           <div class="lookup-actions">
             <button id="findByEanButton" type="button" class="secondary-button">Szukaj EAN</button>
             <button id="findProductButton" type="button" class="secondary-button">Dopasuj produkt</button>
+            <button id="scanWebImagesButton" type="button" class="secondary-button">Pobierz zdjecia</button>
           </div>
           <label class="entry-select-field">
             Istniejacy wpis
@@ -109,6 +114,45 @@
           <button type="button" class="ghost-button modal-close" data-close-modal> Zamknij </button>
         </div>
         <div id="entryMatches" class="entry-matches"></div>
+      </section>
+    </div>
+
+    <div id="webImagesModal" class="modal-view">
+      <section class="modal-panel web-images-panel">
+        <div class="section-heading">
+          <h1>Zdjecia ze strony</h1>
+          <div class="heading-actions">
+            <span id="webImagesStatus"></span>
+            <button type="button" class="ghost-button modal-close" data-close-web-images>Zamknij</button>
+          </div>
+        </div>
+        <div class="web-image-filters">
+          <label>
+            Min. szerokosc
+            <input id="webImageMinWidth" type="number" min="0" step="50" value="0">
+          </label>
+          <label>
+            Min. wysokosc
+            <input id="webImageMinHeight" type="number" min="0" step="50" value="0">
+          </label>
+          <label>
+            Min. rozmiar KB
+            <input id="webImageMinKb" type="number" min="0" step="10" value="0">
+          </label>
+          <div class="check-row compact-check web-image-thumbnail-filter">
+            <input id="webImageHideThumbnails" type="checkbox">
+            <div>
+              <strong>Ukryj miniatury</strong>
+              <small>Ponizej 300 px albo oznaczone jako thumbnail.</small>
+            </div>
+          </div>
+        </div>
+        <div class="web-image-actions">
+          <button id="webImagesSelectVisibleButton" type="button" class="secondary-button">Zaznacz widoczne</button>
+          <button id="webImagesClearSelectionButton" type="button" class="secondary-button">Odznacz</button>
+          <button id="webImagesAddButton" type="button">Dodaj do wolnych slotow</button>
+        </div>
+        <div id="webImagesOutput" class="web-images-grid empty-state">Brak pobranych zdjec.</div>
       </section>
     </div>
 
@@ -247,6 +291,6 @@
       </article>
     </template>
 
-    <script src="/static/app.js?v=20260525-drop-guard"></script>
+    <script src="/static/app.js?v=20260526-web-images"></script>
   </body>
 </html>

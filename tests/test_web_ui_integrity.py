@@ -93,6 +93,7 @@ class WebUiIntegrityTests(unittest.TestCase):
         required_buttons = {
             "findByEanButton",
             "findProductButton",
+            "scanWebImagesButton",
             "submitButton",
             "clearButton",
             "logoutButton",
@@ -103,6 +104,8 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertEqual(required_inputs - html.input_names, set())
         self.assertEqual(required_buttons - html.button_ids, set())
         self.assertIn("entrySelect", html.ids)
+        self.assertIn("webImageUrl", html.ids)
+        self.assertIn("webImagesModal", html.ids)
         self.assertIn("formStatus", html.ids)
 
     def test_modal_navigation_targets_have_matching_panels(self) -> None:
@@ -131,6 +134,16 @@ class WebUiIntegrityTests(unittest.TestCase):
                 type="file",
                 accept="image/*,.pdf,.eps,.psd,.ai,.tif,.tiff",
             )
+        )
+
+    def test_app_js_swaps_two_occupied_slots_on_slot_drop(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("const target = getSlotAssignment(targetPrefix);", source)
+        self.assertIn("Zamieniono slot", source)
+        self.assertLess(
+            source.index("Zamieniono slot"),
+            source.index("Przeniesiono slot"),
         )
 
     def test_login_page_keeps_accessible_login_form(self) -> None:

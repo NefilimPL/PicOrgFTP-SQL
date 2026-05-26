@@ -45,6 +45,13 @@ from ..logging_utils import log_error
 from ..services.ftp_service import sync_remote_files
 from ..services.sql_service import extract_presence_context
 from ..workflow_utils import build_product_directory, parse_slot_filename, sanitize_path_segment
+from ..web_image_import import (
+    ImageImportError,
+    discover_image_candidates,
+    download_image_bytes,
+    fetch_page_html,
+    filename_from_url,
+)
 from ..web_workflow import (
     WebProductForm,
     WebUploadedSlot,
@@ -495,6 +502,36 @@ async def _save_upload_cache(upload: UploadFile, cache_scope: str, prefix: str) 
             handle.write(chunk)
     await upload.close()
     return target_path, size
+
+
+def _save_web_image_cache(
+    image_url: str,
+    page_url: str,
+    cache_scope: str,
+    prefix: str,
+) -> tuple[str, int, str, int, int]:
+    data, filename, _mime_type, width, height = download_image_bytes(image_url, page_url)
+    safe_name = _safe_upload_name(filename or filename_from_url(image_url), f"{prefix}.jpg")
+    stem = Path(safe_name).stem
+    suffix = _safe_file_suffix(safe_name) or ".jpg"
+    safe_prefix = sanitize_path_segment(prefix) or "slot"
+    safe_stem = sanitize_path_segment(stem) or "web_image"
+    safe_stem = safe_stem[:80].strip(" .-_") or "web_image"
+    cache_dir = _upload_cache_dir(cache_scope)
+    os.makedirs(cache_dir, exist_ok=True)
+    target_path = os.path.join(
+        cache_dir,
+        f"{safe_prefix}_{secrets.token_hex(12)}_{safe_stem}{suffix}",
+    )
+    with open(target_path, "wb") as handle:
+        handle.write(data)
+    return target_path, len(data), safe_name, width, height
+
+
+def _scan_web_image_page(page_url: str) -> Dict[str, Any]:
+    html = fetch_page_html(page_url)
+    images = discover_image_candidates(page_url, html)
+    return {"source_url": page_url, "images": images, "count": len(images)}
 
 
 def _result_payload(result: Any) -> Dict[str, Any]:
@@ -1761,6 +1798,78 @@ def create_app() -> FastAPI:
             "token": token,
             "name": _safe_upload_name(display_name, os.path.basename(path)),
             "size_bytes": size,
+            "preprocessed": preprocessed,
+            "file_version": _file_version(path),
+            "url": _versioned_file_url(path, "/api/file", token),
+            "thumb_url": _versioned_file_url(path, "/api/thumbnail", token),
+            "timing": {
+                "total_ms": _elapsed_ms(started),
+                "save_ms": save_ms,
+                "preprocess_ms": preprocess_ms,
+                "mode": _upload_processing_mode(),
+            },
+        }
+
+    @app.post("/api/web-images/scan")
+    async def web_images_scan_api(request: Request) -> JSONResponse:
+        _require_user(request)
+        payload = await request.json()
+        page_url = str(payload.get("url") if isinstance(payload, dict) else "").strip()
+        if not page_url:
+            raise HTTPException(status_code=400, detail="Podaj link do strony.")
+        try:
+            result = await run_in_threadpool(_scan_web_image_page, page_url)
+        except ImageImportError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(result)
+
+    @app.post("/api/web-images/cache")
+    async def web_images_cache_api(request: Request) -> Dict[str, Any]:
+        started = time.perf_counter()
+        username = _require_user(request)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Niepoprawne dane obrazu.")
+        image_url = str(payload.get("url") or "").strip()
+        page_url = str(payload.get("page_url") or payload.get("referer") or "").strip()
+        prefix = str(payload.get("prefix") or "slot").strip() or "slot"
+        if not image_url:
+            raise HTTPException(status_code=400, detail="Brak adresu obrazu.")
+        cleanup_web_upload_cache()
+        save_started = time.perf_counter()
+        try:
+            path, size, display_name, width, height = await run_in_threadpool(
+                _save_web_image_cache,
+                image_url,
+                page_url,
+                _user_cache_scope(request, username),
+                prefix,
+            )
+        except ImageImportError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        save_ms = _elapsed_ms(save_started)
+        preprocess_ms = 0
+        preprocessed = False
+        if _upload_processing_mode() == "host":
+            preprocess_started = time.perf_counter()
+            path, display_name, preprocessed = await run_in_threadpool(
+                preprocess_cached_upload,
+                path,
+                display_name,
+                processing_options_from_config(config.CONFIG),
+            )
+            preprocess_ms = _elapsed_ms(preprocess_started)
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = 0
+        token = _file_token(path)
+        return {
+            "token": token,
+            "name": _safe_upload_name(display_name, os.path.basename(path)),
+            "size_bytes": size,
+            "width": width,
+            "height": height,
             "preprocessed": preprocessed,
             "file_version": _file_version(path),
             "url": _versioned_file_url(path, "/api/file", token),

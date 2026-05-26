@@ -72,6 +72,8 @@ class WebSmokeCiTests(unittest.TestCase):
             "/api/data",
             "/api/process",
             "/api/upload-cache",
+            "/api/web-images/scan",
+            "/api/web-images/cache",
             "/api/entries/search",
             "/api/entries/save",
             "/api/entries/photos",

@@ -48,6 +48,9 @@ const state = {
   processStatusTimer: 0,
   processStatusStartedAt: 0,
   navigationGuardBypass: false,
+  webImages: [],
+  webImageSelected: new Set(),
+  webImagePageUrl: "",
 };
 
 const listLabels = {
@@ -83,6 +86,18 @@ const themeToggleButton = document.querySelector("#themeToggleButton");
 const entrySelect = document.querySelector("#entrySelect");
 const findByEanButton = document.querySelector("#findByEanButton");
 const findProductButton = document.querySelector("#findProductButton");
+const webImageUrl = document.querySelector("#webImageUrl");
+const scanWebImagesButton = document.querySelector("#scanWebImagesButton");
+const webImagesModal = document.querySelector("#webImagesModal");
+const webImagesStatus = document.querySelector("#webImagesStatus");
+const webImagesOutput = document.querySelector("#webImagesOutput");
+const webImageMinWidth = document.querySelector("#webImageMinWidth");
+const webImageMinHeight = document.querySelector("#webImageMinHeight");
+const webImageMinKb = document.querySelector("#webImageMinKb");
+const webImageHideThumbnails = document.querySelector("#webImageHideThumbnails");
+const webImagesSelectVisibleButton = document.querySelector("#webImagesSelectVisibleButton");
+const webImagesClearSelectionButton = document.querySelector("#webImagesClearSelectionButton");
+const webImagesAddButton = document.querySelector("#webImagesAddButton");
 const listTabs = document.querySelector("#listTabs");
 const listValues = document.querySelector("#listValues");
 const listAddForm = document.querySelector("#listAddForm");
@@ -294,6 +309,241 @@ function formatFileSize(bytes) {
   if (value < 1024) return `${Math.round(value)} B`;
   if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function webImageDimensions(image) {
+  const width = Number(image?.width || 0);
+  const height = Number(image?.height || 0);
+  return width && height ? `${width} x ${height}` : "rozmiar nieznany";
+}
+
+function webImageFilters() {
+  return {
+    minWidth: Math.max(0, Number(webImageMinWidth?.value || 0)),
+    minHeight: Math.max(0, Number(webImageMinHeight?.value || 0)),
+    minKb: Math.max(0, Number(webImageMinKb?.value || 0)),
+    hideThumbnails: Boolean(webImageHideThumbnails?.checked),
+  };
+}
+
+function isThumbnailWebImage(image) {
+  const width = Number(image?.width || 0);
+  const height = Number(image?.height || 0);
+  return image?.kind === "thumbnail" || (width > 0 && height > 0 && Math.max(width, height) < 300);
+}
+
+function webImagePassesFilters(image, filters = webImageFilters()) {
+  const width = Number(image?.width || 0);
+  const height = Number(image?.height || 0);
+  const kb = Number(image?.size_bytes || 0) / 1024;
+  if (filters.minWidth && (!width || width < filters.minWidth)) return false;
+  if (filters.minHeight && (!height || height < filters.minHeight)) return false;
+  if (filters.minKb && (!kb || kb < filters.minKb)) return false;
+  if (filters.hideThumbnails && isThumbnailWebImage(image)) return false;
+  return true;
+}
+
+function visibleWebImageEntries() {
+  const filters = webImageFilters();
+  return (state.webImages || [])
+    .map((image, index) => ({ image, index }))
+    .filter((entry) => webImagePassesFilters(entry.image, filters));
+}
+
+function openWebImagesModal() {
+  webImagesModal?.classList.add("active");
+}
+
+function closeWebImagesModal() {
+  webImagesModal?.classList.remove("active");
+}
+
+function renderWebImagesPicker() {
+  if (!webImagesOutput) return;
+  const visible = visibleWebImageEntries();
+  const selectedVisible = visible.filter((entry) => state.webImageSelected.has(entry.index)).length;
+  if (webImagesStatus) {
+    webImagesStatus.textContent = `${selectedVisible}/${visible.length} zaznaczonych, ${state.webImages.length} wykrytych`;
+  }
+  webImagesOutput.textContent = "";
+  webImagesOutput.classList.toggle("empty-state", !visible.length);
+  if (!visible.length) {
+    webImagesOutput.textContent = state.webImages.length
+      ? "Filtry ukryly wszystkie zdjecia."
+      : "Brak pobranych zdjec.";
+    return;
+  }
+  for (const { image, index } of visible) {
+    const card = document.createElement("article");
+    const preview = document.createElement("div");
+    const img = document.createElement("img");
+    const checkbox = document.createElement("input");
+    const meta = document.createElement("div");
+    const title = document.createElement("strong");
+    const dimensions = document.createElement("span");
+    const size = document.createElement("span");
+    const source = document.createElement("span");
+    checkbox.type = "checkbox";
+    checkbox.checked = state.webImageSelected.has(index);
+    checkbox.setAttribute("aria-label", `Wybierz obraz ${image.filename || index + 1}`);
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.alt = "";
+    img.src = image.url;
+    preview.className = "web-image-preview";
+    preview.append(checkbox, img);
+    title.textContent = image.filename || `Obraz ${index + 1}`;
+    dimensions.textContent = webImageDimensions(image);
+    size.textContent = formatFileSize(image.size_bytes || 0);
+    source.textContent = isThumbnailWebImage(image) ? "miniatura" : image.source || "obraz";
+    meta.className = "web-image-meta";
+    meta.append(title, dimensions, size, source);
+    card.className = `web-image-card ${checkbox.checked ? "selected" : ""}`;
+    card.title = image.url;
+    card.append(preview, meta);
+    const setSelected = (selected) => {
+      if (selected) {
+        state.webImageSelected.add(index);
+      } else {
+        state.webImageSelected.delete(index);
+      }
+      checkbox.checked = selected;
+      card.classList.toggle("selected", selected);
+      renderWebImagesPicker();
+    };
+    checkbox.addEventListener("change", () => setSelected(checkbox.checked));
+    card.addEventListener("click", (event) => {
+      if (event.target === checkbox) return;
+      setSelected(!state.webImageSelected.has(index));
+    });
+    webImagesOutput.appendChild(card);
+  }
+}
+
+async function scanWebImages() {
+  const url = webImageUrl?.value?.trim() || "";
+  if (!url) {
+    formStatus.textContent = "Wklej link do strony ze zdjeciami.";
+    return;
+  }
+  scanWebImagesButton.disabled = true;
+  scanWebImagesButton.textContent = "Pobieranie...";
+  formStatus.textContent = "Skanowanie strony ze zdjeciami...";
+  try {
+    const payload = await requestJson("/api/web-images/scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+      timeoutMs: 60000,
+    });
+    state.webImagePageUrl = payload.source_url || url;
+    state.webImages = payload.images || [];
+    state.webImageSelected.clear();
+    openWebImagesModal();
+    renderWebImagesPicker();
+    formStatus.textContent = `Wykryto ${state.webImages.length} zdjec ze strony.`;
+  } catch (error) {
+    formStatus.textContent = error.message;
+  } finally {
+    scanWebImagesButton.disabled = false;
+    scanWebImagesButton.textContent = "Pobierz zdjecia";
+  }
+}
+
+function freeSlotPrefixes(limit = Infinity) {
+  const prefixes = [];
+  for (const slot of state.slots || []) {
+    if (isSlotFreeForNewFile(slot.prefix)) {
+      prefixes.push(slot.prefix);
+      if (prefixes.length >= limit) break;
+    }
+  }
+  return prefixes;
+}
+
+function webImageCacheItem(prefix, image, payload) {
+  return {
+    id: ++state.slotUploadRequestId,
+    prefix,
+    file: null,
+    name: payload.name || image.filename || "web-image.jpg",
+    size: Number(payload.size_bytes || image.size_bytes || 0),
+    type: image.mime_type || "image/jpeg",
+    token: payload.token || "",
+    url: payload.url || "",
+    thumb_url: payload.thumb_url || "",
+    file_version: payload.file_version || "",
+    preprocessed: Boolean(payload.preprocessed),
+    cache_timing: payload.timing || null,
+    client_preprocess_ms: 0,
+    progress: 100,
+    uploading: false,
+    error: "",
+    xhr: null,
+    provisional: false,
+    placementBlocked: false,
+  };
+}
+
+async function cacheWebImageForSlot(image, prefix) {
+  return requestJson("/api/web-images/cache", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      url: image.url,
+      page_url: state.webImagePageUrl || webImageUrl?.value?.trim() || "",
+      prefix,
+    }),
+    timeoutMs: 60000,
+  });
+}
+
+async function addSelectedWebImagesToSlots() {
+  const selected = [...state.webImageSelected]
+    .sort((a, b) => a - b)
+    .map((index) => state.webImages[index])
+    .filter(Boolean);
+  if (!selected.length) {
+    formStatus.textContent = "Zaznacz zdjecia do dodania.";
+    return;
+  }
+  const prefixes = freeSlotPrefixes(selected.length);
+  if (!prefixes.length) {
+    warnNoFreeSlots(selected.map((image) => image.filename || image.url));
+    return;
+  }
+  webImagesAddButton.disabled = true;
+  webImagesAddButton.textContent = "Dodawanie...";
+  const assigned = [];
+  try {
+    const limit = Math.min(selected.length, prefixes.length);
+    for (let index = 0; index < limit; index += 1) {
+      const image = selected[index];
+      const prefix = prefixes[index];
+      formStatus.textContent = `Pobieranie zdjecia ${index + 1}/${limit} do slotu ${prefix}...`;
+      const payload = await cacheWebImageForSlot(image, prefix);
+      if (!payload.token) {
+        throw new Error("Backend nie zwrocil tokenu cache dla zdjecia.");
+      }
+      state.files.set(prefix, webImageCacheItem(prefix, image, payload));
+      state.webImageSelected.delete(state.webImages.indexOf(image));
+      assigned.push(prefix);
+      renderSlot(prefix);
+    }
+    if (assigned.length) {
+      formStatus.textContent = `Dodano ${assigned.length} zdjec do slotow: ${assigned.join(", ")}.`;
+      updateSubmitButtonState();
+    }
+    if (selected.length > prefixes.length) {
+      warnNoFreeSlots(selected.slice(prefixes.length).map((image) => image.filename || image.url));
+    }
+    renderWebImagesPicker();
+  } catch (error) {
+    formStatus.textContent = error.message;
+  } finally {
+    webImagesAddButton.disabled = false;
+    webImagesAddButton.textContent = "Dodaj do wolnych slotow";
+  }
 }
 
 function currentProcessingSettings() {
@@ -1697,17 +1947,23 @@ function setSlotFile(prefix, file, options = {}) {
 
 function getSlotAssignment(prefix) {
   if (state.files.has(prefix)) {
-    return { type: "file", prefix, value: state.files.get(prefix), source: "" };
+    return { type: "file", prefix, value: state.files.get(prefix), source: "", fit: isSlotFit(prefix) };
   }
   if (state.loadedPhotos.has(prefix)) {
     const photo = state.loadedPhotos.get(prefix);
-    return { type: "loaded", prefix, value: photo, source: transferableSlotSource(prefix, photo) };
+    return {
+      type: "loaded",
+      prefix,
+      value: photo,
+      source: transferableSlotSource(prefix, photo),
+      fit: isSlotFit(prefix),
+    };
   }
   return null;
 }
 
 function setSlotAssignment(prefix, assignment, options = {}) {
-  const sourceFit = assignment ? isSlotFit(assignment.prefix || prefix) : false;
+  const sourceFit = assignment && "fit" in assignment ? Boolean(assignment.fit) : isSlotFit(assignment?.prefix || prefix);
   const sourceType = assignment?.source || "";
   clearSlotAssignment(prefix, { markDelete: options.markDelete !== false });
   if (!assignment) {
@@ -1715,6 +1971,11 @@ function setSlotAssignment(prefix, assignment, options = {}) {
   }
   if (assignment.type === "file") {
     const item = slotFileItem(assignment.value);
+    if (item) {
+      item.prefix = prefix;
+      item.provisional = false;
+      item.placementBlocked = false;
+    }
     state.files.set(prefix, item);
     state.slotFits.set(prefix, sourceFit);
     if (sourceType) state.slotSources.set(prefix, sourceType);
@@ -1738,6 +1999,19 @@ function moveSlotContent(sourcePrefix, targetPrefix) {
   }
   const source = getSlotAssignment(sourcePrefix);
   if (!source) {
+    return;
+  }
+  const target = getSlotAssignment(targetPrefix);
+  if (target) {
+    markSlotDeletion(targetPrefix, state.loadedPhotos.get(targetPrefix));
+    markSlotDeletion(sourcePrefix, state.loadedPhotos.get(sourcePrefix));
+    clearSlotAssignment(targetPrefix, { markDelete: false });
+    clearSlotAssignment(sourcePrefix, { markDelete: false });
+    setSlotAssignment(targetPrefix, source, { markDelete: false });
+    setSlotAssignment(sourcePrefix, target, { markDelete: false });
+    formStatus.textContent = `Zamieniono slot ${sourcePrefix} ze slotem ${targetPrefix}.`;
+    renderSlot(targetPrefix);
+    renderSlot(sourcePrefix);
     return;
   }
   markSlotDeletion(targetPrefix, state.loadedPhotos.get(targetPrefix));
@@ -4276,6 +4550,10 @@ document.querySelectorAll("[data-close-modal]").forEach((button) => {
   button.addEventListener("click", closeModals);
 });
 
+document.querySelectorAll("[data-close-web-images]").forEach((button) => {
+  button.addEventListener("click", closeWebImagesModal);
+});
+
 document.querySelectorAll("[data-close-history-detail]").forEach((button) => {
   button.addEventListener("click", () => {
     document.querySelector("#historyDetailModal")?.classList.remove("active");
@@ -4509,6 +4787,43 @@ findByEanButton.addEventListener("click", () => {
 
 findProductButton.addEventListener("click", () => {
   searchByProduct().catch((error) => {
+    formStatus.textContent = error.message;
+  });
+});
+
+scanWebImagesButton?.addEventListener("click", () => {
+  scanWebImages().catch((error) => {
+    formStatus.textContent = error.message;
+  });
+});
+
+webImageUrl?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  scanWebImages().catch((error) => {
+    formStatus.textContent = error.message;
+  });
+});
+
+for (const input of [webImageMinWidth, webImageMinHeight, webImageMinKb, webImageHideThumbnails]) {
+  input?.addEventListener("input", renderWebImagesPicker);
+  input?.addEventListener("change", renderWebImagesPicker);
+}
+
+webImagesSelectVisibleButton?.addEventListener("click", () => {
+  for (const entry of visibleWebImageEntries()) {
+    state.webImageSelected.add(entry.index);
+  }
+  renderWebImagesPicker();
+});
+
+webImagesClearSelectionButton?.addEventListener("click", () => {
+  state.webImageSelected.clear();
+  renderWebImagesPicker();
+});
+
+webImagesAddButton?.addEventListener("click", () => {
+  addSelectedWebImagesToSlots().catch((error) => {
     formStatus.textContent = error.message;
   });
 });
