@@ -3,7 +3,15 @@ name: Code Quality
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
+      - master
+      - dev
   pull_request:
+    branches:
+      - main
+      - master
+      - dev
 
 permissions:
   contents: read
@@ -17,6 +25,7 @@ jobs:
   static-analysis:
     name: Static analysis
     runs-on: windows-latest
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["main", "master", "dev"]'), github.ref_name)
 
     steps:
       - name: Checkout
@@ -48,6 +57,7 @@ jobs:
   tests:
     name: Pytest and coverage
     runs-on: windows-latest
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["main", "master", "dev"]'), github.ref_name)
 
     steps:
       - name: Checkout
@@ -74,6 +84,7 @@ jobs:
   runtime-smoke:
     name: Runtime and GUI smoke checks
     runs-on: windows-latest
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["main", "master", "dev"]'), github.ref_name)
 
     steps:
       - name: Checkout
@@ -138,6 +149,7 @@ jobs:
   pyinstaller-smoke:
     name: PyInstaller EXE smoke build
     runs-on: windows-latest
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["main", "master", "dev"]'), github.ref_name)
 
     steps:
       - name: Checkout

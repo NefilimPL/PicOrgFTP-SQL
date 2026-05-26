@@ -58,6 +58,12 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertNotIn("shouldRepair = photoNeedsRepair", source)
         self.assertNotIn("shouldSyncLocal = !updateMode", source)
 
+    def test_web_app_does_not_use_sha1_hashes(self) -> None:
+        app_path = Path(__file__).resolve().parents[1] / "picorgftp_sql" / "web" / "app.py"
+        source = app_path.read_text(encoding="utf-8")
+
+        self.assertNotIn("hashlib.sha1", source)
+
 
 if __name__ == "__main__":
     unittest.main()

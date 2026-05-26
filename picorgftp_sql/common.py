@@ -403,7 +403,7 @@ except Exception as exc:  # pragma: no cover - optional runtime dependency
     def Ah(*_args, **_kwargs):
         require_runtime_modules("openpyxl")
 
-import ftplib as AB
+import ftplib as AB  # nosec B402 - FTP support is an explicit product feature.
 import socket as BK
 
 try:

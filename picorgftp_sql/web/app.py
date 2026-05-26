@@ -188,7 +188,7 @@ def _user_cache_scope(request: Request, username: str) -> str:
         headers = getattr(request, "headers", {}) or {}
         user_agent = str(headers.get("user-agent", "") if hasattr(headers, "get") else "")
         scope_material = f"{client_host}|{user_agent}|no-session"
-    token_digest = hashlib.sha1(scope_material.encode("utf-8")).hexdigest()[:12]
+    token_digest = hashlib.sha256(scope_material.encode("utf-8")).hexdigest()[:12]
     raw_scope = f"{username}-{token_digest}"
     return re.sub(r"[^0-9A-Za-z_.-]+", "_", raw_scope).strip("._-") or "user-session"
 
@@ -1191,7 +1191,7 @@ def _parse_log_events(log_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         first_line = current[0]
         timestamp_match = re.match(r"^\[([^\]]+)\]", first_line)
         timestamp = timestamp_match.group(1) if timestamp_match else ""
-        digest = hashlib.sha1(f"{key}|{first_line}|{len(current)}".encode("utf-8")).hexdigest()
+        digest = hashlib.sha256(f"{key}|{first_line}|{len(current)}".encode("utf-8")).hexdigest()
         severity = _log_event_severity(key, current)
         events.append(
             {

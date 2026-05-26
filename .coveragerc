@@ -1,0 +1,9 @@
+[run]
+branch = True
+source =
+    picorgftp_sql
+relative_files = True
+
+[report]
+show_missing = True
+skip_empty = True

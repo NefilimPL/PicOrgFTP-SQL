@@ -23,6 +23,38 @@ class GithubActionsWorkflowTests(unittest.TestCase):
         self.assertIn("pull_request:", workflow)
         self.assertIn("workflow_dispatch:", workflow)
 
+    def test_code_quality_push_and_pr_are_limited_to_main_master_dev(self) -> None:
+        workflow = _workflow_text("code-quality.yml")
+
+        for event_name in ("push", "pull_request"):
+            match = re.search(
+                rf"^  {event_name}:\s*\n(?P<body>(?:^    .*(?:\n|$))*)",
+                workflow,
+                flags=re.MULTILINE,
+            )
+            self.assertIsNotNone(match, event_name)
+            body = match.group("body")
+            self.assertIn("branches:", body)
+            self.assertRegex(body, r"(?m)^\s+- main$")
+            self.assertRegex(body, r"(?m)^\s+- master$")
+            self.assertRegex(body, r"(?m)^\s+- dev$")
+
+    def test_coverage_is_limited_to_project_sources(self) -> None:
+        coveragerc = (ROOT / ".coveragerc").read_text(encoding="utf-8")
+
+        self.assertIn("source =", coveragerc)
+        self.assertIn("picorgftp_sql", coveragerc)
+        self.assertNotIn("tests", coveragerc)
+
+    def test_manual_dispatch_jobs_are_limited_to_main_master_dev(self) -> None:
+        workflow = _workflow_text("code-quality.yml")
+        branch_guard = (
+            "if: github.event_name != 'workflow_dispatch' || "
+            "contains(fromJSON('[\"main\", \"master\", \"dev\"]'), github.ref_name)"
+        )
+
+        self.assertEqual(workflow.count(branch_guard), 4)
+
     def test_code_quality_does_not_publish_or_upload_exe_artifacts(self) -> None:
         workflow = _workflow_text("code-quality.yml")
 
