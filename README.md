@@ -2,6 +2,7 @@
 Python picture organiser with ability to send to FTP and SQL
 
 [![Build Windows EXE](https://github.com/NefilimPL/PicOrgFTP-SQL/actions/workflows/build-exe.yml/badge.svg?branch=main)](https://github.com/NefilimPL/PicOrgFTP-SQL/actions/workflows/build-exe.yml)
+[![CI](https://github.com/NefilimPL/PicOrgFTP-SQL/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/NefilimPL/PicOrgFTP-SQL/actions/workflows/ci.yml)
 
 Project roadmap / plan rozwoju: [PLAN_ROZWOJU.md](PLAN_ROZWOJU.md)
 
@@ -90,15 +91,18 @@ The runtime automatically searches for translation files next to the executable,
 
 ### GitHub Actions (Windows EXE)
 
-This repository includes a Windows build workflow in `.github/workflows/build-exe.yml`. It builds the EXE with PyInstaller, packages the web runtime as a separate ZIP and uploads both as workflow artifacts. When a GitHub release is published, the same workflow also attaches `PicOrgFTP-SQL-<tag>.exe` and `PicOrgFTP-SQL-web-<tag>.zip` to that release. The visible program version is taken from the release tag.
+This repository includes a CI workflow in `.github/workflows/ci.yml` and a Windows build workflow in `.github/workflows/build-exe.yml`. CI runs on `push` and `pull_request` for `main`, `master` and `dev`, and checks Python syntax, JavaScript syntax, critical pytest coverage, web smoke tests, UI integrity, desktop imports and lightweight performance paths.
+
+The Windows build workflow builds the EXE with PyInstaller, packages the web runtime as a separate ZIP and uploads both as workflow artifacts only when run manually or when a GitHub release is published. When a GitHub release is published, the same workflow also attaches `PicOrgFTP-SQL-<tag>.exe` and `PicOrgFTP-SQL-web-<tag>.zip` to that release. The visible program version is taken from the release tag.
 
 The local scripts in `Generator exe/` and the GitHub Actions workflow also generate a PyInstaller `--version-file`, so Windows file properties show `File description`, `File version`, `Product name`, `Product version`, `Company name`, `Copyright`, `Internal name` and `Original filename` for both EXE files. In GitHub Actions, product/company metadata is taken from the GitHub repository context; local builds use Windows registration data (`RegisteredOrganization` / `RegisteredOwner`) and then the current Windows user as a fallback.
 
 1. Push the workflow file to your GitHub repository.
 2. Go to **Settings → Actions → General** and make sure Actions are enabled for the repository.
-3. Go to the **Actions** tab, open **Build Windows EXE**, and click **Run workflow** to build on demand (or push to `main`/`master` to run automatically).
-4. After the job finishes, download **PicOrgFTP-SQL-windows** or **PicOrgFTP-SQL-web** from the workflow summary.
-5. To publish release assets, create and publish a GitHub release from a tag such as `v1.2.3`; the workflow will build and attach the EXE and web ZIP automatically.
+3. Go to the **Actions** tab, open **CI**, and check that tests pass for your branch or pull request.
+4. Open **Build Windows EXE** and click **Run workflow** only when you want a manual build artifact.
+5. After the build job finishes, download **PicOrgFTP-SQL-windows** or **PicOrgFTP-SQL-web** from the workflow summary.
+6. To publish release assets, create and publish a GitHub release from a tag such as `v1.2.3`; the workflow will build and attach the EXE and web ZIP automatically.
 
 If you need to tweak build dependencies, edit `requirements-build.txt`. The workflow uses Python 3.11 by default.
 

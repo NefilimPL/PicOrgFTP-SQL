@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - dev
+  pull_request:
+    branches:
+      - main
+      - master
+      - dev
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "1"
+  PICORGFTP_SQL_HEADLESS: "1"
+  PICORG_WEB_AUTH: "0"
+  PYTHONUTF8: "1"
+  QT_QPA_PLATFORM: "offscreen"
+
+jobs:
+  static-checks:
+    name: Static checks
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Python syntax compile
+        run: >
+          python -m compileall -q
+          PicOrgFTP-SQL.pyw
+          PicOrgFTP-SQL-WEB.pyw
+          PicOrgFTP-SQL-QtSlots.pyw
+          picorgftp_sql
+          tests
+          tools
+
+      - name: Web JavaScript syntax
+        run: node --check picorgftp_sql/web/static/app.js
+
+      - name: Workflow trigger sanity
+        shell: pwsh
+        run: |
+          $ci = Get-Content ".github/workflows/ci.yml" -Raw
+          foreach ($branch in @("main", "master", "dev")) {
+            if ($ci -notmatch "(?m)^\s+- $branch\s*$") {
+              throw "CI workflow is missing branch '$branch'."
+            }
+          }
+          $build = Get-Content ".github/workflows/build-exe.yml" -Raw
+          if ($build -match "(?m)^\s+push:\s*$") {
+            throw "build-exe.yml should not build EXE files on ordinary pushes."
+          }
+
+  tests:
+    name: Python tests
+    runs-on: windows-latest
+    needs: static-checks
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements-build.txt
+            requirements-web.txt
+            requirements-qt.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest httpx
+          python -m pip install -r requirements-build.txt
+          python -m pip install -r requirements-web.txt
+          python -m pip install -r requirements-qt.txt
+
+      - name: Run pytest
+        run: python -m pytest -q
