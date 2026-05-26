@@ -1,4 +1,5 @@
 const QUEUE_KEY = "uploadQueue";
+const FAILED_KEY = "uploadFailed";
 const STATUS_KEY = "uploadStatus";
 const ALARM_NAME = "picorg-upload-queue";
 
@@ -36,6 +37,25 @@ function imageMimeType(url, fallback = "image/jpeg") {
   return fallback;
 }
 
+function queueItemUrl(item) {
+  const image = item?.image || item || {};
+  return String(image.url || "");
+}
+
+function queueItemsMatch(left, right) {
+  return (
+    queueItemUrl(left) === queueItemUrl(right) &&
+    String(left?.pageUrl || "") === String(right?.pageUrl || "")
+  );
+}
+
+function queueWithoutItem(queue, item) {
+  const index = queue.findIndex((candidate) => queueItemsMatch(candidate, item));
+  const removeIndex = index >= 0 ? index : queue.length ? 0 : -1;
+  if (removeIndex < 0) return [];
+  return [...queue.slice(0, removeIndex), ...queue.slice(removeIndex + 1)];
+}
+
 async function setBadge(status) {
   const remaining = Number(status?.remaining || 0);
   if (remaining > 0) {
@@ -50,17 +70,20 @@ async function setBadge(status) {
 }
 
 async function updateStatus(patch) {
-  const stored = await storageGet([STATUS_KEY, QUEUE_KEY]);
+  const stored = await storageGet([STATUS_KEY, QUEUE_KEY, FAILED_KEY]);
   const queue = stored[QUEUE_KEY] || [];
+  const failedQueue = stored[FAILED_KEY] || [];
   const status = {
     running: false,
     total: 0,
     uploaded: 0,
     failed: 0,
     remaining: queue.length,
+    failedRetryable: failedQueue.length,
     lastError: "",
     ...(stored[STATUS_KEY] || {}),
     ...patch,
+    failedRetryable: failedQueue.length,
     updatedAt: Date.now(),
   };
   await storageSet({ [STATUS_KEY]: status });
@@ -112,7 +135,7 @@ async function processQueue() {
   processing = true;
   try {
     while (true) {
-      const stored = await storageGet([QUEUE_KEY, STATUS_KEY, "panelUrl", "apiToken"]);
+      const stored = await storageGet([QUEUE_KEY, FAILED_KEY, STATUS_KEY, "panelUrl", "apiToken"]);
       const queue = stored[QUEUE_KEY] || [];
       const status = stored[STATUS_KEY] || {};
       if (!queue.length) {
@@ -127,7 +150,8 @@ async function processQueue() {
           panelUrl: stored.panelUrl,
           apiToken: stored.apiToken,
         });
-        const nextQueue = queue.slice(1);
+        const latest = await storageGet([QUEUE_KEY]);
+        const nextQueue = queueWithoutItem(latest[QUEUE_KEY] || [], item);
         await storageSet({ [QUEUE_KEY]: nextQueue });
         await updateStatus({
           running: true,
@@ -136,13 +160,25 @@ async function processQueue() {
           lastError: "",
         });
       } catch (error) {
-        const nextQueue = queue.slice(1);
-        await storageSet({ [QUEUE_KEY]: nextQueue });
+        const latest = await storageGet([QUEUE_KEY, FAILED_KEY]);
+        const nextQueue = queueWithoutItem(latest[QUEUE_KEY] || [], item);
+        const message = error.message || String(error);
+        await storageSet({
+          [QUEUE_KEY]: nextQueue,
+          [FAILED_KEY]: [
+            ...(latest[FAILED_KEY] || []),
+            {
+              ...item,
+              error: message,
+              failedAt: Date.now(),
+            },
+          ],
+        });
         await updateStatus({
           running: true,
           failed: Number(status.failed || 0) + 1,
           remaining: nextQueue.length,
-          lastError: error.message || String(error),
+          lastError: message,
         });
       }
     }
@@ -155,32 +191,78 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "startUpload") {
     (async () => {
       const images = Array.isArray(message.images) ? message.images : [];
-      const queue = images.map((image) => ({
+      const incomingQueue = images.map((image) => ({
         image,
         pageUrl: message.pageUrl || "",
       }));
+      const stored = await storageGet([QUEUE_KEY, FAILED_KEY, STATUS_KEY]);
+      const queue = stored[QUEUE_KEY] || [];
+      const status = stored[STATUS_KEY] || {};
+      const hasActiveUpload = Boolean(status.running) || queue.length > 0;
+      const nextQueue = hasActiveUpload ? [...queue, ...incomingQueue] : incomingQueue;
+      const uploaded = hasActiveUpload ? Number(status.uploaded || 0) : 0;
+      const failed = hasActiveUpload ? Number(status.failed || 0) : 0;
+      const total = hasActiveUpload
+        ? Number(status.total || uploaded + failed + queue.length) + incomingQueue.length
+        : incomingQueue.length;
       await storageSet({
-        [QUEUE_KEY]: queue,
+        [QUEUE_KEY]: nextQueue,
+        [FAILED_KEY]: hasActiveUpload ? stored[FAILED_KEY] || [] : [],
         [STATUS_KEY]: {
           running: true,
-          total: queue.length,
-          uploaded: 0,
-          failed: 0,
-          remaining: queue.length,
+          total,
+          uploaded,
+          failed,
+          remaining: nextQueue.length,
+          failedRetryable: hasActiveUpload ? (stored[FAILED_KEY] || []).length : 0,
           lastError: "",
           updatedAt: Date.now(),
         },
       });
       await chrome.alarms.create(ALARM_NAME, { periodInMinutes: 1 });
       processQueue();
-      sendResponse({ ok: true, total: queue.length });
+      sendResponse({ ok: true, total: incomingQueue.length, queued: nextQueue.length });
+    })().catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+  if (message?.type === "retryFailed") {
+    (async () => {
+      const stored = await storageGet([QUEUE_KEY, FAILED_KEY, STATUS_KEY]);
+      const failedQueue = stored[FAILED_KEY] || [];
+      if (!failedQueue.length) {
+        sendResponse({ ok: true, total: 0, queued: (stored[QUEUE_KEY] || []).length });
+        return;
+      }
+      const queue = stored[QUEUE_KEY] || [];
+      const nextQueue = [...queue, ...failedQueue.map(({ error, failedAt, ...item }) => item)];
+      const status = stored[STATUS_KEY] || {};
+      const uploaded = Number(status.uploaded || 0);
+      await storageSet({
+        [QUEUE_KEY]: nextQueue,
+        [FAILED_KEY]: [],
+        [STATUS_KEY]: {
+          ...status,
+          running: true,
+          total: uploaded + nextQueue.length,
+          uploaded,
+          failed: 0,
+          remaining: nextQueue.length,
+          failedRetryable: 0,
+          lastError: "",
+          updatedAt: Date.now(),
+        },
+      });
+      await chrome.alarms.create(ALARM_NAME, { periodInMinutes: 1 });
+      processQueue();
+      sendResponse({ ok: true, total: failedQueue.length, queued: nextQueue.length });
     })().catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
     return true;
   }
   if (message?.type === "getUploadStatus") {
-    storageGet([STATUS_KEY, QUEUE_KEY])
+    storageGet([STATUS_KEY, QUEUE_KEY, FAILED_KEY])
       .then((stored) => {
         const status = stored[STATUS_KEY] || {};
+        const failedQueue = stored[FAILED_KEY] || [];
         sendResponse({
           ok: true,
           status: {
@@ -189,6 +271,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             uploaded: Number(status.uploaded || 0),
             failed: Number(status.failed || 0),
             remaining: (stored[QUEUE_KEY] || []).length,
+            failedRetryable: failedQueue.length,
             lastError: status.lastError || "",
           },
         });

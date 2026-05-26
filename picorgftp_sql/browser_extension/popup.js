@@ -26,6 +26,7 @@
   const scanPageButton = document.querySelector("#scanPage");
   const selectAllButton = document.querySelector("#selectAll");
   const clearSelectionButton = document.querySelector("#clearSelection");
+  const retryFailedButton = document.querySelector("#retryFailed");
   const uploadSelectedButton = document.querySelector("#uploadSelected");
   const statusOutput = document.querySelector("#status");
   const summaryOutput = document.querySelector("#summary");
@@ -385,8 +386,22 @@
     if (!response?.ok) {
       throw new Error(response?.error || "Nie udalo sie uruchomic wysylania w tle.");
     }
-    setStatus(`Kolejka ${response.total}`);
+    setStatus(`Kolejka +${response.total}`);
     summaryOutput.textContent = "Wysylanie dziala w tle. W panelu kliknij Odbierz z rozszerzenia.";
+    refreshUploadStatus().catch(() => {});
+  }
+
+  async function retryFailedUploads() {
+    const response = await runtimeMessage({ type: "retryFailed" });
+    if (!response?.ok) {
+      throw new Error(response?.error || "Nie udalo sie ponowic bledow.");
+    }
+    if (!response.total) {
+      setStatus("Brak bledow");
+      return;
+    }
+    setStatus(`Ponawianie ${response.total}`);
+    summaryOutput.textContent = "Nieudane pozycje wracaja do kolejki.";
     refreshUploadStatus().catch(() => {});
   }
 
@@ -397,18 +412,20 @@
     const total = Number(status.total || 0);
     const uploaded = Number(status.uploaded || 0);
     const failed = Number(status.failed || 0);
+    const failedRetryable = Number(status.failedRetryable || 0);
     const remaining = Number(status.remaining || 0);
+    retryFailedButton.disabled = failedRetryable <= 0;
     if (status.running || remaining > 0) {
       setStatus(`${uploaded}/${total} wyslano`);
       summaryOutput.textContent = failed
-        ? `Wysylanie w tle: ${uploaded}/${total}, bledy: ${failed}.`
+        ? `Wysylanie w tle: ${uploaded}/${total}, bledy: ${failed}, do ponowienia: ${failedRetryable}.`
         : `Wysylanie w tle: ${uploaded}/${total}.`;
       return;
     }
     if (total > 0) {
       setStatus(failed ? `Bledy ${failed}` : "Wyslano");
       summaryOutput.textContent = failed
-        ? `Zakonczono z bledami: ${failed}. ${status.lastError || ""}`
+        ? `Zakonczono z bledami: ${failed}. Do ponowienia: ${failedRetryable}. ${status.lastError || ""}`
         : "Wyslano do panelu. Kliknij Odbierz z rozszerzenia.";
     }
   }
@@ -447,6 +464,9 @@
   clearSelectionButton.addEventListener("click", () => {
     state.selected.clear();
     renderImages();
+  });
+  retryFailedButton.addEventListener("click", () => {
+    retryFailedUploads().catch((error) => setStatus(error.message));
   });
   uploadSelectedButton.addEventListener("click", () => {
     uploadSelected().catch((error) => setStatus(error.message));

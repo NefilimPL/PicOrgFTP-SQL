@@ -40,13 +40,18 @@ def test_browser_extension_popup_uploads_to_panel_endpoint() -> None:
     assert "imagePassesFilters" in popup
     assert "parseUrlFilterText" in popup
     assert "startUpload" in popup
+    assert "retryFailed" in popup
     assert "getUploadStatus" in popup
+    assert "FAILED_KEY" in background
+    assert "retryFailed" in background
+    assert "queueWithoutItem" in background
     assert "chrome.alarms" in background
     assert "onStartup" in background
     assert ".then(() => Promise.all([scanPage(), refreshUploadStatus()]))" in popup
     assert 'id="settingsPanel"' in html
     assert 'id="filtersPanel"' in html
     assert 'id="urlFilter"' in html
+    assert 'id="retryFailed"' in html
     assert "!thumb" in html
     assert 'type="password"' in html
 

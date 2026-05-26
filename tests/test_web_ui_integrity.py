@@ -181,6 +181,8 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("downloadBrowserExtension", source)
         self.assertIn("clearLoadedWebImages", source)
         self.assertIn("parseWebImageUrlFilter", source)
+        self.assertIn("existingByUrl", source)
+        self.assertIn("state.webImages.push(image)", source)
         self.assertIn("Odbierz z rozszerzenia", source)
 
     def test_login_page_keeps_accessible_login_form(self) -> None:

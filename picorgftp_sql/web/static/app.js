@@ -807,23 +807,40 @@ function imageFromBrowserExtensionItem(item) {
 
 function loadBrowserExtensionItems(items) {
   const imported = [];
+  const existingByUrl = new Map(
+    (state.webImages || []).map((image, index) => [webImageCacheKey(image), index])
+  );
   for (const item of items || []) {
     const image = imageFromBrowserExtensionItem(item);
     if (!image.url) continue;
-    imported.push(image);
-    state.webImageCache.set(webImageCacheKey(image), {
+    const key = webImageCacheKey(image);
+    if (!key) continue;
+    state.webImageCache.set(key, {
       status: "ready",
       payload: item.cache || item,
       error: "",
       promise: null,
     });
+    const existingIndex = existingByUrl.get(key);
+    if (existingIndex !== undefined) {
+      state.webImages[existingIndex] = {
+        ...state.webImages[existingIndex],
+        ...image,
+      };
+      state.webImageSelected.add(existingIndex);
+      imported.push(image);
+      continue;
+    }
+    const newIndex = state.webImages.length;
+    state.webImages.push(image);
+    state.webImageSelected.add(newIndex);
+    existingByUrl.set(key, newIndex);
+    imported.push(image);
   }
   if (!imported.length) {
     return 0;
   }
-  state.webImagePageUrl = imported[0]?.page_url || state.webImagePageUrl || "";
-  state.webImages = imported;
-  state.webImageSelected = new Set(imported.map((_image, index) => index));
+  state.webImagePageUrl = state.webImagePageUrl || imported[0]?.page_url || "";
   openWebImagesModal();
   renderWebImagesPicker();
   return imported.length;
