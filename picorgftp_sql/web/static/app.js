@@ -51,7 +51,17 @@ const state = {
   webImages: [],
   webImageSelected: new Set(),
   webImagePageUrl: "",
+  webImageScanMode: ["links", "metadata"].includes(
+    localStorage.getItem("picorg-web-image-scan-mode")
+  )
+    ? localStorage.getItem("picorg-web-image-scan-mode")
+    : "links",
+  webImageCache: new Map(),
+  webImageCacheQueue: [],
+  webImageCacheActive: 0,
 };
+
+const WEB_IMAGE_CACHE_LIMIT = 2;
 
 const listLabels = {
   names: "Nazwy",
@@ -92,6 +102,7 @@ const scanWebImagesButton = document.querySelector("#scanWebImagesButton");
 const webImagesModal = document.querySelector("#webImagesModal");
 const webImagesStatus = document.querySelector("#webImagesStatus");
 const webImagesOutput = document.querySelector("#webImagesOutput");
+const webImageScanMode = document.querySelector("#webImageScanMode");
 const webImageMinWidth = document.querySelector("#webImageMinWidth");
 const webImageMinHeight = document.querySelector("#webImageMinHeight");
 const webImageMinKb = document.querySelector("#webImageMinKb");
@@ -337,9 +348,13 @@ function webImagePassesFilters(image, filters = webImageFilters()) {
   const width = Number(image?.width || 0);
   const height = Number(image?.height || 0);
   const kb = Number(image?.size_bytes || 0) / 1024;
-  if (filters.minWidth && (!width || width < filters.minWidth)) return false;
-  if (filters.minHeight && (!height || height < filters.minHeight)) return false;
-  if (filters.minKb && (!kb || kb < filters.minKb)) return false;
+  const unknownPasses = state.webImageScanMode === "links";
+  if (filters.minWidth && width && width < filters.minWidth) return false;
+  if (filters.minWidth && !width && !unknownPasses) return false;
+  if (filters.minHeight && height && height < filters.minHeight) return false;
+  if (filters.minHeight && !height && !unknownPasses) return false;
+  if (filters.minKb && kb && kb < filters.minKb) return false;
+  if (filters.minKb && !kb && !unknownPasses) return false;
   if (filters.hideThumbnails && isThumbnailWebImage(image)) return false;
   return true;
 }
@@ -349,6 +364,109 @@ function visibleWebImageEntries() {
   return (state.webImages || [])
     .map((image, index) => ({ image, index }))
     .filter((entry) => webImagePassesFilters(entry.image, filters));
+}
+
+function webImageCacheKey(image) {
+  return String(image?.url || "").trim();
+}
+
+function webImageCacheEntry(image) {
+  return state.webImageCache.get(webImageCacheKey(image)) || null;
+}
+
+function webImageCacheLabel(image) {
+  const entry = webImageCacheEntry(image);
+  if (!entry) return "";
+  if (entry.status === "queued") return "oczekuje";
+  if (entry.status === "loading") return "pobieranie";
+  if (entry.status === "ready") return "w cache";
+  if (entry.status === "error") return "blad cache";
+  return "";
+}
+
+function queueWebImageCache(image, prefix = "web", { retry = false, render = true } = {}) {
+  const key = webImageCacheKey(image);
+  if (!key) return null;
+  const existing = state.webImageCache.get(key);
+  if (existing && existing.status !== "error") return existing;
+  if (existing && existing.status === "error" && !retry) return existing;
+  const entry = {
+    status: "queued",
+    payload: null,
+    error: "",
+    promise: null,
+  };
+  state.webImageCache.set(key, entry);
+  state.webImageCacheQueue.push({ key, image, prefix });
+  pumpWebImageCacheQueue();
+  if (render) {
+    renderWebImagesPicker();
+  }
+  return entry;
+}
+
+function pumpWebImageCacheQueue() {
+  while (state.webImageCacheActive < WEB_IMAGE_CACHE_LIMIT && state.webImageCacheQueue.length) {
+    const task = state.webImageCacheQueue.shift();
+    const entry = state.webImageCache.get(task.key);
+    if (!entry || entry.status !== "queued") continue;
+    state.webImageCacheActive += 1;
+    entry.status = "loading";
+    entry.promise = cacheWebImageForSlot(task.image, task.prefix)
+      .then((payload) => {
+        entry.status = "ready";
+        entry.payload = payload;
+        entry.error = "";
+        return payload;
+      })
+      .catch((error) => {
+        entry.status = "error";
+        entry.error = error.message || String(error);
+        throw error;
+      })
+      .finally(() => {
+        state.webImageCacheActive = Math.max(0, state.webImageCacheActive - 1);
+        renderWebImagesPicker();
+        pumpWebImageCacheQueue();
+      });
+    entry.promise.catch(() => {});
+    renderWebImagesPicker();
+  }
+}
+
+async function cachedWebImagePayload(image, prefix) {
+  let entry = webImageCacheEntry(image);
+  if (!entry || entry.status === "error") {
+    entry = queueWebImageCache(image, prefix, { retry: true });
+  }
+  if (!entry) {
+    throw new Error("Nie udalo sie przygotowac cache zdjecia.");
+  }
+  if (entry.payload) {
+    return entry.payload;
+  }
+  if (entry.promise) {
+    return entry.promise;
+  }
+  pumpWebImageCacheQueue();
+  if (entry.promise) {
+    return entry.promise;
+  }
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const timer = window.setInterval(() => {
+      if (entry.payload) {
+        window.clearInterval(timer);
+        resolve(entry.payload);
+      } else if (entry.status === "error") {
+        window.clearInterval(timer);
+        reject(new Error(entry.error || "Nie udalo sie pobrac zdjecia."));
+      } else if (Date.now() - started > 60000) {
+        window.clearInterval(timer);
+        reject(new Error("Przekroczono czas oczekiwania na pobranie zdjecia."));
+      }
+    }, 200);
+  });
 }
 
 function openWebImagesModal() {
@@ -386,6 +504,7 @@ function renderWebImagesPicker() {
     const size = document.createElement("span");
     const format = document.createElement("span");
     const source = document.createElement("span");
+    const cache = document.createElement("span");
     checkbox.type = "checkbox";
     checkbox.checked = state.webImageSelected.has(index);
     checkbox.setAttribute("aria-label", `Wybierz obraz ${image.filename || index + 1}`);
@@ -400,14 +519,19 @@ function renderWebImagesPicker() {
     size.textContent = formatFileSize(image.size_bytes || 0);
     format.textContent = image.mime_type || "format nieznany";
     source.textContent = isThumbnailWebImage(image) ? "miniatura" : image.source || "obraz";
+    cache.textContent = webImageCacheLabel(image);
     meta.className = "web-image-meta";
     meta.append(title, dimensions, format, size, source);
+    if (cache.textContent) {
+      meta.append(cache);
+    }
     card.className = `web-image-card ${checkbox.checked ? "selected" : ""}`;
     card.title = image.url;
     card.append(preview, meta);
     const setSelected = (selected) => {
       if (selected) {
         state.webImageSelected.add(index);
+        queueWebImageCache(image, "web");
       } else {
         state.webImageSelected.delete(index);
       }
@@ -424,30 +548,97 @@ function renderWebImagesPicker() {
   }
 }
 
+function webImagesErrorHelp(message) {
+  const text = String(message || "");
+  if (/cloudflare|challenge\s*403/i.test(text)) {
+    return [
+      "Strona pokazuje zabezpieczenie Cloudflare/challenge 403.",
+      "Importer nie dostaje wtedy HTML-a produktu, tylko strone blokady, wiec nie ma z czego wyciagnac linkow do zdjec.",
+      "To zwykle wymaga sesji prawdziwej przegladarki albo cookies z tej strony.",
+    ];
+  }
+  if (/403|forbidden/i.test(text)) {
+    return [
+      "Serwer odrzucil pobieranie strony kodem 403 Forbidden.",
+      "Najczesciej oznacza to blokade botow, brak wymaganej sesji albo ograniczenie hotlinkowania.",
+    ];
+  }
+  if (/html/i.test(text)) {
+    return [
+      "Podany adres nie zwrocil strony HTML produktu.",
+      "Importer potrzebuje strony z linkami do obrazow albo bezposrednich linkow do plikow graficznych.",
+    ];
+  }
+  return ["Nie udalo sie pobrac listy zdjec z podanego adresu."];
+}
+
+function renderWebImagesError(error) {
+  const message = error?.message || String(error || "Operacja nie powiodla sie.");
+  state.webImages = [];
+  state.webImageSelected.clear();
+  state.webImageCache.clear();
+  state.webImageCacheQueue = [];
+  state.webImageCacheActive = 0;
+  openWebImagesModal();
+  if (webImagesStatus) {
+    webImagesStatus.textContent = "Nie mozna pobrac zdjec";
+  }
+  if (!webImagesOutput) {
+    return;
+  }
+  webImagesOutput.textContent = "";
+  webImagesOutput.classList.add("empty-state");
+  const wrapper = document.createElement("div");
+  const title = document.createElement("strong");
+  const details = document.createElement("span");
+  wrapper.className = "web-image-error";
+  title.textContent = message;
+  details.textContent = webImagesErrorHelp(message).join(" ");
+  wrapper.append(title, details);
+  webImagesOutput.appendChild(wrapper);
+}
+
 async function scanWebImages() {
   const url = webImageUrl?.value?.trim() || "";
   if (!url) {
     formStatus.textContent = "Wklej link do strony ze zdjeciami.";
     return;
   }
+  state.webImageScanMode = webImageScanMode?.value || "links";
+  localStorage.setItem("picorg-web-image-scan-mode", state.webImageScanMode);
   scanWebImagesButton.disabled = true;
   scanWebImagesButton.textContent = "Pobieranie...";
-  formStatus.textContent = "Skanowanie strony ze zdjeciami...";
+  formStatus.textContent =
+    state.webImageScanMode === "links"
+      ? "Skanowanie linkow do zdjec..."
+      : "Skanowanie strony i pobieranie metadanych zdjec...";
   try {
     const payload = await requestJson("/api/web-images/scan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({
+        url,
+        mode: state.webImageScanMode,
+        filters: webImageFilters(),
+      }),
       timeoutMs: 60000,
     });
     state.webImagePageUrl = payload.source_url || url;
+    state.webImageScanMode = payload.mode || state.webImageScanMode;
     state.webImages = payload.images || [];
     state.webImageSelected.clear();
+    state.webImageCache.clear();
+    state.webImageCacheQueue = [];
+    state.webImageCacheActive = 0;
     openWebImagesModal();
     renderWebImagesPicker();
-    formStatus.textContent = `Wykryto ${state.webImages.length} zdjec ze strony.`;
+    formStatus.textContent =
+      state.webImageScanMode === "links"
+        ? `Wykryto ${state.webImages.length} linkow do zdjec ze strony.`
+        : `Wykryto ${state.webImages.length} zdjec spelniajacych warunki.`;
   } catch (error) {
     formStatus.textContent = error.message;
+    renderWebImagesError(error);
   } finally {
     scanWebImagesButton.disabled = false;
     scanWebImagesButton.textContent = "Pobierz zdjecia";
@@ -525,7 +716,7 @@ async function addSelectedWebImagesToSlots() {
       const image = selected[index];
       const prefix = prefixes[index];
       formStatus.textContent = `Pobieranie zdjecia ${index + 1}/${limit} do slotu ${prefix}...`;
-      const payload = await cacheWebImageForSlot(image, prefix);
+      const payload = await cachedWebImagePayload(image, prefix);
       if (!payload.token) {
         throw new Error("Backend nie zwrocil tokenu cache dla zdjecia.");
       }
@@ -4819,9 +5010,20 @@ for (const input of [webImageMinWidth, webImageMinHeight, webImageMinKb, webImag
   input?.addEventListener("change", renderWebImagesPicker);
 }
 
+if (webImageScanMode) {
+  webImageScanMode.value = state.webImageScanMode;
+}
+
+webImageScanMode?.addEventListener("change", () => {
+  state.webImageScanMode = webImageScanMode.value || "links";
+  localStorage.setItem("picorg-web-image-scan-mode", state.webImageScanMode);
+  renderWebImagesPicker();
+});
+
 webImagesSelectVisibleButton?.addEventListener("click", () => {
   for (const entry of visibleWebImageEntries()) {
     state.webImageSelected.add(entry.index);
+    queueWebImageCache(entry.image, "web", { render: false });
   }
   renderWebImagesPicker();
 });

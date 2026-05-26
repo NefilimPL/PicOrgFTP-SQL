@@ -125,6 +125,59 @@ def test_discover_image_candidates_reads_escaped_script_urls() -> None:
     ]
 
 
+def test_discover_image_candidates_can_return_links_without_probing() -> None:
+    probed = []
+    html = """
+    <html>
+      <body>
+        <img srcset="/small.jpg 240w, /large.jpg 1200w">
+        <img src="/thumb/photo.jpg" width="120" height="80">
+      </body>
+    </html>
+    """
+
+    candidates = discover_image_candidates(
+        "https://shop.example/product.html",
+        html,
+        image_probe=lambda url, _referer: probed.append(url) or (1, 1, 1, "image/jpeg"),
+        probe_images=False,
+        filters={"minWidth": 800, "hideThumbnails": True},
+    )
+
+    assert probed == []
+    assert [item["url"] for item in candidates] == [
+        "https://shop.example/large.jpg",
+    ]
+    assert candidates[0]["width"] == 1200
+    assert candidates[0]["size_bytes"] == 0
+
+
+def test_discover_image_candidates_applies_size_filter_after_probe() -> None:
+    html = """
+    <html>
+      <body>
+        <img src="/small-file.jpg">
+        <img src="/large-file.jpg">
+      </body>
+    </html>
+    """
+    sizes = {
+        "https://shop.example/small-file.jpg": (1200, 900, 20 * 1024, "image/jpeg"),
+        "https://shop.example/large-file.jpg": (1200, 900, 220 * 1024, "image/jpeg"),
+    }
+
+    candidates = discover_image_candidates(
+        "https://shop.example/product.html",
+        html,
+        image_probe=lambda url, _referer: sizes[url],
+        filters={"minKb": 100},
+    )
+
+    assert [item["url"] for item in candidates] == [
+        "https://shop.example/large-file.jpg",
+    ]
+
+
 def test_fetch_page_html_retries_forbidden_page_with_browser_headers() -> None:
     calls = []
 

@@ -528,10 +528,27 @@ def _save_web_image_cache(
     return target_path, len(data), safe_name, width, height
 
 
-def _scan_web_image_page(page_url: str) -> Dict[str, Any]:
+def _scan_web_image_page(
+    page_url: str,
+    *,
+    mode: str = "metadata",
+    filters: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     html = fetch_page_html(page_url)
-    images = discover_image_candidates(page_url, html)
-    return {"source_url": page_url, "images": images, "count": len(images)}
+    scan_mode = str(mode or "metadata").strip().lower()
+    probe_images = scan_mode not in {"links", "link", "fast"}
+    images = discover_image_candidates(
+        page_url,
+        html,
+        probe_images=probe_images,
+        filters=filters or {},
+    )
+    return {
+        "source_url": page_url,
+        "images": images,
+        "count": len(images),
+        "mode": "metadata" if probe_images else "links",
+    }
 
 
 def _result_payload(result: Any) -> Dict[str, Any]:
@@ -1817,8 +1834,15 @@ def create_app() -> FastAPI:
         page_url = str(payload.get("url") if isinstance(payload, dict) else "").strip()
         if not page_url:
             raise HTTPException(status_code=400, detail="Podaj link do strony.")
+        mode = str(payload.get("mode") or payload.get("scan_mode") or "metadata").strip()
+        filters = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
         try:
-            result = await run_in_threadpool(_scan_web_image_page, page_url)
+            result = await run_in_threadpool(
+                _scan_web_image_page,
+                page_url,
+                mode=mode,
+                filters=filters,
+            )
         except ImageImportError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(result)

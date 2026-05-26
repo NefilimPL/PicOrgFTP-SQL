@@ -111,6 +111,7 @@ class WebUiIntegrityTests(unittest.TestCase):
 
         self.assertIn("webImagesModal", html.ids)
         self.assertIn("webImageUrl", html.ids)
+        self.assertIn("webImageScanMode", html.ids)
         self.assertIn("scanWebImagesButton", html.button_ids)
         self.assertIn("webImageMinWidth", html.ids)
         self.assertIn("webImageMinHeight", html.ids)
@@ -156,6 +157,13 @@ class WebUiIntegrityTests(unittest.TestCase):
             source.index("Zamieniono slot"),
             source.index("Przeniesiono slot"),
         )
+
+    def test_app_js_displays_web_image_scan_errors_inside_modal(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("renderWebImagesError", source)
+        self.assertIn("Cloudflare/challenge 403", source)
+        self.assertIn("Importer nie dostaje wtedy HTML-a produktu", source)
 
     def test_login_page_keeps_accessible_login_form(self) -> None:
         html = _parse(LOGIN_HTML)

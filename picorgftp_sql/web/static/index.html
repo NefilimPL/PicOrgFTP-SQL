@@ -127,6 +127,13 @@
             Link do strony ze zdjeciami
             <input id="webImageUrl" type="url" autocomplete="off" spellcheck="false" placeholder="https://sklep.pl/produkt.html">
           </label>
+          <label>
+            Tryb
+            <select id="webImageScanMode">
+              <option value="links" selected>Linki</option>
+              <option value="metadata">Metadane</option>
+            </select>
+          </label>
           <button id="scanWebImagesButton" type="button">Pobierz zdjecia</button>
         </div>
         <div class="web-image-filters">

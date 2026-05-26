@@ -584,7 +584,7 @@ h2 {
 
 .web-image-url-row {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto;
+  grid-template-columns: minmax(220px, 1fr) minmax(130px, auto) auto;
   gap: 10px;
   align-items: end;
   margin-bottom: 12px;
@@ -653,6 +653,19 @@ h2 {
   left: 6px;
   z-index: 2;
   background: var(--surface);
+}
+
+.web-image-error {
+  display: grid;
+  gap: 8px;
+  max-width: 760px;
+  color: var(--text);
+  text-align: left;
+}
+
+.web-image-error span {
+  color: var(--muted);
+  line-height: 1.5;
 }
 
 .web-image-meta {

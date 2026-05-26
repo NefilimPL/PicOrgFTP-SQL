@@ -391,15 +391,25 @@ def _parse_dimension(value: object) -> int:
     return int(match.group(0)) if match else 0
 
 
-def _parse_srcset(value: object) -> list[str]:
-    result: list[str] = []
+def _parse_srcset(value: object) -> list[tuple[str, int]]:
+    result: list[tuple[str, int]] = []
     for raw_part in _text(value).split(","):
         part = raw_part.strip()
         if not part:
             continue
-        candidate = part.split()[0].strip()
+        parts = part.split()
+        candidate = parts[0].strip()
         if candidate:
-            result.append(candidate)
+            width = 0
+            for descriptor in parts[1:]:
+                descriptor = descriptor.strip().lower()
+                if descriptor.endswith("w"):
+                    try:
+                        width = int(float(descriptor[:-1]))
+                    except ValueError:
+                        width = 0
+                    break
+            result.append((candidate, width))
     return result
 
 
@@ -440,8 +450,8 @@ class _ImageCandidateParser(HTMLParser):
         width = _parse_dimension(attr_map.get("width"))
         height = _parse_dimension(attr_map.get("height"))
         for key in SRCSET_ATTRS:
-            for item in _parse_srcset(attr_map.get(key)):
-                self._add(item, f"{tag}.{key}", width, height)
+            for item, item_width in _parse_srcset(attr_map.get(key)):
+                self._add(item, f"{tag}.{key}", item_width or width, height)
         for key in IMAGE_ATTRS:
             value = attr_map.get(key)
             if not value:
@@ -581,16 +591,78 @@ def download_image_bytes(url: str, referer: str = "") -> tuple[bytes, str, str, 
     )
 
 
+def _normalized_scan_filters(filters: object) -> dict[str, object]:
+    if not isinstance(filters, dict):
+        filters = {}
+
+    def positive_int(key: str) -> int:
+        try:
+            value = int(float(str(filters.get(key) or 0).strip()))
+        except (TypeError, ValueError):
+            return 0
+        return max(0, value)
+
+    return {
+        "min_width": positive_int("min_width") or positive_int("minWidth"),
+        "min_height": positive_int("min_height") or positive_int("minHeight"),
+        "min_kb": positive_int("min_kb") or positive_int("minKb"),
+        "hide_thumbnails": bool(
+            filters.get("hide_thumbnails")
+            or filters.get("hideThumbnails")
+        ),
+    }
+
+
+def _candidate_passes_scan_filters(
+    item: dict[str, object],
+    filters: dict[str, object],
+    *,
+    unknown_passes: bool,
+) -> bool:
+    min_width = int(filters.get("min_width") or 0)
+    min_height = int(filters.get("min_height") or 0)
+    min_kb = int(filters.get("min_kb") or 0)
+    width = int(item.get("width") or 0)
+    height = int(item.get("height") or 0)
+    size_bytes = int(item.get("size_bytes") or 0)
+    if filters.get("hide_thumbnails") and _kind_from_source(
+        str(item.get("url") or ""),
+        str(item.get("source") or ""),
+        width,
+        height,
+    ) == "thumbnail":
+        return False
+    if min_width:
+        if width and width < min_width:
+            return False
+        if not width and not unknown_passes:
+            return False
+    if min_height:
+        if height and height < min_height:
+            return False
+        if not height and not unknown_passes:
+            return False
+    if min_kb:
+        if size_bytes and size_bytes < min_kb * 1024:
+            return False
+        if not size_bytes and not unknown_passes:
+            return False
+    return True
+
+
 def discover_image_candidates(
     page_url: str,
     html: str,
     *,
     image_probe: Callable[[str, str], tuple[int, int, int, str]] | None = None,
     limit: int = MAX_CANDIDATES,
+    probe_images: bool = True,
+    filters: object = None,
 ) -> list[dict[str, object]]:
     """Return de-duplicated image candidates from HTML with optional dimensions."""
 
     probe = image_probe or probe_image_url
+    scan_filters = _normalized_scan_filters(filters)
     seen: set[str] = set()
     result: list[dict[str, object]] = []
     for raw in _html_url_candidates(page_url, html):
@@ -602,14 +674,24 @@ def discover_image_candidates(
         height = int(raw.get("height") or 0)
         size_bytes = 0
         mime_type = mimetype_from_url(url)
-        try:
-            probed_width, probed_height, probed_size, probed_mime = probe(url, page_url)
-            width = probed_width or width
-            height = probed_height or height
-            size_bytes = probed_size
-            mime_type = probed_mime or mime_type
-        except Exception:
-            pass
+        raw_item = {
+            "url": url,
+            "source": raw.get("source") or "",
+            "width": width,
+            "height": height,
+            "size_bytes": 0,
+        }
+        if not _candidate_passes_scan_filters(raw_item, scan_filters, unknown_passes=True):
+            continue
+        if probe_images:
+            try:
+                probed_width, probed_height, probed_size, probed_mime = probe(url, page_url)
+                width = probed_width or width
+                height = probed_height or height
+                size_bytes = probed_size
+                mime_type = probed_mime or mime_type
+            except Exception:
+                pass
         item = {
             "url": url,
             "filename": filename_from_url(url),
@@ -620,6 +702,12 @@ def discover_image_candidates(
             "source": raw.get("source") or "",
             "kind": _kind_from_source(url, str(raw.get("source") or ""), width, height),
         }
+        if not _candidate_passes_scan_filters(
+            item,
+            scan_filters,
+            unknown_passes=not probe_images,
+        ):
+            continue
         result.append(item)
         if len(result) >= limit:
             break
