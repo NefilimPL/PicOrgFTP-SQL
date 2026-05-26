@@ -28,10 +28,17 @@ def test_browser_extension_manifest_is_valid_mv3() -> None:
 
 def test_browser_extension_popup_uploads_to_panel_endpoint() -> None:
     popup = (EXTENSION_DIR / "popup.js").read_text(encoding="utf-8")
+    html = (EXTENSION_DIR / "popup.html").read_text(encoding="utf-8")
 
     assert "/api/browser-extension/upload-cache" in popup
     assert "/api/browser-extension/ping" in popup
     assert "collectImagesFromPage" in popup
+    assert "visibleImageEntries" in popup
+    assert "imagePassesFilters" in popup
+    assert ".then(() => scanPage())" in popup
+    assert 'id="settingsPanel"' in html
+    assert 'id="filtersPanel"' in html
+    assert 'type="password"' in html
 
 
 def test_browser_extension_download_endpoint_returns_zip() -> None:

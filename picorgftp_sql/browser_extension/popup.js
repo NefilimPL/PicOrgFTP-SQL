@@ -3,10 +3,24 @@
   const state = {
     images: [],
     selected: new Set(),
+    filters: {
+      minWidth: 0,
+      minHeight: 0,
+      hideThumbnails: false,
+      urlFilter: "",
+    },
   };
 
   const panelUrlInput = document.querySelector("#panelUrl");
   const apiTokenInput = document.querySelector("#apiToken");
+  const settingsToggle = document.querySelector("#settingsToggle");
+  const filtersToggle = document.querySelector("#filtersToggle");
+  const settingsPanel = document.querySelector("#settingsPanel");
+  const filtersPanel = document.querySelector("#filtersPanel");
+  const minWidthInput = document.querySelector("#minWidth");
+  const minHeightInput = document.querySelector("#minHeight");
+  const hideThumbnailsInput = document.querySelector("#hideThumbnails");
+  const urlFilterInput = document.querySelector("#urlFilter");
   const saveSettingsButton = document.querySelector("#saveSettings");
   const testConnectionButton = document.querySelector("#testConnection");
   const scanPageButton = document.querySelector("#scanPage");
@@ -51,6 +65,62 @@
     if (lower.endsWith(".bmp")) return "image/bmp";
     if (lower.endsWith(".avif")) return "image/avif";
     return fallback;
+  }
+
+  function positiveInt(value) {
+    const parsed = parseInt(String(value || "0"), 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  }
+
+  function readFilters() {
+    state.filters = {
+      minWidth: positiveInt(minWidthInput?.value),
+      minHeight: positiveInt(minHeightInput?.value),
+      hideThumbnails: Boolean(hideThumbnailsInput?.checked),
+      urlFilter: String(urlFilterInput?.value || "").trim().toLowerCase(),
+    };
+    return state.filters;
+  }
+
+  async function saveFilters() {
+    readFilters();
+    await extensionStorageSet({ filters: state.filters });
+  }
+
+  function applyFiltersToInputs() {
+    if (minWidthInput) minWidthInput.value = String(state.filters.minWidth || 0);
+    if (minHeightInput) minHeightInput.value = String(state.filters.minHeight || 0);
+    if (hideThumbnailsInput) hideThumbnailsInput.checked = Boolean(state.filters.hideThumbnails);
+    if (urlFilterInput) urlFilterInput.value = state.filters.urlFilter || "";
+  }
+
+  function isThumbnailImage(image) {
+    const width = Number(image?.width || 0);
+    const height = Number(image?.height || 0);
+    const text = `${image?.url || ""} ${image?.source || ""} ${image?.kind || ""}`.toLowerCase();
+    return (
+      image?.kind === "thumbnail" ||
+      /thumb|thumbnail|small|mini|cart_default|home_default|small_default/.test(text) ||
+      (width > 0 && height > 0 && Math.max(width, height) <= 320)
+    );
+  }
+
+  function imagePassesFilters(image) {
+    const filters = readFilters();
+    const width = Number(image?.width || 0);
+    const height = Number(image?.height || 0);
+    const url = String(image?.url || "").toLowerCase();
+    if (filters.urlFilter && !url.includes(filters.urlFilter)) return false;
+    if (filters.hideThumbnails && isThumbnailImage(image)) return false;
+    if (filters.minWidth && width && width < filters.minWidth) return false;
+    if (filters.minHeight && height && height < filters.minHeight) return false;
+    return true;
+  }
+
+  function visibleImageEntries() {
+    return state.images
+      .map((image, index) => ({ image, index }))
+      .filter((entry) => imagePassesFilters(entry.image));
   }
 
   function collectImagesFromPage() {
@@ -190,15 +260,18 @@
 
   function renderImages() {
     imagesOutput.textContent = "";
+    const visible = visibleImageEntries();
+    const selectedVisible = visible.filter((entry) => state.selected.has(entry.index)).length;
     summaryOutput.textContent = state.images.length
-      ? `${state.selected.size}/${state.images.length} zaznaczonych.`
+      ? `${selectedVisible}/${visible.length} widocznych zaznaczonych, ${state.images.length} wykrytych.`
       : "Brak zeskanowanych zdjec.";
-    state.images.forEach((image, index) => {
+    visible.forEach(({ image, index }) => {
       const row = document.createElement("label");
       const checkbox = document.createElement("input");
       const preview = document.createElement("img");
       const meta = document.createElement("div");
       const title = document.createElement("strong");
+      const dimensions = document.createElement("small");
       const url = document.createElement("span");
       row.className = "image-row";
       checkbox.type = "checkbox";
@@ -214,8 +287,10 @@
       preview.src = image.url;
       preview.alt = "";
       title.textContent = image.filename || imageFilename(image.url);
+      dimensions.textContent =
+        image.width && image.height ? `${image.width} x ${image.height}` : "rozmiar nieznany";
       url.textContent = image.url;
-      meta.append(title, url);
+      meta.append(title, dimensions, url);
       row.append(checkbox, preview, meta);
       imagesOutput.appendChild(row);
     });
@@ -231,11 +306,22 @@
   }
 
   async function loadSettings() {
-    const stored = await extensionStorageGet(["panelUrl", "apiToken", "lastPageUrl"]);
+    const stored = await extensionStorageGet(["panelUrl", "apiToken", "lastPageUrl", "filters"]);
     const panelUrl = normalizePanelUrl(stored.panelUrl || defaults.panelUrl || "http://127.0.0.1:8010");
     const apiToken = stored.apiToken || defaults.apiToken || "";
     panelUrlInput.value = panelUrl;
     apiTokenInput.value = apiToken;
+    if (stored.filters && typeof stored.filters === "object") {
+      state.filters = {
+        ...state.filters,
+        ...stored.filters,
+        minWidth: positiveInt(stored.filters.minWidth),
+        minHeight: positiveInt(stored.filters.minHeight),
+        hideThumbnails: Boolean(stored.filters.hideThumbnails),
+        urlFilter: String(stored.filters.urlFilter || ""),
+      };
+    }
+    applyFiltersToInputs();
     if (!stored.panelUrl || (!stored.apiToken && apiToken)) {
       await extensionStorageSet({ panelUrl, apiToken });
     }
@@ -289,10 +375,9 @@
   async function uploadSelected() {
     await saveSettings();
     const stored = await extensionStorageGet(["lastPageUrl"]);
-    const selected = [...state.selected]
-      .sort((a, b) => a - b)
-      .map((index) => state.images[index])
-      .filter(Boolean);
+    const selected = visibleImageEntries()
+      .filter((entry) => state.selected.has(entry.index))
+      .map((entry) => entry.image);
     if (!selected.length) {
       setStatus("Brak wyboru");
       return;
@@ -315,6 +400,22 @@
   saveSettingsButton.addEventListener("click", () => {
     saveSettings().catch((error) => setStatus(error.message));
   });
+  settingsToggle.addEventListener("click", () => {
+    settingsPanel.hidden = !settingsPanel.hidden;
+  });
+  filtersToggle.addEventListener("click", () => {
+    filtersPanel.hidden = !filtersPanel.hidden;
+  });
+  for (const input of [minWidthInput, minHeightInput, hideThumbnailsInput, urlFilterInput]) {
+    input.addEventListener("input", () => {
+      saveFilters().catch((error) => setStatus(error.message));
+      renderImages();
+    });
+    input.addEventListener("change", () => {
+      saveFilters().catch((error) => setStatus(error.message));
+      renderImages();
+    });
+  }
   testConnectionButton.addEventListener("click", () => {
     testConnection().catch((error) => setStatus(error.message));
   });
@@ -322,7 +423,9 @@
     scanPage().catch((error) => setStatus(error.message));
   });
   selectAllButton.addEventListener("click", () => {
-    state.selected = new Set(state.images.map((_image, index) => index));
+    for (const entry of visibleImageEntries()) {
+      state.selected.add(entry.index);
+    }
     renderImages();
   });
   clearSelectionButton.addEventListener("click", () => {
@@ -333,5 +436,7 @@
     uploadSelected().catch((error) => setStatus(error.message));
   });
 
-  loadSettings().catch((error) => setStatus(error.message));
+  loadSettings()
+    .then(() => scanPage())
+    .catch((error) => setStatus(error.message));
 })();
