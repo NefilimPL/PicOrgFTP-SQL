@@ -43,6 +43,19 @@
     return new Promise((resolve) => chrome.storage.local.set(values, resolve));
   }
 
+  function runtimeMessage(message) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(message, (response) => {
+        const error = chrome.runtime.lastError;
+        if (error) {
+          reject(new Error(error.message || "Blad komunikacji z dodatkiem."));
+          return;
+        }
+        resolve(response);
+      });
+    });
+  }
+
   function normalizePanelUrl(value) {
     return String(value || "").trim().replace(/\/+$/, "");
   }
@@ -55,16 +68,6 @@
     } catch (_error) {
       return fallback;
     }
-  }
-
-  function imageMimeType(url, fallback = "image/jpeg") {
-    const lower = String(url || "").toLowerCase().split("?", 1)[0];
-    if (lower.endsWith(".png")) return "image/png";
-    if (lower.endsWith(".webp")) return "image/webp";
-    if (lower.endsWith(".gif")) return "image/gif";
-    if (lower.endsWith(".bmp")) return "image/bmp";
-    if (lower.endsWith(".avif")) return "image/avif";
-    return fallback;
   }
 
   function positiveInt(value) {
@@ -105,12 +108,35 @@
     );
   }
 
+  function parseUrlFilterText(text) {
+    const parsed = { include: [], exclude: [] };
+    String(text || "")
+      .split(/[\s,;]+/)
+      .map((part) => part.trim().toLowerCase())
+      .filter(Boolean)
+      .forEach((part) => {
+        if (part.startsWith("!") && part.length > 1) {
+          parsed.exclude.push(part.slice(1));
+        } else {
+          parsed.include.push(part);
+        }
+      });
+    return parsed;
+  }
+
+  function imageMatchesUrlFilter(image, text) {
+    const parsed = parseUrlFilterText(text);
+    const haystack = `${image?.url || ""} ${image?.filename || ""} ${image?.source || ""}`.toLowerCase();
+    if (parsed.exclude.some((term) => haystack.includes(term))) return false;
+    if (parsed.include.some((term) => !haystack.includes(term))) return false;
+    return true;
+  }
+
   function imagePassesFilters(image) {
     const filters = readFilters();
     const width = Number(image?.width || 0);
     const height = Number(image?.height || 0);
-    const url = String(image?.url || "").toLowerCase();
-    if (filters.urlFilter && !url.includes(filters.urlFilter)) return false;
+    if (!imageMatchesUrlFilter(image, filters.urlFilter)) return false;
     if (filters.hideThumbnails && isThumbnailImage(image)) return false;
     if (filters.minWidth && width && width < filters.minWidth) return false;
     if (filters.minHeight && height && height < filters.minHeight) return false;
@@ -341,37 +367,6 @@
     setStatus("Polaczono");
   }
 
-  async function uploadImage(image, pageUrl) {
-    const imageResponse = await fetch(image.url, {
-      credentials: "include",
-      cache: "no-cache",
-    });
-    if (!imageResponse.ok) {
-      throw new Error(`Nie udalo sie pobrac obrazu ${imageResponse.status}: ${image.url}`);
-    }
-    const blob = await imageResponse.blob();
-    const filename = imageFilename(image.url);
-    const file = new File([blob], filename, { type: blob.type || imageMimeType(image.url) });
-    const form = new FormData();
-    form.append("file", file, filename);
-    form.append("prefix", "web");
-    form.append("source_url", image.url);
-    form.append("page_url", pageUrl || "");
-
-    const panelUrl = normalizePanelUrl(panelUrlInput.value);
-    const apiToken = apiTokenInput.value.trim();
-    const uploadResponse = await fetch(`${panelUrl}/api/browser-extension/upload-cache`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiToken}` },
-      body: form,
-    });
-    const payload = await uploadResponse.json().catch(() => ({}));
-    if (!uploadResponse.ok) {
-      throw new Error(payload.detail || `Panel odrzucil upload: ${uploadResponse.status}`);
-    }
-    return payload;
-  }
-
   async function uploadSelected() {
     await saveSettings();
     const stored = await extensionStorageGet(["lastPageUrl"]);
@@ -382,18 +377,39 @@
       setStatus("Brak wyboru");
       return;
     }
-    uploadSelectedButton.disabled = true;
-    let uploaded = 0;
-    try {
-      for (const image of selected) {
-        setStatus(`${uploaded + 1}/${selected.length}`);
-        await uploadImage(image, stored.lastPageUrl || "");
-        uploaded += 1;
-      }
-      setStatus(`Wyslano ${uploaded}`);
-      summaryOutput.textContent = "W panelu kliknij Odbierz z rozszerzenia.";
-    } finally {
-      uploadSelectedButton.disabled = false;
+    const response = await runtimeMessage({
+      type: "startUpload",
+      images: selected,
+      pageUrl: stored.lastPageUrl || "",
+    });
+    if (!response?.ok) {
+      throw new Error(response?.error || "Nie udalo sie uruchomic wysylania w tle.");
+    }
+    setStatus(`Kolejka ${response.total}`);
+    summaryOutput.textContent = "Wysylanie dziala w tle. W panelu kliknij Odbierz z rozszerzenia.";
+    refreshUploadStatus().catch(() => {});
+  }
+
+  async function refreshUploadStatus() {
+    const response = await runtimeMessage({ type: "getUploadStatus" });
+    if (!response?.ok) return;
+    const status = response.status || {};
+    const total = Number(status.total || 0);
+    const uploaded = Number(status.uploaded || 0);
+    const failed = Number(status.failed || 0);
+    const remaining = Number(status.remaining || 0);
+    if (status.running || remaining > 0) {
+      setStatus(`${uploaded}/${total} wyslano`);
+      summaryOutput.textContent = failed
+        ? `Wysylanie w tle: ${uploaded}/${total}, bledy: ${failed}.`
+        : `Wysylanie w tle: ${uploaded}/${total}.`;
+      return;
+    }
+    if (total > 0) {
+      setStatus(failed ? `Bledy ${failed}` : "Wyslano");
+      summaryOutput.textContent = failed
+        ? `Zakonczono z bledami: ${failed}. ${status.lastError || ""}`
+        : "Wyslano do panelu. Kliknij Odbierz z rozszerzenia.";
     }
   }
 
@@ -436,7 +452,11 @@
     uploadSelected().catch((error) => setStatus(error.message));
   });
 
+  window.setInterval(() => {
+    refreshUploadStatus().catch(() => {});
+  }, 1500);
+
   loadSettings()
-    .then(() => scanPage())
+    .then(() => Promise.all([scanPage(), refreshUploadStatus()]))
     .catch((error) => setStatus(error.message));
 })();

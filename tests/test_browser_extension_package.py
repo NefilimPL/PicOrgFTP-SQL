@@ -20,6 +20,8 @@ def test_browser_extension_manifest_is_valid_mv3() -> None:
 
     assert manifest["manifest_version"] == 3
     assert manifest["action"]["default_popup"] == "popup.html"
+    assert manifest["background"]["service_worker"] == "background.js"
+    assert "alarms" in manifest["permissions"]
     assert "activeTab" in manifest["permissions"]
     assert "scripting" in manifest["permissions"]
     assert "http://*/*" in manifest["host_permissions"]
@@ -28,16 +30,24 @@ def test_browser_extension_manifest_is_valid_mv3() -> None:
 
 def test_browser_extension_popup_uploads_to_panel_endpoint() -> None:
     popup = (EXTENSION_DIR / "popup.js").read_text(encoding="utf-8")
+    background = (EXTENSION_DIR / "background.js").read_text(encoding="utf-8")
     html = (EXTENSION_DIR / "popup.html").read_text(encoding="utf-8")
 
-    assert "/api/browser-extension/upload-cache" in popup
+    assert "/api/browser-extension/upload-cache" in background
     assert "/api/browser-extension/ping" in popup
     assert "collectImagesFromPage" in popup
     assert "visibleImageEntries" in popup
     assert "imagePassesFilters" in popup
-    assert ".then(() => scanPage())" in popup
+    assert "parseUrlFilterText" in popup
+    assert "startUpload" in popup
+    assert "getUploadStatus" in popup
+    assert "chrome.alarms" in background
+    assert "onStartup" in background
+    assert ".then(() => Promise.all([scanPage(), refreshUploadStatus()]))" in popup
     assert 'id="settingsPanel"' in html
     assert 'id="filtersPanel"' in html
+    assert 'id="urlFilter"' in html
+    assert "!thumb" in html
     assert 'type="password"' in html
 
 
@@ -58,6 +68,7 @@ def test_browser_extension_download_endpoint_returns_zip() -> None:
         names = set(archive.namelist())
         assert "picorgftp-sql-browser-extension/manifest.json" in names
         assert "picorgftp-sql-browser-extension/popup.js" in names
+        assert "picorgftp-sql-browser-extension/background.js" in names
         defaults = archive.read("picorgftp-sql-browser-extension/defaults.js").decode("utf-8")
     assert "window.PICORG_EXTENSION_DEFAULTS" in defaults
     assert "apiToken" in defaults

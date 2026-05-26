@@ -149,6 +149,10 @@
             Min. rozmiar KB
             <input id="webImageMinKb" type="number" min="0" step="10" value="0">
           </label>
+          <label>
+            Filtr linku
+            <input id="webImageUrlFilter" autocomplete="off" spellcheck="false" placeholder="np. large_default !thumb">
+          </label>
           <div class="check-row compact-check web-image-thumbnail-filter">
             <input id="webImageHideThumbnails" type="checkbox">
             <div>
@@ -163,6 +167,7 @@
           <button id="browserExtensionReceiveButton" type="button" class="secondary-button">Odbierz z rozszerzenia</button>
           <button id="webImagesSelectVisibleButton" type="button" class="secondary-button">Zaznacz widoczne</button>
           <button id="webImagesClearSelectionButton" type="button" class="secondary-button">Odznacz</button>
+          <button id="webImagesClearDataButton" type="button" class="secondary-button">Wyczysc wczytane</button>
           <button id="webImagesAddButton" type="button">Dodaj do wolnych slotow</button>
         </div>
         <div id="browserExtensionHelp" class="browser-extension-help" hidden>

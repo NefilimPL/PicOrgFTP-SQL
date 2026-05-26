@@ -106,6 +106,7 @@ const webImageScanMode = document.querySelector("#webImageScanMode");
 const webImageMinWidth = document.querySelector("#webImageMinWidth");
 const webImageMinHeight = document.querySelector("#webImageMinHeight");
 const webImageMinKb = document.querySelector("#webImageMinKb");
+const webImageUrlFilter = document.querySelector("#webImageUrlFilter");
 const webImageHideThumbnails = document.querySelector("#webImageHideThumbnails");
 const browserExtensionDownload = document.querySelector("#browserExtensionDownload");
 const browserExtensionHelpButton = document.querySelector("#browserExtensionHelpButton");
@@ -113,6 +114,7 @@ const browserExtensionHelp = document.querySelector("#browserExtensionHelp");
 const browserExtensionReceiveButton = document.querySelector("#browserExtensionReceiveButton");
 const webImagesSelectVisibleButton = document.querySelector("#webImagesSelectVisibleButton");
 const webImagesClearSelectionButton = document.querySelector("#webImagesClearSelectionButton");
+const webImagesClearDataButton = document.querySelector("#webImagesClearDataButton");
 const webImagesAddButton = document.querySelector("#webImagesAddButton");
 const listTabs = document.querySelector("#listTabs");
 const listValues = document.querySelector("#listValues");
@@ -338,6 +340,7 @@ function webImageFilters() {
     minWidth: Math.max(0, Number(webImageMinWidth?.value || 0)),
     minHeight: Math.max(0, Number(webImageMinHeight?.value || 0)),
     minKb: Math.max(0, Number(webImageMinKb?.value || 0)),
+    urlFilter: String(webImageUrlFilter?.value || "").trim(),
     hideThumbnails: Boolean(webImageHideThumbnails?.checked),
   };
 }
@@ -348,11 +351,36 @@ function isThumbnailWebImage(image) {
   return image?.kind === "thumbnail" || (width > 0 && height > 0 && Math.max(width, height) < 300);
 }
 
+function parseWebImageUrlFilter(text) {
+  const parsed = { include: [], exclude: [] };
+  String(text || "")
+    .split(/[\s,;]+/)
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean)
+    .forEach((part) => {
+      if (part.startsWith("!") && part.length > 1) {
+        parsed.exclude.push(part.slice(1));
+      } else {
+        parsed.include.push(part);
+      }
+    });
+  return parsed;
+}
+
+function webImageMatchesUrlFilter(image, text) {
+  const parsed = parseWebImageUrlFilter(text);
+  const haystack = `${image?.url || ""} ${image?.filename || ""} ${image?.source || ""}`.toLowerCase();
+  if (parsed.exclude.some((term) => haystack.includes(term))) return false;
+  if (parsed.include.some((term) => !haystack.includes(term))) return false;
+  return true;
+}
+
 function webImagePassesFilters(image, filters = webImageFilters()) {
   const width = Number(image?.width || 0);
   const height = Number(image?.height || 0);
   const kb = Number(image?.size_bytes || 0) / 1024;
   const unknownPasses = state.webImageScanMode === "links";
+  if (!webImageMatchesUrlFilter(image, filters.urlFilter)) return false;
   if (filters.minWidth && width && width < filters.minWidth) return false;
   if (filters.minWidth && !width && !unknownPasses) return false;
   if (filters.minHeight && height && height < filters.minHeight) return false;
@@ -480,6 +508,23 @@ function openWebImagesModal() {
 
 function closeWebImagesModal() {
   webImagesModal?.classList.remove("active");
+}
+
+function clearLoadedWebImages() {
+  state.webImages = [];
+  state.webImageSelected.clear();
+  state.webImagePageUrl = "";
+  state.webImageCache.clear();
+  state.webImageCacheQueue = [];
+  state.webImageCacheActive = 0;
+  if (webImagesStatus) {
+    webImagesStatus.textContent = "";
+  }
+  if (webImagesOutput) {
+    webImagesOutput.textContent = "Brak pobranych zdjec.";
+    webImagesOutput.classList.add("empty-state");
+  }
+  formStatus.textContent = "Wyczyszczono wczytane zdjecia WWW.";
 }
 
 function renderWebImagesPicker() {
@@ -5100,7 +5145,13 @@ webImageUrl?.addEventListener("keydown", (event) => {
   });
 });
 
-for (const input of [webImageMinWidth, webImageMinHeight, webImageMinKb, webImageHideThumbnails]) {
+for (const input of [
+  webImageMinWidth,
+  webImageMinHeight,
+  webImageMinKb,
+  webImageUrlFilter,
+  webImageHideThumbnails,
+]) {
   input?.addEventListener("input", renderWebImagesPicker);
   input?.addEventListener("change", renderWebImagesPicker);
 }
@@ -5143,6 +5194,10 @@ webImagesSelectVisibleButton?.addEventListener("click", () => {
 webImagesClearSelectionButton?.addEventListener("click", () => {
   state.webImageSelected.clear();
   renderWebImagesPicker();
+});
+
+webImagesClearDataButton?.addEventListener("click", () => {
+  clearLoadedWebImages();
 });
 
 webImagesAddButton?.addEventListener("click", () => {

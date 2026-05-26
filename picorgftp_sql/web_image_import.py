@@ -602,15 +602,52 @@ def _normalized_scan_filters(filters: object) -> dict[str, object]:
             return 0
         return max(0, value)
 
+    url_filter = _text(filters.get("url_filter") or filters.get("urlFilter"))
+    url_include, url_exclude = _parse_url_filter_terms(url_filter)
     return {
         "min_width": positive_int("min_width") or positive_int("minWidth"),
         "min_height": positive_int("min_height") or positive_int("minHeight"),
         "min_kb": positive_int("min_kb") or positive_int("minKb"),
+        "url_include": url_include,
+        "url_exclude": url_exclude,
         "hide_thumbnails": bool(
             filters.get("hide_thumbnails")
             or filters.get("hideThumbnails")
         ),
     }
+
+
+def _parse_url_filter_terms(value: object) -> tuple[list[str], list[str]]:
+    include: list[str] = []
+    exclude: list[str] = []
+    for raw_part in re.split(r"[\s,;]+", _text(value).lower()):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if part.startswith("!") and len(part) > 1:
+            exclude.append(part[1:])
+        else:
+            include.append(part)
+    return include, exclude
+
+
+def _candidate_matches_url_filter(item: dict[str, object], filters: dict[str, object]) -> bool:
+    include = [str(term) for term in filters.get("url_include") or [] if str(term)]
+    exclude = [str(term) for term in filters.get("url_exclude") or [] if str(term)]
+    if not include and not exclude:
+        return True
+    url = str(item.get("url") or "")
+    haystack = " ".join(
+        [
+            url,
+            filename_from_url(url, ""),
+            str(item.get("filename") or ""),
+            str(item.get("source") or ""),
+        ]
+    ).lower()
+    if any(term in haystack for term in exclude):
+        return False
+    return all(term in haystack for term in include)
 
 
 def _candidate_passes_scan_filters(
@@ -625,6 +662,8 @@ def _candidate_passes_scan_filters(
     width = int(item.get("width") or 0)
     height = int(item.get("height") or 0)
     size_bytes = int(item.get("size_bytes") or 0)
+    if not _candidate_matches_url_filter(item, filters):
+        return False
     if filters.get("hide_thumbnails") and _kind_from_source(
         str(item.get("url") or ""),
         str(item.get("source") or ""),

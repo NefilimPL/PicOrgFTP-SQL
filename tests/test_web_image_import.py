@@ -178,6 +178,29 @@ def test_discover_image_candidates_applies_size_filter_after_probe() -> None:
     ]
 
 
+def test_discover_image_candidates_applies_include_and_exclude_url_filter() -> None:
+    html = """
+    <html>
+      <body>
+        <img src="/gallery/large-front.jpg">
+        <img src="/gallery/thumb-front.jpg">
+        <img src="/gallery/detail-side.jpg">
+      </body>
+    </html>
+    """
+
+    candidates = discover_image_candidates(
+        "https://shop.example/product.html",
+        html,
+        probe_images=False,
+        filters={"urlFilter": "front !thumb"},
+    )
+
+    assert [item["url"] for item in candidates] == [
+        "https://shop.example/gallery/large-front.jpg",
+    ]
+
+
 def test_fetch_page_html_retries_forbidden_page_with_browser_headers() -> None:
     calls = []
 
