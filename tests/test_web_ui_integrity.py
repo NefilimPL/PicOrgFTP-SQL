@@ -117,6 +117,10 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("webImageMinHeight", html.ids)
         self.assertIn("webImageMinKb", html.ids)
         self.assertIn("webImageHideThumbnails", html.ids)
+        self.assertIn("browserExtensionDownload", html.ids)
+        self.assertIn("browserExtensionHelpButton", html.button_ids)
+        self.assertIn("browserExtensionReceiveButton", html.button_ids)
+        self.assertIn("browserExtensionHelp", html.ids)
         self.assertIn("webImagesOutput", html.ids)
         self.assertTrue(html.has_tag("button", id="webImagesButton", type="button"))
 
@@ -164,6 +168,13 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("renderWebImagesError", source)
         self.assertIn("Cloudflare/challenge 403", source)
         self.assertIn("Importer nie dostaje wtedy HTML-a produktu", source)
+
+    def test_app_js_receives_browser_extension_imports(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("/api/browser-extension/imports", source)
+        self.assertIn("receiveBrowserExtensionImages", source)
+        self.assertIn("Odbierz z rozszerzenia", source)
 
     def test_login_page_keeps_accessible_login_form(self) -> None:
         html = _parse(LOGIN_HTML)

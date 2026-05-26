@@ -609,6 +609,35 @@ h2 {
   margin-bottom: 12px;
 }
 
+.browser-extension-download {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+.browser-extension-help {
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--surface-2);
+}
+
+.browser-extension-help strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.browser-extension-help ol {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--muted);
+}
+
+.browser-extension-help code {
+  color: var(--text);
+}
+
 .web-images-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));

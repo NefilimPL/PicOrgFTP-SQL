@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicOrgFTP-SQL Web</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260526-web-images">
+    <link rel="stylesheet" href="/static/app.css?v=20260526-browser-extension">
   </head>
   <body class="app-screen">
     <header class="topbar">
@@ -158,9 +158,23 @@
           </div>
         </div>
         <div class="web-image-actions">
+          <a id="browserExtensionDownload" class="secondary-button browser-extension-download" href="/api/browser-extension/download" download>Pobierz rozszerzenie</a>
+          <button id="browserExtensionHelpButton" type="button" class="secondary-button">Jak zainstalowac</button>
+          <button id="browserExtensionReceiveButton" type="button" class="secondary-button">Odbierz z rozszerzenia</button>
           <button id="webImagesSelectVisibleButton" type="button" class="secondary-button">Zaznacz widoczne</button>
           <button id="webImagesClearSelectionButton" type="button" class="secondary-button">Odznacz</button>
           <button id="webImagesAddButton" type="button">Dodaj do wolnych slotow</button>
+        </div>
+        <div id="browserExtensionHelp" class="browser-extension-help" hidden>
+          <strong>Instalacja Chrome / Edge</strong>
+          <ol>
+            <li>Pobierz ZIP i rozpakuj go do stalego katalogu.</li>
+            <li>Otworz <code>chrome://extensions</code> albo <code>edge://extensions</code>.</li>
+            <li>Wlacz Tryb dewelopera i wybierz Zaladuj rozpakowane.</li>
+            <li>Wskaz rozpakowany folder <code>picorgftp-sql-browser-extension</code>.</li>
+            <li>Na stronie produktu kliknij ikone dodatku, zeskanuj strone i wyslij zdjecia.</li>
+            <li>W tym oknie kliknij Odbierz z rozszerzenia.</li>
+          </ol>
         </div>
         <div id="webImagesOutput" class="web-images-grid empty-state">Brak pobranych zdjec.</div>
       </section>
@@ -301,6 +315,6 @@
       </article>
     </template>
 
-    <script src="/static/app.js?v=20260526-web-images"></script>
+    <script src="/static/app.js?v=20260526-browser-extension"></script>
   </body>
 </html>

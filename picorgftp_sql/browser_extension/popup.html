@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8">
+    <title>PicOrgFTP-SQL</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <header>
+      <strong>PicOrgFTP-SQL</strong>
+      <span id="status">Gotowe</span>
+    </header>
+
+    <section class="settings">
+      <label>
+        Adres panelu
+        <input id="panelUrl" autocomplete="off" spellcheck="false">
+      </label>
+      <label>
+        Token
+        <input id="apiToken" autocomplete="off" spellcheck="false">
+      </label>
+      <div class="actions">
+        <button id="saveSettings" type="button">Zapisz</button>
+        <button id="testConnection" type="button">Test</button>
+      </div>
+    </section>
+
+    <section class="actions">
+      <button id="scanPage" type="button">Skanuj strone</button>
+      <button id="selectAll" type="button">Zaznacz</button>
+      <button id="clearSelection" type="button">Odznacz</button>
+      <button id="uploadSelected" type="button" class="primary">Wyslij do panelu</button>
+    </section>
+
+    <div id="summary" class="summary">Brak zeskanowanych zdjec.</div>
+    <div id="images" class="images"></div>
+
+    <script src="defaults.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

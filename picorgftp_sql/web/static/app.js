@@ -107,6 +107,9 @@ const webImageMinWidth = document.querySelector("#webImageMinWidth");
 const webImageMinHeight = document.querySelector("#webImageMinHeight");
 const webImageMinKb = document.querySelector("#webImageMinKb");
 const webImageHideThumbnails = document.querySelector("#webImageHideThumbnails");
+const browserExtensionHelpButton = document.querySelector("#browserExtensionHelpButton");
+const browserExtensionHelp = document.querySelector("#browserExtensionHelp");
+const browserExtensionReceiveButton = document.querySelector("#browserExtensionReceiveButton");
 const webImagesSelectVisibleButton = document.querySelector("#webImagesSelectVisibleButton");
 const webImagesClearSelectionButton = document.querySelector("#webImagesClearSelectionButton");
 const webImagesAddButton = document.querySelector("#webImagesAddButton");
@@ -738,6 +741,63 @@ async function addSelectedWebImagesToSlots() {
   } finally {
     webImagesAddButton.disabled = false;
     webImagesAddButton.textContent = "Dodaj do wolnych slotow";
+  }
+}
+
+function imageFromBrowserExtensionItem(item) {
+  const cache = item?.cache || {};
+  return {
+    url: item?.source_url || cache.url || "",
+    filename: item?.filename || cache.name || "web-image.jpg",
+    width: Number(item?.width || cache.width || 0),
+    height: Number(item?.height || cache.height || 0),
+    size_bytes: Number(item?.size_bytes || cache.size_bytes || 0),
+    mime_type: item?.mime_type || "image/jpeg",
+    source: item?.source || "browser-extension",
+    kind: item?.kind || "image",
+    page_url: item?.page_url || "",
+  };
+}
+
+function loadBrowserExtensionItems(items) {
+  const imported = [];
+  for (const item of items || []) {
+    const image = imageFromBrowserExtensionItem(item);
+    if (!image.url) continue;
+    imported.push(image);
+    state.webImageCache.set(webImageCacheKey(image), {
+      status: "ready",
+      payload: item.cache || item,
+      error: "",
+      promise: null,
+    });
+  }
+  if (!imported.length) {
+    return 0;
+  }
+  state.webImagePageUrl = imported[0]?.page_url || state.webImagePageUrl || "";
+  state.webImages = imported;
+  state.webImageSelected = new Set(imported.map((_image, index) => index));
+  openWebImagesModal();
+  renderWebImagesPicker();
+  return imported.length;
+}
+
+async function receiveBrowserExtensionImages() {
+  if (!browserExtensionReceiveButton) return;
+  browserExtensionReceiveButton.disabled = true;
+  browserExtensionReceiveButton.textContent = "Odbieranie...";
+  try {
+    const payload = await requestJson("/api/browser-extension/imports");
+    const count = loadBrowserExtensionItems(payload.items || []);
+    formStatus.textContent = count
+      ? `Odebrano ${count} zdjec z rozszerzenia.`
+      : "Brak nowych zdjec z rozszerzenia.";
+  } catch (error) {
+    formStatus.textContent = error.message;
+  } finally {
+    browserExtensionReceiveButton.disabled = false;
+    browserExtensionReceiveButton.textContent = "Odbierz z rozszerzenia";
   }
 }
 
@@ -5018,6 +5078,17 @@ webImageScanMode?.addEventListener("change", () => {
   state.webImageScanMode = webImageScanMode.value || "links";
   localStorage.setItem("picorg-web-image-scan-mode", state.webImageScanMode);
   renderWebImagesPicker();
+});
+
+browserExtensionHelpButton?.addEventListener("click", () => {
+  if (!browserExtensionHelp) return;
+  browserExtensionHelp.hidden = !browserExtensionHelp.hidden;
+});
+
+browserExtensionReceiveButton?.addEventListener("click", () => {
+  receiveBrowserExtensionImages().catch((error) => {
+    formStatus.textContent = error.message;
+  });
 });
 
 webImagesSelectVisibleButton?.addEventListener("click", () => {

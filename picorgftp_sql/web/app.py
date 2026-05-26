@@ -14,10 +14,12 @@ import re
 import secrets
 import shutil
 import tempfile
+import threading
 import time
 import traceback
 import unicodedata
 from typing import Any, Dict, List, Optional, Set
+import zipfile
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -101,14 +103,18 @@ except Exception:  # pragma: no cover
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+BROWSER_EXTENSION_DIR = Path(__file__).resolve().parents[1] / "browser_extension"
 SESSION_COOKIE = "picorg_web_session"
 SESSION_MAX_AGE_SECONDS = 12 * 60 * 60
+BROWSER_EXTENSION_TOKEN_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "admin"
 ACTIVE_CLIENT_MAX_AGE_SECONDS = 180
 WEB_UPLOAD_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
 WEB_UPLOAD_CACHE_CLEAN_INTERVAL_SECONDS = 30 * 60
 _UPLOAD_CACHE_LAST_CLEANUP = 0.0
+_BROWSER_EXTENSION_IMPORTS: Dict[str, List[Dict[str, Any]]] = {}
+_BROWSER_EXTENSION_IMPORTS_LOCK = threading.Lock()
 
 
 def _elapsed_ms(started: float) -> int:
@@ -174,6 +180,12 @@ def _make_session_token(username: str) -> str:
     return base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii")
 
 
+def _make_browser_extension_token(username: str) -> str:
+    payload = f"browser-extension|{username}|{int(time.time())}|{secrets.token_hex(16)}"
+    token = f"{payload}|{_sign(payload)}"
+    return base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii")
+
+
 def _read_session_token(token: Optional[str]) -> Optional[str]:
     if not token:
         return None
@@ -197,10 +209,51 @@ def _read_session_token(token: Optional[str]) -> Optional[str]:
     return username
 
 
+def _read_browser_extension_token(token: Optional[str]) -> Optional[str]:
+    if not token:
+        return None
+    try:
+        decoded = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
+        marker, username, issued_raw, nonce, signature = decoded.rsplit("|", 4)
+    except Exception:
+        return None
+    if marker != "browser-extension":
+        return None
+    payload = f"{marker}|{username}|{issued_raw}|{nonce}"
+    if not hmac.compare_digest(_sign(payload), signature):
+        return None
+    try:
+        issued = int(issued_raw)
+    except ValueError:
+        return None
+    if int(time.time()) - issued > BROWSER_EXTENSION_TOKEN_MAX_AGE_SECONDS:
+        return None
+    user = find_user(username)
+    if not user or not user.get("enabled"):
+        return None
+    return username
+
+
 def _current_user(request: Request) -> Optional[str]:
     if not _auth_enabled():
         return _admin_username()
     return _read_session_token(request.cookies.get(SESSION_COOKIE))
+
+
+def _extension_bearer_token(request: Request) -> str:
+    authorization = str(request.headers.get("authorization") or "").strip()
+    if not authorization.lower().startswith("bearer "):
+        return ""
+    return authorization.split(None, 1)[1].strip()
+
+
+def _require_browser_extension_user(request: Request) -> str:
+    if not _auth_enabled():
+        return _admin_username()
+    username = _read_browser_extension_token(_extension_bearer_token(request))
+    if not username:
+        raise HTTPException(status_code=401, detail="Niepoprawny albo wygasly token rozszerzenia.")
+    return username
 
 
 def _require_user(request: Request) -> str:
@@ -465,6 +518,21 @@ def _thumbnail_bytes(path: str, *, width: int = 360, height: int = 260, content_
     return buffer.getvalue()
 
 
+def _image_dimensions(path: str) -> tuple[int, int]:
+    if Image is None:
+        return 0, 0
+    try:
+        with Image.open(path) as image:
+            if ImageOps is not None:
+                try:
+                    image = ImageOps.exif_transpose(image)
+                except Exception:
+                    pass
+            return int(image.size[0]), int(image.size[1])
+    except Exception:
+        return 0, 0
+
+
 async def _save_upload(upload: UploadFile, temp_dir: str, prefix: str) -> str:
     safe_name = _safe_upload_name(upload.filename, f"{prefix}.upload")
     suffix = _safe_file_suffix(safe_name)
@@ -549,6 +617,67 @@ def _scan_web_image_page(
         "count": len(images),
         "mode": "metadata" if probe_images else "links",
     }
+
+
+def _record_browser_extension_import(username: str, item: Dict[str, Any]) -> None:
+    key = str(username or "").strip().lower() or _admin_username().lower()
+    with _BROWSER_EXTENSION_IMPORTS_LOCK:
+        queue = _BROWSER_EXTENSION_IMPORTS.setdefault(key, [])
+        queue.append(item)
+        del queue[:-120]
+
+
+def _pop_browser_extension_imports(username: str) -> List[Dict[str, Any]]:
+    key = str(username or "").strip().lower() or _admin_username().lower()
+    with _BROWSER_EXTENSION_IMPORTS_LOCK:
+        items = list(_BROWSER_EXTENSION_IMPORTS.get(key, []))
+        _BROWSER_EXTENSION_IMPORTS[key] = []
+    return items
+
+
+def _browser_extension_cors_headers(request: Request) -> Dict[str, str]:
+    origin = str(request.headers.get("origin") or "")
+    if origin.startswith(("chrome-extension://", "edge-extension://")):
+        return {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Headers": "authorization, content-type",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Vary": "Origin",
+        }
+    return {}
+
+
+def _browser_extension_json(request: Request, payload: Dict[str, Any]) -> JSONResponse:
+    return JSONResponse(payload, headers=_browser_extension_cors_headers(request))
+
+
+def _browser_extension_defaults(request: Request, username: str) -> str:
+    base_url = str(request.base_url).rstrip("/")
+    payload = {
+        "panelUrl": base_url,
+        "apiToken": _make_browser_extension_token(username),
+    }
+    return "window.PICORG_EXTENSION_DEFAULTS = " + json.dumps(payload, ensure_ascii=False) + ";\n"
+
+
+def _browser_extension_zip_bytes(request: Request, username: str) -> bytes:
+    if not BROWSER_EXTENSION_DIR.is_dir():
+        raise HTTPException(status_code=404, detail="Brak plikow rozszerzenia.")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        root_name = "picorgftp-sql-browser-extension"
+        for path in sorted(BROWSER_EXTENSION_DIR.rglob("*")):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(BROWSER_EXTENSION_DIR).as_posix()
+            if relative == "defaults.js":
+                continue
+            archive.write(path, f"{root_name}/{relative}")
+        archive.writestr(
+            f"{root_name}/defaults.js",
+            _browser_extension_defaults(request, username),
+        )
+    return buffer.getvalue()
 
 
 def _result_payload(result: Any) -> Dict[str, Any]:
@@ -1826,6 +1955,106 @@ def create_app() -> FastAPI:
                 "mode": _upload_processing_mode(),
             },
         }
+
+    @app.options("/api/browser-extension/{path:path}")
+    def browser_extension_options(request: Request, path: str = "") -> Response:
+        return Response(status_code=204, headers=_browser_extension_cors_headers(request))
+
+    @app.get("/api/browser-extension/download")
+    def browser_extension_download_api(request: Request) -> Response:
+        username = _require_user(request)
+        data = _browser_extension_zip_bytes(request, username)
+        return Response(
+            content=data,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": 'attachment; filename="picorgftp-sql-browser-extension.zip"',
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @app.get("/api/browser-extension/ping")
+    def browser_extension_ping_api(request: Request) -> JSONResponse:
+        username = _require_browser_extension_user(request)
+        return _browser_extension_json(
+            request,
+            {
+                "ok": True,
+                "username": username,
+                "version": get_display_version(),
+            },
+        )
+
+    @app.get("/api/browser-extension/imports")
+    def browser_extension_imports_api(request: Request) -> Dict[str, Any]:
+        username = _require_user(request)
+        return {"items": _pop_browser_extension_imports(username)}
+
+    @app.post("/api/browser-extension/upload-cache")
+    async def browser_extension_upload_cache_api(request: Request) -> JSONResponse:
+        started = time.perf_counter()
+        username = _require_browser_extension_user(request)
+        form = await request.form()
+        upload = form.get("file")
+        if not isinstance(upload, UploadFile) or not upload.filename:
+            raise HTTPException(status_code=400, detail="Brak pliku do wyslania.")
+        original_name = upload.filename
+        prefix = str(form.get("prefix") or "web").strip() or "web"
+        source_url = str(form.get("source_url") or "").strip()
+        page_url = str(form.get("page_url") or "").strip()
+        cleanup_web_upload_cache()
+        save_started = time.perf_counter()
+        path, size = await _save_upload_cache(upload, _user_cache_scope(request, username), prefix)
+        save_ms = _elapsed_ms(save_started)
+        preprocess_ms = 0
+        preprocessed = False
+        display_name = _safe_upload_name(original_name, os.path.basename(path))
+        if _upload_processing_mode() == "host":
+            preprocess_started = time.perf_counter()
+            path, display_name, preprocessed = await run_in_threadpool(
+                preprocess_cached_upload,
+                path,
+                original_name,
+                processing_options_from_config(config.CONFIG),
+            )
+            preprocess_ms = _elapsed_ms(preprocess_started)
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = 0
+        width, height = _image_dimensions(path)
+        token = _file_token(path)
+        cache_payload = {
+            "token": token,
+            "name": _safe_upload_name(display_name, os.path.basename(path)),
+            "size_bytes": size,
+            "width": width,
+            "height": height,
+            "preprocessed": preprocessed,
+            "file_version": _file_version(path),
+            "url": _versioned_file_url(path, "/api/file", token),
+            "thumb_url": _versioned_file_url(path, "/api/thumbnail", token),
+            "timing": {
+                "total_ms": _elapsed_ms(started),
+                "save_ms": save_ms,
+                "preprocess_ms": preprocess_ms,
+                "mode": _upload_processing_mode(),
+            },
+        }
+        item = {
+            "source_url": source_url,
+            "page_url": page_url,
+            "filename": cache_payload["name"],
+            "width": width,
+            "height": height,
+            "size_bytes": size,
+            "mime_type": str(upload.content_type or ""),
+            "source": "browser-extension",
+            "kind": "image",
+            "cache": cache_payload,
+        }
+        _record_browser_extension_import(username, item)
+        return _browser_extension_json(request, {"ok": True, "item": item})
 
     @app.post("/api/web-images/scan")
     async def web_images_scan_api(request: Request) -> JSONResponse:
