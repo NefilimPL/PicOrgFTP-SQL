@@ -1,6 +1,7 @@
 # PicOrgFTP-SQL
 Python picture organiser with ability to send to FTP and SQL
 
+[![Code Quality](https://github.com/NefilimPL/PicOrgFTP-SQL/actions/workflows/code-quality.yml/badge.svg?branch=main)](https://github.com/NefilimPL/PicOrgFTP-SQL/actions/workflows/code-quality.yml)
 [![Build Windows EXE](https://github.com/NefilimPL/PicOrgFTP-SQL/actions/workflows/build-exe.yml/badge.svg?branch=main)](https://github.com/NefilimPL/PicOrgFTP-SQL/actions/workflows/build-exe.yml)
 
 Project roadmap / plan rozwoju: [PLAN_ROZWOJU.md](PLAN_ROZWOJU.md)
@@ -90,11 +91,11 @@ The runtime automatically searches for translation files next to the executable,
 
 ### GitHub Actions (Windows EXE)
 
-This repository includes a Windows build workflow in `.github/workflows/build-exe.yml`. It builds the EXE with PyInstaller, packages the web runtime as a separate ZIP and uploads both as workflow artifacts. When a GitHub release is published, the same workflow also attaches `PicOrgFTP-SQL-<tag>.exe` and `PicOrgFTP-SQL-web-<tag>.zip` to that release. The visible program version is taken from the release tag.
+This repository includes a Windows build workflow in `.github/workflows/build-exe.yml`. It builds the EXE with PyInstaller, packages the web runtime as a separate ZIP and uploads both as workflow artifacts when run manually or when a GitHub release is published. Release builds attach `PicOrgFTP-SQL-<tag>.exe` and `PicOrgFTP-SQL-web-<tag>.zip` to that release. The visible program version is taken from the release tag.
 
 1. Push the workflow file to your GitHub repository.
 2. Go to **Settings → Actions → General** and make sure Actions are enabled for the repository.
-3. Go to the **Actions** tab, open **Build Windows EXE**, and click **Run workflow** to build on demand (or push to `main`/`master` to run automatically).
+3. Go to the **Actions** tab, open **Build Windows EXE**, and click **Run workflow** to build on demand. Normal pushes run the code quality workflow instead of publishing EXE artifacts.
 4. After the job finishes, download **PicOrgFTP-SQL-windows** or **PicOrgFTP-SQL-web** from the workflow summary.
 5. To publish release assets, create and publish a GitHub release from a tag such as `v1.2.3`; the workflow will build and attach the EXE and web ZIP automatically.
 
@@ -186,11 +187,11 @@ Podczas działania program wyszukuje pliki tłumaczeń obok pliku wykonywalnego,
 
 ### GitHub Actions (budowanie EXE na Windows)
 
-W repozytorium znajduje się workflow `.github/workflows/build-exe.yml`, który buduje EXE przez PyInstaller, pakuje panel webowy do osobnego ZIP-a i publikuje oba pliki jako artefakty. Po opublikowaniu GitHub Release workflow dodatkowo podpina do release pliki `PicOrgFTP-SQL-<tag>.exe` oraz `PicOrgFTP-SQL-web-<tag>.zip`. Wersja widoczna w GUI i webie jest pobierana z taga release.
+W repozytorium znajduje się workflow `.github/workflows/build-exe.yml`, który buduje EXE przez PyInstaller, pakuje panel webowy do osobnego ZIP-a i publikuje oba pliki jako artefakty po ręcznym uruchomieniu albo po opublikowaniu GitHub Release. Build release dodatkowo podpina do release pliki `PicOrgFTP-SQL-<tag>.exe` oraz `PicOrgFTP-SQL-web-<tag>.zip`. Wersja widoczna w GUI i webie jest pobierana z taga release.
 
 1. Wypchnij pliki workflow do swojego repozytorium na GitHub.
 2. Wejdź w **Settings → Actions → General** i upewnij się, że Actions są włączone.
-3. Otwórz kartę **Actions**, wybierz **Build Windows EXE** i kliknij **Run workflow** (lub wypchnij zmiany na `main`/`master`, aby uruchomić automatycznie).
+3. Otwórz kartę **Actions**, wybierz **Build Windows EXE** i kliknij **Run workflow**, aby zbudować ręcznie. Zwykłe pushe uruchamiają workflow jakości kodu zamiast publikowania artefaktów EXE.
 4. Po zakończeniu joba pobierz artefakt **PicOrgFTP-SQL-windows** albo **PicOrgFTP-SQL-web** z podsumowania workflow.
 5. Aby opublikować pliki przy wydaniu, utwórz i opublikuj release z tagiem, np. `v1.2.3`; workflow zbuduje pliki i automatycznie doda je do release.
 

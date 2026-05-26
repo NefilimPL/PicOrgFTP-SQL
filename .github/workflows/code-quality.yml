@@ -1,0 +1,210 @@
+name: Code Quality
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  PICORGFTP_SQL_HEADLESS: "1"
+  PYTHONUTF8: "1"
+  QT_QPA_PLATFORM: "offscreen"
+
+jobs:
+  static-analysis:
+    name: Static analysis
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install QA tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ruff bandit
+
+      - name: Compile Python sources
+        run: |
+          python -m compileall -q picorgftp_sql tests
+          python -m py_compile PicOrgFTP-SQL.pyw PicOrgFTP-SQL-WEB.pyw PicOrgFTP-SQL-QtSlots.pyw
+
+      - name: Ruff critical checks
+        run: |
+          ruff check --select E9,F63,F7,F82 PicOrgFTP-SQL.pyw PicOrgFTP-SQL-WEB.pyw PicOrgFTP-SQL-QtSlots.pyw picorgftp_sql tests
+
+      - name: Bandit high confidence security scan
+        run: |
+          bandit -r picorgftp_sql -x picorgftp_sql/Localization --severity-level high --confidence-level high
+
+  tests:
+    name: Pytest and coverage
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-web.txt
+          python -m pip install -r requirements-qt.txt
+          python -m pip install pytest coverage
+
+      - name: Run full test suite with coverage
+        run: |
+          python -m coverage run -m pytest
+          python -m coverage report --show-missing
+          python -m coverage xml -o coverage.xml
+
+  runtime-smoke:
+    name: Runtime and GUI smoke checks
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-web.txt
+          python -m pip install -r requirements-qt.txt
+          python -m pip install pytest
+
+      - name: Web static asset smoke check
+        shell: pwsh
+        run: |
+          $required = @(
+            "picorgftp_sql/web/static/index.html",
+            "picorgftp_sql/web/static/login.html",
+            "picorgftp_sql/web/static/app.css",
+            "picorgftp_sql/web/static/app.js"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path $path)) {
+              throw "Missing required web asset: $path"
+            }
+          }
+
+          $index = Get-Content -Path "picorgftp_sql/web/static/index.html" -Raw
+          foreach ($needle in @("productForm", "submitButton", "/static/app.css")) {
+            if (-not $index.Contains($needle)) {
+              throw "index.html is missing expected UI marker: $needle"
+            }
+          }
+
+          $login = Get-Content -Path "picorgftp_sql/web/static/login.html" -Raw
+          foreach ($needle in @("loginForm", "/api/login", "password")) {
+            if (-not $login.Contains($needle)) {
+              throw "login.html is missing expected UI marker: $needle"
+            }
+          }
+
+          $script = Get-Content -Path "picorgftp_sql/web/static/app.js" -Raw
+          foreach ($needle in @("addEventListener", "fetch(", "productForm")) {
+            if (-not $script.Contains($needle)) {
+              throw "app.js is missing expected runtime marker: $needle"
+            }
+          }
+
+      - name: FastAPI app creation smoke check
+        run: |
+          python -c "from picorgftp_sql.web.app import create_app; app = create_app(); assert app.title == 'PicOrgFTP-SQL Web'; assert app.routes"
+
+      - name: Focused GUI performance helper tests
+        run: |
+          python -m pytest tests/test_app_performance_helpers.py tests/test_app_lookup_state.py -q
+
+  pyinstaller-smoke:
+    name: PyInstaller EXE smoke build
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pyinstaller>=6.6,<7"
+          python -m pip install -r requirements-build.txt
+          python -m pip install -r requirements-web.txt
+
+      - name: Prepare Windows icons
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "build/ci-smoke-icons" -Force | Out-Null
+          python -c "from PIL import Image; Image.open(r'pic/PIC_LOCAL.png').save(r'build/ci-smoke-icons/PIC_LOCAL.ico', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)]); Image.open(r'pic/PIC_WEB.png').save(r'build/ci-smoke-icons/PIC_WEB.ico', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)])"
+
+      - name: Smoke build local EXE
+        shell: pwsh
+        env:
+          PYINSTALLER_BUILD: "1"
+        run: |
+          pyinstaller --noconfirm --clean --log-level=WARN `
+            --name PicOrgFTP-SQL-smoke `
+            --noconsole `
+            --onefile `
+            --distpath "dist/ci-smoke" `
+            --workpath "build/ci-smoke-local" `
+            --icon "build/ci-smoke-icons/PIC_LOCAL.ico" `
+            --collect-submodules mysql.connector `
+            --collect-data mysql.connector `
+            --collect-data certifi `
+            --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" `
+            --add-data "picorgftp_sql/VERSION;picorgftp_sql" `
+            --add-data "pic/PIC_LOCAL.png;pic" `
+            PicOrgFTP-SQL.pyw
+
+      - name: Smoke build web EXE
+        shell: pwsh
+        env:
+          PYINSTALLER_BUILD: "1"
+        run: |
+          pyinstaller --noconfirm --clean --log-level=WARN `
+            --name PicOrgFTP-SQL-WEB-smoke `
+            --noconsole `
+            --onefile `
+            --distpath "dist/ci-smoke" `
+            --workpath "build/ci-smoke-web" `
+            --icon "build/ci-smoke-icons/PIC_WEB.ico" `
+            --collect-submodules picorgftp_sql `
+            --collect-submodules mysql.connector `
+            --collect-submodules uvicorn `
+            --collect-submodules fastapi `
+            --collect-submodules starlette `
+            --collect-submodules multipart `
+            --collect-submodules pystray `
+            --collect-submodules PIL `
+            --collect-data mysql.connector `
+            --collect-data certifi `
+            --add-data "picorgftp_sql/web/static;picorgftp_sql/web/static" `
+            --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" `
+            --add-data "picorgftp_sql/VERSION;picorgftp_sql" `
+            --add-data "pic/PIC_WEB.png;pic" `
+            PicOrgFTP-SQL-WEB.pyw
