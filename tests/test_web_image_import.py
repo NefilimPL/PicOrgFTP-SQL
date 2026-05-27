@@ -201,6 +201,31 @@ def test_discover_image_candidates_applies_include_and_exclude_url_filter() -> N
     ]
 
 
+def test_discover_image_candidates_applies_or_url_filter_groups() -> None:
+    html = """
+    <html>
+      <body>
+        <img src="/gallery/sofa-bialy-front.jpg">
+        <img src="/gallery/sofa-czarny-front.jpg">
+        <img src="/gallery/sofa-szary-front.jpg">
+        <img src="/gallery/sofa-czarny-thumb.jpg">
+      </body>
+    </html>
+    """
+
+    candidates = discover_image_candidates(
+        "https://shop.example/product.html",
+        html,
+        probe_images=False,
+        filters={"urlFilter": "<bialy|czarny> !thumb"},
+    )
+
+    assert [item["url"] for item in candidates] == [
+        "https://shop.example/gallery/sofa-bialy-front.jpg",
+        "https://shop.example/gallery/sofa-czarny-front.jpg",
+    ]
+
+
 def test_fetch_page_html_retries_forbidden_page_with_browser_headers() -> None:
     calls = []
 

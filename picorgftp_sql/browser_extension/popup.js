@@ -9,6 +9,7 @@
       hideThumbnails: false,
       urlFilter: "",
     },
+    uploadStatus: {},
   };
 
   const panelUrlInput = document.querySelector("#panelUrl");
@@ -71,6 +72,19 @@
     }
   }
 
+  function formatMs(value) {
+    const ms = Math.max(0, Math.round(Number(value || 0)));
+    return `${ms} ms`;
+  }
+
+  function formatBytes(bytes) {
+    const value = Math.max(0, Number(bytes || 0));
+    if (!value) return "";
+    if (value < 1024) return `${Math.round(value)} B`;
+    if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
   function positiveInt(value) {
     const parsed = parseInt(String(value || "0"), 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
@@ -111,25 +125,33 @@
 
   function parseUrlFilterText(text) {
     const parsed = { include: [], exclude: [] };
-    String(text || "")
-      .split(/[\s,;]+/)
-      .map((part) => part.trim().toLowerCase())
-      .filter(Boolean)
-      .forEach((part) => {
-        if (part.startsWith("!") && part.length > 1) {
-          parsed.exclude.push(part.slice(1));
-        } else {
-          parsed.include.push(part);
-        }
-      });
+    const matches = String(text || "").toLowerCase().match(/!?<[^>]+>|[^\s,;]+/g) || [];
+    for (let part of matches) {
+      part = part.trim();
+      if (!part) continue;
+      let target = parsed.include;
+      if (part.startsWith("!") && part.length > 1) {
+        target = parsed.exclude;
+        part = part.slice(1);
+      }
+      const terms =
+        part.startsWith("<") && part.endsWith(">")
+          ? part
+              .slice(1, -1)
+              .split("|")
+              .map((term) => term.trim())
+              .filter(Boolean)
+          : [part];
+      if (terms.length) target.push(terms);
+    }
     return parsed;
   }
 
   function imageMatchesUrlFilter(image, text) {
     const parsed = parseUrlFilterText(text);
     const haystack = `${image?.url || ""} ${image?.filename || ""} ${image?.source || ""}`.toLowerCase();
-    if (parsed.exclude.some((term) => haystack.includes(term))) return false;
-    if (parsed.include.some((term) => !haystack.includes(term))) return false;
+    if (parsed.exclude.some((group) => group.some((term) => haystack.includes(term)))) return false;
+    if (parsed.include.some((group) => !group.some((term) => haystack.includes(term)))) return false;
     return true;
   }
 
@@ -148,6 +170,20 @@
     return state.images
       .map((image, index) => ({ image, index }))
       .filter((entry) => imagePassesFilters(entry.image));
+  }
+
+  function uploadStatusTasks(status = state.uploadStatus) {
+    return [
+      ...(Array.isArray(status.active) ? status.active : []),
+      ...(Array.isArray(status.queued) ? status.queued : []),
+      ...(Array.isArray(status.recent) ? status.recent : []),
+    ];
+  }
+
+  function uploadTaskForImage(image) {
+    const url = String(image?.url || "");
+    if (!url) return null;
+    return uploadStatusTasks().find((task) => String(task.url || "") === url) || null;
   }
 
   function collectImagesFromPage() {
@@ -286,6 +322,7 @@
   }
 
   function renderImages() {
+    const scrollTop = imagesOutput.scrollTop || 0;
     imagesOutput.textContent = "";
     const visible = visibleImageEntries();
     const selectedVisible = visible.filter((entry) => state.selected.has(entry.index)).length;
@@ -300,7 +337,8 @@
       const title = document.createElement("strong");
       const dimensions = document.createElement("small");
       const url = document.createElement("span");
-      row.className = "image-row";
+      const task = uploadTaskForImage(image);
+      row.className = `image-row ${task ? task.status || "running" : ""}`;
       checkbox.type = "checkbox";
       checkbox.checked = state.selected.has(index);
       checkbox.addEventListener("change", () => {
@@ -318,9 +356,44 @@
         image.width && image.height ? `${image.width} x ${image.height}` : "rozmiar nieznany";
       url.textContent = image.url;
       meta.append(title, dimensions, url);
+      if (task) {
+        meta.append(uploadProgressNode(task));
+      }
       row.append(checkbox, preview, meta);
       imagesOutput.appendChild(row);
     });
+    imagesOutput.scrollTop = scrollTop;
+  }
+
+  function uploadProgressNode(task) {
+    const wrapper = document.createElement("div");
+    const header = document.createElement("div");
+    const phase = document.createElement("span");
+    const time = document.createElement("span");
+    const track = document.createElement("div");
+    const fill = document.createElement("div");
+    const details = document.createElement("small");
+    const progress = Math.max(0, Math.min(100, Number(task.progress || 0)));
+    const size = formatBytes(task.sizeBytes || task.bytesReceived);
+    const timingParts = [];
+    if (task.downloadMs) timingParts.push(`pobieranie ${formatMs(task.downloadMs)}`);
+    if (task.uploadMs) timingParts.push(`backend/cache ${formatMs(task.uploadMs)}`);
+    if (size) timingParts.push(`pobrano ${size}`);
+    wrapper.className = "image-upload-progress";
+    header.className = "image-upload-header";
+    track.className = "progress-track";
+    fill.className = "progress-fill";
+    fill.style.width = `${progress}%`;
+    phase.textContent = task.error || task.phase || "W kolejce";
+    time.textContent = formatMs(task.totalMs || task.elapsedMs);
+    details.textContent = timingParts.join(" · ");
+    header.append(phase, time);
+    track.append(fill);
+    wrapper.append(header, track);
+    if (details.textContent) {
+      wrapper.append(details);
+    }
+    return wrapper;
   }
 
   async function saveSettings() {
@@ -415,18 +488,20 @@
     const failedRetryable = Number(status.failedRetryable || 0);
     const remaining = Number(status.remaining || 0);
     retryFailedButton.disabled = failedRetryable <= 0;
+    state.uploadStatus = status;
+    renderImages();
     if (status.running || remaining > 0) {
       setStatus(`${uploaded}/${total} wyslano`);
       summaryOutput.textContent = failed
-        ? `Wysylanie w tle: ${uploaded}/${total}, bledy: ${failed}, do ponowienia: ${failedRetryable}.`
-        : `Wysylanie w tle: ${uploaded}/${total}.`;
+        ? `Wysylanie w tle: ${uploaded}/${total}, bledy: ${failed}, do ponowienia: ${failedRetryable}, rownolegle: ${status.concurrency || 1}, czas: ${formatMs(status.elapsedMs)}.`
+        : `Wysylanie w tle: ${uploaded}/${total}, rownolegle: ${status.concurrency || 1}, czas: ${formatMs(status.elapsedMs)}.`;
       return;
     }
     if (total > 0) {
       setStatus(failed ? `Bledy ${failed}` : "Wyslano");
       summaryOutput.textContent = failed
-        ? `Zakonczono z bledami: ${failed}. Do ponowienia: ${failedRetryable}. ${status.lastError || ""}`
-        : "Wyslano do panelu. Kliknij Odbierz z rozszerzenia.";
+        ? `Zakonczono z bledami: ${failed}. Do ponowienia: ${failedRetryable}. Czas: ${formatMs(status.elapsedMs)}. ${status.lastError || ""}`
+        : `Wyslano do panelu w ${formatMs(status.elapsedMs)}. Kliknij Odbierz z rozszerzenia.`;
     }
   }
 
@@ -474,7 +549,7 @@
 
   window.setInterval(() => {
     refreshUploadStatus().catch(() => {});
-  }, 1500);
+  }, 500);
 
   loadSettings()
     .then(() => Promise.all([scanPage(), refreshUploadStatus()]))

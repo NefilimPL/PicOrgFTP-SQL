@@ -617,23 +617,35 @@ def _normalized_scan_filters(filters: object) -> dict[str, object]:
     }
 
 
-def _parse_url_filter_terms(value: object) -> tuple[list[str], list[str]]:
-    include: list[str] = []
-    exclude: list[str] = []
-    for raw_part in re.split(r"[\s,;]+", _text(value).lower()):
-        part = raw_part.strip()
+def _parse_url_filter_terms(value: object) -> tuple[list[list[str]], list[list[str]]]:
+    include: list[list[str]] = []
+    exclude: list[list[str]] = []
+    for match in re.finditer(r"!?<[^>]+>|[^\s,;]+", _text(value).lower()):
+        part = match.group(0).strip()
         if not part:
             continue
+        target = include
         if part.startswith("!") and len(part) > 1:
-            exclude.append(part[1:])
+            target = exclude
+            part = part[1:]
+        if part.startswith("<") and part.endswith(">"):
+            terms = [term.strip() for term in part[1:-1].split("|") if term.strip()]
         else:
-            include.append(part)
+            terms = [part]
+        if terms:
+            target.append(terms)
     return include, exclude
 
 
 def _candidate_matches_url_filter(item: dict[str, object], filters: dict[str, object]) -> bool:
-    include = [str(term) for term in filters.get("url_include") or [] if str(term)]
-    exclude = [str(term) for term in filters.get("url_exclude") or [] if str(term)]
+    include = [
+        [str(term) for term in group if str(term)]
+        for group in filters.get("url_include") or []
+    ]
+    exclude = [
+        [str(term) for term in group if str(term)]
+        for group in filters.get("url_exclude") or []
+    ]
     if not include and not exclude:
         return True
     url = str(item.get("url") or "")
@@ -645,9 +657,9 @@ def _candidate_matches_url_filter(item: dict[str, object], filters: dict[str, ob
             str(item.get("source") or ""),
         ]
     ).lower()
-    if any(term in haystack for term in exclude):
+    if any(any(term in haystack for term in group) for group in exclude):
         return False
-    return all(term in haystack for term in include)
+    return all(any(term in haystack for term in group) for group in include)
 
 
 def _candidate_passes_scan_filters(

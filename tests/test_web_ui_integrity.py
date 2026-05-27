@@ -181,6 +181,7 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("downloadBrowserExtension", source)
         self.assertIn("clearLoadedWebImages", source)
         self.assertIn("parseWebImageUrlFilter", source)
+        self.assertIn("!?<[^>]+>", source)
         self.assertIn("existingByUrl", source)
         self.assertIn("state.webImages.push(image)", source)
         self.assertIn("Odbierz z rozszerzenia", source)

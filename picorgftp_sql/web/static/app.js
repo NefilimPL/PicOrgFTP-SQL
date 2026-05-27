@@ -353,25 +353,33 @@ function isThumbnailWebImage(image) {
 
 function parseWebImageUrlFilter(text) {
   const parsed = { include: [], exclude: [] };
-  String(text || "")
-    .split(/[\s,;]+/)
-    .map((part) => part.trim().toLowerCase())
-    .filter(Boolean)
-    .forEach((part) => {
-      if (part.startsWith("!") && part.length > 1) {
-        parsed.exclude.push(part.slice(1));
-      } else {
-        parsed.include.push(part);
-      }
-    });
+  const matches = String(text || "").toLowerCase().match(/!?<[^>]+>|[^\s,;]+/g) || [];
+  for (let part of matches) {
+    part = part.trim();
+    if (!part) continue;
+    let target = parsed.include;
+    if (part.startsWith("!") && part.length > 1) {
+      target = parsed.exclude;
+      part = part.slice(1);
+    }
+    const terms =
+      part.startsWith("<") && part.endsWith(">")
+        ? part
+            .slice(1, -1)
+            .split("|")
+            .map((term) => term.trim())
+            .filter(Boolean)
+        : [part];
+    if (terms.length) target.push(terms);
+  }
   return parsed;
 }
 
 function webImageMatchesUrlFilter(image, text) {
   const parsed = parseWebImageUrlFilter(text);
   const haystack = `${image?.url || ""} ${image?.filename || ""} ${image?.source || ""}`.toLowerCase();
-  if (parsed.exclude.some((term) => haystack.includes(term))) return false;
-  if (parsed.include.some((term) => !haystack.includes(term))) return false;
+  if (parsed.exclude.some((group) => group.some((term) => haystack.includes(term)))) return false;
+  if (parsed.include.some((group) => !group.some((term) => haystack.includes(term)))) return false;
   return true;
 }
 

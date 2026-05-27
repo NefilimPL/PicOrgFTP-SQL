@@ -3,7 +3,8 @@
 }
 
 body {
-  width: 390px;
+  width: 620px;
+  max-width: 780px;
   margin: 0;
   padding: 12px;
   color: #18211f;
@@ -68,15 +69,15 @@ button:disabled {
 }
 
 .toolbar {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .toolbar .primary {
-  grid-column: 1 / -1;
+  border-color: #2f6f5e;
 }
 
 .toolbar .retry {
-  grid-column: 1 / -1;
+  grid-column: auto;
 }
 
 .panel {
@@ -117,10 +118,24 @@ button:disabled {
   margin: 8px 0;
 }
 
+.progress-track {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e6ebe8;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: #2f6f5e;
+}
+
 .images {
   display: grid;
   gap: 8px;
-  max-height: 420px;
+  max-height: 520px;
   overflow: auto;
 }
 
@@ -134,6 +149,22 @@ button:disabled {
   border-radius: 8px;
   padding: 6px;
   background: #fff;
+}
+
+.image-row.done {
+  border-color: #b9d4ca;
+}
+
+.image-row.queued {
+  opacity: 0.78;
+}
+
+.image-row.error {
+  border-color: #e5b8b3;
+}
+
+.image-row.error .progress-fill {
+  background: #b42318;
 }
 
 .image-row img {
@@ -155,4 +186,25 @@ button:disabled {
 .image-row small {
   display: block;
   color: #7b8581;
+}
+
+.image-upload-progress {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.image-upload-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: #5f6b67;
+  font-size: 12px;
+}
+
+.image-upload-header span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

@@ -45,6 +45,20 @@ def test_browser_extension_popup_uploads_to_panel_endpoint() -> None:
     assert "FAILED_KEY" in background
     assert "retryFailed" in background
     assert "queueWithoutItem" in background
+    assert "UPLOAD_CONCURRENCY = 3" in background
+    assert "Promise.all" in background
+    assert "withStorageMutation" in background
+    assert "responseToProgressBlob" in background
+    assert "active:" in background
+    assert "queued:" in background
+    assert "recent:" in background
+    assert "RECENT_TASK_LIMIT = 160" in background
+    assert "taskTiming" in background
+    assert "uploadProgressNode" in popup
+    assert "uploadTaskForImage" in popup
+    assert "formatMs" in popup
+    assert "backend/cache" in popup
+    assert "pobrano" in popup
     assert "chrome.alarms" in background
     assert "onStartup" in background
     assert ".then(() => Promise.all([scanPage(), refreshUploadStatus()]))" in popup
@@ -52,8 +66,18 @@ def test_browser_extension_popup_uploads_to_panel_endpoint() -> None:
     assert 'id="filtersPanel"' in html
     assert 'id="urlFilter"' in html
     assert 'id="retryFailed"' in html
+    assert "&lt;bialy|czarny&gt;" in html
     assert "!thumb" in html
     assert 'type="password"' in html
+
+
+def test_browser_extension_popup_has_wider_progress_layout() -> None:
+    css = (EXTENSION_DIR / "popup.css").read_text(encoding="utf-8")
+
+    assert "width: 620px" in css
+    assert ".image-upload-progress" in css
+    assert ".progress-fill" in css
+    assert ".image-row.queued" in css
 
 
 def test_browser_extension_download_endpoint_returns_zip() -> None:
