@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicOrgFTP-SQL Web</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260525-drop-guard">
+    <link rel="stylesheet" href="/static/app.css?v=20260526-browser-extension">
   </head>
   <body class="app-screen">
     <header class="topbar">
@@ -14,6 +14,7 @@
         <span id="serverInfo"></span>
       </div>
       <nav class="topnav" aria-label="Widoki">
+        <button id="webImagesButton" type="button" class="nav-button">Zdjecia WWW</button>
         <button type="button" class="nav-button" data-modal="history">Historia</button>
         <button type="button" class="nav-button admin-only" data-modal="logs" style="display: none">Logi</button>
         <button type="button" class="nav-button" data-modal="lists">Listy</button>
@@ -109,6 +110,78 @@
           <button type="button" class="ghost-button modal-close" data-close-modal> Zamknij </button>
         </div>
         <div id="entryMatches" class="entry-matches"></div>
+      </section>
+    </div>
+
+    <div id="webImagesModal" class="modal-view">
+      <section class="modal-panel web-images-panel">
+        <div class="section-heading">
+          <h1>Zdjecia ze strony</h1>
+          <div class="heading-actions">
+            <span id="webImagesStatus"></span>
+            <button type="button" class="ghost-button modal-close" data-close-web-images>Zamknij</button>
+          </div>
+        </div>
+        <div class="web-image-url-row">
+          <label>
+            Link do strony ze zdjeciami
+            <input id="webImageUrl" type="url" autocomplete="off" spellcheck="false" placeholder="https://sklep.pl/produkt.html">
+          </label>
+          <label>
+            Tryb
+            <select id="webImageScanMode">
+              <option value="links" selected>Linki</option>
+              <option value="metadata">Metadane</option>
+            </select>
+          </label>
+          <button id="scanWebImagesButton" type="button">Pobierz zdjecia</button>
+        </div>
+        <div class="web-image-filters">
+          <label>
+            Min. szerokosc
+            <input id="webImageMinWidth" type="number" min="0" step="50" value="0">
+          </label>
+          <label>
+            Min. wysokosc
+            <input id="webImageMinHeight" type="number" min="0" step="50" value="0">
+          </label>
+          <label>
+            Min. rozmiar KB
+            <input id="webImageMinKb" type="number" min="0" step="10" value="0">
+          </label>
+          <label>
+            Filtr linku
+            <input id="webImageUrlFilter" autocomplete="off" spellcheck="false" placeholder="np. &lt;bialy|czarny&gt; !thumb">
+          </label>
+          <div class="check-row compact-check web-image-thumbnail-filter">
+            <input id="webImageHideThumbnails" type="checkbox">
+            <div>
+              <strong>Ukryj miniatury</strong>
+              <small>Ponizej 300 px albo oznaczone jako thumbnail.</small>
+            </div>
+          </div>
+        </div>
+        <div class="web-image-actions">
+          <button id="browserExtensionDownload" type="button" class="secondary-button browser-extension-download">Pobierz rozszerzenie</button>
+          <button id="browserExtensionHelpButton" type="button" class="secondary-button">Jak zainstalowac</button>
+          <button id="browserExtensionReceiveButton" type="button" class="secondary-button">Odbierz z rozszerzenia</button>
+          <button id="webImagesSelectVisibleButton" type="button" class="secondary-button">Zaznacz widoczne</button>
+          <button id="webImagesClearSelectionButton" type="button" class="secondary-button">Odznacz</button>
+          <button id="webImagesClearDataButton" type="button" class="secondary-button">Wyczysc wczytane</button>
+          <button id="webImagesAddButton" type="button">Dodaj do wolnych slotow</button>
+        </div>
+        <div id="browserExtensionHelp" class="browser-extension-help" hidden>
+          <strong>Instalacja Chrome / Edge</strong>
+          <ol>
+            <li>Pobierz ZIP i rozpakuj go do stalego katalogu.</li>
+            <li>Otworz <code>chrome://extensions</code> albo <code>edge://extensions</code>.</li>
+            <li>Wlacz Tryb dewelopera i wybierz Zaladuj rozpakowane.</li>
+            <li>Wskaz rozpakowany folder <code>picorgftp-sql-browser-extension</code>.</li>
+            <li>Na stronie produktu kliknij ikone dodatku, zeskanuj strone i wyslij zdjecia.</li>
+            <li>W tym oknie kliknij Odbierz z rozszerzenia.</li>
+          </ol>
+        </div>
+        <div id="webImagesOutput" class="web-images-grid empty-state">Brak pobranych zdjec.</div>
       </section>
     </div>
 
@@ -247,6 +320,6 @@
       </article>
     </template>
 
-    <script src="/static/app.js?v=20260525-drop-guard"></script>
+    <script src="/static/app.js?v=20260526-browser-extension"></script>
   </body>
 </html>

@@ -91,6 +91,7 @@ class WebUiIntegrityTests(unittest.TestCase):
             "ean",
         }
         required_buttons = {
+            "webImagesButton",
             "findByEanButton",
             "findProductButton",
             "submitButton",
@@ -104,6 +105,27 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertEqual(required_buttons - html.button_ids, set())
         self.assertIn("entrySelect", html.ids)
         self.assertIn("formStatus", html.ids)
+
+    def test_web_images_modal_contains_url_input_filters_and_actions(self) -> None:
+        html = _parse(INDEX_HTML)
+
+        self.assertIn("webImagesModal", html.ids)
+        self.assertIn("webImageUrl", html.ids)
+        self.assertIn("webImageScanMode", html.ids)
+        self.assertIn("scanWebImagesButton", html.button_ids)
+        self.assertIn("webImageMinWidth", html.ids)
+        self.assertIn("webImageMinHeight", html.ids)
+        self.assertIn("webImageMinKb", html.ids)
+        self.assertIn("webImageUrlFilter", html.ids)
+        self.assertIn("webImageHideThumbnails", html.ids)
+        self.assertIn("browserExtensionDownload", html.ids)
+        self.assertIn("browserExtensionDownload", html.button_ids)
+        self.assertIn("browserExtensionHelpButton", html.button_ids)
+        self.assertIn("browserExtensionReceiveButton", html.button_ids)
+        self.assertIn("browserExtensionHelp", html.ids)
+        self.assertIn("webImagesClearDataButton", html.button_ids)
+        self.assertIn("webImagesOutput", html.ids)
+        self.assertTrue(html.has_tag("button", id="webImagesButton", type="button"))
 
     def test_modal_navigation_targets_have_matching_panels(self) -> None:
         html = _parse(INDEX_HTML)
@@ -132,6 +154,37 @@ class WebUiIntegrityTests(unittest.TestCase):
                 accept="image/*,.pdf,.eps,.psd,.ai,.tif,.tiff",
             )
         )
+
+    def test_app_js_swaps_two_occupied_slots_on_slot_drop(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("const target = getSlotAssignment(targetPrefix);", source)
+        self.assertIn("Zamieniono slot", source)
+        self.assertLess(
+            source.index("Zamieniono slot"),
+            source.index("Przeniesiono slot"),
+        )
+
+    def test_app_js_displays_web_image_scan_errors_inside_modal(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("renderWebImagesError", source)
+        self.assertIn("Cloudflare/challenge 403", source)
+        self.assertIn("Importer nie dostaje wtedy HTML-a produktu", source)
+
+    def test_app_js_receives_browser_extension_imports(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("/api/browser-extension/imports", source)
+        self.assertIn("/api/browser-extension/download", source)
+        self.assertIn("receiveBrowserExtensionImages", source)
+        self.assertIn("downloadBrowserExtension", source)
+        self.assertIn("clearLoadedWebImages", source)
+        self.assertIn("parseWebImageUrlFilter", source)
+        self.assertIn("!?<[^>]+>", source)
+        self.assertIn("existingByUrl", source)
+        self.assertIn("state.webImages.push(image)", source)
+        self.assertIn("Odbierz z rozszerzenia", source)
 
     def test_login_page_keeps_accessible_login_form(self) -> None:
         html = _parse(LOGIN_HTML)
