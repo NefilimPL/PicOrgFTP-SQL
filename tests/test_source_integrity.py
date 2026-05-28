@@ -126,9 +126,28 @@ class SourceIntegrityTests(unittest.TestCase):
         html_source = (root / "picorgftp_sql" / "web" / "static" / "index.html").read_text(encoding="utf-8")
 
         self.assertIn('id="processQueuePanel"', html_source)
+        self.assertIn('class="process-queue-section"', html_source)
+        self.assertNotIn('class="slots-layout"', html_source)
         self.assertIn('requestJson("/api/process-jobs/active")', js_source)
         self.assertIn("renderProcessQueue(payload)", js_source)
         self.assertIn("setInterval(() => {\n  refreshProcessQueue()", js_source)
+        self.assertIn("renderProcessMeasurements(payload)", js_source)
+
+    def test_web_history_has_search_pagination_and_timing_modal(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        js_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+        html_source = (root / "picorgftp_sql" / "web" / "static" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('id="historySearchInput"', html_source)
+        self.assertIn('id="historyPrevButton"', html_source)
+        self.assertIn('id="historyNextButton"', html_source)
+        self.assertIn('id="historyTimingModal"', html_source)
+        self.assertIn("data-close-history-timing", html_source)
+        self.assertIn('page_size: String(state.historyPageSize || 50)', js_source)
+        self.assertIn('query: historySearchInput?.value || ""', js_source)
+        self.assertIn('timingButton.textContent = "Czasy"', js_source)
+        self.assertIn("renderHistoryTiming(item)", js_source)
+        self.assertIn("historySearchInput?.addEventListener", js_source)
 
     def test_web_autocomplete_keeps_local_values_first(self) -> None:
         app_path = (

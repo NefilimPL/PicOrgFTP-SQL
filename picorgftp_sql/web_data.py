@@ -379,13 +379,37 @@ def record_history(
     return record
 
 
-def history_snapshot(*, user: str = "", limit: int = 200) -> dict[str, object]:
+def _history_record_search_text(item: dict[str, object]) -> str:
+    details = item.get("details") if isinstance(item.get("details"), dict) else {}
+    entry = details.get("entry") if isinstance(details.get("entry"), dict) else {}
+    pieces = [
+        item.get("ean"),
+        item.get("product_id"),
+        item.get("summary"),
+        item.get("action"),
+        item.get("user"),
+    ]
+    pieces.extend(entry.values())
+    return " ".join(_text(piece) for piece in pieces if _text(piece)).casefold()
+
+
+def history_snapshot(
+    *,
+    user: str = "",
+    limit: int = 200,
+    query: str = "",
+    page: int = 1,
+    page_size: int = 50,
+) -> dict[str, object]:
     """Return recent web history grouped by EAN."""
 
     user_filter = _text(user).lower()
+    query_filter = _text(query).casefold()
     records = sorted(_load_history_records(), key=lambda item: float(item.get("ts") or 0), reverse=True)
     if user_filter:
         records = [item for item in records if _text(item.get("user")).lower() == user_filter]
+    if query_filter:
+        records = [item for item in records if query_filter in _history_record_search_text(item)]
     limit = max(1, min(1000, int(limit or 200)))
     records = records[:limit]
     grouped: dict[str, dict[str, object]] = {}
@@ -395,8 +419,25 @@ def history_snapshot(*, user: str = "", limit: int = 200) -> dict[str, object]:
         group["items"].append(item)
         group["latest_ts"] = max(float(group.get("latest_ts") or 0), float(item.get("ts") or 0))
     groups = sorted(grouped.values(), key=lambda item: float(item.get("latest_ts") or 0), reverse=True)
+    page_size = max(1, min(50, int(page_size or 50)))
+    page = max(1, int(page or 1))
+    total_groups = len(groups)
+    total_pages = max(1, (total_groups + page_size - 1) // page_size)
+    if page > total_pages:
+        page = total_pages
+    start = (page - 1) * page_size
+    groups_page = groups[start : start + page_size]
     users = sorted({_text(item.get("user")) for item in _load_history_records() if _text(item.get("user"))})
-    return {"groups": groups, "users": users, "count": len(records)}
+    return {
+        "groups": groups_page,
+        "users": users,
+        "count": len(records),
+        "total_groups": total_groups,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "query": _text(query),
+    }
 
 
 def _ftp_cache_dir(ean: object, cache_scope: object = "") -> str:

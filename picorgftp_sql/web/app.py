@@ -1698,16 +1698,33 @@ def _process_upload_snapshot(
     username: str,
     cache_scope: str,
     form: _ProcessFormSnapshot,
-    progress: Optional[Callable[[int, str], None]] = None,
+    progress: Optional[
+        Callable[[int, str, List[Dict[str, Any]], Optional[Dict[str, Any]]], None]
+    ] = None,
 ) -> Dict[str, Any]:
-    def mark(percent: int, label: str) -> None:
+    def mark(
+        percent: int,
+        label: str,
+        *,
+        current_key: str = "",
+        current_label: str = "",
+    ) -> None:
         if progress:
-            progress(percent, label)
+            current_stage = None
+            if current_key:
+                current_stage = {
+                    "key": current_key,
+                    "label": current_label or label,
+                    "started_at": time.time(),
+                    "elapsed_ms": 0,
+                    "running": True,
+                }
+            progress(percent, label, list(timings), current_stage)
 
     process_started = time.perf_counter()
     timings: List[Dict[str, Any]] = []
     stage_started = time.perf_counter()
-    mark(4, "Przygotowanie danych")
+    mark(4, "Przygotowanie danych", current_key="prepare", current_label="Przygotowanie danych i slotow")
     slots = slot_definitions_from_config(config.CONFIG)
     slot_by_prefix = {slot["prefix"]: slot for slot in slots}
     uploaded_slots: List[WebUploadedSlot] = []
@@ -1805,8 +1822,8 @@ def _process_upload_snapshot(
                 ftp_pending=len(pending_ftp_slots),
             )
         )
-        mark(10, "Wyszukiwanie wpisu")
         stage_started = time.perf_counter()
+        mark(10, "Wyszukiwanie wpisu", current_key="entry_lookup", current_label="Wyszukanie istniejacego wpisu")
         existing_entry = None
         if product.product_id.strip():
             existing_entry = find_entry_by_identity(product_id=product.product_id)
@@ -1835,8 +1852,8 @@ def _process_upload_snapshot(
                 found=bool(existing_entry),
             )
         )
-        mark(20, "Sprawdzanie zdjec")
         stage_started = time.perf_counter()
+        mark(20, "Sprawdzanie zdjec", current_key="photo_scan", current_label="Sprawdzenie istniejacych zdjec")
         _append_pending_ftp_slots(
             product=product,
             pending_ftp_slots=pending_ftp_slots,
@@ -1891,8 +1908,8 @@ def _process_upload_snapshot(
                 migrated=len(migrated_prefixes),
             )
         )
-        mark(34, "Zapis wpisu")
         stage_started = time.perf_counter()
+        mark(34, "Zapis wpisu", current_key="entry_save", current_label="Zapis wpisu produktu")
         entry_result = save_web_entry(
             {
                 "product_id": product.product_id,
@@ -1907,8 +1924,8 @@ def _process_upload_snapshot(
             }
         )
         timings.append(_timing_item("entry_save", "Zapis wpisu produktu", stage_started))
-        mark(46, "Przetwarzanie plikow")
         stage_started = time.perf_counter()
+        mark(46, "Przetwarzanie plikow", current_key="local_files", current_label="Zapis/przetwarzanie plikow lokalnych")
         result = process_web_uploads(
             base_output_dir=settings.l,
             form=product,
@@ -1924,8 +1941,8 @@ def _process_upload_snapshot(
                 saved=len(result.saved_files),
             )
         )
-        mark(60, "Usuwanie lokalne")
         stage_started = time.perf_counter()
+        mark(60, "Usuwanie lokalne", current_key="local_delete", current_label="Usuwanie lokalne")
         saved_paths = {os.path.abspath(item.path) for item in result.saved_files}
         local_delete_result = _delete_local_files(delete_requests, saved_paths)
         timings.append(
@@ -1937,8 +1954,8 @@ def _process_upload_snapshot(
                 skipped=local_delete_result.get("skipped", 0),
             )
         )
-        mark(70, "Synchronizacja FTP")
         stage_started = time.perf_counter()
+        mark(70, "Synchronizacja FTP", current_key="ftp", current_label="Synchronizacja FTP")
         ftp_backfill_prefixes = {
             str(item.get("prefix") or "")
             for item in delete_requests
@@ -1982,8 +1999,8 @@ def _process_upload_snapshot(
                 skipped=len(skip_upload_prefixes),
             )
         )
-        mark(80, "Czyszczenie cache FTP")
         stage_started = time.perf_counter()
+        mark(80, "Czyszczenie cache FTP", current_key="ftp_cache", current_label="Czyszczenie cache FTP")
         changed_ftp_names = {
             _remote_name_for_output(str(item.filename or ""))
             for item in result.saved_files
@@ -2008,8 +2025,8 @@ def _process_upload_snapshot(
                 deleted=ftp_cache_result.get("deleted", 0),
             )
         )
-        mark(88, "Aktualizacja SQL")
         stage_started = time.perf_counter()
+        mark(88, "Aktualizacja SQL", current_key="sql", current_label="Aktualizacja SQL")
         sql_result = _sync_result_to_sql(
             result,
             clear_prefixes={
@@ -2028,8 +2045,8 @@ def _process_upload_snapshot(
                 skipped=bool(sql_result.get("skipped")),
             )
         )
-        mark(94, "Sprzatanie cache")
         stage_started = time.perf_counter()
+        mark(94, "Sprzatanie cache", current_key="upload_cache", current_label="Sprzatanie cache uploadu")
         upload_cache_result = _delete_upload_cache_files(
             [
                 str(slot.source_path or "")
@@ -2084,8 +2101,8 @@ def _process_upload_snapshot(
     payload["upload_cache"] = upload_cache_result
     payload["sql"] = sql_result
     payload["local_delete"] = local_delete_result
-    mark(98, "Odswiezanie indeksu")
     stage_started = time.perf_counter()
+    mark(98, "Odswiezanie indeksu", current_key="file_index", current_label="Odswiezenie indeksu lokalnego")
     payload["file_index"] = refresh_file_index()
     timings.append(_timing_item("file_index", "Odswiezenie indeksu lokalnego", stage_started))
     payload["timing"] = _timing_payload(timings, process_started)
@@ -2112,6 +2129,7 @@ def _process_upload_snapshot(
             "sql": sql_result,
             "local_delete": local_delete_result,
             "output_dir": payload["output_dir"],
+            "timing": payload["timing"],
             "entry": entry_result.get("entry", {}) if isinstance(entry_result, dict) else {},
         },
     )
@@ -2181,6 +2199,7 @@ def _process_job_payload(job: Dict[str, Any], *, include_result: bool = True) ->
         "progress": int(job.get("progress") or 0),
         "progress_label": job.get("progress_label", ""),
         "queue_position": int(job.get("queue_position") or 0),
+        "timing": _process_job_timing(job),
         "error": job.get("error", ""),
         "warning_messages": list(job.get("warning_messages") or []),
     }
@@ -2189,7 +2208,31 @@ def _process_job_payload(job: Dict[str, Any], *, include_result: bool = True) ->
     return payload
 
 
-def _set_process_job_progress(job_id: str, percent: int, label: str) -> None:
+def _process_job_timing(job: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+    now_value = time.time() if now is None else float(now)
+    started_at = float(job.get("started_at") or 0)
+    finished_at = float(job.get("finished_at") or 0)
+    end_at = finished_at if finished_at else now_value
+    total_ms = int(max(0, end_at - started_at) * 1000) if started_at else 0
+    stages = [dict(stage) for stage in (job.get("timing_stages") or []) if isinstance(stage, dict)]
+    current = job.get("current_stage") if isinstance(job.get("current_stage"), dict) else None
+    if current and not finished_at:
+        current_stage = dict(current)
+        current_started = float(current_stage.get("started_at") or 0)
+        if current_started:
+            current_stage["elapsed_ms"] = int(max(0, now_value - current_started) * 1000)
+        current_stage["running"] = True
+        stages.append(current_stage)
+    return {"total_ms": total_ms, "stages": stages}
+
+
+def _set_process_job_progress(
+    job_id: str,
+    percent: int,
+    label: str,
+    stages: Optional[List[Dict[str, Any]]] = None,
+    current_stage: Optional[Dict[str, Any]] = None,
+) -> None:
     value = max(0, min(100, int(percent or 0)))
     with _PROCESS_JOBS_LOCK:
         job = _PROCESS_JOBS.get(job_id)
@@ -2197,6 +2240,10 @@ def _set_process_job_progress(job_id: str, percent: int, label: str) -> None:
             return
         job["progress"] = value
         job["progress_label"] = str(label or "")
+        if stages is not None:
+            job["timing_stages"] = [dict(stage) for stage in stages if isinstance(stage, dict)]
+        if current_stage is not None:
+            job["current_stage"] = dict(current_stage)
 
 
 def _queue_process_job(
@@ -2224,6 +2271,8 @@ def _queue_process_job(
         "result": None,
         "progress": 0,
         "progress_label": "Oczekuje w kolejce",
+        "timing_stages": [],
+        "current_stage": None,
         "error": "",
         "warning_messages": [],
     }
@@ -2252,7 +2301,13 @@ def _run_process_job(job_id: str) -> None:
             username=username,
             cache_scope=cache_scope,
             form=form,
-            progress=lambda percent, label: _set_process_job_progress(job_id, percent, label),
+            progress=lambda percent, label, stages, current_stage: _set_process_job_progress(
+                job_id,
+                percent,
+                label,
+                stages,
+                current_stage,
+            ),
         )
         warning_messages = _process_warning_messages(payload)
         with _PROCESS_JOBS_LOCK:
@@ -2264,6 +2319,8 @@ def _run_process_job(job_id: str) -> None:
             job["result"] = payload
             job["progress"] = 100
             job["progress_label"] = "Zakonczono"
+            job["timing_stages"] = payload.get("timing", {}).get("stages", [])
+            job["current_stage"] = None
             job["warning_messages"] = warning_messages
             job.pop("form", None)
     except Exception as exc:
@@ -2285,6 +2342,7 @@ def _run_process_job(job_id: str) -> None:
             job["error"] = message
             job["progress_label"] = "Blad zadania"
             job["warning_messages"] = [message]
+            job["current_stage"] = None
             job.pop("form", None)
 
 
@@ -2311,6 +2369,7 @@ def _process_jobs_for_user(username: str, limit: int = 20) -> List[Dict[str, Any
 
 def _active_process_jobs_snapshot() -> Dict[str, Any]:
     _cleanup_process_jobs()
+    now = time.time()
     with _PROCESS_JOBS_LOCK:
         active_jobs = [
             dict(job)
@@ -2341,6 +2400,7 @@ def _active_process_jobs_snapshot() -> Dict[str, Any]:
         "current": payload_jobs[0] if payload_jobs and payload_jobs[0].get("status") == "running" else None,
         "active_count": len(payload_jobs),
         "queued_count": len(queued),
+        "server_time": now,
     }
 
 
@@ -2576,9 +2636,22 @@ def create_app() -> FastAPI:
         return file_index_status(start=True)
 
     @app.get("/api/history")
-    def history_api(request: Request, user: str = "", limit: int = 200) -> Dict[str, Any]:
+    def history_api(
+        request: Request,
+        user: str = "",
+        limit: int = 1000,
+        query: str = "",
+        page: int = 1,
+        page_size: int = 50,
+    ) -> Dict[str, Any]:
         _require_user(request)
-        return history_snapshot(user=user, limit=limit)
+        return history_snapshot(
+            user=user,
+            limit=limit,
+            query=query,
+            page=page,
+            page_size=page_size,
+        )
 
     @app.get("/api/logs")
     def logs_api(request: Request, limit: int = 300) -> Dict[str, Any]:
