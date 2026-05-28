@@ -1017,6 +1017,87 @@ class WebAppFileTests(unittest.TestCase):
         self.assertFalse(web_app._is_visible_log_event(bad_request_event))
         self.assertTrue(web_app._is_visible_log_event(server_error_event))
 
+    def test_background_process_routes_are_registered(self) -> None:
+        route_paths = {getattr(route, "path", "") for route in web_app.app.routes}
+
+        self.assertIn("/api/process/background", route_paths)
+        self.assertIn("/api/process-jobs", route_paths)
+        self.assertIn("/api/process-jobs/active", route_paths)
+        self.assertIn("/api/process-jobs/{job_id}", route_paths)
+
+    def test_process_warning_messages_are_user_visible(self) -> None:
+        payload = {
+            "ftp": {"error": "brak polaczenia"},
+            "sql": {"error": "brak wiersza"},
+            "local_delete": {"errors": ["03: odmowa dostepu"]},
+            "skipped_slots": ["04"],
+        }
+
+        messages = web_app._process_warning_messages(payload)
+
+        self.assertIn("FTP: brak polaczenia", messages)
+        self.assertIn("SQL: brak wiersza", messages)
+        self.assertTrue(any("03: odmowa dostepu" in item for item in messages))
+        self.assertTrue(any("04" in item for item in messages))
+
+    def test_process_job_payload_hides_internal_form_snapshot(self) -> None:
+        job = {
+            "id": "abc",
+            "status": "queued",
+            "form": object(),
+            "entry": {"ean": "5901234567890", "name": "MAGGIORE"},
+            "entry_label": "MAGGIORE - 5901234567890",
+        }
+
+        payload = web_app._process_job_payload(job)
+
+        self.assertNotIn("form", payload)
+        self.assertEqual(payload["job_id"], "abc")
+        self.assertEqual(payload["entry"]["ean"], "5901234567890")
+
+    def test_active_process_jobs_snapshot_is_global_and_ordered(self) -> None:
+        with web_app._PROCESS_JOBS_LOCK:
+            original = dict(web_app._PROCESS_JOBS)
+            web_app._PROCESS_JOBS.clear()
+            web_app._PROCESS_JOBS.update(
+                {
+                    "running": {
+                        "id": "running",
+                        "status": "running",
+                        "username": "user1",
+                        "created_at": 1.0,
+                        "started_at": 3.0,
+                        "entry": {"name": "RUN"},
+                        "entry_label": "RUN",
+                        "progress": 34,
+                        "progress_label": "Zapis wpisu",
+                    },
+                    "queued": {
+                        "id": "queued",
+                        "status": "queued",
+                        "username": "user2",
+                        "created_at": 2.0,
+                        "entry": {"name": "WAIT"},
+                        "entry_label": "WAIT",
+                        "progress": 0,
+                        "progress_label": "Oczekuje w kolejce",
+                    },
+                }
+            )
+        try:
+            snapshot = web_app._active_process_jobs_snapshot()
+        finally:
+            with web_app._PROCESS_JOBS_LOCK:
+                web_app._PROCESS_JOBS.clear()
+                web_app._PROCESS_JOBS.update(original)
+
+        self.assertEqual(snapshot["active_count"], 2)
+        self.assertEqual(snapshot["queued_count"], 1)
+        self.assertEqual(snapshot["jobs"][0]["job_id"], "running")
+        self.assertEqual(snapshot["jobs"][0]["progress"], 34)
+        self.assertEqual(snapshot["jobs"][1]["username"], "user2")
+        self.assertEqual(snapshot["jobs"][1]["queue_position"], 1)
+
     def test_existing_photo_conflicts_detect_unloaded_replacement(self) -> None:
         upload = web_app.WebUploadedSlot(
             prefix="03",

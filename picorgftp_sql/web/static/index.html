@@ -91,7 +91,16 @@
             <span id="latencyInfo"></span>
           </div>
         </div>
-        <div id="slotGrid" class="slot-grid"></div>
+        <div class="slots-layout">
+          <div id="slotGrid" class="slot-grid"></div>
+          <aside id="processQueuePanel" class="process-queue-panel" aria-live="polite">
+            <div class="process-queue-heading">
+              <h2>Kolejka</h2>
+              <span id="processQueueSummary">Brak zadan</span>
+            </div>
+            <div id="processQueueList" class="process-queue-list empty-state">Kolejka pusta.</div>
+          </aside>
+        </div>
       </section>
 
       <section class="result-section" aria-labelledby="resultTitle">
@@ -273,6 +282,21 @@
             <span id="logsClearStatus"></span>
           </div>
         </form>
+      </section>
+    </div>
+
+    <div id="processAlertModal" class="modal-view">
+      <section class="modal-panel compact-modal process-alert-panel">
+        <div class="section-heading">
+          <h1 id="processAlertTitle">Problem w zadaniu</h1>
+          <button type="button" class="ghost-button modal-close" data-close-process-alert>Zamknij</button>
+        </div>
+        <p id="processAlertEntry" class="process-alert-entry"></p>
+        <p id="processAlertMessage" class="error-text"></p>
+        <div class="heading-actions">
+          <button id="processAlertLoadButton" type="button" class="secondary-button">Wczytaj wpis</button>
+          <button type="button" class="ghost-button" data-close-process-alert>Zamknij</button>
+        </div>
       </section>
     </div>
 

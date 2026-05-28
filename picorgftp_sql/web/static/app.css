@@ -399,6 +399,15 @@ h2 {
   background: var(--surface-2);
 }
 
+.process-alert-panel {
+  border-top: 4px solid var(--danger);
+}
+
+.process-alert-entry {
+  margin: 0;
+  color: var(--muted);
+}
+
 .field-changed input {
   border-color: var(--warn);
   background: color-mix(in srgb, var(--warn) 12%, var(--surface));
@@ -845,10 +854,102 @@ h2 {
   font-size: 13px;
 }
 
+.slots-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 300px);
+  align-items: start;
+  gap: 14px;
+}
+
 .slot-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
   gap: 12px;
+  min-width: 0;
+}
+
+.process-queue-panel {
+  position: sticky;
+  top: 76px;
+  display: grid;
+  gap: 10px;
+  max-height: calc(100vh - 112px);
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 12px;
+}
+
+.process-queue-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.process-queue-heading span {
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+}
+
+.process-queue-list {
+  display: grid;
+  gap: 8px;
+}
+
+.process-queue-item {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px;
+}
+
+.process-queue-item strong,
+.process-queue-item span,
+.process-queue-item small {
+  overflow-wrap: anywhere;
+}
+
+.process-queue-item strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.process-queue-item span,
+.process-queue-item small,
+.process-queue-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.process-queue-running {
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.process-queue-queued {
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+
+.process-queue-progress {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.process-queue-progress i {
+  display: block;
+  width: var(--queue-progress, 0%);
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 180ms ease;
 }
 
 .slot-card {
@@ -1465,6 +1566,17 @@ button.slot-badge.on:hover {
 
 .ok-text {
   color: var(--accent-strong);
+}
+
+@media (max-width: 1180px) {
+  .slots-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .process-queue-panel {
+    position: static;
+    max-height: none;
+  }
 }
 
 @media (max-width: 920px) {

@@ -105,6 +105,45 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertNotIn("renderSlots();", body)
         self.assertIn("timeoutMs: Number(options.timeoutMs || photoRequestTimeoutMs(source))", source)
 
+    def test_web_submit_uses_background_process_queue(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        self.assertIn('requestJson("/api/process/background"', source)
+        self.assertIn("trackProcessJob(job);", source)
+        self.assertIn("resetCurrentDraft({", source)
+        self.assertIn("processAlertLoadButton", source)
+
+    def test_web_has_global_process_queue_panel(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        js_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+        html_source = (root / "picorgftp_sql" / "web" / "static" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('id="processQueuePanel"', html_source)
+        self.assertIn('requestJson("/api/process-jobs/active")', js_source)
+        self.assertIn("renderProcessQueue(payload)", js_source)
+        self.assertIn("setInterval(() => {\n  refreshProcessQueue()", js_source)
+
+    def test_web_autocomplete_keeps_local_values_first(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        self.assertIn("MAX_AUTOCOMPLETE_OPTIONS = Number.POSITIVE_INFINITY", source)
+        self.assertIn("uniqueValues([...local, ...values])", source)
+        self.assertIn('panel.dataset.selecting === "1"', source)
+
 
 if __name__ == "__main__":
     unittest.main()

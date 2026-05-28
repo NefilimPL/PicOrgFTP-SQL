@@ -59,9 +59,14 @@ const state = {
   webImageCache: new Map(),
   webImageCacheQueue: [],
   webImageCacheActive: 0,
+  processJobs: new Map(),
+  processJobPollTimer: 0,
+  processQueue: { jobs: [], active_count: 0, queued_count: 0, current: null },
+  acknowledgedProcessAlerts: new Set(),
 };
 
 const WEB_IMAGE_CACHE_LIMIT = 2;
+const MAX_AUTOCOMPLETE_OPTIONS = Number.POSITIVE_INFINITY;
 
 const listLabels = {
   names: "Nazwy",
@@ -78,8 +83,18 @@ const photoSourceLabels = {
   all: "dane",
 };
 
+const processStatusLabels = {
+  queued: "Oczekuje",
+  running: "Trwa",
+  completed: "Zakonczone",
+  failed: "Blad",
+};
+
 const slotGrid = document.querySelector("#slotGrid");
 const slotTemplate = document.querySelector("#slotTemplate");
+const processQueuePanel = document.querySelector("#processQueuePanel");
+const processQueueSummary = document.querySelector("#processQueueSummary");
+const processQueueList = document.querySelector("#processQueueList");
 const productForm = document.querySelector("#productForm");
 const formStatus = document.querySelector("#formStatus");
 const resultOutput = document.querySelector("#resultOutput");
@@ -138,6 +153,11 @@ const logsClearPassword = document.querySelector("#logsClearPassword");
 const logsClearStatus = document.querySelector("#logsClearStatus");
 const logsOutput = document.querySelector("#logsOutput");
 const logsButton = document.querySelector('[data-modal="logs"]');
+const processAlertModal = document.querySelector("#processAlertModal");
+const processAlertTitle = document.querySelector("#processAlertTitle");
+const processAlertMessage = document.querySelector("#processAlertMessage");
+const processAlertEntry = document.querySelector("#processAlertEntry");
+const processAlertLoadButton = document.querySelector("#processAlertLoadButton");
 
 async function requestJson(path, options = {}) {
   const timeoutMs = Number(options.timeoutMs || 0);
@@ -945,9 +965,10 @@ function currentFormPayload() {
   };
 }
 
-function uniqueValues(values, limit = 200) {
+function uniqueValues(values, limit = Number.POSITIVE_INFINITY) {
   const seen = new Set();
   const result = [];
+  const maxItems = Number.isFinite(limit) ? Math.max(1, Number(limit)) : Number.POSITIVE_INFINITY;
   for (const value of values || []) {
     const text = String(value || "").trim();
     if (!text) continue;
@@ -955,7 +976,7 @@ function uniqueValues(values, limit = 200) {
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(text);
-    if (result.length >= limit) break;
+    if (result.length >= maxItems) break;
   }
   return result;
 }
@@ -1146,9 +1167,15 @@ function renderAutocompletePanel(input, panel, values) {
   if (activeAutocompletePanel && activeAutocompletePanel !== panel && document.activeElement !== input) {
     return;
   }
+  if (panel.dataset.selecting === "1") {
+    return;
+  }
   closeAutocompletePanels(panel);
+  const previousScroll = panel.scrollTop;
   const typed = input.value.trim().toUpperCase();
-  const filtered = values.filter((value) => !typed || value.toUpperCase().includes(typed)).slice(0, 200);
+  const filtered = values
+    .filter((value) => !typed || value.toUpperCase().includes(typed))
+    .slice(0, MAX_AUTOCOMPLETE_OPTIONS);
   panel.textContent = "";
   if (!filtered.length) {
     panel.classList.remove("active");
@@ -1160,13 +1187,18 @@ function renderAutocompletePanel(input, panel, values) {
     button.textContent = value;
     button.addEventListener("mousedown", (event) => {
       event.preventDefault();
+      panel.dataset.selecting = "1";
       input.value = value;
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
       closeAutocompletePanels();
+      window.setTimeout(() => {
+        panel.dataset.selecting = "";
+      }, 0);
     });
     panel.appendChild(button);
   }
+  panel.scrollTop = previousScroll;
   panel.classList.add("active");
   activeAutocompletePanel = panel;
 }
@@ -1208,7 +1240,7 @@ function setupAutocomplete() {
         remoteSuggestions(fieldName)
           .then((values) => {
             if (currentRequest === requestId && activeAutocompletePanel === panel) {
-              renderAutocompletePanel(input, panel, uniqueValues([...values, ...local]));
+              renderAutocompletePanel(input, panel, uniqueValues([...local, ...values]));
             }
           })
           .catch(() => {});
@@ -3139,6 +3171,208 @@ function showResult(payload) {
   }
 }
 
+function processJobIsActive(job = {}) {
+  return ["queued", "running"].includes(job.status || "");
+}
+
+function processJobProblemMessages(job = {}) {
+  if (job.status === "failed") {
+    return [job.error || "Zadanie nie powiodlo sie."];
+  }
+  return job.warning_messages || [];
+}
+
+function entryFromProcessJob(job = {}) {
+  if (job.result) {
+    return entryFromProcessPayload(job.result, job.entry || {});
+  }
+  const entry = { ...(job.entry || {}) };
+  entry.label = productEntryLabel(entry);
+  return entry;
+}
+
+function closeProcessAlert() {
+  processAlertModal?.classList.remove("active");
+  if (processAlertLoadButton) {
+    processAlertLoadButton.dataset.jobId = "";
+  }
+}
+
+function showProcessJobAlert(job = {}) {
+  if (!processAlertModal || state.acknowledgedProcessAlerts.has(job.job_id)) {
+    return;
+  }
+  const messages = processJobProblemMessages(job);
+  if (!messages.length) {
+    return;
+  }
+  state.acknowledgedProcessAlerts.add(job.job_id);
+  if (processAlertTitle) {
+    processAlertTitle.textContent =
+      job.status === "failed" ? "Zadanie nie powiodlo sie" : "Zadanie zakonczone z ostrzezeniem";
+  }
+  if (processAlertEntry) {
+    processAlertEntry.textContent = `Wpis: ${job.entry_label || productEntryLabel(job.entry || {}) || "bez danych"}`;
+  }
+  if (processAlertMessage) {
+    processAlertMessage.textContent = messages.join(" | ");
+  }
+  if (processAlertLoadButton) {
+    processAlertLoadButton.dataset.jobId = job.job_id || "";
+    processAlertLoadButton.disabled = !job.entry;
+  }
+  processAlertModal.classList.add("active");
+}
+
+function showQueuedProcess(job = {}) {
+  resultMeta.textContent = "Zadanie w tle";
+  resultOutput.className = "result-output";
+  resultOutput.textContent = "";
+  const message = document.createElement("p");
+  message.className = "ok-text";
+  message.textContent = `Backend przyjal zadanie dla wpisu: ${
+    job.entry_label || productEntryLabel(job.entry || {}) || "bez danych"
+  }. Mozesz uzupelniac kolejny wpis.`;
+  resultOutput.appendChild(message);
+}
+
+function clampProgress(value) {
+  return Math.max(0, Math.min(100, Math.round(Number(value || 0))));
+}
+
+function processQueueMeta(job = {}) {
+  const user = job.username ? `uzytkownik: ${job.username}` : "";
+  if (job.status === "running") {
+    return ["Teraz", user].filter(Boolean).join(" | ");
+  }
+  const position = Number(job.queue_position || 0);
+  return [`W kolejce${position ? ` #${position}` : ""}`, user].filter(Boolean).join(" | ");
+}
+
+function renderProcessQueue(payload = state.processQueue) {
+  if (!processQueuePanel || !processQueueList || !processQueueSummary) {
+    return;
+  }
+  const jobs = payload.jobs || [];
+  state.processQueue = payload;
+  processQueuePanel.classList.toggle("empty", !jobs.length);
+  processQueueList.textContent = "";
+  if (!jobs.length) {
+    processQueueSummary.textContent = "Brak zadan";
+    processQueueList.className = "process-queue-list empty-state";
+    processQueueList.textContent = "Kolejka pusta.";
+    return;
+  }
+  const current = jobs.find((job) => job.status === "running");
+  processQueueSummary.textContent = current
+    ? `Teraz: ${current.entry_label || "zadanie"} | czeka: ${payload.queued_count || 0}`
+    : `Czeka: ${payload.queued_count || jobs.length}`;
+  processQueueList.className = "process-queue-list";
+  for (const job of jobs) {
+    const item = document.createElement("article");
+    const meta = document.createElement("div");
+    const title = document.createElement("strong");
+    const stage = document.createElement("span");
+    const progressLine = document.createElement("div");
+    const progressBar = document.createElement("i");
+    const progressText = document.createElement("small");
+    const progress = clampProgress(job.progress);
+    item.className = `process-queue-item process-queue-${job.status || "queued"}`;
+    meta.className = "process-queue-meta";
+    meta.textContent = processQueueMeta(job);
+    title.textContent = job.entry_label || productEntryLabel(job.entry || {}) || "Zadanie bez nazwy";
+    stage.textContent =
+      job.progress_label || processStatusLabels[job.status] || job.status || "Zadanie";
+    progressLine.className = "process-queue-progress";
+    progressLine.style.setProperty("--queue-progress", `${progress}%`);
+    progressText.textContent = `${progress}%`;
+    progressLine.appendChild(progressBar);
+    item.append(meta, title, stage, progressLine, progressText);
+    processQueueList.appendChild(item);
+  }
+}
+
+async function refreshProcessQueue() {
+  const payload = await requestJson("/api/process-jobs/active");
+  renderProcessQueue(payload);
+}
+
+function updateProcessJobFromPayload(job = {}) {
+  if (!job.job_id) return;
+  const previous = state.processJobs.get(job.job_id) || {};
+  const merged = { ...previous, ...job };
+  state.processJobs.set(job.job_id, merged);
+  if (processJobIsActive(merged)) {
+    return;
+  }
+  if (merged.result) {
+    upsertProductEntry(entryFromProcessJob(merged));
+    if (merged.result.file_index) {
+      state.fileIndex = merged.result.file_index;
+      updateRuntimeMetrics();
+    }
+  }
+  const messages = processJobProblemMessages(merged);
+  if (messages.length) {
+    showProcessJobAlert(merged);
+    formStatus.textContent = `Zadanie w tle ma problem: ${messages[0]}`;
+  } else if (!hasProductDraftData()) {
+    formStatus.textContent = `Zadanie w tle zakonczone: ${merged.entry_label || "wpis"}.`;
+  }
+}
+
+function scheduleProcessJobPoll(delay = 1500) {
+  if (state.processJobPollTimer) {
+    return;
+  }
+  state.processJobPollTimer = window.setTimeout(() => {
+    state.processJobPollTimer = 0;
+    pollProcessJobs().catch(() => {});
+  }, delay);
+}
+
+async function pollProcessJobs() {
+  const active = [...state.processJobs.values()].filter(processJobIsActive);
+  if (!active.length) {
+    return;
+  }
+  for (const job of active) {
+    try {
+      const payload = await requestJson(`/api/process-jobs/${encodeURIComponent(job.job_id)}`);
+      updateProcessJobFromPayload(payload);
+    } catch (error) {
+      const failed = {
+        ...job,
+        status: "failed",
+        error: error.message || "Nie udalo sie sprawdzic statusu zadania.",
+      };
+      updateProcessJobFromPayload(failed);
+    }
+  }
+  if ([...state.processJobs.values()].some(processJobIsActive)) {
+    scheduleProcessJobPoll();
+  }
+}
+
+function trackProcessJob(job = {}) {
+  if (!job.job_id) {
+    return;
+  }
+  state.processJobs.set(job.job_id, job);
+  scheduleProcessJobPoll();
+}
+
+async function loadRecentProcessJobs() {
+  const payload = await requestJson("/api/process-jobs?limit=10");
+  for (const job of payload.jobs || []) {
+    if (processJobIsActive(job)) {
+      trackProcessJob(job);
+    } else if (processJobProblemMessages(job).length) {
+      updateProcessJobFromPayload(job);
+    }
+  }
+}
+
 function entryFromHistoryGroup(group) {
   for (const item of group.items || []) {
     if (item.details?.entry) return item.details.entry;
@@ -4026,6 +4260,8 @@ async function loadBootstrap(options = {}) {
   state.currentUser = payload.current_user || null;
   updateAdminUi();
   pollLogStatus({ initialize: true }).catch(() => {});
+  loadRecentProcessJobs().catch(() => {});
+  refreshProcessQueue().catch(() => {});
   state.lists = payload.lists || {};
   state.entries = payload.entries || [];
   state.fileIndex = payload.file_index || null;
@@ -4924,6 +5160,25 @@ document.querySelectorAll("[data-close-logs-clear]").forEach((button) => {
   button.addEventListener("click", closeLogsClearModal);
 });
 
+document.querySelectorAll("[data-close-process-alert]").forEach((button) => {
+  button.addEventListener("click", closeProcessAlert);
+});
+
+processAlertLoadButton?.addEventListener("click", () => {
+  const jobId = processAlertLoadButton.dataset.jobId || "";
+  const job = state.processJobs.get(jobId);
+  if (!job) {
+    closeProcessAlert();
+    return;
+  }
+  if (hasPendingUserChanges() && !window.confirm("Wczytac wpis z zadania i zastapic aktualny formularz?")) {
+    return;
+  }
+  const entry = entryFromProcessJob(job);
+  fillForm(entry, { loadPhotos: Boolean(entry.product_id || entry.ean) });
+  closeProcessAlert();
+});
+
 themeToggleButton?.addEventListener("click", () => {
   state.theme = state.theme === "dark" ? "light" : "dark";
   applyTheme();
@@ -5056,52 +5311,17 @@ productForm.addEventListener("submit", async (event) => {
       if (item.sql) data.set(`delete_sql_slot_${prefix}`, "1");
     }
     startProcessStatusTicker(updateMode ? "Aktualizacja" : "Synchronizacja", changedPrefixes);
-    const payload = await requestJson("/api/process", { method: "POST", body: data });
-    stopProcessStatusTicker("Backend zakonczyl operacje. Odswiezanie widoku...");
-    showResult(payload);
-    const savedProductId = payload.entry?.product_id || productForm.elements.product_id.value;
-    if (savedProductId) {
-      productForm.elements.product_id.value = savedProductId;
-    }
-    state.loadedEntryOriginal = { ...formPayload(), product_id: savedProductId };
-    updateFieldWarnings();
-    state.deletedSlots.clear();
-    clearSelectedFiles();
-    setBusy(true, "Aktualizowanie listy wpisow...");
-    upsertProductEntry(entryFromProcessPayload(payload, state.loadedEntryOriginal));
-    if (payload.file_index) {
-      state.fileIndex = payload.file_index;
-    }
-    renderDatalists();
-    renderListEditor();
-    updateRuntimeMetrics();
-    for (const item of payload.saved_files || []) {
-      if (item.prefix) changedPrefixes.add(item.prefix);
-    }
-    for (const item of payload.deleted_slots || []) {
-      if (item.prefix) changedPrefixes.add(item.prefix);
-    }
-    for (const prefix of payload.migrated_slots || []) {
-      if (prefix) changedPrefixes.add(prefix);
-    }
-    const entryToReload = {
-      ...formPayload(),
-      product_id: payload.entry?.product_id || productForm.elements.product_id.value,
-    };
-    clearFtpPreviewCacheForPrefixes(changedPrefixes, entryToReload.ean);
-    clearSavedSlotMarkers(changedPrefixes);
-    setBusy(true, "Odswiezanie podgladow zmienionych slotow...");
-    if (identityChanged || !changedPrefixes.size) {
-      await loadPhotosForEntry(entryToReload);
-    } else {
-      await loadPhotosForEntry(entryToReload, {
-        prefixes: [...changedPrefixes],
-        force: true,
-        clearDirty: true,
-      });
-    }
-    updateSubmitButtonState();
-    setBusy(false, "Zakonczono.");
+    const payload = await requestJson("/api/process/background", { method: "POST", body: data });
+    const job = payload.job || {};
+    stopProcessStatusTicker("Backend przyjal zadanie w tle.");
+    trackProcessJob(job);
+    refreshProcessQueue().catch(() => {});
+    showQueuedProcess(job);
+    resetCurrentDraft({
+      clearOutput: false,
+      status: "Zadanie przyjete w tle. Mozesz uzupelniac kolejny wpis.",
+    });
+    setBusy(false, "Zadanie przyjete w tle. Mozesz uzupelniac kolejny wpis.");
   } catch (error) {
     stopProcessStatusTicker();
     showError(error);
@@ -5109,7 +5329,7 @@ productForm.addEventListener("submit", async (event) => {
   }
 });
 
-clearButton.addEventListener("click", () => {
+function resetCurrentDraft({ clearOutput = true, status = "" } = {}) {
   state.photoLoadRequestId += 1;
   productForm.reset();
   productForm.elements.product_id.value = "";
@@ -5135,8 +5355,14 @@ clearButton.addEventListener("click", () => {
   renderSlots();
   renderEntrySelect();
   updateFieldWarnings();
-  clearResult();
-  formStatus.textContent = "";
+  if (clearOutput) {
+    clearResult();
+  }
+  formStatus.textContent = status;
+}
+
+clearButton.addEventListener("click", () => {
+  resetCurrentDraft();
 });
 
 findByEanButton.addEventListener("click", () => {
@@ -5265,3 +5491,6 @@ setInterval(() => {
 setInterval(() => {
   pollLogStatus().catch(() => {});
 }, 15000);
+setInterval(() => {
+  refreshProcessQueue().catch(() => {});
+}, 2500);
