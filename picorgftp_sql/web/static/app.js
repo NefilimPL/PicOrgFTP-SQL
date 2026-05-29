@@ -20,6 +20,9 @@ const state = {
   lastLookupMs: null,
   activeSettingsTab: "app",
   history: null,
+  historyPage: 1,
+  historyPageSize: 50,
+  historySearchTimer: 0,
   logs: null,
   settingsSecrets: null,
   theme: localStorage.getItem("picorg-theme") || "light",
@@ -59,9 +62,14 @@ const state = {
   webImageCache: new Map(),
   webImageCacheQueue: [],
   webImageCacheActive: 0,
+  processJobs: new Map(),
+  processJobPollTimer: 0,
+  processQueue: { jobs: [], active_count: 0, queued_count: 0, current: null },
+  acknowledgedProcessAlerts: new Set(),
 };
 
 const WEB_IMAGE_CACHE_LIMIT = 2;
+const MAX_AUTOCOMPLETE_OPTIONS = Number.POSITIVE_INFINITY;
 
 const listLabels = {
   names: "Nazwy",
@@ -78,12 +86,23 @@ const photoSourceLabels = {
   all: "dane",
 };
 
+const processStatusLabels = {
+  queued: "Oczekuje",
+  running: "Trwa",
+  completed: "Zakonczone",
+  failed: "Blad",
+};
+
 const slotGrid = document.querySelector("#slotGrid");
 const slotTemplate = document.querySelector("#slotTemplate");
+const processQueuePanel = document.querySelector("#processQueuePanel");
+const processQueueSummary = document.querySelector("#processQueueSummary");
+const processQueueList = document.querySelector("#processQueueList");
 const productForm = document.querySelector("#productForm");
 const formStatus = document.querySelector("#formStatus");
 const resultOutput = document.querySelector("#resultOutput");
 const resultMeta = document.querySelector("#resultMeta");
+const resultSection = document.querySelector(".result-section");
 const slotCount = document.querySelector("#slotCount");
 const fileIndexInfo = document.querySelector("#fileIndexInfo");
 const latencyInfo = document.querySelector("#latencyInfo");
@@ -127,10 +146,16 @@ const settingsOutput = document.querySelector("#settingsOutput");
 const settingsStatus = document.querySelector("#settingsStatus");
 const entryMatches = document.querySelector("#entryMatches");
 const historyUserFilter = document.querySelector("#historyUserFilter");
+const historySearchInput = document.querySelector("#historySearchInput");
 const historyRefreshButton = document.querySelector("#historyRefreshButton");
+const historyPrevButton = document.querySelector("#historyPrevButton");
+const historyNextButton = document.querySelector("#historyNextButton");
+const historyPageInfo = document.querySelector("#historyPageInfo");
 const historyOutput = document.querySelector("#historyOutput");
 const historyDetailTitle = document.querySelector("#historyDetailTitle");
 const historyDetailOutput = document.querySelector("#historyDetailOutput");
+const historyTimingTitle = document.querySelector("#historyTimingTitle");
+const historyTimingOutput = document.querySelector("#historyTimingOutput");
 const logsRefreshButton = document.querySelector("#logsRefreshButton");
 const logsClearButton = document.querySelector("#logsClearButton");
 const logsClearForm = document.querySelector("#logsClearForm");
@@ -138,6 +163,11 @@ const logsClearPassword = document.querySelector("#logsClearPassword");
 const logsClearStatus = document.querySelector("#logsClearStatus");
 const logsOutput = document.querySelector("#logsOutput");
 const logsButton = document.querySelector('[data-modal="logs"]');
+const processAlertModal = document.querySelector("#processAlertModal");
+const processAlertTitle = document.querySelector("#processAlertTitle");
+const processAlertMessage = document.querySelector("#processAlertMessage");
+const processAlertEntry = document.querySelector("#processAlertEntry");
+const processAlertLoadButton = document.querySelector("#processAlertLoadButton");
 
 async function requestJson(path, options = {}) {
   const timeoutMs = Number(options.timeoutMs || 0);
@@ -227,9 +257,7 @@ function openModal(name) {
     });
   }
   if (name === "history") {
-    loadHistory().catch((error) => {
-      historyOutput.textContent = error.message;
-    });
+    loadHistory().catch(showHistoryLoadError);
   }
   if (name === "logs") {
     loadLogs().catch((error) => {
@@ -914,8 +942,27 @@ function uploadProcessingMode() {
   return currentProcessingSettings().upload_processing_mode || "save";
 }
 
+function timingPreferenceStorageKey() {
+  const username = state.currentUser?.username || "anonymous";
+  return `picorg-show-timing-${username}`;
+}
+
 function showTimingDetails() {
+  const stored = localStorage.getItem(timingPreferenceStorageKey());
+  if (stored === "1") return true;
+  if (stored === "0") return false;
   return Boolean(currentProcessingSettings().show_timing_details);
+}
+
+function setTimingDetailsVisible(value) {
+  localStorage.setItem(timingPreferenceStorageKey(), value ? "1" : "0");
+  applyTimingDetailsVisibility();
+}
+
+function applyTimingDetailsVisibility() {
+  if (resultSection) {
+    resultSection.hidden = !showTimingDetails();
+  }
 }
 
 function updateRuntimeMetrics() {
@@ -945,9 +992,10 @@ function currentFormPayload() {
   };
 }
 
-function uniqueValues(values, limit = 200) {
+function uniqueValues(values, limit = Number.POSITIVE_INFINITY) {
   const seen = new Set();
   const result = [];
+  const maxItems = Number.isFinite(limit) ? Math.max(1, Number(limit)) : Number.POSITIVE_INFINITY;
   for (const value of values || []) {
     const text = String(value || "").trim();
     if (!text) continue;
@@ -955,7 +1003,7 @@ function uniqueValues(values, limit = 200) {
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(text);
-    if (result.length >= limit) break;
+    if (result.length >= maxItems) break;
   }
   return result;
 }
@@ -1146,9 +1194,15 @@ function renderAutocompletePanel(input, panel, values) {
   if (activeAutocompletePanel && activeAutocompletePanel !== panel && document.activeElement !== input) {
     return;
   }
+  if (panel.dataset.selecting === "1") {
+    return;
+  }
   closeAutocompletePanels(panel);
+  const previousScroll = panel.scrollTop;
   const typed = input.value.trim().toUpperCase();
-  const filtered = values.filter((value) => !typed || value.toUpperCase().includes(typed)).slice(0, 200);
+  const filtered = values
+    .filter((value) => !typed || value.toUpperCase().includes(typed))
+    .slice(0, MAX_AUTOCOMPLETE_OPTIONS);
   panel.textContent = "";
   if (!filtered.length) {
     panel.classList.remove("active");
@@ -1160,13 +1214,18 @@ function renderAutocompletePanel(input, panel, values) {
     button.textContent = value;
     button.addEventListener("mousedown", (event) => {
       event.preventDefault();
+      panel.dataset.selecting = "1";
       input.value = value;
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
       closeAutocompletePanels();
+      window.setTimeout(() => {
+        panel.dataset.selecting = "";
+      }, 0);
     });
     panel.appendChild(button);
   }
+  panel.scrollTop = previousScroll;
   panel.classList.add("active");
   activeAutocompletePanel = panel;
 }
@@ -1208,7 +1267,7 @@ function setupAutocomplete() {
         remoteSuggestions(fieldName)
           .then((values) => {
             if (currentRequest === requestId && activeAutocompletePanel === panel) {
-              renderAutocompletePanel(input, panel, uniqueValues([...values, ...local]));
+              renderAutocompletePanel(input, panel, uniqueValues([...local, ...values]));
             }
           })
           .catch(() => {});
@@ -2992,7 +3051,7 @@ function startProcessStatusTicker(label, prefixes = new Set()) {
 function clearResult() {
   resultMeta.textContent = "";
   resultOutput.className = "result-output empty-state";
-  resultOutput.textContent = "Brak wykonanych operacji.";
+  resultOutput.textContent = "Brak aktywnych pomiarow.";
 }
 
 function showError(error) {
@@ -3064,78 +3123,298 @@ function renderTimingDetails(timing, savedFiles = []) {
 function showResult(payload) {
   resultOutput.className = "result-output";
   resultOutput.textContent = "";
-  resultMeta.textContent = `${payload.saved_files.length} zapisanych`;
-  const dir = document.createElement("p");
-  dir.className = "ok-text";
-  dir.textContent = payload.output_dir;
-  resultOutput.appendChild(dir);
+  resultMeta.textContent = payload.timing?.total_ms ? `Czas: ${formatDuration(payload.timing.total_ms)}` : "";
   if (payload.entry && payload.entry.product_id) {
     productForm.elements.product_id.value = payload.entry.product_id;
   }
   if (!productForm.elements.ean.value && payload.ean && payload.ean !== "BRAK-EAN") {
     productForm.elements.ean.value = payload.ean;
   }
-  const list = document.createElement("ul");
-  list.className = "result-list";
-  for (const file of payload.saved_files || []) {
-    const item = document.createElement("li");
-    const name = document.createElement("strong");
-    const path = document.createElement("span");
-    name.textContent = `${file.prefix} - ${file.filename}`;
-    path.textContent = file.path;
-    item.append(name, path);
-    list.appendChild(item);
-  }
-  if ((payload.saved_files || []).length) {
-    resultOutput.appendChild(list);
+  const timing = renderTimingDetails(payload.timing, []);
+  if (timing) {
+    resultOutput.appendChild(timing);
   } else {
-    const noFiles = document.createElement("p");
-    noFiles.className = "ok-text";
-    noFiles.textContent = "Nie dodano nowych plikow; zapisano pozostale zmiany.";
-    resultOutput.appendChild(noFiles);
+    resultOutput.className = "result-output empty-state";
+    resultOutput.textContent = "Brak danych pomiarowych.";
   }
-  if (payload.ftp?.enabled) {
-    const ftp = document.createElement("p");
-    ftp.className = payload.ftp.error ? "error-text" : "ok-text";
-    ftp.textContent = payload.ftp.error
-      ? `FTP: blad - ${payload.ftp.error}`
-      : `FTP: wyslano ${payload.ftp.uploaded || 0}, usunieto ${
-          payload.ftp.deleted || 0
-        }. Czas: ${formatDuration(payload.ftp.elapsed_ms)}.`;
-    resultOutput.appendChild(ftp);
+}
+
+function processJobIsActive(job = {}) {
+  return ["queued", "running"].includes(job.status || "");
+}
+
+function processJobProblemMessages(job = {}) {
+  if (job.status === "failed") {
+    return [job.error || "Zadanie nie powiodlo sie."];
   }
-  if (
-    payload.local_delete?.deleted ||
-    payload.local_delete?.skipped ||
-    (payload.local_delete?.errors || []).length
-  ) {
-    const deletions = document.createElement("p");
-    const deleteErrors = payload.local_delete?.errors || [];
-    deletions.className = deleteErrors.length ? "error-text" : "ok-text";
-    deletions.textContent = deleteErrors.length
-      ? `Usuwanie lokalne: ${payload.local_delete.deleted || 0}, pominieto: ${
-          payload.local_delete.skipped || 0
-        }, bledy: ${deleteErrors.join("; ")}`
-      : `Usunieto lokalnie: ${payload.local_delete.deleted || 0}, pominieto: ${
-          payload.local_delete.skipped || 0
-        }`;
-    resultOutput.appendChild(deletions);
+  return job.warning_messages || [];
+}
+
+function entryFromProcessJob(job = {}) {
+  if (job.result) {
+    return entryFromProcessPayload(job.result, job.entry || {});
   }
-  if (payload.sql?.enabled) {
-    const sql = document.createElement("p");
-    sql.className = payload.sql.error ? "error-text" : "ok-text";
-    sql.textContent = payload.sql.error
-      ? `SQL: blad - ${payload.sql.error}`
-      : payload.sql.skipped
-        ? `SQL: pominieto - ${payload.sql.reason || "brak wiersza do aktualizacji"}`
-        : `SQL: aktualizacje ${payload.sql.updated || 0}, czyszczenia ${
-            payload.sql.cleared || 0
-          }. Czas: ${formatDuration(payload.sql.elapsed_ms)}.`;
-    resultOutput.appendChild(sql);
+  const entry = { ...(job.entry || {}) };
+  entry.label = productEntryLabel(entry);
+  return entry;
+}
+
+function closeProcessAlert() {
+  processAlertModal?.classList.remove("active");
+  if (processAlertLoadButton) {
+    processAlertLoadButton.dataset.jobId = "";
   }
-  if (payload.show_timing_details) {
-    const timing = renderTimingDetails(payload.timing, payload.saved_files || []);
-    if (timing) resultOutput.appendChild(timing);
+}
+
+function showProcessJobAlert(job = {}) {
+  if (!processAlertModal || state.acknowledgedProcessAlerts.has(job.job_id)) {
+    return;
+  }
+  const messages = processJobProblemMessages(job);
+  if (!messages.length) {
+    return;
+  }
+  state.acknowledgedProcessAlerts.add(job.job_id);
+  if (processAlertTitle) {
+    processAlertTitle.textContent =
+      job.status === "failed" ? "Zadanie nie powiodlo sie" : "Zadanie zakonczone z ostrzezeniem";
+  }
+  if (processAlertEntry) {
+    processAlertEntry.textContent = `Wpis: ${job.entry_label || productEntryLabel(job.entry || {}) || "bez danych"}`;
+  }
+  if (processAlertMessage) {
+    processAlertMessage.textContent = messages.join(" | ");
+  }
+  if (processAlertLoadButton) {
+    processAlertLoadButton.dataset.jobId = job.job_id || "";
+    processAlertLoadButton.disabled = !job.entry;
+  }
+  processAlertModal.classList.add("active");
+}
+
+function showQueuedProcess(job = {}) {
+  resultMeta.textContent = "Kolejka";
+  resultOutput.className = "result-output";
+  resultOutput.textContent = "";
+  const message = document.createElement("p");
+  message.className = "ok-text";
+  message.textContent = `Przyjeto zadanie dla wpisu: ${
+    job.entry_label || productEntryLabel(job.entry || {}) || "bez danych"
+  }. Pomiary beda aktualizowane podczas pracy kolejki.`;
+  resultOutput.appendChild(message);
+}
+
+function clampProgress(value) {
+  return Math.max(0, Math.min(100, Math.round(Number(value || 0))));
+}
+
+function processQueueMeta(job = {}) {
+  const user = job.username ? `uzytkownik: ${job.username}` : "";
+  if (job.status === "running") {
+    return ["Teraz", user].filter(Boolean).join(" | ");
+  }
+  const position = Number(job.queue_position || 0);
+  return [`W kolejce${position ? ` #${position}` : ""}`, user].filter(Boolean).join(" | ");
+}
+
+function processQueueElapsedMs(job = {}, payload = state.processQueue, key = "started_at") {
+  const reference = Number(payload.server_time || Date.now() / 1000);
+  const started = Number(job[key] || 0);
+  return started > 0 ? Math.max(0, Math.round((reference - started) * 1000)) : 0;
+}
+
+function processMetricRow(labelText, valueText, options = {}) {
+  const row = document.createElement("div");
+  const label = document.createElement("span");
+  const value = document.createElement("strong");
+  if (options.wide) {
+    row.className = "wide";
+  }
+  label.textContent = labelText;
+  value.textContent = valueText;
+  row.append(label, value);
+  return row;
+}
+
+function renderProcessMeasurements(payload = state.processQueue) {
+  if (!resultOutput || !resultMeta) {
+    return;
+  }
+  applyTimingDetailsVisibility();
+  if (!showTimingDetails()) {
+    return;
+  }
+  const jobs = payload.jobs || [];
+  const current = jobs.find((job) => job.status === "running");
+  resultOutput.textContent = "";
+  if (!jobs.length) {
+    resultMeta.textContent = "";
+    resultOutput.className = "result-output empty-state";
+    resultOutput.textContent = "Brak aktywnych pomiarow.";
+    return;
+  }
+  resultOutput.className = "result-output";
+  const metrics = document.createElement("div");
+  metrics.className = "timing-list";
+  if (current) {
+    const stages = current.timing?.stages || [];
+    resultMeta.textContent = `${clampProgress(current.progress)}% | czeka: ${payload.queued_count || 0}`;
+    metrics.append(
+      processMetricRow("Aktualny towar", current.entry_label || "zadanie", { wide: true }),
+      processMetricRow("Etap", current.progress_label || "Trwa"),
+      processMetricRow("Czas zadania", formatDuration(processQueueElapsedMs(current, payload, "started_at"))),
+      processMetricRow("Czas od zlecenia", formatDuration(processQueueElapsedMs(current, payload, "created_at"))),
+      processMetricRow("Oczekuje w kolejce", String(payload.queued_count || 0))
+    );
+    if (stages.length) {
+      const section = document.createElement("div");
+      section.className = "timing-section";
+      section.textContent = "Czynnosci";
+      metrics.appendChild(section);
+      for (const stage of stages) {
+        metrics.appendChild(
+          processMetricRow(
+            stage.running ? `${stage.label || stage.key} (trwa)` : stage.label || stage.key || "Etap",
+            timingMs(stage.elapsed_ms)
+          )
+        );
+      }
+    }
+  } else {
+    const first = jobs[0] || {};
+    resultMeta.textContent = `Czeka: ${payload.queued_count || jobs.length}`;
+    metrics.append(
+      processMetricRow("Pierwszy w kolejce", first.entry_label || "zadanie", { wide: true }),
+      processMetricRow("Czas oczekiwania", formatDuration(processQueueElapsedMs(first, payload, "created_at"))),
+      processMetricRow("Liczba zadan", String(jobs.length))
+    );
+  }
+  resultOutput.appendChild(metrics);
+}
+
+function renderProcessQueue(payload = state.processQueue) {
+  if (!processQueuePanel || !processQueueList || !processQueueSummary) {
+    return;
+  }
+  const jobs = payload.jobs || [];
+  state.processQueue = payload;
+  processQueuePanel.classList.toggle("empty", !jobs.length);
+  processQueueList.textContent = "";
+  if (!jobs.length) {
+    processQueueSummary.textContent = "Brak zadan";
+    processQueueList.className = "process-queue-list empty-state";
+    processQueueList.textContent = "Kolejka pusta.";
+    renderProcessMeasurements(payload);
+    return;
+  }
+  const current = jobs.find((job) => job.status === "running");
+  processQueueSummary.textContent = current
+    ? `Teraz: ${current.entry_label || "zadanie"} | czeka: ${payload.queued_count || 0}`
+    : `Czeka: ${payload.queued_count || jobs.length}`;
+  processQueueList.className = "process-queue-list";
+  for (const job of jobs) {
+    const item = document.createElement("article");
+    const meta = document.createElement("div");
+    const title = document.createElement("strong");
+    const stage = document.createElement("span");
+    const progressLine = document.createElement("div");
+    const progressBar = document.createElement("i");
+    const progressText = document.createElement("small");
+    const progress = clampProgress(job.progress);
+    item.className = `process-queue-item process-queue-${job.status || "queued"}`;
+    meta.className = "process-queue-meta";
+    meta.textContent = processQueueMeta(job);
+    title.textContent = job.entry_label || productEntryLabel(job.entry || {}) || "Zadanie bez nazwy";
+    stage.textContent =
+      job.progress_label || processStatusLabels[job.status] || job.status || "Zadanie";
+    progressLine.className = "process-queue-progress";
+    progressLine.style.setProperty("--queue-progress", `${progress}%`);
+    progressText.textContent = `${progress}%`;
+    progressLine.appendChild(progressBar);
+    item.append(meta, title, stage, progressLine, progressText);
+    processQueueList.appendChild(item);
+  }
+  renderProcessMeasurements(payload);
+}
+
+async function refreshProcessQueue() {
+  const payload = await requestJson("/api/process-jobs/active");
+  renderProcessQueue(payload);
+}
+
+function updateProcessJobFromPayload(job = {}) {
+  if (!job.job_id) return;
+  const previous = state.processJobs.get(job.job_id) || {};
+  const merged = { ...previous, ...job };
+  state.processJobs.set(job.job_id, merged);
+  if (processJobIsActive(merged)) {
+    return;
+  }
+  if (merged.result) {
+    upsertProductEntry(entryFromProcessJob(merged));
+    if (merged.result.file_index) {
+      state.fileIndex = merged.result.file_index;
+      updateRuntimeMetrics();
+    }
+  }
+  const messages = processJobProblemMessages(merged);
+  if (messages.length) {
+    showProcessJobAlert(merged);
+    formStatus.textContent = `Zadanie w tle ma problem: ${messages[0]}`;
+  } else if (!hasProductDraftData()) {
+    formStatus.textContent = `Zadanie w tle zakonczone: ${merged.entry_label || "wpis"}.`;
+  }
+}
+
+function scheduleProcessJobPoll(delay = 1500) {
+  if (state.processJobPollTimer) {
+    return;
+  }
+  state.processJobPollTimer = window.setTimeout(() => {
+    state.processJobPollTimer = 0;
+    pollProcessJobs().catch(() => {});
+  }, delay);
+}
+
+async function pollProcessJobs() {
+  const active = [...state.processJobs.values()].filter(processJobIsActive);
+  if (!active.length) {
+    return;
+  }
+  for (const job of active) {
+    try {
+      const payload = await requestJson(`/api/process-jobs/${encodeURIComponent(job.job_id)}`);
+      updateProcessJobFromPayload(payload);
+    } catch (error) {
+      const failed = {
+        ...job,
+        status: "failed",
+        error: error.message || "Nie udalo sie sprawdzic statusu zadania.",
+      };
+      updateProcessJobFromPayload(failed);
+    }
+  }
+  if ([...state.processJobs.values()].some(processJobIsActive)) {
+    scheduleProcessJobPoll();
+  }
+}
+
+function trackProcessJob(job = {}) {
+  if (!job.job_id) {
+    return;
+  }
+  state.processJobs.set(job.job_id, job);
+  scheduleProcessJobPoll();
+}
+
+async function loadRecentProcessJobs() {
+  const payload = await requestJson("/api/process-jobs?limit=10");
+  for (const job of payload.jobs || []) {
+    if (processJobIsActive(job)) {
+      trackProcessJob(job);
+    } else if (processJobProblemMessages(job).length) {
+      updateProcessJobFromPayload(job);
+    }
   }
 }
 
@@ -3173,6 +3452,39 @@ function historyEntryLabel(entry) {
     .join(" | ");
 }
 
+function timingMs(value) {
+  return `${Math.max(0, Math.round(Number(value || 0)))} ms`;
+}
+
+function renderHistoryTiming(item = {}) {
+  if (!historyTimingTitle || !historyTimingOutput) {
+    return;
+  }
+  const timing = item.details?.timing || {};
+  historyTimingTitle.textContent = `Czasy: ${item.time || item.summary || "zmiana"}`;
+  historyTimingOutput.textContent = "";
+  const stages = timing.stages || [];
+  historyTimingOutput.appendChild(processMetricRow("Razem", timingMs(timing.total_ms)));
+  if (stages.length) {
+    const section = document.createElement("div");
+    section.className = "timing-section";
+    section.textContent = "Czynnosci";
+    historyTimingOutput.appendChild(section);
+  }
+  for (const stage of stages) {
+    historyTimingOutput.appendChild(
+      processMetricRow(stage.label || stage.key || "Etap", timingMs(stage.elapsed_ms))
+    );
+  }
+  if (!stages.length && !timing.total_ms) {
+    historyTimingOutput.className = "timing-list empty-state";
+    historyTimingOutput.textContent = "Ta zmiana nie ma zapisanych pomiarow czasu.";
+  } else {
+    historyTimingOutput.className = "timing-list";
+  }
+  document.querySelector("#historyTimingModal")?.classList.add("active");
+}
+
 function renderHistoryDetails(group) {
   historyDetailTitle.textContent = `Historia EAN ${group.ean}`;
   historyDetailOutput.textContent = "";
@@ -3181,6 +3493,8 @@ function renderHistoryDetails(group) {
     const meta = document.createElement("div");
     const summary = document.createElement("strong");
     const details = document.createElement("span");
+    const actions = document.createElement("div");
+    const timingButton = document.createElement("button");
     row.className = "history-item";
     meta.className = "history-meta";
     meta.textContent = `${item.time || ""} | ${item.user || ""}`;
@@ -3199,14 +3513,38 @@ function renderHistoryDetails(group) {
     ]
       .filter(Boolean)
       .join(" | ");
-    row.append(meta, summary, details);
+    actions.className = "history-item-actions";
+    timingButton.type = "button";
+    timingButton.className = "secondary-button";
+    timingButton.textContent = "Czasy";
+    timingButton.disabled = !item.details?.timing;
+    timingButton.addEventListener("click", () => renderHistoryTiming(item));
+    actions.appendChild(timingButton);
+    row.append(meta, summary, details, actions);
     historyDetailOutput.appendChild(row);
   }
   document.querySelector("#historyDetailModal").classList.add("active");
 }
 
+function updateHistoryPagination(payload) {
+  if (!historyPageInfo) {
+    return;
+  }
+  const page = Number(payload.page || 1);
+  const totalPages = Number(payload.total_pages || 1);
+  const totalGroups = Number(payload.total_groups || 0);
+  historyPageInfo.textContent = `Strona ${page}/${totalPages} | wpisy: ${totalGroups}`;
+  if (historyPrevButton) {
+    historyPrevButton.disabled = page <= 1;
+  }
+  if (historyNextButton) {
+    historyNextButton.disabled = page >= totalPages;
+  }
+}
+
 function renderHistory(payload) {
   state.history = payload;
+  state.historyPage = Number(payload.page || state.historyPage || 1);
   const selectedUser = historyUserFilter.value;
   historyUserFilter.textContent = "";
   const all = document.createElement("option");
@@ -3221,6 +3559,7 @@ function renderHistory(payload) {
     historyUserFilter.appendChild(option);
   }
   historyOutput.textContent = "";
+  updateHistoryPagination(payload);
   const groups = payload.groups || [];
   if (!groups.length) {
     historyOutput.className = "history-output empty-state";
@@ -3246,10 +3585,25 @@ function renderHistory(payload) {
   }
 }
 
-async function loadHistory() {
-  const params = new URLSearchParams({ user: historyUserFilter.value || "", limit: "300" });
+async function loadHistory(options = {}) {
+  const page = Math.max(1, Number(options.page || state.historyPage || 1));
+  state.historyPage = page;
+  const params = new URLSearchParams({
+    user: historyUserFilter?.value || "",
+    query: historySearchInput?.value || "",
+    page: String(page),
+    page_size: String(state.historyPageSize || 50),
+    limit: "1000",
+  });
   const payload = await requestJson(`/api/history?${params.toString()}`);
   renderHistory(payload);
+}
+
+function showHistoryLoadError(error) {
+  if (historyOutput) {
+    historyOutput.className = "history-output empty-state";
+    historyOutput.textContent = error.message;
+  }
 }
 
 function logReadStorageKey() {
@@ -4025,7 +4379,10 @@ async function loadBootstrap(options = {}) {
   logoutButton.style.display = payload.auth_enabled ? "" : "none";
   state.currentUser = payload.current_user || null;
   updateAdminUi();
+  applyTimingDetailsVisibility();
   pollLogStatus({ initialize: true }).catch(() => {});
+  loadRecentProcessJobs().catch(() => {});
+  refreshProcessQueue().catch(() => {});
   state.lists = payload.lists || {};
   state.entries = payload.entries || [];
   state.fileIndex = payload.file_index || null;
@@ -4534,10 +4891,10 @@ function renderSettingsProcessing() {
       ]
     ),
     checkField(
-      "show_timing_details",
-      "Pokazuj szczegolowe czasy operacji",
-      p.show_timing_details,
-      "Po zapisie pokazuje czytelny rozklad czasu dla lokalnych plikow, FTP, SQL i cache."
+      "user_show_timing_details",
+      "Pokazuj blok Pomiary",
+      showTimingDetails(),
+      "Ustawienie tylko dla aktualnego uzytkownika. Pokazuje lub ukrywa blok Pomiary z czasami kolejki i operacji."
     ),
     checkField(
       "resize_enabled",
@@ -4599,9 +4956,12 @@ function renderSettingsProcessing() {
       convert_enabled: data.has("convert_enabled"),
       target_format: data.get("target_format"),
       upload_processing_mode: data.get("upload_processing_mode"),
-      show_timing_details: data.has("show_timing_details"),
     },
   }));
+  form.addEventListener("submit", () => {
+    const data = new FormData(form);
+    setTimingDetailsVisible(data.has("user_show_timing_details"));
+  });
   settingsOutput.appendChild(form);
 }
 
@@ -4898,6 +5258,7 @@ async function loadSettings() {
   state.processing = state.settings.processing || state.processing || {};
   state.colorFieldLabels = state.settings.color_field_labels || state.colorFieldLabels || {};
   updateAdminUi();
+  applyTimingDetailsVisibility();
   applyProductFieldLabels();
   renderSettings();
 }
@@ -4920,8 +5281,33 @@ document.querySelectorAll("[data-close-history-detail]").forEach((button) => {
   });
 });
 
+document.querySelectorAll("[data-close-history-timing]").forEach((button) => {
+  button.addEventListener("click", () => {
+    document.querySelector("#historyTimingModal")?.classList.remove("active");
+  });
+});
+
 document.querySelectorAll("[data-close-logs-clear]").forEach((button) => {
   button.addEventListener("click", closeLogsClearModal);
+});
+
+document.querySelectorAll("[data-close-process-alert]").forEach((button) => {
+  button.addEventListener("click", closeProcessAlert);
+});
+
+processAlertLoadButton?.addEventListener("click", () => {
+  const jobId = processAlertLoadButton.dataset.jobId || "";
+  const job = state.processJobs.get(jobId);
+  if (!job) {
+    closeProcessAlert();
+    return;
+  }
+  if (hasPendingUserChanges() && !window.confirm("Wczytac wpis z zadania i zastapic aktualny formularz?")) {
+    return;
+  }
+  const entry = entryFromProcessJob(job);
+  fillForm(entry, { loadPhotos: Boolean(entry.product_id || entry.ean) });
+  closeProcessAlert();
 });
 
 themeToggleButton?.addEventListener("click", () => {
@@ -4937,15 +5323,30 @@ document.querySelectorAll(".settings-tab").forEach((button) => {
 });
 
 historyUserFilter?.addEventListener("change", () => {
-  loadHistory().catch((error) => {
-    historyOutput.textContent = error.message;
-  });
+  state.historyPage = 1;
+  loadHistory({ page: 1 }).catch(showHistoryLoadError);
+});
+
+historySearchInput?.addEventListener("input", () => {
+  window.clearTimeout(state.historySearchTimer);
+  state.historySearchTimer = window.setTimeout(() => {
+    state.historyPage = 1;
+    loadHistory({ page: 1 }).catch(showHistoryLoadError);
+  }, 250);
 });
 
 historyRefreshButton?.addEventListener("click", () => {
-  loadHistory().catch((error) => {
-    historyOutput.textContent = error.message;
-  });
+  loadHistory({ page: state.historyPage || 1 }).catch(showHistoryLoadError);
+});
+
+historyPrevButton?.addEventListener("click", () => {
+  const page = Math.max(1, Number(state.historyPage || 1) - 1);
+  loadHistory({ page }).catch(showHistoryLoadError);
+});
+
+historyNextButton?.addEventListener("click", () => {
+  const page = Math.max(1, Number(state.historyPage || 1) + 1);
+  loadHistory({ page }).catch(showHistoryLoadError);
 });
 
 logsRefreshButton?.addEventListener("click", () => {
@@ -5056,52 +5457,17 @@ productForm.addEventListener("submit", async (event) => {
       if (item.sql) data.set(`delete_sql_slot_${prefix}`, "1");
     }
     startProcessStatusTicker(updateMode ? "Aktualizacja" : "Synchronizacja", changedPrefixes);
-    const payload = await requestJson("/api/process", { method: "POST", body: data });
-    stopProcessStatusTicker("Backend zakonczyl operacje. Odswiezanie widoku...");
-    showResult(payload);
-    const savedProductId = payload.entry?.product_id || productForm.elements.product_id.value;
-    if (savedProductId) {
-      productForm.elements.product_id.value = savedProductId;
-    }
-    state.loadedEntryOriginal = { ...formPayload(), product_id: savedProductId };
-    updateFieldWarnings();
-    state.deletedSlots.clear();
-    clearSelectedFiles();
-    setBusy(true, "Aktualizowanie listy wpisow...");
-    upsertProductEntry(entryFromProcessPayload(payload, state.loadedEntryOriginal));
-    if (payload.file_index) {
-      state.fileIndex = payload.file_index;
-    }
-    renderDatalists();
-    renderListEditor();
-    updateRuntimeMetrics();
-    for (const item of payload.saved_files || []) {
-      if (item.prefix) changedPrefixes.add(item.prefix);
-    }
-    for (const item of payload.deleted_slots || []) {
-      if (item.prefix) changedPrefixes.add(item.prefix);
-    }
-    for (const prefix of payload.migrated_slots || []) {
-      if (prefix) changedPrefixes.add(prefix);
-    }
-    const entryToReload = {
-      ...formPayload(),
-      product_id: payload.entry?.product_id || productForm.elements.product_id.value,
-    };
-    clearFtpPreviewCacheForPrefixes(changedPrefixes, entryToReload.ean);
-    clearSavedSlotMarkers(changedPrefixes);
-    setBusy(true, "Odswiezanie podgladow zmienionych slotow...");
-    if (identityChanged || !changedPrefixes.size) {
-      await loadPhotosForEntry(entryToReload);
-    } else {
-      await loadPhotosForEntry(entryToReload, {
-        prefixes: [...changedPrefixes],
-        force: true,
-        clearDirty: true,
-      });
-    }
-    updateSubmitButtonState();
-    setBusy(false, "Zakonczono.");
+    const payload = await requestJson("/api/process/background", { method: "POST", body: data });
+    const job = payload.job || {};
+    stopProcessStatusTicker("Backend przyjal zadanie w tle.");
+    trackProcessJob(job);
+    refreshProcessQueue().catch(() => {});
+    showQueuedProcess(job);
+    resetCurrentDraft({
+      clearOutput: false,
+      status: "Zadanie przyjete w tle. Mozesz uzupelniac kolejny wpis.",
+    });
+    setBusy(false, "Zadanie przyjete w tle. Mozesz uzupelniac kolejny wpis.");
   } catch (error) {
     stopProcessStatusTicker();
     showError(error);
@@ -5109,7 +5475,7 @@ productForm.addEventListener("submit", async (event) => {
   }
 });
 
-clearButton.addEventListener("click", () => {
+function resetCurrentDraft({ clearOutput = true, status = "" } = {}) {
   state.photoLoadRequestId += 1;
   productForm.reset();
   productForm.elements.product_id.value = "";
@@ -5135,8 +5501,14 @@ clearButton.addEventListener("click", () => {
   renderSlots();
   renderEntrySelect();
   updateFieldWarnings();
-  clearResult();
-  formStatus.textContent = "";
+  if (clearOutput) {
+    clearResult();
+  }
+  formStatus.textContent = status;
+}
+
+clearButton.addEventListener("click", () => {
+  resetCurrentDraft();
 });
 
 findByEanButton.addEventListener("click", () => {
@@ -5265,3 +5637,6 @@ setInterval(() => {
 setInterval(() => {
   pollLogStatus().catch(() => {});
 }, 15000);
+setInterval(() => {
+  refreshProcessQueue().catch(() => {});
+}, 2500);

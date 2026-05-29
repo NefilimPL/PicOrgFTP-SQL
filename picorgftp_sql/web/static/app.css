@@ -240,6 +240,7 @@ h2 {
   grid-template-columns: minmax(280px, 360px) minmax(420px, 1fr);
   grid-template-areas:
     "product slots"
+    "queue slots"
     "result slots";
   gap: 18px;
   max-width: 1540px;
@@ -292,7 +293,17 @@ h2 {
 .heading-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
+}
+
+.heading-actions input {
+  flex: 1 1 220px;
+  min-width: min(220px, 100%);
+}
+
+.heading-actions select {
+  flex: 0 1 220px;
 }
 
 .subtle-metrics {
@@ -306,6 +317,7 @@ h2 {
 }
 
 .product-section,
+.process-queue-section,
 .slots-section,
 .result-section {
   border: 1px solid var(--line);
@@ -316,6 +328,12 @@ h2 {
   grid-area: product;
   border-radius: 8px;
   padding: 18px;
+}
+
+.process-queue-section {
+  grid-area: queue;
+  border-radius: 8px;
+  padding: 14px;
 }
 
 .slots-section {
@@ -397,6 +415,15 @@ h2 {
 
 .autocomplete-panel button:hover {
   background: var(--surface-2);
+}
+
+.process-alert-panel {
+  border-top: 4px solid var(--danger);
+}
+
+.process-alert-entry {
+  margin: 0;
+  color: var(--muted);
 }
 
 .field-changed input {
@@ -849,6 +876,86 @@ h2 {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
   gap: 12px;
+  min-width: 0;
+}
+
+.process-queue-panel {
+  display: grid;
+  gap: 10px;
+  max-height: 280px;
+  overflow: auto;
+  min-width: 0;
+}
+
+.process-queue-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.process-queue-heading span {
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+}
+
+.process-queue-list {
+  display: grid;
+  gap: 8px;
+}
+
+.process-queue-item {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px;
+}
+
+.process-queue-item strong,
+.process-queue-item span,
+.process-queue-item small {
+  overflow-wrap: anywhere;
+}
+
+.process-queue-item strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.process-queue-item span,
+.process-queue-item small,
+.process-queue-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.process-queue-running {
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.process-queue-queued {
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+
+.process-queue-progress {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.process-queue-progress i {
+  display: block;
+  width: var(--queue-progress, 0%);
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 180ms ease;
 }
 
 .slot-card {
@@ -1136,6 +1243,19 @@ button.slot-badge.on:hover {
   gap: 12px;
 }
 
+.history-pagination {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0 0 14px;
+}
+
+.history-pagination span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .history-summary-row,
 .history-group {
   display: grid;
@@ -1171,6 +1291,7 @@ button.slot-badge.on:hover {
   gap: 3px;
   border-top: 1px solid var(--surface-2);
   padding-top: 8px;
+  overflow-wrap: anywhere;
 }
 
 .history-item:first-child {
@@ -1182,6 +1303,17 @@ button.slot-badge.on:hover {
 .history-item span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.history-item-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.history-item-actions button {
+  min-height: 32px;
 }
 
 .log-category,
@@ -1440,14 +1572,30 @@ button.slot-badge.on:hover {
 
 .timing-list div {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(72px, max-content);
   gap: 10px;
-  align-items: center;
+  align-items: start;
   font-size: 13px;
 }
 
 .timing-list span {
   color: var(--muted);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.timing-list strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.timing-list div.wide {
+  grid-template-columns: 1fr;
+}
+
+.timing-list div.wide strong {
+  text-align: left;
 }
 
 .timing-list .timing-section {
@@ -1467,11 +1615,18 @@ button.slot-badge.on:hover {
   color: var(--accent-strong);
 }
 
+@media (max-width: 1180px) {
+  .process-queue-panel {
+    max-height: none;
+  }
+}
+
 @media (max-width: 920px) {
   .workspace {
     grid-template-columns: 1fr;
     grid-template-areas:
       "product"
+      "queue"
       "slots"
       "result";
   }

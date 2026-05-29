@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime
 import hashlib
 import hmac
@@ -18,7 +20,7 @@ import threading
 import time
 import traceback
 import unicodedata
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 import zipfile
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -115,6 +117,28 @@ WEB_UPLOAD_CACHE_CLEAN_INTERVAL_SECONDS = 30 * 60
 _UPLOAD_CACHE_LAST_CLEANUP = 0.0
 _BROWSER_EXTENSION_IMPORTS: Dict[str, List[Dict[str, Any]]] = {}
 _BROWSER_EXTENSION_IMPORTS_LOCK = threading.Lock()
+_PROCESS_JOB_RETENTION_SECONDS = 6 * 60 * 60
+_PROCESS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="picorg-process")
+_PROCESS_JOBS: Dict[str, Dict[str, Any]] = {}
+_PROCESS_JOBS_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class _QueuedUploadFile:
+    path: str
+    filename: str
+
+
+@dataclass
+class _ProcessFormSnapshot:
+    fields: Dict[str, str] = field(default_factory=dict)
+    uploads: Dict[str, _QueuedUploadFile] = field(default_factory=dict)
+    temp_dir: str = ""
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key in self.uploads:
+            return self.uploads[key]
+        return self.fields.get(key, default)
 
 
 def _elapsed_ms(started: float) -> int:
@@ -545,6 +569,33 @@ async def _save_upload(upload: UploadFile, temp_dir: str, prefix: str) -> str:
             handle.write(chunk)
     await upload.close()
     return target_path
+
+
+def _upload_prefix_from_form_key(key: str) -> str:
+    text = str(key or "").strip()
+    if text.startswith("slot_"):
+        text = text[5:]
+    return sanitize_path_segment(text) or "slot"
+
+
+async def _materialize_process_form(form: Any, temp_dir: str) -> _ProcessFormSnapshot:
+    os.makedirs(temp_dir, exist_ok=True)
+    fields: Dict[str, str] = {}
+    uploads: Dict[str, _QueuedUploadFile] = {}
+    items = form.multi_items() if hasattr(form, "multi_items") else form.items()
+    for key, value in items:
+        key_text = str(key)
+        if isinstance(value, UploadFile):
+            if not value.filename:
+                continue
+            path = await _save_upload(value, temp_dir, _upload_prefix_from_form_key(key_text))
+            uploads[key_text] = _QueuedUploadFile(
+                path=path,
+                filename=_safe_upload_name(value.filename, os.path.basename(path)),
+            )
+            continue
+        fields[key_text] = str(value)
+    return _ProcessFormSnapshot(fields=fields, uploads=uploads, temp_dir=temp_dir)
 
 
 async def _save_upload_cache(upload: UploadFile, cache_scope: str, prefix: str) -> tuple[str, int]:
@@ -1592,6 +1643,767 @@ def _logs_response(limit: int) -> Dict[str, Any]:
     return {"logs": logs, "events": events, "summary": _logs_summary(events)}
 
 
+def _snapshot_entry_payload(form: _ProcessFormSnapshot) -> Dict[str, str]:
+    return {
+        "product_id": str(form.get("product_id") or ""),
+        "name": str(form.get("name") or ""),
+        "type_name": str(form.get("type_name") or ""),
+        "model": str(form.get("model") or ""),
+        "color1": str(form.get("color1") or ""),
+        "color2": str(form.get("color2") or ""),
+        "color3": str(form.get("color3") or ""),
+        "extra": str(form.get("extra") or ""),
+        "ean": str(form.get("ean") or ""),
+    }
+
+
+def _process_entry_label(entry: Dict[str, Any]) -> str:
+    colors = " / ".join(
+        str(entry.get(key) or "").strip()
+        for key in ("color1", "color2", "color3")
+        if str(entry.get(key) or "").strip()
+    )
+    parts = [
+        str(entry.get("name") or "").strip(),
+        str(entry.get("type_name") or "").strip(),
+        str(entry.get("model") or "").strip(),
+        colors,
+        str(entry.get("extra") or "").strip(),
+    ]
+    suffix = str(entry.get("ean") or entry.get("product_id") or "").strip()
+    label = " | ".join(part for part in parts if part)
+    return f"{label} - {suffix}" if label and suffix else label or suffix or "bez identyfikatora"
+
+
+def _process_warning_messages(payload: Dict[str, Any]) -> List[str]:
+    messages: List[str] = []
+    ftp_payload = payload.get("ftp") if isinstance(payload.get("ftp"), dict) else {}
+    sql_payload = payload.get("sql") if isinstance(payload.get("sql"), dict) else {}
+    local_delete = payload.get("local_delete") if isinstance(payload.get("local_delete"), dict) else {}
+    if ftp_payload.get("error"):
+        messages.append(f"FTP: {ftp_payload.get('error')}")
+    if sql_payload.get("error"):
+        messages.append(f"SQL: {sql_payload.get('error')}")
+    local_errors = local_delete.get("errors") if isinstance(local_delete, dict) else []
+    if local_errors:
+        messages.append("Usuwanie lokalne: " + "; ".join(str(item) for item in local_errors))
+    skipped = payload.get("skipped_slots") or []
+    if skipped:
+        messages.append("Pominiete sloty: " + ", ".join(str(item) for item in skipped))
+    return messages
+
+
+def _process_upload_snapshot(
+    *,
+    username: str,
+    cache_scope: str,
+    form: _ProcessFormSnapshot,
+    progress: Optional[
+        Callable[[int, str, List[Dict[str, Any]], Optional[Dict[str, Any]]], None]
+    ] = None,
+) -> Dict[str, Any]:
+    def mark(
+        percent: int,
+        label: str,
+        *,
+        current_key: str = "",
+        current_label: str = "",
+    ) -> None:
+        if progress:
+            current_stage = None
+            if current_key:
+                current_stage = {
+                    "key": current_key,
+                    "label": current_label or label,
+                    "started_at": time.time(),
+                    "elapsed_ms": 0,
+                    "running": True,
+                }
+            progress(percent, label, list(timings), current_stage)
+
+    process_started = time.perf_counter()
+    timings: List[Dict[str, Any]] = []
+    stage_started = time.perf_counter()
+    mark(4, "Przygotowanie danych", current_key="prepare", current_label="Przygotowanie danych i slotow")
+    slots = slot_definitions_from_config(config.CONFIG)
+    slot_by_prefix = {slot["prefix"]: slot for slot in slots}
+    uploaded_slots: List[WebUploadedSlot] = []
+    delete_requests: List[Dict[str, Any]] = []
+    pending_ftp_slots: List[Dict[str, Any]] = []
+    explicit_slot_prefixes: Set[str] = set()
+    product: Optional[WebProductForm] = None
+    try:
+        for prefix, slot in slot_by_prefix.items():
+            if str(form.get(f"delete_slot_{prefix}") or "") == "1":
+                delete_item: Dict[str, Any] = {
+                    "prefix": prefix,
+                    "label": slot["label"],
+                    "local_path": "",
+                    "ftp_filename": os.path.basename(str(form.get(f"delete_ftp_slot_{prefix}") or "")),
+                    "sql": str(form.get(f"delete_sql_slot_{prefix}") or "") == "1",
+                }
+                local_token = str(form.get(f"delete_local_slot_{prefix}") or "").strip()
+                if local_token:
+                    delete_item["local_path"] = _path_from_file_token(
+                        local_token,
+                        require_exists=False,
+                    )
+                delete_requests.append(delete_item)
+            token = str(form.get(f"existing_slot_{prefix}") or "").strip()
+            if token:
+                source_path = _path_from_file_token(token)
+                original_filename = _safe_upload_name(
+                    str(form.get(f"existing_slot_name_{prefix}") or ""),
+                    os.path.basename(source_path),
+                )
+                preprocessed = str(form.get(f"existing_slot_preprocessed_{prefix}") or "") == "1"
+                explicit_slot_prefixes.add(prefix)
+                uploaded_slots.append(
+                    WebUploadedSlot(
+                        prefix=prefix,
+                        label=slot["label"],
+                        filename_label=slot.get("filename_label", ""),
+                        source_path=source_path,
+                        original_filename=original_filename,
+                        content_fit=_optional_form_bool(form, f"slot_fit_{prefix}"),
+                        preprocessed=preprocessed,
+                    )
+                )
+                continue
+            ftp_filename = os.path.basename(str(form.get(f"existing_ftp_slot_{prefix}") or ""))
+            if ftp_filename:
+                explicit_slot_prefixes.add(prefix)
+                pending_ftp_slots.append(
+                    {
+                        "prefix": prefix,
+                        "label": slot["label"],
+                        "filename_label": slot.get("filename_label", ""),
+                        "filename": ftp_filename,
+                        "ean": str(form.get(f"existing_ftp_ean_{prefix}") or ""),
+                        "content_fit": _optional_form_bool(form, f"slot_fit_{prefix}"),
+                    }
+                )
+                continue
+            value = form.get(f"slot_{prefix}")
+            if not isinstance(value, _QueuedUploadFile):
+                continue
+            explicit_slot_prefixes.add(prefix)
+            uploaded_slots.append(
+                WebUploadedSlot(
+                    prefix=prefix,
+                    label=slot["label"],
+                    filename_label=slot.get("filename_label", ""),
+                    source_path=value.path,
+                    original_filename=value.filename,
+                    content_fit=_optional_form_bool(form, f"slot_fit_{prefix}"),
+                )
+            )
+        product = WebProductForm(
+            name=str(form.get("name") or ""),
+            type_name=str(form.get("type_name") or ""),
+            model=str(form.get("model") or ""),
+            color1=str(form.get("color1") or ""),
+            color2=str(form.get("color2") or ""),
+            color3=str(form.get("color3") or ""),
+            extra=str(form.get("extra") or ""),
+            ean=str(form.get("ean") or ""),
+            product_id=str(form.get("product_id") or ""),
+        )
+        errors = validate_product_form(product)
+        if errors:
+            raise ValueError(" ".join(errors))
+        timings.append(
+            _timing_item(
+                "prepare",
+                "Przygotowanie danych i slotow",
+                stage_started,
+                uploaded=len(uploaded_slots),
+                deleted=len(delete_requests),
+                ftp_pending=len(pending_ftp_slots),
+            )
+        )
+        stage_started = time.perf_counter()
+        mark(10, "Wyszukiwanie wpisu", current_key="entry_lookup", current_label="Wyszukanie istniejacego wpisu")
+        existing_entry = None
+        if product.product_id.strip():
+            existing_entry = find_entry_by_identity(product_id=product.product_id)
+        if existing_entry is None and product.ean.strip() and product.ean.strip().upper() != "BRAK-EAN":
+            existing_entry = find_entry_by_identity(ean=product.ean)
+        if existing_entry:
+            preserved_product_id = product.product_id or str(existing_entry.get("product_id") or "")
+            preserved_ean = product.ean or str(existing_entry.get("ean") or "")
+            if preserved_product_id != product.product_id or preserved_ean != product.ean:
+                product = WebProductForm(
+                    name=product.name,
+                    type_name=product.type_name,
+                    model=product.model,
+                    color1=product.color1,
+                    color2=product.color2,
+                    color3=product.color3,
+                    extra=product.extra,
+                    ean=preserved_ean,
+                    product_id=preserved_product_id,
+                )
+        timings.append(
+            _timing_item(
+                "entry_lookup",
+                "Wyszukanie istniejacego wpisu",
+                stage_started,
+                found=bool(existing_entry),
+            )
+        )
+        stage_started = time.perf_counter()
+        mark(20, "Sprawdzanie zdjec", current_key="photo_scan", current_label="Sprawdzenie istniejacych zdjec")
+        _append_pending_ftp_slots(
+            product=product,
+            pending_ftp_slots=pending_ftp_slots,
+            uploaded_slots=uploaded_slots,
+            delete_requests=delete_requests,
+            cache_scope=cache_scope,
+        )
+        photo_lookup_entry = existing_entry or _entry_payload_from_product(product)
+        include_sql_in_existing_photo_scan = existing_entry is not None
+        existing_photos = find_product_photos(
+            photo_lookup_entry,
+            include_local=True,
+            include_ftp=bool(config.CONFIG.get(ft, True)),
+            include_sql=include_sql_in_existing_photo_scan,
+        )
+        existing_file_photos = [photo for photo in existing_photos if _photo_has_file_source(photo)]
+        if existing_entry is None:
+            conflicts = _existing_photo_conflicts(
+                existing_file_photos,
+                uploaded_slots,
+                delete_requests,
+            )
+            if conflicts:
+                raise ValueError(_format_existing_photo_conflicts(conflicts))
+        migrated_prefixes = _append_existing_photo_migrations(
+            existing_entry=existing_entry,
+            product=product,
+            uploaded_slots=uploaded_slots,
+            delete_requests=delete_requests,
+            slot_by_prefix=slot_by_prefix,
+            existing_photos=existing_photos,
+            cache_scope=cache_scope,
+        )
+        if existing_entry is None and existing_file_photos and not uploaded_slots and not delete_requests:
+            raise ValueError(
+                _format_existing_photo_conflicts(
+                    [
+                        {
+                            "prefix": photo.get("prefix"),
+                            "sources": _photo_source_labels(photo),
+                        }
+                        for photo in existing_file_photos
+                    ]
+                )
+            )
+        timings.append(
+            _timing_item(
+                "photo_scan",
+                "Sprawdzenie istniejacych zdjec",
+                stage_started,
+                found=len(existing_photos),
+                migrated=len(migrated_prefixes),
+            )
+        )
+        stage_started = time.perf_counter()
+        mark(34, "Zapis wpisu", current_key="entry_save", current_label="Zapis wpisu produktu")
+        entry_result = save_web_entry(
+            {
+                "product_id": product.product_id,
+                "ean": product.ean,
+                "name": product.name,
+                "type_name": product.type_name,
+                "model": product.model,
+                "color1": product.color1,
+                "color2": product.color2,
+                "color3": product.color3,
+                "extra": product.extra,
+            }
+        )
+        timings.append(_timing_item("entry_save", "Zapis wpisu produktu", stage_started))
+        stage_started = time.perf_counter()
+        mark(46, "Przetwarzanie plikow", current_key="local_files", current_label="Zapis/przetwarzanie plikow lokalnych")
+        result = process_web_uploads(
+            base_output_dir=settings.l,
+            form=product,
+            uploaded_slots=uploaded_slots,
+            options=processing_options_from_config(config.CONFIG),
+            allow_empty=True,
+        )
+        timings.append(
+            _timing_item(
+                "local_files",
+                "Zapis/przetwarzanie plikow lokalnych",
+                stage_started,
+                saved=len(result.saved_files),
+            )
+        )
+        stage_started = time.perf_counter()
+        mark(60, "Usuwanie lokalne", current_key="local_delete", current_label="Usuwanie lokalne")
+        saved_paths = {os.path.abspath(item.path) for item in result.saved_files}
+        local_delete_result = _delete_local_files(delete_requests, saved_paths)
+        timings.append(
+            _timing_item(
+                "local_delete",
+                "Usuwanie lokalne",
+                stage_started,
+                deleted=local_delete_result.get("deleted", 0),
+                skipped=local_delete_result.get("skipped", 0),
+            )
+        )
+        stage_started = time.perf_counter()
+        mark(70, "Synchronizacja FTP", current_key="ftp", current_label="Synchronizacja FTP")
+        ftp_backfill_prefixes = {
+            str(item.get("prefix") or "")
+            for item in delete_requests
+            if item.get("ftp_backfill")
+        }
+        skip_upload_prefixes = _ftp_skip_upload_prefixes(
+            result,
+            existing_file_photos,
+            explicit_prefixes=explicit_slot_prefixes,
+            migrated_prefixes=(
+                set(migrated_prefixes)
+                if _should_migrate_existing_photos(existing_entry, product)
+                else set()
+            ),
+            ftp_backfill_prefixes=ftp_backfill_prefixes,
+        )
+        ftp_delete_candidates = [
+            item.get("ftp_filename", "")
+            for item in delete_requests
+            if not item.get("ftp_backfill")
+        ]
+        ftp_delete_candidates.extend(
+            _ftp_replacement_delete_candidates(
+                result,
+                existing_file_photos,
+                explicit_prefixes=explicit_slot_prefixes,
+            )
+        )
+        ftp_result = _sync_result_to_ftp(
+            result,
+            ftp_delete_candidates,
+            skip_upload_prefixes=skip_upload_prefixes,
+        )
+        timings.append(
+            _timing_item(
+                "ftp",
+                "Synchronizacja FTP",
+                stage_started,
+                uploaded=ftp_result.get("uploaded", 0),
+                deleted=ftp_result.get("deleted", 0),
+                skipped=len(skip_upload_prefixes),
+            )
+        )
+        stage_started = time.perf_counter()
+        mark(80, "Czyszczenie cache FTP", current_key="ftp_cache", current_label="Czyszczenie cache FTP")
+        changed_ftp_names = {
+            _remote_name_for_output(str(item.filename or ""))
+            for item in result.saved_files
+            if getattr(item, "filename", "")
+        }
+        changed_ftp_names.update(
+            os.path.basename(str(name or ""))
+            for name in ftp_delete_candidates
+            if os.path.basename(str(name or ""))
+        )
+        changed_ftp_names.discard("")
+        ftp_cache_result = invalidate_ftp_preview_cache(
+            result.ean,
+            changed_ftp_names,
+            cache_scope=cache_scope,
+        )
+        timings.append(
+            _timing_item(
+                "ftp_cache",
+                "Czyszczenie cache FTP",
+                stage_started,
+                deleted=ftp_cache_result.get("deleted", 0),
+            )
+        )
+        stage_started = time.perf_counter()
+        mark(88, "Aktualizacja SQL", current_key="sql", current_label="Aktualizacja SQL")
+        sql_result = _sync_result_to_sql(
+            result,
+            clear_prefixes={
+                str(item.get("prefix") or "")
+                for item in delete_requests
+                if item.get("sql") or item.get("ftp_filename") or item.get("local_path")
+            },
+        )
+        timings.append(
+            _timing_item(
+                "sql",
+                "Aktualizacja SQL",
+                stage_started,
+                updated=sql_result.get("updated", 0),
+                cleared=sql_result.get("cleared", 0),
+                skipped=bool(sql_result.get("skipped")),
+            )
+        )
+        stage_started = time.perf_counter()
+        mark(94, "Sprzatanie cache", current_key="upload_cache", current_label="Sprzatanie cache uploadu")
+        upload_cache_result = _delete_upload_cache_files(
+            [
+                str(slot.source_path or "")
+                for slot in uploaded_slots
+                if _is_upload_cache_path(str(slot.source_path or ""))
+            ]
+        )
+        timings.append(
+            _timing_item(
+                "upload_cache",
+                "Sprzatanie cache uploadu",
+                stage_started,
+                deleted=upload_cache_result.get("deleted", 0),
+                skipped=upload_cache_result.get("skipped", 0),
+            )
+        )
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        details: Dict[str, Any] = {"status_code": exc.status_code}
+        if product is not None:
+            details.update(_process_event_details(product, uploaded_slots, delete_requests))
+        _write_web_event(
+            level="warning" if exc.status_code < 500 else "error",
+            event="PROCESS_REJECTED",
+            username=username,
+            message=detail,
+            details=details,
+        )
+        raise
+    except ValueError as exc:
+        details = {}
+        if product is not None:
+            details = _process_event_details(product, uploaded_slots, delete_requests)
+        _write_web_event(
+            level="warning",
+            event="PROCESS_REJECTED",
+            username=username,
+            message=str(exc),
+            details=details,
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        if form.temp_dir:
+            shutil.rmtree(form.temp_dir, ignore_errors=True)
+
+    payload = _result_payload(result)
+    payload["entry"] = entry_result
+    payload["migrated_slots"] = migrated_prefixes
+    payload["deleted_slots"] = delete_requests
+    payload["ftp"] = ftp_result
+    payload["ftp_cache"] = ftp_cache_result
+    payload["upload_cache"] = upload_cache_result
+    payload["sql"] = sql_result
+    payload["local_delete"] = local_delete_result
+    stage_started = time.perf_counter()
+    mark(98, "Odswiezanie indeksu", current_key="file_index", current_label="Odswiezenie indeksu lokalnego")
+    payload["file_index"] = refresh_file_index()
+    timings.append(_timing_item("file_index", "Odswiezenie indeksu lokalnego", stage_started))
+    payload["timing"] = _timing_payload(timings, process_started)
+    payload["show_timing_details"] = _show_timing_details()
+    record_history(
+        username=username,
+        action="process",
+        ean=product.ean,
+        product_id=entry_result.get("product_id", "") if isinstance(entry_result, dict) else "",
+        summary=(
+            "Zapisano usuniecia produktu."
+            if delete_requests and not result.saved_files
+            else "Zsynchronizowano produkt bez zmian w plikach."
+            if not delete_requests and not result.saved_files
+            else "Przetworzono pliki produktu."
+        ),
+        details={
+            "saved_files": payload["saved_files"],
+            "deleted_slots": delete_requests,
+            "migrated_slots": migrated_prefixes,
+            "ftp": ftp_result,
+            "ftp_cache": ftp_cache_result,
+            "upload_cache": upload_cache_result,
+            "sql": sql_result,
+            "local_delete": local_delete_result,
+            "output_dir": payload["output_dir"],
+            "timing": payload["timing"],
+            "entry": entry_result.get("entry", {}) if isinstance(entry_result, dict) else {},
+        },
+    )
+    event_level = "info"
+    event_name = "PROCESS_COMPLETED"
+    if (
+        ftp_result.get("error")
+        or sql_result.get("error")
+        or (local_delete_result.get("errors") if isinstance(local_delete_result, dict) else [])
+        or result.skipped_slots
+    ):
+        event_level = "warning"
+        event_name = "PROCESS_COMPLETED_WITH_WARNINGS"
+    _write_web_event(
+        level=event_level,
+        event=event_name,
+        username=username,
+        message=(
+            f"Zapisano {len(result.saved_files)} plikow, "
+            f"usunieto lokalnie {local_delete_result.get('deleted', 0)}."
+        ),
+        details=_process_event_details(
+            product,
+            uploaded_slots,
+            delete_requests,
+            saved_files=[item.filename for item in result.saved_files],
+            skipped_slots=result.skipped_slots,
+            migrated_slots=migrated_prefixes,
+            ftp=ftp_result,
+            ftp_cache=ftp_cache_result,
+            upload_cache=upload_cache_result,
+            sql=sql_result,
+            local_delete=local_delete_result,
+        ),
+    )
+    return payload
+
+
+def _exception_message(exc: BaseException) -> str:
+    if isinstance(exc, HTTPException):
+        detail = exc.detail
+        return detail if isinstance(detail, str) else str(detail)
+    return str(exc) or exc.__class__.__name__
+
+
+def _cleanup_process_jobs(now: Optional[float] = None) -> None:
+    cutoff = (time.time() if now is None else now) - _PROCESS_JOB_RETENTION_SECONDS
+    with _PROCESS_JOBS_LOCK:
+        for job_id, job in list(_PROCESS_JOBS.items()):
+            if job.get("status") not in {"completed", "failed"}:
+                continue
+            if float(job.get("finished_at") or 0) < cutoff:
+                _PROCESS_JOBS.pop(job_id, None)
+
+
+def _process_job_payload(job: Dict[str, Any], *, include_result: bool = True) -> Dict[str, Any]:
+    payload = {
+        "job_id": job.get("id", ""),
+        "status": job.get("status", "queued"),
+        "username": job.get("username", ""),
+        "created_at": job.get("created_at", 0),
+        "created_time": job.get("created_time", ""),
+        "started_at": job.get("started_at", 0),
+        "finished_at": job.get("finished_at", 0),
+        "entry": dict(job.get("entry") or {}),
+        "entry_label": job.get("entry_label", ""),
+        "progress": int(job.get("progress") or 0),
+        "progress_label": job.get("progress_label", ""),
+        "queue_position": int(job.get("queue_position") or 0),
+        "timing": _process_job_timing(job),
+        "error": job.get("error", ""),
+        "warning_messages": list(job.get("warning_messages") or []),
+    }
+    if include_result and job.get("result") is not None:
+        payload["result"] = job.get("result")
+    return payload
+
+
+def _process_job_timing(job: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+    now_value = time.time() if now is None else float(now)
+    started_at = float(job.get("started_at") or 0)
+    finished_at = float(job.get("finished_at") or 0)
+    end_at = finished_at if finished_at else now_value
+    total_ms = int(max(0, end_at - started_at) * 1000) if started_at else 0
+    stages = [dict(stage) for stage in (job.get("timing_stages") or []) if isinstance(stage, dict)]
+    current = job.get("current_stage") if isinstance(job.get("current_stage"), dict) else None
+    if current and not finished_at:
+        current_stage = dict(current)
+        current_started = float(current_stage.get("started_at") or 0)
+        if current_started:
+            current_stage["elapsed_ms"] = int(max(0, now_value - current_started) * 1000)
+        current_stage["running"] = True
+        stages.append(current_stage)
+    return {"total_ms": total_ms, "stages": stages}
+
+
+def _set_process_job_progress(
+    job_id: str,
+    percent: int,
+    label: str,
+    stages: Optional[List[Dict[str, Any]]] = None,
+    current_stage: Optional[Dict[str, Any]] = None,
+) -> None:
+    value = max(0, min(100, int(percent or 0)))
+    with _PROCESS_JOBS_LOCK:
+        job = _PROCESS_JOBS.get(job_id)
+        if not job:
+            return
+        job["progress"] = value
+        job["progress_label"] = str(label or "")
+        if stages is not None:
+            job["timing_stages"] = [dict(stage) for stage in stages if isinstance(stage, dict)]
+        if current_stage is not None:
+            job["current_stage"] = dict(current_stage)
+
+
+def _queue_process_job(
+    *,
+    username: str,
+    cache_scope: str,
+    form: _ProcessFormSnapshot,
+) -> Dict[str, Any]:
+    _cleanup_process_jobs()
+    job_id = secrets.token_hex(8)
+    entry = _snapshot_entry_payload(form)
+    created_at = time.time()
+    job = {
+        "id": job_id,
+        "status": "queued",
+        "username": username,
+        "cache_scope": cache_scope,
+        "form": form,
+        "entry": entry,
+        "entry_label": _process_entry_label(entry),
+        "created_at": created_at,
+        "created_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_at)),
+        "started_at": 0.0,
+        "finished_at": 0.0,
+        "result": None,
+        "progress": 0,
+        "progress_label": "Oczekuje w kolejce",
+        "timing_stages": [],
+        "current_stage": None,
+        "error": "",
+        "warning_messages": [],
+    }
+    with _PROCESS_JOBS_LOCK:
+        _PROCESS_JOBS[job_id] = job
+    _PROCESS_EXECUTOR.submit(_run_process_job, job_id)
+    return _process_job_payload(job, include_result=False)
+
+
+def _run_process_job(job_id: str) -> None:
+    with _PROCESS_JOBS_LOCK:
+        job = _PROCESS_JOBS.get(job_id)
+        if not job:
+            return
+        job["status"] = "running"
+        job["started_at"] = time.time()
+        job["progress"] = max(1, int(job.get("progress") or 0))
+        job["progress_label"] = "Start zadania"
+        username = str(job.get("username") or "")
+        cache_scope = str(job.get("cache_scope") or "")
+        form = job.get("form")
+        entry = dict(job.get("entry") or {})
+        entry_label = str(job.get("entry_label") or "")
+    try:
+        payload = _process_upload_snapshot(
+            username=username,
+            cache_scope=cache_scope,
+            form=form,
+            progress=lambda percent, label, stages, current_stage: _set_process_job_progress(
+                job_id,
+                percent,
+                label,
+                stages,
+                current_stage,
+            ),
+        )
+        warning_messages = _process_warning_messages(payload)
+        with _PROCESS_JOBS_LOCK:
+            job = _PROCESS_JOBS.get(job_id)
+            if not job:
+                return
+            job["status"] = "completed"
+            job["finished_at"] = time.time()
+            job["result"] = payload
+            job["progress"] = 100
+            job["progress_label"] = "Zakonczono"
+            job["timing_stages"] = payload.get("timing", {}).get("stages", [])
+            job["current_stage"] = None
+            job["warning_messages"] = warning_messages
+            job.pop("form", None)
+    except Exception as exc:
+        message = _exception_message(exc)
+        status_code = getattr(exc, "status_code", 500)
+        _write_web_event(
+            level="warning" if int(status_code or 500) < 500 else "error",
+            event="PROCESS_JOB_FAILED",
+            username=username,
+            message=f"{entry_label}: {message}",
+            details={"job_id": job_id, "entry": entry},
+        )
+        with _PROCESS_JOBS_LOCK:
+            job = _PROCESS_JOBS.get(job_id)
+            if not job:
+                return
+            job["status"] = "failed"
+            job["finished_at"] = time.time()
+            job["error"] = message
+            job["progress_label"] = "Blad zadania"
+            job["warning_messages"] = [message]
+            job["current_stage"] = None
+            job.pop("form", None)
+
+
+def _process_job_for_user(job_id: str, username: str) -> Optional[Dict[str, Any]]:
+    _cleanup_process_jobs()
+    with _PROCESS_JOBS_LOCK:
+        job = _PROCESS_JOBS.get(job_id)
+        if not job or str(job.get("username") or "") != username:
+            return None
+        return dict(job)
+
+
+def _process_jobs_for_user(username: str, limit: int = 20) -> List[Dict[str, Any]]:
+    _cleanup_process_jobs()
+    with _PROCESS_JOBS_LOCK:
+        jobs = [
+            dict(job)
+            for job in _PROCESS_JOBS.values()
+            if str(job.get("username") or "") == username
+        ]
+    jobs.sort(key=lambda item: float(item.get("created_at") or 0), reverse=True)
+    return [_process_job_payload(job, include_result=False) for job in jobs[: max(1, min(100, limit))]]
+
+
+def _active_process_jobs_snapshot() -> Dict[str, Any]:
+    _cleanup_process_jobs()
+    now = time.time()
+    with _PROCESS_JOBS_LOCK:
+        active_jobs = [
+            dict(job)
+            for job in _PROCESS_JOBS.values()
+            if job.get("status") in {"queued", "running"}
+        ]
+    running = sorted(
+        [job for job in active_jobs if job.get("status") == "running"],
+        key=lambda item: float(item.get("started_at") or item.get("created_at") or 0),
+    )
+    queued = sorted(
+        [job for job in active_jobs if job.get("status") == "queued"],
+        key=lambda item: float(item.get("created_at") or 0),
+    )
+    ordered = running + queued
+    payload_jobs: List[Dict[str, Any]] = []
+    queued_position = 0
+    for job in ordered:
+        item = dict(job)
+        if item.get("status") == "running":
+            item["queue_position"] = 0
+        else:
+            queued_position += 1
+            item["queue_position"] = queued_position
+        payload_jobs.append(_process_job_payload(item, include_result=False))
+    return {
+        "jobs": payload_jobs,
+        "current": payload_jobs[0] if payload_jobs and payload_jobs[0].get("status") == "running" else None,
+        "active_count": len(payload_jobs),
+        "queued_count": len(queued),
+        "server_time": now,
+    }
+
+
 def _active_clients_log_path() -> Path:
     return Path(settings.LOG_DIR) / "web_active_clients.json"
 
@@ -1824,9 +2636,22 @@ def create_app() -> FastAPI:
         return file_index_status(start=True)
 
     @app.get("/api/history")
-    def history_api(request: Request, user: str = "", limit: int = 200) -> Dict[str, Any]:
+    def history_api(
+        request: Request,
+        user: str = "",
+        limit: int = 1000,
+        query: str = "",
+        page: int = 1,
+        page_size: int = 50,
+    ) -> Dict[str, Any]:
         _require_user(request)
-        return history_snapshot(user=user, limit=limit)
+        return history_snapshot(
+            user=user,
+            limit=limit,
+            query=query,
+            page=page,
+            page_size=page_size,
+        )
 
     @app.get("/api/logs")
     def logs_api(request: Request, limit: int = 300) -> Dict[str, Any]:
@@ -2354,462 +3179,61 @@ def create_app() -> FastAPI:
             return JSONResponse(test_sql_connection())
         raise HTTPException(status_code=404, detail="Nieznany test diagnostyczny.")
 
-    @app.post("/api/process")
-    async def process_uploads(request: Request) -> JSONResponse:
-        process_started = time.perf_counter()
-        timings: List[Dict[str, Any]] = []
+    @app.get("/api/process-jobs")
+    def process_jobs_api(request: Request, limit: int = 20) -> Dict[str, Any]:
+        username = _require_user(request)
+        return {"jobs": _process_jobs_for_user(username, limit=limit)}
+
+    @app.get("/api/process-jobs/active")
+    def process_jobs_active_api(request: Request) -> Dict[str, Any]:
+        _require_user(request)
+        return _active_process_jobs_snapshot()
+
+    @app.get("/api/process-jobs/{job_id}")
+    def process_job_api(request: Request, job_id: str) -> Dict[str, Any]:
+        username = _require_user(request)
+        job = _process_job_for_user(job_id, username)
+        if not job:
+            raise HTTPException(status_code=404, detail="Nie znaleziono zadania.")
+        return _process_job_payload(job)
+
+    @app.post("/api/process/background")
+    async def process_uploads_background(request: Request) -> JSONResponse:
         username = _require_user(request)
         cache_scope = _user_cache_scope(request, username)
-        stage_started = time.perf_counter()
-        form = await request.form()
-        timings.append(_timing_item("form", "Odczyt formularza", stage_started))
-        stage_started = time.perf_counter()
-        slots = slot_definitions_from_config(config.CONFIG)
-        slot_by_prefix = {slot["prefix"]: slot for slot in slots}
-        temp_dir = tempfile.mkdtemp(prefix="picorg_web_upload_")
-        uploaded_slots: List[WebUploadedSlot] = []
-        delete_requests: List[Dict[str, Any]] = []
-        pending_ftp_slots: List[Dict[str, Any]] = []
-        explicit_slot_prefixes: Set[str] = set()
-        product: Optional[WebProductForm] = None
+        temp_dir = tempfile.mkdtemp(prefix="picorg_web_process_")
         try:
-            for prefix, slot in slot_by_prefix.items():
-                if str(form.get(f"delete_slot_{prefix}") or "") == "1":
-                    delete_item: Dict[str, Any] = {
-                        "prefix": prefix,
-                        "label": slot["label"],
-                        "local_path": "",
-                        "ftp_filename": os.path.basename(str(form.get(f"delete_ftp_slot_{prefix}") or "")),
-                        "sql": str(form.get(f"delete_sql_slot_{prefix}") or "") == "1",
-                    }
-                    local_token = str(form.get(f"delete_local_slot_{prefix}") or "").strip()
-                    if local_token:
-                        delete_item["local_path"] = _path_from_file_token(
-                            local_token,
-                            require_exists=False,
-                        )
-                    delete_requests.append(delete_item)
-                token = str(form.get(f"existing_slot_{prefix}") or "").strip()
-                if token:
-                    source_path = _path_from_file_token(token)
-                    original_filename = _safe_upload_name(
-                        str(form.get(f"existing_slot_name_{prefix}") or ""),
-                        os.path.basename(source_path),
-                    )
-                    preprocessed = (
-                        str(form.get(f"existing_slot_preprocessed_{prefix}") or "")
-                        == "1"
-                    )
-                    explicit_slot_prefixes.add(prefix)
-                    uploaded_slots.append(
-                        WebUploadedSlot(
-                            prefix=prefix,
-                            label=slot["label"],
-                            filename_label=slot.get("filename_label", ""),
-                            source_path=source_path,
-                            original_filename=original_filename,
-                            content_fit=_optional_form_bool(form, f"slot_fit_{prefix}"),
-                            preprocessed=preprocessed,
-                        )
-                    )
-                    continue
-                ftp_filename = os.path.basename(str(form.get(f"existing_ftp_slot_{prefix}") or ""))
-                if ftp_filename:
-                    explicit_slot_prefixes.add(prefix)
-                    pending_ftp_slots.append(
-                        {
-                            "prefix": prefix,
-                            "label": slot["label"],
-                            "filename_label": slot.get("filename_label", ""),
-                            "filename": ftp_filename,
-                            "ean": str(form.get(f"existing_ftp_ean_{prefix}") or ""),
-                            "content_fit": _optional_form_bool(form, f"slot_fit_{prefix}"),
-                        }
-                    )
-                    continue
-                value = form.get(f"slot_{prefix}")
-                if not isinstance(value, UploadFile) or not value.filename:
-                    continue
-                source_path = await _save_upload(value, temp_dir, prefix)
-                explicit_slot_prefixes.add(prefix)
-                uploaded_slots.append(
-                    WebUploadedSlot(
-                        prefix=prefix,
-                        label=slot["label"],
-                        filename_label=slot.get("filename_label", ""),
-                        source_path=source_path,
-                        original_filename=value.filename or "",
-                        content_fit=_optional_form_bool(form, f"slot_fit_{prefix}"),
-                    )
-                )
-            product = WebProductForm(
-                name=str(form.get("name") or ""),
-                type_name=str(form.get("type_name") or ""),
-                model=str(form.get("model") or ""),
-                color1=str(form.get("color1") or ""),
-                color2=str(form.get("color2") or ""),
-                color3=str(form.get("color3") or ""),
-                extra=str(form.get("extra") or ""),
-                ean=str(form.get("ean") or ""),
-                product_id=str(form.get("product_id") or ""),
-            )
-            errors = validate_product_form(product)
-            if errors:
-                raise ValueError(" ".join(errors))
-            timings.append(
-                _timing_item(
-                    "prepare",
-                    "Przygotowanie danych i slotow",
-                    stage_started,
-                    uploaded=len(uploaded_slots),
-                    deleted=len(delete_requests),
-                    ftp_pending=len(pending_ftp_slots),
-                )
-            )
-            stage_started = time.perf_counter()
-            existing_entry = None
-            if product.product_id.strip():
-                existing_entry = find_entry_by_identity(product_id=product.product_id)
-            if (
-                existing_entry is None
-                and product.ean.strip()
-                and product.ean.strip().upper() != "BRAK-EAN"
-            ):
-                existing_entry = find_entry_by_identity(ean=product.ean)
-            if existing_entry:
-                preserved_product_id = product.product_id or str(
-                    existing_entry.get("product_id") or ""
-                )
-                preserved_ean = product.ean or str(existing_entry.get("ean") or "")
-                if preserved_product_id != product.product_id or preserved_ean != product.ean:
-                    product = WebProductForm(
-                        name=product.name,
-                        type_name=product.type_name,
-                        model=product.model,
-                        color1=product.color1,
-                        color2=product.color2,
-                        color3=product.color3,
-                        extra=product.extra,
-                        ean=preserved_ean,
-                        product_id=preserved_product_id,
-                    )
-            timings.append(
-                _timing_item(
-                    "entry_lookup",
-                    "Wyszukanie istniejacego wpisu",
-                    stage_started,
-                    found=bool(existing_entry),
-                )
-            )
-            stage_started = time.perf_counter()
-            _append_pending_ftp_slots(
-                product=product,
-                pending_ftp_slots=pending_ftp_slots,
-                uploaded_slots=uploaded_slots,
-                delete_requests=delete_requests,
-                cache_scope=cache_scope,
-            )
-            photo_lookup_entry = existing_entry or _entry_payload_from_product(product)
-            include_sql_in_existing_photo_scan = existing_entry is not None
-            existing_photos = find_product_photos(
-                photo_lookup_entry,
-                include_local=True,
-                include_ftp=bool(config.CONFIG.get(ft, True)),
-                include_sql=include_sql_in_existing_photo_scan,
-            )
-            existing_file_photos = [
-                photo for photo in existing_photos if _photo_has_file_source(photo)
-            ]
-            if existing_entry is None:
-                conflicts = _existing_photo_conflicts(
-                    existing_file_photos,
-                    uploaded_slots,
-                    delete_requests,
-                )
-                if conflicts:
-                    raise ValueError(_format_existing_photo_conflicts(conflicts))
-            migrated_prefixes = _append_existing_photo_migrations(
-                existing_entry=existing_entry,
-                product=product,
-                uploaded_slots=uploaded_slots,
-                delete_requests=delete_requests,
-                slot_by_prefix=slot_by_prefix,
-                existing_photos=existing_photos,
-                cache_scope=cache_scope,
-            )
-            if existing_entry is None and existing_file_photos and not uploaded_slots and not delete_requests:
-                raise ValueError(
-                    _format_existing_photo_conflicts(
-                        [
-                            {
-                                "prefix": photo.get("prefix"),
-                                "sources": _photo_source_labels(photo),
-                            }
-                            for photo in existing_file_photos
-                        ]
-                    )
-                )
-            timings.append(
-                _timing_item(
-                    "photo_scan",
-                    "Sprawdzenie istniejacych zdjec",
-                    stage_started,
-                    found=len(existing_photos),
-                    migrated=len(migrated_prefixes),
-                )
-            )
-            stage_started = time.perf_counter()
-            entry_result = save_web_entry(
-                {
-                    "product_id": product.product_id,
-                    "ean": product.ean,
-                    "name": product.name,
-                    "type_name": product.type_name,
-                    "model": product.model,
-                    "color1": product.color1,
-                    "color2": product.color2,
-                    "color3": product.color3,
-                    "extra": product.extra,
-                }
-            )
-            timings.append(
-                _timing_item("entry_save", "Zapis wpisu produktu", stage_started)
-            )
-            stage_started = time.perf_counter()
-            result = process_web_uploads(
-                base_output_dir=settings.l,
-                form=product,
-                uploaded_slots=uploaded_slots,
-                options=processing_options_from_config(config.CONFIG),
-                allow_empty=True,
-            )
-            timings.append(
-                _timing_item(
-                    "local_files",
-                    "Zapis/przetwarzanie plikow lokalnych",
-                    stage_started,
-                    saved=len(result.saved_files),
-                )
-            )
-            stage_started = time.perf_counter()
-            saved_paths = {os.path.abspath(item.path) for item in result.saved_files}
-            local_delete_result = _delete_local_files(delete_requests, saved_paths)
-            timings.append(
-                _timing_item(
-                    "local_delete",
-                    "Usuwanie lokalne",
-                    stage_started,
-                    deleted=local_delete_result.get("deleted", 0),
-                    skipped=local_delete_result.get("skipped", 0),
-                )
-            )
-            stage_started = time.perf_counter()
-            ftp_backfill_prefixes = {
-                str(item.get("prefix") or "")
-                for item in delete_requests
-                if item.get("ftp_backfill")
-            }
-            skip_upload_prefixes = _ftp_skip_upload_prefixes(
-                result,
-                existing_file_photos,
-                explicit_prefixes=explicit_slot_prefixes,
-                migrated_prefixes=(
-                    set(migrated_prefixes)
-                    if _should_migrate_existing_photos(existing_entry, product)
-                    else set()
-                ),
-                ftp_backfill_prefixes=ftp_backfill_prefixes,
-            )
-            ftp_delete_candidates = [
-                item.get("ftp_filename", "")
-                for item in delete_requests
-                if not item.get("ftp_backfill")
-            ]
-            ftp_delete_candidates.extend(
-                _ftp_replacement_delete_candidates(
-                    result,
-                    existing_file_photos,
-                    explicit_prefixes=explicit_slot_prefixes,
-                )
-            )
-            ftp_result = _sync_result_to_ftp(
-                result,
-                ftp_delete_candidates,
-                skip_upload_prefixes=skip_upload_prefixes,
-            )
-            timings.append(
-                _timing_item(
-                    "ftp",
-                    "Synchronizacja FTP",
-                    stage_started,
-                    uploaded=ftp_result.get("uploaded", 0),
-                    deleted=ftp_result.get("deleted", 0),
-                    skipped=len(skip_upload_prefixes),
-                )
-            )
-            stage_started = time.perf_counter()
-            changed_ftp_names = {
-                _remote_name_for_output(str(item.filename or ""))
-                for item in result.saved_files
-                if getattr(item, "filename", "")
-            }
-            changed_ftp_names.update(
-                os.path.basename(str(name or ""))
-                for name in ftp_delete_candidates
-                if os.path.basename(str(name or ""))
-            )
-            changed_ftp_names.discard("")
-            ftp_cache_result = invalidate_ftp_preview_cache(
-                result.ean,
-                changed_ftp_names,
-                cache_scope=cache_scope,
-            )
-            timings.append(
-                _timing_item(
-                    "ftp_cache",
-                    "Czyszczenie cache FTP",
-                    stage_started,
-                    deleted=ftp_cache_result.get("deleted", 0),
-                )
-            )
-            stage_started = time.perf_counter()
-            sql_result = _sync_result_to_sql(
-                result,
-                clear_prefixes={
-                    str(item.get("prefix") or "")
-                    for item in delete_requests
-                    if item.get("sql") or item.get("ftp_filename") or item.get("local_path")
-                },
-            )
-            timings.append(
-                _timing_item(
-                    "sql",
-                    "Aktualizacja SQL",
-                    stage_started,
-                    updated=sql_result.get("updated", 0),
-                    cleared=sql_result.get("cleared", 0),
-                    skipped=bool(sql_result.get("skipped")),
-                )
-            )
-            stage_started = time.perf_counter()
-            upload_cache_result = _delete_upload_cache_files(
-                [
-                    str(slot.source_path or "")
-                    for slot in uploaded_slots
-                    if _is_upload_cache_path(str(slot.source_path or ""))
-                ]
-            )
-            timings.append(
-                _timing_item(
-                    "upload_cache",
-                    "Sprzatanie cache uploadu",
-                    stage_started,
-                    deleted=upload_cache_result.get("deleted", 0),
-                    skipped=upload_cache_result.get("skipped", 0),
-                )
-            )
-        except HTTPException as exc:
-            detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-            details: Dict[str, Any] = {"status_code": exc.status_code}
-            if product is not None:
-                details.update(_process_event_details(product, uploaded_slots, delete_requests))
-            _write_web_event(
-                level="warning" if exc.status_code < 500 else "error",
-                event="PROCESS_REJECTED",
-                username=username,
-                message=detail,
-                details=details,
-            )
-            raise
-        except ValueError as exc:
-            details = {}
-            if product is not None:
-                details = _process_event_details(product, uploaded_slots, delete_requests)
-            _write_web_event(
-                level="warning",
-                event="PROCESS_REJECTED",
-                username=username,
-                message=str(exc),
-                details=details,
-            )
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        finally:
+            form = await request.form()
+            snapshot = await _materialize_process_form(form, temp_dir)
+        except Exception:
             shutil.rmtree(temp_dir, ignore_errors=True)
-        payload = _result_payload(result)
-        payload["entry"] = entry_result
-        payload["migrated_slots"] = migrated_prefixes
-        payload["deleted_slots"] = delete_requests
-        payload["ftp"] = ftp_result
-        payload["ftp_cache"] = ftp_cache_result
-        payload["upload_cache"] = upload_cache_result
-        payload["sql"] = sql_result
-        payload["local_delete"] = local_delete_result
-        stage_started = time.perf_counter()
-        payload["file_index"] = refresh_file_index()
-        timings.append(
-            _timing_item("file_index", "Odswiezenie indeksu lokalnego", stage_started)
-        )
-        payload["timing"] = _timing_payload(timings, process_started)
-        payload["show_timing_details"] = _show_timing_details()
-        record_history(
+            raise
+        job = _queue_process_job(
             username=username,
-            action="process",
-            ean=product.ean,
-            product_id=entry_result.get("product_id", "") if isinstance(entry_result, dict) else "",
-            summary=(
-                "Zapisano usuniecia produktu."
-                if delete_requests and not result.saved_files
-                else "Zsynchronizowano produkt bez zmian w plikach."
-                if not delete_requests and not result.saved_files
-                else "Przetworzono pliki produktu."
-            ),
-            details={
-                "saved_files": payload["saved_files"],
-                "deleted_slots": delete_requests,
-                "migrated_slots": migrated_prefixes,
-                "ftp": ftp_result,
-                "ftp_cache": ftp_cache_result,
-                "upload_cache": upload_cache_result,
-                "sql": sql_result,
-                "local_delete": local_delete_result,
-                "output_dir": payload["output_dir"],
-                "entry": entry_result.get("entry", {}) if isinstance(entry_result, dict) else {},
-            },
+            cache_scope=cache_scope,
+            form=snapshot,
         )
-        event_level = "info"
-        event_name = "PROCESS_COMPLETED"
-        if (
-            ftp_result.get("error")
-            or sql_result.get("error")
-            or (local_delete_result.get("errors") if isinstance(local_delete_result, dict) else [])
-            or result.skipped_slots
-        ):
-            event_level = "warning"
-            event_name = "PROCESS_COMPLETED_WITH_WARNINGS"
-        _write_web_event(
-            level=event_level,
-            event=event_name,
-            username=username,
-            message=(
-                f"Zapisano {len(result.saved_files)} plikow, "
-                f"usunieto lokalnie {local_delete_result.get('deleted', 0)}."
-            ),
-            details=_process_event_details(
-                product,
-                uploaded_slots,
-                delete_requests,
-                saved_files=[item.filename for item in result.saved_files],
-                skipped_slots=result.skipped_slots,
-                migrated_slots=migrated_prefixes,
-                ftp=ftp_result,
-                ftp_cache=ftp_cache_result,
-                upload_cache=upload_cache_result,
-                sql=sql_result,
-                local_delete=local_delete_result,
-            ),
+        return JSONResponse({"queued": True, "job": job})
+
+    @app.post("/api/process")
+    async def process_uploads(request: Request) -> JSONResponse:
+        username = _require_user(request)
+        cache_scope = _user_cache_scope(request, username)
+        temp_dir = tempfile.mkdtemp(prefix="picorg_web_process_")
+        try:
+            form = await request.form()
+            snapshot = await _materialize_process_form(form, temp_dir)
+        except Exception:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
+        payload = await run_in_threadpool(
+            lambda: _process_upload_snapshot(
+                username=username,
+                cache_scope=cache_scope,
+                form=snapshot,
+            )
         )
         return JSONResponse(payload)
-
     return app
 
 

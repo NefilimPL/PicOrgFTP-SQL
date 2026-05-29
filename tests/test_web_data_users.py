@@ -70,6 +70,37 @@ class WebDataUserTests(unittest.TestCase):
         self.assertEqual(caught.exception.used_by, used_by)
         remove_from_list.assert_not_called()
 
+    def test_history_snapshot_filters_search_and_limits_page_size(self) -> None:
+        records = []
+        for index in range(60):
+            records.append(
+                {
+                    "ts": 1000 - index,
+                    "ean": f"5900000000{index:02}",
+                    "product_id": f"PRD-{index:02}",
+                    "summary": f"Zmiana {index}",
+                    "user": "alice" if index % 2 else "bob",
+                    "details": {
+                        "entry": {
+                            "NAZWA": "Target Lamp" if index == 10 else f"Name {index}",
+                            "MODEL": f"Model {index}",
+                        },
+                        "timing": {"total_ms": index, "stages": []},
+                    },
+                }
+            )
+
+        with patch.object(web_data, "_load_history_records", return_value=records):
+            search_payload = web_data.history_snapshot(query="target", page_size=50, limit=1000)
+            page_payload = web_data.history_snapshot(page=2, page_size=80, limit=1000)
+
+        self.assertEqual(search_payload["total_groups"], 1)
+        self.assertEqual(search_payload["groups"][0]["ean"], "590000000010")
+        self.assertEqual(page_payload["page_size"], 50)
+        self.assertEqual(page_payload["page"], 2)
+        self.assertEqual(page_payload["total_pages"], 2)
+        self.assertEqual(len(page_payload["groups"]), 10)
+
     def test_ftp_cache_dir_can_be_scoped_per_user_session(self) -> None:
         temp_dir = _workspace_temp("web_data_ftp_cache_scope")
         try:
