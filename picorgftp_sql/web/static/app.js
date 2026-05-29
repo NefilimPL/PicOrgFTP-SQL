@@ -185,6 +185,10 @@ const logsClearPassword = document.querySelector("#logsClearPassword");
 const logsClearStatus = document.querySelector("#logsClearStatus");
 const logsOutput = document.querySelector("#logsOutput");
 const logsButton = document.querySelector('[data-modal="logs"]');
+const secretRevealModal = document.querySelector("#secretRevealModal");
+const secretRevealForm = document.querySelector("#secretRevealForm");
+const secretRevealPassword = document.querySelector("#secretRevealPassword");
+const secretRevealStatus = document.querySelector("#secretRevealStatus");
 const processAlertModal = document.querySelector("#processAlertModal");
 const processAlertTitle = document.querySelector("#processAlertTitle");
 const processAlertMessage = document.querySelector("#processAlertMessage");
@@ -321,6 +325,7 @@ function closeModals() {
   document.querySelectorAll(".modal-view").forEach((modal) => modal.classList.remove("active"));
   if (logsClearPassword) logsClearPassword.value = "";
   if (logsClearStatus) logsClearStatus.textContent = "";
+  closeSecretRevealModal();
   setActiveModalNav("");
 }
 
@@ -4932,12 +4937,47 @@ async function loadSettingsSecrets(password) {
   });
 }
 
+let secretRevealResolve = null;
+
+function closeSecretRevealModal(result = null) {
+  if (secretRevealModal) {
+    secretRevealModal.classList.remove("active");
+  }
+  if (secretRevealPassword) {
+    secretRevealPassword.value = "";
+  }
+  if (secretRevealStatus) {
+    secretRevealStatus.textContent = "";
+  }
+  if (secretRevealResolve) {
+    const resolve = secretRevealResolve;
+    secretRevealResolve = null;
+    resolve(result);
+  }
+}
+
+function requestSecretRevealPassword() {
+  if (!secretRevealModal || !secretRevealPassword || !secretRevealStatus) {
+    return Promise.reject(new Error("Brak formularza potwierdzenia hasla administratora."));
+  }
+  if (secretRevealResolve) {
+    closeSecretRevealModal();
+  }
+  secretRevealPassword.value = "";
+  secretRevealStatus.textContent = "";
+  secretRevealModal.classList.add("active");
+  window.setTimeout(() => secretRevealPassword.focus(), 0);
+  return new Promise((resolve) => {
+    secretRevealResolve = resolve;
+  });
+}
+
 async function toggleCredentialReveal(input, button, secretPath, originalType) {
   if (input.dataset.secretVisible === "1") {
     hideCredentialSecret(input, button, originalType);
     return;
   }
-  const password = window.prompt("Podaj haslo administratora, zeby pokazac zapisana wartosc.");
+  const password = await requestSecretRevealPassword();
   if (password === null) {
     return;
   }
@@ -5728,6 +5768,10 @@ document.querySelectorAll("[data-close-logs-clear]").forEach((button) => {
   button.addEventListener("click", closeLogsClearModal);
 });
 
+document.querySelectorAll("[data-close-secret-reveal]").forEach((button) => {
+  button.addEventListener("click", () => closeSecretRevealModal());
+});
+
 document.querySelectorAll("[data-close-process-alert]").forEach((button) => {
   button.addEventListener("click", closeProcessAlert);
 });
@@ -5803,6 +5847,18 @@ logsClearForm?.addEventListener("submit", (event) => {
       logsClearStatus.textContent = error.message;
     }
   });
+});
+
+secretRevealForm?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const password = secretRevealPassword?.value || "";
+  if (!password) {
+    if (secretRevealStatus) {
+      secretRevealStatus.textContent = "Podaj haslo administratora.";
+    }
+    return;
+  }
+  closeSecretRevealModal(password);
 });
 
 entrySelect.addEventListener("change", () => {

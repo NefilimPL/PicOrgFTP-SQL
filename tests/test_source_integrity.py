@@ -167,14 +167,17 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("setActiveAutocompleteOption", source)
 
     def test_web_settings_security_tab_owns_secret_and_upload_limits(self) -> None:
+        root = Path(__file__).resolve().parents[1]
         app_path = (
-            Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            root / "picorgftp_sql"
             / "web"
             / "static"
             / "app.js"
         )
         source = app_path.read_text(encoding="utf-8")
+        html_source = (
+            root / "picorgftp_sql" / "web" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
         app_start = source.index("function renderSettingsApp")
         processing_start = source.index("function renderSettingsProcessing")
         security_start = source.index("function renderSettingsSecurity")
@@ -191,6 +194,10 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("blocked_upload_extensions", security_body)
         self.assertIn("block_executable_uploads", security_body)
         self.assertIn("uploadAcceptAttribute", source)
+        self.assertIn('id="secretRevealModal"', html_source)
+        self.assertIn('id="secretRevealPassword" type="password"', html_source)
+        self.assertIn("requestSecretRevealPassword", source)
+        self.assertNotIn("window.prompt", source)
 
     def test_web_settings_processing_groups_related_controls(self) -> None:
         app_path = (

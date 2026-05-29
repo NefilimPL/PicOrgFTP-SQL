@@ -339,6 +339,25 @@
       </section>
     </div>
 
+    <div id="secretRevealModal" class="modal-view">
+      <section class="modal-panel compact-modal">
+        <div class="section-heading">
+          <h1>Pokazanie sekretu</h1>
+          <button type="button" class="ghost-button modal-close" data-close-secret-reveal>Anuluj</button>
+        </div>
+        <form id="secretRevealForm" class="settings-grid">
+          <label>
+            Haslo administratora
+            <input id="secretRevealPassword" type="password" autocomplete="current-password" />
+          </label>
+          <div class="heading-actions">
+            <button type="submit" class="secondary-button">Pokaz zapisane</button>
+            <span id="secretRevealStatus"></span>
+          </div>
+        </form>
+      </section>
+    </div>
+
     <datalist id="namesList"></datalist>
     <datalist id="typesList"></datalist>
     <datalist id="modelsList"></datalist>
