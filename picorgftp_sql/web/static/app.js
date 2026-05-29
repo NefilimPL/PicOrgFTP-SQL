@@ -67,10 +67,16 @@ const state = {
   processJobPollTimer: 0,
   processQueue: { jobs: [], active_count: 0, queued_count: 0, current: null },
   acknowledgedProcessAlerts: new Set(),
+  csrfToken: "",
+  pollers: [],
 };
 
 const WEB_IMAGE_CACHE_LIMIT = 2;
-const MAX_AUTOCOMPLETE_OPTIONS = Number.POSITIVE_INFINITY;
+const MAX_AUTOCOMPLETE_OPTIONS = 80;
+const CSRF_HEADER = "X-PicOrg-CSRF";
+const CSRF_SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+const SECRET_REVEAL_MS = 60000;
+const POLL_HIDDEN_DELAY_MS = 30000;
 const CLIENT_EXECUTABLE_UPLOAD_EXTENSIONS = new Set([
   "exe",
   "bat",
@@ -185,10 +191,36 @@ const processAlertMessage = document.querySelector("#processAlertMessage");
 const processAlertEntry = document.querySelector("#processAlertEntry");
 const processAlertLoadButton = document.querySelector("#processAlertLoadButton");
 
+function isSameOriginRequest(path) {
+  try {
+    return new URL(path, window.location.href).origin === window.location.origin;
+  } catch (_error) {
+    return true;
+  }
+}
+
+function isMutatingRequest(options = {}) {
+  const method = String(options.method || "GET").toUpperCase();
+  return !CSRF_SAFE_METHODS.has(method);
+}
+
+function applyPanelRequestHeaders(path, fetchOptions) {
+  if (!isMutatingRequest(fetchOptions) || !isSameOriginRequest(path)) {
+    return;
+  }
+  const headers = new Headers(fetchOptions.headers || {});
+  headers.set("X-Requested-With", "XMLHttpRequest");
+  if (state.csrfToken) {
+    headers.set(CSRF_HEADER, state.csrfToken);
+  }
+  fetchOptions.headers = headers;
+}
+
 async function requestJson(path, options = {}) {
   const timeoutMs = Number(options.timeoutMs || 0);
   const fetchOptions = { ...options };
   delete fetchOptions.timeoutMs;
+  applyPanelRequestHeaders(path, fetchOptions);
   let timeoutId = 0;
   if (timeoutMs > 0 && !fetchOptions.signal) {
     const controller = new AbortController();
@@ -227,6 +259,9 @@ async function requestJson(path, options = {}) {
     error.status = response.status;
     error.detail = detail;
     throw error;
+  }
+  if (payload.csrf_token) {
+    state.csrfToken = payload.csrf_token;
   }
   return payload;
 }
@@ -1239,6 +1274,55 @@ function closeAutocompletePanels(exceptPanel = null) {
   });
 }
 
+function autocompleteOptions(panel) {
+  return [...panel.querySelectorAll('button[data-autocomplete-option="1"]')];
+}
+
+function setActiveAutocompleteOption(panel, index) {
+  const options = autocompleteOptions(panel);
+  if (!options.length) {
+    panel.dataset.activeIndex = "-1";
+    return;
+  }
+  const nextIndex = ((index % options.length) + options.length) % options.length;
+  options.forEach((option, optionIndex) => {
+    option.classList.toggle("active", optionIndex === nextIndex);
+    option.setAttribute("aria-selected", optionIndex === nextIndex ? "true" : "false");
+  });
+  panel.dataset.activeIndex = String(nextIndex);
+  options[nextIndex].scrollIntoView({ block: "nearest" });
+}
+
+function appendAutocompleteText(button, value, query) {
+  const text = String(value || "");
+  const needle = String(query || "").trim();
+  if (!needle) {
+    button.textContent = text;
+    return;
+  }
+  const index = text.toLowerCase().indexOf(needle.toLowerCase());
+  if (index < 0) {
+    button.textContent = text;
+    return;
+  }
+  button.append(
+    document.createTextNode(text.slice(0, index)),
+    Object.assign(document.createElement("mark"), { textContent: text.slice(index, index + needle.length) }),
+    document.createTextNode(text.slice(index + needle.length))
+  );
+}
+
+function commitAutocompleteValue(input, panel, value) {
+  panel.dataset.selecting = "1";
+  input.value = value;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  closeAutocompletePanels();
+  window.setTimeout(() => {
+    panel.dataset.selecting = "";
+  }, 0);
+}
+
 function renderAutocompletePanel(input, panel, values) {
   if (activeAutocompletePanel && activeAutocompletePanel !== panel && document.activeElement !== input) {
     return;
@@ -1248,29 +1332,28 @@ function renderAutocompletePanel(input, panel, values) {
   }
   closeAutocompletePanels(panel);
   const previousScroll = panel.scrollTop;
-  const typed = input.value.trim().toUpperCase();
+  const typed = input.value.trim();
+  const typedUpper = typed.toUpperCase();
   const filtered = values
-    .filter((value) => !typed || value.toUpperCase().includes(typed))
+    .filter((value) => !typedUpper || value.toUpperCase().includes(typedUpper))
     .slice(0, MAX_AUTOCOMPLETE_OPTIONS);
   panel.textContent = "";
+  panel.dataset.activeIndex = "-1";
   if (!filtered.length) {
     panel.classList.remove("active");
     return;
   }
-  for (const value of filtered) {
+  for (const [index, value] of filtered.entries()) {
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = value;
+    button.dataset.autocompleteOption = "1";
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", "false");
+    appendAutocompleteText(button, value, typed);
+    button.addEventListener("mouseenter", () => setActiveAutocompleteOption(panel, index));
     button.addEventListener("mousedown", (event) => {
       event.preventDefault();
-      panel.dataset.selecting = "1";
-      input.value = value;
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      input.dispatchEvent(new Event("change", { bubbles: true }));
-      closeAutocompletePanels();
-      window.setTimeout(() => {
-        panel.dataset.selecting = "";
-      }, 0);
+      commitAutocompleteValue(input, panel, value);
     });
     panel.appendChild(button);
   }
@@ -1298,6 +1381,7 @@ function setupAutocomplete() {
     host.classList.add("autocomplete-host");
     const panel = document.createElement("div");
     panel.className = "autocomplete-panel";
+    panel.setAttribute("role", "listbox");
     host.appendChild(panel);
     let requestId = 0;
     let remoteTimer = 0;
@@ -1327,7 +1411,34 @@ function setupAutocomplete() {
     input.addEventListener("focus", refresh);
     input.addEventListener("input", refresh);
     input.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") closeAutocompletePanels();
+      if (event.key === "Escape") {
+        closeAutocompletePanels();
+        return;
+      }
+      if (!["ArrowDown", "ArrowUp", "Enter"].includes(event.key)) {
+        return;
+      }
+      if (!panel.classList.contains("active")) {
+        if (event.key === "Enter") {
+          return;
+        }
+        refresh();
+      }
+      const options = autocompleteOptions(panel);
+      if (!options.length) {
+        return;
+      }
+      const currentIndex = Number(panel.dataset.activeIndex || "-1");
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setActiveAutocompleteOption(panel, currentIndex + 1);
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setActiveAutocompleteOption(panel, currentIndex - 1);
+      } else if (event.key === "Enter" && currentIndex >= 0 && options[currentIndex]) {
+        event.preventDefault();
+        commitAutocompleteValue(input, panel, options[currentIndex].textContent || "");
+      }
     });
   }
   document.addEventListener("mousedown", (event) => {
@@ -2087,6 +2198,10 @@ function uploadSlotFile(prefix, item) {
     refreshFileItemSlots(item);
   });
   xhr.open("POST", "/api/upload-cache");
+  xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+  if (state.csrfToken) {
+    xhr.setRequestHeader(CSRF_HEADER, state.csrfToken);
+  }
   xhr.responseType = "json";
   xhr.send(data);
   };
@@ -3464,7 +3579,11 @@ function updateProcessJobFromPayload(job = {}) {
 
 function scheduleProcessJobPoll(delay = 1500) {
   if (state.processJobPollTimer) {
-    return;
+    if (delay > 0) {
+      return;
+    }
+    window.clearTimeout(state.processJobPollTimer);
+    state.processJobPollTimer = 0;
   }
   state.processJobPollTimer = window.setTimeout(() => {
     state.processJobPollTimer = 0;
@@ -3473,6 +3592,10 @@ function scheduleProcessJobPoll(delay = 1500) {
 }
 
 async function pollProcessJobs() {
+  if (document.hidden) {
+    scheduleProcessJobPoll(POLL_HIDDEN_DELAY_MS);
+    return;
+  }
   const active = [...state.processJobs.values()].filter(processJobIsActive);
   if (!active.length) {
     return;
@@ -3842,6 +3965,76 @@ async function pollLogStatus({ initialize = false } = {}) {
   const payload = await requestJson("/api/logs?limit=120");
   updateLogAlert(payload.summary || {}, { initialize });
 }
+
+function createPoller(name, intervalMs, callback, options = {}) {
+  const maxDelayMs = Number(options.maxDelayMs || 60000);
+  const hiddenDelayMs = Number(options.hiddenDelayMs || POLL_HIDDEN_DELAY_MS);
+  const poller = {
+    name,
+    intervalMs,
+    failures: 0,
+    timer: 0,
+    running: false,
+  };
+  const schedule = (delayMs = intervalMs) => {
+    if (poller.timer) {
+      window.clearTimeout(poller.timer);
+    }
+    poller.timer = window.setTimeout(run, Math.max(0, delayMs));
+  };
+  const nextDelay = () => {
+    if (document.hidden) {
+      return hiddenDelayMs;
+    }
+    if (!poller.failures) {
+      return intervalMs;
+    }
+    return Math.min(maxDelayMs, intervalMs * 2 ** poller.failures);
+  };
+  const run = async () => {
+    poller.timer = 0;
+    if (document.hidden) {
+      schedule(hiddenDelayMs);
+      return;
+    }
+    if (poller.running) {
+      schedule(intervalMs);
+      return;
+    }
+    poller.running = true;
+    try {
+      await callback();
+      poller.failures = 0;
+    } catch (_error) {
+      poller.failures += 1;
+    } finally {
+      poller.running = false;
+      schedule(nextDelay());
+    }
+  };
+  poller.schedule = schedule;
+  poller.kick = () => {
+    schedule(0);
+  };
+  state.pollers.push(poller);
+  return poller;
+}
+
+function startBackgroundPollers() {
+  createPoller("fileIndex", 5000, refreshFileIndexStatus).schedule(5000);
+  createPoller("logs", 15000, pollLogStatus).schedule(15000);
+  createPoller("processQueue", 2500, refreshProcessQueue).schedule(2500);
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    return;
+  }
+  state.pollers.forEach((poller) => poller.kick());
+  if ([...state.processJobs.values()].some(processJobIsActive)) {
+    scheduleProcessJobPoll(0);
+  }
+});
 
 function openLogsClearModal() {
   if (!logsClearPassword || !logsClearStatus) {
@@ -4472,6 +4665,7 @@ async function refreshData() {
 
 async function loadBootstrap(options = {}) {
   const payload = await requestJson("/api/bootstrap", options);
+  state.csrfToken = payload.csrf_token || state.csrfToken || "";
   state.defaultSlotFit = Boolean(payload.auto_content_fit);
   state.processing = payload.processing || state.processing || {};
   state.security = payload.security || state.security || {};
@@ -4692,7 +4886,7 @@ function credentialField(name, label, isSet = false, attrs = {}) {
     reveal.type = "button";
     reveal.className = "secondary-button";
     reveal.textContent = "Pokaz zapisane";
-    reveal.title = "Wczytuje zapisana wartosc tylko do tego pola.";
+    reveal.title = "Wymaga hasla administratora i pokazuje wartosc tylko tymczasowo.";
     reveal.addEventListener("click", () => {
       toggleCredentialReveal(input, reveal, attrs.secretPath, originalType);
     });
@@ -4711,26 +4905,51 @@ function secretValueByPath(payload, path) {
   return value === undefined || value === null ? "" : String(value);
 }
 
-async function loadSettingsSecrets() {
-  if (!state.settingsSecrets) {
-    state.settingsSecrets = await requestJson("/api/settings/secrets", { timeoutMs: 10000 });
+const secretRevealTimers = new WeakMap();
+
+function clearSecretRevealTimer(input) {
+  const timer = secretRevealTimers.get(input);
+  if (timer) {
+    window.clearTimeout(timer);
+    secretRevealTimers.delete(input);
   }
-  return state.settingsSecrets;
+}
+
+function hideCredentialSecret(input, button, originalType) {
+  clearSecretRevealTimer(input);
+  input.value = "";
+  input.type = originalType;
+  input.dataset.secretVisible = "";
+  button.textContent = "Pokaz zapisane";
+}
+
+async function loadSettingsSecrets(password) {
+  return requestJson("/api/settings/secrets", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+    timeoutMs: 10000,
+  });
 }
 
 async function toggleCredentialReveal(input, button, secretPath, originalType) {
   if (input.dataset.secretVisible === "1") {
-    input.value = "";
-    input.type = originalType;
-    input.dataset.secretVisible = "";
-    button.textContent = "Pokaz zapisane";
+    hideCredentialSecret(input, button, originalType);
+    return;
+  }
+  const password = window.prompt("Podaj haslo administratora, zeby pokazac zapisana wartosc.");
+  if (password === null) {
+    return;
+  }
+  if (!password) {
+    settingsStatus.textContent = "Podaj haslo administratora.";
     return;
   }
   const previousLabel = button.textContent;
   button.disabled = true;
   button.textContent = "Wczytywanie...";
   try {
-    const payload = await loadSettingsSecrets();
+    const payload = await loadSettingsSecrets(password);
     const value = secretValueByPath(payload, secretPath);
     if (!value) {
       settingsStatus.textContent = "Brak zapisanej wartosci albo nie mozna jej odczytac aktualnym APP_SECRET.";
@@ -4743,11 +4962,17 @@ async function toggleCredentialReveal(input, button, secretPath, originalType) {
     }
     input.dataset.secretVisible = "1";
     button.textContent = "Ukryj";
-    settingsStatus.textContent = "Wczytano zapisana wartosc do pola. Zapisz tylko wtedy, gdy chcesz ja utrwalic.";
+    clearSecretRevealTimer(input);
+    secretRevealTimers.set(
+      input,
+      window.setTimeout(() => hideCredentialSecret(input, button, originalType), SECRET_REVEAL_MS)
+    );
+    settingsStatus.textContent = "Wczytano zapisana wartosc do pola na 60 s. Zapisz tylko wtedy, gdy chcesz ja utrwalic.";
   } catch (error) {
     settingsStatus.textContent = error.message || "Nie udalo sie wczytac zapisanej wartosci.";
     button.textContent = previousLabel;
   } finally {
+    state.settingsSecrets = null;
     button.disabled = false;
   }
 }
@@ -5834,7 +6059,13 @@ logoutButton.addEventListener("click", async () => {
     return;
   }
   state.navigationGuardBypass = true;
-  await fetch("/api/logout", { method: "POST" }).catch(() => {});
+  await fetch("/api/logout", {
+    method: "POST",
+    headers: {
+      "X-Requested-With": "XMLHttpRequest",
+      ...(state.csrfToken ? { [CSRF_HEADER]: state.csrfToken } : {}),
+    },
+  }).catch(() => {});
   window.location.href = "/";
 });
 
@@ -5843,12 +6074,4 @@ setupFieldChangeTracking();
 setupPageExitGuards();
 applyTheme();
 loadBootstrap().catch(showError);
-setInterval(() => {
-  refreshFileIndexStatus().catch(() => {});
-}, 5000);
-setInterval(() => {
-  pollLogStatus().catch(() => {});
-}, 15000);
-setInterval(() => {
-  refreshProcessQueue().catch(() => {});
-}, 2500);
+startBackgroundPollers();

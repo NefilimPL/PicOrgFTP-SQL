@@ -131,7 +131,8 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertNotIn('class="slots-layout"', html_source)
         self.assertIn('requestJson("/api/process-jobs/active")', js_source)
         self.assertIn("renderProcessQueue(payload)", js_source)
-        self.assertIn("setInterval(() => {\n  refreshProcessQueue()", js_source)
+        self.assertIn('createPoller("processQueue", 2500, refreshProcessQueue)', js_source)
+        self.assertIn("document.hidden", js_source)
         self.assertIn("renderProcessMeasurements(payload)", js_source)
 
     def test_web_history_has_search_pagination_and_timing_modal(self) -> None:
@@ -160,9 +161,10 @@ class SourceIntegrityTests(unittest.TestCase):
         )
         source = app_path.read_text(encoding="utf-8")
 
-        self.assertIn("MAX_AUTOCOMPLETE_OPTIONS = Number.POSITIVE_INFINITY", source)
+        self.assertIn("MAX_AUTOCOMPLETE_OPTIONS = 80", source)
         self.assertIn("uniqueValues([...local, ...values])", source)
         self.assertIn('panel.dataset.selecting === "1"', source)
+        self.assertIn("setActiveAutocompleteOption", source)
 
     def test_web_settings_security_tab_owns_secret_and_upload_limits(self) -> None:
         app_path = (

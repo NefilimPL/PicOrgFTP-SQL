@@ -21,6 +21,7 @@ import time
 import traceback
 import unicodedata
 from typing import Any, Callable, Dict, List, Optional, Set
+from urllib.parse import urlsplit
 import zipfile
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -113,8 +114,11 @@ BROWSER_EXTENSION_TOKEN_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "admin"
 ACTIVE_CLIENT_MAX_AGE_SECONDS = 180
+ACTIVE_CLIENT_FLUSH_INTERVAL_SECONDS = 15
 WEB_UPLOAD_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
 WEB_UPLOAD_CACHE_CLEAN_INTERVAL_SECONDS = 30 * 60
+CSRF_HEADER = "x-picorg-csrf"
+MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _UPLOAD_CACHE_LAST_CLEANUP = 0.0
 _BROWSER_EXTENSION_IMPORTS: Dict[str, List[Dict[str, Any]]] = {}
 _BROWSER_EXTENSION_IMPORTS_LOCK = threading.Lock()
@@ -122,6 +126,11 @@ _PROCESS_JOB_RETENTION_SECONDS = 6 * 60 * 60
 _PROCESS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="picorg-process")
 _PROCESS_JOBS: Dict[str, Dict[str, Any]] = {}
 _PROCESS_JOBS_LOCK = threading.Lock()
+_ACTIVE_CLIENTS: Dict[str, Dict[str, Any]] = {}
+_ACTIVE_CLIENTS_LOCK = threading.Lock()
+_ACTIVE_CLIENTS_LOADED = False
+_ACTIVE_CLIENTS_DIRTY = False
+_ACTIVE_CLIENTS_LAST_FLUSH = 0.0
 EXECUTABLE_UPLOAD_EXTENSIONS = {
     "exe",
     "bat",
@@ -241,6 +250,68 @@ def _session_secret() -> bytes:
 
 def _sign(payload: str) -> str:
     return hmac.new(_session_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _csrf_token_for_session(session_token: Optional[str]) -> str:
+    token = str(session_token or "")
+    if not token:
+        return ""
+    return _sign(f"csrf|{token}")
+
+
+def _csrf_token(request: Request) -> str:
+    if not _auth_enabled():
+        return ""
+    return _csrf_token_for_session(request.cookies.get(SESSION_COOKIE))
+
+
+def _request_host(request: Request) -> str:
+    return str(request.headers.get("host") or request.url.netloc or "").lower()
+
+
+def _origin_matches_request(request: Request, value: str) -> bool:
+    parsed = urlsplit(str(value or ""))
+    if not parsed.scheme or not parsed.netloc:
+        return False
+    return (
+        parsed.scheme.lower() == str(request.url.scheme or "").lower()
+        and parsed.netloc.lower() == _request_host(request)
+    )
+
+
+def _require_same_origin_mutation(request: Request) -> None:
+    origin = str(request.headers.get("origin") or "")
+    referer = str(request.headers.get("referer") or "")
+    fetch_site = str(request.headers.get("sec-fetch-site") or "").lower()
+    if origin and not _origin_matches_request(request, origin):
+        raise HTTPException(status_code=403, detail="Odrzucono request z obcego Origin.")
+    if not origin and referer and not _origin_matches_request(request, referer):
+        raise HTTPException(status_code=403, detail="Odrzucono request z obcego Referer.")
+    if not origin and not referer and fetch_site in {"cross-site", "same-site"}:
+        raise HTTPException(status_code=403, detail="Odrzucono request spoza panelu.")
+
+
+def _validate_mutating_request(request: Request) -> None:
+    method = str(request.method or "").upper()
+    if method not in MUTATING_METHODS:
+        return
+    path = str(request.url.path or "")
+    if path.startswith("/api/browser-extension/"):
+        return
+    _require_same_origin_mutation(request)
+    if path == "/api/login":
+        if str(request.headers.get("x-requested-with") or "").lower() != "xmlhttprequest":
+            raise HTTPException(status_code=403, detail="Brak naglowka requestu panelu.")
+        return
+    if not _auth_enabled():
+        return
+    session_token = request.cookies.get(SESSION_COOKIE)
+    if not session_token:
+        return
+    expected = _csrf_token_for_session(session_token)
+    supplied = str(request.headers.get(CSRF_HEADER) or "")
+    if not expected or not hmac.compare_digest(expected, supplied):
+        raise HTTPException(status_code=403, detail="Niepoprawny token CSRF.")
 
 
 def _make_session_token(username: str) -> str:
@@ -2026,23 +2097,7 @@ def _process_upload_snapshot(
             )
         )
         stage_started = time.perf_counter()
-        mark(34, "Zapis wpisu", current_key="entry_save", current_label="Zapis wpisu produktu")
-        entry_result = save_web_entry(
-            {
-                "product_id": product.product_id,
-                "ean": product.ean,
-                "name": product.name,
-                "type_name": product.type_name,
-                "model": product.model,
-                "color1": product.color1,
-                "color2": product.color2,
-                "color3": product.color3,
-                "extra": product.extra,
-            }
-        )
-        timings.append(_timing_item("entry_save", "Zapis wpisu produktu", stage_started))
-        stage_started = time.perf_counter()
-        mark(46, "Przetwarzanie plikow", current_key="local_files", current_label="Zapis/przetwarzanie plikow lokalnych")
+        mark(34, "Przetwarzanie plikow", current_key="local_files", current_label="Zapis/przetwarzanie plikow lokalnych")
         result = process_web_uploads(
             base_output_dir=settings.l,
             form=product,
@@ -2180,6 +2235,10 @@ def _process_upload_snapshot(
                 skipped=upload_cache_result.get("skipped", 0),
             )
         )
+        stage_started = time.perf_counter()
+        mark(96, "Zapis wpisu", current_key="entry_save", current_label="Zapis wpisu produktu")
+        entry_result = save_web_entry(_entry_payload_from_product(product))
+        timings.append(_timing_item("entry_save", "Zapis wpisu produktu", stage_started))
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
         details: Dict[str, Any] = {"status_code": exc.status_code}
@@ -2535,16 +2594,18 @@ def _active_client_key(item: Dict[str, Any]) -> str:
     )
 
 
-def _active_clients_snapshot(now: Optional[float] = None) -> List[Dict[str, Any]]:
-    now_value = time.time() if now is None else float(now)
+def _load_active_clients_from_disk_locked(now_value: float) -> None:
+    global _ACTIVE_CLIENTS_LOADED
+    if _ACTIVE_CLIENTS_LOADED:
+        return
+    _ACTIVE_CLIENTS_LOADED = True
     path = _active_clients_log_path()
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return []
+        return
     if not isinstance(payload, list):
-        return []
-    clients: List[Dict[str, Any]] = []
+        return
     for item in payload:
         if not isinstance(item, dict):
             continue
@@ -2553,12 +2614,62 @@ def _active_clients_snapshot(now: Optional[float] = None) -> List[Dict[str, Any]
         except (TypeError, ValueError):
             continue
         if last_seen and now_value - last_seen <= ACTIVE_CLIENT_MAX_AGE_SECONDS:
-            clients.append(item)
-    clients.sort(key=lambda item: float(item.get("last_seen_epoch") or 0), reverse=True)
-    return clients
+            _ACTIVE_CLIENTS[_active_client_key(item)] = item
+
+
+def _prune_active_clients_locked(now_value: float) -> None:
+    global _ACTIVE_CLIENTS_DIRTY
+    expired = [
+        key
+        for key, item in _ACTIVE_CLIENTS.items()
+        if now_value - float(item.get("last_seen_epoch") or 0) > ACTIVE_CLIENT_MAX_AGE_SECONDS
+    ]
+    for key in expired:
+        _ACTIVE_CLIENTS.pop(key, None)
+    if expired:
+        _ACTIVE_CLIENTS_DIRTY = True
+
+
+def _active_client_payload_locked(now_value: float) -> List[Dict[str, Any]]:
+    _load_active_clients_from_disk_locked(now_value)
+    _prune_active_clients_locked(now_value)
+    clients = sorted(
+        _ACTIVE_CLIENTS.values(),
+        key=lambda item: float(item.get("last_seen_epoch") or 0),
+        reverse=True,
+    )[:100]
+    return [dict(item) for item in clients]
+
+
+def _flush_active_clients_locked(now_value: float, *, force: bool = False) -> None:
+    global _ACTIVE_CLIENTS_DIRTY, _ACTIVE_CLIENTS_LAST_FLUSH
+    if not _ACTIVE_CLIENTS_DIRTY and not force:
+        return
+    if not force and now_value - _ACTIVE_CLIENTS_LAST_FLUSH < ACTIVE_CLIENT_FLUSH_INTERVAL_SECONDS:
+        return
+    payload = _active_client_payload_locked(now_value)
+    try:
+        path = _active_clients_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(".json.tmp")
+        temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temp_path, path)
+        _ACTIVE_CLIENTS_DIRTY = False
+        _ACTIVE_CLIENTS_LAST_FLUSH = now_value
+    except OSError:
+        pass
+
+
+def _active_clients_snapshot(now: Optional[float] = None) -> List[Dict[str, Any]]:
+    now_value = time.time() if now is None else float(now)
+    with _ACTIVE_CLIENTS_LOCK:
+        clients = _active_client_payload_locked(now_value)
+        _flush_active_clients_locked(now_value)
+        return clients
 
 
 def _record_active_client(request: Request, status_code: int) -> None:
+    global _ACTIVE_CLIENTS_DIRTY
     path_text = str(request.url.path or "")
     if path_text.startswith("/static/") or path_text == "/api/health":
         return
@@ -2580,22 +2691,12 @@ def _record_active_client(request: Request, status_code: int) -> None:
         "last_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "last_seen_epoch": now_value,
     }
-    clients = _active_clients_snapshot(now_value)
-    by_key = {_active_client_key(existing): existing for existing in clients}
-    by_key[_active_client_key(item)] = item
-    payload = sorted(
-        by_key.values(),
-        key=lambda existing: float(existing.get("last_seen_epoch") or 0),
-        reverse=True,
-    )[:100]
-    try:
-        path = _active_clients_log_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = path.with_suffix(".json.tmp")
-        temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temp_path, path)
-    except OSError:
-        pass
+    with _ACTIVE_CLIENTS_LOCK:
+        _load_active_clients_from_disk_locked(now_value)
+        _prune_active_clients_locked(now_value)
+        _ACTIVE_CLIENTS[_active_client_key(item)] = item
+        _ACTIVE_CLIENTS_DIRTY = True
+        _flush_active_clients_locked(now_value)
 
 
 def _optional_form_bool(form: Any, key: str) -> Optional[bool]:
@@ -2662,6 +2763,14 @@ def create_app() -> FastAPI:
             raise
 
     @app.middleware("http")
+    async def _guard_mutating_requests(request: Request, call_next):
+        try:
+            _validate_mutating_request(request)
+        except HTTPException as exc:
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+        return await call_next(request)
+
+    @app.middleware("http")
     async def _track_active_clients(request: Request, call_next):
         response = await call_next(request)
         _record_active_client(request, getattr(response, "status_code", 0))
@@ -2674,6 +2783,11 @@ def create_app() -> FastAPI:
         app.state.runtime_info = runtime_info
         cleanup_web_ftp_cache(force=True)
         cleanup_web_upload_cache(force=True)
+
+    @app.on_event("shutdown")
+    def _shutdown() -> None:
+        with _ACTIVE_CLIENTS_LOCK:
+            _flush_active_clients_locked(time.time(), force=True)
 
     @app.get("/api/health")
     def health() -> Dict[str, Any]:
@@ -2705,10 +2819,13 @@ def create_app() -> FastAPI:
         user = authenticate_user(username, password)
         if not user:
             raise HTTPException(status_code=401, detail="Niepoprawny login lub haslo.")
-        response = JSONResponse({"ok": True, "user": user})
+        session_token = _make_session_token(username)
+        response = JSONResponse(
+            {"ok": True, "user": user, "csrf_token": _csrf_token_for_session(session_token)}
+        )
         response.set_cookie(
             SESSION_COOKIE,
-            _make_session_token(username),
+            session_token,
             max_age=SESSION_MAX_AGE_SECONDS,
             httponly=True,
             samesite="lax",
@@ -2740,6 +2857,7 @@ def create_app() -> FastAPI:
             "admin_user": _admin_username(),
             "auth_enabled": _auth_enabled(),
             "current_user": _current_user_payload(request),
+            "csrf_token": _csrf_token(request),
             **load_web_data(),
         }
 
@@ -3248,9 +3366,15 @@ def create_app() -> FastAPI:
         snapshot["current_user"] = _current_user_payload(request)
         return JSONResponse(snapshot)
 
-    @app.get("/api/settings/secrets")
-    def settings_secrets(request: Request) -> JSONResponse:
-        _require_admin(request)
+    @app.post("/api/settings/secrets")
+    async def settings_secrets(request: Request) -> JSONResponse:
+        current_user = _require_admin(request)
+        payload = await request.json()
+        password = str(payload.get("password") if isinstance(payload, dict) else "")
+        username = str(current_user.get("username") or "")
+        verified = authenticate_user(username, password)
+        if not verified or verified.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Niepoprawne haslo administratora.")
         return JSONResponse(
             settings_secret_values(),
             headers={"Cache-Control": "no-store"},
