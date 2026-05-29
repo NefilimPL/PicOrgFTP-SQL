@@ -738,24 +738,48 @@ h2 {
 
 .settings-form {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 14px;
+  grid-template-columns: 1fr;
+  align-items: start;
+  gap: 12px;
 }
 
-.settings-form .wide-field {
+.settings-form > .wide-field,
+.settings-field-group > .wide-field {
   grid-column: 1 / -1;
 }
 
 .settings-field-group {
+  grid-column: 1 / -1;
   display: grid;
-  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  align-items: start;
+  gap: 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 12px;
 }
 
 .settings-field-group h2 {
+  grid-column: 1 / -1;
   margin: 0;
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.settings-field-group label,
+.settings-field-group .credential-field,
+.settings-field-group .check-row {
+  min-width: 0;
+}
+
+.settings-field-group small,
+.settings-field-group .settings-note {
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.settings-field-group .user-add-form {
+  margin-bottom: 0;
 }
 
 .nested-grid {

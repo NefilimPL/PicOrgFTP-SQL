@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+import re
 import unittest
 
 
@@ -286,6 +287,32 @@ class SourceIntegrityTests(unittest.TestCase):
                 block = body[start:] if next_group == -1 else body[start:next_group]
                 for field in expected_fields:
                     self.assertIn(field, block)
+
+    def test_web_settings_field_groups_are_full_width_cards(self) -> None:
+        css_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.css"
+        )
+        source = css_path.read_text(encoding="utf-8")
+
+        def css_block(selector: str) -> str:
+            pattern = rf"(?m)^{re.escape(selector)}\s*\{{(?P<body>.*?)\n\}}"
+            match = re.search(pattern, source, flags=re.S)
+            self.assertIsNotNone(match, f"Missing CSS block for {selector}")
+            return match.group("body")
+
+        settings_form = css_block(".settings-form")
+        settings_group = css_block(".settings-field-group")
+        settings_group_title = css_block(".settings-field-group h2")
+
+        self.assertIn("grid-template-columns: 1fr", settings_form)
+        self.assertIn("grid-column: 1 / -1", settings_group)
+        self.assertIn("grid-template-columns: repeat(auto-fit, minmax(220px, 1fr))", settings_group)
+        self.assertIn("align-items: start", settings_group)
+        self.assertIn("grid-column: 1 / -1", settings_group_title)
 
 
 if __name__ == "__main__":
