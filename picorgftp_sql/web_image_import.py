@@ -15,7 +15,7 @@ import subprocess
 from typing import Callable, Iterable
 from urllib.parse import unquote, urldefrag, urljoin, urlparse
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 from .common import SSL_CONTEXT
 
@@ -39,7 +39,9 @@ IMAGE_EXTENSIONS = {
 }
 MAX_PAGE_BYTES = 5 * 1024 * 1024
 MAX_IMAGE_BYTES = 30 * 1024 * 1024
+MAX_REDIRECTS = 5
 MAX_CANDIDATES = 140
+REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
 CURL_META_MARKER = b"\n---PICORGFTP-CURL-META-0b57754a---\n"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -131,11 +133,69 @@ def validate_public_http_url(url: object) -> str:
     return text
 
 
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, *_args, **_kwargs):
+        return None
+
+
 def _urlopen(request: Request, timeout: int = 12):
-    kwargs = {"timeout": timeout}
-    if SSL_CONTEXT is not None:
-        kwargs["context"] = SSL_CONTEXT
-    return urlopen(request, **kwargs)
+    if SSL_CONTEXT is None:
+        return build_opener(_NoRedirectHandler()).open(request, timeout=timeout)
+    return build_opener(
+        _NoRedirectHandler(),
+        HTTPSHandler(context=SSL_CONTEXT),
+    ).open(request, timeout=timeout)
+
+
+def _request_headers(request: Request) -> dict[str, str]:
+    return {key: value for key, value in request.header_items()}
+
+
+def _redirect_location(exc: HTTPError) -> str:
+    if exc.code not in REDIRECT_STATUS_CODES:
+        return ""
+    header_getter = getattr(exc.headers, "get", None)
+    if not callable(header_getter):
+        return ""
+    return str(header_getter("Location") or header_getter("location") or "").strip()
+
+
+def _response_url(response: object) -> str:
+    getter = getattr(response, "geturl", None)
+    if callable(getter):
+        return str(getter() or "").strip()
+    return str(getattr(response, "url", "") or "").strip()
+
+
+def _open_validated_request(
+    request: Request,
+    timeout: int,
+    *,
+    opener: Callable[[Request, int], object],
+    validator: Callable[[object], str],
+) -> object:
+    current = request
+    for _redirect_count in range(MAX_REDIRECTS + 1):
+        try:
+            response = opener(current, timeout)
+        except HTTPError as exc:
+            location = _redirect_location(exc)
+            if not location:
+                raise
+            redirected_url = validator(urljoin(current.full_url, location))
+            current = Request(redirected_url, headers=_request_headers(current))
+            continue
+        final_url = _response_url(response)
+        if final_url and final_url != current.full_url:
+            try:
+                validator(final_url)
+            except Exception:
+                close = getattr(response, "close", None)
+                if callable(close):
+                    close()
+                raise
+        return response
+    raise ImageImportError("Za duzo przekierowan podczas pobierania URL.")
 
 
 def _read_limited(response, max_bytes: int) -> bytes:
@@ -216,6 +276,17 @@ def _decode_html_bytes(data: bytes, content_type: str = "", charset: str = "") -
     return data.decode(encoding or "utf-8", errors="replace")
 
 
+def _validate_image_pixel_limit(width: int, height: int, max_pixels: int | None) -> None:
+    if not max_pixels or width <= 0 or height <= 0:
+        return
+    limit = max(1, int(max_pixels))
+    pixels = int(width) * int(height)
+    if pixels > limit:
+        raise ImageImportError(
+            f"Obraz ma {pixels} pikseli ({width}x{height}), limit to {limit} pikseli."
+        )
+
+
 def _curl_executable() -> str:
     return shutil.which("curl.exe") or shutil.which("curl") or ""
 
@@ -230,7 +301,6 @@ def _fetch_page_html_with_curl(url: str) -> str:
     )
     command = [
         executable,
-        "-L",
         "--silent",
         "--show-error",
         "--compressed",
@@ -287,6 +357,8 @@ def _fetch_page_html_with_curl(url: str) -> str:
         raise ImageImportError(f"Nie udalo sie pobrac strony: {message or completed.returncode}")
     if _is_cloudflare_challenge(status_code, body=body):
         raise _challenge_error()
+    if status_code in REDIRECT_STATUS_CODES:
+        raise ImageImportError("Strona zwrocila przekierowanie, ktore nie zostalo pobrane przez curl.")
     if status_code >= 400:
         raise ImageImportError(f"Nie udalo sie pobrac strony: HTTP Error {status_code}")
     if "html" not in content_type and "xml" not in content_type and content_type:
@@ -307,7 +379,12 @@ def fetch_page_html(
     for retry in (False, True):
         request = Request(cleaned_url, headers=_page_request_headers(cleaned_url, retry=retry))
         try:
-            with opener(request, 12) as response:
+            with _open_validated_request(
+                request,
+                12,
+                opener=opener,
+                validator=validator,
+            ) as response:
                 headers = response.headers
                 content_type = headers.get("content-type", "")
                 if "html" not in content_type and "xml" not in content_type and content_type:
@@ -514,7 +591,13 @@ def _html_url_candidates(base_url: str, html: str) -> list[dict[str, object]]:
     return parser.candidates
 
 
-def probe_image_url(url: str, referer: str = "") -> tuple[int, int, int, str]:
+def probe_image_url(
+    url: str,
+    referer: str = "",
+    *,
+    max_bytes: int = MAX_IMAGE_BYTES,
+    max_pixels: int | None = None,
+) -> tuple[int, int, int, str]:
     """Download an image and return width, height, size and MIME type."""
 
     cleaned_url = validate_public_http_url(url)
@@ -526,9 +609,14 @@ def probe_image_url(url: str, referer: str = "") -> tuple[int, int, int, str]:
         headers["Referer"] = referer
     request = Request(cleaned_url, headers=headers)
     try:
-        with _urlopen(request) as response:
+        with _open_validated_request(
+            request,
+            12,
+            opener=_urlopen,
+            validator=validate_public_http_url,
+        ) as response:
             content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-            data = _read_limited(response, MAX_IMAGE_BYTES)
+            data = _read_limited(response, max_bytes)
     except ImageImportError:
         raise
     except Exception as exc:
@@ -547,12 +635,19 @@ def probe_image_url(url: str, referer: str = "") -> tuple[int, int, int, str]:
                 content_type = content_type or Image.MIME.get(image.format, "")
         except Exception as exc:
             raise ImageImportError("Pobrany plik nie jest obslugiwanym obrazem.") from exc
+    _validate_image_pixel_limit(width, height, max_pixels)
     if content_type and not content_type.startswith("image/"):
         raise ImageImportError("Pobrany plik nie jest obrazem.")
     return width, height, len(data), content_type or mimetype_from_url(url) or "image/jpeg"
 
 
-def download_image_bytes(url: str, referer: str = "") -> tuple[bytes, str, str, int, int]:
+def download_image_bytes(
+    url: str,
+    referer: str = "",
+    *,
+    max_bytes: int = MAX_IMAGE_BYTES,
+    max_pixels: int | None = None,
+) -> tuple[bytes, str, str, int, int]:
     """Download an image and return bytes, filename, MIME type, width and height."""
 
     cleaned_url = validate_public_http_url(url)
@@ -564,9 +659,14 @@ def download_image_bytes(url: str, referer: str = "") -> tuple[bytes, str, str, 
         headers["Referer"] = referer
     request = Request(cleaned_url, headers=headers)
     try:
-        with _urlopen(request) as response:
+        with _open_validated_request(
+            request,
+            12,
+            opener=_urlopen,
+            validator=validate_public_http_url,
+        ) as response:
             content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-            data = _read_limited(response, MAX_IMAGE_BYTES)
+            data = _read_limited(response, max_bytes)
     except ImageImportError:
         raise
     except Exception as exc:
@@ -580,6 +680,7 @@ def download_image_bytes(url: str, referer: str = "") -> tuple[bytes, str, str, 
                 content_type = content_type or Image.MIME.get(image.format, "")
         except Exception as exc:
             raise ImageImportError("Pobrany plik nie jest obslugiwanym obrazem.") from exc
+    _validate_image_pixel_limit(width, height, max_pixels)
     if content_type and not content_type.startswith("image/"):
         raise ImageImportError("Pobrany plik nie jest obrazem.")
     return (

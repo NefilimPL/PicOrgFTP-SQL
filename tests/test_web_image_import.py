@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import io
+from types import SimpleNamespace
 from urllib.error import HTTPError
+from urllib.parse import urlparse
 
 import picorgftp_sql.web_image_import as web_image_import
 from picorgftp_sql.web_image_import import discover_image_candidates
 from picorgftp_sql.web_image_import import fetch_page_html
+from picorgftp_sql.web_image_import import ImageImportError
+
+try:
+    from PIL import Image
+except Exception:  # pragma: no cover - optional test dependency
+    Image = None
 
 
 def test_discover_image_candidates_collects_gallery_sources_and_dimensions() -> None:
@@ -299,3 +307,133 @@ def test_fetch_page_html_uses_curl_fallback_after_repeated_forbidden(monkeypatch
 
     assert html == "<html>curl:https://shop.example/product.html</html>"
     assert len(calls) == 2
+
+
+def test_fetch_page_html_revalidates_redirect_targets() -> None:
+    validated = []
+
+    def validator(url):
+        cleaned = str(url)
+        validated.append(cleaned)
+        if urlparse(cleaned).hostname == "127.0.0.1":
+            raise ImageImportError("private redirect blocked")
+        return cleaned
+
+    def fake_open(request, _timeout=12):
+        raise HTTPError(
+            request.full_url,
+            302,
+            "Found",
+            hdrs={"Location": "http://127.0.0.1/admin"},
+            fp=io.BytesIO(b""),
+        )
+
+    try:
+        fetch_page_html(
+            "https://shop.example/product.html",
+            opener=fake_open,
+            validator=validator,
+        )
+    except ImageImportError as exc:
+        assert "private redirect blocked" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("redirect to private address was accepted")
+
+    assert "http://127.0.0.1/admin" in validated
+
+
+def test_download_image_bytes_revalidates_redirect_targets(monkeypatch) -> None:
+    validated = []
+
+    def validator(url):
+        cleaned = str(url)
+        validated.append(cleaned)
+        if urlparse(cleaned).hostname == "127.0.0.1":
+            raise ImageImportError("private redirect blocked")
+        return cleaned
+
+    def fake_open(request, _timeout=12):
+        raise HTTPError(
+            request.full_url,
+            302,
+            "Found",
+            hdrs={"Location": "http://127.0.0.1/image.jpg"},
+            fp=io.BytesIO(b""),
+        )
+
+    monkeypatch.setattr(web_image_import, "_urlopen", fake_open)
+    monkeypatch.setattr(web_image_import, "validate_public_http_url", validator)
+
+    try:
+        web_image_import.download_image_bytes("https://cdn.example/image.jpg")
+    except ImageImportError as exc:
+        assert "private redirect blocked" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("redirect to private address was accepted")
+
+    assert "http://127.0.0.1/image.jpg" in validated
+
+
+def test_fetch_page_html_curl_fallback_does_not_follow_redirects(monkeypatch) -> None:
+    captured = {}
+
+    def fake_run(command, **_kwargs):
+        captured["command"] = command
+        return SimpleNamespace(
+            returncode=0,
+            stdout=b"<html>ok</html>"
+            + web_image_import.CURL_META_MARKER
+            + b"200\ntext/html; charset=utf-8\n",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(web_image_import, "_curl_executable", lambda: "curl")
+    monkeypatch.setattr(web_image_import.subprocess, "run", fake_run)
+
+    html = web_image_import._fetch_page_html_with_curl("https://shop.example/product.html")
+
+    assert html == "<html>ok</html>"
+    assert "-L" not in captured["command"]
+
+
+def test_download_image_bytes_rejects_images_above_pixel_limit(monkeypatch) -> None:
+    if Image is None:
+        return
+    buffer = io.BytesIO()
+    Image.new("RGB", (10, 10), "white").save(buffer, format="PNG")
+
+    class FakeResponse:
+        headers = {"content-type": "image/png"}
+
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+            self._sent = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size=-1):
+            if self._sent:
+                return b""
+            self._sent = True
+            return self._payload
+
+    monkeypatch.setattr(
+        web_image_import,
+        "_urlopen",
+        lambda _request, _timeout=12: FakeResponse(buffer.getvalue()),
+    )
+    monkeypatch.setattr(web_image_import, "validate_public_http_url", lambda url: str(url))
+
+    try:
+        web_image_import.download_image_bytes(
+            "https://cdn.example/large.png",
+            max_pixels=50,
+        )
+    except ImageImportError as exc:
+        assert "pikseli" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("image above pixel limit was accepted")

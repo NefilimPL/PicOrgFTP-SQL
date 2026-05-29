@@ -36,6 +36,7 @@ from ..common import (
     H,
     K,
     PROCESSING_SETTINGS_KEY,
+    SECURITY_SETTINGS_KEY,
     SQL_COLUMN_MAP_KEY,
     SQL_UPDATE_TEMPLATE,
     ft,
@@ -121,6 +122,21 @@ _PROCESS_JOB_RETENTION_SECONDS = 6 * 60 * 60
 _PROCESS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="picorg-process")
 _PROCESS_JOBS: Dict[str, Dict[str, Any]] = {}
 _PROCESS_JOBS_LOCK = threading.Lock()
+EXECUTABLE_UPLOAD_EXTENSIONS = {
+    "exe",
+    "bat",
+    "cmd",
+    "com",
+    "msi",
+    "ps1",
+    "vbs",
+    "js",
+    "jar",
+    "dll",
+    "scr",
+    "pif",
+    "sh",
+}
 
 
 @dataclass(frozen=True)
@@ -166,12 +182,41 @@ def _processing_settings() -> Dict[str, Any]:
     )
 
 
+def _security_settings() -> Dict[str, Any]:
+    raw_security = config.CONFIG.get(SECURITY_SETTINGS_KEY, {})
+    if not isinstance(raw_security, dict):
+        raw_security = {}
+    merged = dict(raw_security)
+    legacy_processing = config.CONFIG.get(PROCESSING_SETTINGS_KEY, {})
+    if isinstance(legacy_processing, dict):
+        for key in ("max_upload_mb", "max_upload_pixels"):
+            if key not in merged and key in legacy_processing:
+                merged[key] = legacy_processing[key]
+    return config._normalize_security_settings(merged)
+
+
 def _upload_processing_mode() -> str:
     return str(_processing_settings().get("upload_processing_mode") or "save")
 
 
 def _show_timing_details() -> bool:
     return bool(_processing_settings().get("show_timing_details", False))
+
+
+def _upload_limits() -> tuple[int, int]:
+    security = _security_settings()
+    max_bytes = max(1, int(security.get("max_upload_mb") or 50)) * 1024 * 1024
+    max_pixels = max(1, int(security.get("max_upload_pixels") or 25_000_000))
+    return max_bytes, max_pixels
+
+
+def _upload_limit_message(size: int, max_bytes: int) -> str:
+    limit_mb = max_bytes / (1024 * 1024)
+    return f"Plik ma zbyt duzy rozmiar. Limit uploadu to {limit_mb:g} MB."
+
+
+def _raise_upload_too_large(message: str) -> None:
+    raise HTTPException(status_code=413, detail=message)
 
 
 def _auth_enabled() -> bool:
@@ -335,6 +380,29 @@ def _safe_file_suffix(filename: str) -> str:
     if suffix and len(suffix) <= 12 and re.fullmatch(r"\.[a-z0-9]+", suffix):
         return suffix
     return ""
+
+
+def _upload_extension(filename: object) -> str:
+    suffix = _safe_file_suffix(str(filename or ""))
+    return suffix[1:] if suffix.startswith(".") else ""
+
+
+def _validate_upload_extension(filename: object) -> None:
+    extension = _upload_extension(filename)
+    security = _security_settings()
+    allowed = set(security.get("allowed_upload_extensions") or [])
+    blocked = set(security.get("blocked_upload_extensions") or [])
+    if not extension:
+        raise HTTPException(status_code=400, detail="Plik musi miec rozszerzenie.")
+    if extension in blocked:
+        raise HTTPException(status_code=400, detail=f"Typ pliku .{extension} jest zablokowany.")
+    if security.get("block_executable_uploads", True) and extension in EXECUTABLE_UPLOAD_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Plik wykonywalny .{extension} jest zablokowany.",
+        )
+    if allowed and extension not in allowed:
+        raise HTTPException(status_code=400, detail=f"Typ pliku .{extension} nie jest dozwolony.")
 
 
 def _upload_cache_root() -> str:
@@ -557,18 +625,46 @@ def _image_dimensions(path: str) -> tuple[int, int]:
         return 0, 0
 
 
+def _validate_upload_image_pixels(path: str, max_pixels: int) -> tuple[int, int]:
+    width, height = _image_dimensions(path)
+    if width <= 0 or height <= 0:
+        return width, height
+    pixels = int(width) * int(height)
+    if pixels > max_pixels:
+        _raise_upload_too_large(
+            f"Obraz ma {pixels} pikseli ({width}x{height}), limit uploadu to {max_pixels} pikseli."
+        )
+    return width, height
+
+
 async def _save_upload(upload: UploadFile, temp_dir: str, prefix: str) -> str:
     safe_name = _safe_upload_name(upload.filename, f"{prefix}.upload")
     suffix = _safe_file_suffix(safe_name)
     target_path = os.path.join(temp_dir, f"{prefix}_{secrets.token_hex(8)}{suffix}")
-    with open(target_path, "wb") as handle:
-        while True:
-            chunk = await upload.read(1024 * 1024)
-            if not chunk:
-                break
-            handle.write(chunk)
-    await upload.close()
-    return target_path
+    max_bytes, max_pixels = _upload_limits()
+    size = 0
+    try:
+        _validate_upload_extension(safe_name)
+        with open(target_path, "wb") as handle:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    _raise_upload_too_large(_upload_limit_message(size, max_bytes))
+                handle.write(chunk)
+        _validate_upload_image_pixels(target_path, max_pixels)
+        return target_path
+    except Exception:
+        if os.path.exists(target_path):
+            try:
+                os.remove(target_path)
+            except OSError:
+                pass
+        raise
+    finally:
+        await upload.close()
 
 
 def _upload_prefix_from_form_key(key: str) -> str:
@@ -611,16 +707,30 @@ async def _save_upload_cache(upload: UploadFile, cache_scope: str, prefix: str) 
         cache_dir,
         f"{safe_prefix}_{secrets.token_hex(12)}_{safe_stem}{suffix}",
     )
+    max_bytes, max_pixels = _upload_limits()
     size = 0
-    with open(target_path, "wb") as handle:
-        while True:
-            chunk = await upload.read(1024 * 1024)
-            if not chunk:
-                break
-            size += len(chunk)
-            handle.write(chunk)
-    await upload.close()
-    return target_path, size
+    try:
+        _validate_upload_extension(safe_name)
+        with open(target_path, "wb") as handle:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    _raise_upload_too_large(_upload_limit_message(size, max_bytes))
+                handle.write(chunk)
+        _validate_upload_image_pixels(target_path, max_pixels)
+        return target_path, size
+    except Exception:
+        if os.path.exists(target_path):
+            try:
+                os.remove(target_path)
+            except OSError:
+                pass
+        raise
+    finally:
+        await upload.close()
 
 
 def _save_web_image_cache(
@@ -629,8 +739,15 @@ def _save_web_image_cache(
     cache_scope: str,
     prefix: str,
 ) -> tuple[str, int, str, int, int]:
-    data, filename, _mime_type, width, height = download_image_bytes(image_url, page_url)
+    max_bytes, max_pixels = _upload_limits()
+    data, filename, _mime_type, width, height = download_image_bytes(
+        image_url,
+        page_url,
+        max_bytes=max_bytes,
+        max_pixels=max_pixels,
+    )
     safe_name = _safe_upload_name(filename or filename_from_url(image_url), f"{prefix}.jpg")
+    _validate_upload_extension(safe_name)
     stem = Path(safe_name).stem
     suffix = _safe_file_suffix(safe_name) or ".jpg"
     safe_prefix = sanitize_path_segment(prefix) or "slot"
@@ -2617,6 +2734,7 @@ def create_app() -> FastAPI:
             "version": get_display_version(),
             "auto_content_fit": bool(config.CONFIG.get(AUTO_CONTENT_FIT_KEY, False)),
             "processing": _processing_settings(),
+            "security": _security_settings(),
             "runtime_warning": runtime_info.get("warning"),
             "slots": slots,
             "admin_user": _admin_username(),
@@ -3109,6 +3227,7 @@ def create_app() -> FastAPI:
         payload = await request.json()
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Niepoprawne ustawienia.")
+        previous_session_secret = _session_secret()
         try:
             snapshot = await run_in_threadpool(update_settings, payload)
         except ValueError as exc:
@@ -3120,6 +3239,12 @@ def create_app() -> FastAPI:
                 detail=f"Nie udalo sie zapisac ustawien: {exc}",
             ) from exc
         app.state.runtime_info = _runtime_info()
+        if _auth_enabled() and not hmac.compare_digest(previous_session_secret, _session_secret()):
+            snapshot["session_invalidated"] = True
+            snapshot["session_message"] = "Zapisano APP_SECRET. Zaloguj sie ponownie."
+            response = JSONResponse(snapshot)
+            response.delete_cookie(SESSION_COOKIE)
+            return response
         snapshot["current_user"] = _current_user_payload(request)
         return JSONResponse(snapshot)
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+import re
 import unittest
 
 
@@ -162,6 +163,197 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("MAX_AUTOCOMPLETE_OPTIONS = Number.POSITIVE_INFINITY", source)
         self.assertIn("uniqueValues([...local, ...values])", source)
         self.assertIn('panel.dataset.selecting === "1"', source)
+
+    def test_web_settings_security_tab_owns_secret_and_upload_limits(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+        app_start = source.index("function renderSettingsApp")
+        processing_start = source.index("function renderSettingsProcessing")
+        security_start = source.index("function renderSettingsSecurity")
+        ftp_start = source.index("function renderSettingsFtp")
+        app_body = source[app_start:processing_start]
+        processing_body = source[processing_start:security_start]
+        security_body = source[security_start:ftp_start]
+
+        self.assertNotIn('credentialField("app_secret"', app_body)
+        self.assertNotIn("max_upload_mb", processing_body)
+        self.assertIn('credentialField("app_secret"', security_body)
+        self.assertIn("max_upload_mb", security_body)
+        self.assertIn("allowed_upload_extensions", security_body)
+        self.assertIn("blocked_upload_extensions", security_body)
+        self.assertIn("block_executable_uploads", security_body)
+        self.assertIn("uploadAcceptAttribute", source)
+
+    def test_web_settings_processing_groups_related_controls(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+        app_start = source.index("function renderSettingsApp")
+        processing_start = source.index("function renderSettingsProcessing")
+        security_start = source.index("function renderSettingsSecurity")
+        app_body = source[app_start:processing_start]
+        processing_body = source[processing_start:security_start]
+
+        self.assertIn("function settingsFieldGroup", source)
+        self.assertIn('"user_show_timing_details"', app_body)
+        self.assertNotIn('"user_show_timing_details"', processing_body)
+
+        expectations = {
+            'settingsFieldGroup("Zmniejszanie obrazu"': ('"resize_enabled"', '"max_dim"'),
+            'settingsFieldGroup("Kompresja JPG/WEBP"': ('"compress_enabled"', '"compress_quality"'),
+            'settingsFieldGroup("Limit rozmiaru pliku"': ('"max_size_enabled"', '"max_file_kb"'),
+            'settingsFieldGroup("Konwersja formatu"': ('"convert_enabled"', '"target_format"'),
+        }
+        for marker, required in expectations.items():
+            start = processing_body.index(marker)
+            next_group = processing_body.find("settingsFieldGroup(", start + len(marker))
+            block = processing_body[start:] if next_group == -1 else processing_body[start:next_group]
+            for needle in required:
+                self.assertIn(needle, block)
+
+    def test_web_settings_tabs_use_consistent_field_groups(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        def function_body(name: str, next_name: str) -> str:
+            start = source.index(f"function {name}")
+            end = source.index(f"function {next_name}", start + len(f"function {name}"))
+            return source[start:end]
+
+        checks = {
+            "renderSettingsApp": [
+                ("Runtime aplikacji", ["versionNote", "configNote", "runtimeWarning", '"base_dir"']),
+                ("Indeks lokalny", ['"local_file_index"', "diagnosticButton", "fileIndexRefreshButton"]),
+                ("Widok panelu", ['"user_show_timing_details"']),
+                ("Nazwy pol kolorow", ['"color1"', '"color2"', '"color3"']),
+            ],
+            "renderSettingsSecurity": [
+                ("Sekret aplikacji", ['credentialField("app_secret"']),
+                ("Limity uploadu", ['"max_upload_mb"', '"max_upload_pixels"']),
+                (
+                    "Typy plikow uploadu",
+                    ['"allowed_upload_extensions"', '"blocked_upload_extensions"', '"block_executable_uploads"'],
+                ),
+            ],
+            "renderSettingsFtp": [
+                ("Polaczenie FTP", ['"enabled"', '"host"', '"port"', '"path"', "diagnosticButton"]),
+                ("Dane logowania FTP", ['credentialField("user"', 'credentialField("password"']),
+            ],
+            "renderSettingsSql": [
+                ("Tryb SQL", ['"type"', '"sql_update_enabled"', '"query"', "diagnosticButton"]),
+                ("MS SQL", ['"mssql_server"', '"mssql_database"', 'credentialField("mssql_user"']),
+                ("MySQL", ['"mysql_server"', '"mysql_database"', 'credentialField("mysql_user"']),
+            ],
+            "renderSettingsSlots": [
+                ("Lista slotow", ["note", "list", "addButton"]),
+            ],
+            "renderSettingsUsers": [
+                ("Nowy uzytkownik", ["addForm"]),
+                ("Lista uzytkownikow", ["list"]),
+            ],
+        }
+        boundaries = {
+            "renderSettingsApp": "renderSettingsProcessing",
+            "renderSettingsSecurity": "renderSettingsFtp",
+            "renderSettingsFtp": "renderSettingsSql",
+            "renderSettingsSql": "renderSettingsSlots",
+            "renderSettingsSlots": "renderSettingsUsers",
+            "renderSettingsUsers": "renderSettings",
+        }
+
+        for function_name, groups in checks.items():
+            body = function_body(function_name, boundaries[function_name])
+            for title, expected_fields in groups:
+                marker = f'settingsFieldGroup("{title}"'
+                start = body.index(marker)
+                next_group = body.find("settingsFieldGroup(", start + len(marker))
+                block = body[start:] if next_group == -1 else body[start:next_group]
+                for field in expected_fields:
+                    self.assertIn(field, block)
+
+    def test_web_settings_field_groups_are_full_width_cards(self) -> None:
+        css_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.css"
+        )
+        source = css_path.read_text(encoding="utf-8")
+
+        def css_block(selector: str) -> str:
+            pattern = rf"(?m)^{re.escape(selector)}\s*\{{(?P<body>.*?)\n\}}"
+            match = re.search(pattern, source, flags=re.S)
+            self.assertIsNotNone(match, f"Missing CSS block for {selector}")
+            return match.group("body")
+
+        settings_form = css_block(".settings-form")
+        settings_group = css_block(".settings-field-group")
+        settings_group_title = css_block(".settings-field-group h2")
+
+        self.assertIn("grid-template-columns: 1fr", settings_form)
+        self.assertIn("grid-column: 1 / -1", settings_group)
+        self.assertIn("grid-template-columns: repeat(auto-fit, minmax(220px, 1fr))", settings_group)
+        self.assertIn("align-items: start", settings_group)
+        self.assertIn("grid-column: 1 / -1", settings_group_title)
+
+    def test_web_client_validates_slot_upload_format_before_xhr(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        validation_start = source.index("function uploadFileValidationError")
+        validation_end = source.index("function fileListFromInput", validation_start)
+        validation_body = source[validation_start:validation_end]
+        for required in (
+            "allowed_upload_extensions",
+            "blocked_upload_extensions",
+            "block_executable_uploads",
+            "CLIENT_EXECUTABLE_UPLOAD_EXTENSIONS",
+        ):
+            self.assertIn(required, validation_body)
+        self.assertIn("nie jest na bialej liscie", validation_body)
+
+        set_slot_start = source.index("function setSlotFile")
+        set_slot_end = source.index("function getSlotAssignment", set_slot_start)
+        set_slot_body = source[set_slot_start:set_slot_end]
+        validation_call = set_slot_body.index("uploadFileValidationError(file)")
+        upload_call = set_slot_body.index("uploadSlotFile(prefix, item)")
+        self.assertLess(validation_call, upload_call)
+        self.assertIn("item.error = validationError", set_slot_body)
+        self.assertIn("return", set_slot_body[validation_call:upload_call])
+
+        assign_start = source.index("function assignFilesFromSlot")
+        assign_end = source.index("function applyDefaultSlotSource", assign_start)
+        assign_body = source[assign_start:assign_end]
+        self.assertIn("slotUploadError(item)", assign_body)
+        self.assertIn("Odrzucono", assign_body)
+
+        self.assertIn('`${base} - blad uploadu: ${slotUploadError(item)}`', source)
+        self.assertIn('`Upload nieudany: ${error}`', source)
+        self.assertIn("Upload nieudany: slot", source)
 
 
 if __name__ == "__main__":

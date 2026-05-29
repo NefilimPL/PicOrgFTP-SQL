@@ -29,6 +29,7 @@ from .common import (
     N,
     P,
     PROCESSING_SETTINGS_KEY,
+    SECURITY_SETTINGS_KEY,
     SQL_AVAILABLE_COLUMNS_KEY,
     SQL_COLUMN_MAP_KEY,
     SLOT_DEFS_KEY,
@@ -1134,12 +1135,15 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
     ftp_payload = payload.get("ftp") if isinstance(payload.get("ftp"), dict) else {}
     db_payload = payload.get("database") if isinstance(payload.get("database"), dict) else {}
     processing_payload = payload.get("processing") if isinstance(payload.get("processing"), dict) else {}
+    security_payload = payload.get("security") if isinstance(payload.get("security"), dict) else {}
     slots_payload = payload.get("slots") if isinstance(payload.get("slots"), list) else None
     runtime_reloaded = False
 
     if "base_dir" in app_payload:
         runtime_reloaded = _apply_base_dir_from_web(app_payload.get("base_dir")) or runtime_reloaded
-    if APP_SECRET_KEY in app_payload:
+    if APP_SECRET_KEY in security_payload:
+        runtime_reloaded = _apply_app_secret_from_web(security_payload.get(APP_SECRET_KEY)) or runtime_reloaded
+    elif APP_SECRET_KEY in app_payload:
         runtime_reloaded = _apply_app_secret_from_web(app_payload.get(APP_SECRET_KEY)) or runtime_reloaded
     if runtime_reloaded:
         config.initialize_config(interactive=False)
@@ -1162,6 +1166,11 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
         merged_processing = dict(cfg.get(PROCESSING_SETTINGS_KEY, {}) or {})
         merged_processing.update(processing_payload)
         cfg[PROCESSING_SETTINGS_KEY] = config._normalize_processing_settings(merged_processing)
+
+    if security_payload:
+        merged_security = dict(cfg.get(SECURITY_SETTINGS_KEY, {}) or {})
+        merged_security.update(security_payload)
+        cfg[SECURITY_SETTINGS_KEY] = config._normalize_security_settings(merged_security)
 
     if ftp_payload:
         ftp = cfg.setdefault(H, {})
@@ -1251,6 +1260,9 @@ def settings_snapshot() -> dict[str, object]:
         "auto_content_fit": bool(cfg.get(AUTO_CONTENT_FIT_KEY, False)),
         "processing": config._normalize_processing_settings(
             cfg.get(PROCESSING_SETTINGS_KEY, {})
+        ),
+        "security": config._normalize_security_settings(
+            cfg.get(SECURITY_SETTINGS_KEY, {})
         ),
         "processing_formats": available_convert_formats(),
         "ftp": {

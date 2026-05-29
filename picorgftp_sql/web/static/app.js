@@ -45,6 +45,7 @@ const state = {
   backgroundFtpLookupKey: "",
   backgroundFtpLookupRequestId: 0,
   processing: {},
+  security: {},
   slotRevisions: new Map(),
   userSelectedSlotSources: new Set(),
   slotUploadRequestId: 0,
@@ -70,6 +71,21 @@ const state = {
 
 const WEB_IMAGE_CACHE_LIMIT = 2;
 const MAX_AUTOCOMPLETE_OPTIONS = Number.POSITIVE_INFINITY;
+const CLIENT_EXECUTABLE_UPLOAD_EXTENSIONS = new Set([
+  "exe",
+  "bat",
+  "cmd",
+  "com",
+  "msi",
+  "ps1",
+  "vbs",
+  "js",
+  "jar",
+  "dll",
+  "scr",
+  "pif",
+  "sh",
+]);
 
 const listLabels = {
   names: "Nazwy",
@@ -337,7 +353,7 @@ function fileLabel(file) {
   }
   const kb = Math.max(1, Math.round(slotFileSize(item) / 1024));
   const base = `${slotFileName(item)} (${kb} KB)`;
-  if (slotUploadError(item)) return `${base} - blad uploadu`;
+  if (slotUploadError(item)) return `${base} - blad uploadu: ${slotUploadError(item)}`;
   if (isSlotUploadActive(item)) return `${base} - wysylanie ${slotUploadProgress(item)}%`;
   if (slotFileToken(item)) return `${base} - w cache`;
   return base;
@@ -936,6 +952,39 @@ async function downloadBrowserExtension() {
 
 function currentProcessingSettings() {
   return state.settings?.processing || state.processing || {};
+}
+
+function currentSecuritySettings() {
+  return state.settings?.security || state.security || {};
+}
+
+function extensionListText(value) {
+  if (Array.isArray(value)) return value.join(", ");
+  return String(value || "");
+}
+
+function normalizeUploadExtensionList(value) {
+  const items = Array.isArray(value) ? value : String(value || "").split(/[\s,;]+/);
+  return items
+    .map((extension) => String(extension || "").trim().toLowerCase().replace(/^\.+/, ""))
+    .filter((extension, index, list) => /^[a-z0-9]+$/.test(extension) && list.indexOf(extension) === index);
+}
+
+function uploadAcceptAttribute() {
+  const security = currentSecuritySettings();
+  const allowed = normalizeUploadExtensionList(security.allowed_upload_extensions);
+  if (allowed.length) {
+    const blocked = normalizeUploadExtensionList(security.blocked_upload_extensions);
+    const pickerAllowed = allowed.filter(
+      (extension) =>
+        !blocked.includes(extension) &&
+        !(security.block_executable_uploads !== false && CLIENT_EXECUTABLE_UPLOAD_EXTENSIONS.has(extension))
+    );
+    return pickerAllowed.length
+      ? pickerAllowed.map((extension) => `.${extension}`).join(",")
+      : ".picorg-no-allowed-upload";
+  }
+  return "image/*,.pdf,.eps,.psd,.ai,.tif,.tiff";
 }
 
 function uploadProcessingMode() {
@@ -2092,7 +2141,7 @@ function renderSlotUploadOverlay(preview, item) {
   const bar = document.createElement("i");
   const progress = slotUploadProgress(item);
   overlay.className = `slot-upload-overlay ${error ? "error" : ""}`;
-  label.textContent = error ? "Upload nieudany" : `Wysylanie ${progress}%`;
+  label.textContent = error ? `Upload nieudany: ${error}` : `Wysylanie ${progress}%`;
   line.className = "progress-line upload-progress-line";
   line.style.setProperty("--upload-progress", `${progress}%`);
   line.appendChild(bar);
@@ -2351,6 +2400,7 @@ function clearSlotAssignment(prefix, options = {}) {
 }
 
 function setSlotFile(prefix, file, options = {}) {
+  const validationError = uploadFileValidationError(file);
   bumpSlotRevision(prefix);
   markSlotDeletion(prefix, state.loadedPhotos.get(prefix));
   revokeFilePreviewUrl(prefix);
@@ -2361,7 +2411,14 @@ function setSlotFile(prefix, file, options = {}) {
   state.loadedPhotos.delete(prefix);
   state.slotSources.delete(prefix);
   state.userSelectedSlotSources.delete(prefix);
+  if (validationError) {
+    item.error = validationError;
+    formStatus.textContent = `Blad uploadu slotu ${prefix}: ${item.error}`;
+    updateSubmitButtonState();
+    return item;
+  }
   uploadSlotFile(prefix, item);
+  return item;
 }
 
 function getSlotAssignment(prefix) {
@@ -2480,6 +2537,32 @@ function warnNoFreeSlots(files, context = "") {
   window.alert(formStatus.textContent);
 }
 
+function uploadFileExtension(file) {
+  const name = String(file?.name || slotFileName(file) || "").trim();
+  const match = name.match(/\.([a-z0-9]+)$/i);
+  return match ? match[1].toLowerCase() : "";
+}
+
+function uploadFileValidationError(file) {
+  const extension = uploadFileExtension(file);
+  const security = currentSecuritySettings();
+  const allowed = normalizeUploadExtensionList(security.allowed_upload_extensions);
+  const blocked = normalizeUploadExtensionList(security.blocked_upload_extensions);
+  if (!extension) {
+    return "Format niedozwolony: plik musi miec rozszerzenie.";
+  }
+  if (blocked.includes(extension)) {
+    return `Format niedozwolony: .${extension} jest na czarnej liscie.`;
+  }
+  if (security.block_executable_uploads !== false && CLIENT_EXECUTABLE_UPLOAD_EXTENSIONS.has(extension)) {
+    return `Format niedozwolony: .${extension} jest plikiem wykonywalnym.`;
+  }
+  if (allowed.length && !allowed.includes(extension)) {
+    return `Format niedozwolony: .${extension} nie jest na bialej liscie.`;
+  }
+  return "";
+}
+
 function fileListFromInput(files) {
   return Array.from(files || []).filter(Boolean);
 }
@@ -2489,11 +2572,14 @@ function assignFilesFromSlot(startPrefix, files, options = {}) {
   if (!incoming.length) return;
   const assigned = [];
   const unassigned = [];
+  const rejected = [];
   let searchPrefix = startPrefix;
   if (options.replaceStart && incoming.length === 1) {
-    setSlotFile(startPrefix, incoming[0], { provisional: isProvisionalSlotPlacement(startPrefix) });
+    const item = setSlotFile(startPrefix, incoming[0], { provisional: isProvisionalSlotPlacement(startPrefix) });
     renderSlot(startPrefix);
-    formStatus.textContent = `Dodano plik do slotu ${startPrefix}.`;
+    formStatus.textContent = slotUploadError(item)
+      ? `Blad uploadu slotu ${startPrefix}: ${slotUploadError(item)}`
+      : `Dodano plik do slotu ${startPrefix}.`;
     return;
   }
   for (const file of incoming) {
@@ -2502,14 +2588,23 @@ function assignFilesFromSlot(startPrefix, files, options = {}) {
       unassigned.push(file);
       continue;
     }
-    setSlotFile(targetPrefix, file, { provisional: isProvisionalSlotPlacement(targetPrefix) });
-    assigned.push({ prefix: targetPrefix, file });
+    const item = setSlotFile(targetPrefix, file, { provisional: isProvisionalSlotPlacement(targetPrefix) });
+    assigned.push({ prefix: targetPrefix, file, item });
+    if (slotUploadError(item)) {
+      rejected.push({ prefix: targetPrefix, file, item });
+    }
     searchPrefix = slotPrefixAt(slotIndex(targetPrefix) + 1) || targetPrefix;
   }
   for (const item of assigned) {
     renderSlot(item.prefix);
   }
-  if (assigned.length) {
+  if (rejected.length) {
+    const first = rejected[0];
+    formStatus.textContent =
+      rejected.length === 1
+        ? `Blad uploadu slotu ${first.prefix}: ${slotUploadError(first.item)}`
+        : `Odrzucono ${rejected.length} plikow przed uploadem. Pierwszy blad: slot ${first.prefix}: ${slotUploadError(first.item)}`;
+  } else if (assigned.length) {
     const targetText = assigned.map((item) => item.prefix).join(", ");
     formStatus.textContent =
       assigned.length === 1
@@ -2684,6 +2779,7 @@ function createSlotNode(slot) {
     detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, slot.prefix);
     input.name = `slot_${slot.prefix}`;
     input.multiple = true;
+    input.accept = uploadAcceptAttribute();
     previewImage.draggable = false;
     previewImage.loading = "lazy";
     previewImage.decoding = "async";
@@ -3938,10 +4034,17 @@ function updateSubmitButtonState() {
   }
   const failedUploads = failedSlotUploads();
   if (failedUploads.length) {
+    const [prefix, item] = failedUploads[0];
+    const reason = slotUploadError(item);
     submitButton.disabled = true;
     submitButton.textContent = "Upload nieudany";
-    submitButton.title = "Popraw slot z nieudanym uploadem albo wybierz plik ponownie.";
-    submitButton.setAttribute("aria-label", submitButton.textContent);
+    submitButton.title = reason
+      ? `Slot ${prefix}: ${reason}`
+      : "Popraw slot z nieudanym uploadem albo wybierz plik ponownie.";
+    submitButton.setAttribute(
+      "aria-label",
+      reason ? `Upload nieudany: slot ${prefix}: ${reason}` : submitButton.textContent
+    );
     return;
   }
   submitButton.disabled = false;
@@ -4371,6 +4474,7 @@ async function loadBootstrap(options = {}) {
   const payload = await requestJson("/api/bootstrap", options);
   state.defaultSlotFit = Boolean(payload.auto_content_fit);
   state.processing = payload.processing || state.processing || {};
+  state.security = payload.security || state.security || {};
   state.ftpEnabled = payload.ftp_enabled !== false;
   if (versionInfo) {
     versionInfo.textContent = payload.version ? `Wersja ${payload.version}` : "";
@@ -4389,6 +4493,7 @@ async function loadBootstrap(options = {}) {
   state.ftpEnabled = payload.ftp_enabled !== false;
   state.colorFieldLabels = payload.color_field_labels || {};
   state.processing = payload.processing || state.processing || {};
+  state.security = payload.security || state.security || {};
   renderDatalists();
   applyProductFieldLabels();
   renderEntrySelect();
@@ -4555,6 +4660,18 @@ function checkField(name, label, checked = false, description = "") {
   }
   wrapper.append(input, text);
   return wrapper;
+}
+
+function settingsFieldGroup(titleText, ...nodes) {
+  const group = document.createElement("div");
+  const title = document.createElement("h2");
+  group.className = "settings-field-group";
+  title.textContent = titleText;
+  group.appendChild(title);
+  for (const node of nodes.flat()) {
+    if (node) group.appendChild(node);
+  }
+  return group;
 }
 
 function credentialField(name, label, isSet = false, attrs = {}) {
@@ -4749,10 +4866,21 @@ function settingsSaveButton(form, buildPayload) {
         body: JSON.stringify(buildPayload(new FormData(form))),
         timeoutMs: 60000,
       });
+      if (state.settings.session_invalidated) {
+        state.currentUser = null;
+        updateAdminUi();
+        settingsStatus.textContent =
+          state.settings.session_message || "Zapisano. Zaloguj sie ponownie.";
+        window.setTimeout(() => {
+          window.location.href = "/login";
+        }, 1500);
+        return;
+      }
       state.currentUser = state.settings.current_user || state.currentUser;
       state.defaultSlotFit = Boolean(state.settings.auto_content_fit);
       state.ftpEnabled = state.settings.ftp?.enabled !== false;
       state.processing = state.settings.processing || state.processing || {};
+      state.security = state.settings.security || state.security || {};
       state.colorFieldLabels = state.settings.color_field_labels || state.colorFieldLabels || {};
       updateAdminUi();
       if (Array.isArray(state.settings.slots)) {
@@ -4787,7 +4915,7 @@ function renderSettingsApp() {
   const configNote = document.createElement("p");
   configNote.className = "settings-note wide-field";
   configNote.textContent =
-    `Panel webowy uzywa tej samej lokalizacji, config.json i APP_SECRET co lokalna aplikacja uruchomiona na backendzie. local_settings.json: ${
+    `Panel webowy uzywa tej samej lokalizacji i config.json co lokalna aplikacja uruchomiona na backendzie. local_settings.json: ${
       s.local_settings_path || "nieznany"
     }`;
   const runtimeWarning = document.createElement("p");
@@ -4796,60 +4924,44 @@ function renderSettingsApp() {
   const versionNote = document.createElement("p");
   versionNote.className = "settings-note wide-field";
   versionNote.textContent = `Wersja programu: ${s.version || "dev"}`;
-  const colorGroup = document.createElement("div");
-  colorGroup.className = "settings-field-group wide-field";
-  const colorTitle = document.createElement("h2");
-  colorTitle.textContent = "Nazwy pol kolorow";
-  const colorGrid = document.createElement("div");
-  colorGrid.className = "settings-form nested-grid";
-  colorGrid.append(
-    inputField("color1", "Kolor 1", s.color_field_labels?.color1 || ""),
-    inputField("color2", "Kolor 2", s.color_field_labels?.color2 || ""),
-    inputField("color3", "Kolor 3", s.color_field_labels?.color3 || "")
-  );
-  colorGroup.append(colorTitle, colorGrid);
-  const secretGroup = document.createElement("div");
-  const secretTitle = document.createElement("h2");
-  const secretHint = document.createElement("p");
-  const secretGrid = document.createElement("div");
-  secretGroup.className = "settings-field-group wide-field";
-  secretTitle.textContent = "Sekret aplikacji";
-  secretHint.className = "settings-note";
-  secretHint.textContent =
-    "APP_SECRET sluzy do odczytu zaszyfrowanych hasel z config.json. " +
-    "Przy podpinaniu istniejacego katalogu wpisz sekret uzyty przy jego konfiguracji; puste pole niczego nie zmienia.";
-  secretGrid.className = "settings-form nested-grid";
-  secretGrid.append(
-    credentialField("app_secret", "APP_SECRET", s.app_secret_set, {
-      type: "password",
-      secretPath: "app_secret",
-    })
-  );
-  secretGroup.append(secretTitle, secretHint, secretGrid);
   form.append(
-    versionNote,
-    configNote,
-    runtimeWarning,
-    inputField("base_dir", "Katalog bazowy", s.base_dir, {
-      placeholder: "np. C:\\PicOrgFTP-SQL albo \\\\SERWER\\Udzial\\PicOrgFTP-SQL",
-      description:
-        "Folder, w ktorym backend trzyma config.json, lists.xlsx i katalog zdjec. " +
-        "Dla uslugi Windows najlepiej uzywac pelnej sciezki lokalnej albo UNC; dyski mapowane typu Z:\\ moga nie byc widoczne.",
-    }),
-    secretGroup,
-    checkField(
-      "local_file_index",
-      "Indeks plikow lokalnych",
-      s.local_file_index,
-      "Backend sprawdza lokalne pliki przy wczytywaniu statusow slotow."
+    settingsFieldGroup("Runtime aplikacji",
+      versionNote,
+      configNote,
+      runtimeWarning,
+      inputField("base_dir", "Katalog bazowy", s.base_dir, {
+        placeholder: "np. C:\\PicOrgFTP-SQL albo \\\\SERWER\\Udzial\\PicOrgFTP-SQL",
+        description:
+          "Folder, w ktorym backend trzyma config.json, lists.xlsx i katalog zdjec. " +
+          "Dla uslugi Windows najlepiej uzywac pelnej sciezki lokalnej albo UNC; dyski mapowane typu Z:\\ moga nie byc widoczne.",
+      })
     ),
-    colorGroup,
-    actionRow(diagnosticButton("local", "Test folderow backendu"), fileIndexRefreshButton())
+    settingsFieldGroup("Indeks lokalny",
+      checkField(
+        "local_file_index",
+        "Indeks plikow lokalnych",
+        s.local_file_index,
+        "Backend sprawdza lokalne pliki przy wczytywaniu statusow slotow."
+      ),
+      actionRow(diagnosticButton("local", "Test folderow backendu"), fileIndexRefreshButton())
+    ),
+    settingsFieldGroup("Widok panelu",
+      checkField(
+        "user_show_timing_details",
+        "Pokazuj blok Pomiary",
+        showTimingDetails(),
+        "Ustawienie tylko dla aktualnego uzytkownika. Pokazuje lub ukrywa blok Pomiary z czasami kolejki i operacji."
+      )
+    ),
+    settingsFieldGroup("Nazwy pol kolorow",
+      inputField("color1", "Kolor 1", s.color_field_labels?.color1 || ""),
+      inputField("color2", "Kolor 2", s.color_field_labels?.color2 || ""),
+      inputField("color3", "Kolor 3", s.color_field_labels?.color3 || "")
+    )
   );
   settingsSaveButton(form, (data) => ({
     app: {
       base_dir: data.get("base_dir"),
-      app_secret: data.get("app_secret"),
       local_file_index: data.has("local_file_index"),
       color_field_labels: {
         color1: data.get("color1"),
@@ -4858,6 +4970,10 @@ function renderSettingsApp() {
       },
     },
   }));
+  form.addEventListener("submit", () => {
+    const data = new FormData(form);
+    setTimingDetailsVisible(data.has("user_show_timing_details"));
+  });
   settingsOutput.appendChild(form);
 }
 
@@ -4874,72 +4990,78 @@ function renderSettingsProcessing() {
     "Te ustawienia sa stosowane przy zapisie z panelu webowego. FIT w slocie nadal moze byc wlaczany osobno dla pojedynczego zdjecia.";
   form.append(
     note,
-    checkField(
-      "auto_content_fit",
-      "FIT domyslnie dla kazdego slotu",
-      state.settings.auto_content_fit,
-      "Nowe i wczytane sloty startuja z wlaczonym FIT, ale pojedynczy slot nadal mozna przelaczyc."
+    settingsFieldGroup("FIT slotu",
+      checkField(
+        "auto_content_fit",
+        "FIT domyslnie dla kazdego slotu",
+        state.settings.auto_content_fit,
+        "Nowe i wczytane sloty startuja z wlaczonym FIT, ale pojedynczy slot nadal mozna przelaczyc."
+      )
     ),
-    selectField(
-      "upload_processing_mode",
-      "Kiedy przetwarzac obrazy",
-      p.upload_processing_mode || "save",
-      [
-        ["save", "Host przy zapisie"],
-        ["host", "Host przy uploadzie do cache"],
-        ["client", "Klient przed uploadem"],
-      ]
+    settingsFieldGroup("Przetwarzanie uploadu",
+      selectField(
+        "upload_processing_mode",
+        "Kiedy przetwarzac obrazy",
+        p.upload_processing_mode || "save",
+        [
+          ["save", "Host przy zapisie"],
+          ["host", "Host przy uploadzie do cache"],
+          ["client", "Klient przed uploadem"],
+        ]
+      )
     ),
-    checkField(
-      "user_show_timing_details",
-      "Pokazuj blok Pomiary",
-      showTimingDetails(),
-      "Ustawienie tylko dla aktualnego uzytkownika. Pokazuje lub ukrywa blok Pomiary z czasami kolejki i operacji."
+    settingsFieldGroup("Zmniejszanie obrazu",
+      checkField(
+        "resize_enabled",
+        "Wlacz zmniejszanie",
+        p.resize_enabled,
+        "Najdluzszy bok obrazu zostanie ograniczony do podanej liczby pikseli."
+      ),
+      inputField("max_dim", "Maksymalny bok (px)", p.max_dim || 2000, {
+        type: "number",
+        min: 64,
+        max: 20000,
+      })
     ),
-    checkField(
-      "resize_enabled",
-      "Zmniejszanie obrazu",
-      p.resize_enabled,
-      "Najdluzszy bok obrazu zostanie ograniczony do podanej liczby pikseli."
+    settingsFieldGroup("Kompresja JPG/WEBP",
+      checkField(
+        "compress_enabled",
+        "Wlacz kompresje",
+        p.compress_enabled,
+        "Uzywa podanej jakosci przy zapisie stratnych formatow."
+      ),
+      inputField("compress_quality", "Jakosc (%)", p.compress_quality || 85, {
+        type: "number",
+        min: 1,
+        max: 100,
+      })
     ),
-    inputField("max_dim", "Maksymalny bok (px)", p.max_dim || 2000, {
-      type: "number",
-      min: 64,
-      max: 20000,
-    }),
-    checkField(
-      "compress_enabled",
-      "Kompresja JPG/WEBP",
-      p.compress_enabled,
-      "Uzywa podanej jakosci przy zapisie stratnych formatow."
+    settingsFieldGroup("Limit rozmiaru pliku",
+      checkField(
+        "max_size_enabled",
+        "Wlacz limit rozmiaru",
+        p.max_size_enabled,
+        "Dla JPG/WEBP jakosc jest obnizana stopniowo, az plik miesci sie w limicie."
+      ),
+      inputField("max_file_kb", "Maksymalny rozmiar (KB)", p.max_file_kb || 500, {
+        type: "number",
+        min: 1,
+        max: 102400,
+      })
     ),
-    inputField("compress_quality", "Jakosc (%)", p.compress_quality || 85, {
-      type: "number",
-      min: 1,
-      max: 100,
-    }),
-    checkField(
-      "max_size_enabled",
-      "Limit rozmiaru pliku",
-      p.max_size_enabled,
-      "Dla JPG/WEBP jakosc jest obnizana stopniowo, az plik miesci sie w limicie."
-    ),
-    inputField("max_file_kb", "Maksymalny rozmiar (KB)", p.max_file_kb || 500, {
-      type: "number",
-      min: 1,
-      max: 102400,
-    }),
-    checkField(
-      "convert_enabled",
-      "Konwersja formatu obrazow",
-      p.convert_enabled,
-      "Obrazy sa zapisywane w wybranym formacie zamiast w formacie zrodlowym."
-    ),
-    selectField(
-      "target_format",
-      "Format docelowy",
-      p.target_format || "PNG",
-      formats.map((format) => [format, format])
+    settingsFieldGroup("Konwersja formatu",
+      checkField(
+        "convert_enabled",
+        "Wlacz konwersje",
+        p.convert_enabled,
+        "Obrazy sa zapisywane w wybranym formacie zamiast w formacie zrodlowym."
+      ),
+      selectField(
+        "target_format",
+        "Format docelowy",
+        p.target_format || "PNG",
+        formats.map((format) => [format, format])
+      )
     )
   );
   settingsSaveButton(form, (data) => ({
@@ -4958,10 +5080,85 @@ function renderSettingsProcessing() {
       upload_processing_mode: data.get("upload_processing_mode"),
     },
   }));
-  form.addEventListener("submit", () => {
-    const data = new FormData(form);
-    setTimingDetailsVisible(data.has("user_show_timing_details"));
-  });
+  settingsOutput.appendChild(form);
+}
+
+function renderSettingsSecurity() {
+  const security = state.settings.security || {};
+  const form = document.createElement("form");
+  form.className = "settings-form";
+  const secretHint = document.createElement("p");
+  secretHint.className = "settings-note";
+  secretHint.textContent =
+    "APP_SECRET sluzy do odczytu zaszyfrowanych hasel z config.json. " +
+    "Przy podpinaniu istniejacego katalogu wpisz sekret uzyty przy jego konfiguracji; puste pole niczego nie zmienia.";
+  form.append(
+    settingsFieldGroup("Sekret aplikacji",
+      secretHint,
+      credentialField("app_secret", "APP_SECRET", state.settings.app_secret_set, {
+        type: "password",
+        secretPath: "app_secret",
+      })
+    ),
+    settingsFieldGroup("Limity uploadu",
+      inputField("max_upload_mb", "Maksymalny upload (MB)", security.max_upload_mb || 50, {
+        type: "number",
+        min: 1,
+        max: 2048,
+        description: "Backend przerwie zapis i usunie czesciowy plik po przekroczeniu limitu.",
+      }),
+      inputField(
+        "max_upload_pixels",
+        "Maksymalna liczba pikseli",
+        security.max_upload_pixels || 25000000,
+        {
+          type: "number",
+          min: 1,
+          max: 400000000,
+          step: 100000,
+          description: "Dotyczy obrazow z uploadu, cache, rozszerzenia i importu z URL.",
+        }
+      )
+    ),
+    settingsFieldGroup("Typy plikow uploadu",
+      inputField(
+        "allowed_upload_extensions",
+        "Akceptowane rozszerzenia",
+        extensionListText(security.allowed_upload_extensions),
+        {
+          textarea: true,
+          description:
+            "Lista po przecinku. Gdy ma wpisy, wszystko spoza niej jest odrzucane. " +
+            "Pusta lista wylacza allow-liste, ale nadal dzialaja blokady ponizej.",
+        }
+      ),
+      inputField(
+        "blocked_upload_extensions",
+        "Zabronione rozszerzenia",
+        extensionListText(security.blocked_upload_extensions),
+        {
+          textarea: true,
+          description: "Lista po przecinku. Te typy sa odrzucane niezaleznie od listy akceptowanych.",
+        }
+      ),
+      checkField(
+        "block_executable_uploads",
+        "Blokuj pliki wykonywalne",
+        security.block_executable_uploads !== false,
+        "Odrzuca m.in. exe, bat, cmd, msi, ps1, vbs, js, jar, dll, scr, sh."
+      )
+    )
+  );
+  settingsSaveButton(form, (data) => ({
+    security: {
+      app_secret: data.get("app_secret"),
+      max_upload_mb: data.get("max_upload_mb"),
+      max_upload_pixels: data.get("max_upload_pixels"),
+      allowed_upload_extensions: data.get("allowed_upload_extensions"),
+      blocked_upload_extensions: data.get("blocked_upload_extensions"),
+      block_executable_uploads: data.has("block_executable_uploads"),
+    },
+  }));
   settingsOutput.appendChild(form);
 }
 
@@ -4970,21 +5167,25 @@ function renderSettingsFtp() {
   const form = document.createElement("form");
   form.className = "settings-form";
   form.append(
-    checkField(
-      "enabled",
-      "Aktualizacja FTP",
-      ftp.enabled,
-      "Po zapisie backend bedzie wysylal przetworzone pliki na FTP."
+    settingsFieldGroup("Polaczenie FTP",
+      checkField(
+        "enabled",
+        "Aktualizacja FTP",
+        ftp.enabled,
+        "Po zapisie backend bedzie wysylal przetworzone pliki na FTP."
+      ),
+      inputField("host", "Host", ftp.host),
+      inputField("port", "Port", ftp.port, { type: "number" }),
+      inputField("path", "Sciezka", ftp.path),
+      actionRow(diagnosticButton("ftp", "Test FTP"))
     ),
-    inputField("host", "Host", ftp.host),
-    inputField("port", "Port", ftp.port, { type: "number" }),
-    inputField("path", "Sciezka", ftp.path),
-    credentialField("user", "Uzytkownik", ftp.user_set, { secretPath: "ftp.user" }),
-    credentialField("password", "Haslo", ftp.password_set, {
-      type: "password",
-      secretPath: "ftp.password",
-    }),
-    actionRow(diagnosticButton("ftp", "Test FTP"))
+    settingsFieldGroup("Dane logowania FTP",
+      credentialField("user", "Uzytkownik", ftp.user_set, { secretPath: "ftp.user" }),
+      credentialField("password", "Haslo", ftp.password_set, {
+        type: "password",
+        secretPath: "ftp.password",
+      })
+    )
   );
   settingsSaveButton(form, (data) => ({
     ftp: {
@@ -5004,33 +5205,39 @@ function renderSettingsSql() {
   const form = document.createElement("form");
   form.className = "settings-form";
   form.append(
-    selectField("type", "Typ bazy", db.type, [["mysql", "MySQL"], ["mssql", "MS SQL"]]),
-    checkField(
-      "sql_update_enabled",
-      "Aktualizacja SQL",
-      db.sql_update_enabled,
-      "Backend bedzie aktualizowal pola SQL przypisane w zakladce Sloty."
+    settingsFieldGroup("Tryb SQL",
+      selectField("type", "Typ bazy", db.type, [["mysql", "MySQL"], ["mssql", "MS SQL"]]),
+      checkField(
+        "sql_update_enabled",
+        "Aktualizacja SQL",
+        db.sql_update_enabled,
+        "Backend bedzie aktualizowal pola SQL przypisane w zakladce Sloty."
+      ),
+      inputField("query", "Zapytanie SQL", db.query, { textarea: true }),
+      actionRow(diagnosticButton("sql", "Test SQL"))
     ),
-    inputField("query", "Zapytanie SQL", db.query, { textarea: true, className: "wide-field" }),
-    inputField("mssql_server", "MS SQL server", db.mssql.server),
-    inputField("mssql_database", "MS SQL database", db.mssql.database),
-    credentialField("mssql_user", "MS SQL user", db.mssql.user_set, {
-      secretPath: "database.mssql.user",
-    }),
-    credentialField("mssql_password", "MS SQL haslo", db.mssql.password_set, {
-      type: "password",
-      secretPath: "database.mssql.password",
-    }),
-    inputField("mysql_server", "MySQL server", db.mysql.server),
-    inputField("mysql_database", "MySQL database", db.mysql.database),
-    credentialField("mysql_user", "MySQL user", db.mysql.user_set, {
-      secretPath: "database.mysql.user",
-    }),
-    credentialField("mysql_password", "MySQL haslo", db.mysql.password_set, {
-      type: "password",
-      secretPath: "database.mysql.password",
-    }),
-    actionRow(diagnosticButton("sql", "Test SQL"))
+    settingsFieldGroup("MS SQL",
+      inputField("mssql_server", "MS SQL server", db.mssql.server),
+      inputField("mssql_database", "MS SQL database", db.mssql.database),
+      credentialField("mssql_user", "MS SQL user", db.mssql.user_set, {
+        secretPath: "database.mssql.user",
+      }),
+      credentialField("mssql_password", "MS SQL haslo", db.mssql.password_set, {
+        type: "password",
+        secretPath: "database.mssql.password",
+      })
+    ),
+    settingsFieldGroup("MySQL",
+      inputField("mysql_server", "MySQL server", db.mysql.server),
+      inputField("mysql_database", "MySQL database", db.mysql.database),
+      credentialField("mysql_user", "MySQL user", db.mysql.user_set, {
+        secretPath: "database.mysql.user",
+      }),
+      credentialField("mysql_password", "MySQL haslo", db.mysql.password_set, {
+        type: "password",
+        secretPath: "database.mysql.password",
+      })
+    )
   );
   settingsSaveButton(form, (data) => ({
     database: {
@@ -5110,7 +5317,7 @@ function renderSettingsSlots() {
       sql_column: "",
     });
   });
-  form.append(note, list, actionRow(addButton));
+  form.append(settingsFieldGroup("Lista slotow", note, list, actionRow(addButton)));
   settingsSaveButton(form, () => {
     const slots = [...form.querySelectorAll(".slot-settings-row")].map((row) => {
       const label = row.querySelector('[name="label"]').value;
@@ -5226,7 +5433,10 @@ function renderSettingsUsers() {
     row.append(name, role, passwordInput, enabledWrap, save);
     list.appendChild(row);
   }
-  wrapper.append(addForm, list);
+  wrapper.append(
+    settingsFieldGroup("Nowy uzytkownik", addForm),
+    settingsFieldGroup("Lista uzytkownikow", list)
+  );
   settingsOutput.appendChild(wrapper);
 }
 
@@ -5243,6 +5453,7 @@ function renderSettings() {
     : "Proces backendu dziala bez uprawnien administratora Windows. Rola web admin jest niezalezna.";
   if (state.activeSettingsTab === "app") renderSettingsApp();
   if (state.activeSettingsTab === "processing") renderSettingsProcessing();
+  if (state.activeSettingsTab === "security") renderSettingsSecurity();
   if (state.activeSettingsTab === "ftp") renderSettingsFtp();
   if (state.activeSettingsTab === "sql") renderSettingsSql();
   if (state.activeSettingsTab === "slots") renderSettingsSlots();
@@ -5256,6 +5467,7 @@ async function loadSettings() {
   state.defaultSlotFit = Boolean(state.settings.auto_content_fit);
   state.ftpEnabled = state.settings.ftp?.enabled !== false;
   state.processing = state.settings.processing || state.processing || {};
+  state.security = state.settings.security || state.security || {};
   state.colorFieldLabels = state.settings.color_field_labels || state.colorFieldLabels || {};
   updateAdminUi();
   applyTimingDetailsVisibility();
