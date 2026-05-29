@@ -71,6 +71,21 @@ const state = {
 
 const WEB_IMAGE_CACHE_LIMIT = 2;
 const MAX_AUTOCOMPLETE_OPTIONS = Number.POSITIVE_INFINITY;
+const CLIENT_EXECUTABLE_UPLOAD_EXTENSIONS = new Set([
+  "exe",
+  "bat",
+  "cmd",
+  "com",
+  "msi",
+  "ps1",
+  "vbs",
+  "js",
+  "jar",
+  "dll",
+  "scr",
+  "pif",
+  "sh",
+]);
 
 const listLabels = {
   names: "Nazwy",
@@ -338,7 +353,7 @@ function fileLabel(file) {
   }
   const kb = Math.max(1, Math.round(slotFileSize(item) / 1024));
   const base = `${slotFileName(item)} (${kb} KB)`;
-  if (slotUploadError(item)) return `${base} - blad uploadu`;
+  if (slotUploadError(item)) return `${base} - blad uploadu: ${slotUploadError(item)}`;
   if (isSlotUploadActive(item)) return `${base} - wysylanie ${slotUploadProgress(item)}%`;
   if (slotFileToken(item)) return `${base} - w cache`;
   return base;
@@ -948,10 +963,26 @@ function extensionListText(value) {
   return String(value || "");
 }
 
+function normalizeUploadExtensionList(value) {
+  const items = Array.isArray(value) ? value : String(value || "").split(/[\s,;]+/);
+  return items
+    .map((extension) => String(extension || "").trim().toLowerCase().replace(/^\.+/, ""))
+    .filter((extension, index, list) => /^[a-z0-9]+$/.test(extension) && list.indexOf(extension) === index);
+}
+
 function uploadAcceptAttribute() {
-  const allowed = currentSecuritySettings().allowed_upload_extensions;
-  if (Array.isArray(allowed) && allowed.length) {
-    return allowed.map((extension) => `.${String(extension).replace(/^\./, "")}`).join(",");
+  const security = currentSecuritySettings();
+  const allowed = normalizeUploadExtensionList(security.allowed_upload_extensions);
+  if (allowed.length) {
+    const blocked = normalizeUploadExtensionList(security.blocked_upload_extensions);
+    const pickerAllowed = allowed.filter(
+      (extension) =>
+        !blocked.includes(extension) &&
+        !(security.block_executable_uploads !== false && CLIENT_EXECUTABLE_UPLOAD_EXTENSIONS.has(extension))
+    );
+    return pickerAllowed.length
+      ? pickerAllowed.map((extension) => `.${extension}`).join(",")
+      : ".picorg-no-allowed-upload";
   }
   return "image/*,.pdf,.eps,.psd,.ai,.tif,.tiff";
 }
@@ -2110,7 +2141,7 @@ function renderSlotUploadOverlay(preview, item) {
   const bar = document.createElement("i");
   const progress = slotUploadProgress(item);
   overlay.className = `slot-upload-overlay ${error ? "error" : ""}`;
-  label.textContent = error ? "Upload nieudany" : `Wysylanie ${progress}%`;
+  label.textContent = error ? `Upload nieudany: ${error}` : `Wysylanie ${progress}%`;
   line.className = "progress-line upload-progress-line";
   line.style.setProperty("--upload-progress", `${progress}%`);
   line.appendChild(bar);
@@ -2369,6 +2400,7 @@ function clearSlotAssignment(prefix, options = {}) {
 }
 
 function setSlotFile(prefix, file, options = {}) {
+  const validationError = uploadFileValidationError(file);
   bumpSlotRevision(prefix);
   markSlotDeletion(prefix, state.loadedPhotos.get(prefix));
   revokeFilePreviewUrl(prefix);
@@ -2379,7 +2411,14 @@ function setSlotFile(prefix, file, options = {}) {
   state.loadedPhotos.delete(prefix);
   state.slotSources.delete(prefix);
   state.userSelectedSlotSources.delete(prefix);
+  if (validationError) {
+    item.error = validationError;
+    formStatus.textContent = `Blad uploadu slotu ${prefix}: ${item.error}`;
+    updateSubmitButtonState();
+    return item;
+  }
   uploadSlotFile(prefix, item);
+  return item;
 }
 
 function getSlotAssignment(prefix) {
@@ -2498,6 +2537,32 @@ function warnNoFreeSlots(files, context = "") {
   window.alert(formStatus.textContent);
 }
 
+function uploadFileExtension(file) {
+  const name = String(file?.name || slotFileName(file) || "").trim();
+  const match = name.match(/\.([a-z0-9]+)$/i);
+  return match ? match[1].toLowerCase() : "";
+}
+
+function uploadFileValidationError(file) {
+  const extension = uploadFileExtension(file);
+  const security = currentSecuritySettings();
+  const allowed = normalizeUploadExtensionList(security.allowed_upload_extensions);
+  const blocked = normalizeUploadExtensionList(security.blocked_upload_extensions);
+  if (!extension) {
+    return "Format niedozwolony: plik musi miec rozszerzenie.";
+  }
+  if (blocked.includes(extension)) {
+    return `Format niedozwolony: .${extension} jest na czarnej liscie.`;
+  }
+  if (security.block_executable_uploads !== false && CLIENT_EXECUTABLE_UPLOAD_EXTENSIONS.has(extension)) {
+    return `Format niedozwolony: .${extension} jest plikiem wykonywalnym.`;
+  }
+  if (allowed.length && !allowed.includes(extension)) {
+    return `Format niedozwolony: .${extension} nie jest na bialej liscie.`;
+  }
+  return "";
+}
+
 function fileListFromInput(files) {
   return Array.from(files || []).filter(Boolean);
 }
@@ -2507,11 +2572,14 @@ function assignFilesFromSlot(startPrefix, files, options = {}) {
   if (!incoming.length) return;
   const assigned = [];
   const unassigned = [];
+  const rejected = [];
   let searchPrefix = startPrefix;
   if (options.replaceStart && incoming.length === 1) {
-    setSlotFile(startPrefix, incoming[0], { provisional: isProvisionalSlotPlacement(startPrefix) });
+    const item = setSlotFile(startPrefix, incoming[0], { provisional: isProvisionalSlotPlacement(startPrefix) });
     renderSlot(startPrefix);
-    formStatus.textContent = `Dodano plik do slotu ${startPrefix}.`;
+    formStatus.textContent = slotUploadError(item)
+      ? `Blad uploadu slotu ${startPrefix}: ${slotUploadError(item)}`
+      : `Dodano plik do slotu ${startPrefix}.`;
     return;
   }
   for (const file of incoming) {
@@ -2520,14 +2588,23 @@ function assignFilesFromSlot(startPrefix, files, options = {}) {
       unassigned.push(file);
       continue;
     }
-    setSlotFile(targetPrefix, file, { provisional: isProvisionalSlotPlacement(targetPrefix) });
-    assigned.push({ prefix: targetPrefix, file });
+    const item = setSlotFile(targetPrefix, file, { provisional: isProvisionalSlotPlacement(targetPrefix) });
+    assigned.push({ prefix: targetPrefix, file, item });
+    if (slotUploadError(item)) {
+      rejected.push({ prefix: targetPrefix, file, item });
+    }
     searchPrefix = slotPrefixAt(slotIndex(targetPrefix) + 1) || targetPrefix;
   }
   for (const item of assigned) {
     renderSlot(item.prefix);
   }
-  if (assigned.length) {
+  if (rejected.length) {
+    const first = rejected[0];
+    formStatus.textContent =
+      rejected.length === 1
+        ? `Blad uploadu slotu ${first.prefix}: ${slotUploadError(first.item)}`
+        : `Odrzucono ${rejected.length} plikow przed uploadem. Pierwszy blad: slot ${first.prefix}: ${slotUploadError(first.item)}`;
+  } else if (assigned.length) {
     const targetText = assigned.map((item) => item.prefix).join(", ");
     formStatus.textContent =
       assigned.length === 1
@@ -3957,10 +4034,17 @@ function updateSubmitButtonState() {
   }
   const failedUploads = failedSlotUploads();
   if (failedUploads.length) {
+    const [prefix, item] = failedUploads[0];
+    const reason = slotUploadError(item);
     submitButton.disabled = true;
     submitButton.textContent = "Upload nieudany";
-    submitButton.title = "Popraw slot z nieudanym uploadem albo wybierz plik ponownie.";
-    submitButton.setAttribute("aria-label", submitButton.textContent);
+    submitButton.title = reason
+      ? `Slot ${prefix}: ${reason}`
+      : "Popraw slot z nieudanym uploadem albo wybierz plik ponownie.";
+    submitButton.setAttribute(
+      "aria-label",
+      reason ? `Upload nieudany: slot ${prefix}: ${reason}` : submitButton.textContent
+    );
     return;
   }
   submitButton.disabled = false;
@@ -5043,7 +5127,9 @@ function renderSettingsSecurity() {
         extensionListText(security.allowed_upload_extensions),
         {
           textarea: true,
-          description: "Lista po przecinku. Pusta lista wylacza allow-liste, ale nadal dzialaja blokady ponizej.",
+          description:
+            "Lista po przecinku. Gdy ma wpisy, wszystko spoza niej jest odrzucane. " +
+            "Pusta lista wylacza allow-liste, ale nadal dzialaja blokady ponizej.",
         }
       ),
       inputField(

@@ -314,6 +314,47 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("align-items: start", settings_group)
         self.assertIn("grid-column: 1 / -1", settings_group_title)
 
+    def test_web_client_validates_slot_upload_format_before_xhr(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        validation_start = source.index("function uploadFileValidationError")
+        validation_end = source.index("function fileListFromInput", validation_start)
+        validation_body = source[validation_start:validation_end]
+        for required in (
+            "allowed_upload_extensions",
+            "blocked_upload_extensions",
+            "block_executable_uploads",
+            "CLIENT_EXECUTABLE_UPLOAD_EXTENSIONS",
+        ):
+            self.assertIn(required, validation_body)
+        self.assertIn("nie jest na bialej liscie", validation_body)
+
+        set_slot_start = source.index("function setSlotFile")
+        set_slot_end = source.index("function getSlotAssignment", set_slot_start)
+        set_slot_body = source[set_slot_start:set_slot_end]
+        validation_call = set_slot_body.index("uploadFileValidationError(file)")
+        upload_call = set_slot_body.index("uploadSlotFile(prefix, item)")
+        self.assertLess(validation_call, upload_call)
+        self.assertIn("item.error = validationError", set_slot_body)
+        self.assertIn("return", set_slot_body[validation_call:upload_call])
+
+        assign_start = source.index("function assignFilesFromSlot")
+        assign_end = source.index("function applyDefaultSlotSource", assign_start)
+        assign_body = source[assign_start:assign_end]
+        self.assertIn("slotUploadError(item)", assign_body)
+        self.assertIn("Odrzucono", assign_body)
+
+        self.assertIn('`${base} - blad uploadu: ${slotUploadError(item)}`', source)
+        self.assertIn('`Upload nieudany: ${error}`', source)
+        self.assertIn("Upload nieudany: slot", source)
+
 
 if __name__ == "__main__":
     unittest.main()
