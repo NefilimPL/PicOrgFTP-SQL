@@ -4578,6 +4578,18 @@ function checkField(name, label, checked = false, description = "") {
   return wrapper;
 }
 
+function settingsFieldGroup(titleText, ...nodes) {
+  const group = document.createElement("div");
+  const title = document.createElement("h2");
+  group.className = "settings-field-group";
+  title.textContent = titleText;
+  group.appendChild(title);
+  for (const node of nodes.flat()) {
+    if (node) group.appendChild(node);
+  }
+  return group;
+}
+
 function credentialField(name, label, isSet = false, attrs = {}) {
   const field = document.createElement("label");
   const title = document.createElement("span");
@@ -4856,6 +4868,15 @@ function renderSettingsApp() {
       s.local_file_index,
       "Backend sprawdza lokalne pliki przy wczytywaniu statusow slotow."
     ),
+    settingsFieldGroup(
+      "Widok panelu",
+      checkField(
+        "user_show_timing_details",
+        "Pokazuj blok Pomiary",
+        showTimingDetails(),
+        "Ustawienie tylko dla aktualnego uzytkownika. Pokazuje lub ukrywa blok Pomiary z czasami kolejki i operacji."
+      )
+    ),
     colorGroup,
     actionRow(diagnosticButton("local", "Test folderow backendu"), fileIndexRefreshButton())
   );
@@ -4870,6 +4891,10 @@ function renderSettingsApp() {
       },
     },
   }));
+  form.addEventListener("submit", () => {
+    const data = new FormData(form);
+    setTimingDetailsVisible(data.has("user_show_timing_details"));
+  });
   settingsOutput.appendChild(form);
 }
 
@@ -4886,72 +4911,78 @@ function renderSettingsProcessing() {
     "Te ustawienia sa stosowane przy zapisie z panelu webowego. FIT w slocie nadal moze byc wlaczany osobno dla pojedynczego zdjecia.";
   form.append(
     note,
-    checkField(
-      "auto_content_fit",
-      "FIT domyslnie dla kazdego slotu",
-      state.settings.auto_content_fit,
-      "Nowe i wczytane sloty startuja z wlaczonym FIT, ale pojedynczy slot nadal mozna przelaczyc."
+    settingsFieldGroup("FIT slotu",
+      checkField(
+        "auto_content_fit",
+        "FIT domyslnie dla kazdego slotu",
+        state.settings.auto_content_fit,
+        "Nowe i wczytane sloty startuja z wlaczonym FIT, ale pojedynczy slot nadal mozna przelaczyc."
+      )
     ),
-    selectField(
-      "upload_processing_mode",
-      "Kiedy przetwarzac obrazy",
-      p.upload_processing_mode || "save",
-      [
-        ["save", "Host przy zapisie"],
-        ["host", "Host przy uploadzie do cache"],
-        ["client", "Klient przed uploadem"],
-      ]
+    settingsFieldGroup("Przetwarzanie uploadu",
+      selectField(
+        "upload_processing_mode",
+        "Kiedy przetwarzac obrazy",
+        p.upload_processing_mode || "save",
+        [
+          ["save", "Host przy zapisie"],
+          ["host", "Host przy uploadzie do cache"],
+          ["client", "Klient przed uploadem"],
+        ]
+      )
     ),
-    checkField(
-      "user_show_timing_details",
-      "Pokazuj blok Pomiary",
-      showTimingDetails(),
-      "Ustawienie tylko dla aktualnego uzytkownika. Pokazuje lub ukrywa blok Pomiary z czasami kolejki i operacji."
+    settingsFieldGroup("Zmniejszanie obrazu",
+      checkField(
+        "resize_enabled",
+        "Wlacz zmniejszanie",
+        p.resize_enabled,
+        "Najdluzszy bok obrazu zostanie ograniczony do podanej liczby pikseli."
+      ),
+      inputField("max_dim", "Maksymalny bok (px)", p.max_dim || 2000, {
+        type: "number",
+        min: 64,
+        max: 20000,
+      })
     ),
-    checkField(
-      "resize_enabled",
-      "Zmniejszanie obrazu",
-      p.resize_enabled,
-      "Najdluzszy bok obrazu zostanie ograniczony do podanej liczby pikseli."
+    settingsFieldGroup("Kompresja JPG/WEBP",
+      checkField(
+        "compress_enabled",
+        "Wlacz kompresje",
+        p.compress_enabled,
+        "Uzywa podanej jakosci przy zapisie stratnych formatow."
+      ),
+      inputField("compress_quality", "Jakosc (%)", p.compress_quality || 85, {
+        type: "number",
+        min: 1,
+        max: 100,
+      })
     ),
-    inputField("max_dim", "Maksymalny bok (px)", p.max_dim || 2000, {
-      type: "number",
-      min: 64,
-      max: 20000,
-    }),
-    checkField(
-      "compress_enabled",
-      "Kompresja JPG/WEBP",
-      p.compress_enabled,
-      "Uzywa podanej jakosci przy zapisie stratnych formatow."
+    settingsFieldGroup("Limit rozmiaru pliku",
+      checkField(
+        "max_size_enabled",
+        "Wlacz limit rozmiaru",
+        p.max_size_enabled,
+        "Dla JPG/WEBP jakosc jest obnizana stopniowo, az plik miesci sie w limicie."
+      ),
+      inputField("max_file_kb", "Maksymalny rozmiar (KB)", p.max_file_kb || 500, {
+        type: "number",
+        min: 1,
+        max: 102400,
+      })
     ),
-    inputField("compress_quality", "Jakosc (%)", p.compress_quality || 85, {
-      type: "number",
-      min: 1,
-      max: 100,
-    }),
-    checkField(
-      "max_size_enabled",
-      "Limit rozmiaru pliku",
-      p.max_size_enabled,
-      "Dla JPG/WEBP jakosc jest obnizana stopniowo, az plik miesci sie w limicie."
-    ),
-    inputField("max_file_kb", "Maksymalny rozmiar (KB)", p.max_file_kb || 500, {
-      type: "number",
-      min: 1,
-      max: 102400,
-    }),
-    checkField(
-      "convert_enabled",
-      "Konwersja formatu obrazow",
-      p.convert_enabled,
-      "Obrazy sa zapisywane w wybranym formacie zamiast w formacie zrodlowym."
-    ),
-    selectField(
-      "target_format",
-      "Format docelowy",
-      p.target_format || "PNG",
-      formats.map((format) => [format, format])
+    settingsFieldGroup("Konwersja formatu",
+      checkField(
+        "convert_enabled",
+        "Wlacz konwersje",
+        p.convert_enabled,
+        "Obrazy sa zapisywane w wybranym formacie zamiast w formacie zrodlowym."
+      ),
+      selectField(
+        "target_format",
+        "Format docelowy",
+        p.target_format || "PNG",
+        formats.map((format) => [format, format])
+      )
     )
   );
   settingsSaveButton(form, (data) => ({
@@ -4970,10 +5001,6 @@ function renderSettingsProcessing() {
       upload_processing_mode: data.get("upload_processing_mode"),
     },
   }));
-  form.addEventListener("submit", () => {
-    const data = new FormData(form);
-    setTimingDetailsVisible(data.has("user_show_timing_details"));
-  });
   settingsOutput.appendChild(form);
 }
 

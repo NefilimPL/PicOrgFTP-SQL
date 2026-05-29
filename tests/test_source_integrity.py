@@ -189,6 +189,38 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("block_executable_uploads", security_body)
         self.assertIn("uploadAcceptAttribute", source)
 
+    def test_web_settings_processing_groups_related_controls(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+        app_start = source.index("function renderSettingsApp")
+        processing_start = source.index("function renderSettingsProcessing")
+        security_start = source.index("function renderSettingsSecurity")
+        app_body = source[app_start:processing_start]
+        processing_body = source[processing_start:security_start]
+
+        self.assertIn("function settingsFieldGroup", source)
+        self.assertIn('"user_show_timing_details"', app_body)
+        self.assertNotIn('"user_show_timing_details"', processing_body)
+
+        expectations = {
+            'settingsFieldGroup("Zmniejszanie obrazu"': ('"resize_enabled"', '"max_dim"'),
+            'settingsFieldGroup("Kompresja JPG/WEBP"': ('"compress_enabled"', '"compress_quality"'),
+            'settingsFieldGroup("Limit rozmiaru pliku"': ('"max_size_enabled"', '"max_file_kb"'),
+            'settingsFieldGroup("Konwersja formatu"': ('"convert_enabled"', '"target_format"'),
+        }
+        for marker, required in expectations.items():
+            start = processing_body.index(marker)
+            next_group = processing_body.find("settingsFieldGroup(", start + len(marker))
+            block = processing_body[start:] if next_group == -1 else processing_body[start:next_group]
+            for needle in required:
+                self.assertIn(needle, block)
+
 
 if __name__ == "__main__":
     unittest.main()
