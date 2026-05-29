@@ -28,6 +28,7 @@ from .common import (
     LOCAL_FILE_INDEX_KEY,
     AUTO_CONTENT_FIT_KEY,
     PROCESSING_SETTINGS_KEY,
+    SECURITY_SETTINGS_KEY,
     COLOR_FIELD_LABELS_KEY,
     AK,
     SLOT_DEFS_KEY,
@@ -150,13 +151,51 @@ def _normalize_processing_settings(raw_settings):
         "compress_quality": _int_value("compress_quality", 1, 100),
         "max_size_enabled": bool(raw.get("max_size_enabled", defaults.get("max_size_enabled", False))),
         "max_file_kb": _int_value("max_file_kb", 1, 102400),
-        "max_upload_mb": _int_value("max_upload_mb", 1, 2048),
-        "max_upload_pixels": _int_value("max_upload_pixels", 1, 400_000_000),
         "convert_enabled": bool(raw.get("convert_enabled", defaults.get("convert_enabled", False))),
         "target_format": target_format,
         "upload_processing_mode": upload_processing_mode,
         "show_timing_details": bool(
             raw.get("show_timing_details", defaults.get("show_timing_details", False))
+        ),
+    }
+
+
+def _normalize_security_settings(raw_settings):
+    defaults = DEFAULT_CONFIG.get(SECURITY_SETTINGS_KEY, {})
+    raw = raw_settings if Aq(raw_settings, dict) else {}
+
+    def _int_value(key, minimum, maximum):
+        try:
+            value = int(raw.get(key, defaults.get(key)))
+        except (TypeError, ValueError):
+            value = int(defaults.get(key))
+        return max(minimum, min(maximum, value))
+
+    def _extension_list(key):
+        value = raw.get(key, defaults.get(key, []))
+        if Aq(value, str):
+            parts = value.replace(";", ",").replace("\n", ",").split(",")
+        elif Aq(value, list):
+            parts = value
+        else:
+            parts = defaults.get(key, [])
+        cleaned = []
+        seen = set()
+        for item in parts:
+            text = str(item or "").strip().lower().lstrip(".")
+            if not text or not text.isalnum() or len(text) > 12 or text in seen:
+                continue
+            cleaned.append(text)
+            seen.add(text)
+        return cleaned
+
+    return {
+        "max_upload_mb": _int_value("max_upload_mb", 1, 2048),
+        "max_upload_pixels": _int_value("max_upload_pixels", 1, 400_000_000),
+        "allowed_upload_extensions": _extension_list("allowed_upload_extensions"),
+        "blocked_upload_extensions": _extension_list("blocked_upload_extensions"),
+        "block_executable_uploads": bool(
+            raw.get("block_executable_uploads", defaults.get("block_executable_uploads", True))
         ),
     }
 
@@ -215,6 +254,9 @@ def load_config(interactive=I):
                 PROCESSING_SETTINGS_KEY: _normalize_processing_settings(
                     config_copy.get(PROCESSING_SETTINGS_KEY)
                 ),
+                SECURITY_SETTINGS_KEY: _normalize_security_settings(
+                    config_copy.get(SECURITY_SETTINGS_KEY)
+                ),
                 COLOR_FIELD_LABELS_KEY: config_copy.get(COLOR_FIELD_LABELS_KEY, {}),
                 TRANSLATION_SETTINGS_KEY: {
                     TRANSLATION_PROVIDER_KEY: translation_defaults.get(
@@ -269,6 +311,19 @@ def load_config(interactive=I):
                 config_copy.get(PROCESSING_SETTINGS_KEY, {}),
             )
         )
+        raw_security = raw_config.get(
+            SECURITY_SETTINGS_KEY,
+            config_copy.get(SECURITY_SETTINGS_KEY, {}),
+        )
+        if not Aq(raw_security, dict):
+            raw_security = {}
+        legacy_processing = raw_config.get(PROCESSING_SETTINGS_KEY, {})
+        if Aq(legacy_processing, dict):
+            raw_security = dict(raw_security)
+            for key in ("max_upload_mb", "max_upload_pixels"):
+                if key not in raw_security and key in legacy_processing:
+                    raw_security[key] = legacy_processing[key]
+        config_copy[SECURITY_SETTINGS_KEY] = _normalize_security_settings(raw_security)
         config_copy[COLOR_FIELD_LABELS_KEY] = _normalize_color_field_labels(
             raw_config.get(
                 COLOR_FIELD_LABELS_KEY,
@@ -408,6 +463,9 @@ def save_config(config, raw_config=None, preserve_secrets=None):
         AUTO_CONTENT_FIT_KEY: bool(config.get(AUTO_CONTENT_FIT_KEY, False)),
         PROCESSING_SETTINGS_KEY: _normalize_processing_settings(
             config.get(PROCESSING_SETTINGS_KEY, {})
+        ),
+        SECURITY_SETTINGS_KEY: _normalize_security_settings(
+            config.get(SECURITY_SETTINGS_KEY, {})
         ),
         COLOR_FIELD_LABELS_KEY: _normalize_color_field_labels(
             config.get(COLOR_FIELD_LABELS_KEY, {})

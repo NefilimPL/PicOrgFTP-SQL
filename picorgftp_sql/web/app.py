@@ -36,6 +36,7 @@ from ..common import (
     H,
     K,
     PROCESSING_SETTINGS_KEY,
+    SECURITY_SETTINGS_KEY,
     SQL_COLUMN_MAP_KEY,
     SQL_UPDATE_TEMPLATE,
     ft,
@@ -121,6 +122,21 @@ _PROCESS_JOB_RETENTION_SECONDS = 6 * 60 * 60
 _PROCESS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="picorg-process")
 _PROCESS_JOBS: Dict[str, Dict[str, Any]] = {}
 _PROCESS_JOBS_LOCK = threading.Lock()
+EXECUTABLE_UPLOAD_EXTENSIONS = {
+    "exe",
+    "bat",
+    "cmd",
+    "com",
+    "msi",
+    "ps1",
+    "vbs",
+    "js",
+    "jar",
+    "dll",
+    "scr",
+    "pif",
+    "sh",
+}
 
 
 @dataclass(frozen=True)
@@ -166,6 +182,19 @@ def _processing_settings() -> Dict[str, Any]:
     )
 
 
+def _security_settings() -> Dict[str, Any]:
+    raw_security = config.CONFIG.get(SECURITY_SETTINGS_KEY, {})
+    if not isinstance(raw_security, dict):
+        raw_security = {}
+    merged = dict(raw_security)
+    legacy_processing = config.CONFIG.get(PROCESSING_SETTINGS_KEY, {})
+    if isinstance(legacy_processing, dict):
+        for key in ("max_upload_mb", "max_upload_pixels"):
+            if key not in merged and key in legacy_processing:
+                merged[key] = legacy_processing[key]
+    return config._normalize_security_settings(merged)
+
+
 def _upload_processing_mode() -> str:
     return str(_processing_settings().get("upload_processing_mode") or "save")
 
@@ -175,9 +204,9 @@ def _show_timing_details() -> bool:
 
 
 def _upload_limits() -> tuple[int, int]:
-    processing = _processing_settings()
-    max_bytes = max(1, int(processing.get("max_upload_mb") or 50)) * 1024 * 1024
-    max_pixels = max(1, int(processing.get("max_upload_pixels") or 25_000_000))
+    security = _security_settings()
+    max_bytes = max(1, int(security.get("max_upload_mb") or 50)) * 1024 * 1024
+    max_pixels = max(1, int(security.get("max_upload_pixels") or 25_000_000))
     return max_bytes, max_pixels
 
 
@@ -351,6 +380,29 @@ def _safe_file_suffix(filename: str) -> str:
     if suffix and len(suffix) <= 12 and re.fullmatch(r"\.[a-z0-9]+", suffix):
         return suffix
     return ""
+
+
+def _upload_extension(filename: object) -> str:
+    suffix = _safe_file_suffix(str(filename or ""))
+    return suffix[1:] if suffix.startswith(".") else ""
+
+
+def _validate_upload_extension(filename: object) -> None:
+    extension = _upload_extension(filename)
+    security = _security_settings()
+    allowed = set(security.get("allowed_upload_extensions") or [])
+    blocked = set(security.get("blocked_upload_extensions") or [])
+    if not extension:
+        raise HTTPException(status_code=400, detail="Plik musi miec rozszerzenie.")
+    if extension in blocked:
+        raise HTTPException(status_code=400, detail=f"Typ pliku .{extension} jest zablokowany.")
+    if security.get("block_executable_uploads", True) and extension in EXECUTABLE_UPLOAD_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Plik wykonywalny .{extension} jest zablokowany.",
+        )
+    if allowed and extension not in allowed:
+        raise HTTPException(status_code=400, detail=f"Typ pliku .{extension} nie jest dozwolony.")
 
 
 def _upload_cache_root() -> str:
@@ -592,6 +644,7 @@ async def _save_upload(upload: UploadFile, temp_dir: str, prefix: str) -> str:
     max_bytes, max_pixels = _upload_limits()
     size = 0
     try:
+        _validate_upload_extension(safe_name)
         with open(target_path, "wb") as handle:
             while True:
                 chunk = await upload.read(1024 * 1024)
@@ -657,6 +710,7 @@ async def _save_upload_cache(upload: UploadFile, cache_scope: str, prefix: str) 
     max_bytes, max_pixels = _upload_limits()
     size = 0
     try:
+        _validate_upload_extension(safe_name)
         with open(target_path, "wb") as handle:
             while True:
                 chunk = await upload.read(1024 * 1024)
@@ -693,6 +747,7 @@ def _save_web_image_cache(
         max_pixels=max_pixels,
     )
     safe_name = _safe_upload_name(filename or filename_from_url(image_url), f"{prefix}.jpg")
+    _validate_upload_extension(safe_name)
     stem = Path(safe_name).stem
     suffix = _safe_file_suffix(safe_name) or ".jpg"
     safe_prefix = sanitize_path_segment(prefix) or "slot"
@@ -2679,6 +2734,7 @@ def create_app() -> FastAPI:
             "version": get_display_version(),
             "auto_content_fit": bool(config.CONFIG.get(AUTO_CONTENT_FIT_KEY, False)),
             "processing": _processing_settings(),
+            "security": _security_settings(),
             "runtime_warning": runtime_info.get("warning"),
             "slots": slots,
             "admin_user": _admin_username(),

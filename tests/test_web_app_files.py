@@ -138,6 +138,63 @@ class WebAppFileTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_save_process_upload_rejects_executable_extension(self) -> None:
+        temp_dir = _workspace_temp("web_app_process_upload_executable")
+        try:
+            upload = _MemoryUpload("payload.exe", [b"MZ"])
+            with (
+                patch.object(web_app.settings, "AC", str(temp_dir)),
+                patch.object(
+                    web_app.config,
+                    "CONFIG",
+                    {
+                        web_app.SECURITY_SETTINGS_KEY: {
+                            "allowed_upload_extensions": ["jpg", "exe"],
+                            "blocked_upload_extensions": [],
+                            "block_executable_uploads": True,
+                        }
+                    },
+                ),
+            ):
+                with self.assertRaises(HTTPException) as caught:
+                    asyncio.run(web_app._save_upload(upload, str(temp_dir), "01"))
+
+            self.assertEqual(caught.exception.status_code, 400)
+            self.assertEqual(list(temp_dir.iterdir()), [])
+            self.assertTrue(upload.closed)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_save_upload_cache_rejects_extension_outside_allow_list(self) -> None:
+        temp_dir = _workspace_temp("web_app_upload_extension_limit")
+        try:
+            upload = _MemoryUpload("document.pdf", [b"%PDF"])
+            with (
+                patch.object(web_app.settings, "AC", str(temp_dir)),
+                patch.object(
+                    web_app.config,
+                    "CONFIG",
+                    {
+                        web_app.SECURITY_SETTINGS_KEY: {
+                            "allowed_upload_extensions": ["jpg", "png"],
+                            "blocked_upload_extensions": [],
+                            "block_executable_uploads": True,
+                        }
+                    },
+                ),
+            ):
+                with self.assertRaises(HTTPException) as caught:
+                    asyncio.run(web_app._save_upload_cache(upload, "session", "01"))
+
+            self.assertEqual(caught.exception.status_code, 400)
+            self.assertEqual(caught.exception.detail, "Typ pliku .pdf nie jest dozwolony.")
+            cache_root = temp_dir / "web_upload_cache"
+            cached_files = list(cache_root.rglob("*")) if cache_root.exists() else []
+            self.assertEqual([path for path in cached_files if path.is_file()], [])
+            self.assertTrue(upload.closed)
+        finally:
+            shutil.rmtree(temp_dir)
+
     def test_save_upload_cache_rejects_image_above_pixel_limit_and_removes_file(self) -> None:
         if Image is None:
             self.skipTest("Pillow unavailable")

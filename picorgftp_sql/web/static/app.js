@@ -45,6 +45,7 @@ const state = {
   backgroundFtpLookupKey: "",
   backgroundFtpLookupRequestId: 0,
   processing: {},
+  security: {},
   slotRevisions: new Map(),
   userSelectedSlotSources: new Set(),
   slotUploadRequestId: 0,
@@ -936,6 +937,23 @@ async function downloadBrowserExtension() {
 
 function currentProcessingSettings() {
   return state.settings?.processing || state.processing || {};
+}
+
+function currentSecuritySettings() {
+  return state.settings?.security || state.security || {};
+}
+
+function extensionListText(value) {
+  if (Array.isArray(value)) return value.join(", ");
+  return String(value || "");
+}
+
+function uploadAcceptAttribute() {
+  const allowed = currentSecuritySettings().allowed_upload_extensions;
+  if (Array.isArray(allowed) && allowed.length) {
+    return allowed.map((extension) => `.${String(extension).replace(/^\./, "")}`).join(",");
+  }
+  return "image/*,.pdf,.eps,.psd,.ai,.tif,.tiff";
 }
 
 function uploadProcessingMode() {
@@ -2684,6 +2702,7 @@ function createSlotNode(slot) {
     detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, slot.prefix);
     input.name = `slot_${slot.prefix}`;
     input.multiple = true;
+    input.accept = uploadAcceptAttribute();
     previewImage.draggable = false;
     previewImage.loading = "lazy";
     previewImage.decoding = "async";
@@ -4371,6 +4390,7 @@ async function loadBootstrap(options = {}) {
   const payload = await requestJson("/api/bootstrap", options);
   state.defaultSlotFit = Boolean(payload.auto_content_fit);
   state.processing = payload.processing || state.processing || {};
+  state.security = payload.security || state.security || {};
   state.ftpEnabled = payload.ftp_enabled !== false;
   if (versionInfo) {
     versionInfo.textContent = payload.version ? `Wersja ${payload.version}` : "";
@@ -4389,6 +4409,7 @@ async function loadBootstrap(options = {}) {
   state.ftpEnabled = payload.ftp_enabled !== false;
   state.colorFieldLabels = payload.color_field_labels || {};
   state.processing = payload.processing || state.processing || {};
+  state.security = payload.security || state.security || {};
   renderDatalists();
   applyProductFieldLabels();
   renderEntrySelect();
@@ -4763,6 +4784,7 @@ function settingsSaveButton(form, buildPayload) {
       state.defaultSlotFit = Boolean(state.settings.auto_content_fit);
       state.ftpEnabled = state.settings.ftp?.enabled !== false;
       state.processing = state.settings.processing || state.processing || {};
+      state.security = state.settings.security || state.security || {};
       state.colorFieldLabels = state.settings.color_field_labels || state.colorFieldLabels || {};
       updateAdminUi();
       if (Array.isArray(state.settings.slots)) {
@@ -4797,7 +4819,7 @@ function renderSettingsApp() {
   const configNote = document.createElement("p");
   configNote.className = "settings-note wide-field";
   configNote.textContent =
-    `Panel webowy uzywa tej samej lokalizacji, config.json i APP_SECRET co lokalna aplikacja uruchomiona na backendzie. local_settings.json: ${
+    `Panel webowy uzywa tej samej lokalizacji i config.json co lokalna aplikacja uruchomiona na backendzie. local_settings.json: ${
       s.local_settings_path || "nieznany"
     }`;
   const runtimeWarning = document.createElement("p");
@@ -4818,24 +4840,6 @@ function renderSettingsApp() {
     inputField("color3", "Kolor 3", s.color_field_labels?.color3 || "")
   );
   colorGroup.append(colorTitle, colorGrid);
-  const secretGroup = document.createElement("div");
-  const secretTitle = document.createElement("h2");
-  const secretHint = document.createElement("p");
-  const secretGrid = document.createElement("div");
-  secretGroup.className = "settings-field-group wide-field";
-  secretTitle.textContent = "Sekret aplikacji";
-  secretHint.className = "settings-note";
-  secretHint.textContent =
-    "APP_SECRET sluzy do odczytu zaszyfrowanych hasel z config.json. " +
-    "Przy podpinaniu istniejacego katalogu wpisz sekret uzyty przy jego konfiguracji; puste pole niczego nie zmienia.";
-  secretGrid.className = "settings-form nested-grid";
-  secretGrid.append(
-    credentialField("app_secret", "APP_SECRET", s.app_secret_set, {
-      type: "password",
-      secretPath: "app_secret",
-    })
-  );
-  secretGroup.append(secretTitle, secretHint, secretGrid);
   form.append(
     versionNote,
     configNote,
@@ -4846,7 +4850,6 @@ function renderSettingsApp() {
         "Folder, w ktorym backend trzyma config.json, lists.xlsx i katalog zdjec. " +
         "Dla uslugi Windows najlepiej uzywac pelnej sciezki lokalnej albo UNC; dyski mapowane typu Z:\\ moga nie byc widoczne.",
     }),
-    secretGroup,
     checkField(
       "local_file_index",
       "Indeks plikow lokalnych",
@@ -4859,7 +4862,6 @@ function renderSettingsApp() {
   settingsSaveButton(form, (data) => ({
     app: {
       base_dir: data.get("base_dir"),
-      app_secret: data.get("app_secret"),
       local_file_index: data.has("local_file_index"),
       color_field_labels: {
         color1: data.get("color1"),
@@ -4939,24 +4941,6 @@ function renderSettingsProcessing() {
       min: 1,
       max: 102400,
     }),
-    inputField("max_upload_mb", "Maksymalny upload (MB)", p.max_upload_mb || 50, {
-      type: "number",
-      min: 1,
-      max: 2048,
-      description: "Backend przerwie zapis i usunie czesciowy plik po przekroczeniu limitu.",
-    }),
-    inputField(
-      "max_upload_pixels",
-      "Maksymalna liczba pikseli",
-      p.max_upload_pixels || 25000000,
-      {
-        type: "number",
-        min: 1,
-        max: 400000000,
-        step: 100000,
-        description: "Dotyczy obrazow z uploadu, cache, rozszerzenia i importu z URL.",
-      }
-    ),
     checkField(
       "convert_enabled",
       "Konwersja formatu obrazow",
@@ -4981,8 +4965,6 @@ function renderSettingsProcessing() {
       compress_quality: data.get("compress_quality"),
       max_size_enabled: data.has("max_size_enabled"),
       max_file_kb: data.get("max_file_kb"),
-      max_upload_mb: data.get("max_upload_mb"),
-      max_upload_pixels: data.get("max_upload_pixels"),
       convert_enabled: data.has("convert_enabled"),
       target_format: data.get("target_format"),
       upload_processing_mode: data.get("upload_processing_mode"),
@@ -4992,6 +4974,86 @@ function renderSettingsProcessing() {
     const data = new FormData(form);
     setTimingDetailsVisible(data.has("user_show_timing_details"));
   });
+  settingsOutput.appendChild(form);
+}
+
+function renderSettingsSecurity() {
+  const security = state.settings.security || {};
+  const form = document.createElement("form");
+  form.className = "settings-form";
+  const secretGroup = document.createElement("div");
+  const secretTitle = document.createElement("h2");
+  const secretHint = document.createElement("p");
+  const secretGrid = document.createElement("div");
+  secretGroup.className = "settings-field-group wide-field";
+  secretTitle.textContent = "Sekret aplikacji";
+  secretHint.className = "settings-note";
+  secretHint.textContent =
+    "APP_SECRET sluzy do odczytu zaszyfrowanych hasel z config.json. " +
+    "Przy podpinaniu istniejacego katalogu wpisz sekret uzyty przy jego konfiguracji; puste pole niczego nie zmienia.";
+  secretGrid.className = "settings-form nested-grid";
+  secretGrid.append(
+    credentialField("app_secret", "APP_SECRET", state.settings.app_secret_set, {
+      type: "password",
+      secretPath: "app_secret",
+    })
+  );
+  secretGroup.append(secretTitle, secretHint, secretGrid);
+  form.append(
+    secretGroup,
+    inputField("max_upload_mb", "Maksymalny upload (MB)", security.max_upload_mb || 50, {
+      type: "number",
+      min: 1,
+      max: 2048,
+      description: "Backend przerwie zapis i usunie czesciowy plik po przekroczeniu limitu.",
+    }),
+    inputField(
+      "max_upload_pixels",
+      "Maksymalna liczba pikseli",
+      security.max_upload_pixels || 25000000,
+      {
+        type: "number",
+        min: 1,
+        max: 400000000,
+        step: 100000,
+        description: "Dotyczy obrazow z uploadu, cache, rozszerzenia i importu z URL.",
+      }
+    ),
+    inputField(
+      "allowed_upload_extensions",
+      "Akceptowane rozszerzenia",
+      extensionListText(security.allowed_upload_extensions),
+      {
+        textarea: true,
+        description: "Lista po przecinku. Pusta lista wylacza allow-liste, ale nadal dzialaja blokady ponizej.",
+      }
+    ),
+    inputField(
+      "blocked_upload_extensions",
+      "Zabronione rozszerzenia",
+      extensionListText(security.blocked_upload_extensions),
+      {
+        textarea: true,
+        description: "Lista po przecinku. Te typy sa odrzucane niezaleznie od listy akceptowanych.",
+      }
+    ),
+    checkField(
+      "block_executable_uploads",
+      "Blokuj pliki wykonywalne",
+      security.block_executable_uploads !== false,
+      "Odrzuca m.in. exe, bat, cmd, msi, ps1, vbs, js, jar, dll, scr, sh."
+    )
+  );
+  settingsSaveButton(form, (data) => ({
+    security: {
+      app_secret: data.get("app_secret"),
+      max_upload_mb: data.get("max_upload_mb"),
+      max_upload_pixels: data.get("max_upload_pixels"),
+      allowed_upload_extensions: data.get("allowed_upload_extensions"),
+      blocked_upload_extensions: data.get("blocked_upload_extensions"),
+      block_executable_uploads: data.has("block_executable_uploads"),
+    },
+  }));
   settingsOutput.appendChild(form);
 }
 
@@ -5273,6 +5335,7 @@ function renderSettings() {
     : "Proces backendu dziala bez uprawnien administratora Windows. Rola web admin jest niezalezna.";
   if (state.activeSettingsTab === "app") renderSettingsApp();
   if (state.activeSettingsTab === "processing") renderSettingsProcessing();
+  if (state.activeSettingsTab === "security") renderSettingsSecurity();
   if (state.activeSettingsTab === "ftp") renderSettingsFtp();
   if (state.activeSettingsTab === "sql") renderSettingsSql();
   if (state.activeSettingsTab === "slots") renderSettingsSlots();
@@ -5286,6 +5349,7 @@ async function loadSettings() {
   state.defaultSlotFit = Boolean(state.settings.auto_content_fit);
   state.ftpEnabled = state.settings.ftp?.enabled !== false;
   state.processing = state.settings.processing || state.processing || {};
+  state.security = state.settings.security || state.security || {};
   state.colorFieldLabels = state.settings.color_field_labels || state.colorFieldLabels || {};
   updateAdminUi();
   applyTimingDetailsVisibility();

@@ -544,6 +544,44 @@ class WebDataUserTests(unittest.TestCase):
         self.assertEqual(preserve[web_data.P], {web_data.N, web_data.M})
         self.assertEqual(preserve[web_data.K], {web_data.M})
 
+    def test_update_settings_stores_security_payload_separately_from_processing(self) -> None:
+        saved_configs = []
+        cfg = {
+            web_data.PROCESSING_SETTINGS_KEY: {"max_dim": 2000},
+            web_data.SECURITY_SETTINGS_KEY: {"max_upload_mb": 50},
+        }
+
+        def capture_save_config(config_payload, *_args, **_kwargs):
+            saved_configs.append(dict(config_payload))
+
+        with (
+            patch.object(web_data.config, "CONFIG", cfg),
+            patch.object(web_data, "save_config", side_effect=capture_save_config),
+            patch.object(web_data.config, "initialize_config", return_value=cfg),
+            patch.object(web_data, "settings_snapshot", return_value={}),
+        ):
+            web_data.update_settings(
+                {
+                    "processing": {"max_dim": 1600},
+                    "security": {
+                        "max_upload_mb": 75,
+                        "max_upload_pixels": 12_000_000,
+                        "allowed_upload_extensions": "jpg,png",
+                        "blocked_upload_extensions": "exe,bat",
+                        "block_executable_uploads": True,
+                    },
+                }
+            )
+
+        saved_config = saved_configs[0]
+        self.assertEqual(saved_config[web_data.PROCESSING_SETTINGS_KEY]["max_dim"], 1600)
+        self.assertNotIn("max_upload_mb", saved_config[web_data.PROCESSING_SETTINGS_KEY])
+        self.assertEqual(saved_config[web_data.SECURITY_SETTINGS_KEY]["max_upload_mb"], 75)
+        self.assertEqual(
+            saved_config[web_data.SECURITY_SETTINGS_KEY]["allowed_upload_extensions"],
+            ["jpg", "png"],
+        )
+
     def test_settings_secret_values_returns_current_decrypted_config(self) -> None:
         config_payload = {
             web_data.H: {web_data.N: "ftp-user", web_data.M: "ftp-pass"},

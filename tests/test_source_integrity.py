@@ -163,6 +163,32 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("uniqueValues([...local, ...values])", source)
         self.assertIn('panel.dataset.selecting === "1"', source)
 
+    def test_web_settings_security_tab_owns_secret_and_upload_limits(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+        app_start = source.index("function renderSettingsApp")
+        processing_start = source.index("function renderSettingsProcessing")
+        security_start = source.index("function renderSettingsSecurity")
+        ftp_start = source.index("function renderSettingsFtp")
+        app_body = source[app_start:processing_start]
+        processing_body = source[processing_start:security_start]
+        security_body = source[security_start:ftp_start]
+
+        self.assertNotIn('credentialField("app_secret"', app_body)
+        self.assertNotIn("max_upload_mb", processing_body)
+        self.assertIn('credentialField("app_secret"', security_body)
+        self.assertIn("max_upload_mb", security_body)
+        self.assertIn("allowed_upload_extensions", security_body)
+        self.assertIn("blocked_upload_extensions", security_body)
+        self.assertIn("block_executable_uploads", security_body)
+        self.assertIn("uploadAcceptAttribute", source)
+
 
 if __name__ == "__main__":
     unittest.main()

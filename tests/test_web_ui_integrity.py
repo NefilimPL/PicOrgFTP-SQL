@@ -140,6 +140,18 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("modal-view", html.classes)
         self.assertIn("manager-panel", html.classes)
 
+    def test_settings_tabs_include_security_section(self) -> None:
+        html = _parse(INDEX_HTML)
+
+        self.assertIn("settingsView", html.ids)
+        self.assertTrue(
+            html.has_tag(
+                "button",
+                type="button",
+                **{"data-settings-tab": "security"},
+            )
+        )
+
     def test_slot_template_keeps_preview_and_file_input_controls(self) -> None:
         html = _parse(INDEX_HTML)
 
