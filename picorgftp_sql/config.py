@@ -150,6 +150,8 @@ def _normalize_processing_settings(raw_settings):
         "compress_quality": _int_value("compress_quality", 1, 100),
         "max_size_enabled": bool(raw.get("max_size_enabled", defaults.get("max_size_enabled", False))),
         "max_file_kb": _int_value("max_file_kb", 1, 102400),
+        "max_upload_mb": _int_value("max_upload_mb", 1, 2048),
+        "max_upload_pixels": _int_value("max_upload_pixels", 1, 400_000_000),
         "convert_enabled": bool(raw.get("convert_enabled", defaults.get("convert_enabled", False))),
         "target_format": target_format,
         "upload_processing_mode": upload_processing_mode,

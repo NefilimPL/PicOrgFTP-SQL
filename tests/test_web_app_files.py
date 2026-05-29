@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import io
 from pathlib import Path
 import shutil
 import tempfile
@@ -13,6 +15,11 @@ from fastapi import HTTPException
 
 from picorgftp_sql.web import app as web_app
 
+try:
+    from PIL import Image
+except Exception:  # pragma: no cover - optional test dependency
+    Image = None
+
 
 def _workspace_temp(name: str) -> Path:
     root = Path(__file__).resolve().parents[1] / "tmp_test" / name
@@ -20,6 +27,22 @@ def _workspace_temp(name: str) -> Path:
         shutil.rmtree(root)
     root.mkdir(parents=True)
     return root
+
+
+class _MemoryUpload:
+    def __init__(self, filename: str, chunks: list[bytes], content_type: str = "image/jpeg") -> None:
+        self.filename = filename
+        self.content_type = content_type
+        self._chunks = list(chunks)
+        self.closed = False
+
+    async def read(self, _size: int = -1) -> bytes:
+        if not self._chunks:
+            return b""
+        return self._chunks.pop(0)
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 class WebAppFileTests(unittest.TestCase):
@@ -86,6 +109,64 @@ class WebAppFileTests(unittest.TestCase):
             self.assertEqual(result["errors"], [])
             self.assertFalse(cached.exists())
             self.assertTrue(processed_file.exists())
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_save_process_upload_rejects_oversized_file_and_removes_partial(self) -> None:
+        temp_dir = _workspace_temp("web_app_process_upload_limit")
+        try:
+            upload = _MemoryUpload("large.jpg", [b"x" * (1024 * 1024), b"y"])
+            with (
+                patch.object(web_app.settings, "AC", str(temp_dir)),
+                patch.object(
+                    web_app.config,
+                    "CONFIG",
+                    {
+                        web_app.PROCESSING_SETTINGS_KEY: {
+                            "max_upload_mb": 1,
+                            "max_upload_pixels": 25_000_000,
+                        }
+                    },
+                ),
+            ):
+                with self.assertRaises(HTTPException) as caught:
+                    asyncio.run(web_app._save_upload(upload, str(temp_dir), "01"))
+
+            self.assertEqual(caught.exception.status_code, 413)
+            self.assertEqual(list(temp_dir.iterdir()), [])
+            self.assertTrue(upload.closed)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_save_upload_cache_rejects_image_above_pixel_limit_and_removes_file(self) -> None:
+        if Image is None:
+            self.skipTest("Pillow unavailable")
+        temp_dir = _workspace_temp("web_app_upload_pixel_limit")
+        try:
+            buffer = io.BytesIO()
+            Image.new("RGB", (10, 10), "white").save(buffer, format="PNG")
+            upload = _MemoryUpload("large.png", [buffer.getvalue()], "image/png")
+            with (
+                patch.object(web_app.settings, "AC", str(temp_dir)),
+                patch.object(
+                    web_app.config,
+                    "CONFIG",
+                    {
+                        web_app.PROCESSING_SETTINGS_KEY: {
+                            "max_upload_mb": 50,
+                            "max_upload_pixels": 50,
+                        }
+                    },
+                ),
+            ):
+                with self.assertRaises(HTTPException) as caught:
+                    asyncio.run(web_app._save_upload_cache(upload, "session", "01"))
+
+            self.assertEqual(caught.exception.status_code, 413)
+            cache_root = temp_dir / "web_upload_cache"
+            cached_files = list(cache_root.rglob("*")) if cache_root.exists() else []
+            self.assertEqual([path for path in cached_files if path.is_file()], [])
+            self.assertTrue(upload.closed)
         finally:
             shutil.rmtree(temp_dir)
 

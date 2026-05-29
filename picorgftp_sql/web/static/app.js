@@ -4749,6 +4749,16 @@ function settingsSaveButton(form, buildPayload) {
         body: JSON.stringify(buildPayload(new FormData(form))),
         timeoutMs: 60000,
       });
+      if (state.settings.session_invalidated) {
+        state.currentUser = null;
+        updateAdminUi();
+        settingsStatus.textContent =
+          state.settings.session_message || "Zapisano. Zaloguj sie ponownie.";
+        window.setTimeout(() => {
+          window.location.href = "/login";
+        }, 1500);
+        return;
+      }
       state.currentUser = state.settings.current_user || state.currentUser;
       state.defaultSlotFit = Boolean(state.settings.auto_content_fit);
       state.ftpEnabled = state.settings.ftp?.enabled !== false;
@@ -4929,6 +4939,24 @@ function renderSettingsProcessing() {
       min: 1,
       max: 102400,
     }),
+    inputField("max_upload_mb", "Maksymalny upload (MB)", p.max_upload_mb || 50, {
+      type: "number",
+      min: 1,
+      max: 2048,
+      description: "Backend przerwie zapis i usunie czesciowy plik po przekroczeniu limitu.",
+    }),
+    inputField(
+      "max_upload_pixels",
+      "Maksymalna liczba pikseli",
+      p.max_upload_pixels || 25000000,
+      {
+        type: "number",
+        min: 1,
+        max: 400000000,
+        step: 100000,
+        description: "Dotyczy obrazow z uploadu, cache, rozszerzenia i importu z URL.",
+      }
+    ),
     checkField(
       "convert_enabled",
       "Konwersja formatu obrazow",
@@ -4953,6 +4981,8 @@ function renderSettingsProcessing() {
       compress_quality: data.get("compress_quality"),
       max_size_enabled: data.has("max_size_enabled"),
       max_file_kb: data.get("max_file_kb"),
+      max_upload_mb: data.get("max_upload_mb"),
+      max_upload_pixels: data.get("max_upload_pixels"),
       convert_enabled: data.has("convert_enabled"),
       target_format: data.get("target_format"),
       upload_processing_mode: data.get("upload_processing_mode"),

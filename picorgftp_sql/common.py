@@ -272,6 +272,8 @@ DEFAULT_CONFIG.setdefault(
         "compress_quality": 85,
         "max_size_enabled": False,
         "max_file_kb": 500,
+        "max_upload_mb": 50,
+        "max_upload_pixels": 25_000_000,
         "convert_enabled": False,
         "target_format": "PNG",
         "upload_processing_mode": "save",

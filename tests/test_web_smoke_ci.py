@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("PICORGFTP_SQL_HEADLESS", "1")
 os.environ.setdefault("PICORG_WEB_AUTH", "0")
@@ -87,6 +88,61 @@ class WebSmokeCiTests(unittest.TestCase):
             "/api/users",
         }
         self.assertEqual(expected_paths - route_paths, set())
+
+    def test_auth_enabled_protects_routes_and_accepts_login_session(self) -> None:
+        previous = os.environ.get("PICORG_WEB_AUTH")
+        os.environ["PICORG_WEB_AUTH"] = "1"
+        try:
+            client = TestClient(web_app.app)
+
+            anonymous = client.post("/api/logout")
+            self.assertEqual(anonymous.status_code, 401)
+
+            login = client.post(
+                "/api/login",
+                data={"username": "admin", "password": "admin"},
+            )
+            self.assertEqual(login.status_code, 200)
+
+            authenticated = client.post("/api/logout")
+            self.assertEqual(authenticated.status_code, 200)
+        finally:
+            if previous is None:
+                os.environ.pop("PICORG_WEB_AUTH", None)
+            else:
+                os.environ["PICORG_WEB_AUTH"] = previous
+
+    def test_app_secret_change_returns_relogin_response_instead_of_401(self) -> None:
+        previous = os.environ.get("PICORG_WEB_AUTH")
+        os.environ["PICORG_WEB_AUTH"] = "1"
+        try:
+            client = TestClient(web_app.app)
+            with patch.object(web_app.common, "APP_SECRET", "old-session-secret"):
+                login = client.post(
+                    "/api/login",
+                    data={"username": "admin", "password": "admin"},
+                )
+                self.assertEqual(login.status_code, 200)
+
+                def fake_update_settings(_payload):
+                    web_app.common.APP_SECRET = "new-session-secret"
+                    return {"version": "test", "processing": {}}
+
+                with patch.object(web_app, "update_settings", side_effect=fake_update_settings):
+                    response = client.post(
+                        "/api/settings",
+                        json={"app": {"app_secret": "new-session-secret"}},
+                    )
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertTrue(payload["session_invalidated"])
+            self.assertIn("Zaloguj", payload["session_message"])
+        finally:
+            if previous is None:
+                os.environ.pop("PICORG_WEB_AUTH", None)
+            else:
+                os.environ["PICORG_WEB_AUTH"] = previous
 
 
 if __name__ == "__main__":

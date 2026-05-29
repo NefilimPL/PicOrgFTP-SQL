@@ -174,6 +174,22 @@ def _show_timing_details() -> bool:
     return bool(_processing_settings().get("show_timing_details", False))
 
 
+def _upload_limits() -> tuple[int, int]:
+    processing = _processing_settings()
+    max_bytes = max(1, int(processing.get("max_upload_mb") or 50)) * 1024 * 1024
+    max_pixels = max(1, int(processing.get("max_upload_pixels") or 25_000_000))
+    return max_bytes, max_pixels
+
+
+def _upload_limit_message(size: int, max_bytes: int) -> str:
+    limit_mb = max_bytes / (1024 * 1024)
+    return f"Plik ma zbyt duzy rozmiar. Limit uploadu to {limit_mb:g} MB."
+
+
+def _raise_upload_too_large(message: str) -> None:
+    raise HTTPException(status_code=413, detail=message)
+
+
 def _auth_enabled() -> bool:
     return os.environ.get("PICORG_WEB_AUTH", "1").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -557,18 +573,45 @@ def _image_dimensions(path: str) -> tuple[int, int]:
         return 0, 0
 
 
+def _validate_upload_image_pixels(path: str, max_pixels: int) -> tuple[int, int]:
+    width, height = _image_dimensions(path)
+    if width <= 0 or height <= 0:
+        return width, height
+    pixels = int(width) * int(height)
+    if pixels > max_pixels:
+        _raise_upload_too_large(
+            f"Obraz ma {pixels} pikseli ({width}x{height}), limit uploadu to {max_pixels} pikseli."
+        )
+    return width, height
+
+
 async def _save_upload(upload: UploadFile, temp_dir: str, prefix: str) -> str:
     safe_name = _safe_upload_name(upload.filename, f"{prefix}.upload")
     suffix = _safe_file_suffix(safe_name)
     target_path = os.path.join(temp_dir, f"{prefix}_{secrets.token_hex(8)}{suffix}")
-    with open(target_path, "wb") as handle:
-        while True:
-            chunk = await upload.read(1024 * 1024)
-            if not chunk:
-                break
-            handle.write(chunk)
-    await upload.close()
-    return target_path
+    max_bytes, max_pixels = _upload_limits()
+    size = 0
+    try:
+        with open(target_path, "wb") as handle:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    _raise_upload_too_large(_upload_limit_message(size, max_bytes))
+                handle.write(chunk)
+        _validate_upload_image_pixels(target_path, max_pixels)
+        return target_path
+    except Exception:
+        if os.path.exists(target_path):
+            try:
+                os.remove(target_path)
+            except OSError:
+                pass
+        raise
+    finally:
+        await upload.close()
 
 
 def _upload_prefix_from_form_key(key: str) -> str:
@@ -611,16 +654,29 @@ async def _save_upload_cache(upload: UploadFile, cache_scope: str, prefix: str) 
         cache_dir,
         f"{safe_prefix}_{secrets.token_hex(12)}_{safe_stem}{suffix}",
     )
+    max_bytes, max_pixels = _upload_limits()
     size = 0
-    with open(target_path, "wb") as handle:
-        while True:
-            chunk = await upload.read(1024 * 1024)
-            if not chunk:
-                break
-            size += len(chunk)
-            handle.write(chunk)
-    await upload.close()
-    return target_path, size
+    try:
+        with open(target_path, "wb") as handle:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    _raise_upload_too_large(_upload_limit_message(size, max_bytes))
+                handle.write(chunk)
+        _validate_upload_image_pixels(target_path, max_pixels)
+        return target_path, size
+    except Exception:
+        if os.path.exists(target_path):
+            try:
+                os.remove(target_path)
+            except OSError:
+                pass
+        raise
+    finally:
+        await upload.close()
 
 
 def _save_web_image_cache(
@@ -629,7 +685,13 @@ def _save_web_image_cache(
     cache_scope: str,
     prefix: str,
 ) -> tuple[str, int, str, int, int]:
-    data, filename, _mime_type, width, height = download_image_bytes(image_url, page_url)
+    max_bytes, max_pixels = _upload_limits()
+    data, filename, _mime_type, width, height = download_image_bytes(
+        image_url,
+        page_url,
+        max_bytes=max_bytes,
+        max_pixels=max_pixels,
+    )
     safe_name = _safe_upload_name(filename or filename_from_url(image_url), f"{prefix}.jpg")
     stem = Path(safe_name).stem
     suffix = _safe_file_suffix(safe_name) or ".jpg"
@@ -3109,6 +3171,7 @@ def create_app() -> FastAPI:
         payload = await request.json()
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Niepoprawne ustawienia.")
+        previous_session_secret = _session_secret()
         try:
             snapshot = await run_in_threadpool(update_settings, payload)
         except ValueError as exc:
@@ -3120,6 +3183,12 @@ def create_app() -> FastAPI:
                 detail=f"Nie udalo sie zapisac ustawien: {exc}",
             ) from exc
         app.state.runtime_info = _runtime_info()
+        if _auth_enabled() and not hmac.compare_digest(previous_session_secret, _session_secret()):
+            snapshot["session_invalidated"] = True
+            snapshot["session_message"] = "Zapisano APP_SECRET. Zaloguj sie ponownie."
+            response = JSONResponse(snapshot)
+            response.delete_cookie(SESSION_COOKIE)
+            return response
         snapshot["current_user"] = _current_user_payload(request)
         return JSONResponse(snapshot)
 
