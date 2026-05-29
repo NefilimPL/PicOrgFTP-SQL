@@ -4840,36 +4840,28 @@ function renderSettingsApp() {
   const versionNote = document.createElement("p");
   versionNote.className = "settings-note wide-field";
   versionNote.textContent = `Wersja programu: ${s.version || "dev"}`;
-  const colorGroup = document.createElement("div");
-  colorGroup.className = "settings-field-group wide-field";
-  const colorTitle = document.createElement("h2");
-  colorTitle.textContent = "Nazwy pol kolorow";
-  const colorGrid = document.createElement("div");
-  colorGrid.className = "settings-form nested-grid";
-  colorGrid.append(
-    inputField("color1", "Kolor 1", s.color_field_labels?.color1 || ""),
-    inputField("color2", "Kolor 2", s.color_field_labels?.color2 || ""),
-    inputField("color3", "Kolor 3", s.color_field_labels?.color3 || "")
-  );
-  colorGroup.append(colorTitle, colorGrid);
   form.append(
-    versionNote,
-    configNote,
-    runtimeWarning,
-    inputField("base_dir", "Katalog bazowy", s.base_dir, {
-      placeholder: "np. C:\\PicOrgFTP-SQL albo \\\\SERWER\\Udzial\\PicOrgFTP-SQL",
-      description:
-        "Folder, w ktorym backend trzyma config.json, lists.xlsx i katalog zdjec. " +
-        "Dla uslugi Windows najlepiej uzywac pelnej sciezki lokalnej albo UNC; dyski mapowane typu Z:\\ moga nie byc widoczne.",
-    }),
-    checkField(
-      "local_file_index",
-      "Indeks plikow lokalnych",
-      s.local_file_index,
-      "Backend sprawdza lokalne pliki przy wczytywaniu statusow slotow."
+    settingsFieldGroup("Runtime aplikacji",
+      versionNote,
+      configNote,
+      runtimeWarning,
+      inputField("base_dir", "Katalog bazowy", s.base_dir, {
+        placeholder: "np. C:\\PicOrgFTP-SQL albo \\\\SERWER\\Udzial\\PicOrgFTP-SQL",
+        description:
+          "Folder, w ktorym backend trzyma config.json, lists.xlsx i katalog zdjec. " +
+          "Dla uslugi Windows najlepiej uzywac pelnej sciezki lokalnej albo UNC; dyski mapowane typu Z:\\ moga nie byc widoczne.",
+      })
     ),
-    settingsFieldGroup(
-      "Widok panelu",
+    settingsFieldGroup("Indeks lokalny",
+      checkField(
+        "local_file_index",
+        "Indeks plikow lokalnych",
+        s.local_file_index,
+        "Backend sprawdza lokalne pliki przy wczytywaniu statusow slotow."
+      ),
+      actionRow(diagnosticButton("local", "Test folderow backendu"), fileIndexRefreshButton())
+    ),
+    settingsFieldGroup("Widok panelu",
       checkField(
         "user_show_timing_details",
         "Pokazuj blok Pomiary",
@@ -4877,8 +4869,11 @@ function renderSettingsApp() {
         "Ustawienie tylko dla aktualnego uzytkownika. Pokazuje lub ukrywa blok Pomiary z czasami kolejki i operacji."
       )
     ),
-    colorGroup,
-    actionRow(diagnosticButton("local", "Test folderow backendu"), fileIndexRefreshButton())
+    settingsFieldGroup("Nazwy pol kolorow",
+      inputField("color1", "Kolor 1", s.color_field_labels?.color1 || ""),
+      inputField("color2", "Kolor 2", s.color_field_labels?.color2 || ""),
+      inputField("color3", "Kolor 3", s.color_field_labels?.color3 || "")
+    )
   );
   settingsSaveButton(form, (data) => ({
     app: {
@@ -5008,67 +5003,64 @@ function renderSettingsSecurity() {
   const security = state.settings.security || {};
   const form = document.createElement("form");
   form.className = "settings-form";
-  const secretGroup = document.createElement("div");
-  const secretTitle = document.createElement("h2");
   const secretHint = document.createElement("p");
-  const secretGrid = document.createElement("div");
-  secretGroup.className = "settings-field-group wide-field";
-  secretTitle.textContent = "Sekret aplikacji";
   secretHint.className = "settings-note";
   secretHint.textContent =
     "APP_SECRET sluzy do odczytu zaszyfrowanych hasel z config.json. " +
     "Przy podpinaniu istniejacego katalogu wpisz sekret uzyty przy jego konfiguracji; puste pole niczego nie zmienia.";
-  secretGrid.className = "settings-form nested-grid";
-  secretGrid.append(
-    credentialField("app_secret", "APP_SECRET", state.settings.app_secret_set, {
-      type: "password",
-      secretPath: "app_secret",
-    })
-  );
-  secretGroup.append(secretTitle, secretHint, secretGrid);
   form.append(
-    secretGroup,
-    inputField("max_upload_mb", "Maksymalny upload (MB)", security.max_upload_mb || 50, {
-      type: "number",
-      min: 1,
-      max: 2048,
-      description: "Backend przerwie zapis i usunie czesciowy plik po przekroczeniu limitu.",
-    }),
-    inputField(
-      "max_upload_pixels",
-      "Maksymalna liczba pikseli",
-      security.max_upload_pixels || 25000000,
-      {
+    settingsFieldGroup("Sekret aplikacji",
+      secretHint,
+      credentialField("app_secret", "APP_SECRET", state.settings.app_secret_set, {
+        type: "password",
+        secretPath: "app_secret",
+      })
+    ),
+    settingsFieldGroup("Limity uploadu",
+      inputField("max_upload_mb", "Maksymalny upload (MB)", security.max_upload_mb || 50, {
         type: "number",
         min: 1,
-        max: 400000000,
-        step: 100000,
-        description: "Dotyczy obrazow z uploadu, cache, rozszerzenia i importu z URL.",
-      }
+        max: 2048,
+        description: "Backend przerwie zapis i usunie czesciowy plik po przekroczeniu limitu.",
+      }),
+      inputField(
+        "max_upload_pixels",
+        "Maksymalna liczba pikseli",
+        security.max_upload_pixels || 25000000,
+        {
+          type: "number",
+          min: 1,
+          max: 400000000,
+          step: 100000,
+          description: "Dotyczy obrazow z uploadu, cache, rozszerzenia i importu z URL.",
+        }
+      )
     ),
-    inputField(
-      "allowed_upload_extensions",
-      "Akceptowane rozszerzenia",
-      extensionListText(security.allowed_upload_extensions),
-      {
-        textarea: true,
-        description: "Lista po przecinku. Pusta lista wylacza allow-liste, ale nadal dzialaja blokady ponizej.",
-      }
-    ),
-    inputField(
-      "blocked_upload_extensions",
-      "Zabronione rozszerzenia",
-      extensionListText(security.blocked_upload_extensions),
-      {
-        textarea: true,
-        description: "Lista po przecinku. Te typy sa odrzucane niezaleznie od listy akceptowanych.",
-      }
-    ),
-    checkField(
-      "block_executable_uploads",
-      "Blokuj pliki wykonywalne",
-      security.block_executable_uploads !== false,
-      "Odrzuca m.in. exe, bat, cmd, msi, ps1, vbs, js, jar, dll, scr, sh."
+    settingsFieldGroup("Typy plikow uploadu",
+      inputField(
+        "allowed_upload_extensions",
+        "Akceptowane rozszerzenia",
+        extensionListText(security.allowed_upload_extensions),
+        {
+          textarea: true,
+          description: "Lista po przecinku. Pusta lista wylacza allow-liste, ale nadal dzialaja blokady ponizej.",
+        }
+      ),
+      inputField(
+        "blocked_upload_extensions",
+        "Zabronione rozszerzenia",
+        extensionListText(security.blocked_upload_extensions),
+        {
+          textarea: true,
+          description: "Lista po przecinku. Te typy sa odrzucane niezaleznie od listy akceptowanych.",
+        }
+      ),
+      checkField(
+        "block_executable_uploads",
+        "Blokuj pliki wykonywalne",
+        security.block_executable_uploads !== false,
+        "Odrzuca m.in. exe, bat, cmd, msi, ps1, vbs, js, jar, dll, scr, sh."
+      )
     )
   );
   settingsSaveButton(form, (data) => ({
@@ -5089,21 +5081,25 @@ function renderSettingsFtp() {
   const form = document.createElement("form");
   form.className = "settings-form";
   form.append(
-    checkField(
-      "enabled",
-      "Aktualizacja FTP",
-      ftp.enabled,
-      "Po zapisie backend bedzie wysylal przetworzone pliki na FTP."
+    settingsFieldGroup("Polaczenie FTP",
+      checkField(
+        "enabled",
+        "Aktualizacja FTP",
+        ftp.enabled,
+        "Po zapisie backend bedzie wysylal przetworzone pliki na FTP."
+      ),
+      inputField("host", "Host", ftp.host),
+      inputField("port", "Port", ftp.port, { type: "number" }),
+      inputField("path", "Sciezka", ftp.path),
+      actionRow(diagnosticButton("ftp", "Test FTP"))
     ),
-    inputField("host", "Host", ftp.host),
-    inputField("port", "Port", ftp.port, { type: "number" }),
-    inputField("path", "Sciezka", ftp.path),
-    credentialField("user", "Uzytkownik", ftp.user_set, { secretPath: "ftp.user" }),
-    credentialField("password", "Haslo", ftp.password_set, {
-      type: "password",
-      secretPath: "ftp.password",
-    }),
-    actionRow(diagnosticButton("ftp", "Test FTP"))
+    settingsFieldGroup("Dane logowania FTP",
+      credentialField("user", "Uzytkownik", ftp.user_set, { secretPath: "ftp.user" }),
+      credentialField("password", "Haslo", ftp.password_set, {
+        type: "password",
+        secretPath: "ftp.password",
+      })
+    )
   );
   settingsSaveButton(form, (data) => ({
     ftp: {
@@ -5123,33 +5119,39 @@ function renderSettingsSql() {
   const form = document.createElement("form");
   form.className = "settings-form";
   form.append(
-    selectField("type", "Typ bazy", db.type, [["mysql", "MySQL"], ["mssql", "MS SQL"]]),
-    checkField(
-      "sql_update_enabled",
-      "Aktualizacja SQL",
-      db.sql_update_enabled,
-      "Backend bedzie aktualizowal pola SQL przypisane w zakladce Sloty."
+    settingsFieldGroup("Tryb SQL",
+      selectField("type", "Typ bazy", db.type, [["mysql", "MySQL"], ["mssql", "MS SQL"]]),
+      checkField(
+        "sql_update_enabled",
+        "Aktualizacja SQL",
+        db.sql_update_enabled,
+        "Backend bedzie aktualizowal pola SQL przypisane w zakladce Sloty."
+      ),
+      inputField("query", "Zapytanie SQL", db.query, { textarea: true }),
+      actionRow(diagnosticButton("sql", "Test SQL"))
     ),
-    inputField("query", "Zapytanie SQL", db.query, { textarea: true, className: "wide-field" }),
-    inputField("mssql_server", "MS SQL server", db.mssql.server),
-    inputField("mssql_database", "MS SQL database", db.mssql.database),
-    credentialField("mssql_user", "MS SQL user", db.mssql.user_set, {
-      secretPath: "database.mssql.user",
-    }),
-    credentialField("mssql_password", "MS SQL haslo", db.mssql.password_set, {
-      type: "password",
-      secretPath: "database.mssql.password",
-    }),
-    inputField("mysql_server", "MySQL server", db.mysql.server),
-    inputField("mysql_database", "MySQL database", db.mysql.database),
-    credentialField("mysql_user", "MySQL user", db.mysql.user_set, {
-      secretPath: "database.mysql.user",
-    }),
-    credentialField("mysql_password", "MySQL haslo", db.mysql.password_set, {
-      type: "password",
-      secretPath: "database.mysql.password",
-    }),
-    actionRow(diagnosticButton("sql", "Test SQL"))
+    settingsFieldGroup("MS SQL",
+      inputField("mssql_server", "MS SQL server", db.mssql.server),
+      inputField("mssql_database", "MS SQL database", db.mssql.database),
+      credentialField("mssql_user", "MS SQL user", db.mssql.user_set, {
+        secretPath: "database.mssql.user",
+      }),
+      credentialField("mssql_password", "MS SQL haslo", db.mssql.password_set, {
+        type: "password",
+        secretPath: "database.mssql.password",
+      })
+    ),
+    settingsFieldGroup("MySQL",
+      inputField("mysql_server", "MySQL server", db.mysql.server),
+      inputField("mysql_database", "MySQL database", db.mysql.database),
+      credentialField("mysql_user", "MySQL user", db.mysql.user_set, {
+        secretPath: "database.mysql.user",
+      }),
+      credentialField("mysql_password", "MySQL haslo", db.mysql.password_set, {
+        type: "password",
+        secretPath: "database.mysql.password",
+      })
+    )
   );
   settingsSaveButton(form, (data) => ({
     database: {
@@ -5229,7 +5231,7 @@ function renderSettingsSlots() {
       sql_column: "",
     });
   });
-  form.append(note, list, actionRow(addButton));
+  form.append(settingsFieldGroup("Lista slotow", note, list, actionRow(addButton)));
   settingsSaveButton(form, () => {
     const slots = [...form.querySelectorAll(".slot-settings-row")].map((row) => {
       const label = row.querySelector('[name="label"]').value;
@@ -5345,7 +5347,10 @@ function renderSettingsUsers() {
     row.append(name, role, passwordInput, enabledWrap, save);
     list.appendChild(row);
   }
-  wrapper.append(addForm, list);
+  wrapper.append(
+    settingsFieldGroup("Nowy uzytkownik", addForm),
+    settingsFieldGroup("Lista uzytkownikow", list)
+  );
   settingsOutput.appendChild(wrapper);
 }
 

@@ -221,6 +221,72 @@ class SourceIntegrityTests(unittest.TestCase):
             for needle in required:
                 self.assertIn(needle, block)
 
+    def test_web_settings_tabs_use_consistent_field_groups(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        def function_body(name: str, next_name: str) -> str:
+            start = source.index(f"function {name}")
+            end = source.index(f"function {next_name}", start + len(f"function {name}"))
+            return source[start:end]
+
+        checks = {
+            "renderSettingsApp": [
+                ("Runtime aplikacji", ["versionNote", "configNote", "runtimeWarning", '"base_dir"']),
+                ("Indeks lokalny", ['"local_file_index"', "diagnosticButton", "fileIndexRefreshButton"]),
+                ("Widok panelu", ['"user_show_timing_details"']),
+                ("Nazwy pol kolorow", ['"color1"', '"color2"', '"color3"']),
+            ],
+            "renderSettingsSecurity": [
+                ("Sekret aplikacji", ['credentialField("app_secret"']),
+                ("Limity uploadu", ['"max_upload_mb"', '"max_upload_pixels"']),
+                (
+                    "Typy plikow uploadu",
+                    ['"allowed_upload_extensions"', '"blocked_upload_extensions"', '"block_executable_uploads"'],
+                ),
+            ],
+            "renderSettingsFtp": [
+                ("Polaczenie FTP", ['"enabled"', '"host"', '"port"', '"path"', "diagnosticButton"]),
+                ("Dane logowania FTP", ['credentialField("user"', 'credentialField("password"']),
+            ],
+            "renderSettingsSql": [
+                ("Tryb SQL", ['"type"', '"sql_update_enabled"', '"query"', "diagnosticButton"]),
+                ("MS SQL", ['"mssql_server"', '"mssql_database"', 'credentialField("mssql_user"']),
+                ("MySQL", ['"mysql_server"', '"mysql_database"', 'credentialField("mysql_user"']),
+            ],
+            "renderSettingsSlots": [
+                ("Lista slotow", ["note", "list", "addButton"]),
+            ],
+            "renderSettingsUsers": [
+                ("Nowy uzytkownik", ["addForm"]),
+                ("Lista uzytkownikow", ["list"]),
+            ],
+        }
+        boundaries = {
+            "renderSettingsApp": "renderSettingsProcessing",
+            "renderSettingsSecurity": "renderSettingsFtp",
+            "renderSettingsFtp": "renderSettingsSql",
+            "renderSettingsSql": "renderSettingsSlots",
+            "renderSettingsSlots": "renderSettingsUsers",
+            "renderSettingsUsers": "renderSettings",
+        }
+
+        for function_name, groups in checks.items():
+            body = function_body(function_name, boundaries[function_name])
+            for title, expected_fields in groups:
+                marker = f'settingsFieldGroup("{title}"'
+                start = body.index(marker)
+                next_group = body.find("settingsFieldGroup(", start + len(marker))
+                block = body[start:] if next_group == -1 else body[start:next_group]
+                for field in expected_fields:
+                    self.assertIn(field, block)
+
 
 if __name__ == "__main__":
     unittest.main()
