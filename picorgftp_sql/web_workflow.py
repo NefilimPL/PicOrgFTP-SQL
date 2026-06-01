@@ -34,6 +34,7 @@ except Exception:  # pragma: no cover - handled when image processing is request
 
 
 IMAGE_EXTENSIONS = {
+    ".avif",
     ".bmp",
     ".gif",
     ".jpg",

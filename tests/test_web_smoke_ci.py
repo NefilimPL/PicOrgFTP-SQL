@@ -101,10 +101,15 @@ class WebSmokeCiTests(unittest.TestCase):
             login = client.post(
                 "/api/login",
                 data={"username": "admin", "password": "admin"},
+                headers={"X-Requested-With": "XMLHttpRequest"},
             )
             self.assertEqual(login.status_code, 200)
+            csrf_headers = {"X-PicOrg-CSRF": login.json()["csrf_token"]}
 
-            authenticated = client.post("/api/logout")
+            forged = client.post("/api/logout", headers={"X-PicOrg-CSRF": "bad"})
+            self.assertEqual(forged.status_code, 403)
+
+            authenticated = client.post("/api/logout", headers=csrf_headers)
             self.assertEqual(authenticated.status_code, 200)
         finally:
             if previous is None:
@@ -121,8 +126,10 @@ class WebSmokeCiTests(unittest.TestCase):
                 login = client.post(
                     "/api/login",
                     data={"username": "admin", "password": "admin"},
+                    headers={"X-Requested-With": "XMLHttpRequest"},
                 )
                 self.assertEqual(login.status_code, 200)
+                headers = {"X-PicOrg-CSRF": login.json()["csrf_token"]}
 
                 def fake_update_settings(_payload):
                     web_app.common.APP_SECRET = "new-session-secret"
@@ -132,6 +139,7 @@ class WebSmokeCiTests(unittest.TestCase):
                     response = client.post(
                         "/api/settings",
                         json={"app": {"app_secret": "new-session-secret"}},
+                        headers=headers,
                     )
 
             self.assertEqual(response.status_code, 200)

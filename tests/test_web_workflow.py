@@ -93,6 +93,34 @@ class WebWorkflowTests(unittest.TestCase):
                     ],
                 )
 
+    def test_process_web_uploads_accepts_avif_allowed_by_web_security_defaults(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            source = Path(temp_dir) / "source.avif"
+            source.write_bytes(b"avif-payload")
+
+            result = process_web_uploads(
+                base_output_dir=str(Path(temp_dir) / "processed"),
+                form=WebProductForm(
+                    name="Maggiore",
+                    type_name="komoda",
+                    model="MA03",
+                    color1="bialy",
+                    ean="5901234567890",
+                ),
+                uploaded_slots=[
+                    WebUploadedSlot(
+                        prefix="03",
+                        label="DETAIL_pic",
+                        source_path=str(source),
+                        original_filename="front.avif",
+                    )
+                ],
+            )
+
+            self.assertEqual(result.saved_files[0].operation, "copy_unsupported_image")
+            self.assertTrue(result.saved_files[0].filename.endswith(".avif"))
+
     def test_process_web_uploads_uses_filename_label_independent_from_display_label(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:

@@ -413,8 +413,16 @@ h2 {
   text-align: left;
 }
 
-.autocomplete-panel button:hover {
+.autocomplete-panel button:hover,
+.autocomplete-panel button.active {
   background: var(--surface-2);
+}
+
+.autocomplete-panel mark {
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: inherit;
+  padding: 0 2px;
 }
 
 .process-alert-panel {
@@ -1676,11 +1684,16 @@ button.slot-badge.on:hover {
   }
 
   .topnav {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
     width: 100%;
     margin-left: 0;
   }
 
-  .topnav button,
+  .topnav .nav-button {
+    width: 100%;
+  }
+
   .lookup-actions,
   .web-image-url-row,
   .inline-form,
