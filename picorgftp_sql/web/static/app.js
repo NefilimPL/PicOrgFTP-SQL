@@ -5645,7 +5645,10 @@ function renderSettingsUsers() {
   for (const user of state.settings.users || []) {
     const row = document.createElement("div");
     row.className = "user-row";
-    const name = document.createElement("strong");
+    row.classList.toggle("user-row-locked", Boolean(user.locked));
+    const name = document.createElement("div");
+    const nameTitle = document.createElement("strong");
+    const nameMeta = document.createElement("small");
     const role = document.createElement("select");
     const enabled = document.createElement("input");
     const enabledWrap = document.createElement("div");
@@ -5653,11 +5656,32 @@ function renderSettingsUsers() {
     const enabledTitle = document.createElement("strong");
     const enabledDescription = document.createElement("small");
     const passwordInput = document.createElement("input");
+    const actions = document.createElement("div");
     const save = document.createElement("button");
+    const unlock = document.createElement("button");
     const isCurrentUser =
       state.currentUser &&
       String(state.currentUser.username || "").toLowerCase() === String(user.username || "").toLowerCase();
-    name.textContent = user.username;
+    const loginMeta = [];
+    name.className = "user-summary";
+    nameTitle.textContent = user.username;
+    if (user.locked) {
+      loginMeta.push(
+        user.lock_manual
+          ? "Zablokowane do recznego odblokowania"
+          : `Zablokowane do ${user.lock_expires_at || "-"}`
+      );
+    }
+    if (user.failed_login_count) {
+      loginMeta.push(`Bledne proby: ${user.failed_login_count}`);
+    }
+    if (user.last_failed_login_at) {
+      const ip = user.last_failed_login_ip ? `, ${user.last_failed_login_ip}` : "";
+      loginMeta.push(`Ostatnia bledna: ${user.last_failed_login_at}${ip}`);
+    }
+    nameMeta.textContent = loginMeta.join(" | ") || "Brak blednych prob logowania.";
+    nameMeta.className = user.locked ? "user-lock-warning" : "";
+    name.append(nameTitle, nameMeta);
     for (const value of ["user", "admin"]) {
       const option = document.createElement("option");
       option.value = value;
@@ -5680,6 +5704,10 @@ function renderSettingsUsers() {
     passwordInput.placeholder = user.has_password ? "Nowe haslo opcjonalnie" : "Ustaw haslo";
     save.type = "button";
     save.textContent = "Zapisz";
+    unlock.type = "button";
+    unlock.textContent = "Odblokuj";
+    unlock.hidden = !user.locked && !user.failed_login_count;
+    actions.className = "user-actions";
     save.addEventListener("click", async () => {
       const payload = { enabled: enabled.checked, role: role.value };
       if (passwordInput.value) {
@@ -5695,7 +5723,19 @@ function renderSettingsUsers() {
       updateAdminUi();
       renderSettings();
     });
-    row.append(name, role, passwordInput, enabledWrap, save);
+    unlock.addEventListener("click", async () => {
+      const response = await requestJson(`/api/users/${encodeURIComponent(user.username)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ unlock: true }),
+      });
+      state.settings.users = response.users;
+      state.currentUser = response.current_user || state.currentUser;
+      updateAdminUi();
+      renderSettings();
+    });
+    actions.append(save, unlock);
+    row.append(name, role, passwordInput, enabledWrap, actions);
     list.appendChild(row);
   }
   wrapper.append(

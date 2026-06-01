@@ -65,6 +65,53 @@ def active_clients_path(root: Path | None = None) -> Path:
     return log_dir(root) / "web_active_clients.json"
 
 
+def web_account_rows() -> list[tuple[str, str, str, str, str, str]]:
+    try:
+        from .web_data import load_users
+
+        users = load_users()
+    except Exception as exc:
+        return [("blad", "", "", str(exc), "", "")]
+    rows: list[tuple[str, str, str, str, str, str]] = []
+    for user in users:
+        locked = bool(user.get("locked"))
+        if locked and user.get("lock_manual"):
+            lock_text = "reczne odblokowanie"
+        elif locked:
+            lock_text = f"do {user.get('lock_expires_at') or '-'}"
+        else:
+            lock_text = "nie"
+        last_parts = [
+            str(user.get("last_failed_login_at") or ""),
+            str(user.get("last_failed_login_ip") or ""),
+        ]
+        rows.append(
+            (
+                str(user.get("username") or ""),
+                str(user.get("role") or ""),
+                "tak" if user.get("enabled") else "nie",
+                lock_text,
+                str(user.get("failed_login_count") or 0),
+                " / ".join(part for part in last_parts if part) or "-",
+            )
+        )
+    return rows or [("brak", "", "", "", "", "")]
+
+
+def unlock_web_account(username: str) -> ActionResult:
+    if not username or username in {"brak", "blad"}:
+        return ActionResult(False, "Wybierz konto do odblokowania.")
+    try:
+        from .logging_utils import log_info
+        from .web_data import unlock_user
+
+        unlock_user(username)
+        log_info(f"WEB admin unlock account from starter panel: {username}")
+    except Exception as exc:
+        return ActionResult(False, f"Nie udalo sie odblokowac konta {username}: {exc}")
+    return ActionResult(True, f"Odblokowano konto {username}.")
+
+
 def _creationflags() -> int:
     return int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0
 
@@ -869,6 +916,39 @@ class WebManagerApp:
         self.listeners_tree.column("process", width=190)
         self.listeners_tree.pack(fill="both", expand=True, padx=8, pady=8)
 
+        accounts = ttk.LabelFrame(lower, text="Konta web i blokady logowania")
+        accounts.pack(fill="x", pady=(0, 8))
+        ttk.Label(
+            accounts,
+            text="Tu widac konta zablokowane po blednych haslach. Konto admina po limicie wymaga recznego odblokowania tutaj albo z innego aktywnego konta administratora.",
+            foreground="#555555",
+            wraplength=980,
+        ).pack(anchor="w", padx=8, pady=(8, 0))
+        account_toolbar = ttk.Frame(accounts, padding=(8, 4, 8, 0))
+        account_toolbar.pack(fill="x")
+        unlock_btn = ttk.Button(account_toolbar, text="Odblokuj zaznaczone konto", command=self.unlock_selected_account)
+        unlock_btn.pack(side="left")
+        Tooltip(unlock_btn, "Czyści licznik blednych hasel i blokade logowania dla zaznaczonego konta.")
+        self.accounts_tree = ttk.Treeview(
+            accounts,
+            columns=("user", "role", "enabled", "lock", "failed", "last"),
+            show="headings",
+            height=5,
+        )
+        self.accounts_tree.heading("user", text="Uzytkownik")
+        self.accounts_tree.heading("role", text="Rola")
+        self.accounts_tree.heading("enabled", text="Aktywne")
+        self.accounts_tree.heading("lock", text="Blokada")
+        self.accounts_tree.heading("failed", text="Bledne")
+        self.accounts_tree.heading("last", text="Ostatnia bledna proba")
+        self.accounts_tree.column("user", width=130)
+        self.accounts_tree.column("role", width=80)
+        self.accounts_tree.column("enabled", width=70)
+        self.accounts_tree.column("lock", width=190)
+        self.accounts_tree.column("failed", width=70)
+        self.accounts_tree.column("last", width=260)
+        self.accounts_tree.pack(fill="x", padx=8, pady=8)
+
         users = ttk.LabelFrame(lower, text="Aktywni uzytkownicy strony i polaczenia TCP")
         users.pack(fill="both", expand=True)
         ttk.Label(
@@ -963,11 +1043,27 @@ class WebManagerApp:
     def open_web(self) -> None:
         webbrowser.open(local_url(self._port()))
 
+    def unlock_selected_account(self) -> None:
+        selection = self.accounts_tree.selection()
+        if not selection:
+            self.status_override_until = time.time() + 8
+            self.status_var.set("Wybierz konto do odblokowania.")
+            return
+        values = self.accounts_tree.item(selection[0], "values")
+        username = str(values[0] if values else "")
+        result = unlock_web_account(username)
+        self.status_override_until = time.time() + 12
+        self.status_var.set(result.message)
+        self._refresh_account_rows()
+
     def _set_rows(self, tree, rows: list[tuple[str, ...]]) -> None:
         for item in tree.get_children():
             tree.delete(item)
         for row in rows:
             tree.insert("", "end", values=row)
+
+    def _refresh_account_rows(self) -> None:
+        self._set_rows(self.accounts_tree, web_account_rows())
 
     def refresh(self) -> None:
         self.request_refresh(clear_status=True)
@@ -992,6 +1088,7 @@ class WebManagerApp:
 
     def _apply_status(self, status: dict[str, Any]) -> None:
         self.refreshing = False
+        self._refresh_account_rows()
         if status.get("error"):
             if time.time() >= self.status_override_until:
                 self.status_var.set(f"Status: blad odswiezania: {status['error']}")

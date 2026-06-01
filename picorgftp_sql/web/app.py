@@ -20,6 +20,7 @@ import threading
 import time
 import traceback
 import unicodedata
+import warnings
 from typing import Any, Callable, Dict, List, Optional, Set
 from urllib.parse import urlsplit
 import zipfile
@@ -71,6 +72,7 @@ from ..web_workflow import (
 from ..web_data import (
     add_list_value,
     add_user,
+    authenticate_login,
     authenticate_user,
     cache_ftp_preview,
     cleanup_web_ftp_cache,
@@ -146,6 +148,44 @@ EXECUTABLE_UPLOAD_EXTENSIONS = {
     "pif",
     "sh",
 }
+GENERIC_UPLOAD_MIME_TYPES = {
+    "",
+    "application/octet-stream",
+    "binary/octet-stream",
+}
+UPLOAD_MIME_TYPES = {
+    "jpg": {"image/jpeg", "image/jpg", "image/pjpeg"},
+    "jpeg": {"image/jpeg", "image/jpg", "image/pjpeg"},
+    "png": {"image/png"},
+    "webp": {"image/webp"},
+    "gif": {"image/gif"},
+    "bmp": {"image/bmp", "image/x-ms-bmp", "image/x-windows-bmp"},
+    "tif": {"image/tiff", "image/tif"},
+    "tiff": {"image/tiff", "image/tif"},
+    "avif": {"image/avif", "image/heif", "image/heic"},
+    "psd": {"image/vnd.adobe.photoshop", "image/x-photoshop", "image/psd"},
+    "pdf": {"application/pdf", "application/x-pdf"},
+    "eps": {"application/postscript", "application/eps", "image/eps"},
+    "ai": {
+        "application/pdf",
+        "application/postscript",
+        "application/illustrator",
+        "application/vnd.adobe.illustrator",
+    },
+}
+IMAGE_UPLOAD_EXTENSIONS = {
+    "jpg",
+    "jpeg",
+    "png",
+    "webp",
+    "gif",
+    "bmp",
+    "tif",
+    "tiff",
+    "avif",
+    "psd",
+}
+METADATA_STRIP_UPLOAD_EXTENSIONS = {"jpg", "jpeg", "png"}
 
 
 @dataclass(frozen=True)
@@ -344,7 +384,7 @@ def _read_session_token(token: Optional[str]) -> Optional[str]:
     if int(time.time()) - issued > SESSION_MAX_AGE_SECONDS:
         return None
     user = find_user(username)
-    if not user or not user.get("enabled"):
+    if not user or not user.get("enabled") or user.get("locked"):
         return None
     return username
 
@@ -369,7 +409,7 @@ def _read_browser_extension_token(token: Optional[str]) -> Optional[str]:
     if int(time.time()) - issued > BROWSER_EXTENSION_TOKEN_MAX_AGE_SECONDS:
         return None
     user = find_user(username)
-    if not user or not user.get("enabled"):
+    if not user or not user.get("enabled") or user.get("locked"):
         return None
     return username
 
@@ -378,6 +418,14 @@ def _current_user(request: Request) -> Optional[str]:
     if not _auth_enabled():
         return _admin_username()
     return _read_session_token(request.cookies.get(SESSION_COOKIE))
+
+
+def _request_remote_address(request: Request) -> str:
+    forwarded = str(request.headers.get("x-forwarded-for") or "").split(",", 1)[0].strip()
+    if forwarded:
+        return forwarded
+    client = getattr(request, "client", None)
+    return str(getattr(client, "host", "") or "")
 
 
 def _extension_bearer_token(request: Request) -> str:
@@ -474,6 +522,170 @@ def _validate_upload_extension(filename: object) -> None:
         )
     if allowed and extension not in allowed:
         raise HTTPException(status_code=400, detail=f"Typ pliku .{extension} nie jest dozwolony.")
+
+
+def _normalized_content_type(content_type: object) -> str:
+    return str(content_type or "").split(";", 1)[0].strip().lower()
+
+
+def _validate_upload_mime_type(filename: object, content_type: object) -> None:
+    extension = _upload_extension(filename)
+    normalized = _normalized_content_type(content_type)
+    if normalized in GENERIC_UPLOAD_MIME_TYPES:
+        return
+    allowed = UPLOAD_MIME_TYPES.get(extension)
+    if allowed is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Typ pliku .{extension} nie ma skonfigurowanej walidacji MIME.",
+        )
+    if normalized not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"MIME type {normalized} nie pasuje do pliku .{extension}.",
+        )
+
+
+def _is_iso_base_media_brand(header: bytes, allowed_brands: Set[bytes]) -> bool:
+    if len(header) < 16 or header[4:8] != b"ftyp":
+        return False
+    brands = {header[8:12]}
+    compatible = header[16:64]
+    brands.update(compatible[index : index + 4] for index in range(0, len(compatible) - 3, 4))
+    return any(brand in allowed_brands for brand in brands)
+
+
+def _upload_signature_matches(extension: str, header: bytes) -> bool:
+    if extension in {"jpg", "jpeg"}:
+        return header.startswith(b"\xff\xd8\xff")
+    if extension == "png":
+        return header.startswith(b"\x89PNG\r\n\x1a\n")
+    if extension == "gif":
+        return header.startswith((b"GIF87a", b"GIF89a"))
+    if extension == "bmp":
+        return header.startswith(b"BM")
+    if extension in {"tif", "tiff"}:
+        return header.startswith((b"II*\x00", b"MM\x00*"))
+    if extension == "webp":
+        return len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP"
+    if extension == "avif":
+        return _is_iso_base_media_brand(header, {b"avif", b"avis"})
+    if extension == "pdf":
+        return header.startswith(b"%PDF-")
+    if extension == "eps":
+        return header.startswith(b"%!PS-Adobe-")
+    if extension == "ai":
+        return header.startswith((b"%PDF-", b"%!PS-Adobe-"))
+    if extension == "psd":
+        return header.startswith(b"8BPS")
+    return False
+
+
+def _validate_upload_signature(path: str, filename: object) -> None:
+    extension = _upload_extension(filename)
+    try:
+        with open(path, "rb") as handle:
+            header = handle.read(128)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail="Nie mozna odczytac wyslanego pliku.") from exc
+    if not header:
+        raise HTTPException(status_code=400, detail="Plik jest pusty.")
+    stripped = header.lstrip().lower()
+    if stripped.startswith((b"<html", b"<!doctype", b"<svg", b"<?xml")):
+        raise HTTPException(
+            status_code=400,
+            detail="Zawartosc pliku wyglada jak HTML/XML/SVG, a nie dozwolony upload.",
+        )
+    if not _upload_signature_matches(extension, header):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Sygnatura pliku nie pasuje do rozszerzenia .{extension}.",
+        )
+
+
+def _validate_upload_image_file(path: str, filename: object, max_pixels: int) -> tuple[int, int]:
+    extension = _upload_extension(filename)
+    if extension not in IMAGE_UPLOAD_EXTENSIONS:
+        return 0, 0
+    if Image is None:
+        raise HTTPException(status_code=415, detail="Pillow nie jest dostepny do walidacji obrazu.")
+    try:
+        with warnings.catch_warnings():
+            if hasattr(Image, "DecompressionBombWarning"):
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(path) as image:
+                width, height = int(image.size[0]), int(image.size[1])
+                pixels = width * height
+                if pixels > max_pixels:
+                    _raise_upload_too_large(
+                        f"Obraz ma {pixels} pikseli ({width}x{height}), limit uploadu to {max_pixels} pikseli."
+                    )
+                image.verify()
+                return width, height
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Nie mozna otworzyc pliku jako obrazu.") from exc
+
+
+def _validate_upload_content(
+    path: str,
+    filename: object,
+    content_type: object,
+    max_pixels: int,
+) -> tuple[int, int]:
+    _validate_upload_mime_type(filename, content_type)
+    _validate_upload_signature(path, filename)
+    return _validate_upload_image_file(path, filename, max_pixels)
+
+
+def _jpeg_safe_image(image: Any) -> Any:
+    if image.mode in {"RGB", "L"}:
+        return image
+    if image.mode in {"RGBA", "LA"}:
+        rgba = image.convert("RGBA")
+        background = Image.new("RGB", rgba.size, (255, 255, 255))
+        background.paste(rgba, (0, 0), rgba.getchannel("A"))
+        return background
+    return image.convert("RGB")
+
+
+def _strip_upload_metadata(path: str, filename: object) -> None:
+    extension = _upload_extension(filename)
+    if extension not in METADATA_STRIP_UPLOAD_EXTENSIONS or Image is None:
+        return
+    temp_path = f"{path}.clean-{secrets.token_hex(6)}"
+    try:
+        with Image.open(path) as image:
+            work = image.copy()
+        if ImageOps is not None:
+            try:
+                work = ImageOps.exif_transpose(work)
+            except Exception:
+                pass
+        if extension in {"jpg", "jpeg"}:
+            work = _jpeg_safe_image(work)
+            work.save(temp_path, format="JPEG", quality=95, optimize=True)
+        else:
+            work.save(temp_path, format="PNG", optimize=True)
+        os.replace(temp_path, path)
+    except Exception as exc:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        raise HTTPException(status_code=400, detail="Nie mozna wyczyscic metadanych obrazu.") from exc
+
+
+def _enforce_upload_size(path: str, max_bytes: int) -> int:
+    try:
+        size = os.path.getsize(path)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail="Nie mozna sprawdzic rozmiaru wyslanego pliku.") from exc
+    if size > max_bytes:
+        _raise_upload_too_large(_upload_limit_message(size, max_bytes))
+    return size
 
 
 def _upload_cache_root() -> str:
@@ -725,7 +937,9 @@ async def _save_upload(upload: UploadFile, temp_dir: str, prefix: str) -> str:
                 if size > max_bytes:
                     _raise_upload_too_large(_upload_limit_message(size, max_bytes))
                 handle.write(chunk)
-        _validate_upload_image_pixels(target_path, max_pixels)
+        _validate_upload_content(target_path, safe_name, getattr(upload, "content_type", ""), max_pixels)
+        _strip_upload_metadata(target_path, safe_name)
+        _enforce_upload_size(target_path, max_bytes)
         return target_path
     except Exception:
         if os.path.exists(target_path):
@@ -791,7 +1005,9 @@ async def _save_upload_cache(upload: UploadFile, cache_scope: str, prefix: str) 
                 if size > max_bytes:
                     _raise_upload_too_large(_upload_limit_message(size, max_bytes))
                 handle.write(chunk)
-        _validate_upload_image_pixels(target_path, max_pixels)
+        _validate_upload_content(target_path, safe_name, getattr(upload, "content_type", ""), max_pixels)
+        _strip_upload_metadata(target_path, safe_name)
+        size = _enforce_upload_size(target_path, max_bytes)
         return target_path, size
     except Exception:
         if os.path.exists(target_path):
@@ -2771,6 +2987,14 @@ def create_app() -> FastAPI:
         return await call_next(request)
 
     @app.middleware("http")
+    async def _add_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        return response
+
+    @app.middleware("http")
     async def _track_active_clients(request: Request, call_next):
         response = await call_next(request)
         _record_active_client(request, getattr(response, "status_code", 0))
@@ -2816,7 +3040,52 @@ def create_app() -> FastAPI:
         form = await request.form()
         username = str(form.get("username") or "").strip()
         password = str(form.get("password") or "")
-        user = authenticate_user(username, password)
+        auth_result = authenticate_login(
+            username,
+            password,
+            remote_address=_request_remote_address(request),
+            user_agent=str(request.headers.get("user-agent") or ""),
+        )
+        user = auth_result.get("user") if isinstance(auth_result.get("user"), dict) else None
+        if not auth_result.get("ok"):
+            failed_count = int(auth_result.get("failed_login_count") or (user or {}).get("failed_login_count") or 0)
+            locked = bool((user or {}).get("locked"))
+            reason = str(auth_result.get("reason") or "bad_password")
+            level = "WARNING"
+            if locked and (user or {}).get("lock_manual"):
+                message = "Konto administratora zablokowane po blednych probach logowania."
+            elif locked:
+                message = "Konto zablokowane czasowo po blednych probach logowania."
+            elif failed_count > 1:
+                message = "Kolejna bledna proba logowania."
+            else:
+                message = "Bledna proba logowania."
+            _write_web_event(
+                level=level,
+                event="login_failed",
+                username=username or "unknown",
+                message=message,
+                details={
+                    "reason": reason,
+                    "failed_login_count": failed_count,
+                    "limit": auth_result.get("limit"),
+                    "locked": locked,
+                    "lock_manual": bool((user or {}).get("lock_manual")),
+                    "lock_expires_at": (user or {}).get("lock_expires_at", ""),
+                    "remote_address": _request_remote_address(request),
+                    "user_agent": str(request.headers.get("user-agent") or "")[:200],
+                },
+            )
+            if locked and (user or {}).get("lock_manual"):
+                raise HTTPException(
+                    status_code=423,
+                    detail="Konto jest zablokowane. Odblokuj je w panelu startowym WEB.",
+                )
+            if locked:
+                until = str((user or {}).get("lock_expires_at") or "")
+                suffix = f" do {until}" if until else ""
+                raise HTTPException(status_code=423, detail=f"Konto jest zablokowane{suffix}.")
+            raise HTTPException(status_code=401, detail="Niepoprawny login lub haslo.")
         if not user:
             raise HTTPException(status_code=401, detail="Niepoprawny login lub haslo.")
         session_token = _make_session_token(username)
@@ -2828,7 +3097,7 @@ def create_app() -> FastAPI:
             session_token,
             max_age=SESSION_MAX_AGE_SECONDS,
             httponly=True,
-            samesite="lax",
+            samesite="strict",
         )
         return response
 
@@ -3411,10 +3680,19 @@ def create_app() -> FastAPI:
                 enabled=payload.get("enabled") if "enabled" in payload else None,
                 role=payload.get("role") if "role" in payload else None,
                 password=payload.get("password") if "password" in payload else None,
+                unlock=bool(payload.get("unlock")) if "unlock" in payload else None,
                 current_username=str(current_user.get("username") or ""),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if payload.get("unlock"):
+            _write_web_event(
+                level="INFO",
+                event="login_unlocked",
+                username=username,
+                message=f"Odblokowano konto {username}.",
+                details={"by": str(current_user.get("username") or "")},
+            )
         return JSONResponse({"users": users, "current_user": _current_user_payload(request)})
 
     @app.post("/api/diagnostics/{target}")

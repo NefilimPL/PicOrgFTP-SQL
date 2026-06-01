@@ -857,6 +857,34 @@ h2 {
   grid-template-columns: 140px minmax(120px, 160px) minmax(180px, 1fr) minmax(120px, 160px) auto;
 }
 
+.user-row-locked {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 7%, var(--surface));
+}
+
+.user-summary {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.user-summary strong,
+.user-summary small {
+  overflow-wrap: anywhere;
+}
+
+.user-lock-warning {
+  color: var(--danger);
+}
+
+.user-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
 .loaded-photo {
   border-color: var(--accent);
 }

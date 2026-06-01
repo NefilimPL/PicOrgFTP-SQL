@@ -48,6 +48,51 @@ class WebDataUserTests(unittest.TestCase):
         operator = next(user for user in users if user["username"] == "operator")
         self.assertFalse(operator["enabled"])
 
+    def test_failed_login_temporarily_locks_regular_user(self) -> None:
+        temp_dir = _workspace_temp("web_data_users_temp_lock")
+        try:
+            with patch.object(web_data.settings, "AC", str(temp_dir)):
+                web_data.add_user("operator", "secret", "user")
+                result = {}
+                for _index in range(web_data.LOGIN_FAILURE_LIMIT):
+                    result = web_data.authenticate_login(
+                        "operator",
+                        "bad",
+                        remote_address="10.0.0.5",
+                    )
+
+                self.assertFalse(result["ok"])
+                self.assertTrue(result["user"]["locked"])
+                self.assertFalse(result["user"]["lock_manual"])
+                self.assertEqual(result["user"]["failed_login_count"], web_data.LOGIN_FAILURE_LIMIT)
+                self.assertIsNone(web_data.authenticate_user("operator", "secret"))
+
+                users = web_data.unlock_user("operator")
+                operator = next(user for user in users if user["username"] == "operator")
+                self.assertFalse(operator["locked"])
+                self.assertEqual(operator["failed_login_count"], 0)
+                self.assertIsNotNone(web_data.authenticate_user("operator", "secret"))
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_failed_login_locks_admin_until_manual_unlock(self) -> None:
+        temp_dir = _workspace_temp("web_data_users_admin_lock")
+        try:
+            with patch.object(web_data.settings, "AC", str(temp_dir)):
+                result = {}
+                for _index in range(web_data.LOGIN_FAILURE_LIMIT):
+                    result = web_data.authenticate_login("admin", "bad")
+
+                self.assertFalse(result["ok"])
+                self.assertTrue(result["user"]["locked"])
+                self.assertTrue(result["user"]["lock_manual"])
+                self.assertIsNone(web_data.authenticate_user("admin", "admin"))
+
+                web_data.unlock_user("admin")
+                self.assertIsNotNone(web_data.authenticate_user("admin", "admin"))
+        finally:
+            shutil.rmtree(temp_dir)
+
     def test_add_list_value_rejects_case_insensitive_duplicate(self) -> None:
         with (
             patch.object(web_data, "prepare_excel_lists", return_value={"NAZWY": ["Żyrandol"]}),

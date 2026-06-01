@@ -97,6 +97,8 @@ LIST_SHEETS = {
 
 WEB_USERS_PATH = "web_users.json"
 WEB_HISTORY_PATH = "web_history.json"
+LOGIN_FAILURE_LIMIT = 5
+LOGIN_LOCK_SECONDS = 60 * 60
 IMAGE_PREVIEW_EXTENSIONS = {
     ".bmp",
     ".gif",
@@ -117,6 +119,7 @@ _FILE_INDEX_KEY: tuple[str, str] | None = None
 _FILE_INDEX_REFRESH_STARTED = False
 _FTP_CACHE_LOCKS: dict[str, threading.Lock] = {}
 _FTP_CACHE_LOCKS_GUARD = threading.Lock()
+_USERS_LOCK = threading.RLock()
 _CONFIG_SECRET_FIELDS = {
     H: {N, M},
     P: {N, M},
@@ -725,11 +728,27 @@ def field_suggestions(field: str, payload: dict[str, object]) -> list[str]:
 
 
 def _public_user(user: dict[str, object]) -> dict[str, object]:
+    now = time.time()
+    lock_until = _float_user_value(user.get("login_locked_until"))
+    manual_lock = bool(user.get("login_lock_manual", False))
+    temporary_lock = lock_until > now
+    locked = manual_lock or temporary_lock
+    failed_at = _float_user_value(user.get("last_failed_login_at"))
     return {
         "username": _text(user.get("username")),
         "role": "admin" if _text(user.get("role")) == "admin" else "user",
         "enabled": bool(user.get("enabled", True)),
         "has_password": bool(_text(user.get("password_hash"))),
+        "locked": locked,
+        "lock_manual": manual_lock,
+        "lock_expires_ts": lock_until if temporary_lock else 0.0,
+        "lock_expires_at": _format_local_time(lock_until) if temporary_lock else "",
+        "lock_reason": _text(user.get("login_lock_reason")),
+        "failed_login_count": _int_user_value(user.get("failed_login_count")),
+        "last_failed_login_ts": failed_at,
+        "last_failed_login_at": _format_local_time(failed_at) if failed_at else "",
+        "last_failed_login_ip": _text(user.get("last_failed_login_ip")),
+        "last_failed_login_user_agent": _text(user.get("last_failed_login_user_agent")),
     }
 
 
@@ -739,43 +758,97 @@ def _default_admin() -> dict[str, object]:
         "role": "admin",
         "enabled": True,
         "password_hash": _hash_password("admin"),
+        "failed_login_count": 0,
+        "last_failed_login_at": 0.0,
+        "last_failed_login_ip": "",
+        "last_failed_login_user_agent": "",
+        "login_locked_until": 0.0,
+        "login_lock_manual": False,
+        "login_lock_reason": "",
     }
+
+
+def _int_user_value(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _float_user_value(value: object) -> float:
+    try:
+        return max(0.0, float(value or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _format_local_time(timestamp: float) -> str:
+    if not timestamp:
+        return ""
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(timestamp)))
+
+
+def _normalized_user_record(item: dict[str, object]) -> dict[str, object] | None:
+    username = _text(item.get("username"))
+    if not username:
+        return None
+    role = _text(item.get("role")) or "user"
+    return {
+        "username": username,
+        "role": "admin" if role == "admin" else "user",
+        "enabled": bool(item.get("enabled", True)),
+        "password_hash": _text(item.get("password_hash"))
+        or (_hash_password("admin") if username.lower() == "admin" else ""),
+        "failed_login_count": _int_user_value(item.get("failed_login_count")),
+        "last_failed_login_at": _float_user_value(item.get("last_failed_login_at")),
+        "last_failed_login_ip": _text(item.get("last_failed_login_ip")),
+        "last_failed_login_user_agent": _text(item.get("last_failed_login_user_agent"))[:200],
+        "login_locked_until": _float_user_value(item.get("login_locked_until")),
+        "login_lock_manual": bool(item.get("login_lock_manual", False)),
+        "login_lock_reason": _text(item.get("login_lock_reason")),
+    }
+
+
+def _login_lock_active(user: dict[str, object], now: float | None = None) -> bool:
+    now_value = time.time() if now is None else float(now)
+    if bool(user.get("login_lock_manual", False)):
+        return True
+    return _float_user_value(user.get("login_locked_until")) > now_value
+
+
+def _clear_login_state(user: dict[str, object]) -> None:
+    user["failed_login_count"] = 0
+    user["login_locked_until"] = 0.0
+    user["login_lock_manual"] = False
+    user["login_lock_reason"] = ""
 
 
 def load_user_records() -> list[dict[str, object]]:
     """Load full local web user records, including password hashes."""
 
-    path = Path(settings.AC) / WEB_USERS_PATH
-    if not path.exists():
-        return [_default_admin()]
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return [_default_admin()]
-    if not isinstance(data, list):
-        return [_default_admin()]
-    users = []
-    seen = set()
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        username = _text(item.get("username"))
-        if not username or username.lower() in seen:
-            continue
-        role = _text(item.get("role")) or "user"
-        users.append(
-            {
-                "username": username,
-                "role": "admin" if role == "admin" else "user",
-                "enabled": bool(item.get("enabled", True)),
-                "password_hash": _text(item.get("password_hash"))
-                or (_hash_password("admin") if username.lower() == "admin" else ""),
-            }
-        )
-        seen.add(username.lower())
-    if not any(user["username"].lower() == "admin" for user in users):
-        users.insert(0, _default_admin())
-    return users
+    with _USERS_LOCK:
+        path = Path(settings.AC) / WEB_USERS_PATH
+        if not path.exists():
+            return [_default_admin()]
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return [_default_admin()]
+        if not isinstance(data, list):
+            return [_default_admin()]
+        users = []
+        seen = set()
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            user = _normalized_user_record(item)
+            if not user or user["username"].lower() in seen:
+                continue
+            users.append(user)
+            seen.add(user["username"].lower())
+        if not any(user["username"].lower() == "admin" for user in users):
+            users.insert(0, _default_admin())
+        return users
 
 
 def load_users() -> list[dict[str, object]]:
@@ -787,24 +860,115 @@ def load_users() -> list[dict[str, object]]:
 def save_users(users: list[dict[str, object]]) -> list[dict[str, object]]:
     """Persist local web user records."""
 
-    path = Path(settings.AC) / WEB_USERS_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(users, indent=4, ensure_ascii=False), encoding="utf-8")
-    return load_users()
+    with _USERS_LOCK:
+        path = Path(settings.AC) / WEB_USERS_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(users, indent=4, ensure_ascii=False), encoding="utf-8")
+        return load_users()
 
 
 def authenticate_user(username: str, password: str) -> dict[str, object] | None:
     """Return a public user record when credentials are valid."""
 
     normalized = _text(username).lower()
-    for user in load_user_records():
-        if _text(user.get("username")).lower() != normalized:
-            continue
-        if not bool(user.get("enabled", True)):
-            return None
-        if verify_password(password, _text(user.get("password_hash"))):
-            return _public_user(user)
+    with _USERS_LOCK:
+        for user in load_user_records():
+            if _text(user.get("username")).lower() != normalized:
+                continue
+            if not bool(user.get("enabled", True)) or _login_lock_active(user):
+                return None
+            if verify_password(password, _text(user.get("password_hash"))):
+                return _public_user(user)
     return None
+
+
+def authenticate_login(
+    username: str,
+    password: str,
+    *,
+    remote_address: str = "",
+    user_agent: str = "",
+) -> dict[str, object]:
+    """Authenticate a login attempt and update lockout state."""
+
+    normalized = _text(username).lower()
+    now = time.time()
+    with _USERS_LOCK:
+        users = load_user_records()
+        matched: dict[str, object] | None = None
+        for user in users:
+            if _text(user.get("username")).lower() == normalized:
+                matched = user
+                break
+        if matched is None:
+            return {
+                "ok": False,
+                "known": False,
+                "reason": "unknown_user",
+                "failed_login_count": 0,
+            }
+        if not bool(matched.get("enabled", True)):
+            return {
+                "ok": False,
+                "known": True,
+                "reason": "disabled",
+                "user": _public_user(matched),
+            }
+        expired_lock_cleared = False
+        if (
+            not bool(matched.get("login_lock_manual", False))
+            and _float_user_value(matched.get("login_locked_until"))
+            and _float_user_value(matched.get("login_locked_until")) <= now
+        ):
+            _clear_login_state(matched)
+            expired_lock_cleared = True
+        if _login_lock_active(matched, now):
+            return {
+                "ok": False,
+                "known": True,
+                "reason": "locked",
+                "user": _public_user(matched),
+            }
+        if verify_password(password, _text(matched.get("password_hash"))):
+            had_failed_state = bool(_int_user_value(matched.get("failed_login_count"))) or bool(
+                matched.get("login_lock_reason")
+            )
+            if had_failed_state or expired_lock_cleared:
+                _clear_login_state(matched)
+                save_users(users)
+            return {
+                "ok": True,
+                "known": True,
+                "reason": "ok",
+                "user": _public_user(matched),
+            }
+
+        failed_count = _int_user_value(matched.get("failed_login_count")) + 1
+        matched["failed_login_count"] = failed_count
+        matched["last_failed_login_at"] = now
+        matched["last_failed_login_ip"] = _text(remote_address)
+        matched["last_failed_login_user_agent"] = _text(user_agent)[:200]
+        just_locked = False
+        if failed_count >= LOGIN_FAILURE_LIMIT:
+            just_locked = True
+            if _text(matched.get("role")) == "admin":
+                matched["login_lock_manual"] = True
+                matched["login_locked_until"] = 0.0
+                matched["login_lock_reason"] = "admin_failed_logins_manual_unlock"
+            else:
+                matched["login_lock_manual"] = False
+                matched["login_locked_until"] = now + LOGIN_LOCK_SECONDS
+                matched["login_lock_reason"] = "failed_logins_temporary_lock"
+        save_users(users)
+        return {
+            "ok": False,
+            "known": True,
+            "reason": "locked" if just_locked else "bad_password",
+            "just_locked": just_locked,
+            "failed_login_count": failed_count,
+            "limit": LOGIN_FAILURE_LIMIT,
+            "user": _public_user(matched),
+        }
 
 
 def find_user(username: str) -> dict[str, object] | None:
@@ -834,6 +998,13 @@ def add_user(username: str, password: str, role: str = "user") -> list[dict[str,
             "role": "admin" if _text(role) == "admin" else "user",
             "enabled": True,
             "password_hash": _hash_password(password),
+            "failed_login_count": 0,
+            "last_failed_login_at": 0.0,
+            "last_failed_login_ip": "",
+            "last_failed_login_user_agent": "",
+            "login_locked_until": 0.0,
+            "login_lock_manual": False,
+            "login_lock_reason": "",
         }
     )
     return save_users(users)
@@ -845,6 +1016,7 @@ def update_user(
     enabled: bool | None = None,
     role: str | None = None,
     password: str | None = None,
+    unlock: bool | None = None,
     current_username: str = "",
 ) -> list[dict[str, object]]:
     """Update a web user account."""
@@ -861,8 +1033,16 @@ def update_user(
             user["role"] = "admin" if _text(role) == "admin" else "user"
         if password is not None and _text(password):
             user["password_hash"] = _hash_password(password)
+        if unlock:
+            _clear_login_state(user)
         return save_users(users)
     raise ValueError("Nie znaleziono uzytkownika.")
+
+
+def unlock_user(username: str) -> list[dict[str, object]]:
+    """Clear login lockout state for a web user account."""
+
+    return update_user(username, unlock=True)
 
 
 def _matches_field(entry_value: str, expected: str) -> bool:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -17,6 +18,7 @@ except Exception as exc:  # pragma: no cover - depends on CI test dependencies
 else:
     TEST_CLIENT_IMPORT_ERROR = None
 
+from picorgftp_sql import web_data
 from picorgftp_sql.web import app as web_app
 
 
@@ -111,6 +113,35 @@ class WebSmokeCiTests(unittest.TestCase):
 
             authenticated = client.post("/api/logout", headers=csrf_headers)
             self.assertEqual(authenticated.status_code, 200)
+        finally:
+            if previous is None:
+                os.environ.pop("PICORG_WEB_AUTH", None)
+            else:
+                os.environ["PICORG_WEB_AUTH"] = previous
+
+    def test_failed_admin_login_is_logged_and_locked_until_manual_unlock(self) -> None:
+        previous = os.environ.get("PICORG_WEB_AUTH")
+        os.environ["PICORG_WEB_AUTH"] = "1"
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                with (
+                    patch.object(web_app.settings, "AC", temp_dir),
+                    patch.object(web_app.settings, "LOG_DIR", temp_dir),
+                ):
+                    client = TestClient(web_app.app)
+                    response = None
+                    for _index in range(web_data.LOGIN_FAILURE_LIMIT):
+                        response = client.post(
+                            "/api/login",
+                            data={"username": "admin", "password": "bad"},
+                            headers={"X-Requested-With": "XMLHttpRequest"},
+                        )
+
+                    self.assertIsNotNone(response)
+                    self.assertEqual(response.status_code, 423)
+                    log_text = (web_app._web_events_log_path()).read_text(encoding="utf-8")
+                    self.assertIn("LOGIN_FAILED", log_text)
+                    self.assertIn("Konto administratora zablokowane", log_text)
         finally:
             if previous is None:
                 os.environ.pop("PICORG_WEB_AUTH", None)
