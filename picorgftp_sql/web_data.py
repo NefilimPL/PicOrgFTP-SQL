@@ -734,11 +734,19 @@ def _public_user(user: dict[str, object]) -> dict[str, object]:
     temporary_lock = lock_until > now
     locked = manual_lock or temporary_lock
     failed_at = _float_user_value(user.get("last_failed_login_at"))
+    token_issued_at = _float_user_value(user.get("extension_token_issued_at"))
+    token_last_used_at = _float_user_value(user.get("extension_token_last_used_at"))
     return {
         "username": _text(user.get("username")),
         "role": "admin" if _text(user.get("role")) == "admin" else "user",
         "enabled": bool(user.get("enabled", True)),
         "has_password": bool(_text(user.get("password_hash"))),
+        "session_version": _int_user_value(user.get("session_version")),
+        "extension_token_version": _int_user_value(user.get("extension_token_version")),
+        "extension_token_issued_ts": token_issued_at,
+        "extension_token_issued_at": _format_local_time(token_issued_at) if token_issued_at else "",
+        "extension_token_last_used_ts": token_last_used_at,
+        "extension_token_last_used_at": _format_local_time(token_last_used_at) if token_last_used_at else "",
         "locked": locked,
         "lock_manual": manual_lock,
         "lock_expires_ts": lock_until if temporary_lock else 0.0,
@@ -758,6 +766,10 @@ def _default_admin() -> dict[str, object]:
         "role": "admin",
         "enabled": True,
         "password_hash": _hash_password("admin"),
+        "session_version": 0,
+        "extension_token_version": 0,
+        "extension_token_issued_at": 0.0,
+        "extension_token_last_used_at": 0.0,
         "failed_login_count": 0,
         "last_failed_login_at": 0.0,
         "last_failed_login_ip": "",
@@ -799,6 +811,10 @@ def _normalized_user_record(item: dict[str, object]) -> dict[str, object] | None
         "enabled": bool(item.get("enabled", True)),
         "password_hash": _text(item.get("password_hash"))
         or (_hash_password("admin") if username.lower() == "admin" else ""),
+        "session_version": _int_user_value(item.get("session_version")),
+        "extension_token_version": _int_user_value(item.get("extension_token_version")),
+        "extension_token_issued_at": _float_user_value(item.get("extension_token_issued_at")),
+        "extension_token_last_used_at": _float_user_value(item.get("extension_token_last_used_at")),
         "failed_login_count": _int_user_value(item.get("failed_login_count")),
         "last_failed_login_at": _float_user_value(item.get("last_failed_login_at")),
         "last_failed_login_ip": _text(item.get("last_failed_login_ip")),
@@ -821,6 +837,12 @@ def _clear_login_state(user: dict[str, object]) -> None:
     user["login_locked_until"] = 0.0
     user["login_lock_manual"] = False
     user["login_lock_reason"] = ""
+
+
+def _bump_user_counter(user: dict[str, object], key: str) -> int:
+    value = _int_user_value(user.get(key)) + 1
+    user[key] = value
+    return value
 
 
 def load_user_records() -> list[dict[str, object]]:
@@ -998,6 +1020,10 @@ def add_user(username: str, password: str, role: str = "user") -> list[dict[str,
             "role": "admin" if _text(role) == "admin" else "user",
             "enabled": True,
             "password_hash": _hash_password(password),
+            "session_version": 0,
+            "extension_token_version": 0,
+            "extension_token_issued_at": 0.0,
+            "extension_token_last_used_at": 0.0,
             "failed_login_count": 0,
             "last_failed_login_at": 0.0,
             "last_failed_login_ip": "",
@@ -1017,6 +1043,8 @@ def update_user(
     role: str | None = None,
     password: str | None = None,
     unlock: bool | None = None,
+    revoke_sessions: bool | None = None,
+    revoke_extension_token: bool | None = None,
     current_username: str = "",
 ) -> list[dict[str, object]]:
     """Update a web user account."""
@@ -1033,8 +1061,14 @@ def update_user(
             user["role"] = "admin" if _text(role) == "admin" else "user"
         if password is not None and _text(password):
             user["password_hash"] = _hash_password(password)
+            _bump_user_counter(user, "session_version")
+            _bump_user_counter(user, "extension_token_version")
         if unlock:
             _clear_login_state(user)
+        if revoke_sessions:
+            _bump_user_counter(user, "session_version")
+        if revoke_extension_token:
+            _bump_user_counter(user, "extension_token_version")
         return save_users(users)
     raise ValueError("Nie znaleziono uzytkownika.")
 
@@ -1043,6 +1077,38 @@ def unlock_user(username: str) -> list[dict[str, object]]:
     """Clear login lockout state for a web user account."""
 
     return update_user(username, unlock=True)
+
+
+def mark_browser_extension_token_issued(username: str) -> dict[str, object] | None:
+    """Store token issue time for the current browser extension token version."""
+
+    normalized = _text(username).lower()
+    with _USERS_LOCK:
+        users = load_user_records()
+        for user in users:
+            if _text(user.get("username")).lower() != normalized:
+                continue
+            user["extension_token_issued_at"] = time.time()
+            save_users(users)
+            return _public_user(user)
+    return None
+
+
+def mark_browser_extension_token_used(username: str, version: int) -> dict[str, object] | None:
+    """Store last-use time when an extension token matches the active version."""
+
+    normalized = _text(username).lower()
+    with _USERS_LOCK:
+        users = load_user_records()
+        for user in users:
+            if _text(user.get("username")).lower() != normalized:
+                continue
+            if _int_user_value(user.get("extension_token_version")) != int(version):
+                return None
+            user["extension_token_last_used_at"] = time.time()
+            save_users(users)
+            return _public_user(user)
+    return None
 
 
 def _matches_field(entry_value: str, expected: str) -> bool:
