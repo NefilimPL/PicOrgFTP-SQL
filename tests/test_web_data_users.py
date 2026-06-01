@@ -93,6 +93,38 @@ class WebDataUserTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_password_change_bumps_session_and_extension_versions(self) -> None:
+        temp_dir = _workspace_temp("web_data_users_session_version")
+        try:
+            with patch.object(web_data.settings, "AC", str(temp_dir)):
+                web_data.add_user("operator", "secret", "user")
+                before = web_data.find_user("operator")
+                users = web_data.update_user("operator", password="new-secret")
+                after = next(user for user in users if user["username"] == "operator")
+
+            self.assertEqual(before["session_version"], 0)
+            self.assertEqual(before["extension_token_version"], 0)
+            self.assertEqual(after["session_version"], 1)
+            self.assertEqual(after["extension_token_version"], 1)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_extension_token_issue_and_use_metadata_is_public(self) -> None:
+        temp_dir = _workspace_temp("web_data_users_extension_metadata")
+        try:
+            with patch.object(web_data.settings, "AC", str(temp_dir)):
+                web_data.add_user("operator", "secret", "user")
+                issued = web_data.mark_browser_extension_token_issued("operator")
+                used = web_data.mark_browser_extension_token_used(
+                    "operator",
+                    issued["extension_token_version"],
+                )
+
+            self.assertTrue(issued["extension_token_issued_at"])
+            self.assertTrue(used["extension_token_last_used_at"])
+        finally:
+            shutil.rmtree(temp_dir)
+
     def test_add_list_value_rejects_case_insensitive_duplicate(self) -> None:
         with (
             patch.object(web_data, "prepare_excel_lists", return_value={"NAZWY": ["Żyrandol"]}),
@@ -614,6 +646,7 @@ class WebDataUserTests(unittest.TestCase):
                         "allowed_upload_extensions": "jpg,png",
                         "blocked_upload_extensions": "exe,bat",
                         "block_executable_uploads": True,
+                        "antivirus_scan_uploads": True,
                     },
                 }
             )
@@ -626,6 +659,7 @@ class WebDataUserTests(unittest.TestCase):
             saved_config[web_data.SECURITY_SETTINGS_KEY]["allowed_upload_extensions"],
             ["jpg", "png"],
         )
+        self.assertTrue(saved_config[web_data.SECURITY_SETTINGS_KEY]["antivirus_scan_uploads"])
 
     def test_settings_secret_values_returns_current_decrypted_config(self) -> None:
         config_payload = {

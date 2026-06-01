@@ -6,6 +6,8 @@ import os
 import tempfile
 import unittest
 from unittest.mock import patch
+import zipfile
+import io
 
 os.environ.setdefault("PICORGFTP_SQL_HEADLESS", "1")
 os.environ.setdefault("PICORG_WEB_AUTH", "0")
@@ -119,6 +121,52 @@ class WebSmokeCiTests(unittest.TestCase):
             else:
                 os.environ["PICORG_WEB_AUTH"] = previous
 
+    def test_security_headers_include_strict_csp(self) -> None:
+        client = TestClient(web_app.app)
+
+        response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        csp = response.headers.get("content-security-policy", "")
+        self.assertIn("script-src 'self'", csp)
+        self.assertIn("frame-ancestors 'none'", csp)
+        self.assertNotIn("unsafe-inline", csp)
+
+    def test_login_rate_limit_is_per_ip(self) -> None:
+        previous = os.environ.get("PICORG_WEB_AUTH")
+        os.environ["PICORG_WEB_AUTH"] = "1"
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                with (
+                    patch.object(web_app.settings, "AC", temp_dir),
+                    patch.object(web_app, "RATE_LIMIT_LOGIN_ATTEMPTS", 2),
+                    patch.object(web_app, "RATE_LIMIT_LOGIN_WINDOW_SECONDS", 60),
+                ):
+                    web_app._RATE_LIMITS.clear()
+                    client = TestClient(web_app.app)
+                    for _index in range(2):
+                        response = client.post(
+                            "/api/login",
+                            data={"username": "admin", "password": "bad"},
+                            headers={"X-Requested-With": "XMLHttpRequest"},
+                        )
+                        self.assertEqual(response.status_code, 401)
+
+                    limited = client.post(
+                        "/api/login",
+                        data={"username": "admin", "password": "bad"},
+                        headers={"X-Requested-With": "XMLHttpRequest"},
+                    )
+
+            self.assertEqual(limited.status_code, 429)
+            self.assertIn("Retry-After", limited.headers)
+        finally:
+            web_app._RATE_LIMITS.clear()
+            if previous is None:
+                os.environ.pop("PICORG_WEB_AUTH", None)
+            else:
+                os.environ["PICORG_WEB_AUTH"] = previous
+
     def test_failed_admin_login_is_logged_and_locked_until_manual_unlock(self) -> None:
         previous = os.environ.get("PICORG_WEB_AUTH")
         os.environ["PICORG_WEB_AUTH"] = "1"
@@ -142,6 +190,81 @@ class WebSmokeCiTests(unittest.TestCase):
                     log_text = (web_app._web_events_log_path()).read_text(encoding="utf-8")
                     self.assertIn("LOGIN_FAILED", log_text)
                     self.assertIn("Konto administratora zablokowane", log_text)
+        finally:
+            if previous is None:
+                os.environ.pop("PICORG_WEB_AUTH", None)
+            else:
+                os.environ["PICORG_WEB_AUTH"] = previous
+
+    def test_password_change_invalidates_current_session(self) -> None:
+        previous = os.environ.get("PICORG_WEB_AUTH")
+        os.environ["PICORG_WEB_AUTH"] = "1"
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                with patch.object(web_app.settings, "AC", temp_dir):
+                    client = TestClient(web_app.app)
+                    login = client.post(
+                        "/api/login",
+                        data={"username": "admin", "password": "admin"},
+                        headers={"X-Requested-With": "XMLHttpRequest"},
+                    )
+                    self.assertEqual(login.status_code, 200)
+                    headers = {"X-PicOrg-CSRF": login.json()["csrf_token"]}
+                    response = client.patch(
+                        "/api/users/admin",
+                        json={"password": "new-admin"},
+                        headers=headers,
+                    )
+
+                    self.assertEqual(response.status_code, 200)
+                    self.assertTrue(response.json()["session_invalidated"])
+                    self.assertEqual(client.get("/api/bootstrap").status_code, 401)
+        finally:
+            if previous is None:
+                os.environ.pop("PICORG_WEB_AUTH", None)
+            else:
+                os.environ["PICORG_WEB_AUTH"] = previous
+
+    def test_browser_extension_token_version_can_be_revoked(self) -> None:
+        previous = os.environ.get("PICORG_WEB_AUTH")
+        os.environ["PICORG_WEB_AUTH"] = "1"
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                with patch.object(web_app.settings, "AC", temp_dir):
+                    client = TestClient(web_app.app)
+                    login = client.post(
+                        "/api/login",
+                        data={"username": "admin", "password": "admin"},
+                        headers={"X-Requested-With": "XMLHttpRequest"},
+                    )
+                    self.assertEqual(login.status_code, 200)
+                    headers = {"X-PicOrg-CSRF": login.json()["csrf_token"]}
+                    archive_response = client.get("/api/browser-extension/download")
+                    self.assertEqual(archive_response.status_code, 200)
+                    with zipfile.ZipFile(io.BytesIO(archive_response.content)) as archive:
+                        defaults = archive.read(
+                            "picorgftp-sql-browser-extension/defaults.js"
+                        ).decode("utf-8")
+                    self.assertIn("tokenVersion", defaults)
+                    token = defaults.split('"apiToken": "', 1)[1].split('"', 1)[0]
+                    ping = client.get(
+                        "/api/browser-extension/ping",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                    self.assertEqual(ping.status_code, 200)
+                    self.assertEqual(ping.json()["token_version"], 0)
+
+                    revoked = client.patch(
+                        "/api/users/admin",
+                        json={"revoke_extension_token": True},
+                        headers=headers,
+                    )
+                    self.assertEqual(revoked.status_code, 200)
+                    rejected = client.get(
+                        "/api/browser-extension/ping",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                    self.assertEqual(rejected.status_code, 401)
         finally:
             if previous is None:
                 os.environ.pop("PICORG_WEB_AUTH", None)

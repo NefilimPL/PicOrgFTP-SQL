@@ -197,6 +197,9 @@ def _normalize_security_settings(raw_settings):
         "block_executable_uploads": bool(
             raw.get("block_executable_uploads", defaults.get("block_executable_uploads", True))
         ),
+        "antivirus_scan_uploads": bool(
+            raw.get("antivirus_scan_uploads", defaults.get("antivirus_scan_uploads", False))
+        ),
     }
 
 

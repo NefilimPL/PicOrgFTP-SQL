@@ -273,7 +273,7 @@ async function requestJson(path, options = {}) {
 function updateAdminUi() {
   state.isAdmin = state.currentUser?.role === "admin";
   document.querySelectorAll(".admin-only").forEach((node) => {
-    node.style.display = state.isAdmin ? "" : "none";
+    node.hidden = !state.isAdmin;
   });
   if (!state.isAdmin) {
     updateLogAlert({});
@@ -3303,7 +3303,12 @@ function renderTimingDetails(timing, savedFiles = []) {
     const row = document.createElement("div");
     const label = document.createElement("span");
     const value = document.createElement("strong");
-    label.textContent = stage.label || stage.key || "Etap";
+    const details = stage.details || {};
+    const detailText =
+      stage.key === "antivirus_scan"
+        ? ` (${details.enabled ? "wlaczony" : "wylaczony"}, skan: ${details.scanned || 0})`
+        : "";
+    label.textContent = `${stage.label || stage.key || "Etap"}${detailText}`;
     value.textContent = formatDuration(stage.elapsed_ms);
     row.append(label, value);
     list.appendChild(row);
@@ -4679,7 +4684,7 @@ async function loadBootstrap(options = {}) {
     versionInfo.textContent = payload.version ? `Wersja ${payload.version}` : "";
   }
   serverInfo.textContent = payload.processed_dir;
-  logoutButton.style.display = payload.auth_enabled ? "" : "none";
+  logoutButton.hidden = !payload.auth_enabled;
   state.currentUser = payload.current_user || null;
   updateAdminUi();
   applyTimingDetailsVisibility();
@@ -5411,6 +5416,12 @@ function renderSettingsSecurity() {
         "Blokuj pliki wykonywalne",
         security.block_executable_uploads !== false,
         "Odrzuca m.in. exe, bat, cmd, msi, ps1, vbs, js, jar, dll, scr, sh."
+      ),
+      checkField(
+        "antivirus_scan_uploads",
+        "Skanuj upload Microsoft Defender",
+        Boolean(security.antivirus_scan_uploads),
+        "Dotyczy tylko plikow wysylanych przez panel lub rozszerzenie; pliki juz lokalne i pobrane z FTP nie sa ponownie skanowane."
       )
     )
   );
@@ -5422,6 +5433,7 @@ function renderSettingsSecurity() {
       allowed_upload_extensions: data.get("allowed_upload_extensions"),
       blocked_upload_extensions: data.get("blocked_upload_extensions"),
       block_executable_uploads: data.has("block_executable_uploads"),
+      antivirus_scan_uploads: data.has("antivirus_scan_uploads"),
     },
   }));
   settingsOutput.appendChild(form);
@@ -5659,6 +5671,8 @@ function renderSettingsUsers() {
     const actions = document.createElement("div");
     const save = document.createElement("button");
     const unlock = document.createElement("button");
+    const revokeSessions = document.createElement("button");
+    const revokeExtension = document.createElement("button");
     const isCurrentUser =
       state.currentUser &&
       String(state.currentUser.username || "").toLowerCase() === String(user.username || "").toLowerCase();
@@ -5679,6 +5693,12 @@ function renderSettingsUsers() {
       const ip = user.last_failed_login_ip ? `, ${user.last_failed_login_ip}` : "";
       loginMeta.push(`Ostatnia bledna: ${user.last_failed_login_at}${ip}`);
     }
+    loginMeta.push(`Sesje v${Number(user.session_version || 0)}`);
+    loginMeta.push(
+      `Token rozszerzenia v${Number(user.extension_token_version || 0)}${
+        user.extension_token_last_used_at ? `, ostatnio ${user.extension_token_last_used_at}` : ""
+      }`
+    );
     nameMeta.textContent = loginMeta.join(" | ") || "Brak blednych prob logowania.";
     nameMeta.className = user.locked ? "user-lock-warning" : "";
     name.append(nameTitle, nameMeta);
@@ -5707,6 +5727,10 @@ function renderSettingsUsers() {
     unlock.type = "button";
     unlock.textContent = "Odblokuj";
     unlock.hidden = !user.locked && !user.failed_login_count;
+    revokeSessions.type = "button";
+    revokeSessions.textContent = "Wyloguj sesje";
+    revokeExtension.type = "button";
+    revokeExtension.textContent = "Uniewaznij token";
     actions.className = "user-actions";
     save.addEventListener("click", async () => {
       const payload = { enabled: enabled.checked, role: role.value };
@@ -5731,10 +5755,40 @@ function renderSettingsUsers() {
       });
       state.settings.users = response.users;
       state.currentUser = response.current_user || state.currentUser;
+      if (response.session_invalidated) {
+        window.location.href = "/login";
+        return;
+      }
       updateAdminUi();
       renderSettings();
     });
-    actions.append(save, unlock);
+    revokeSessions.addEventListener("click", async () => {
+      const response = await requestJson(`/api/users/${encodeURIComponent(user.username)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ revoke_sessions: true }),
+      });
+      if (response.session_invalidated) {
+        window.location.href = "/login";
+        return;
+      }
+      state.settings.users = response.users;
+      state.currentUser = response.current_user || state.currentUser;
+      updateAdminUi();
+      renderSettings();
+    });
+    revokeExtension.addEventListener("click", async () => {
+      const response = await requestJson(`/api/users/${encodeURIComponent(user.username)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ revoke_extension_token: true }),
+      });
+      state.settings.users = response.users;
+      state.currentUser = response.current_user || state.currentUser;
+      updateAdminUi();
+      renderSettings();
+    });
+    actions.append(save, unlock, revokeSessions, revokeExtension);
     row.append(name, role, passwordInput, enabledWrap, actions);
     list.appendChild(row);
   }
