@@ -315,6 +315,7 @@ DEFAULT_CONFIG.setdefault(
             "sh",
         ],
         "block_executable_uploads": True,
+        "antivirus_scan_uploads": False,
     },
 )
 DEFAULT_CONFIG.setdefault(COLOR_FIELD_LABELS_KEY, {})

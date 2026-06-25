@@ -15,11 +15,13 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
 import traceback
 import unicodedata
+import warnings
 from typing import Any, Callable, Dict, List, Optional, Set
 from urllib.parse import urlsplit
 import zipfile
@@ -71,6 +73,7 @@ from ..web_workflow import (
 from ..web_data import (
     add_list_value,
     add_user,
+    authenticate_login,
     authenticate_user,
     cache_ftp_preview,
     cleanup_web_ftp_cache,
@@ -82,6 +85,8 @@ from ..web_data import (
     invalidate_ftp_preview_cache,
     load_web_data,
     load_users,
+    mark_browser_extension_token_issued,
+    mark_browser_extension_token_used,
     history_snapshot,
     ListValueInUseError,
     refresh_file_index,
@@ -131,6 +136,15 @@ _ACTIVE_CLIENTS_LOCK = threading.Lock()
 _ACTIVE_CLIENTS_LOADED = False
 _ACTIVE_CLIENTS_DIRTY = False
 _ACTIVE_CLIENTS_LAST_FLUSH = 0.0
+_RATE_LIMITS: Dict[str, List[float]] = {}
+_RATE_LIMITS_LOCK = threading.Lock()
+_UPLOAD_SCAN_RESULTS: Dict[str, Dict[str, Any]] = {}
+_UPLOAD_SCAN_RESULTS_LOCK = threading.Lock()
+RATE_LIMIT_LOGIN_ATTEMPTS = 20
+RATE_LIMIT_LOGIN_WINDOW_SECONDS = 10 * 60
+RATE_LIMIT_UPLOAD_ATTEMPTS = 80
+RATE_LIMIT_UPLOAD_WINDOW_SECONDS = 60
+ANTIVIRUS_SCAN_TIMEOUT_SECONDS = 120
 EXECUTABLE_UPLOAD_EXTENSIONS = {
     "exe",
     "bat",
@@ -146,6 +160,44 @@ EXECUTABLE_UPLOAD_EXTENSIONS = {
     "pif",
     "sh",
 }
+GENERIC_UPLOAD_MIME_TYPES = {
+    "",
+    "application/octet-stream",
+    "binary/octet-stream",
+}
+UPLOAD_MIME_TYPES = {
+    "jpg": {"image/jpeg", "image/jpg", "image/pjpeg"},
+    "jpeg": {"image/jpeg", "image/jpg", "image/pjpeg"},
+    "png": {"image/png"},
+    "webp": {"image/webp"},
+    "gif": {"image/gif"},
+    "bmp": {"image/bmp", "image/x-ms-bmp", "image/x-windows-bmp"},
+    "tif": {"image/tiff", "image/tif"},
+    "tiff": {"image/tiff", "image/tif"},
+    "avif": {"image/avif", "image/heif", "image/heic"},
+    "psd": {"image/vnd.adobe.photoshop", "image/x-photoshop", "image/psd"},
+    "pdf": {"application/pdf", "application/x-pdf"},
+    "eps": {"application/postscript", "application/eps", "image/eps"},
+    "ai": {
+        "application/pdf",
+        "application/postscript",
+        "application/illustrator",
+        "application/vnd.adobe.illustrator",
+    },
+}
+IMAGE_UPLOAD_EXTENSIONS = {
+    "jpg",
+    "jpeg",
+    "png",
+    "webp",
+    "gif",
+    "bmp",
+    "tif",
+    "tiff",
+    "avif",
+    "psd",
+}
+METADATA_STRIP_UPLOAD_EXTENSIONS = {"jpg", "jpeg", "png"}
 
 
 @dataclass(frozen=True)
@@ -315,13 +367,17 @@ def _validate_mutating_request(request: Request) -> None:
 
 
 def _make_session_token(username: str) -> str:
-    payload = f"{username}|{int(time.time())}|{secrets.token_hex(12)}"
+    user = find_user(username) or {}
+    session_version = int(user.get("session_version") or 0)
+    payload = f"session|{username}|{session_version}|{int(time.time())}|{secrets.token_hex(12)}"
     token = f"{payload}|{_sign(payload)}"
     return base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii")
 
 
 def _make_browser_extension_token(username: str) -> str:
-    payload = f"browser-extension|{username}|{int(time.time())}|{secrets.token_hex(16)}"
+    user = mark_browser_extension_token_issued(username) or find_user(username) or {}
+    token_version = int(user.get("extension_token_version") or 0)
+    payload = f"browser-extension|{username}|{token_version}|{int(time.time())}|{secrets.token_hex(16)}"
     token = f"{payload}|{_sign(payload)}"
     return base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii")
 
@@ -331,20 +387,30 @@ def _read_session_token(token: Optional[str]) -> Optional[str]:
         return None
     try:
         decoded = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
-        username, issued_raw, nonce, signature = decoded.rsplit("|", 3)
+        payload, signature = decoded.rsplit("|", 1)
     except Exception:
         return None
-    payload = f"{username}|{issued_raw}|{nonce}"
     if not hmac.compare_digest(_sign(payload), signature):
+        return None
+    parts = payload.split("|")
+    if len(parts) == 5 and parts[0] == "session":
+        _marker, username, version_raw, issued_raw, _nonce = parts
+    elif len(parts) == 3:
+        username, issued_raw, _nonce = parts
+        version_raw = "0"
+    else:
         return None
     try:
         issued = int(issued_raw)
+        session_version = int(version_raw)
     except ValueError:
         return None
     if int(time.time()) - issued > SESSION_MAX_AGE_SECONDS:
         return None
     user = find_user(username)
-    if not user or not user.get("enabled"):
+    if not user or not user.get("enabled") or user.get("locked"):
+        return None
+    if int(user.get("session_version") or 0) != session_version:
         return None
     return username
 
@@ -354,23 +420,32 @@ def _read_browser_extension_token(token: Optional[str]) -> Optional[str]:
         return None
     try:
         decoded = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
-        marker, username, issued_raw, nonce, signature = decoded.rsplit("|", 4)
+        payload, signature = decoded.rsplit("|", 1)
     except Exception:
         return None
-    if marker != "browser-extension":
-        return None
-    payload = f"{marker}|{username}|{issued_raw}|{nonce}"
     if not hmac.compare_digest(_sign(payload), signature):
+        return None
+    parts = payload.split("|")
+    if len(parts) == 5 and parts[0] == "browser-extension":
+        _marker, username, version_raw, issued_raw, _nonce = parts
+    elif len(parts) == 4 and parts[0] == "browser-extension":
+        _marker, username, issued_raw, _nonce = parts
+        version_raw = "0"
+    else:
         return None
     try:
         issued = int(issued_raw)
+        token_version = int(version_raw)
     except ValueError:
         return None
     if int(time.time()) - issued > BROWSER_EXTENSION_TOKEN_MAX_AGE_SECONDS:
         return None
     user = find_user(username)
-    if not user or not user.get("enabled"):
+    if not user or not user.get("enabled") or user.get("locked"):
         return None
+    if int(user.get("extension_token_version") or 0) != token_version:
+        return None
+    mark_browser_extension_token_used(username, token_version)
     return username
 
 
@@ -378,6 +453,53 @@ def _current_user(request: Request) -> Optional[str]:
     if not _auth_enabled():
         return _admin_username()
     return _read_session_token(request.cookies.get(SESSION_COOKIE))
+
+
+def _request_remote_address(request: Request) -> str:
+    forwarded = str(request.headers.get("x-forwarded-for") or "").split(",", 1)[0].strip()
+    if forwarded:
+        return forwarded
+    client = getattr(request, "client", None)
+    return str(getattr(client, "host", "") or "")
+
+
+def _rate_limit_scope(request: Request) -> tuple[str, int, int]:
+    method = str(request.method or "").upper()
+    path = str(request.url.path or "")
+    if method == "POST" and path == "/api/login":
+        return "login", RATE_LIMIT_LOGIN_ATTEMPTS, RATE_LIMIT_LOGIN_WINDOW_SECONDS
+    upload_paths = {
+        "/api/upload-cache",
+        "/api/browser-extension/upload-cache",
+        "/api/web-images/cache",
+        "/api/web-images/scan",
+        "/api/process",
+        "/api/process/background",
+    }
+    if method == "POST" and path in upload_paths:
+        return "upload", RATE_LIMIT_UPLOAD_ATTEMPTS, RATE_LIMIT_UPLOAD_WINDOW_SECONDS
+    return "", 0, 0
+
+
+def _check_rate_limit(request: Request) -> None:
+    scope, limit, window = _rate_limit_scope(request)
+    if not scope or limit <= 0 or window <= 0:
+        return
+    now = time.time()
+    remote = _request_remote_address(request) or "unknown"
+    key = f"{scope}|{remote}"
+    cutoff = now - window
+    with _RATE_LIMITS_LOCK:
+        attempts = [item for item in _RATE_LIMITS.get(key, []) if item >= cutoff]
+        if len(attempts) >= limit:
+            retry_after = max(1, int(window - (now - attempts[0])))
+            raise HTTPException(
+                status_code=429,
+                detail=f"Za duzo requestow z tego adresu IP. Sprobuj ponownie za {retry_after} s.",
+                headers={"Retry-After": str(retry_after)},
+            )
+        attempts.append(now)
+        _RATE_LIMITS[key] = attempts
 
 
 def _extension_bearer_token(request: Request) -> str:
@@ -474,6 +596,281 @@ def _validate_upload_extension(filename: object) -> None:
         )
     if allowed and extension not in allowed:
         raise HTTPException(status_code=400, detail=f"Typ pliku .{extension} nie jest dozwolony.")
+
+
+def _normalized_content_type(content_type: object) -> str:
+    return str(content_type or "").split(";", 1)[0].strip().lower()
+
+
+def _validate_upload_mime_type(filename: object, content_type: object) -> None:
+    extension = _upload_extension(filename)
+    normalized = _normalized_content_type(content_type)
+    if normalized in GENERIC_UPLOAD_MIME_TYPES:
+        return
+    allowed = UPLOAD_MIME_TYPES.get(extension)
+    if allowed is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Typ pliku .{extension} nie ma skonfigurowanej walidacji MIME.",
+        )
+    if normalized not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"MIME type {normalized} nie pasuje do pliku .{extension}.",
+        )
+
+
+def _is_iso_base_media_brand(header: bytes, allowed_brands: Set[bytes]) -> bool:
+    if len(header) < 16 or header[4:8] != b"ftyp":
+        return False
+    brands = {header[8:12]}
+    compatible = header[16:64]
+    brands.update(compatible[index : index + 4] for index in range(0, len(compatible) - 3, 4))
+    return any(brand in allowed_brands for brand in brands)
+
+
+def _upload_signature_matches(extension: str, header: bytes) -> bool:
+    if extension in {"jpg", "jpeg"}:
+        return header.startswith(b"\xff\xd8\xff")
+    if extension == "png":
+        return header.startswith(b"\x89PNG\r\n\x1a\n")
+    if extension == "gif":
+        return header.startswith((b"GIF87a", b"GIF89a"))
+    if extension == "bmp":
+        return header.startswith(b"BM")
+    if extension in {"tif", "tiff"}:
+        return header.startswith((b"II*\x00", b"MM\x00*"))
+    if extension == "webp":
+        return len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP"
+    if extension == "avif":
+        return _is_iso_base_media_brand(header, {b"avif", b"avis"})
+    if extension == "pdf":
+        return header.startswith(b"%PDF-")
+    if extension == "eps":
+        return header.startswith(b"%!PS-Adobe-")
+    if extension == "ai":
+        return header.startswith((b"%PDF-", b"%!PS-Adobe-"))
+    if extension == "psd":
+        return header.startswith(b"8BPS")
+    return False
+
+
+def _validate_upload_signature(path: str, filename: object) -> None:
+    extension = _upload_extension(filename)
+    try:
+        with open(path, "rb") as handle:
+            header = handle.read(128)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail="Nie mozna odczytac wyslanego pliku.") from exc
+    if not header:
+        raise HTTPException(status_code=400, detail="Plik jest pusty.")
+    stripped = header.lstrip().lower()
+    if stripped.startswith((b"<html", b"<!doctype", b"<svg", b"<?xml")):
+        raise HTTPException(
+            status_code=400,
+            detail="Zawartosc pliku wyglada jak HTML/XML/SVG, a nie dozwolony upload.",
+        )
+    if not _upload_signature_matches(extension, header):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Sygnatura pliku nie pasuje do rozszerzenia .{extension}.",
+        )
+
+
+def _validate_upload_image_file(path: str, filename: object, max_pixels: int) -> tuple[int, int]:
+    extension = _upload_extension(filename)
+    if extension not in IMAGE_UPLOAD_EXTENSIONS:
+        return 0, 0
+    if Image is None:
+        raise HTTPException(status_code=415, detail="Pillow nie jest dostepny do walidacji obrazu.")
+    try:
+        with warnings.catch_warnings():
+            if hasattr(Image, "DecompressionBombWarning"):
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(path) as image:
+                width, height = int(image.size[0]), int(image.size[1])
+                pixels = width * height
+                if pixels > max_pixels:
+                    _raise_upload_too_large(
+                        f"Obraz ma {pixels} pikseli ({width}x{height}), limit uploadu to {max_pixels} pikseli."
+                    )
+                image.verify()
+                return width, height
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Nie mozna otworzyc pliku jako obrazu.") from exc
+
+
+def _validate_upload_content(
+    path: str,
+    filename: object,
+    content_type: object,
+    max_pixels: int,
+) -> tuple[int, int]:
+    _validate_upload_mime_type(filename, content_type)
+    _validate_upload_signature(path, filename)
+    return _validate_upload_image_file(path, filename, max_pixels)
+
+
+def _jpeg_safe_image(image: Any) -> Any:
+    if image.mode in {"RGB", "L"}:
+        return image
+    if image.mode in {"RGBA", "LA"}:
+        rgba = image.convert("RGBA")
+        background = Image.new("RGB", rgba.size, (255, 255, 255))
+        background.paste(rgba, (0, 0), rgba.getchannel("A"))
+        return background
+    return image.convert("RGB")
+
+
+def _strip_upload_metadata(path: str, filename: object) -> None:
+    extension = _upload_extension(filename)
+    if extension not in METADATA_STRIP_UPLOAD_EXTENSIONS or Image is None:
+        return
+    temp_path = f"{path}.clean-{secrets.token_hex(6)}"
+    try:
+        with Image.open(path) as image:
+            work = image.copy()
+        if ImageOps is not None:
+            try:
+                work = ImageOps.exif_transpose(work)
+            except Exception:
+                pass
+        if extension in {"jpg", "jpeg"}:
+            work = _jpeg_safe_image(work)
+            work.save(temp_path, format="JPEG", quality=95, optimize=True)
+        else:
+            work.save(temp_path, format="PNG", optimize=True)
+        os.replace(temp_path, path)
+    except Exception as exc:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        raise HTTPException(status_code=400, detail="Nie mozna wyczyscic metadanych obrazu.") from exc
+
+
+def _enforce_upload_size(path: str, max_bytes: int) -> int:
+    try:
+        size = os.path.getsize(path)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail="Nie mozna sprawdzic rozmiaru wyslanego pliku.") from exc
+    if size > max_bytes:
+        _raise_upload_too_large(_upload_limit_message(size, max_bytes))
+    return size
+
+
+def _defender_scan_executable() -> str:
+    if os.name != "nt":
+        return ""
+    candidates: List[Path] = []
+    for env_name in ("ProgramFiles", "ProgramFiles(x86)"):
+        base = os.environ.get(env_name)
+        if base:
+            candidates.append(Path(base) / "Windows Defender" / "MpCmdRun.exe")
+    platform_root = Path(os.environ.get("ProgramData") or r"C:\ProgramData") / "Microsoft" / "Windows Defender" / "Platform"
+    try:
+        candidates.extend(sorted(platform_root.glob("*/MpCmdRun.exe"), reverse=True))
+    except OSError:
+        pass
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return ""
+
+
+def _remember_upload_scan_result(path: str, result: Dict[str, Any]) -> None:
+    if not path:
+        return
+    with _UPLOAD_SCAN_RESULTS_LOCK:
+        _UPLOAD_SCAN_RESULTS[os.path.abspath(path)] = dict(result)
+
+
+def _copy_upload_scan_result(source_path: str, target_path: str) -> None:
+    if not source_path or not target_path:
+        return
+    with _UPLOAD_SCAN_RESULTS_LOCK:
+        result = _UPLOAD_SCAN_RESULTS.get(os.path.abspath(source_path))
+        if result:
+            _UPLOAD_SCAN_RESULTS[os.path.abspath(target_path)] = dict(result)
+
+
+def _upload_scan_result(path: str) -> Dict[str, Any]:
+    with _UPLOAD_SCAN_RESULTS_LOCK:
+        return dict(_UPLOAD_SCAN_RESULTS.get(os.path.abspath(path)) or {})
+
+
+def _uploaded_scan_summary(uploaded_slots: List[WebUploadedSlot]) -> Dict[str, Any]:
+    results: List[Dict[str, Any]] = []
+    for slot in uploaded_slots:
+        result = _upload_scan_result(str(slot.source_path or ""))
+        if result:
+            item = dict(result)
+            item["prefix"] = str(slot.prefix or "")
+            item["filename"] = str(slot.original_filename or "")
+            results.append(item)
+    scanned = [item for item in results if item.get("scanned")]
+    enabled = any(item.get("enabled") for item in results)
+    return {
+        "enabled": enabled,
+        "scanned": len(scanned),
+        "skipped": sum(1 for item in results if item.get("enabled") and not item.get("scanned")),
+        "items": results,
+    }
+
+
+def _scan_uploaded_file(path: str) -> Dict[str, Any]:
+    if not _security_settings().get("antivirus_scan_uploads", False):
+        result = {"enabled": False, "scanned": False, "scanner": "", "elapsed_ms": 0}
+        _remember_upload_scan_result(path, result)
+        return result
+    started = time.perf_counter()
+    scanner = _defender_scan_executable()
+    if not scanner:
+        raise HTTPException(
+            status_code=503,
+            detail="Skan antywirusowy uploadu jest wlaczony, ale nie znaleziono Microsoft Defender MpCmdRun.exe.",
+        )
+    try:
+        completed = subprocess.run(
+            [
+                scanner,
+                "-Scan",
+                "-ScanType",
+                "3",
+                "-File",
+                os.path.abspath(path),
+                "-DisableRemediation",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=ANTIVIRUS_SCAN_TIMEOUT_SECONDS,
+            creationflags=int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=503, detail="Skan antywirusowy uploadu przekroczyl limit czasu.") from exc
+    output = "\n".join(
+        part.strip()
+        for part in (completed.stdout, completed.stderr)
+        if str(part or "").strip()
+    )
+    result = {
+        "enabled": True,
+        "scanned": completed.returncode == 0,
+        "scanner": "Microsoft Defender",
+        "return_code": int(completed.returncode),
+        "elapsed_ms": _elapsed_ms(started),
+    }
+    _remember_upload_scan_result(path, result)
+    if completed.returncode != 0:
+        details = output[-500:] if output else f"kod {completed.returncode}"
+        raise HTTPException(
+            status_code=400,
+            detail=f"Skan antywirusowy odrzucil upload ({details}).",
+        )
+    return result
 
 
 def _upload_cache_root() -> str:
@@ -725,7 +1122,10 @@ async def _save_upload(upload: UploadFile, temp_dir: str, prefix: str) -> str:
                 if size > max_bytes:
                     _raise_upload_too_large(_upload_limit_message(size, max_bytes))
                 handle.write(chunk)
-        _validate_upload_image_pixels(target_path, max_pixels)
+        _validate_upload_content(target_path, safe_name, getattr(upload, "content_type", ""), max_pixels)
+        _strip_upload_metadata(target_path, safe_name)
+        _enforce_upload_size(target_path, max_bytes)
+        _scan_uploaded_file(target_path)
         return target_path
     except Exception:
         if os.path.exists(target_path):
@@ -791,7 +1191,10 @@ async def _save_upload_cache(upload: UploadFile, cache_scope: str, prefix: str) 
                 if size > max_bytes:
                     _raise_upload_too_large(_upload_limit_message(size, max_bytes))
                 handle.write(chunk)
-        _validate_upload_image_pixels(target_path, max_pixels)
+        _validate_upload_content(target_path, safe_name, getattr(upload, "content_type", ""), max_pixels)
+        _strip_upload_metadata(target_path, safe_name)
+        size = _enforce_upload_size(target_path, max_bytes)
+        _scan_uploaded_file(target_path)
         return target_path, size
     except Exception:
         if os.path.exists(target_path):
@@ -892,9 +1295,12 @@ def _browser_extension_json(request: Request, payload: Dict[str, Any]) -> JSONRe
 
 def _browser_extension_defaults(request: Request, username: str) -> str:
     base_url = str(request.base_url).rstrip("/")
+    user = find_user(username) or {}
     payload = {
         "panelUrl": base_url,
         "apiToken": _make_browser_extension_token(username),
+        "tokenVersion": int(user.get("extension_token_version") or 0),
+        "panelVersion": get_display_version(),
     }
     return "window.PICORG_EXTENSION_DEFAULTS = " + json.dumps(payload, ensure_ascii=False) + ";\n"
 
@@ -1920,6 +2326,7 @@ def _process_upload_snapshot(
     pending_ftp_slots: List[Dict[str, Any]] = []
     explicit_slot_prefixes: Set[str] = set()
     product: Optional[WebProductForm] = None
+    antivirus_scan_result: Dict[str, Any] = {"enabled": False, "scanned": 0, "skipped": 0, "items": []}
     try:
         for prefix, slot in slot_by_prefix.items():
             if str(form.get(f"delete_slot_{prefix}") or "") == "1":
@@ -2096,6 +2503,23 @@ def _process_upload_snapshot(
                 migrated=len(migrated_prefixes),
             )
         )
+        antivirus_scan_result = _uploaded_scan_summary(uploaded_slots)
+        if antivirus_scan_result.get("enabled") or antivirus_scan_result.get("items"):
+            timings.append(
+                {
+                    "key": "antivirus_scan",
+                    "label": "Skan antywirusowy uploadu",
+                    "elapsed_ms": sum(
+                        int(item.get("elapsed_ms") or 0)
+                        for item in antivirus_scan_result.get("items", [])
+                    ),
+                    "details": {
+                        "enabled": bool(antivirus_scan_result.get("enabled")),
+                        "scanned": int(antivirus_scan_result.get("scanned") or 0),
+                        "skipped": int(antivirus_scan_result.get("skipped") or 0),
+                    },
+                }
+            )
         stage_started = time.perf_counter()
         mark(34, "Przetwarzanie plikow", current_key="local_files", current_label="Zapis/przetwarzanie plikow lokalnych")
         result = process_web_uploads(
@@ -2277,6 +2701,7 @@ def _process_upload_snapshot(
     payload["upload_cache"] = upload_cache_result
     payload["sql"] = sql_result
     payload["local_delete"] = local_delete_result
+    payload["antivirus_scan"] = antivirus_scan_result
     stage_started = time.perf_counter()
     mark(98, "Odswiezanie indeksu", current_key="file_index", current_label="Odswiezenie indeksu lokalnego")
     payload["file_index"] = refresh_file_index()
@@ -2302,6 +2727,7 @@ def _process_upload_snapshot(
             "ftp": ftp_result,
             "ftp_cache": ftp_cache_result,
             "upload_cache": upload_cache_result,
+            "antivirus_scan": antivirus_scan_result,
             "sql": sql_result,
             "local_delete": local_delete_result,
             "output_dir": payload["output_dir"],
@@ -2337,6 +2763,7 @@ def _process_upload_snapshot(
             ftp=ftp_result,
             ftp_cache=ftp_cache_result,
             upload_cache=upload_cache_result,
+            antivirus_scan=antivirus_scan_result,
             sql=sql_result,
             local_delete=local_delete_result,
         ),
@@ -2771,6 +3198,38 @@ def create_app() -> FastAPI:
         return await call_next(request)
 
     @app.middleware("http")
+    async def _guard_rate_limits(request: Request, call_next):
+        try:
+            _check_rate_limit(request)
+        except HTTPException as exc:
+            return JSONResponse(
+                {"detail": exc.detail},
+                status_code=exc.status_code,
+                headers=getattr(exc, "headers", None),
+            )
+        return await call_next(request)
+
+    @app.middleware("http")
+    async def _add_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self'; "
+            "img-src 'self' data: blob:; "
+            "connect-src 'self'; "
+            "object-src 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'; "
+            "frame-ancestors 'none'",
+        )
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        return response
+
+    @app.middleware("http")
     async def _track_active_clients(request: Request, call_next):
         response = await call_next(request)
         _record_active_client(request, getattr(response, "status_code", 0))
@@ -2816,7 +3275,52 @@ def create_app() -> FastAPI:
         form = await request.form()
         username = str(form.get("username") or "").strip()
         password = str(form.get("password") or "")
-        user = authenticate_user(username, password)
+        auth_result = authenticate_login(
+            username,
+            password,
+            remote_address=_request_remote_address(request),
+            user_agent=str(request.headers.get("user-agent") or ""),
+        )
+        user = auth_result.get("user") if isinstance(auth_result.get("user"), dict) else None
+        if not auth_result.get("ok"):
+            failed_count = int(auth_result.get("failed_login_count") or (user or {}).get("failed_login_count") or 0)
+            locked = bool((user or {}).get("locked"))
+            reason = str(auth_result.get("reason") or "bad_password")
+            level = "WARNING"
+            if locked and (user or {}).get("lock_manual"):
+                message = "Konto administratora zablokowane po blednych probach logowania."
+            elif locked:
+                message = "Konto zablokowane czasowo po blednych probach logowania."
+            elif failed_count > 1:
+                message = "Kolejna bledna proba logowania."
+            else:
+                message = "Bledna proba logowania."
+            _write_web_event(
+                level=level,
+                event="login_failed",
+                username=username or "unknown",
+                message=message,
+                details={
+                    "reason": reason,
+                    "failed_login_count": failed_count,
+                    "limit": auth_result.get("limit"),
+                    "locked": locked,
+                    "lock_manual": bool((user or {}).get("lock_manual")),
+                    "lock_expires_at": (user or {}).get("lock_expires_at", ""),
+                    "remote_address": _request_remote_address(request),
+                    "user_agent": str(request.headers.get("user-agent") or "")[:200],
+                },
+            )
+            if locked and (user or {}).get("lock_manual"):
+                raise HTTPException(
+                    status_code=423,
+                    detail="Konto jest zablokowane. Odblokuj je w panelu startowym WEB.",
+                )
+            if locked:
+                until = str((user or {}).get("lock_expires_at") or "")
+                suffix = f" do {until}" if until else ""
+                raise HTTPException(status_code=423, detail=f"Konto jest zablokowane{suffix}.")
+            raise HTTPException(status_code=401, detail="Niepoprawny login lub haslo.")
         if not user:
             raise HTTPException(status_code=401, detail="Niepoprawny login lub haslo.")
         session_token = _make_session_token(username)
@@ -2828,7 +3332,7 @@ def create_app() -> FastAPI:
             session_token,
             max_age=SESSION_MAX_AGE_SECONDS,
             httponly=True,
-            samesite="lax",
+            samesite="strict",
         )
         return response
 
@@ -2989,12 +3493,14 @@ def create_app() -> FastAPI:
         display_name = _safe_upload_name(original_name, os.path.basename(path))
         if _upload_processing_mode() == "host":
             preprocess_started = time.perf_counter()
+            original_scan_path = path
             path, display_name, preprocessed = await run_in_threadpool(
                 preprocess_cached_upload,
                 path,
                 original_name,
                 processing_options_from_config(config.CONFIG),
             )
+            _copy_upload_scan_result(original_scan_path, path)
             preprocess_ms = _elapsed_ms(preprocess_started)
             try:
                 size = os.path.getsize(path)
@@ -3013,8 +3519,10 @@ def create_app() -> FastAPI:
                 "total_ms": _elapsed_ms(started),
                 "save_ms": save_ms,
                 "preprocess_ms": preprocess_ms,
+                "antivirus_scan_ms": int(_upload_scan_result(path).get("elapsed_ms") or 0),
                 "mode": _upload_processing_mode(),
             },
+            "antivirus_scan": _upload_scan_result(path),
         }
 
     @app.options("/api/browser-extension/{path:path}")
@@ -3043,6 +3551,7 @@ def create_app() -> FastAPI:
                 "ok": True,
                 "username": username,
                 "version": get_display_version(),
+                "token_version": int((find_user(username) or {}).get("extension_token_version") or 0),
             },
         )
 
@@ -3072,12 +3581,14 @@ def create_app() -> FastAPI:
         display_name = _safe_upload_name(original_name, os.path.basename(path))
         if _upload_processing_mode() == "host":
             preprocess_started = time.perf_counter()
+            original_scan_path = path
             path, display_name, preprocessed = await run_in_threadpool(
                 preprocess_cached_upload,
                 path,
                 original_name,
                 processing_options_from_config(config.CONFIG),
             )
+            _copy_upload_scan_result(original_scan_path, path)
             preprocess_ms = _elapsed_ms(preprocess_started)
             try:
                 size = os.path.getsize(path)
@@ -3099,8 +3610,10 @@ def create_app() -> FastAPI:
                 "total_ms": _elapsed_ms(started),
                 "save_ms": save_ms,
                 "preprocess_ms": preprocess_ms,
+                "antivirus_scan_ms": int(_upload_scan_result(path).get("elapsed_ms") or 0),
                 "mode": _upload_processing_mode(),
             },
+            "antivirus_scan": _upload_scan_result(path),
         }
         item = {
             "source_url": source_url,
@@ -3411,11 +3924,42 @@ def create_app() -> FastAPI:
                 enabled=payload.get("enabled") if "enabled" in payload else None,
                 role=payload.get("role") if "role" in payload else None,
                 password=payload.get("password") if "password" in payload else None,
+                unlock=bool(payload.get("unlock")) if "unlock" in payload else None,
+                revoke_sessions=bool(payload.get("revoke_sessions")) if "revoke_sessions" in payload else None,
+                revoke_extension_token=bool(payload.get("revoke_extension_token"))
+                if "revoke_extension_token" in payload
+                else None,
                 current_username=str(current_user.get("username") or ""),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse({"users": users, "current_user": _current_user_payload(request)})
+        if payload.get("unlock"):
+            _write_web_event(
+                level="INFO",
+                event="login_unlocked",
+                username=username,
+                message=f"Odblokowano konto {username}.",
+                details={"by": str(current_user.get("username") or "")},
+            )
+        current_username = str(current_user.get("username") or "")
+        current_session_invalidated = (
+            username.lower() == current_username.lower()
+            and (
+                bool(payload.get("revoke_sessions"))
+                or bool(payload.get("password"))
+            )
+        )
+        response_payload: Dict[str, Any] = {
+            "users": users,
+            "current_user": current_user if current_session_invalidated else _current_user_payload(request),
+        }
+        if current_session_invalidated:
+            response_payload["session_invalidated"] = True
+            response_payload["session_message"] = "Sesje konta zostaly uniewaznione. Zaloguj sie ponownie."
+            response = JSONResponse(response_payload)
+            response.delete_cookie(SESSION_COOKIE)
+            return response
+        return JSONResponse(response_payload)
 
     @app.post("/api/diagnostics/{target}")
     def diagnostics(request: Request, target: str) -> JSONResponse:

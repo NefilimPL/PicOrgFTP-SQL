@@ -227,6 +227,92 @@ class WebAppFileTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_save_upload_cache_rejects_html_content_named_as_jpg(self) -> None:
+        temp_dir = _workspace_temp("web_app_upload_magic_mismatch")
+        try:
+            upload = _MemoryUpload("photo.jpg", [b"<!doctype html><script>alert(1)</script>"], "image/jpeg")
+            with (
+                patch.object(web_app.settings, "AC", str(temp_dir)),
+                patch.object(
+                    web_app.config,
+                    "CONFIG",
+                    {
+                        web_app.SECURITY_SETTINGS_KEY: {
+                            "allowed_upload_extensions": ["jpg", "png"],
+                            "blocked_upload_extensions": [],
+                            "block_executable_uploads": True,
+                        }
+                    },
+                ),
+            ):
+                with self.assertRaises(HTTPException) as caught:
+                    asyncio.run(web_app._save_upload_cache(upload, "session", "01"))
+
+            self.assertEqual(caught.exception.status_code, 400)
+            self.assertIn("HTML/XML/SVG", caught.exception.detail)
+            cache_root = temp_dir / "web_upload_cache"
+            cached_files = list(cache_root.rglob("*")) if cache_root.exists() else []
+            self.assertEqual([path for path in cached_files if path.is_file()], [])
+            self.assertTrue(upload.closed)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_save_upload_cache_strips_jpeg_exif_metadata(self) -> None:
+        if Image is None:
+            self.skipTest("Pillow unavailable")
+        temp_dir = _workspace_temp("web_app_upload_metadata_strip")
+        try:
+            buffer = io.BytesIO()
+            image = Image.new("RGB", (16, 16), "white")
+            exif = image.getexif()
+            exif[0x010E] = "private description"
+            image.save(buffer, format="JPEG", exif=exif.tobytes())
+            upload = _MemoryUpload("photo.jpg", [buffer.getvalue()], "image/jpeg")
+            with patch.object(web_app.settings, "AC", str(temp_dir)):
+                path, _size = asyncio.run(web_app._save_upload_cache(upload, "session", "01"))
+
+            with Image.open(path) as saved:
+                self.assertEqual(dict(saved.getexif()), {})
+            self.assertTrue(upload.closed)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_save_upload_cache_runs_optional_antivirus_scan(self) -> None:
+        if Image is None:
+            self.skipTest("Pillow unavailable")
+        temp_dir = _workspace_temp("web_app_upload_antivirus")
+        try:
+            buffer = io.BytesIO()
+            Image.new("RGB", (10, 10), "white").save(buffer, format="JPEG")
+            upload = _MemoryUpload("photo.jpg", [buffer.getvalue()], "image/jpeg")
+            with (
+                patch.object(web_app.settings, "AC", str(temp_dir)),
+                patch.object(
+                    web_app.config,
+                    "CONFIG",
+                    {
+                        web_app.SECURITY_SETTINGS_KEY: {
+                            "antivirus_scan_uploads": True,
+                        }
+                    },
+                ),
+                patch.object(web_app, "_defender_scan_executable", return_value="MpCmdRun.exe"),
+                patch.object(
+                    web_app.subprocess,
+                    "run",
+                    return_value=SimpleNamespace(returncode=0, stdout="clean", stderr=""),
+                ) as scan,
+            ):
+                path, _size = asyncio.run(web_app._save_upload_cache(upload, "session", "01"))
+
+            scan.assert_called_once()
+            scan_result = web_app._upload_scan_result(path)
+            self.assertTrue(scan_result["enabled"])
+            self.assertTrue(scan_result["scanned"])
+            self.assertEqual(scan_result["scanner"], "Microsoft Defender")
+        finally:
+            shutil.rmtree(temp_dir)
+
     def test_delete_local_files_is_idempotent_and_preserves_saved_paths(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:

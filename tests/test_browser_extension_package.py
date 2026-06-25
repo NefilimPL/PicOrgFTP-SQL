@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 import zipfile
+from unittest.mock import patch
 
 
 os.environ.setdefault("PICORGFTP_SQL_HEADLESS", "1")
@@ -85,8 +87,10 @@ def test_browser_extension_download_endpoint_returns_zip() -> None:
 
     from picorgftp_sql.web import app as web_app
 
-    client = TestClient(web_app.app)
-    response = client.get("/api/browser-extension/download")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with patch.object(web_app.settings, "AC", temp_dir):
+            client = TestClient(web_app.app)
+            response = client.get("/api/browser-extension/download")
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/zip"

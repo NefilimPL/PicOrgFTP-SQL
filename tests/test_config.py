@@ -62,6 +62,7 @@ class ConfigTests(unittest.TestCase):
                 "allowed_upload_extensions": "jpg, .PNG, exe, dziwny!",
                 "blocked_upload_extensions": ["EXE", ".bat", " "],
                 "block_executable_uploads": False,
+                "antivirus_scan_uploads": True,
             }
         )
 
@@ -70,6 +71,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings["allowed_upload_extensions"], ["jpg", "png", "exe"])
         self.assertEqual(settings["blocked_upload_extensions"], ["exe", "bat"])
         self.assertFalse(settings["block_executable_uploads"])
+        self.assertTrue(settings["antivirus_scan_uploads"])
 
 
 if __name__ == "__main__":
