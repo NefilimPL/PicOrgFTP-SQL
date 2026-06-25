@@ -270,10 +270,17 @@ class App(BU.Tk):
             A.makedirs(l, exist_ok=J)
         B._local_file_index_enabled = bool(D.get(LOCAL_FILE_INDEX_KEY, J))
         B._file_index_status_var = F.StringVar()
+        active_store = data_store.get_active_store()
+        file_index_cache_store = (
+            active_store
+            if getattr(active_store, "mode", "") == storage_settings.DATA_MODE_SQLITE
+            else I
+        )
         B._file_index = LocalFileIndex(
             l,
             A.path.join(settings.AC, "file_index.json"),
             status_callback=B._on_file_index_status_change,
+            cache_store=file_index_cache_store,
         )
         if B._local_file_index_enabled and B._file_index.load_cache():
             B._refresh_name_values_from_index()

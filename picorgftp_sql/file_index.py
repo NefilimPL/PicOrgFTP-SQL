@@ -74,9 +74,16 @@ def _normalize_extra_key(value: object) -> str:
 class LocalFileIndex:
     """Cache the local product directory tree for faster GUI lookups."""
 
-    def __init__(self, root_dir: str, cache_path: str, status_callback=None):
+    def __init__(
+        self,
+        root_dir: str,
+        cache_path: str,
+        status_callback=None,
+        cache_store=None,
+    ):
         self.root_dir = os.path.abspath(root_dir)
         self.cache_path = os.path.abspath(cache_path)
+        self._cache_store = cache_store
         self._status_callback = status_callback
         self._lock = threading.Lock()
         self._snapshot = None
@@ -120,6 +127,9 @@ class LocalFileIndex:
         )
 
     def _write_cache(self, snapshot: dict) -> None:
+        if self._cache_store is not None:
+            self._cache_store.save_file_index_cache(snapshot)
+            return
         directory = os.path.dirname(self.cache_path) or "."
         os.makedirs(directory, exist_ok=True)
         fd, temp_path = tempfile.mkstemp(
@@ -256,9 +266,12 @@ class LocalFileIndex:
         """Load a previously saved snapshot if it matches the active root."""
 
         try:
-            with open(self.cache_path, "r", encoding="utf-8") as handle:
-                snapshot = json.load(handle)
-        except (OSError, ValueError, TypeError):
+            if self._cache_store is not None:
+                snapshot = self._cache_store.load_file_index_cache()
+            else:
+                with open(self.cache_path, "r", encoding="utf-8") as handle:
+                    snapshot = json.load(handle)
+        except (OSError, ValueError, TypeError, AttributeError):
             return False
         if not isinstance(snapshot, dict):
             return False

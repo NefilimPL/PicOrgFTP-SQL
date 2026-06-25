@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from picorgftp_sql.file_index import LocalFileIndex
+from picorgftp_sql.sqlite_store import SqliteStore
 
 
 class LocalFileIndexTests(unittest.TestCase):
@@ -78,6 +79,38 @@ class LocalFileIndexTests(unittest.TestCase):
                 ),
                 ["5901234567890_01_MAIN.jpg"],
             )
+            self.assertEqual(reader.get_status()["state"], "cached")
+
+    def test_sqlite_cache_store_reuses_saved_snapshot_without_json_file(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            root = base / "_ZDJECIA PRZEROBIONE_"
+            product_dir = root / "MAGGIORE" / "KOMODA" / "MA03" / "BIALY" / "NO-LED"
+            product_dir.mkdir(parents=True)
+            (product_dir / "5901234567890_01_MAIN.jpg").write_text("a", encoding="utf-8")
+            cache_path = base / "file_index.json"
+            sqlite_store = SqliteStore(str(base / "data.sqlite"))
+
+            writer = LocalFileIndex(
+                str(root),
+                str(cache_path),
+                cache_store=sqlite_store,
+            )
+            self.assertTrue(writer.refresh_sync())
+
+            self.assertFalse(cache_path.exists())
+            self.assertEqual(
+                sqlite_store.load_file_index_cache()["names"],
+                ["MAGGIORE"],
+            )
+
+            reader = LocalFileIndex(
+                str(root),
+                str(cache_path),
+                cache_store=sqlite_store,
+            )
+            self.assertTrue(reader.load_cache())
+            self.assertEqual(reader.get_names(), ["MAGGIORE"])
             self.assertEqual(reader.get_status()["state"], "cached")
 
 

@@ -115,7 +115,7 @@ IMAGE_PREVIEW_EXTENSIONS = {
 PASSWORD_ALGORITHM = "pbkdf2_sha256"
 PASSWORD_ITERATIONS = 200_000
 _FILE_INDEX: LocalFileIndex | None = None
-_FILE_INDEX_KEY: tuple[str, str] | None = None
+_FILE_INDEX_KEY: tuple[str, str, str, str] | None = None
 _FILE_INDEX_REFRESH_STARTED = False
 _FTP_CACHE_LOCKS: dict[str, threading.Lock] = {}
 _FTP_CACHE_LOCKS_GUARD = threading.Lock()
@@ -288,9 +288,16 @@ def _get_file_index(*, start: bool = False) -> LocalFileIndex | None:
         return None
     root_dir = os.path.abspath(settings.l)
     index_path = os.path.abspath(os.path.join(settings.AC, "file_index.json"))
-    key = (root_dir, index_path)
+    active_store = data_store.get_active_store()
+    cache_store = (
+        active_store
+        if getattr(active_store, "mode", "") == storage_settings.DATA_MODE_SQLITE
+        else None
+    )
+    store_key = str(getattr(cache_store, "database_path", "")) if cache_store else ""
+    key = (root_dir, index_path, getattr(active_store, "mode", ""), store_key)
     if _FILE_INDEX is None or _FILE_INDEX_KEY != key:
-        index = LocalFileIndex(root_dir, index_path)
+        index = LocalFileIndex(root_dir, index_path, cache_store=cache_store)
         index.load_cache()
         _FILE_INDEX = index
         _FILE_INDEX_KEY = key

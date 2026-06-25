@@ -345,6 +345,15 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("Importuj stare dane do SQLite", source)
         self.assertIn("storage_settings.save_bootstrap_settings", source)
 
+    def test_desktop_local_file_index_uses_active_cache_store(self) -> None:
+        app_path = Path(__file__).resolve().parents[1] / "picorgftp_sql" / "app.py"
+        source = app_path.read_text(encoding="utf-8")
+        index_start = source.index("B._file_index = LocalFileIndex(")
+        index_block = source[index_start : index_start + 500]
+
+        self.assertIn("cache_store=", index_block)
+        self.assertIn("data_store.get_active_store", source)
+
     def test_web_client_validates_slot_upload_format_before_xhr(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]
