@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from picorgftp_sql.services.sql_service import (
     build_column_detection_query,
+    detect_available_columns,
     extract_presence_context,
     query_presence_details,
 )
@@ -60,6 +61,44 @@ class SqlServiceTests(unittest.TestCase):
             "WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'object_query_1' "
             "ORDER BY ORDINAL_POSITION",
         )
+
+    def test_detect_available_columns_returns_columns_and_preview(self) -> None:
+        class Cursor:
+            def execute(self, query, params=()):
+                self.query = query
+                self.params = params
+
+            def fetchall(self):
+                return [("img_01",), ("img_02",), ("img_01",)]
+
+            def close(self):
+                return None
+
+        class Connection:
+            def cursor(self):
+                return Cursor()
+
+            def close(self):
+                return None
+
+        with patch(
+            "picorgftp_sql.services.sql_service.connect_db",
+            return_value=Connection(),
+        ):
+            result = detect_available_columns(
+                {
+                    "sql_query": (
+                        "UPDATE object_query_1 SET img = '' "
+                        "WHERE EAN = '{ean}'"
+                    ),
+                    "db_type": "mysql",
+                }
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["columns"], ["img_01", "img_02"])
+        self.assertEqual(result["table"], "object_query_1")
+        self.assertIn("INFORMATION_SCHEMA.COLUMNS", result["preview"])
 
     def test_extract_presence_context_normalizes_quoted_table_reference(self) -> None:
         context = extract_presence_context(

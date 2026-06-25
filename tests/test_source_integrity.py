@@ -248,7 +248,19 @@ class SourceIntegrityTests(unittest.TestCase):
 
         checks = {
             "renderSettingsApp": [
-                ("Runtime aplikacji", ["versionNote", "configNote", "runtimeWarning", '"base_dir"']),
+                (
+                    "Runtime aplikacji",
+                    [
+                        "versionNote",
+                        "configNote",
+                        "runtimeWarning",
+                        '"data_mode"',
+                        '"image_dir"',
+                        '"database_location_mode"',
+                        '"database_path"',
+                        "importLegacyDataButton",
+                    ],
+                ),
                 ("Indeks lokalny", ['"local_file_index"', "diagnosticButton", "fileIndexRefreshButton"]),
                 ("Widok panelu", ['"user_show_timing_details"']),
                 ("Nazwy pol kolorow", ['"color1"', '"color2"', '"color3"']),
@@ -271,7 +283,7 @@ class SourceIntegrityTests(unittest.TestCase):
                 ("MySQL", ['"mysql_server"', '"mysql_database"', 'credentialField("mysql_user"']),
             ],
             "renderSettingsSlots": [
-                ("Lista slotow", ["note", "list", "addButton"]),
+                ("Lista slotow", ["note", "list", "addButton", "detectSqlColumnsButton"]),
             ],
             "renderSettingsUsers": [
                 ("Nowy uzytkownik", ["addForm"]),
@@ -322,6 +334,25 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("grid-template-columns: repeat(auto-fit, minmax(220px, 1fr))", settings_group)
         self.assertIn("align-items: start", settings_group)
         self.assertIn("grid-column: 1 / -1", settings_group_title)
+
+    def test_desktop_settings_include_storage_controls(self) -> None:
+        app_path = Path(__file__).resolve().parents[1] / "picorgftp_sql" / "app.py"
+        source = app_path.read_text(encoding="utf-8")
+
+        self.assertIn("data_mode_var", source)
+        self.assertIn("database_location_mode_var", source)
+        self.assertIn("database_path_var", source)
+        self.assertIn("Importuj stare dane do SQLite", source)
+        self.assertIn("storage_settings.save_bootstrap_settings", source)
+
+    def test_desktop_local_file_index_uses_active_cache_store(self) -> None:
+        app_path = Path(__file__).resolve().parents[1] / "picorgftp_sql" / "app.py"
+        source = app_path.read_text(encoding="utf-8")
+        index_start = source.index("B._file_index = LocalFileIndex(")
+        index_block = source[index_start : index_start + 500]
+
+        self.assertIn("cache_store=", index_block)
+        self.assertIn("data_store.get_active_store", source)
 
     def test_web_client_validates_slot_upload_format_before_xhr(self) -> None:
         app_path = (

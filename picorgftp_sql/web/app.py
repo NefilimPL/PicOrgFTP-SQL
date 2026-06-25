@@ -32,16 +32,22 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
-from .. import common, config, settings
+from .. import common, config, data_store, settings, storage_settings
 from ..bootstrap import initialize_application_runtime
 from ..common import (
     AUTO_CONTENT_FIT_KEY,
     H,
     K,
+    M,
+    N,
+    P,
     PROCESSING_SETTINGS_KEY,
     SECURITY_SETTINGS_KEY,
+    SQL_AVAILABLE_COLUMNS_KEY,
     SQL_COLUMN_MAP_KEY,
     SQL_UPDATE_TEMPLATE,
+    TRANSLATION_API_KEY,
+    TRANSLATION_SETTINGS_KEY,
     ft,
     p,
     u,
@@ -49,9 +55,10 @@ from ..common import (
 )
 from ..database import connect_db
 from ..image_utils import fit_image_to_content
+from ..legacy_import import import_legacy_to_sqlite
 from ..logging_utils import log_error
 from ..services.ftp_service import sync_remote_files
-from ..services.sql_service import extract_presence_context
+from ..services.sql_service import detect_available_columns, extract_presence_context
 from ..workflow_utils import build_product_directory, parse_slot_filename, sanitize_path_segment
 from ..web_image_import import (
     ImageImportError,
@@ -3878,6 +3885,52 @@ def create_app() -> FastAPI:
             return response
         snapshot["current_user"] = _current_user_payload(request)
         return JSONResponse(snapshot)
+
+    @app.post("/api/settings/import-legacy")
+    async def settings_import_legacy(request: Request) -> JSONResponse:
+        _require_admin(request)
+        database_path = storage_settings.resolve_sqlite_path()
+        if not database_path:
+            raise HTTPException(status_code=400, detail="Nie ustawiono sciezki bazy SQLite.")
+        try:
+            result = await run_in_threadpool(
+                import_legacy_to_sqlite,
+                legacy_dir=settings.AC,
+                database_path=database_path,
+            )
+            storage_settings.save_bootstrap_settings(
+                {storage_settings.DATA_MODE_KEY: storage_settings.DATA_MODE_SQLITE}
+            )
+            data_store.reset_active_store_cache()
+            config.initialize_config(interactive=False)
+        except Exception as exc:
+            log_error(f"WEB legacy import failed: {exc}\n{traceback.format_exc()}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Nie udalo sie zaimportowac danych legacy: {exc}",
+            ) from exc
+        app.state.runtime_info = _runtime_info()
+        result["settings"] = settings_snapshot()
+        result["message"] = "Zaimportowano stare dane do SQLite i wlaczono tryb SQLite."
+        return JSONResponse(result)
+
+    @app.post("/api/settings/sql-columns/detect")
+    def settings_sql_columns_detect(request: Request) -> JSONResponse:
+        _require_admin(request)
+        result = detect_available_columns(config.CONFIG)
+        if result.get("ok"):
+            config.CONFIG[SQL_AVAILABLE_COLUMNS_KEY] = list(result.get("columns") or [])
+            config.save_config(
+                config.CONFIG,
+                preserve_secrets={
+                    H: {N, M},
+                    P: {N, M},
+                    K: {N, M},
+                    TRANSLATION_SETTINGS_KEY: {TRANSLATION_API_KEY},
+                },
+            )
+            result["settings"] = settings_snapshot()
+        return JSONResponse(result)
 
     @app.post("/api/settings/secrets")
     async def settings_secrets(request: Request) -> JSONResponse:

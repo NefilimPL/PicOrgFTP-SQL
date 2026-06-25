@@ -62,6 +62,20 @@ def _excel_sheets() -> dict[str, str]:
     return settings.EXCEL_SHEETS
 
 
+def _active_sqlite_store():
+    """Return the active SQLite store adapter, or None in legacy mode."""
+
+    try:
+        from . import data_store
+
+        store = data_store.get_active_store()
+        if getattr(store, "mode", "") == "sqlite":
+            return store
+    except Exception:
+        return None
+    return None
+
+
 def label_category(label: str) -> str:
     """Return a human-readable category for a slot label."""
 
@@ -310,6 +324,10 @@ def _find_ean_conflict_row(sheet, header_map: dict[str, int], ean: str, skip_row
 def prepare_excel_lists() -> Dict[str, Dict[str, dict] | list]:
     """Load all Excel lists into memory."""
 
+    sqlite_store = _active_sqlite_store()
+    if sqlite_store is not None:
+        return sqlite_store.load_lists()
+
     workbook = _load_workbook_readonly()
     lists: Dict[str, Dict[str, dict] | list] = {}
     try:
@@ -477,6 +495,10 @@ def _save_workbook(workbook: Workbook, error_event: str, **context) -> bool:
 def add_to_list(sheet_name: str, value: str) -> bool:
     """Append a new normalised value to the given list sheet."""
 
+    sqlite_store = _active_sqlite_store()
+    if sqlite_store is not None:
+        return sqlite_store.add_list_value(sheet_name, value)
+
     if not value:
         return False
     normalized = value.strip().upper()
@@ -511,6 +533,11 @@ def add_to_list(sheet_name: str, value: str) -> bool:
 
 def remove_from_list(sheet_name: str, value: str) -> None:
     """Remove the first occurrence of ``value`` from the target sheet."""
+
+    sqlite_store = _active_sqlite_store()
+    if sqlite_store is not None:
+        sqlite_store.remove_list_value(sheet_name, value)
+        return
 
     locked_by = get_file_lock_user(_workbook_path())
     if locked_by:
@@ -580,6 +607,21 @@ def save_ean_entry(
     product_id: str = EMPTY,
 ) -> dict[str, object] | bool:
     """Insert or update a row in the entries sheet, handling locks gracefully."""
+
+    sqlite_store = _active_sqlite_store()
+    if sqlite_store is not None:
+        payload = _build_entry_payload(
+            ean,
+            name,
+            furniture_type,
+            model,
+            color1,
+            color2,
+            color3,
+            extra,
+            product_id,
+        )
+        return sqlite_store.save_product_entry(payload)
 
     locked_by = get_file_lock_user(_workbook_path())
     if locked_by:

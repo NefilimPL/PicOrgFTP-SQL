@@ -183,6 +183,68 @@ def build_column_detection_query(template, db_type):
     )
 
 
+def detect_available_columns(config_dict):
+    """Detect available SQL columns for the configured UPDATE target."""
+
+    template = config_dict.get(w, SQL_UPDATE_TEMPLATE) or SQL_UPDATE_TEMPLATE
+    db_type = str(config_dict.get(p, K) or K).lower()
+    query_info = build_column_detection_query(template, db_type)
+    if query_info is None:
+        return {
+            "ok": False,
+            "columns": [],
+            "table": "",
+            "preview": "",
+            "message": "Nie udalo sie odczytac tabeli z zapytania SQL.",
+        }
+    conn = None
+    cur = None
+    try:
+        conn = connect_db()
+        cur = conn.cursor()
+        cur.execute(query_info.query, query_info.params)
+        rows = cur.fetchall()
+        columns = []
+        seen = set()
+        for row in rows or []:
+            try:
+                value = row[0]
+            except E:
+                value = row
+            text = str(value or "").strip()
+            key = text.lower()
+            if not text or key in seen:
+                continue
+            columns.append(text)
+            seen.add(key)
+        return {
+            "ok": True,
+            "columns": columns,
+            "table": query_info.table_ref,
+            "preview": query_info.preview,
+            "message": f"Wykryto {len(columns)} pol SQL dla tabeli {query_info.table_ref}.",
+        }
+    except E as exc:
+        return {
+            "ok": False,
+            "columns": [],
+            "table": query_info.table_ref,
+            "preview": query_info.preview,
+            "message": str(exc),
+        }
+    finally:
+        if cur is not None:
+            try:
+                cur.close()
+            except E:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except E:
+                pass
+
+
 def should_check_presence(config_dict):
     """Return True when database credentials are configured for lookups."""
 

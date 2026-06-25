@@ -32,7 +32,8 @@ from .system_utils import get_file_lock_user, is_admin
 from .database import connect_db
 from .file_index import LocalFileIndex
 from .config import save_config
-from . import config, localization, settings, common, encryption
+from . import config, localization, settings, common, encryption, storage_settings, data_store
+from .legacy_import import import_legacy_to_sqlite
 from .settings import BW, EXCEL_SHEETS, AN, l
 from .product_state import (
     ProductIdentity,
@@ -269,10 +270,17 @@ class App(BU.Tk):
             A.makedirs(l, exist_ok=J)
         B._local_file_index_enabled = bool(D.get(LOCAL_FILE_INDEX_KEY, J))
         B._file_index_status_var = F.StringVar()
+        active_store = data_store.get_active_store()
+        file_index_cache_store = (
+            active_store
+            if getattr(active_store, "mode", "") == storage_settings.DATA_MODE_SQLITE
+            else I
+        )
         B._file_index = LocalFileIndex(
             l,
             A.path.join(settings.AC, "file_index.json"),
             status_callback=B._on_file_index_status_change,
+            cache_store=file_index_cache_store,
         )
         if B._local_file_index_enabled and B._file_index.load_cache():
             B._refresh_name_values_from_index()
@@ -8516,6 +8524,19 @@ class App(BU.Tk):
         app_secret_mask = "*" * max(8, Q(app_secret_value))
         app_secret_var = F.StringVar(value=app_secret_mask)
         base_dir_var = F.StringVar(value=base_dir_value)
+        storage_summary = storage_settings.storage_summary()
+        data_mode_var = F.StringVar(
+            value=storage_summary.get("data_mode", storage_settings.DATA_MODE_LEGACY)
+        )
+        database_location_mode_var = F.StringVar(
+            value=storage_summary.get(
+                "database_location_mode",
+                storage_settings.DATABASE_LOCATION_IMAGE_DIR,
+            )
+        )
+        database_path_var = F.StringVar(
+            value=storage_summary.get("database_path", B)
+        )
         local_file_index_var = F.BooleanVar(
             value=bool(D.get(LOCAL_FILE_INDEX_KEY, J))
         )
@@ -8541,6 +8562,58 @@ class App(BU.Tk):
             if selected:
                 base_dir_var.set(selected.strip())
 
+        def _choose_database_path():
+            initial_value = database_path_var.get().strip()
+            initial_dir = (
+                common.A.path.dirname(initial_value)
+                if initial_value
+                else common.A.path.expanduser("~")
+            )
+            selected = BT.asksaveasfilename(
+                parent=a_,
+                title="Wybierz plik SQLite",
+                initialdir=initial_dir,
+                defaultextension=".sqlite",
+                filetypes=[("SQLite", "*.sqlite *.db"), ("Wszystkie pliki", "*.*")],
+            )
+            if selected:
+                database_path_var.set(selected.strip())
+
+        def _selected_sqlite_path():
+            return storage_settings.resolve_sqlite_path(
+                {
+                    storage_settings.DATABASE_LOCATION_MODE_KEY: database_location_mode_var.get(),
+                    storage_settings.DATABASE_PATH_KEY: database_path_var.get(),
+                }
+            )
+
+        def _import_legacy_to_sqlite_desktop():
+            try:
+                database_path = _selected_sqlite_path()
+                if not database_path:
+                    O.showwarning(WARNING_LABEL, "Nie ustawiono sciezki bazy SQLite.")
+                    return
+                result = import_legacy_to_sqlite(
+                    legacy_dir=settings.AC,
+                    database_path=database_path,
+                )
+                storage_settings.save_bootstrap_settings(
+                    {
+                        storage_settings.DATA_MODE_KEY: storage_settings.DATA_MODE_SQLITE,
+                        storage_settings.DATABASE_LOCATION_MODE_KEY: database_location_mode_var.get(),
+                        storage_settings.DATABASE_PATH_KEY: database_path_var.get(),
+                    }
+                )
+                data_store.reset_active_store_cache()
+                config.initialize_config(interactive=False)
+                O.showinfo(
+                    SETTINGS_LABEL,
+                    "Importuj stare dane do SQLite: zakonczono. "
+                    f"Wpisy: {result.get('entries', 0)}, uzytkownicy: {result.get('users', 0)}.",
+                )
+            except E as exc:
+                O.showerror(AK, f"Nie udalo sie zaimportowac danych do SQLite:\n{exc}")
+
         def _set_system_state(state):
             nonlocal system_unlocked
             system_unlocked = state
@@ -8549,11 +8622,21 @@ class App(BU.Tk):
                 app_secret_entry.configure(state=X, show=B)
                 base_dir_entry.configure(state=X)
                 base_dir_btn.configure(state=X)
+                data_mode_combo.configure(state="readonly")
+                database_location_mode_combo.configure(state="readonly")
+                database_path_entry.configure(state=X)
+                database_path_btn.configure(state=X)
+                import_legacy_btn.configure(state=X)
             else:
                 app_secret_var.set(app_secret_mask)
                 app_secret_entry.configure(state=i_, show=Y)
                 base_dir_entry.configure(state=i_)
                 base_dir_btn.configure(state=V)
+                data_mode_combo.configure(state=V)
+                database_location_mode_combo.configure(state=V)
+                database_path_entry.configure(state=i_)
+                database_path_btn.configure(state=V)
+                import_legacy_btn.configure(state=V)
 
         def _unlock_system_settings():
             if is_admin():
@@ -8600,6 +8683,58 @@ class App(BU.Tk):
             wraplength=520,
             justify="left",
         ).grid(row=4, column=0, columnspan=3, padx=5, pady=(6, 4), sticky="w")
+        _slabel(
+            system_tab,
+            text="Tryb danych i SQLite",
+            style="SettingsHeader.TLabel",
+        ).grid(row=5, column=0, columnspan=3, padx=5, pady=(10, 4), sticky="w")
+        _slabel(system_tab, text="Tryb danych").grid(
+            row=6, column=0, padx=5, pady=4, sticky=R
+        )
+        data_mode_combo = C.Combobox(
+            system_tab,
+            textvariable=data_mode_var,
+            values=[
+                storage_settings.DATA_MODE_LEGACY,
+                storage_settings.DATA_MODE_SQLITE,
+            ],
+            state=V,
+            width=16,
+        )
+        data_mode_combo.grid(row=6, column=1, padx=5, pady=4, sticky="w")
+        _slabel(system_tab, text="Lokalizacja SQLite").grid(
+            row=7, column=0, padx=5, pady=4, sticky=R
+        )
+        database_location_mode_combo = C.Combobox(
+            system_tab,
+            textvariable=database_location_mode_var,
+            values=[
+                storage_settings.DATABASE_LOCATION_IMAGE_DIR,
+                storage_settings.DATABASE_LOCATION_CUSTOM,
+                storage_settings.DATABASE_LOCATION_EXE_DIR,
+            ],
+            state=V,
+            width=18,
+        )
+        database_location_mode_combo.grid(row=7, column=1, padx=5, pady=4, sticky="w")
+        _slabel(system_tab, text="Plik SQLite").grid(
+            row=8, column=0, padx=5, pady=4, sticky=R
+        )
+        database_path_entry = C.Entry(
+            system_tab, textvariable=database_path_var, width=50, state=i_
+        )
+        database_path_entry.grid(row=8, column=1, padx=5, pady=4, sticky="ew")
+        database_path_btn = C.Button(
+            system_tab, text=CHOOSE_LABEL, command=_choose_database_path, state=V
+        )
+        database_path_btn.grid(row=8, column=2, padx=5, pady=4, sticky="w")
+        import_legacy_btn = C.Button(
+            system_tab,
+            text="Importuj stare dane do SQLite",
+            command=_import_legacy_to_sqlite_desktop,
+            state=V,
+        )
+        import_legacy_btn.grid(row=9, column=1, columnspan=2, padx=5, pady=(4, 8), sticky="w")
         file_index_toggle = C.Checkbutton(
             system_tab,
             text=LANG.get(
@@ -8608,20 +8743,20 @@ class App(BU.Tk):
             ),
             variable=local_file_index_var,
         )
-        file_index_toggle.grid(row=5, column=0, columnspan=3, padx=5, pady=(4, 0), sticky="w")
+        file_index_toggle.grid(row=10, column=0, columnspan=3, padx=5, pady=(4, 0), sticky="w")
         file_index_btn = C.Button(
             system_tab,
             text=LANG.get("file_index_rebuild_action", "Odbuduj indeks plików"),
             command=A._start_file_index_refresh,
         )
-        file_index_btn.grid(row=6, column=0, padx=5, pady=(6, 0), sticky="w")
+        file_index_btn.grid(row=11, column=0, padx=5, pady=(6, 0), sticky="w")
         _slabel(
             system_tab,
             textvariable=A._file_index_status_var,
             style="SettingsHint.TLabel",
             wraplength=420,
             justify="left",
-        ).grid(row=6, column=1, columnspan=2, padx=5, pady=(6, 0), sticky="w")
+        ).grid(row=11, column=1, columnspan=2, padx=5, pady=(6, 0), sticky="w")
         _slabel(
             system_tab,
             text=LANG.get(
@@ -8629,27 +8764,27 @@ class App(BU.Tk):
                 "Własne nazwy pól kolorów",
             ),
             style="SettingsHeader.TLabel",
-        ).grid(row=7, column=0, columnspan=3, padx=5, pady=(10, 4), sticky="w")
+        ).grid(row=12, column=0, columnspan=3, padx=5, pady=(10, 4), sticky="w")
         _slabel(
             system_tab,
             text=LANG.get("color1_custom_label", "Pole 1:"),
-        ).grid(row=8, column=0, padx=5, pady=4, sticky=R)
+        ).grid(row=13, column=0, padx=5, pady=4, sticky=R)
         C.Entry(system_tab, textvariable=color1_label_var, width=30).grid(
-            row=8, column=1, columnspan=2, padx=5, pady=4, sticky="ew"
+            row=13, column=1, columnspan=2, padx=5, pady=4, sticky="ew"
         )
         _slabel(
             system_tab,
             text=LANG.get("color2_custom_label", "Pole 2:"),
-        ).grid(row=9, column=0, padx=5, pady=4, sticky=R)
+        ).grid(row=14, column=0, padx=5, pady=4, sticky=R)
         C.Entry(system_tab, textvariable=color2_label_var, width=30).grid(
-            row=9, column=1, columnspan=2, padx=5, pady=4, sticky="ew"
+            row=14, column=1, columnspan=2, padx=5, pady=4, sticky="ew"
         )
         _slabel(
             system_tab,
             text=LANG.get("color3_custom_label", "Pole 3:"),
-        ).grid(row=10, column=0, padx=5, pady=4, sticky=R)
+        ).grid(row=15, column=0, padx=5, pady=4, sticky=R)
         C.Entry(system_tab, textvariable=color3_label_var, width=30).grid(
-            row=10, column=1, columnspan=2, padx=5, pady=4, sticky="ew"
+            row=15, column=1, columnspan=2, padx=5, pady=4, sticky="ew"
         )
         _slabel(
             system_tab,
@@ -8660,12 +8795,12 @@ class App(BU.Tk):
             style="SettingsHint.TLabel",
             wraplength=520,
             justify="left",
-        ).grid(row=11, column=0, columnspan=3, padx=5, pady=(2, 0), sticky="w")
+        ).grid(row=16, column=0, columnspan=3, padx=5, pady=(2, 0), sticky="w")
         system_admin_btn = C.Button(
             system_tab, text=Ag_, command=_unlock_system_settings
         )
         system_admin_btn.grid(
-            row=12, column=0, columnspan=3, padx=5, pady=(6, 0), sticky="e"
+            row=17, column=0, columnspan=3, padx=5, pady=(6, 0), sticky="e"
         )
         system_tab.columnconfigure(1, weight=1)
         _set_system_state(Ay)
@@ -10116,6 +10251,20 @@ class App(BU.Tk):
                     encryption.APP_SECRET = new_app_secret
                 if new_base_dir != base_dir_value:
                     restart_needed = J
+            storage_updates = {
+                storage_settings.DATA_MODE_KEY: data_mode_var.get(),
+                storage_settings.DATABASE_LOCATION_MODE_KEY: database_location_mode_var.get(),
+                storage_settings.DATABASE_PATH_KEY: database_path_var.get(),
+            }
+            storage_settings.save_bootstrap_settings(storage_updates)
+            data_store.reset_active_store_cache()
+            if (
+                data_mode_var.get() != storage_summary.get("data_mode")
+                or database_location_mode_var.get()
+                != storage_summary.get("database_location_mode")
+                or database_path_var.get() != storage_summary.get("database_path")
+            ):
+                restart_needed = J
             preserve_secrets = {}
             ftp_preserve = set()
             if original_ftp_settings.get(N) == D[H][N]:

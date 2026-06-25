@@ -16,7 +16,7 @@ import threading
 import time
 import unicodedata
 
-from . import common, config, settings
+from . import common, config, data_store, settings, storage_settings
 from . import encryption
 from .common import (
     APP_SECRET_KEY,
@@ -115,7 +115,7 @@ IMAGE_PREVIEW_EXTENSIONS = {
 PASSWORD_ALGORITHM = "pbkdf2_sha256"
 PASSWORD_ITERATIONS = 200_000
 _FILE_INDEX: LocalFileIndex | None = None
-_FILE_INDEX_KEY: tuple[str, str] | None = None
+_FILE_INDEX_KEY: tuple[str, str, str, str] | None = None
 _FILE_INDEX_REFRESH_STARTED = False
 _FTP_CACHE_LOCKS: dict[str, threading.Lock] = {}
 _FTP_CACHE_LOCKS_GUARD = threading.Lock()
@@ -166,6 +166,18 @@ class WebEntry:
 
 def _text(value: object) -> str:
     return str(value or "").strip()
+
+
+def _active_sqlite_store():
+    """Return the active SQLite store adapter, or None in legacy mode."""
+
+    try:
+        store = data_store.get_active_store()
+        if getattr(store, "mode", "") == "sqlite":
+            return store
+    except Exception:
+        return None
+    return None
 
 
 def _norm(value: object) -> str:
@@ -276,9 +288,16 @@ def _get_file_index(*, start: bool = False) -> LocalFileIndex | None:
         return None
     root_dir = os.path.abspath(settings.l)
     index_path = os.path.abspath(os.path.join(settings.AC, "file_index.json"))
-    key = (root_dir, index_path)
+    active_store = data_store.get_active_store()
+    cache_store = (
+        active_store
+        if getattr(active_store, "mode", "") == storage_settings.DATA_MODE_SQLITE
+        else None
+    )
+    store_key = str(getattr(cache_store, "database_path", "")) if cache_store else ""
+    key = (root_dir, index_path, getattr(active_store, "mode", ""), store_key)
     if _FILE_INDEX is None or _FILE_INDEX_KEY != key:
-        index = LocalFileIndex(root_dir, index_path)
+        index = LocalFileIndex(root_dir, index_path, cache_store=cache_store)
         index.load_cache()
         _FILE_INDEX = index
         _FILE_INDEX_KEY = key
@@ -338,6 +357,9 @@ def _history_path() -> Path:
 
 
 def _load_history_records() -> list[dict[str, object]]:
+    sqlite_store = _active_sqlite_store()
+    if sqlite_store is not None:
+        return sqlite_store.load_history()
     path = _history_path()
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -349,6 +371,10 @@ def _load_history_records() -> list[dict[str, object]]:
 
 
 def _save_history_records(records: list[dict[str, object]]) -> None:
+    sqlite_store = _active_sqlite_store()
+    if sqlite_store is not None:
+        sqlite_store.save_history(records)
+        return
     path = _history_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(records[-2000:], indent=2, ensure_ascii=False), encoding="utf-8")
@@ -849,6 +875,24 @@ def load_user_records() -> list[dict[str, object]]:
     """Load full local web user records, including password hashes."""
 
     with _USERS_LOCK:
+        sqlite_store = _active_sqlite_store()
+        if sqlite_store is not None:
+            data = sqlite_store.load_users()
+            if not data:
+                return [_default_admin()]
+            users = []
+            seen = set()
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                user = _normalized_user_record(item)
+                if not user or user["username"].lower() in seen:
+                    continue
+                users.append(user)
+                seen.add(user["username"].lower())
+            if not any(user["username"].lower() == "admin" for user in users):
+                users.insert(0, _default_admin())
+            return users
         path = Path(settings.AC) / WEB_USERS_PATH
         if not path.exists():
             return [_default_admin()]
@@ -883,6 +927,10 @@ def save_users(users: list[dict[str, object]]) -> list[dict[str, object]]:
     """Persist local web user records."""
 
     with _USERS_LOCK:
+        sqlite_store = _active_sqlite_store()
+        if sqlite_store is not None:
+            sqlite_store.save_users(users)
+            return load_users()
         path = Path(settings.AC) / WEB_USERS_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(users, indent=4, ensure_ascii=False), encoding="utf-8")
@@ -1385,8 +1433,22 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
     slots_payload = payload.get("slots") if isinstance(payload.get("slots"), list) else None
     runtime_reloaded = False
 
-    if "base_dir" in app_payload:
+    if "image_dir" in app_payload:
+        runtime_reloaded = _apply_base_dir_from_web(app_payload.get("image_dir")) or runtime_reloaded
+    elif "base_dir" in app_payload:
         runtime_reloaded = _apply_base_dir_from_web(app_payload.get("base_dir")) or runtime_reloaded
+    storage_updates: dict[str, object] = {}
+    for payload_key, settings_key in {
+        "data_mode": storage_settings.DATA_MODE_KEY,
+        "database_location_mode": storage_settings.DATABASE_LOCATION_MODE_KEY,
+        "database_path": storage_settings.DATABASE_PATH_KEY,
+    }.items():
+        if payload_key in app_payload:
+            storage_updates[settings_key] = app_payload.get(payload_key)
+    if storage_updates:
+        storage_settings.save_bootstrap_settings(storage_updates)
+        data_store.reset_active_store_cache()
+        runtime_reloaded = True
     if APP_SECRET_KEY in security_payload:
         runtime_reloaded = _apply_app_secret_from_web(security_payload.get(APP_SECRET_KEY)) or runtime_reloaded
     elif APP_SECRET_KEY in app_payload:
@@ -1486,6 +1548,7 @@ def settings_snapshot() -> dict[str, object]:
     """Return non-secret settings for the web settings view."""
 
     cfg = config.CONFIG
+    storage = storage_settings.storage_summary()
     ftp = cfg.get(H, {})
     sql = cfg.get(P, {})
     mysql_cfg = cfg.get(K, {})
@@ -1495,6 +1558,10 @@ def settings_snapshot() -> dict[str, object]:
         "version": get_display_version(),
         "windows_admin": is_windows_admin_process(),
         "base_dir": settings.AC,
+        "image_dir": storage.get("image_dir", settings.AC),
+        "data_mode": storage.get("data_mode", "legacy"),
+        "database_location_mode": storage.get("database_location_mode", "image_dir"),
+        "database_path": storage.get("database_path", ""),
         "processed_dir": settings.l,
         "config_path": config.CONFIG_PATH,
         "local_settings_path": str(_local_settings_path()),

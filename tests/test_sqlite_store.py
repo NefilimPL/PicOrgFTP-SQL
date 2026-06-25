@@ -1,0 +1,242 @@
+"""Tests for the SQLite-backed application data store."""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+from picorgftp_sql.excel_utils import ENTRY_RECORDS_KEY
+from picorgftp_sql.sqlite_store import SqliteStore
+
+
+def test_schema_creates_expected_tables(tmp_path: Path) -> None:
+    db_path = tmp_path / "data.sqlite"
+    store = SqliteStore(str(db_path))
+
+    store.initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert {
+        "schema_version",
+        "app_settings",
+        "app_config_values",
+        "slot_definitions",
+        "sql_column_map",
+        "sql_available_columns",
+        "list_values",
+        "product_entries",
+        "web_users",
+        "web_history",
+        "file_index_cache",
+    } <= tables
+
+
+def test_config_roundtrip_preserves_payload(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.initialize()
+
+    store.save_config({"db_type": "mysql", "enable_sql_update": True})
+
+    assert store.load_config()["db_type"] == "mysql"
+    assert store.load_config()["enable_sql_update"] is True
+
+
+def test_config_is_stored_as_readable_path_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "data.sqlite"
+    store = SqliteStore(str(db_path))
+    store.initialize()
+
+    store.save_config(
+        {
+            "db_type": "mysql",
+            "enable_sql_update": True,
+            "ftp": {"host": "ftp.example.com", "port": 21},
+            "processing": {"formats": ["jpg", "png"]},
+        }
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        rows = {
+            row[0]: (row[1], row[2])
+            for row in conn.execute(
+                """
+                SELECT path, value_json, updated_at
+                FROM app_config_values
+                ORDER BY path
+                """
+            )
+        }
+        legacy_config = conn.execute(
+            "SELECT 1 FROM app_settings WHERE key = 'config'"
+        ).fetchone()
+
+    assert legacy_config is None
+    assert rows["db_type"][0] == '"mysql"'
+    assert rows["enable_sql_update"][0] == "true"
+    assert rows["ftp.host"][0] == '"ftp.example.com"'
+    assert rows["ftp.port"][0] == "21"
+    assert rows["processing.formats"][0] == '["jpg", "png"]'
+    assert rows["db_type"][1].endswith("Z")
+    assert "T" in rows["db_type"][1]
+
+
+def test_load_config_falls_back_to_legacy_json_blob(tmp_path: Path) -> None:
+    db_path = tmp_path / "data.sqlite"
+    store = SqliteStore(str(db_path))
+    store.initialize()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO app_settings (key, value_json, updated_at)
+            VALUES ('config', ?, ?)
+            """,
+            ('{"db_type": "mssql", "ftp": {"host": "legacy.example.com"}}', "2026-06-25T12:00:00.000Z"),
+        )
+
+    assert store.load_config() == {
+        "db_type": "mssql",
+        "ftp": {"host": "legacy.example.com"},
+    }
+
+
+def test_sqlite_timestamps_are_iso_8601_text(tmp_path: Path) -> None:
+    db_path = tmp_path / "data.sqlite"
+    store = SqliteStore(str(db_path))
+    store.initialize()
+
+    store.save_sql_columns(["img_01"], table_name="object_query_1")
+    store.save_product_entry(
+        {
+            "EAN": "5901234567890",
+            "NAZWA": "MAGGIORE",
+            "TYP": "KOMODA",
+            "MODEL": "MA03",
+            "KOLOR1": "BIALY",
+            "KOLOR2": "",
+            "KOLOR3": "",
+            "DODATKI": "NO-LED",
+            "PRODUCT_ID": "PRD-1",
+        }
+    )
+    store.save_users([{"username": "operator", "role": "user"}])
+    store.save_file_index_cache({"version": 1, "names": ["MAGGIORE"]})
+
+    with sqlite3.connect(db_path) as conn:
+        values = [
+            conn.execute("SELECT applied_at FROM schema_version").fetchone()[0],
+            conn.execute("SELECT detected_at FROM sql_available_columns").fetchone()[0],
+            conn.execute("SELECT updated_at FROM product_entries").fetchone()[0],
+            conn.execute("SELECT updated_at FROM web_users").fetchone()[0],
+            conn.execute("SELECT updated_at FROM file_index_cache").fetchone()[0],
+        ]
+
+    for value in values:
+        assert isinstance(value, str)
+        assert value.endswith("Z")
+        assert "T" in value
+
+
+def test_slots_and_sql_columns_roundtrip(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.initialize()
+
+    store.save_slots(
+        [{"prefix": "01", "label": "MAIN", "filename_label": "MAIN_pic"}],
+        {"01": "img_01"},
+    )
+    store.save_sql_columns(["img_01", "img_02"], table_name="object_query_1")
+
+    slots, sql_map = store.load_slots()
+    assert slots == [{"prefix": "01", "label": "MAIN", "filename_label": "MAIN_pic"}]
+    assert sql_map == {"01": "img_01"}
+    assert store.load_sql_columns() == ["img_01", "img_02"]
+
+
+def test_lists_roundtrip_uses_excel_payload_shape(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.initialize()
+
+    store.save_lists(
+        {
+            "NAZWY": ["MAGGIORE"],
+            "TYPY": ["KOMODA"],
+            "MODELE": ["MA03"],
+            "KOLORY": ["BIALY"],
+            "DODATKI": ["NO-LED"],
+            ENTRY_RECORDS_KEY: [
+                {
+                    "EAN": "5901234567890",
+                    "NAZWA": "MAGGIORE",
+                    "TYP": "KOMODA",
+                    "MODEL": "MA03",
+                    "KOLOR1": "BIALY",
+                    "KOLOR2": "",
+                    "KOLOR3": "",
+                    "DODATKI": "NO-LED",
+                    "PRODUCT_ID": "PRD-1",
+                }
+            ],
+        }
+    )
+
+    payload = store.load_lists()
+    assert payload["NAZWY"] == ["MAGGIORE"]
+    assert payload["TYPY"] == ["KOMODA"]
+    assert payload[ENTRY_RECORDS_KEY][0]["PRODUCT_ID"] == "PRD-1"
+
+
+def test_add_and_remove_list_value(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.initialize()
+
+    assert store.add_list_value("NAZWY", "maggiore") is True
+    assert store.add_list_value("NAZWY", "MAGGIORE") is False
+    assert store.load_lists()["NAZWY"] == ["MAGGIORE"]
+
+    store.remove_list_value("NAZWY", "maggiore")
+
+    assert store.load_lists()["NAZWY"] == []
+
+
+def test_save_product_entry_updates_by_product_id(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.initialize()
+
+    first = store.save_product_entry(
+        {
+            "EAN": "5901234567890",
+            "NAZWA": "MAGGIORE",
+            "TYP": "KOMODA",
+            "MODEL": "MA03",
+            "KOLOR1": "BIALY",
+            "KOLOR2": "",
+            "KOLOR3": "",
+            "DODATKI": "NO-LED",
+            "PRODUCT_ID": "PRD-1",
+        }
+    )
+    second = store.save_product_entry(
+        {
+            "EAN": "5901234567890",
+            "NAZWA": "MAGGIORE",
+            "TYP": "KOMODA",
+            "MODEL": "MA04",
+            "KOLOR1": "BIALY",
+            "KOLOR2": "",
+            "KOLOR3": "",
+            "DODATKI": "NO-LED",
+            "PRODUCT_ID": "PRD-1",
+        }
+    )
+
+    records = store.load_lists()[ENTRY_RECORDS_KEY]
+    assert first["updated"] is False
+    assert second["updated"] is True
+    assert len(records) == 1
+    assert records[0]["MODEL"] == "MA04"
