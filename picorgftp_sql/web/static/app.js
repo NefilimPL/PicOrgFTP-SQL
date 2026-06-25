@@ -652,7 +652,7 @@ function renderWebImagesPicker() {
     img.loading = "lazy";
     img.decoding = "async";
     img.alt = "";
-    img.src = image.url;
+    img.src = image.preview_url || image.thumb_url || image.url;
     preview.className = "web-image-preview";
     preview.append(checkbox, img);
     title.textContent = image.filename || `Obraz ${index + 1}`;
@@ -886,6 +886,8 @@ function imageFromBrowserExtensionItem(item) {
   const cache = item?.cache || {};
   return {
     url: item?.source_url || cache.url || "",
+    preview_url: cache.thumb_url || cache.url || item?.source_url || "",
+    thumb_url: cache.thumb_url || "",
     filename: item?.filename || cache.name || "web-image.jpg",
     width: Number(item?.width || cache.width || 0),
     height: Number(item?.height || cache.height || 0),

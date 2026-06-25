@@ -433,6 +433,16 @@ def service_command_parts(port: int, host: str) -> list[str]:
     ]
 
 
+def service_environment(port: int, host: str) -> dict[str, str]:
+    env = os.environ.copy()
+    env["PICORGFTP_SQL_HEADLESS"] = "1"
+    env["PICORG_WEB_PORT"] = str(port)
+    env["PICORG_WEB_HOST"] = host
+    if getattr(sys, "frozen", False):
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
+
+
 def ensure_firewall_rule(port: int) -> None:
     if os.name != "nt" or not is_admin():
         return
@@ -538,10 +548,7 @@ def start_user_web(port: int, host: str) -> ActionResult:
     root = app_root()
     log_dir(root).mkdir(parents=True, exist_ok=True)
     ensure_firewall_rule(port)
-    env = os.environ.copy()
-    env["PICORGFTP_SQL_HEADLESS"] = "1"
-    env["PICORG_WEB_PORT"] = str(port)
-    env["PICORG_WEB_HOST"] = host
+    env = service_environment(port, host)
     args = service_command_parts(port, host)
     out_handle = out_log_path(root).open("a", encoding="utf-8", buffering=1)
     err_handle = err_log_path(root).open("a", encoding="utf-8", buffering=1)

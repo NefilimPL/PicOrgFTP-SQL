@@ -205,12 +205,39 @@ IMAGE_UPLOAD_EXTENSIONS = {
     "psd",
 }
 METADATA_STRIP_UPLOAD_EXTENSIONS = {"jpg", "jpeg", "png"}
+UPLOAD_EXTENSION_MIME_TYPE = {
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+    "webp": "image/webp",
+    "gif": "image/gif",
+    "bmp": "image/bmp",
+    "tif": "image/tiff",
+    "tiff": "image/tiff",
+    "avif": "image/avif",
+}
+IMAGE_SIGNATURE_EXTENSIONS = (
+    "jpg",
+    "png",
+    "webp",
+    "gif",
+    "bmp",
+    "tif",
+    "avif",
+)
 
 
 @dataclass(frozen=True)
 class _QueuedUploadFile:
     path: str
     filename: str
+
+
+@dataclass(frozen=True)
+class _SavedUploadCache:
+    path: str
+    size: int
+    name: str
 
 
 @dataclass
@@ -660,6 +687,46 @@ def _upload_signature_matches(extension: str, header: bytes) -> bool:
     if extension == "psd":
         return header.startswith(b"8BPS")
     return False
+
+
+def _upload_extension_from_signature(header: bytes) -> str:
+    for extension in IMAGE_SIGNATURE_EXTENSIONS:
+        if _upload_signature_matches(extension, header):
+            return extension
+    return ""
+
+
+def _upload_extensions_equivalent(current: str, detected: str) -> bool:
+    if current == detected:
+        return True
+    return {current, detected} <= {"jpg", "jpeg"} or {current, detected} <= {"tif", "tiff"}
+
+
+def _upload_name_with_extension(filename: str, extension: str) -> str:
+    stem = Path(filename or "").stem.strip(" .-_") or "upload"
+    return f"{stem}.{extension}"
+
+
+def _normalize_upload_cache_extension(
+    path: str,
+    filename: str,
+    content_type: object,
+) -> tuple[str, str, str]:
+    try:
+        with open(path, "rb") as handle:
+            header = handle.read(128)
+    except OSError:
+        return path, filename, _normalized_content_type(content_type)
+    detected_extension = _upload_extension_from_signature(header)
+    current_extension = _upload_extension(filename)
+    if not detected_extension or _upload_extensions_equivalent(current_extension, detected_extension):
+        return path, filename, _normalized_content_type(content_type)
+    corrected_name = _upload_name_with_extension(filename, detected_extension)
+    base, _old_extension = os.path.splitext(path)
+    corrected_path = f"{base}.{detected_extension}"
+    if os.path.normcase(os.path.abspath(corrected_path)) != os.path.normcase(os.path.abspath(path)):
+        os.replace(path, corrected_path)
+    return corrected_path, corrected_name, UPLOAD_EXTENSION_MIME_TYPE.get(detected_extension, "")
 
 
 def _validate_upload_signature(path: str, filename: object) -> None:
@@ -1172,7 +1239,13 @@ async def _materialize_process_form(form: Any, temp_dir: str) -> _ProcessFormSna
     return _ProcessFormSnapshot(fields=fields, uploads=uploads, temp_dir=temp_dir)
 
 
-async def _save_upload_cache(upload: UploadFile, cache_scope: str, prefix: str) -> tuple[str, int]:
+async def _save_upload_cache_entry(
+    upload: UploadFile,
+    cache_scope: str,
+    prefix: str,
+    *,
+    normalize_extension: bool = False,
+) -> _SavedUploadCache:
     safe_name = _safe_upload_name(upload.filename, f"{prefix}.upload")
     stem = Path(safe_name).stem
     suffix = _safe_file_suffix(safe_name)
@@ -1189,6 +1262,7 @@ async def _save_upload_cache(upload: UploadFile, cache_scope: str, prefix: str) 
     size = 0
     try:
         _validate_upload_extension(safe_name)
+        content_type = getattr(upload, "content_type", "")
         with open(target_path, "wb") as handle:
             while True:
                 chunk = await upload.read(1024 * 1024)
@@ -1198,11 +1272,18 @@ async def _save_upload_cache(upload: UploadFile, cache_scope: str, prefix: str) 
                 if size > max_bytes:
                     _raise_upload_too_large(_upload_limit_message(size, max_bytes))
                 handle.write(chunk)
-        _validate_upload_content(target_path, safe_name, getattr(upload, "content_type", ""), max_pixels)
+        if normalize_extension:
+            target_path, safe_name, content_type = _normalize_upload_cache_extension(
+                target_path,
+                safe_name,
+                content_type,
+            )
+            _validate_upload_extension(safe_name)
+        _validate_upload_content(target_path, safe_name, content_type, max_pixels)
         _strip_upload_metadata(target_path, safe_name)
         size = _enforce_upload_size(target_path, max_bytes)
         _scan_uploaded_file(target_path)
-        return target_path, size
+        return _SavedUploadCache(target_path, size, safe_name)
     except Exception:
         if os.path.exists(target_path):
             try:
@@ -1212,6 +1293,11 @@ async def _save_upload_cache(upload: UploadFile, cache_scope: str, prefix: str) 
         raise
     finally:
         await upload.close()
+
+
+async def _save_upload_cache(upload: UploadFile, cache_scope: str, prefix: str) -> tuple[str, int]:
+    saved = await _save_upload_cache_entry(upload, cache_scope, prefix)
+    return saved.path, saved.size
 
 
 def _save_web_image_cache(
@@ -3581,18 +3667,25 @@ def create_app() -> FastAPI:
         page_url = str(form.get("page_url") or "").strip()
         cleanup_web_upload_cache()
         save_started = time.perf_counter()
-        path, size = await _save_upload_cache(upload, _user_cache_scope(request, username), prefix)
+        saved_cache = await _save_upload_cache_entry(
+            upload,
+            _user_cache_scope(request, username),
+            prefix,
+            normalize_extension=True,
+        )
+        path = saved_cache.path
+        size = saved_cache.size
         save_ms = _elapsed_ms(save_started)
         preprocess_ms = 0
         preprocessed = False
-        display_name = _safe_upload_name(original_name, os.path.basename(path))
+        display_name = _safe_upload_name(saved_cache.name or original_name, os.path.basename(path))
         if _upload_processing_mode() == "host":
             preprocess_started = time.perf_counter()
             original_scan_path = path
             path, display_name, preprocessed = await run_in_threadpool(
                 preprocess_cached_upload,
                 path,
-                original_name,
+                display_name,
                 processing_options_from_config(config.CONFIG),
             )
             _copy_upload_scan_result(original_scan_path, path)
@@ -3603,6 +3696,10 @@ def create_app() -> FastAPI:
                 size = 0
         width, height = _image_dimensions(path)
         token = _file_token(path)
+        cache_mime_type = UPLOAD_EXTENSION_MIME_TYPE.get(
+            _upload_extension(display_name),
+            str(upload.content_type or ""),
+        )
         cache_payload = {
             "token": token,
             "name": _safe_upload_name(display_name, os.path.basename(path)),
@@ -3629,7 +3726,7 @@ def create_app() -> FastAPI:
             "width": width,
             "height": height,
             "size_bytes": size,
-            "mime_type": str(upload.content_type or ""),
+            "mime_type": cache_mime_type,
             "source": "browser-extension",
             "kind": "image",
             "cache": cache_payload,
