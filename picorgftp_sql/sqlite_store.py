@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import time
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +23,7 @@ from .excel_utils import (
     TYPE_HEADER,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 LIST_SHEETS = ("NAZWY", "TYPY", "MODELE", "KOLORY", "DODATKI")
 ENTRY_HEADERS = (
     EAN_HEADER,
@@ -55,6 +55,51 @@ def _json_loads(payload: object, fallback: object) -> object:
         return json.loads(str(payload or ""))
     except (TypeError, ValueError):
         return fallback
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _flatten_config(payload: dict[str, object]) -> list[tuple[str, object]]:
+    rows: list[tuple[str, object]] = []
+
+    def walk(prefix: str, value: object) -> None:
+        if isinstance(value, dict) and value:
+            for key in sorted(value):
+                text_key = _text(key)
+                if text_key:
+                    walk(f"{prefix}.{text_key}" if prefix else text_key, value[key])
+            return
+        rows.append((prefix, value))
+
+    for key in sorted(payload or {}):
+        text_key = _text(key)
+        if text_key:
+            walk(text_key, payload[key])
+    return rows
+
+
+def _unflatten_config(rows: list[sqlite3.Row]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for row in rows:
+        path = _text(row["path"])
+        if not path:
+            continue
+        parts = [part for part in path.split(".") if part]
+        if not parts:
+            continue
+        cursor = payload
+        for part in parts[:-1]:
+            existing = cursor.get(part)
+            if not isinstance(existing, dict):
+                existing = {}
+                cursor[part] = existing
+            cursor = existing
+        cursor[parts[-1]] = _json_loads(row["value_json"], None)
+    return payload
 
 
 def _list_value(sheet: str, value: object) -> str:
@@ -107,13 +152,19 @@ class SqliteStore:
                 """
                 CREATE TABLE IF NOT EXISTS schema_version (
                     version INTEGER NOT NULL,
-                    applied_at REAL NOT NULL
+                    applied_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS app_settings (
                     key TEXT PRIMARY KEY,
                     value_json TEXT NOT NULL,
-                    updated_at REAL NOT NULL
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS app_config_values (
+                    path TEXT PRIMARY KEY,
+                    value_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS slot_definitions (
@@ -132,7 +183,7 @@ class SqliteStore:
                     column_name TEXT PRIMARY KEY,
                     table_name TEXT NOT NULL DEFAULT '',
                     sort_order INTEGER NOT NULL DEFAULT 0,
-                    detected_at REAL NOT NULL
+                    detected_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS list_values (
@@ -152,13 +203,13 @@ class SqliteStore:
                     color2 TEXT NOT NULL DEFAULT '',
                     color3 TEXT NOT NULL DEFAULT '',
                     extra TEXT NOT NULL DEFAULT '',
-                    updated_at REAL NOT NULL
+                    updated_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS web_users (
                     username TEXT PRIMARY KEY,
                     payload_json TEXT NOT NULL,
-                    updated_at REAL NOT NULL
+                    updated_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS web_history (
@@ -170,15 +221,18 @@ class SqliteStore:
                 CREATE TABLE IF NOT EXISTS file_index_cache (
                     cache_key TEXT PRIMARY KEY,
                     payload_json TEXT NOT NULL,
-                    updated_at REAL NOT NULL
+                    updated_at TEXT NOT NULL
                 );
                 """
             )
-            exists = conn.execute("SELECT 1 FROM schema_version LIMIT 1").fetchone()
-            if not exists:
+            version_row = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version"
+            ).fetchone()
+            current_version = int(version_row[0] or 0) if version_row else 0
+            if current_version < SCHEMA_VERSION:
                 conn.execute(
                     "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                    (SCHEMA_VERSION, time.time()),
+                    (SCHEMA_VERSION, _now_iso()),
                 )
 
     def load_config(self) -> dict[str, Any]:
@@ -186,6 +240,15 @@ class SqliteStore:
 
         self.initialize()
         with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT path, value_json
+                FROM app_config_values
+                ORDER BY path
+                """
+            ).fetchall()
+            if rows:
+                return _unflatten_config(rows)
             row = conn.execute(
                 "SELECT value_json FROM app_settings WHERE key = 'config'"
             ).fetchone()
@@ -198,17 +261,19 @@ class SqliteStore:
         """Store the normalized config payload."""
 
         self.initialize()
+        rows = _flatten_config(dict(payload or {}))
         with self.connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO app_settings (key, value_json, updated_at)
-                VALUES ('config', ?, ?)
-                ON CONFLICT(key) DO UPDATE SET
-                    value_json = excluded.value_json,
-                    updated_at = excluded.updated_at
-                """,
-                (_json_dumps(dict(payload or {})), time.time()),
-            )
+            conn.execute("DELETE FROM app_config_values")
+            conn.execute("DELETE FROM app_settings WHERE key = 'config'")
+            updated_at = _now_iso()
+            for path, value in rows:
+                conn.execute(
+                    """
+                    INSERT INTO app_config_values (path, value_json, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (path, _json_dumps(value), updated_at),
+                )
 
     def load_slots(self) -> tuple[list[dict[str, str]], dict[str, str]]:
         """Return slot definitions and SQL column mappings."""
@@ -302,7 +367,7 @@ class SqliteStore:
             seen.add(text.lower())
         with self.connection() as conn:
             conn.execute("DELETE FROM sql_available_columns")
-            detected_at = time.time()
+            detected_at = _now_iso()
             for index, column in enumerate(cleaned):
                 conn.execute(
                     """
@@ -468,7 +533,7 @@ class SqliteStore:
                 entry[COLOR2_HEADER],
                 entry[COLOR3_HEADER],
                 entry[EXTRA_HEADER],
-                time.time(),
+                _now_iso(),
             ),
         )
         return {"updated": updated, "product_id": product_id, "entry": entry}
@@ -515,7 +580,7 @@ class SqliteStore:
                         payload_json = excluded.payload_json,
                         updated_at = excluded.updated_at
                     """,
-                    (username, _json_dumps(item), time.time()),
+                    (username, _json_dumps(item), _now_iso()),
                 )
 
     def load_history(self) -> list[dict[str, Any]]:
@@ -614,5 +679,5 @@ class SqliteStore:
                     payload_json = excluded.payload_json,
                     updated_at = excluded.updated_at
                 """,
-                (_text(key) or "default", _json_dumps(payload or {}), time.time()),
+                (_text(key) or "default", _json_dumps(payload or {}), _now_iso()),
             )

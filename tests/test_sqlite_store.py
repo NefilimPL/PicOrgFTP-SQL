@@ -25,6 +25,7 @@ def test_schema_creates_expected_tables(tmp_path: Path) -> None:
     assert {
         "schema_version",
         "app_settings",
+        "app_config_values",
         "slot_definitions",
         "sql_column_map",
         "sql_available_columns",
@@ -44,6 +45,101 @@ def test_config_roundtrip_preserves_payload(tmp_path: Path) -> None:
 
     assert store.load_config()["db_type"] == "mysql"
     assert store.load_config()["enable_sql_update"] is True
+
+
+def test_config_is_stored_as_readable_path_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "data.sqlite"
+    store = SqliteStore(str(db_path))
+    store.initialize()
+
+    store.save_config(
+        {
+            "db_type": "mysql",
+            "enable_sql_update": True,
+            "ftp": {"host": "ftp.example.com", "port": 21},
+            "processing": {"formats": ["jpg", "png"]},
+        }
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        rows = {
+            row[0]: (row[1], row[2])
+            for row in conn.execute(
+                """
+                SELECT path, value_json, updated_at
+                FROM app_config_values
+                ORDER BY path
+                """
+            )
+        }
+        legacy_config = conn.execute(
+            "SELECT 1 FROM app_settings WHERE key = 'config'"
+        ).fetchone()
+
+    assert legacy_config is None
+    assert rows["db_type"][0] == '"mysql"'
+    assert rows["enable_sql_update"][0] == "true"
+    assert rows["ftp.host"][0] == '"ftp.example.com"'
+    assert rows["ftp.port"][0] == "21"
+    assert rows["processing.formats"][0] == '["jpg", "png"]'
+    assert rows["db_type"][1].endswith("Z")
+    assert "T" in rows["db_type"][1]
+
+
+def test_load_config_falls_back_to_legacy_json_blob(tmp_path: Path) -> None:
+    db_path = tmp_path / "data.sqlite"
+    store = SqliteStore(str(db_path))
+    store.initialize()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO app_settings (key, value_json, updated_at)
+            VALUES ('config', ?, ?)
+            """,
+            ('{"db_type": "mssql", "ftp": {"host": "legacy.example.com"}}', "2026-06-25T12:00:00.000Z"),
+        )
+
+    assert store.load_config() == {
+        "db_type": "mssql",
+        "ftp": {"host": "legacy.example.com"},
+    }
+
+
+def test_sqlite_timestamps_are_iso_8601_text(tmp_path: Path) -> None:
+    db_path = tmp_path / "data.sqlite"
+    store = SqliteStore(str(db_path))
+    store.initialize()
+
+    store.save_sql_columns(["img_01"], table_name="object_query_1")
+    store.save_product_entry(
+        {
+            "EAN": "5901234567890",
+            "NAZWA": "MAGGIORE",
+            "TYP": "KOMODA",
+            "MODEL": "MA03",
+            "KOLOR1": "BIALY",
+            "KOLOR2": "",
+            "KOLOR3": "",
+            "DODATKI": "NO-LED",
+            "PRODUCT_ID": "PRD-1",
+        }
+    )
+    store.save_users([{"username": "operator", "role": "user"}])
+    store.save_file_index_cache({"version": 1, "names": ["MAGGIORE"]})
+
+    with sqlite3.connect(db_path) as conn:
+        values = [
+            conn.execute("SELECT applied_at FROM schema_version").fetchone()[0],
+            conn.execute("SELECT detected_at FROM sql_available_columns").fetchone()[0],
+            conn.execute("SELECT updated_at FROM product_entries").fetchone()[0],
+            conn.execute("SELECT updated_at FROM web_users").fetchone()[0],
+            conn.execute("SELECT updated_at FROM file_index_cache").fetchone()[0],
+        ]
+
+    for value in values:
+        assert isinstance(value, str)
+        assert value.endswith("Z")
+        assert "T" in value
 
 
 def test_slots_and_sql_columns_roundtrip(tmp_path: Path) -> None:
