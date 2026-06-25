@@ -5078,6 +5078,37 @@ function diagnosticButton(target, label) {
   return button;
 }
 
+function detectSqlColumnsButton() {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary-button";
+  button.textContent = "Wykryj pola SQL";
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    settingsStatus.textContent = "Wykrywanie pol SQL...";
+    try {
+      const payload = await requestJson("/api/settings/sql-columns/detect", {
+        method: "POST",
+        timeoutMs: 60000,
+      });
+      if (payload.settings) {
+        state.settings = payload.settings;
+        state.currentUser = state.settings.current_user || state.currentUser;
+      } else if (Array.isArray(payload.columns)) {
+        state.settings.sql_available_columns = payload.columns;
+      }
+      ensureSqlColumnsDatalist();
+      renderSettings();
+      settingsStatus.textContent = payload.message || "Wykryto pola SQL.";
+    } catch (error) {
+      settingsStatus.textContent = error.message || "Nie udalo sie wykryc pol SQL.";
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
 function fileIndexRefreshButton() {
   const button = document.createElement("button");
   button.type = "button";
@@ -5093,6 +5124,33 @@ function fileIndexRefreshButton() {
       settingsStatus.textContent = payload.label || "Indeksowanie uruchomione.";
     } catch (error) {
       settingsStatus.textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
+function importLegacyDataButton() {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary-button";
+  button.textContent = "Importuj stare dane do SQLite";
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    settingsStatus.textContent = "Importowanie danych legacy...";
+    try {
+      const payload = await requestJson("/api/settings/import-legacy", {
+        method: "POST",
+        timeoutMs: 120000,
+      });
+      if (payload.settings) {
+        state.settings = payload.settings;
+      }
+      settingsStatus.textContent = payload.message || "Import zakonczony.";
+      renderSettings();
+    } catch (error) {
+      settingsStatus.textContent = error.message || "Nie udalo sie zaimportowac danych.";
     } finally {
       button.disabled = false;
     }
@@ -5199,12 +5257,26 @@ function renderSettingsApp() {
       versionNote,
       configNote,
       runtimeWarning,
-      inputField("base_dir", "Katalog bazowy", s.base_dir, {
-        placeholder: "np. C:\\PicOrgFTP-SQL albo \\\\SERWER\\Udzial\\PicOrgFTP-SQL",
+      selectField("data_mode", "Tryb danych", s.data_mode || "legacy", [
+        ["legacy", "Pliki legacy"],
+        ["sqlite", "SQLite"],
+      ]),
+      inputField("image_dir", "Lokalizacja zdjec", s.image_dir || s.base_dir, {
+        placeholder: "np. C:\\PicOrgFTP-SQL albo \\\\SERWER\\Udzial\\Zdjecia",
         description:
-          "Folder, w ktorym backend trzyma config.json, lists.xlsx i katalog zdjec. " +
+          "Folder, w ktorym backend trzyma zdjecia i cache podgladow. " +
           "Dla uslugi Windows najlepiej uzywac pelnej sciezki lokalnej albo UNC; dyski mapowane typu Z:\\ moga nie byc widoczne.",
-      })
+      }),
+      selectField("database_location_mode", "Lokalizacja SQLite", s.database_location_mode || "image_dir", [
+        ["image_dir", "Przy zdjeciach"],
+        ["custom", "Wskazana sciezka"],
+        ["exe_dir", "Przy backendzie"],
+      ]),
+      inputField("database_path", "Plik SQLite", s.database_path || "", {
+        placeholder: "np. C:\\PicOrgFTP-SQL\\picorgftp_sql.sqlite",
+        description: "Uzywane tylko dla lokalizacji: wskazana sciezka.",
+      }),
+      actionRow(importLegacyDataButton())
     ),
     settingsFieldGroup("Indeks lokalny",
       checkField(
@@ -5231,7 +5303,10 @@ function renderSettingsApp() {
   );
   settingsSaveButton(form, (data) => ({
     app: {
-      base_dir: data.get("base_dir"),
+      image_dir: data.get("image_dir"),
+      data_mode: data.get("data_mode"),
+      database_location_mode: data.get("database_location_mode"),
+      database_path: data.get("database_path"),
       local_file_index: data.has("local_file_index"),
       color_field_labels: {
         color1: data.get("color1"),
@@ -5594,7 +5669,7 @@ function renderSettingsSlots() {
       sql_column: "",
     });
   });
-  form.append(settingsFieldGroup("Lista slotow", note, list, actionRow(addButton)));
+  form.append(settingsFieldGroup("Lista slotow", note, list, actionRow(addButton, detectSqlColumnsButton())));
   settingsSaveButton(form, () => {
     const slots = [...form.querySelectorAll(".slot-settings-row")].map((row) => {
       const label = row.querySelector('[name="label"]').value;

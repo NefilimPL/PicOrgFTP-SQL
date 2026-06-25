@@ -10,7 +10,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from picorgftp_sql import web_data
+from picorgftp_sql import data_store, storage_settings, web_data
 
 
 def _workspace_temp(name: str) -> Path:
@@ -22,6 +22,9 @@ def _workspace_temp(name: str) -> Path:
 
 
 class WebDataUserTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        data_store.reset_active_store_cache()
+
     def test_default_admin_can_authenticate(self) -> None:
         temp_dir = _workspace_temp("web_data_users_default")
         try:
@@ -606,6 +609,42 @@ class WebDataUserTests(unittest.TestCase):
         self.assertTrue(saved_config["target_only"])
         self.assertTrue(saved_config[web_data.LOCAL_FILE_INDEX_KEY])
 
+    def test_update_settings_persists_storage_bootstrap(self) -> None:
+        temp_dir = _workspace_temp("web_data_storage_update")
+        try:
+            image_dir = temp_dir / "photos"
+            db_path = temp_dir / "db" / "data.sqlite"
+            with (
+                patch.object(web_data, "_apply_base_dir_from_web", return_value=True) as apply_base,
+                patch.object(web_data.storage_settings, "save_bootstrap_settings") as save_bootstrap,
+                patch.object(web_data.data_store, "reset_active_store_cache") as reset_store,
+                patch.object(web_data.config, "initialize_config", return_value=web_data.config.CONFIG),
+                patch.object(web_data, "save_config"),
+                patch.object(web_data, "settings_snapshot", return_value={}),
+            ):
+                web_data.update_settings(
+                    {
+                        "app": {
+                            "image_dir": str(image_dir),
+                            "data_mode": "sqlite",
+                            "database_location_mode": "custom",
+                            "database_path": str(db_path),
+                        }
+                    }
+                )
+
+            apply_base.assert_called_once_with(str(image_dir))
+            save_bootstrap.assert_called_once_with(
+                {
+                    "data_mode": "sqlite",
+                    "database_location_mode": "custom",
+                    "database_path": str(db_path),
+                }
+            )
+            reset_store.assert_called()
+        finally:
+            shutil.rmtree(temp_dir)
+
     def test_update_settings_preserves_unsubmitted_encrypted_secrets(self) -> None:
         preserve = web_data._preserve_unsubmitted_config_secrets(
             {
@@ -678,6 +717,75 @@ class WebDataUserTests(unittest.TestCase):
         self.assertEqual(payload["ftp"]["password"], "ftp-pass")
         self.assertEqual(payload["database"]["mssql"]["password"], "mssql-pass")
         self.assertEqual(payload["database"]["mysql"]["user"], "mysql-user")
+
+    def test_sqlite_mode_persists_web_user_without_json_file(self) -> None:
+        temp_dir = _workspace_temp("web_data_sqlite_users")
+        try:
+            bootstrap = {
+                "data_mode": "sqlite",
+                "database_location_mode": "custom",
+                "database_path": str(temp_dir / "data.sqlite"),
+            }
+            with (
+                patch.object(web_data.settings, "AC", str(temp_dir)),
+                patch.object(storage_settings, "load_bootstrap_settings", return_value=bootstrap),
+            ):
+                data_store.reset_active_store_cache()
+                web_data.add_user("operator", "secret", "user")
+                users = web_data.load_users()
+
+            self.assertTrue(any(user["username"] == "operator" for user in users))
+            self.assertFalse((temp_dir / web_data.WEB_USERS_PATH).exists())
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_sqlite_mode_records_history_without_json_file(self) -> None:
+        temp_dir = _workspace_temp("web_data_sqlite_history")
+        try:
+            bootstrap = {
+                "data_mode": "sqlite",
+                "database_location_mode": "custom",
+                "database_path": str(temp_dir / "data.sqlite"),
+            }
+            with (
+                patch.object(web_data.settings, "AC", str(temp_dir)),
+                patch.object(storage_settings, "load_bootstrap_settings", return_value=bootstrap),
+            ):
+                data_store.reset_active_store_cache()
+                web_data.record_history(
+                    username="admin",
+                    action="save",
+                    ean="5901234567890",
+                    summary="Zapis",
+                )
+                snapshot = web_data.history_snapshot()
+
+            self.assertEqual(snapshot["groups"][0]["ean"], "5901234567890")
+            self.assertFalse((temp_dir / web_data.WEB_HISTORY_PATH).exists())
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_settings_snapshot_exposes_storage_locations(self) -> None:
+        temp_dir = _workspace_temp("web_data_storage_snapshot")
+        try:
+            bootstrap = {
+                "data_mode": "sqlite",
+                "database_location_mode": "custom",
+                "database_path": str(temp_dir / "data.sqlite"),
+            }
+            with (
+                patch.object(web_data.settings, "AC", str(temp_dir)),
+                patch.object(storage_settings, "load_bootstrap_settings", return_value=bootstrap),
+                patch.object(web_data, "load_users", return_value=[]),
+            ):
+                snapshot = web_data.settings_snapshot()
+
+            self.assertEqual(snapshot["data_mode"], "sqlite")
+            self.assertEqual(snapshot["image_dir"], str(temp_dir))
+            self.assertEqual(snapshot["database_location_mode"], "custom")
+            self.assertTrue(snapshot["database_path"].endswith("data.sqlite"))
+        finally:
+            shutil.rmtree(temp_dir)
 
 
 if __name__ == "__main__":

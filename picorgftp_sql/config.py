@@ -58,6 +58,20 @@ CONFIG_SAVE_FAILED_MSG = "Nie udało się zapisać pliku konfiguracyjnego:\n{err
 CONFIG = Ar.loads(Ar.dumps(DEFAULT_CONFIG))
 
 
+def _active_sqlite_store():
+    """Return the active SQLite store adapter, or None in legacy mode."""
+
+    try:
+        from . import data_store
+
+        store = data_store.get_active_store()
+        if getattr(store, "mode", "") == "sqlite":
+            return store
+    except Exception:
+        return None
+    return None
+
+
 def _get_config_path():
     return A.path.join(settings.AC, "config.json")
 
@@ -203,6 +217,99 @@ def _normalize_security_settings(raw_settings):
     }
 
 
+def _merge_raw_config(raw_config, config_copy):
+    """Merge a raw persisted config payload into a normalized config copy."""
+
+    if not Aq(raw_config, dict):
+        return config_copy
+    config_copy[H][v] = raw_config.get(H, {}).get(v, config_copy[H][v])
+    config_copy[H][r] = raw_config.get(H, {}).get(r, config_copy[H][r])
+    config_copy[H][N] = decrypt(raw_config.get(H, {}).get(N, encrypt(config_copy[H][N])))
+    config_copy[H][M] = decrypt(raw_config.get(H, {}).get(M, encrypt(config_copy[H][M])))
+    config_copy[H][m] = raw_config.get(H, {}).get(m, config_copy[H][m])
+    config_copy[P][c] = raw_config.get(P, {}).get(c, config_copy[P][c])
+    config_copy[P][b] = raw_config.get(P, {}).get(b, config_copy[P][b])
+    config_copy[P][N] = decrypt(raw_config.get(P, {}).get(N, encrypt(config_copy[P][N])))
+    config_copy[P][M] = decrypt(raw_config.get(P, {}).get(M, encrypt(config_copy[P][M])))
+    config_copy[K][c] = raw_config.get(K, {}).get(c, config_copy[K][c])
+    config_copy[K][b] = raw_config.get(K, {}).get(b, config_copy[K][b])
+    config_copy[K][N] = decrypt(raw_config.get(K, {}).get(N, encrypt(config_copy[K][N])))
+    config_copy[K][M] = decrypt(raw_config.get(K, {}).get(M, encrypt(config_copy[K][M])))
+    config_copy[p] = raw_config.get(p, config_copy[p])
+    config_copy[w] = raw_config.get(w, config_copy[w])
+    config_copy[ft] = raw_config.get(ft, config_copy[ft])
+    config_copy[u] = raw_config.get(u, config_copy[u])
+    config_copy[LOCAL_FILE_INDEX_KEY] = raw_config.get(
+        LOCAL_FILE_INDEX_KEY, config_copy.get(LOCAL_FILE_INDEX_KEY, True)
+    )
+    config_copy[AUTO_CONTENT_FIT_KEY] = bool(
+        raw_config.get(
+            AUTO_CONTENT_FIT_KEY,
+            config_copy.get(AUTO_CONTENT_FIT_KEY, False),
+        )
+    )
+    config_copy[PROCESSING_SETTINGS_KEY] = _normalize_processing_settings(
+        raw_config.get(
+            PROCESSING_SETTINGS_KEY,
+            config_copy.get(PROCESSING_SETTINGS_KEY, {}),
+        )
+    )
+    raw_security = raw_config.get(
+        SECURITY_SETTINGS_KEY,
+        config_copy.get(SECURITY_SETTINGS_KEY, {}),
+    )
+    if not Aq(raw_security, dict):
+        raw_security = {}
+    legacy_processing = raw_config.get(PROCESSING_SETTINGS_KEY, {})
+    if Aq(legacy_processing, dict):
+        raw_security = dict(raw_security)
+        for key in ("max_upload_mb", "max_upload_pixels"):
+            if key not in raw_security and key in legacy_processing:
+                raw_security[key] = legacy_processing[key]
+    config_copy[SECURITY_SETTINGS_KEY] = _normalize_security_settings(raw_security)
+    config_copy[COLOR_FIELD_LABELS_KEY] = _normalize_color_field_labels(
+        raw_config.get(
+            COLOR_FIELD_LABELS_KEY,
+            config_copy.get(COLOR_FIELD_LABELS_KEY, {}),
+        )
+    )
+    raw_slot_defs = raw_config.get(SLOT_DEFS_KEY, config_copy.get(SLOT_DEFS_KEY))
+    slot_defs, _ = normalize_slot_definitions(raw_slot_defs)
+    config_copy[SLOT_DEFS_KEY] = slot_defs
+    raw_sql_map = raw_config.get(SQL_COLUMN_MAP_KEY, config_copy.get(SQL_COLUMN_MAP_KEY))
+    sql_map, _ = normalize_sql_column_map(raw_sql_map, slot_defs)
+    config_copy[SQL_COLUMN_MAP_KEY] = sql_map
+    raw_columns = raw_config.get(
+        SQL_AVAILABLE_COLUMNS_KEY, config_copy.get(SQL_AVAILABLE_COLUMNS_KEY)
+    )
+    config_copy[SQL_AVAILABLE_COLUMNS_KEY] = _normalize_sql_columns(raw_columns)
+    raw_translation = raw_config.get(
+        TRANSLATION_SETTINGS_KEY, config_copy.get(TRANSLATION_SETTINGS_KEY, {})
+    )
+    if not Aq(raw_translation, dict):
+        raw_translation = {}
+    translation_defaults = config_copy.get(TRANSLATION_SETTINGS_KEY, {})
+    config_copy[TRANSLATION_SETTINGS_KEY] = {
+        TRANSLATION_PROVIDER_KEY: raw_translation.get(
+            TRANSLATION_PROVIDER_KEY,
+            translation_defaults.get(
+                TRANSLATION_PROVIDER_KEY, TRANSLATION_PROVIDER_DEFAULT
+            ),
+        ),
+        TRANSLATION_API_KEY: decrypt(
+            raw_translation.get(
+                TRANSLATION_API_KEY,
+                encrypt(translation_defaults.get(TRANSLATION_API_KEY, B)),
+            )
+        ),
+        TRANSLATION_API_URL: raw_translation.get(
+            TRANSLATION_API_URL,
+            translation_defaults.get(TRANSLATION_API_URL, B),
+        ),
+    }
+    return config_copy
+
+
 def load_config(interactive=I):
     """Return a configuration dictionary, creating defaults when necessary."""
 
@@ -212,6 +319,14 @@ def load_config(interactive=I):
     if interactive is I:
         interactive = not settings.HEADLESS_ENV
     config_copy = Ar.loads(Ar.dumps(DEFAULT_CONFIG))
+    sqlite_store = _active_sqlite_store()
+    if sqlite_store is not None:
+        CONFIG_PATH = getattr(sqlite_store, "database_path", CONFIG_PATH)
+        raw_config = sqlite_store.load_config()
+        if raw_config:
+            return _merge_raw_config(raw_config, config_copy)
+        save_config(config_copy)
+        return config_copy
     config_path = _get_config_path()
     if not A.path.exists(config_path):
         if interactive and not settings.has_saved_base_dir_override():
@@ -392,6 +507,9 @@ def load_config(interactive=I):
 def _load_raw_config():
     """Return the raw configuration dict without decryption."""
 
+    sqlite_store = _active_sqlite_store()
+    if sqlite_store is not None:
+        return sqlite_store.load_config()
     try:
         config_path = _get_config_path()
         if A.path.exists(config_path):
@@ -485,6 +603,19 @@ def save_config(config, raw_config=None, preserve_secrets=None):
             TRANSLATION_API_URL: translation_settings.get(TRANSLATION_API_URL, B),
         },
     }
+    sqlite_store = _active_sqlite_store()
+    if sqlite_store is not None:
+        try:
+            CONFIG_PATH = getattr(sqlite_store, "database_path", CONFIG_PATH)
+            sqlite_store.save_config(payload)
+        except E as exc:
+            if O:
+                O.showerror(AK, CONFIG_SAVE_FAILED_MSG.format(error=exc))
+            try:
+                _write_error_log_direct(f"Failed to save SQLite config: {exc}")
+            except Exception:
+                pass
+        return
     try:
         config_path = _get_config_path()
         CONFIG_PATH = config_path

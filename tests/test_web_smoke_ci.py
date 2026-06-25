@@ -89,9 +89,75 @@ class WebSmokeCiTests(unittest.TestCase):
             "/api/file",
             "/api/thumbnail",
             "/api/settings",
+            "/api/settings/import-legacy",
+            "/api/settings/sql-columns/detect",
             "/api/users",
         }
         self.assertEqual(expected_paths - route_paths, set())
+
+    def test_legacy_import_endpoint_switches_to_sqlite(self) -> None:
+        client = TestClient(web_app.app)
+        with (
+            patch.object(web_app.settings, "AC", "C:/Photos"),
+            patch.object(web_app.storage_settings, "resolve_sqlite_path", return_value="C:/Data/app.sqlite"),
+            patch.object(
+                web_app,
+                "import_legacy_to_sqlite",
+                return_value={"ok": True, "entries": 1},
+            ) as importer,
+            patch.object(web_app.storage_settings, "save_bootstrap_settings") as save_bootstrap,
+            patch.object(web_app.data_store, "reset_active_store_cache") as reset_store,
+            patch.object(web_app.config, "initialize_config"),
+            patch.object(web_app, "settings_snapshot", return_value={"data_mode": "sqlite"}),
+        ):
+            response = client.post("/api/settings/import-legacy")
+
+        self.assertEqual(response.status_code, 200)
+        importer.assert_called_once_with(
+            legacy_dir="C:/Photos",
+            database_path="C:/Data/app.sqlite",
+        )
+        save_bootstrap.assert_called_once_with({"data_mode": "sqlite"})
+        reset_store.assert_called_once()
+        self.assertEqual(response.json()["settings"]["data_mode"], "sqlite")
+
+    def test_sql_column_detection_endpoint_updates_settings(self) -> None:
+        client = TestClient(web_app.app)
+        cfg = {
+            web_app.SQL_AVAILABLE_COLUMNS_KEY: [],
+            web_app.H: {},
+            web_app.P: {},
+            web_app.K: {},
+        }
+
+        with (
+            patch.object(web_app.config, "CONFIG", cfg),
+            patch.object(
+                web_app,
+                "detect_available_columns",
+                return_value={
+                    "ok": True,
+                    "columns": ["img_01", "img_02"],
+                    "table": "object_query_1",
+                    "preview": "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS",
+                    "message": "Wykryto 2 pola SQL.",
+                },
+            ),
+            patch.object(web_app.config, "save_config") as save_config,
+            patch.object(
+                web_app,
+                "settings_snapshot",
+                return_value={"sql_available_columns": ["img_01", "img_02"]},
+            ),
+        ):
+            response = client.post("/api/settings/sql-columns/detect")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["columns"], ["img_01", "img_02"])
+        self.assertEqual(cfg[web_app.SQL_AVAILABLE_COLUMNS_KEY], ["img_01", "img_02"])
+        save_config.assert_called_once()
 
     def test_auth_enabled_protects_routes_and_accepts_login_session(self) -> None:
         previous = os.environ.get("PICORG_WEB_AUTH")
