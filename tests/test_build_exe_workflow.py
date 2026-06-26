@@ -56,6 +56,8 @@ def test_self_hosted_build_uses_existing_python_instead_of_setup_python() -> Non
     assert '"3.14" = "Python314"' in source
     assert '$dirName\\python.exe' in source
     assert "Resolve Python diagnostics" in source
+    assert 'if ($versionsToTry.Contains($version))' in source
+    assert '$LASTEXITCODE -eq 0 -and $versionsToTry.Contains($version)' not in source
     assert "Python.Python.3.14" in source
     assert "-m PyInstaller" in source
 
