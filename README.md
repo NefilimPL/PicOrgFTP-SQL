@@ -97,12 +97,12 @@ The Windows build workflow builds the EXE with PyInstaller, packages the web run
 
 To let the workflow inspect repository self-hosted runners, create a fine-grained personal access token with access only to this repository and **Administration: Read-only** permission, then save it as an Actions repository secret named `ACTIONS_RUNNER_READ_TOKEN`. If the secret is missing or the API call is rejected, the workflow safely uses `windows-latest`.
 
-On self-hosted runners, the workflow uses the locally installed Python 3.11 instead of `actions/setup-python`, because that action may need registry permissions when it tries to install Python into the runner tool cache. Install Python once on the runner as an administrator, then restart the runner service:
+On self-hosted runners, the workflow uses the locally installed Python instead of `actions/setup-python`, because that action may need registry permissions when it tries to install Python into the runner tool cache. The preferred version is Python 3.14; Python 3.13, 3.12 and 3.11 are accepted as fallbacks. Install Python once on the runner as an administrator, then restart the runner service:
 
 ```powershell
-winget install -e --id Python.Python.3.11 --scope machine
-py -3.11 -m pip install --upgrade pip
-py -3.11 -m pip install "pyinstaller>=6.6,<7" -r requirements-build.txt -r requirements-web.txt
+winget install -e --id Python.Python.3.14 --scope machine
+py -3.14 -m pip install --upgrade pip
+py -3.14 -m pip install -r requirements-build.txt -r requirements-web.txt
 ```
 
 The workflow installs Python package dependencies during each run; the manual `pip install` command above is useful to pre-warm the runner and verify that Python works. The GitHub Actions runner application should also be kept current because the workflow uses Node 24-compatible action versions.
@@ -120,7 +120,7 @@ The local scripts in `Generator exe/` and the GitHub Actions workflow also gener
 7. After the build job finishes, download **PicOrgFTP-SQL-windows**, **PicOrgFTP-SQL-web-exe** or **PicOrgFTP-SQL-web** from the workflow summary when artifact upload succeeded.
 8. To publish release assets, create and publish a GitHub release from a tag such as `v1.2.3`; the workflow will build and try to attach the EXE and web ZIP automatically.
 
-If you need to tweak build dependencies, edit `requirements-build.txt`. The workflow uses Python 3.11 by default.
+If you need to tweak build dependencies, edit `requirements-build.txt`. The workflow uses Python 3.14 by default on GitHub-hosted runners and accepts Python 3.14, 3.13, 3.12 or 3.11 on self-hosted runners.
 
 
 <img width="1080" height="780" alt="image" src="https://github.com/user-attachments/assets/953f09d3-e6f2-4c14-96a0-7193689fe16a" />
@@ -212,12 +212,12 @@ W repozytorium znajduje się workflow `.github/workflows/build-exe.yml`, który 
 
 Do sprawdzania runnerów najlepiej dodać sekret `ACTIONS_RUNNER_READ_TOKEN`. Utwórz fine-grained personal access token na GitHubie z dostępem tylko do tego repozytorium i uprawnieniem **Administration: Read-only**. Następnie wejdź w repozytorium na GitHubie: **Settings -> Secrets and variables -> Actions -> New repository secret**, ustaw nazwę `ACTIONS_RUNNER_READ_TOKEN` i wklej token jako wartość. Token nie jest potrzebny do samego builda EXE, ale bez niego sprawdzanie self-hosted runnerów może dostać `403` i wtedy workflow przejdzie na `windows-latest`.
 
-Na self-hosted runnerach workflow używa lokalnie zainstalowanego Pythona 3.11 zamiast `actions/setup-python`, bo `setup-python` może próbować instalacji do tool cache i wymagać uprawnień do rejestru Windows. Zainstaluj Pythona raz na runnerze jako administrator, a potem zrestartuj usługę runnera:
+Na self-hosted runnerach workflow używa lokalnie zainstalowanego Pythona zamiast `actions/setup-python`, bo `setup-python` może próbować instalacji do tool cache i wymagać uprawnień do rejestru Windows. Preferowany jest Python 3.14; Python 3.13, 3.12 i 3.11 są akceptowane jako fallback. Zainstaluj Pythona raz na runnerze jako administrator, a potem zrestartuj usługę runnera:
 
 ```powershell
-winget install -e --id Python.Python.3.11 --scope machine
-py -3.11 -m pip install --upgrade pip
-py -3.11 -m pip install "pyinstaller>=6.6,<7" -r requirements-build.txt -r requirements-web.txt
+winget install -e --id Python.Python.3.14 --scope machine
+py -3.14 -m pip install --upgrade pip
+py -3.14 -m pip install -r requirements-build.txt -r requirements-web.txt
 ```
 
 Workflow i tak instaluje zależności Pythona przy każdym uruchomieniu; powyższe `pip install` jest przydatne do sprawdzenia runnera i wstępnego pobrania pakietów. Aplikacja GitHub Actions runnera powinna być aktualna, bo workflow używa wersji akcji kompatybilnych z Node 24.
@@ -236,7 +236,7 @@ Lokalne skrypty z `Generator exe/` i workflow GitHub Actions generują też plik
 8. Jeżeli zobaczysz komunikat `Artifact upload was skipped or partially failed`, build EXE się wykonał, ale GitHub nie przyjął artefaktów. Najczęściej trzeba usunąć stare artefakty albo poczekać na zwolnienie limitu.
 9. Aby opublikować pliki przy wydaniu, utwórz i opublikuj release z tagiem, np. `v1.2.3`; workflow zbuduje pliki i spróbuje dodać EXE oraz ZIP do release.
 
-Jeśli chcesz zmienić zależności do budowania, edytuj `requirements-build.txt`. Workflow domyślnie używa Pythona 3.11.
+Jeśli chcesz zmienić zależności do budowania, edytuj `requirements-build.txt`. Workflow domyślnie używa Pythona 3.14 na runnerach GitHub-hosted i akceptuje Pythona 3.14, 3.13, 3.12 albo 3.11 na self-hosted runnerach.
 
 
 Web:

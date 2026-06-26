@@ -48,8 +48,10 @@ def test_self_hosted_build_uses_existing_python_instead_of_setup_python() -> Non
 
     assert "uses: actions/setup-python@v6" in source
     assert "if: needs.select-runner.outputs.using_self_hosted != 'true'" in source
+    assert 'python-version: "3.14"' in source
     assert "PICORGFTP_SQL_PYTHON" in source
-    assert "Python.Python.3.11" in source
+    assert '$versionsToTry = @("3.14", "3.13", "3.12", "3.11")' in source
+    assert "Python.Python.3.14" in source
     assert "-m PyInstaller" in source
 
 

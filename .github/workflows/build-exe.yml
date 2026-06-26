@@ -116,9 +116,9 @@ jobs:
         if: needs.select-runner.outputs.using_self_hosted != 'true'
         uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.14"
 
-      - name: Resolve Python 3.11
+      - name: Resolve Python 3.x
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -135,11 +135,15 @@ jobs:
             }
           }
 
+          $versionsToTry = @("3.14", "3.13", "3.12", "3.11")
+
           if ("${{ needs.select-runner.outputs.using_self_hosted }}" -eq "true") {
             if (Get-Command py -ErrorAction SilentlyContinue) {
-              $pyPath = (& py -3.11 -c "import sys; print(sys.executable)" 2>$null | Select-Object -First 1)
-              if ($LASTEXITCODE -eq 0) {
-                Add-Candidate $pyPath
+              foreach ($versionToTry in $versionsToTry) {
+                $pyPath = (& py "-$versionToTry" -c "import sys; print(sys.executable)" 2>$null | Select-Object -First 1)
+                if ($LASTEXITCODE -eq 0) {
+                  Add-Candidate $pyPath
+                }
               }
             }
           }
@@ -153,14 +157,14 @@ jobs:
 
           foreach ($candidate in $candidatePaths) {
             $version = (& $candidate -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null | Select-Object -First 1)
-            if ($LASTEXITCODE -eq 0 -and $version -eq "3.11") {
+            if ($LASTEXITCODE -eq 0 -and $versionsToTry.Contains($version)) {
               "PICORGFTP_SQL_PYTHON=$candidate" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
               & $candidate --version
               exit 0
             }
           }
 
-          throw "Python 3.11 was not found. On a self-hosted Windows runner install it with: winget install -e --id Python.Python.3.11 --scope machine"
+          throw "Python 3.14, 3.13, 3.12 or 3.11 was not found. On a self-hosted Windows runner install Python 3.14 with: winget install -e --id Python.Python.3.14 --scope machine"
 
       - name: Set release/build version
         shell: pwsh
