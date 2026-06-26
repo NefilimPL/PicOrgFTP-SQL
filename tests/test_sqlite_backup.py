@@ -104,3 +104,37 @@ def test_mark_schedule_slots_run_keeps_recent_slots() -> None:
     )
 
     assert updated["last_run_slots"] == ["2026-06-21T08", "2026-06-22T08"]
+
+
+def test_restore_backup_creates_pre_restore_backup_and_replaces_database(tmp_path: Path) -> None:
+    active = tmp_path / "active.sqlite"
+    backup = tmp_path / "BACKUP" / "picorgftp_sql-20260625-130234-manual.sqlite"
+    backup.parent.mkdir()
+    _create_db(active)
+    _create_db(backup)
+    with sqlite3.connect(backup) as conn:
+        conn.execute("UPDATE app_config_values SET value_json = '\"restored\"' WHERE path = 'database.query'")
+
+    result = sqlite_backup.restore_backup(str(active), str(backup), str(backup.parent))
+
+    assert result["ok"] is True
+    assert Path(result["pre_restore_backup"]["backup_path"]).exists()
+    with sqlite3.connect(active) as conn:
+        value = conn.execute("SELECT value_json FROM app_config_values WHERE path = 'database.query'").fetchone()[0]
+    assert value == '"restored"'
+
+
+def test_diff_databases_masks_secret_values(tmp_path: Path) -> None:
+    left = tmp_path / "left.sqlite"
+    right = tmp_path / "right.sqlite"
+    _create_db(left)
+    _create_db(right)
+    with sqlite3.connect(right) as conn:
+        conn.execute("INSERT INTO app_config_values VALUES ('ftp.password', '\"secret\"', '2026-06-25T13:02:34.300Z')")
+
+    diff = sqlite_backup.diff_databases(str(left), str(right))
+
+    assert diff["tables"]["app_config_values"]["added"] >= 1
+    assert "secret" not in json.dumps(diff)
+    assert "ftp.password" in json.dumps(diff)
+    assert "present" in json.dumps(diff)

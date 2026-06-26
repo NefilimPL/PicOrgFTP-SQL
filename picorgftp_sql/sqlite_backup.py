@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import gc
+import os
 import sqlite3
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+SECRET_KEYWORDS = ("password", "pass", "secret", "token", "hash", "api_key")
 
 
 def _utc_datetime(value: datetime | None = None) -> datetime:
@@ -40,23 +44,31 @@ def _backup_name(now: datetime, reason: str) -> str:
 
 
 def _schema_version(path: str) -> int:
+    conn = None
     try:
-        with sqlite3.connect(path) as conn:
-            row = conn.execute(
-                "SELECT COALESCE(MAX(version), 0) FROM schema_version"
-            ).fetchone()
+        conn = sqlite3.connect(path)
+        row = conn.execute(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version"
+        ).fetchone()
         return int(row[0] or 0) if row else 0
     except Exception:
         return 0
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _integrity_check(path: str) -> str:
+    conn = None
     try:
-        with sqlite3.connect(path) as conn:
-            row = conn.execute("PRAGMA integrity_check").fetchone()
+        conn = sqlite3.connect(path)
+        row = conn.execute("PRAGMA integrity_check").fetchone()
         return str(row[0] if row else "")
     except Exception as exc:
         return str(exc)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def create_backup(
@@ -74,12 +86,20 @@ def create_backup(
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / _backup_name(timestamp, reason)
     method = "sqlite_backup"
+    src = None
+    dst = None
     try:
-        with sqlite3.connect(str(source)) as src, sqlite3.connect(str(target)) as dst:
-            src.backup(dst)
+        src = sqlite3.connect(str(source))
+        dst = sqlite3.connect(str(target))
+        src.backup(dst)
     except sqlite3.Error:
         method = "raw_copy"
         target.write_bytes(source.read_bytes())
+    finally:
+        if dst is not None:
+            dst.close()
+        if src is not None:
+            src.close()
     metadata = {
         "source_path": str(source),
         "backup_path": str(target),
@@ -172,3 +192,106 @@ def mark_schedule_slots_run(
     merged = existing + [slot for slot in slots if slot not in existing]
     updated["last_run_slots"] = merged[-500:]
     return updated
+
+
+def restore_backup(active_path: str, backup_path: str, backup_dir: str) -> dict[str, Any]:
+    pre_restore = create_backup(active_path, backup_dir, reason="pre-restore")
+    active = Path(active_path)
+    source = Path(backup_path)
+    fd, temp_path = tempfile.mkstemp(
+        prefix="restore_",
+        suffix=".sqlite.tmp",
+        dir=str(active.parent),
+    )
+    os.close(fd)
+    temp = Path(temp_path)
+    try:
+        temp.write_bytes(source.read_bytes())
+        gc.collect()
+        os.replace(str(temp), str(active))
+    finally:
+        if temp.exists():
+            temp.unlink()
+    return {
+        "ok": True,
+        "pre_restore_backup": pre_restore,
+        "restored_from": str(source),
+        "active_path": str(active),
+    }
+
+
+def _mask_value(key: str, value: object) -> object:
+    lowered = str(key or "").lower()
+    if any(keyword in lowered for keyword in SECRET_KEYWORDS):
+        return "present" if str(value or "") else "empty"
+    return value
+
+
+def _table_count(conn: sqlite3.Connection, table: str) -> int:
+    try:
+        return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] or 0)
+    except sqlite3.Error:
+        return 0
+
+
+def _config_rows(conn: sqlite3.Connection) -> dict[str, object]:
+    try:
+        rows = conn.execute(
+            "SELECT path, value_json FROM app_config_values ORDER BY path"
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {str(path): _mask_value(str(path), value) for path, value in rows}
+
+
+def diff_databases(active_path: str, backup_path: str) -> dict[str, Any]:
+    tables = [
+        "app_config_values",
+        "list_values",
+        "slot_definitions",
+        "sql_column_map",
+        "sql_available_columns",
+        "web_users",
+        "product_entries",
+        "file_index_segments",
+        "web_history",
+    ]
+    with sqlite3.connect(active_path) as active, sqlite3.connect(backup_path) as backup:
+        active_counts = {table: _table_count(active, table) for table in tables}
+        backup_counts = {table: _table_count(backup, table) for table in tables}
+        active_config = _config_rows(active)
+        backup_config = _config_rows(backup)
+    config_added = sorted(set(backup_config) - set(active_config))
+    config_removed = sorted(set(active_config) - set(backup_config))
+    config_changed = sorted(
+        key
+        for key in set(active_config) & set(backup_config)
+        if active_config[key] != backup_config[key]
+    )
+    return {
+        "tables": {
+            table: {
+                "active": active_counts[table],
+                "backup": backup_counts[table],
+                "added": max(0, backup_counts[table] - active_counts[table]),
+                "removed": max(0, active_counts[table] - backup_counts[table]),
+            }
+            for table in tables
+        },
+        "config": {
+            "added": [
+                {"key": key, "value": backup_config[key]} for key in config_added
+            ],
+            "removed": [
+                {"key": key, "value": active_config[key]} for key in config_removed
+            ],
+            "changed": [
+                {
+                    "key": key,
+                    "active": active_config[key],
+                    "backup": backup_config[key],
+                }
+                for key in config_changed
+            ],
+        },
+    }
