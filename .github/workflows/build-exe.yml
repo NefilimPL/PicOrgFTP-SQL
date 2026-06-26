@@ -124,6 +124,12 @@ jobs:
           $ErrorActionPreference = "Stop"
           $candidatePaths = [System.Collections.Generic.List[string]]::new()
 
+          Write-Host "Resolve Python diagnostics"
+          Write-Host "User: $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
+          Write-Host "PATH: $env:PATH"
+          Write-Host "LocalAppData: $env:LOCALAPPDATA"
+          Write-Host "ProgramFiles: $env:ProgramFiles"
+
           function Add-Candidate {
             param([string]$Path)
             if ([string]::IsNullOrWhiteSpace($Path)) {
@@ -135,33 +141,84 @@ jobs:
             }
           }
 
+          function Add-CandidateFromRoot {
+            param(
+              [string]$Root,
+              [string]$RelativePath
+            )
+            if ([string]::IsNullOrWhiteSpace($Root)) {
+              return
+            }
+            Add-Candidate (Join-Path $Root $RelativePath)
+          }
+
           $versionsToTry = @("3.14", "3.13", "3.12", "3.11")
+          $versionDirNames = @{
+            "3.14" = "Python314"
+            "3.13" = "Python313"
+            "3.12" = "Python312"
+            "3.11" = "Python311"
+          }
 
           if ("${{ needs.select-runner.outputs.using_self_hosted }}" -eq "true") {
             if (Get-Command py -ErrorAction SilentlyContinue) {
+              Write-Host "Found Python launcher: $((Get-Command py).Source)"
+              & py -0p
               foreach ($versionToTry in $versionsToTry) {
                 $pyPath = (& py "-$versionToTry" -c "import sys; print(sys.executable)" 2>$null | Select-Object -First 1)
                 if ($LASTEXITCODE -eq 0) {
                   Add-Candidate $pyPath
                 }
               }
+            } else {
+              Write-Host "Python launcher 'py' was not found in this runner process."
             }
           }
 
           if (Get-Command python -ErrorAction SilentlyContinue) {
+            Write-Host "Found python command: $((Get-Command python).Source)"
             $pythonPath = (& python -c "import sys; print(sys.executable)" 2>$null | Select-Object -First 1)
             if ($LASTEXITCODE -eq 0) {
               Add-Candidate $pythonPath
             }
+          } else {
+            Write-Host "Command 'python' was not found in this runner process."
+          }
+
+          foreach ($versionToTry in $versionsToTry) {
+            foreach ($root in @("HKLM:\SOFTWARE\Python\PythonCore", "HKCU:\SOFTWARE\Python\PythonCore")) {
+              $installPathKey = Join-Path $root "$versionToTry\InstallPath"
+              if (Test-Path $installPathKey) {
+                $installPath = Get-ItemProperty -Path $installPathKey -ErrorAction SilentlyContinue
+                Add-Candidate $installPath.ExecutablePath
+                Add-CandidateFromRoot $installPath.'(default)' "python.exe"
+              }
+            }
+
+            $dirName = $versionDirNames[$versionToTry]
+            Add-CandidateFromRoot $env:ProgramFiles "$dirName\python.exe"
+            Add-CandidateFromRoot ${env:ProgramFiles(x86)} "$dirName-32\python.exe"
+            Add-CandidateFromRoot $env:LOCALAPPDATA "Programs\Python\$dirName\python.exe"
+            Add-CandidateFromRoot $env:USERPROFILE "AppData\Local\Programs\Python\$dirName\python.exe"
+          }
+
+          Write-Host "Python candidates:"
+          foreach ($candidate in $candidatePaths) {
+            Write-Host "  $candidate"
           }
 
           foreach ($candidate in $candidatePaths) {
+            if (-not (Test-Path $candidate)) {
+              Write-Host "Skipping missing candidate: $candidate"
+              continue
+            }
             $version = (& $candidate -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null | Select-Object -First 1)
             if ($LASTEXITCODE -eq 0 -and $versionsToTry.Contains($version)) {
               "PICORGFTP_SQL_PYTHON=$candidate" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
               & $candidate --version
               exit 0
             }
+            Write-Host "Rejected candidate: $candidate version=$version exit=$LASTEXITCODE"
           }
 
           throw "Python 3.14, 3.13, 3.12 or 3.11 was not found. On a self-hosted Windows runner install Python 3.14 with: winget install -e --id Python.Python.3.14 --scope machine"
