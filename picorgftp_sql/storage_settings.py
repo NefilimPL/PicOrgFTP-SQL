@@ -19,6 +19,15 @@ DATABASE_LOCATION_CUSTOM = "custom"
 DATABASE_LOCATION_EXE_DIR = "exe_dir"
 DATABASE_PATH_KEY = "database_path"
 DEFAULT_SQLITE_FILENAME = "picorgftp_sql.sqlite"
+BACKUP_SETTINGS_KEY = "sqlite_backup"
+BACKUP_DEFAULTS = {
+    "enabled": False,
+    "days": [],
+    "hours": [],
+    "max_copies": 10,
+    "last_run_slots": [],
+}
+BACKUP_WEEKDAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
 
 
 def _text(value: object) -> str:
@@ -85,6 +94,49 @@ def save_bootstrap_settings(updates: dict[str, object]) -> dict[str, Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=4, ensure_ascii=False), encoding="utf-8")
     return data
+
+
+def _normalize_backup_settings(raw: object) -> dict[str, Any]:
+    payload = raw if isinstance(raw, dict) else {}
+    days = []
+    for day in payload.get("days", []):
+        text = str(day).lower()
+        if text in BACKUP_WEEKDAYS:
+            days.append(text)
+    hours = set()
+    for hour in payload.get("hours", []):
+        try:
+            hours.add(max(0, min(23, int(hour))))
+        except (TypeError, ValueError):
+            continue
+    try:
+        max_copies = max(1, min(999, int(payload.get("max_copies", 10))))
+    except (TypeError, ValueError):
+        max_copies = 10
+    return {
+        "enabled": bool(payload.get("enabled", False)),
+        "days": days,
+        "hours": sorted(hours),
+        "max_copies": max_copies,
+        "last_run_slots": [
+            str(item) for item in payload.get("last_run_slots", []) if str(item).strip()
+        ],
+    }
+
+
+def load_backup_settings() -> dict[str, Any]:
+    data = load_bootstrap_settings()
+    return _normalize_backup_settings(data.get(BACKUP_SETTINGS_KEY, BACKUP_DEFAULTS))
+
+
+def save_backup_settings(updates: dict[str, object]) -> dict[str, Any]:
+    settings_payload = _normalize_backup_settings(updates)
+    save_bootstrap_settings({BACKUP_SETTINGS_KEY: settings_payload})
+    return settings_payload
+
+
+def resolve_backup_dir() -> str:
+    return str(_settings_path().resolve().parent / "BACKUP")
 
 
 def _resolve_path(value: object) -> str:
