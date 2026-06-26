@@ -5554,9 +5554,27 @@ function renderSettingsFtp() {
   settingsOutput.appendChild(form);
 }
 
+function sqlPlaceholderHelp(items = []) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "settings-note sql-placeholder-help";
+  wrapper.append("Dostepne placeholdery SQL: ");
+  for (const [token, label] of items) {
+    const code = document.createElement("code");
+    code.textContent = token;
+    wrapper.append(code, ` ${label}; `);
+  }
+  return wrapper;
+}
+
 function renderSettingsSql() {
   const db = state.settings.database;
   const form = document.createElement("form");
+  const placeholderItems = [
+    ["{ean}", "EAN aktualnego produktu"],
+    ["{filename}", "Nazwa wygenerowanego pliku"],
+    ["{col}", "Kolumna SQL przypisana do slotu"],
+    ["{column}", "Alias dla {col}"],
+  ];
   form.className = "settings-form";
   form.append(
     settingsFieldGroup("Tryb SQL",
@@ -5568,6 +5586,7 @@ function renderSettingsSql() {
         "Backend bedzie aktualizowal pola SQL przypisane w zakladce Sloty."
       ),
       inputField("query", "Zapytanie SQL", db.query, { textarea: true }),
+      sqlPlaceholderHelp(placeholderItems),
       actionRow(diagnosticButton("sql", "Test SQL"))
     ),
     settingsFieldGroup("MS SQL",

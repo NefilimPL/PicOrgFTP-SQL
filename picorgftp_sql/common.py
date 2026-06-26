@@ -28,10 +28,7 @@ BASE_DIR_SETTINGS_TEMPLATE[APP_SECRET_KEY] = APP_SECRET
 PORT = 21
 
 # Zapytanie SQL aktualizujące ścieżkę do obrazu.
-SQL_UPDATE_TEMPLATE = (
-    "UPDATE object_query_1 SET {col} = 'https://xml.wipmebgroup.pl/img/{filename}' "
-    "WHERE EAN = '{ean}' OR Towar_powiazany_z_SKU = '{ean}'"
-)
+SQL_UPDATE_TEMPLATE = ""
 
 # Domyślne dane konfiguracyjne wykorzystywane przy pierwszym uruchomieniu.
 DEFAULT_CONFIG = {

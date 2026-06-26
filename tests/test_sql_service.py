@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from picorgftp_sql.services import sql_service
 from picorgftp_sql.services.sql_service import (
     build_column_detection_query,
     detect_available_columns,
@@ -99,6 +100,22 @@ class SqlServiceTests(unittest.TestCase):
         self.assertEqual(result["columns"], ["img_01", "img_02"])
         self.assertEqual(result["table"], "object_query_1")
         self.assertIn("INFORMATION_SCHEMA.COLUMNS", result["preview"])
+
+    def test_empty_sql_query_is_not_configured_for_column_detection(self) -> None:
+        result = detect_available_columns({"sql_query": "", "db_type": "mysql"})
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["columns"], [])
+        self.assertEqual(result["table"], "")
+        self.assertIn("nie skonfigurowano", result["message"].lower())
+
+    def test_placeholder_metadata_lists_supported_tokens(self) -> None:
+        self.assertTrue(hasattr(sql_service, "sql_placeholder_metadata"))
+
+        placeholders = sql_service.sql_placeholder_metadata()
+        tokens = {item["token"] for item in placeholders}
+
+        self.assertEqual(tokens, {"{ean}", "{filename}", "{col}", "{column}"})
 
     def test_extract_presence_context_normalizes_quoted_table_reference(self) -> None:
         context = extract_presence_context(

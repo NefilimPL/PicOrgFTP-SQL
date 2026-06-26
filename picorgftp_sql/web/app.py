@@ -45,7 +45,6 @@ from ..common import (
     SECURITY_SETTINGS_KEY,
     SQL_AVAILABLE_COLUMNS_KEY,
     SQL_COLUMN_MAP_KEY,
-    SQL_UPDATE_TEMPLATE,
     TRANSLATION_API_KEY,
     TRANSLATION_SETTINGS_KEY,
     ft,
@@ -1563,7 +1562,11 @@ def _sync_result_to_sql(
                 payload["skipped"] = True
                 payload["reason"] = "nie znaleziono wiersza produktu dla tego EAN"
                 return payload
-        template = config.CONFIG.get(w, SQL_UPDATE_TEMPLATE) or SQL_UPDATE_TEMPLATE
+        template = str(config.CONFIG.get(w, "") or "").strip()
+        if not template:
+            payload["skipped"] = True
+            payload["reason"] = "nie skonfigurowano zapytania SQL"
+            return payload
         for prefix, filename in saved_by_prefix.items():
             column = _safe_sql_identifier(sql_map.get(prefix, ""))
             if not column:
@@ -1572,7 +1575,7 @@ def _sync_result_to_sql(
             if not parsed:
                 continue
             short_name = f"{ean}_{prefix}{parsed.extension}"
-            query = template.format(col=column, filename=short_name, ean=ean)
+            query = template.format(col=column, column=column, filename=short_name, ean=ean)
             cur.execute(query)
             rowcount = _cursor_rowcount(cur)
             if rowcount != 0:

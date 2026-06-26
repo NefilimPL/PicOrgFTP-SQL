@@ -309,6 +309,19 @@ class SourceIntegrityTests(unittest.TestCase):
                 for field in expected_fields:
                     self.assertIn(field, block)
 
+    def test_web_sql_settings_show_placeholder_help(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+        sql_start = source.index("function renderSettingsSql")
+        slots_start = source.index("function renderSettingsSlots", sql_start)
+        sql_body = source[sql_start:slots_start]
+
+        self.assertIn("sqlPlaceholderHelp", source)
+        self.assertIn("{ean}", sql_body)
+        self.assertIn("{filename}", sql_body)
+        self.assertIn("{col}", sql_body)
+        self.assertIn("{column}", sql_body)
+
     def test_web_settings_field_groups_are_full_width_cards(self) -> None:
         css_path = (
             Path(__file__).resolve().parents[1]

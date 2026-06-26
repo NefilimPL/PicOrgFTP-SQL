@@ -7834,7 +7834,8 @@ class App(BU.Tk):
                 Aq_ = 0
                 CANCEL_LABEL = 0
                 INCOMPLETE_DATA_MSG = 0
-                if D.get(u, J) and K_ and len(K_) == 13 and K_.isdigit():
+                AX_ = G(D.get(w, B) or B).strip()
+                if D.get(u, J) and AX_ and K_ and len(K_) == 13 and K_.isdigit():
                     Br = Ag.perf_counter()
                     try:
                         conn = connect_db()
@@ -7849,9 +7850,11 @@ class App(BU.Tk):
                                 ext = A.path.splitext(Bs)[1].lower()
                                 short_name = f"{K_}_{Az_}{ext}"
                                 try:
-                                    AX_ = D.get(w, SQL_UPDATE_TEMPLATE)
                                     AC_ = AX_.format(
-                                        col=B3_, filename=short_name, ean=K_
+                                        col=B3_,
+                                        column=B3_,
+                                        filename=short_name,
+                                        ean=K_,
                                     )
                                 except E as R:
                                     raise E(
@@ -7862,7 +7865,6 @@ class App(BU.Tk):
                                 if Aj(cur, A3, -1) >= 0:
                                     CANCEL_LABEL += cur.rowcount
                             elif Az_ in sql_clear_prefixes:
-                                AX_ = D.get(w, SQL_UPDATE_TEMPLATE)
                                 AY_ = I
                                 AZ_ = I
                                 try:
@@ -7879,10 +7881,8 @@ class App(BU.Tk):
                                 except E:
                                     AY_ = I
                                     AZ_ = I
-                                if not AY_:
-                                    AY_ = "object_query_1"
-                                if not AZ_:
-                                    AZ_ = " WHERE EAN = '{ean}' OR Towar_powiazany_z_SKU = '{ean}'"
+                                if not AY_ or not AZ_:
+                                    continue
                                 Bv = AZ_.replace("{ean}", K_)
                                 AC_ = f"UPDATE {AY_} SET {B3_} = ''" + Bv
                                 cur.execute(AC_)
@@ -9149,7 +9149,7 @@ class App(BU.Tk):
             row=3, column=0, sticky="ne", padx=5, pady=2
         )
         h_ = F.Text(S, width=80, height=3)
-        h_.insert(A_, D.get(w, SQL_UPDATE_TEMPLATE))
+        h_.insert(A_, D.get(w, B))
         h_.grid(row=3, column=1, padx=5, pady=2, sticky=T)
         _slabel(S, text=SQL_COLUMNS_QUERY_LABEL).grid(
             row=4, column=0, sticky="ne", padx=5, pady=2
