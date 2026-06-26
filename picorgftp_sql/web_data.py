@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import base64
 import ctypes
 import hashlib
@@ -309,6 +309,26 @@ def _get_file_index(*, start: bool = False) -> LocalFileIndex | None:
     return _FILE_INDEX
 
 
+def _parse_generated_at(value: object) -> tuple[str, float | None]:
+    text = _text(value)
+    if text.endswith("Z") and "T" in text:
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return text, dt.timestamp()
+        except ValueError:
+            return text, None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return text, None
+    iso = (
+        datetime.fromtimestamp(number, timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+    return iso, number
+
+
 def file_index_status(*, start: bool = False) -> dict[str, object]:
     """Return web-friendly local file index status."""
 
@@ -318,13 +338,17 @@ def file_index_status(*, start: bool = False) -> dict[str, object]:
     if index is None:
         return {"enabled": False, "state": "disabled", "label": "Indeks lokalny wylaczony."}
     status = index.get_status()
-    generated_at = status.get("generated_at")
-    age_seconds = int(time.time() - float(generated_at)) if generated_at else None
+    generated_at, generated_ts = _parse_generated_at(status.get("generated_at"))
+    age_seconds = int(time.time() - generated_ts) if generated_ts is not None else None
     state = str(status.get("state") or "idle")
     if state == "refreshing":
         label = "Indeksowanie lokalnych plikow..."
     elif generated_at:
-        label = f"Indeks lokalny: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(float(generated_at)))}"
+        if generated_ts is not None:
+            readable = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(generated_ts))
+        else:
+            readable = generated_at
+        label = f"Indeks lokalny: {readable}"
     elif status.get("cache_loaded"):
         label = "Indeks lokalny: cache wczytany."
     else:

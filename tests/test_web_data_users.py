@@ -801,6 +801,29 @@ class WebDataUserTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_file_index_status_accepts_iso_generated_at(self) -> None:
+        class Index:
+            def get_status(self):
+                return {
+                    "state": "ready",
+                    "cache_loaded": True,
+                    "has_snapshot": True,
+                    "dirs_scanned": 1,
+                    "products_scanned": 1,
+                    "name_count": 1,
+                    "generated_at": "2026-06-25T13:02:34.300Z",
+                    "error": "",
+                }
+
+        with (
+            patch.object(web_data, "_file_index_enabled", return_value=True),
+            patch.object(web_data, "_get_file_index", return_value=Index()),
+        ):
+            status = web_data.file_index_status()
+
+        self.assertEqual(status["generated_at"], "2026-06-25T13:02:34.300Z")
+        self.assertIn("2026-06-25", status["label"])
+
     def test_settings_snapshot_exposes_storage_locations(self) -> None:
         temp_dir = _workspace_temp("web_data_storage_snapshot")
         try:

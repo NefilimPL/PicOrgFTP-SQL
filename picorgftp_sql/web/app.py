@@ -147,6 +147,8 @@ _RATE_LIMITS: Dict[str, List[float]] = {}
 _RATE_LIMITS_LOCK = threading.Lock()
 _UPLOAD_SCAN_RESULTS: Dict[str, Dict[str, Any]] = {}
 _UPLOAD_SCAN_RESULTS_LOCK = threading.Lock()
+_BACKUP_SCHEDULER_STOP = threading.Event()
+_BACKUP_SCHEDULER_THREAD: threading.Thread | None = None
 RATE_LIMIT_LOGIN_ATTEMPTS = 20
 RATE_LIMIT_LOGIN_WINDOW_SECONDS = 10 * 60
 RATE_LIMIT_UPLOAD_ATTEMPTS = 80
@@ -3262,6 +3264,53 @@ def _enrich_photo_payload(photos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return enriched
 
 
+def _run_due_sqlite_backups_once() -> Dict[str, Any]:
+    settings_payload = storage_settings.load_backup_settings()
+    slots = sqlite_backup.due_schedule_slots(settings_payload)
+    if not slots:
+        return {"created": 0, "slots": []}
+    backup_dir = storage_settings.resolve_backup_dir()
+    result = sqlite_backup.create_backup(
+        storage_settings.resolve_sqlite_path(),
+        backup_dir,
+        reason="scheduled",
+    )
+    sqlite_backup.enforce_retention(backup_dir, settings_payload.get("max_copies", 10))
+    updated = sqlite_backup.mark_schedule_slots_run(settings_payload, slots)
+    storage_settings.save_backup_settings(updated)
+    return {"created": 1, "slots": slots, "backup": result}
+
+
+def _backup_scheduler_loop() -> None:
+    while not _BACKUP_SCHEDULER_STOP.wait(60):
+        try:
+            _run_due_sqlite_backups_once()
+        except Exception as exc:
+            log_error(f"WEB scheduled SQLite backup failed: {exc}\n{traceback.format_exc()}")
+
+
+def _start_backup_scheduler() -> None:
+    global _BACKUP_SCHEDULER_THREAD
+    if _BACKUP_SCHEDULER_THREAD is not None and _BACKUP_SCHEDULER_THREAD.is_alive():
+        return
+    _BACKUP_SCHEDULER_STOP.clear()
+    _BACKUP_SCHEDULER_THREAD = threading.Thread(
+        target=_backup_scheduler_loop,
+        name="picorg-sqlite-backup-scheduler",
+        daemon=True,
+    )
+    _BACKUP_SCHEDULER_THREAD.start()
+
+
+def _stop_backup_scheduler() -> None:
+    global _BACKUP_SCHEDULER_THREAD
+    _BACKUP_SCHEDULER_STOP.set()
+    thread = _BACKUP_SCHEDULER_THREAD
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=2)
+    _BACKUP_SCHEDULER_THREAD = None
+
+
 def create_app() -> FastAPI:
     """Create the LAN web backend."""
 
@@ -3339,9 +3388,11 @@ def create_app() -> FastAPI:
         app.state.runtime_info = runtime_info
         cleanup_web_ftp_cache(force=True)
         cleanup_web_upload_cache(force=True)
+        _start_backup_scheduler()
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
+        _stop_backup_scheduler()
         with _ACTIVE_CLIENTS_LOCK:
             _flush_active_clients_locked(time.time(), force=True)
 
