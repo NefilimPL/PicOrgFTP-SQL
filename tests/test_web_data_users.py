@@ -823,6 +823,35 @@ class WebDataUserTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_settings_snapshot_exposes_backup_settings(self) -> None:
+        temp_dir = _workspace_temp("web_data_backup_settings")
+        try:
+            with (
+                patch.object(web_data.settings, "AC", str(temp_dir)),
+                patch.object(
+                    web_data.storage_settings,
+                    "load_backup_settings",
+                    return_value={
+                        "enabled": True,
+                        "days": ["mon"],
+                        "hours": [8],
+                        "max_copies": 3,
+                        "last_run_slots": [],
+                    },
+                ),
+                patch.object(
+                    web_data.storage_settings,
+                    "resolve_backup_dir",
+                    return_value=str(temp_dir / "BACKUP"),
+                ),
+            ):
+                snapshot = web_data.settings_snapshot()
+
+            self.assertEqual(snapshot["sqlite_backup"]["days"], ["mon"])
+            self.assertEqual(snapshot["sqlite_backup_dir"], str(temp_dir / "BACKUP"))
+        finally:
+            shutil.rmtree(temp_dir)
+
 
 if __name__ == "__main__":
     unittest.main()

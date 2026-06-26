@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import base64
 import ctypes
 import hashlib
@@ -423,6 +424,20 @@ def _history_record_search_text(item: dict[str, object]) -> str:
     return " ".join(_text(piece) for piece in pieces if _text(piece)).casefold()
 
 
+def _history_timestamp_value(item: dict[str, object]) -> float:
+    value = item.get("created_at") or item.get("ts")
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        text = _text(value)
+    if text.endswith("Z") and "T" in text:
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
 def history_snapshot(
     *,
     user: str = "",
@@ -435,7 +450,7 @@ def history_snapshot(
 
     user_filter = _text(user).lower()
     query_filter = _text(query).casefold()
-    records = sorted(_load_history_records(), key=lambda item: float(item.get("ts") or 0), reverse=True)
+    records = sorted(_load_history_records(), key=_history_timestamp_value, reverse=True)
     if user_filter:
         records = [item for item in records if _text(item.get("user")).lower() == user_filter]
     if query_filter:
@@ -447,7 +462,10 @@ def history_snapshot(
         ean = _text(item.get("ean")) or "BRAK-EAN"
         group = grouped.setdefault(ean, {"ean": ean, "latest_ts": 0.0, "items": []})
         group["items"].append(item)
-        group["latest_ts"] = max(float(group.get("latest_ts") or 0), float(item.get("ts") or 0))
+        group["latest_ts"] = max(
+            float(group.get("latest_ts") or 0),
+            _history_timestamp_value(item),
+        )
     groups = sorted(grouped.values(), key=lambda item: float(item.get("latest_ts") or 0), reverse=True)
     page_size = max(1, min(50, int(page_size or 50)))
     page = max(1, int(page or 1))
@@ -1430,6 +1448,7 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
     db_payload = payload.get("database") if isinstance(payload.get("database"), dict) else {}
     processing_payload = payload.get("processing") if isinstance(payload.get("processing"), dict) else {}
     security_payload = payload.get("security") if isinstance(payload.get("security"), dict) else {}
+    backup_payload = payload.get("sqlite_backup") if isinstance(payload.get("sqlite_backup"), dict) else None
     slots_payload = payload.get("slots") if isinstance(payload.get("slots"), list) else None
     runtime_reloaded = False
 
@@ -1449,6 +1468,8 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
         storage_settings.save_bootstrap_settings(storage_updates)
         data_store.reset_active_store_cache()
         runtime_reloaded = True
+    if backup_payload is not None:
+        storage_settings.save_backup_settings(backup_payload)
     if APP_SECRET_KEY in security_payload:
         runtime_reloaded = _apply_app_secret_from_web(security_payload.get(APP_SECRET_KEY)) or runtime_reloaded
     elif APP_SECRET_KEY in app_payload:
@@ -1562,6 +1583,8 @@ def settings_snapshot() -> dict[str, object]:
         "data_mode": storage.get("data_mode", "legacy"),
         "database_location_mode": storage.get("database_location_mode", "image_dir"),
         "database_path": storage.get("database_path", ""),
+        "sqlite_backup": storage_settings.load_backup_settings(),
+        "sqlite_backup_dir": storage_settings.resolve_backup_dir(),
         "processed_dir": settings.l,
         "config_path": config.CONFIG_PATH,
         "local_settings_path": str(_local_settings_path()),

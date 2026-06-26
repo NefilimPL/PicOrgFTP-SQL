@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
-from .. import common, config, data_store, settings, storage_settings
+from .. import common, config, data_store, settings, sqlite_backup, storage_settings
 from ..bootstrap import initialize_application_runtime
 from ..common import (
     AUTO_CONTENT_FIT_KEY,
@@ -58,6 +58,7 @@ from ..legacy_import import import_legacy_to_sqlite
 from ..logging_utils import log_error
 from ..services.ftp_service import sync_remote_files
 from ..services.sql_service import detect_available_columns, extract_presence_context
+from ..sqlite_maintenance import repair_sqlite_database
 from ..workflow_utils import build_product_directory, parse_slot_filename, sanitize_path_segment
 from ..web_image_import import (
     ImageImportError,
@@ -4012,6 +4013,69 @@ def create_app() -> FastAPI:
         app.state.runtime_info = _runtime_info()
         result["settings"] = settings_snapshot()
         result["message"] = "Zaimportowano stare dane do SQLite i wlaczono tryb SQLite."
+        return JSONResponse(result)
+
+    @app.post("/api/settings/sqlite/repair")
+    async def settings_sqlite_repair(request: Request) -> JSONResponse:
+        _require_admin(request)
+        database_path = storage_settings.resolve_sqlite_path()
+        backup_dir = storage_settings.resolve_backup_dir()
+        result = await run_in_threadpool(
+            repair_sqlite_database,
+            database_path,
+            backup_dir,
+        )
+        data_store.reset_active_store_cache()
+        config.initialize_config(interactive=False)
+        result["settings"] = settings_snapshot()
+        return JSONResponse(result)
+
+    @app.post("/api/settings/sqlite/backup")
+    async def settings_sqlite_backup(request: Request) -> JSONResponse:
+        _require_admin(request)
+        result = await run_in_threadpool(
+            sqlite_backup.create_backup,
+            storage_settings.resolve_sqlite_path(),
+            storage_settings.resolve_backup_dir(),
+            reason="manual",
+        )
+        sqlite_backup.enforce_retention(
+            storage_settings.resolve_backup_dir(),
+            storage_settings.load_backup_settings().get("max_copies", 10),
+        )
+        return JSONResponse(result)
+
+    @app.get("/api/settings/sqlite/backups")
+    def settings_sqlite_backups(request: Request) -> Dict[str, Any]:
+        _require_admin(request)
+        return {"items": sqlite_backup.list_backups(storage_settings.resolve_backup_dir())}
+
+    @app.post("/api/settings/sqlite/backup-diff")
+    async def settings_sqlite_backup_diff(request: Request) -> JSONResponse:
+        _require_admin(request)
+        payload = await request.json()
+        backup_path = str(payload.get("backup_path") if isinstance(payload, dict) else "")
+        result = await run_in_threadpool(
+            sqlite_backup.diff_databases,
+            storage_settings.resolve_sqlite_path(),
+            backup_path,
+        )
+        return JSONResponse(result)
+
+    @app.post("/api/settings/sqlite/restore")
+    async def settings_sqlite_restore(request: Request) -> JSONResponse:
+        _require_admin(request)
+        payload = await request.json()
+        backup_path = str(payload.get("backup_path") if isinstance(payload, dict) else "")
+        result = await run_in_threadpool(
+            sqlite_backup.restore_backup,
+            storage_settings.resolve_sqlite_path(),
+            backup_path,
+            storage_settings.resolve_backup_dir(),
+        )
+        data_store.reset_active_store_cache()
+        config.initialize_config(interactive=False)
+        result["settings"] = settings_snapshot()
         return JSONResponse(result)
 
     @app.post("/api/settings/sql-columns/detect")
