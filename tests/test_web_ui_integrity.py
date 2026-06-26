@@ -227,6 +227,14 @@ class WebUiIntegrityTests(unittest.TestCase):
             source.index('window.location.href = "/"'),
         )
 
+    def test_backup_history_and_diff_modals_exist(self) -> None:
+        html = _parse(INDEX_HTML)
+
+        self.assertIn("backupHistoryModal", html.ids)
+        self.assertIn("backupHistoryOutput", html.ids)
+        self.assertIn("backupDiffModal", html.ids)
+        self.assertIn("backupDiffOutput", html.ids)
+
 
 if __name__ == "__main__":
     unittest.main()

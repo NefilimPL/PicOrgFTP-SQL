@@ -322,6 +322,20 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("{col}", sql_body)
         self.assertIn("{column}", sql_body)
 
+    def test_web_settings_include_sqlite_repair_and_backup_controls(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("repairSqliteDatabaseButton", source)
+        self.assertIn("manualSqliteBackupButton", source)
+        self.assertIn("backupHistoryButton", source)
+        self.assertIn("sqliteBackupScheduleGrid", source)
+        self.assertIn("/api/settings/sqlite/repair", source)
+        self.assertIn("/api/settings/sqlite/backup", source)
+        self.assertIn("/api/settings/sqlite/backups", source)
+        self.assertIn("/api/settings/sqlite/restore", source)
+        self.assertIn("/api/settings/sqlite/backup-diff", source)
+
     def test_web_settings_field_groups_are_full_width_cards(self) -> None:
         css_path = (
             Path(__file__).resolve().parents[1]

@@ -77,6 +77,15 @@ const CSRF_HEADER = "X-PicOrg-CSRF";
 const CSRF_SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const SECRET_REVEAL_MS = 60000;
 const POLL_HIDDEN_DELAY_MS = 30000;
+const SQLITE_BACKUP_DAYS = [
+  ["mon", "Pon"],
+  ["tue", "Wt"],
+  ["wed", "Sr"],
+  ["thu", "Czw"],
+  ["fri", "Pt"],
+  ["sat", "Sob"],
+  ["sun", "Nd"],
+];
 const CLIENT_EXECUTABLE_UPLOAD_EXTENSIONS = new Set([
   "exe",
   "bat",
@@ -178,6 +187,8 @@ const historyDetailTitle = document.querySelector("#historyDetailTitle");
 const historyDetailOutput = document.querySelector("#historyDetailOutput");
 const historyTimingTitle = document.querySelector("#historyTimingTitle");
 const historyTimingOutput = document.querySelector("#historyTimingOutput");
+const backupHistoryOutput = document.querySelector("#backupHistoryOutput");
+const backupDiffOutput = document.querySelector("#backupDiffOutput");
 const logsRefreshButton = document.querySelector("#logsRefreshButton");
 const logsClearButton = document.querySelector("#logsClearButton");
 const logsClearForm = document.querySelector("#logsClearForm");
@@ -5160,6 +5171,284 @@ function importLegacyDataButton() {
   return button;
 }
 
+function repairSqliteDatabaseButton() {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary-button";
+  button.textContent = "Napraw SQLite";
+  button.addEventListener("click", async () => {
+    if (!window.confirm("Utworzyc kopie i uruchomic naprawe aktywnej bazy SQLite?")) {
+      return;
+    }
+    button.disabled = true;
+    settingsStatus.textContent = "Naprawianie SQLite...";
+    try {
+      const payload = await requestJson("/api/settings/sqlite/repair", {
+        method: "POST",
+        timeoutMs: 120000,
+      });
+      if (payload.settings) {
+        state.settings = payload.settings;
+        renderSettings();
+      }
+      settingsStatus.textContent = payload.message || "Naprawa SQLite zakonczona.";
+    } catch (error) {
+      settingsStatus.textContent = error.message || "Nie udalo sie naprawic SQLite.";
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
+function manualSqliteBackupButton() {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary-button";
+  button.textContent = "Utworz kopie SQLite";
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    settingsStatus.textContent = "Tworzenie kopii SQLite...";
+    try {
+      const payload = await requestJson("/api/settings/sqlite/backup", {
+        method: "POST",
+        timeoutMs: 60000,
+      });
+      settingsStatus.textContent = `Utworzono kopie: ${payload.backup_path || "SQLite"}`;
+      await loadSqliteBackups();
+    } catch (error) {
+      settingsStatus.textContent = error.message || "Nie udalo sie utworzyc kopii SQLite.";
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
+async function loadSqliteBackups() {
+  const payload = await requestJson("/api/settings/sqlite/backups");
+  renderBackupHistory(payload.items || []);
+  return payload.items || [];
+}
+
+function backupHistoryButton() {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary-button";
+  button.textContent = "Historia kopii";
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    settingsStatus.textContent = "Wczytywanie historii kopii...";
+    try {
+      await loadSqliteBackups();
+      document.querySelector("#backupHistoryModal")?.classList.add("active");
+      settingsStatus.textContent = "Wczytano historie kopii.";
+    } catch (error) {
+      settingsStatus.textContent = error.message || "Nie udalo sie wczytac historii kopii.";
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
+function sqliteBackupScheduleGrid(settings = {}) {
+  const wrapper = document.createElement("div");
+  const grid = document.createElement("div");
+  const selectedDays = new Set(settings.days || []);
+  const selectedHours = new Set((settings.hours || []).map((hour) => Number(hour)));
+  wrapper.className = "sqlite-backup-settings wide-field";
+  wrapper.appendChild(
+    checkField(
+      "sqlite_backup_enabled",
+      "Automatyczne kopie SQLite",
+      settings.enabled,
+      "Backend tworzy kopie w wybrane dni i godziny."
+    )
+  );
+  grid.className = "sqlite-backup-grid";
+  grid.appendChild(document.createElement("span"));
+  for (let hour = 0; hour < 24; hour += 1) {
+    const label = document.createElement("span");
+    label.textContent = String(hour).padStart(2, "0");
+    grid.appendChild(label);
+  }
+  const dayTitle = document.createElement("strong");
+  dayTitle.textContent = "Dni";
+  grid.appendChild(dayTitle);
+  for (const [key, labelText] of SQLITE_BACKUP_DAYS) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.name = `sqlite_backup_day_${key}`;
+    input.checked = selectedDays.has(key);
+    input.setAttribute("aria-label", `Kopie w dzien ${labelText}`);
+    label.title = labelText;
+    label.append(input, document.createTextNode(labelText));
+    grid.appendChild(label);
+  }
+  for (let index = SQLITE_BACKUP_DAYS.length; index < 24; index += 1) {
+    grid.appendChild(document.createElement("span"));
+  }
+  const hourTitle = document.createElement("strong");
+  hourTitle.textContent = "Godz.";
+  grid.appendChild(hourTitle);
+  for (let hour = 0; hour < 24; hour += 1) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.name = `sqlite_backup_hour_${hour}`;
+    input.checked = selectedHours.has(hour);
+    input.setAttribute("aria-label", `Kopie o godzinie ${hour}`);
+    label.title = `${String(hour).padStart(2, "0")}:00`;
+    label.appendChild(input);
+    grid.appendChild(label);
+  }
+  wrapper.appendChild(grid);
+  return wrapper;
+}
+
+function collectSqliteBackupSchedule(form) {
+  const data = new FormData(form);
+  const days = SQLITE_BACKUP_DAYS
+    .map(([key]) => (data.has(`sqlite_backup_day_${key}`) ? key : ""))
+    .filter(Boolean);
+  const hours = [];
+  for (let hour = 0; hour < 24; hour += 1) {
+    if (data.has(`sqlite_backup_hour_${hour}`)) {
+      hours.push(hour);
+    }
+  }
+  return {
+    enabled: data.has("sqlite_backup_enabled"),
+    days,
+    hours,
+    max_copies: Math.max(1, Math.min(999, Number(data.get("sqlite_backup_max_copies") || 10))),
+  };
+}
+
+function backupItemLabel(item) {
+  const parts = [item.created_at || "bez daty"];
+  if (item.reason) parts.push(item.reason);
+  if (item.schema_version !== undefined && item.schema_version !== null) {
+    parts.push(`schema ${item.schema_version}`);
+  }
+  parts.push(formatFileSize(item.size_bytes || 0));
+  return parts.join(" | ");
+}
+
+function renderBackupHistory(items = []) {
+  if (!backupHistoryOutput) {
+    return;
+  }
+  backupHistoryOutput.textContent = "";
+  if (!items.length) {
+    backupHistoryOutput.className = "backup-history-output empty-state";
+    backupHistoryOutput.textContent = "Brak kopii.";
+    return;
+  }
+  backupHistoryOutput.className = "backup-history-output";
+  for (const item of items) {
+    const row = document.createElement("div");
+    const details = document.createElement("div");
+    const title = document.createElement("strong");
+    const path = document.createElement("small");
+    const actions = document.createElement("div");
+    const diff = document.createElement("button");
+    const restore = document.createElement("button");
+    const backupPath = item.backup_path || "";
+    row.className = "backup-history-row";
+    title.textContent = backupItemLabel(item);
+    path.textContent = backupPath;
+    diff.type = "button";
+    diff.className = "secondary-button";
+    diff.textContent = "Porownaj";
+    diff.disabled = !backupPath;
+    diff.addEventListener("click", () => showSqliteBackupDiff(backupPath));
+    restore.type = "button";
+    restore.className = "danger-button";
+    restore.textContent = "Przywroc";
+    restore.disabled = !backupPath;
+    restore.addEventListener("click", () => restoreSqliteBackup(backupPath));
+    details.append(title, path);
+    actions.className = "heading-actions";
+    actions.append(diff, restore);
+    row.append(details, actions);
+    backupHistoryOutput.appendChild(row);
+  }
+}
+
+async function restoreSqliteBackup(backupPath) {
+  if (!backupPath) {
+    return;
+  }
+  if (!window.confirm("Przywrocic aktywna baze SQLite z tej kopii? Przed przywroceniem zostanie utworzona kopia aktualnej bazy.")) {
+    return;
+  }
+  settingsStatus.textContent = "Przywracanie kopii SQLite...";
+  try {
+    const payload = await requestJson("/api/settings/sqlite/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ backup_path: backupPath }),
+      timeoutMs: 120000,
+    });
+    if (payload.settings) {
+      state.settings = payload.settings;
+      renderSettings();
+    }
+    await loadSqliteBackups();
+    settingsStatus.textContent = `Przywrocono kopie: ${payload.restored_from || backupPath}`;
+  } catch (error) {
+    settingsStatus.textContent = error.message || "Nie udalo sie przywrocic kopii SQLite.";
+  }
+}
+
+async function showSqliteBackupDiff(backupPath) {
+  if (!backupPath || !backupDiffOutput) {
+    return;
+  }
+  backupDiffOutput.className = "backup-diff-output empty-state";
+  backupDiffOutput.textContent = "Porownywanie...";
+  document.querySelector("#backupDiffModal")?.classList.add("active");
+  try {
+    const payload = await requestJson("/api/settings/sqlite/backup-diff", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ backup_path: backupPath }),
+      timeoutMs: 60000,
+    });
+    backupDiffOutput.textContent = "";
+    backupDiffOutput.className = "backup-diff-output";
+    for (const [table, counts] of Object.entries(payload.tables || {}).sort()) {
+      const row = document.createElement("div");
+      const name = document.createElement("strong");
+      const values = document.createElement("span");
+      row.className = "backup-diff-row";
+      name.textContent = table;
+      values.textContent =
+        `aktywna: ${counts.active || 0}, kopia: ${counts.backup || 0}, ` +
+        `dodane: ${counts.added || 0}, usuniete: ${counts.removed || 0}`;
+      row.append(name, values);
+      backupDiffOutput.appendChild(row);
+    }
+    const config = payload.config || {};
+    const configRow = document.createElement("div");
+    const configTitle = document.createElement("strong");
+    const configValues = document.createElement("span");
+    configRow.className = "backup-diff-row";
+    configTitle.textContent = "Ustawienia";
+    configValues.textContent =
+      `dodane: ${(config.added || []).length}, usuniete: ${(config.removed || []).length}, ` +
+      `zmienione: ${(config.changed || []).length}`;
+    configRow.append(configTitle, configValues);
+    backupDiffOutput.appendChild(configRow);
+  } catch (error) {
+    backupDiffOutput.className = "backup-diff-output empty-state";
+    backupDiffOutput.textContent = error.message || "Nie udalo sie porownac kopii SQLite.";
+  }
+}
+
 function ensureSqlColumnsDatalist() {
   let datalist = document.querySelector("#sqlColumnsList");
   if (!datalist) {
@@ -5278,7 +5567,20 @@ function renderSettingsApp() {
         placeholder: "np. C:\\PicOrgFTP-SQL\\picorgftp_sql.sqlite",
         description: "Uzywane tylko dla lokalizacji: wskazana sciezka.",
       }),
-      actionRow(importLegacyDataButton())
+      actionRow(
+        importLegacyDataButton(),
+        repairSqliteDatabaseButton(),
+        manualSqliteBackupButton(),
+        backupHistoryButton()
+      )
+    ),
+    settingsFieldGroup("Kopie zapasowe SQLite",
+      sqliteBackupScheduleGrid(s.sqlite_backup || {}),
+      inputField("sqlite_backup_max_copies", "Maksymalna liczba kopii", s.sqlite_backup?.max_copies || 10, {
+        type: "number",
+        min: 1,
+        max: 999,
+      })
     ),
     settingsFieldGroup("Indeks lokalny",
       checkField(
@@ -5316,6 +5618,7 @@ function renderSettingsApp() {
         color3: data.get("color3"),
       },
     },
+    sqlite_backup: collectSqliteBackupSchedule(form),
   }));
   form.addEventListener("submit", () => {
     const data = new FormData(form);
@@ -5951,6 +6254,18 @@ document.querySelectorAll("[data-close-history-detail]").forEach((button) => {
 document.querySelectorAll("[data-close-history-timing]").forEach((button) => {
   button.addEventListener("click", () => {
     document.querySelector("#historyTimingModal")?.classList.remove("active");
+  });
+});
+
+document.querySelectorAll("[data-close-backup-history]").forEach((button) => {
+  button.addEventListener("click", () => {
+    document.querySelector("#backupHistoryModal")?.classList.remove("active");
+  });
+});
+
+document.querySelectorAll("[data-close-backup-diff]").forEach((button) => {
+  button.addEventListener("click", () => {
+    document.querySelector("#backupDiffModal")?.classList.remove("active");
   });
 });
 
