@@ -93,16 +93,22 @@ The runtime automatically searches for translation files next to the executable,
 
 This repository includes a CI workflow in `.github/workflows/ci.yml` and a Windows build workflow in `.github/workflows/build-exe.yml`. CI runs on `push` and `pull_request` for `main`, `master` and `dev`, and checks Python syntax, JavaScript syntax, critical pytest coverage, web smoke tests, UI integrity, desktop imports and lightweight performance paths.
 
-The Windows build workflow builds the EXE with PyInstaller, packages the web runtime as a separate ZIP and uploads both as workflow artifacts only when run manually or when a GitHub release is published. When a GitHub release is published, the same workflow also attaches `PicOrgFTP-SQL-<tag>.exe` and `PicOrgFTP-SQL-web-<tag>.zip` to that release. The visible program version is taken from the release tag.
+The Windows build workflow builds the EXE with PyInstaller, packages the web runtime as a separate ZIP and uploads the EXE files and ZIP as workflow artifacts only when run manually or when a GitHub release is published. Before building, the workflow checks whether an idle online self-hosted runner with `self-hosted`, `Windows` and `X64` labels is available. If one is found, the build runs there; otherwise it falls back to `windows-latest`. When a GitHub release is published, the same workflow also tries to attach `PicOrgFTP-SQL-<tag>.exe`, `PicOrgFTP-SQL-WEB-<tag>.exe` and `PicOrgFTP-SQL-web-<tag>.zip` to that release. The visible program version is taken from the release tag.
+
+To let the workflow inspect repository self-hosted runners, create a fine-grained personal access token with access only to this repository and **Administration: Read-only** permission, then save it as an Actions repository secret named `ACTIONS_RUNNER_READ_TOKEN`. If the secret is missing or the API call is rejected, the workflow safely uses `windows-latest`.
+
+Artifact upload is guarded by a tiny probe artifact with one-day retention. If GitHub rejects artifact upload, usually because of storage quota or permissions, the EXE build still completes and the workflow summary notes that upload was skipped or partially failed. Normal EXE artifacts use seven-day retention to reduce storage pressure.
 
 The local scripts in `Generator exe/` and the GitHub Actions workflow also generate a PyInstaller `--version-file`, so Windows file properties show `File description`, `File version`, `Product name`, `Product version`, `Company name`, `Copyright`, `Internal name` and `Original filename` for both EXE files. In GitHub Actions, product/company metadata is taken from the GitHub repository context; local builds use Windows registration data (`RegisteredOrganization` / `RegisteredOwner`) and then the current Windows user as a fallback.
 
 1. Push the workflow file to your GitHub repository.
 2. Go to **Settings → Actions → General** and make sure Actions are enabled for the repository.
 3. Go to the **Actions** tab, open **CI**, and check that tests pass for your branch or pull request.
-4. Open **Build Windows EXE** and click **Run workflow** only when you want a manual build artifact.
-5. After the build job finishes, download **PicOrgFTP-SQL-windows** or **PicOrgFTP-SQL-web** from the workflow summary.
-6. To publish release assets, create and publish a GitHub release from a tag such as `v1.2.3`; the workflow will build and attach the EXE and web ZIP automatically.
+4. Add the optional `ACTIONS_RUNNER_READ_TOKEN` repository secret if you want self-hosted runner detection.
+5. Open **Build Windows EXE** and click **Run workflow** only when you want a manual build artifact.
+6. Check the workflow summary. It shows whether the build used a self-hosted runner or `windows-latest`, and whether artifact upload was available.
+7. After the build job finishes, download **PicOrgFTP-SQL-windows**, **PicOrgFTP-SQL-web-exe** or **PicOrgFTP-SQL-web** from the workflow summary when artifact upload succeeded.
+8. To publish release assets, create and publish a GitHub release from a tag such as `v1.2.3`; the workflow will build and try to attach the EXE and web ZIP automatically.
 
 If you need to tweak build dependencies, edit `requirements-build.txt`. The workflow uses Python 3.11 by default.
 
@@ -192,15 +198,23 @@ Podczas działania program wyszukuje pliki tłumaczeń obok pliku wykonywalnego,
 
 ### GitHub Actions (budowanie EXE na Windows)
 
-W repozytorium znajduje się workflow `.github/workflows/build-exe.yml`, który buduje EXE przez PyInstaller, pakuje panel webowy do osobnego ZIP-a i publikuje oba pliki jako artefakty. Po opublikowaniu GitHub Release workflow dodatkowo podpina do release pliki `PicOrgFTP-SQL-<tag>.exe` oraz `PicOrgFTP-SQL-web-<tag>.zip`. Wersja widoczna w GUI i webie jest pobierana z taga release.
+W repozytorium znajduje się workflow `.github/workflows/build-exe.yml`, który buduje EXE przez PyInstaller, pakuje panel webowy do osobnego ZIP-a i publikuje pliki jako artefakty. Przed właściwym buildem workflow sprawdza, czy jest dostępny self-hosted runner z etykietami `self-hosted`, `Windows` i `X64`, statusem `online` oraz `busy: false`. Jeżeli taki runner jest dostępny, build EXE uruchamia się na nim. Jeżeli nie ma wolnego runnera albo API GitHuba nie pozwala odczytać listy runnerów, workflow używa `windows-latest`.
+
+Do sprawdzania runnerów najlepiej dodać sekret `ACTIONS_RUNNER_READ_TOKEN`. Utwórz fine-grained personal access token na GitHubie z dostępem tylko do tego repozytorium i uprawnieniem **Administration: Read-only**. Następnie wejdź w repozytorium na GitHubie: **Settings -> Secrets and variables -> Actions -> New repository secret**, ustaw nazwę `ACTIONS_RUNNER_READ_TOKEN` i wklej token jako wartość. Token nie jest potrzebny do samego builda EXE, ale bez niego sprawdzanie self-hosted runnerów może dostać `403` i wtedy workflow przejdzie na `windows-latest`.
+
+Workflow wykonuje też próbny upload małego artefaktu z retencją jednego dnia. Jeżeli GitHub odrzuci upload, najczęściej przez limit miejsca albo uprawnienia, właściwe artefakty są pomijane lub oznaczone jako częściowo nieudane, ale build EXE nie jest przez to przerywany. Zwykłe artefakty EXE mają retencję siedmiu dni, żeby ograniczyć zużycie limitu. Po opublikowaniu GitHub Release workflow dodatkowo próbuje podpiąć do release pliki `PicOrgFTP-SQL-<tag>.exe`, `PicOrgFTP-SQL-WEB-<tag>.exe` oraz `PicOrgFTP-SQL-web-<tag>.zip`. Wersja widoczna w GUI i webie jest pobierana z taga release.
 
 Lokalne skrypty z `Generator exe/` i workflow GitHub Actions generują też plik PyInstaller `--version-file`, dlatego we właściwościach Windows dla obu EXE są uzupełniane: opis pliku, wersja pliku, nazwa produktu, wersja produktu, firma, prawa autorskie, nazwa wewnętrzna i oryginalna nazwa pliku. W GitHub Actions dane produktu/firmy są pobierane z kontekstu repozytorium GitHub, a lokalne buildy używają danych rejestracji Windows (`RegisteredOrganization` / `RegisteredOwner`) i awaryjnie bieżącego użytkownika Windows.
 
 1. Wypchnij pliki workflow do swojego repozytorium na GitHub.
-2. Wejdź w **Settings → Actions → General** i upewnij się, że Actions są włączone.
-3. Otwórz kartę **Actions**, wybierz **Build Windows EXE** i kliknij **Run workflow** (lub wypchnij zmiany na `main`/`master`, aby uruchomić automatycznie).
-4. Po zakończeniu joba pobierz artefakt **PicOrgFTP-SQL-windows** albo **PicOrgFTP-SQL-web** z podsumowania workflow.
-5. Aby opublikować pliki przy wydaniu, utwórz i opublikuj release z tagiem, np. `v1.2.3`; workflow zbuduje pliki i automatycznie doda je do release.
+2. Wejdź w **Settings -> Actions -> General** i upewnij się, że Actions są włączone dla repozytorium.
+3. Jeżeli chcesz używać self-hosted runnerów, upewnij się, że runner ma etykiety `self-hosted`, `Windows` i `X64`, jest `Idle`/`online` oraz nie wykonuje innego joba.
+4. Dodaj sekret `ACTIONS_RUNNER_READ_TOKEN`: **Settings -> Secrets and variables -> Actions -> New repository secret**. Wartością ma być fine-grained PAT z uprawnieniem **Administration: Read-only** dla tego repozytorium.
+5. Otwórz kartę **Actions**, wybierz **Build Windows EXE** i kliknij **Run workflow**.
+6. W podsumowaniu workflow sprawdź sekcję **Runner selection**. `Self-hosted: true` oznacza, że EXE budował Twój runner. `Self-hosted: false` oznacza fallback na `windows-latest`.
+7. Po zakończeniu joba pobierz artefakty **PicOrgFTP-SQL-windows**, **PicOrgFTP-SQL-web-exe** albo **PicOrgFTP-SQL-web**, jeżeli upload artefaktów był dostępny.
+8. Jeżeli zobaczysz komunikat `Artifact upload was skipped or partially failed`, build EXE się wykonał, ale GitHub nie przyjął artefaktów. Najczęściej trzeba usunąć stare artefakty albo poczekać na zwolnienie limitu.
+9. Aby opublikować pliki przy wydaniu, utwórz i opublikuj release z tagiem, np. `v1.2.3`; workflow zbuduje pliki i spróbuje dodać EXE oraz ZIP do release.
 
 Jeśli chcesz zmienić zależności do budowania, edytuj `requirements-build.txt`. Workflow domyślnie używa Pythona 3.11.
 

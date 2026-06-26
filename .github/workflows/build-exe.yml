@@ -7,11 +7,92 @@ on:
       - published
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  select-runner:
+    name: Select Windows runner
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      runs_on: ${{ steps.select.outputs.runs_on }}
+      runner_name: ${{ steps.select.outputs.runner_name }}
+      using_self_hosted: ${{ steps.select.outputs.using_self_hosted }}
+
+    steps:
+      - name: Select GitHub Actions runner
+        id: select
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ACTIONS_RUNNER_READ_TOKEN || github.token }}
+          script: |
+            const fallbackRunsOn = JSON.stringify('windows-latest');
+            const selfHostedLabels = ['self-hosted', 'Windows', 'X64'];
+
+            function useFallback(message) {
+              core.warning(message);
+              core.setOutput('runs_on', fallbackRunsOn);
+              core.setOutput('runner_name', 'windows-latest');
+              core.setOutput('using_self_hosted', 'false');
+            }
+
+            try {
+              const { owner, repo } = context.repo;
+              const runners = await github.paginate(
+                github.rest.actions.listSelfHostedRunnersForRepo,
+                {
+                  owner,
+                  repo,
+                  per_page: 100,
+                },
+              );
+              const requiredLabels = selfHostedLabels.map((label) => label.toLowerCase());
+              const availableRunner = runners.find((runner) => {
+                const labels = new Set(
+                  (runner.labels || []).map((label) => String(label.name).toLowerCase()),
+                );
+                return (
+                  runner.status === "online" &&
+                  runner.busy === false &&
+                  requiredLabels.every((label) => labels.has(label))
+                );
+              });
+
+              if (!availableRunner) {
+                useFallback(
+                  'No idle online self-hosted Windows X64 runner was found. Falling back to windows-latest.',
+                );
+                return;
+              }
+
+              core.notice(`Using self-hosted runner: ${availableRunner.name}`);
+              core.setOutput('runs_on', JSON.stringify(selfHostedLabels));
+              core.setOutput('runner_name', availableRunner.name);
+              core.setOutput('using_self_hosted', 'true');
+            } catch (error) {
+              useFallback(
+                `Could not query self-hosted runners. Falling back to windows-latest. ${error.message}`,
+              );
+            }
+
+      - name: Runner selection summary
+        shell: bash
+        run: |
+          {
+            echo "### Runner selection"
+            echo ""
+            echo "- Runner: ${{ steps.select.outputs.runner_name }}"
+            echo "- Self-hosted: ${{ steps.select.outputs.using_self_hosted }}"
+            echo "- runs-on: \`${{ steps.select.outputs.runs_on }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   build-windows:
-    runs-on: windows-latest
+    needs: select-runner
+    runs-on: ${{ fromJSON(needs.select-runner.outputs.runs_on) }}
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -146,26 +227,62 @@ jobs:
           Copy-Item -Path "dist/output/PicOrgFTP-SQL-WEB.exe" -Destination "dist/release/PicOrgFTP-SQL-WEB-$env:PICORGFTP_SQL_ASSET_VERSION.exe" -Force
           Copy-Item -Path "dist/web/PicOrgFTP-SQL-web-$env:PICORGFTP_SQL_ASSET_VERSION.zip" -Destination "dist/release/PicOrgFTP-SQL-web-$env:PICORGFTP_SQL_ASSET_VERSION.zip" -Force
 
-      - name: Upload Windows artifact
+      - name: Prepare artifact upload probe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "build" -Force | Out-Null
+          Set-Content -Path "build/artifact-upload-probe.txt" -Value "Artifact upload probe for $env:GITHUB_REPOSITORY run $env:GITHUB_RUN_ID" -Encoding utf8
+
+      - name: Check artifact upload availability
+        id: artifact-probe
         uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: PicOrgFTP-SQL-artifact-probe-${{ github.run_id }}
+          path: build/artifact-upload-probe.txt
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload Windows artifact
+        id: upload-windows
+        if: steps.artifact-probe.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: PicOrgFTP-SQL-windows
           path: dist/output/PicOrgFTP-SQL.exe
+          retention-days: 7
 
       - name: Upload web EXE artifact
+        id: upload-web-exe
+        if: steps.artifact-probe.outcome == 'success'
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: PicOrgFTP-SQL-web-exe
           path: dist/output/PicOrgFTP-SQL-WEB.exe
+          retention-days: 7
 
       - name: Upload web artifact
+        id: upload-web
+        if: steps.artifact-probe.outcome == 'success'
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: PicOrgFTP-SQL-web
           path: dist/web/*.zip
+          retention-days: 7
+
+      - name: Report skipped artifact upload
+        if: steps.artifact-probe.outcome != 'success' || steps.upload-windows.outcome != 'success' || steps.upload-web-exe.outcome != 'success' || steps.upload-web.outcome != 'success'
+        shell: pwsh
+        run: |
+          "Artifact upload was skipped or partially failed. The EXE build completed; check upload-artifact logs for quota or permission details." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
       - name: Publish assets to release
+        id: publish-release-assets
         if: github.event_name == 'release'
+        continue-on-error: true
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -175,3 +292,9 @@ jobs:
             "dist/release/PicOrgFTP-SQL-WEB-$env:PICORGFTP_SQL_ASSET_VERSION.exe" `
             "dist/release/PicOrgFTP-SQL-web-$env:PICORGFTP_SQL_ASSET_VERSION.zip" `
             --clobber
+
+      - name: Report skipped release asset upload
+        if: github.event_name == 'release' && steps.publish-release-assets.outcome != 'success'
+        shell: pwsh
+        run: |
+          "Release asset upload was skipped or failed. The EXE build completed; check gh release upload logs for quota or permission details." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
