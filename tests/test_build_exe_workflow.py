@@ -62,6 +62,18 @@ def test_self_hosted_build_uses_existing_python_instead_of_setup_python() -> Non
     assert "-m PyInstaller" in source
 
 
+def test_build_dependencies_install_into_isolated_virtualenv() -> None:
+    source = workflow_source()
+
+    assert "PICORGFTP_SQL_BASE_PYTHON" in source
+    assert "Create isolated build virtualenv" in source
+    assert "RUNNER_TEMP" in source
+    assert "picorgftp-sql-build-${{ matrix.target }}" in source
+    assert "-m venv" in source
+    assert "PICORGFTP_SQL_PYTHON=$venvPython" in source
+    assert 'pip install "pyinstaller>=6.6,<7"' not in source
+
+
 def test_artifact_uploads_are_guarded_by_probe_and_non_fatal_per_target() -> None:
     source = workflow_source()
 
@@ -81,3 +93,12 @@ def test_node_actions_use_node_24_compatible_major_versions() -> None:
     assert "uses: actions/setup-python@v6" in source
     assert "uses: actions/upload-artifact@v7" in source
     assert "uses: actions/github-script@v9" in source
+
+
+def test_release_assets_upload_without_github_cli() -> None:
+    source = workflow_source()
+
+    assert "gh release upload" not in source
+    assert "github.rest.repos.uploadReleaseAsset" in source
+    assert "github.rest.repos.deleteReleaseAsset" in source
+    assert "github.rest.repos.listReleaseAssets" in source
