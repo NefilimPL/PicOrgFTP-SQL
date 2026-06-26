@@ -11,20 +11,21 @@ permissions:
 
 jobs:
   select-runner:
-    name: Select Windows runner
+    name: Select Windows runners
     runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: read
     outputs:
       runs_on: ${{ steps.select.outputs.runs_on }}
-      runner_name: ${{ steps.select.outputs.runner_name }}
+      runner_names: ${{ steps.select.outputs.runner_names }}
       using_self_hosted: ${{ steps.select.outputs.using_self_hosted }}
+      available_count: ${{ steps.select.outputs.available_count }}
 
     steps:
-      - name: Select GitHub Actions runner
+      - name: Select GitHub Actions runners
         id: select
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.ACTIONS_RUNNER_READ_TOKEN || github.token }}
           script: |
@@ -34,8 +35,9 @@ jobs:
             function useFallback(message) {
               core.warning(message);
               core.setOutput('runs_on', fallbackRunsOn);
-              core.setOutput('runner_name', 'windows-latest');
+              core.setOutput('runner_names', 'windows-latest');
               core.setOutput('using_self_hosted', 'false');
+              core.setOutput('available_count', '0');
             }
 
             try {
@@ -49,7 +51,7 @@ jobs:
                 },
               );
               const requiredLabels = selfHostedLabels.map((label) => label.toLowerCase());
-              const availableRunner = runners.find((runner) => {
+              const availableRunners = runners.filter((runner) => {
                 const labels = new Set(
                   (runner.labels || []).map((label) => String(label.name).toLowerCase()),
                 );
@@ -60,17 +62,19 @@ jobs:
                 );
               });
 
-              if (!availableRunner) {
+              if (availableRunners.length === 0) {
                 useFallback(
                   'No idle online self-hosted Windows X64 runner was found. Falling back to windows-latest.',
                 );
                 return;
               }
 
-              core.notice(`Using self-hosted runner: ${availableRunner.name}`);
+              const runnerNames = availableRunners.map((runner) => runner.name).join(', ');
+              core.notice(`Using ${availableRunners.length} self-hosted runner(s): ${runnerNames}`);
               core.setOutput('runs_on', JSON.stringify(selfHostedLabels));
-              core.setOutput('runner_name', availableRunner.name);
+              core.setOutput('runner_names', runnerNames);
               core.setOutput('using_self_hosted', 'true');
+              core.setOutput('available_count', String(availableRunners.length));
             } catch (error) {
               useFallback(
                 `Could not query self-hosted runners. Falling back to windows-latest. ${error.message}`,
@@ -83,25 +87,80 @@ jobs:
           {
             echo "### Runner selection"
             echo ""
-            echo "- Runner: ${{ steps.select.outputs.runner_name }}"
+            echo "- Runners: ${{ steps.select.outputs.runner_names }}"
+            echo "- Available self-hosted runners: ${{ steps.select.outputs.available_count }}"
             echo "- Self-hosted: ${{ steps.select.outputs.using_self_hosted }}"
             echo "- runs-on: \`${{ steps.select.outputs.runs_on }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   build-windows:
+    name: Build ${{ matrix.name }}
     needs: select-runner
     runs-on: ${{ fromJSON(needs.select-runner.outputs.runs_on) }}
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: local
+            name: desktop EXE
+          - target: web
+            name: web EXE and ZIP
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        if: needs.select-runner.outputs.using_self_hosted != 'true'
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
+
+      - name: Resolve Python 3.11
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $candidatePaths = [System.Collections.Generic.List[string]]::new()
+
+          function Add-Candidate {
+            param([string]$Path)
+            if ([string]::IsNullOrWhiteSpace($Path)) {
+              return
+            }
+            $candidate = $Path.Trim()
+            if (-not $candidatePaths.Contains($candidate)) {
+              $candidatePaths.Add($candidate)
+            }
+          }
+
+          if ("${{ needs.select-runner.outputs.using_self_hosted }}" -eq "true") {
+            if (Get-Command py -ErrorAction SilentlyContinue) {
+              $pyPath = (& py -3.11 -c "import sys; print(sys.executable)" 2>$null | Select-Object -First 1)
+              if ($LASTEXITCODE -eq 0) {
+                Add-Candidate $pyPath
+              }
+            }
+          }
+
+          if (Get-Command python -ErrorAction SilentlyContinue) {
+            $pythonPath = (& python -c "import sys; print(sys.executable)" 2>$null | Select-Object -First 1)
+            if ($LASTEXITCODE -eq 0) {
+              Add-Candidate $pythonPath
+            }
+          }
+
+          foreach ($candidate in $candidatePaths) {
+            $version = (& $candidate -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null | Select-Object -First 1)
+            if ($LASTEXITCODE -eq 0 -and $version -eq "3.11") {
+              "PICORGFTP_SQL_PYTHON=$candidate" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+              & $candidate --version
+              exit 0
+            }
+          }
+
+          throw "Python 3.11 was not found. On a self-hosted Windows runner install it with: winget install -e --id Python.Python.3.11 --scope machine"
 
       - name: Set release/build version
         shell: pwsh
@@ -122,40 +181,43 @@ jobs:
           "PICORGFTP_SQL_ASSET_VERSION=$assetVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install dependencies (pinned packager)
+        shell: pwsh
         run: |
-          python -m pip install --upgrade pip
-          # Pin PyInstaller to avoid known Windows CI weirdness and keep builds reproducible
-          python -m pip install "pyinstaller>=6.6,<7"
-          python -m pip install -r requirements-build.txt
-          python -m pip install -r requirements-web.txt
+          & $env:PICORGFTP_SQL_PYTHON -m pip install --upgrade pip
+          & $env:PICORGFTP_SQL_PYTHON -m pip install "pyinstaller>=6.6,<7"
+          & $env:PICORGFTP_SQL_PYTHON -m pip install -r requirements-build.txt
+          if ("${{ matrix.target }}" -eq "web") {
+            & $env:PICORGFTP_SQL_PYTHON -m pip install -r requirements-web.txt
+          }
 
       - name: Prepare Windows icons
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path "build/icons" -Force | Out-Null
-          python -c "from PIL import Image; Image.open(r'pic/PIC_LOCAL.png').save(r'build/icons/PIC_LOCAL.ico', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)]); Image.open(r'pic/PIC_WEB.png').save(r'build/icons/PIC_WEB.ico', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)])"
+          & $env:PICORGFTP_SQL_PYTHON -c "from PIL import Image; Image.open(r'pic/PIC_LOCAL.png').save(r'build/icons/PIC_LOCAL.ico', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)]); Image.open(r'pic/PIC_WEB.png').save(r'build/icons/PIC_WEB.ico', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)])"
 
       - name: Prepare Windows version metadata
         shell: pwsh
         run: |
-          python tools/generate_windows_version_info.py `
+          & $env:PICORGFTP_SQL_PYTHON tools/generate_windows_version_info.py `
             --output "build/version-info/PicOrgFTP-SQL.version.txt" `
             --file-description "PicOrgFTP-SQL desktop application" `
             --internal-name "PicOrgFTP-SQL" `
             --original-filename "PicOrgFTP-SQL.exe"
-          python tools/generate_windows_version_info.py `
+          & $env:PICORGFTP_SQL_PYTHON tools/generate_windows_version_info.py `
             --output "build/version-info/PicOrgFTP-SQL-WEB.version.txt" `
             --file-description "PicOrgFTP-SQL web manager" `
             --internal-name "PicOrgFTP-SQL-WEB" `
             --original-filename "PicOrgFTP-SQL-WEB.exe"
 
       - name: Build local EXE with PyInstaller
+        if: matrix.target == 'local'
         shell: pwsh
         env:
           PICORGFTP_SQL_HEADLESS: "1"
           PYINSTALLER_BUILD: "1"
         run: |
-          pyinstaller --noconfirm --clean --log-level=WARN `
+          & $env:PICORGFTP_SQL_PYTHON -m PyInstaller --noconfirm --clean --log-level=WARN `
             --name PicOrgFTP-SQL `
             --noconsole `
             --onefile `
@@ -174,12 +236,13 @@ jobs:
           Copy-Item -Path "picorgftp_sql/VERSION" -Destination "dist/output/VERSION" -Force
 
       - name: Build web manager EXE with PyInstaller
+        if: matrix.target == 'web'
         shell: pwsh
         env:
           PICORGFTP_SQL_HEADLESS: "1"
           PYINSTALLER_BUILD: "1"
         run: |
-          pyinstaller --noconfirm --clean --log-level=WARN `
+          & $env:PICORGFTP_SQL_PYTHON -m PyInstaller --noconfirm --clean --log-level=WARN `
             --name PicOrgFTP-SQL-WEB `
             --noconsole `
             --onefile `
@@ -205,6 +268,7 @@ jobs:
             PicOrgFTP-SQL-WEB.pyw
 
       - name: Package web runtime
+        if: matrix.target == 'web'
         shell: pwsh
         run: |
           $webRoot = "dist/web/PicOrgFTP-SQL-web"
@@ -218,12 +282,18 @@ jobs:
           $zipPath = "dist/web/PicOrgFTP-SQL-web-$env:PICORGFTP_SQL_ASSET_VERSION.zip"
           Compress-Archive -Path "$webRoot/*" -DestinationPath $zipPath -Force
 
-      - name: Prepare release assets
-        if: github.event_name == 'release'
+      - name: Prepare local release asset
+        if: github.event_name == 'release' && matrix.target == 'local'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path "dist/release" -Force | Out-Null
           Copy-Item -Path "dist/output/PicOrgFTP-SQL.exe" -Destination "dist/release/PicOrgFTP-SQL-$env:PICORGFTP_SQL_ASSET_VERSION.exe" -Force
+
+      - name: Prepare web release assets
+        if: github.event_name == 'release' && matrix.target == 'web'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "dist/release" -Force | Out-Null
           Copy-Item -Path "dist/output/PicOrgFTP-SQL-WEB.exe" -Destination "dist/release/PicOrgFTP-SQL-WEB-$env:PICORGFTP_SQL_ASSET_VERSION.exe" -Force
           Copy-Item -Path "dist/web/PicOrgFTP-SQL-web-$env:PICORGFTP_SQL_ASSET_VERSION.zip" -Destination "dist/release/PicOrgFTP-SQL-web-$env:PICORGFTP_SQL_ASSET_VERSION.zip" -Force
 
@@ -231,22 +301,22 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path "build" -Force | Out-Null
-          Set-Content -Path "build/artifact-upload-probe.txt" -Value "Artifact upload probe for $env:GITHUB_REPOSITORY run $env:GITHUB_RUN_ID" -Encoding utf8
+          Set-Content -Path "build/artifact-upload-probe.txt" -Value "Artifact upload probe for $env:GITHUB_REPOSITORY run $env:GITHUB_RUN_ID target ${{ matrix.target }}" -Encoding utf8
 
       - name: Check artifact upload availability
         id: artifact-probe
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         continue-on-error: true
         with:
-          name: PicOrgFTP-SQL-artifact-probe-${{ github.run_id }}
+          name: PicOrgFTP-SQL-artifact-probe-${{ matrix.target }}-${{ github.run_id }}
           path: build/artifact-upload-probe.txt
           if-no-files-found: error
           retention-days: 1
 
       - name: Upload Windows artifact
         id: upload-windows
-        if: steps.artifact-probe.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        if: matrix.target == 'local' && steps.artifact-probe.outcome == 'success'
+        uses: actions/upload-artifact@v7
         continue-on-error: true
         with:
           name: PicOrgFTP-SQL-windows
@@ -255,8 +325,8 @@ jobs:
 
       - name: Upload web EXE artifact
         id: upload-web-exe
-        if: steps.artifact-probe.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        if: matrix.target == 'web' && steps.artifact-probe.outcome == 'success'
+        uses: actions/upload-artifact@v7
         continue-on-error: true
         with:
           name: PicOrgFTP-SQL-web-exe
@@ -265,8 +335,8 @@ jobs:
 
       - name: Upload web artifact
         id: upload-web
-        if: steps.artifact-probe.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        if: matrix.target == 'web' && steps.artifact-probe.outcome == 'success'
+        uses: actions/upload-artifact@v7
         continue-on-error: true
         with:
           name: PicOrgFTP-SQL-web
@@ -274,14 +344,26 @@ jobs:
           retention-days: 7
 
       - name: Report skipped artifact upload
-        if: steps.artifact-probe.outcome != 'success' || steps.upload-windows.outcome != 'success' || steps.upload-web-exe.outcome != 'success' || steps.upload-web.outcome != 'success'
+        if: steps.artifact-probe.outcome != 'success'
         shell: pwsh
         run: |
-          "Artifact upload was skipped or partially failed. The EXE build completed; check upload-artifact logs for quota or permission details." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "Artifact upload was skipped for ${{ matrix.target }} because the upload probe failed. The EXE build completed; check upload-artifact logs for quota or permission details." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
-      - name: Publish assets to release
-        id: publish-release-assets
-        if: github.event_name == 'release'
+      - name: Report failed Windows artifact upload
+        if: matrix.target == 'local' && steps.artifact-probe.outcome == 'success' && steps.upload-windows.outcome != 'success'
+        shell: pwsh
+        run: |
+          "Artifact upload was skipped or failed for PicOrgFTP-SQL-windows. The EXE build completed; check upload-artifact logs for quota or permission details." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: Report failed web artifact upload
+        if: matrix.target == 'web' && steps.artifact-probe.outcome == 'success' && (steps.upload-web-exe.outcome != 'success' || steps.upload-web.outcome != 'success')
+        shell: pwsh
+        run: |
+          "Artifact upload was skipped or partially failed for web outputs. The EXE build completed; check upload-artifact logs for quota or permission details." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: Publish local asset to release
+        id: publish-local-release-asset
+        if: github.event_name == 'release' && matrix.target == 'local'
         continue-on-error: true
         shell: pwsh
         env:
@@ -289,12 +371,29 @@ jobs:
         run: |
           gh release upload "$env:PICORGFTP_SQL_VERSION" `
             "dist/release/PicOrgFTP-SQL-$env:PICORGFTP_SQL_ASSET_VERSION.exe" `
+            --clobber
+
+      - name: Publish web assets to release
+        id: publish-web-release-assets
+        if: github.event_name == 'release' && matrix.target == 'web'
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$env:PICORGFTP_SQL_VERSION" `
             "dist/release/PicOrgFTP-SQL-WEB-$env:PICORGFTP_SQL_ASSET_VERSION.exe" `
             "dist/release/PicOrgFTP-SQL-web-$env:PICORGFTP_SQL_ASSET_VERSION.zip" `
             --clobber
 
-      - name: Report skipped release asset upload
-        if: github.event_name == 'release' && steps.publish-release-assets.outcome != 'success'
+      - name: Report skipped local release asset upload
+        if: github.event_name == 'release' && matrix.target == 'local' && steps.publish-local-release-asset.outcome != 'success'
         shell: pwsh
         run: |
-          "Release asset upload was skipped or failed. The EXE build completed; check gh release upload logs for quota or permission details." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "Release asset upload was skipped or failed for the local EXE. The EXE build completed; check gh release upload logs for quota or permission details." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: Report skipped web release asset upload
+        if: github.event_name == 'release' && matrix.target == 'web' && steps.publish-web-release-assets.outcome != 'success'
+        shell: pwsh
+        run: |
+          "Release asset upload was skipped or failed for web outputs. The EXE build completed; check gh release upload logs for quota or permission details." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append

@@ -17,7 +17,7 @@ def test_build_workflow_selects_self_hosted_runner_before_build() -> None:
     source = workflow_source()
 
     assert "select-runner:" in source
-    assert "uses: actions/github-script@v7" in source
+    assert "uses: actions/github-script@v9" in source
     assert "actions: read" in source
     assert "secrets.ACTIONS_RUNNER_READ_TOKEN || github.token" in source
     assert "github.rest.actions.listSelfHostedRunnersForRepo" in source
@@ -26,6 +26,7 @@ def test_build_workflow_selects_self_hosted_runner_before_build() -> None:
     assert "['self-hosted', 'Windows', 'X64']" in source
     assert "JSON.stringify(selfHostedLabels)" in source
     assert "core.setOutput('runs_on'" in source
+    assert "core.setOutput('available_count'" in source
 
 
 def test_build_job_uses_selected_runner_or_github_hosted_fallback() -> None:
@@ -35,16 +36,39 @@ def test_build_job_uses_selected_runner_or_github_hosted_fallback() -> None:
 
     assert "needs: select-runner" in build_job
     assert "runs-on: ${{ fromJSON(needs.select-runner.outputs.runs_on) }}" in build_job
+    assert "strategy:" in build_job
+    assert "fail-fast: false" in build_job
+    assert "target: local" in build_job
+    assert "target: web" in build_job
     assert "JSON.stringify('windows-latest')" in source
 
 
-def test_artifact_uploads_are_guarded_by_probe_and_non_fatal() -> None:
+def test_self_hosted_build_uses_existing_python_instead_of_setup_python() -> None:
+    source = workflow_source()
+
+    assert "uses: actions/setup-python@v6" in source
+    assert "if: needs.select-runner.outputs.using_self_hosted != 'true'" in source
+    assert "PICORGFTP_SQL_PYTHON" in source
+    assert "Python.Python.3.11" in source
+    assert "-m PyInstaller" in source
+
+
+def test_artifact_uploads_are_guarded_by_probe_and_non_fatal_per_target() -> None:
     source = workflow_source()
 
     assert "id: artifact-probe" in source
-    assert "name: PicOrgFTP-SQL-artifact-probe-${{ github.run_id }}" in source
+    assert "name: PicOrgFTP-SQL-artifact-probe-${{ matrix.target }}-${{ github.run_id }}" in source
     assert "retention-days: 1" in source
     assert "steps.artifact-probe.outcome == 'success'" in source
     assert source.count("continue-on-error: true") >= 4
     assert source.count("retention-days: 7") >= 3
     assert "Artifact upload was skipped" in source
+
+
+def test_node_actions_use_node_24_compatible_major_versions() -> None:
+    source = workflow_source()
+
+    assert "uses: actions/checkout@v7" in source
+    assert "uses: actions/setup-python@v6" in source
+    assert "uses: actions/upload-artifact@v7" in source
+    assert "uses: actions/github-script@v9" in source
