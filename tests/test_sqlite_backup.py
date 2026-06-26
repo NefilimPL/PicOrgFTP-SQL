@@ -77,3 +77,30 @@ def test_backup_settings_roundtrip(tmp_path: Path) -> None:
     assert loaded["days"] == ["mon"]
     assert loaded["hours"] == [8, 13]
     assert loaded["max_copies"] == 4
+
+
+def test_due_schedule_slots_respects_day_hour_and_last_run() -> None:
+    now = datetime(2026, 6, 22, 8, 15, tzinfo=timezone.utc)  # Monday
+    settings_payload = {
+        "enabled": True,
+        "days": ["mon", "tue"],
+        "hours": [8, 13],
+        "max_copies": 5,
+        "last_run_slots": [],
+    }
+
+    due = sqlite_backup.due_schedule_slots(settings_payload, now)
+
+    assert due == ["2026-06-22T08"]
+
+    settings_payload["last_run_slots"] = ["2026-06-22T08"]
+    assert sqlite_backup.due_schedule_slots(settings_payload, now) == []
+
+
+def test_mark_schedule_slots_run_keeps_recent_slots() -> None:
+    updated = sqlite_backup.mark_schedule_slots_run(
+        {"last_run_slots": ["2026-06-21T08"]},
+        ["2026-06-22T08"],
+    )
+
+    assert updated["last_run_slots"] == ["2026-06-21T08", "2026-06-22T08"]

@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
 
 def _utc_datetime(value: datetime | None = None) -> datetime:
     current = value or datetime.now(timezone.utc)
@@ -132,3 +134,41 @@ def enforce_retention(backup_dir: str, max_copies: int) -> dict[str, Any]:
             except FileNotFoundError:
                 pass
     return {"removed": removed}
+
+
+def schedule_slot(now: datetime) -> str:
+    return _utc_datetime(now).strftime("%Y-%m-%dT%H")
+
+
+def due_schedule_slots(
+    settings_payload: dict[str, Any],
+    now: datetime | None = None,
+) -> list[str]:
+    value = _utc_datetime(now)
+    if not settings_payload.get("enabled"):
+        return []
+    day = WEEKDAY_KEYS[value.weekday()]
+    hour = value.hour
+    if day not in set(settings_payload.get("days") or []):
+        return []
+    try:
+        hours = {int(item) for item in settings_payload.get("hours") or []}
+    except (TypeError, ValueError):
+        hours = set()
+    if hour not in hours:
+        return []
+    slot = schedule_slot(value)
+    if slot in set(settings_payload.get("last_run_slots") or []):
+        return []
+    return [slot]
+
+
+def mark_schedule_slots_run(
+    settings_payload: dict[str, Any],
+    slots: list[str],
+) -> dict[str, Any]:
+    updated = dict(settings_payload or {})
+    existing = [str(item) for item in updated.get("last_run_slots", [])]
+    merged = existing + [slot for slot in slots if slot not in existing]
+    updated["last_run_slots"] = merged[-500:]
+    return updated
