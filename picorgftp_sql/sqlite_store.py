@@ -87,6 +87,14 @@ def _history_created_at(payload: dict[str, object]) -> str:
     )
 
 
+def _segment_key(value: object) -> str:
+    text = _upper(value)
+    for ch in text:
+        if ch.isalnum():
+            return ch if ch.isascii() else "_"
+    return "_"
+
+
 def _migrate_web_history_created_at(conn: sqlite3.Connection) -> None:
     columns = {
         row["name"]
@@ -286,6 +294,15 @@ class SqliteStore:
                     payload_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS file_index_segments (
+                    segment_key TEXT NOT NULL,
+                    section TEXT NOT NULL,
+                    lookup_key TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (segment_key, section, lookup_key)
+                );
                 """
             )
             _migrate_web_history_created_at(conn)
@@ -299,6 +316,10 @@ class SqliteStore:
                     ON product_entries(name, type_name, model);
                 CREATE INDEX IF NOT EXISTS idx_app_config_values_updated_at
                     ON app_config_values(updated_at);
+                CREATE INDEX IF NOT EXISTS idx_file_index_segments_lookup
+                    ON file_index_segments(segment_key, section, lookup_key);
+                CREATE INDEX IF NOT EXISTS idx_file_index_segments_updated_at
+                    ON file_index_segments(updated_at);
                 """
             )
             version_row = conn.execute(
@@ -744,6 +765,8 @@ class SqliteStore:
         """Store local file index cache payload."""
 
         self.initialize()
+        snapshot = dict(payload or {})
+        snapshot["generated_at"] = _iso_from_timestamp(snapshot.get("generated_at"))
         with self.connection() as conn:
             conn.execute(
                 """
@@ -753,5 +776,59 @@ class SqliteStore:
                     payload_json = excluded.payload_json,
                     updated_at = excluded.updated_at
                 """,
-                (_text(key) or "default", _json_dumps(payload or {}), _now_iso()),
+                (
+                    _text(key) or "default",
+                    _json_dumps(snapshot),
+                    snapshot["generated_at"],
+                ),
             )
+        self.save_file_index_segments(snapshot)
+
+    def save_file_index_segments(self, snapshot: dict[str, object]) -> int:
+        """Store segmented lookup rows for the local file index cache."""
+
+        self.initialize()
+        generated_at = _iso_from_timestamp(snapshot.get("generated_at"))
+        rows = []
+        names = snapshot.get("names", [])
+        for name in names if isinstance(names, list) else []:
+            rows.append((_segment_key(name), "names", _upper(name), name))
+        for section in ("types", "models", "colors", "extras", "files"):
+            section_payload = snapshot.get(section, {})
+            if not isinstance(section_payload, dict):
+                continue
+            for lookup_key, value in section_payload.items():
+                segment = _segment_key(str(lookup_key).split("\x1f", 1)[0])
+                rows.append((segment, section, str(lookup_key), value))
+        with self.connection() as conn:
+            conn.execute("DELETE FROM file_index_segments")
+            for segment, section, lookup_key, value in rows:
+                conn.execute(
+                    """
+                    INSERT INTO file_index_segments
+                        (segment_key, section, lookup_key, payload_json, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (segment, section, lookup_key, _json_dumps(value), generated_at),
+                )
+        return len(rows)
+
+    def load_file_index_segment(self, segment_key: str, section: str, lookup_key: str):
+        """Return one segmented local file index payload, or None."""
+
+        self.initialize()
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT payload_json FROM file_index_segments
+                WHERE segment_key = ? AND section = ? AND lookup_key = ?
+                """,
+                (
+                    _segment_key(segment_key) if segment_key else "_",
+                    _text(section),
+                    _text(lookup_key),
+                ),
+            ).fetchone()
+        if not row:
+            return None
+        return _json_loads(row["payload_json"], None)

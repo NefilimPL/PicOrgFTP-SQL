@@ -201,6 +201,36 @@ def test_migration_converts_legacy_web_history_ts_real(tmp_path: Path) -> None:
     assert payload["ts"].endswith("Z")
 
 
+def test_file_index_segments_are_saved_by_name_prefix(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.initialize()
+    snapshot = {
+        "version": 1,
+        "root": "C:/photos",
+        "generated_at": "2026-06-25T13:02:34.300Z",
+        "names": ["LUNA", "MAGGIORE"],
+        "types": {"LUNA": ["SZAFKA"], "MAGGIORE": ["KOMODA"]},
+        "models": {},
+        "colors": {},
+        "extras": {},
+        "files": {},
+    }
+
+    store.save_file_index_cache(snapshot)
+
+    with sqlite3.connect(tmp_path / "data.sqlite") as conn:
+        rows = conn.execute(
+            """
+            SELECT segment_key, section, lookup_key, payload_json
+            FROM file_index_segments
+            ORDER BY segment_key, section, lookup_key
+            """
+        ).fetchall()
+
+    assert ("L", "names", "LUNA", '"LUNA"') in rows
+    assert ("M", "names", "MAGGIORE", '"MAGGIORE"') in rows
+
+
 def test_slots_and_sql_columns_roundtrip(tmp_path: Path) -> None:
     store = SqliteStore(str(tmp_path / "data.sqlite"))
     store.initialize()
