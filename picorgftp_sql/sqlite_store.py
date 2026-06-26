@@ -23,7 +23,7 @@ from .excel_utils import (
     TYPE_HEADER,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 LIST_SHEETS = ("NAZWY", "TYPY", "MODELE", "KOLORY", "DODATKI")
 ENTRY_HEADERS = (
     EAN_HEADER,
@@ -61,6 +61,69 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
         "+00:00", "Z"
     )
+
+
+def _iso_from_timestamp(value: object) -> str:
+    if isinstance(value, str):
+        text = value.strip()
+        if text.endswith("Z") and "T" in text:
+            return text
+        try:
+            value = float(text)
+        except (TypeError, ValueError):
+            return _now_iso()
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return _now_iso()
+    return datetime.fromtimestamp(number, timezone.utc).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+
+
+def _history_created_at(payload: dict[str, object]) -> str:
+    return _iso_from_timestamp(
+        payload.get("created_at") or payload.get("ts") or payload.get("time")
+    )
+
+
+def _migrate_web_history_created_at(conn: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(web_history)").fetchall()
+    }
+    if "ts" not in columns or "created_at" in columns:
+        return
+    conn.execute("ALTER TABLE web_history RENAME TO web_history_legacy_ts")
+    conn.execute(
+        """
+        CREATE TABLE web_history (
+            id TEXT PRIMARY KEY,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    for row in conn.execute(
+        "SELECT id, payload_json, ts FROM web_history_legacy_ts"
+    ).fetchall():
+        payload = _json_loads(row["payload_json"], {})
+        if not isinstance(payload, dict):
+            payload = {}
+        created_at = _iso_from_timestamp(
+            payload.get("created_at") or payload.get("ts") or row["ts"]
+        )
+        payload["id"] = _text(row["id"]) or f"hist-{uuid.uuid4().hex}"
+        payload["created_at"] = created_at
+        payload["ts"] = created_at
+        conn.execute(
+            """
+            INSERT INTO web_history (id, payload_json, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (payload["id"], _json_dumps(payload), created_at),
+        )
+    conn.execute("DROP TABLE web_history_legacy_ts")
 
 
 def _flatten_config(payload: dict[str, object]) -> list[tuple[str, object]]:
@@ -215,7 +278,7 @@ class SqliteStore:
                 CREATE TABLE IF NOT EXISTS web_history (
                     id TEXT PRIMARY KEY,
                     payload_json TEXT NOT NULL,
-                    ts REAL NOT NULL
+                    created_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS file_index_cache (
@@ -223,6 +286,19 @@ class SqliteStore:
                     payload_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                """
+            )
+            _migrate_web_history_created_at(conn)
+            conn.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_web_history_created_at
+                    ON web_history(created_at);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_ean
+                    ON product_entries(ean);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_identity
+                    ON product_entries(name, type_name, model);
+                CREATE INDEX IF NOT EXISTS idx_app_config_values_updated_at
+                    ON app_config_values(updated_at);
                 """
             )
             version_row = conn.execute(
@@ -589,7 +665,7 @@ class SqliteStore:
         self.initialize()
         with self.connection() as conn:
             rows = conn.execute(
-                "SELECT payload_json FROM web_history ORDER BY ts, rowid"
+                "SELECT payload_json FROM web_history ORDER BY created_at, rowid"
             ).fetchall()
         records = []
         for row in rows:
@@ -610,19 +686,18 @@ class SqliteStore:
                 record_id = _text(item.get("id")) or f"hist-{uuid.uuid4().hex}"
                 payload = dict(item)
                 payload["id"] = record_id
-                try:
-                    ts = float(payload.get("ts") or 0.0)
-                except (TypeError, ValueError):
-                    ts = 0.0
+                created_at = _history_created_at(payload)
+                payload["created_at"] = created_at
+                payload["ts"] = created_at
                 conn.execute(
                     """
-                    INSERT INTO web_history (id, payload_json, ts)
+                    INSERT INTO web_history (id, payload_json, created_at)
                     VALUES (?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         payload_json = excluded.payload_json,
-                        ts = excluded.ts
+                        created_at = excluded.created_at
                     """,
-                    (record_id, _json_dumps(payload), ts),
+                    (record_id, _json_dumps(payload), created_at),
                 )
 
     def append_history(self, record: dict[str, object]) -> None:
@@ -634,20 +709,19 @@ class SqliteStore:
         record_id = _text(record.get("id")) or f"hist-{uuid.uuid4().hex}"
         payload = dict(record)
         payload["id"] = record_id
-        try:
-            ts = float(payload.get("ts") or 0.0)
-        except (TypeError, ValueError):
-            ts = 0.0
+        created_at = _history_created_at(payload)
+        payload["created_at"] = created_at
+        payload["ts"] = created_at
         with self.connection() as conn:
             conn.execute(
                 """
-                INSERT INTO web_history (id, payload_json, ts)
+                INSERT INTO web_history (id, payload_json, created_at)
                 VALUES (?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     payload_json = excluded.payload_json,
-                    ts = excluded.ts
+                    created_at = excluded.created_at
                 """,
-                (record_id, _json_dumps(payload), ts),
+                (record_id, _json_dumps(payload), created_at),
             )
 
     def load_file_index_cache(self, key: str = "default") -> dict[str, Any]:

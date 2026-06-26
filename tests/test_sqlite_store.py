@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -140,6 +141,64 @@ def test_sqlite_timestamps_are_iso_8601_text(tmp_path: Path) -> None:
         assert isinstance(value, str)
         assert value.endswith("Z")
         assert "T" in value
+
+
+def test_web_history_schema_uses_iso_created_at(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.initialize()
+    store.save_history(
+        [
+            {
+                "id": "hist-1",
+                "ts": 1782392554.3,
+                "time": "2026-06-25 13:02:34",
+                "user": "admin",
+                "ean": "5901234567890",
+            }
+        ]
+    )
+
+    with sqlite3.connect(tmp_path / "data.sqlite") as conn:
+        columns = {row[1]: row[2] for row in conn.execute("PRAGMA table_info(web_history)")}
+        row = conn.execute("SELECT created_at, payload_json FROM web_history WHERE id = 'hist-1'").fetchone()
+
+    assert columns["created_at"].upper() == "TEXT"
+    assert isinstance(row[0], str)
+    assert row[0].endswith("Z")
+    assert "T" in row[0]
+    payload = json.loads(row[1])
+    assert payload["created_at"] == row[0]
+
+
+def test_migration_converts_legacy_web_history_ts_real(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE schema_version (version INTEGER NOT NULL, applied_at TEXT NOT NULL);
+            INSERT INTO schema_version VALUES (2, '2026-06-25T12:00:00.000Z');
+            CREATE TABLE web_history (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, ts REAL NOT NULL);
+            INSERT INTO web_history VALUES (
+                'hist-1',
+                '{"id":"hist-1","ts":1782392554.3,"user":"admin","ean":"5901234567890"}',
+                1782392554.3
+            );
+            """
+        )
+
+    store = SqliteStore(str(db_path))
+    store.initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1]: row[2] for row in conn.execute("PRAGMA table_info(web_history)")}
+        row = conn.execute("SELECT created_at, payload_json FROM web_history WHERE id = 'hist-1'").fetchone()
+
+    assert "created_at" in columns
+    assert row[0].endswith("Z")
+    payload = json.loads(row[1])
+    assert payload["created_at"] == row[0]
+    assert isinstance(payload["ts"], str)
+    assert payload["ts"].endswith("Z")
 
 
 def test_slots_and_sql_columns_roundtrip(tmp_path: Path) -> None:
