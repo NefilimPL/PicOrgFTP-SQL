@@ -69,11 +69,18 @@ def test_backup_settings_roundtrip(tmp_path: Path) -> None:
     settings_path = tmp_path / "local_settings.json"
     with patch.object(storage_settings.settings, "BASE_DIR_SETTINGS_PATH", str(settings_path)):
         saved = storage_settings.save_backup_settings(
-            {"enabled": True, "days": ["mon"], "hours": [8, 13], "max_copies": 4}
+            {
+                "enabled": True,
+                "slots": ["mon:8", "mon:13"],
+                "days": ["mon"],
+                "hours": [8, 13],
+                "max_copies": 4,
+            }
         )
         loaded = storage_settings.load_backup_settings()
 
     assert saved["enabled"] is True
+    assert loaded["slots"] == ["mon:8", "mon:13"]
     assert loaded["days"] == ["mon"]
     assert loaded["hours"] == [8, 13]
     assert loaded["max_copies"] == 4
@@ -95,6 +102,20 @@ def test_due_schedule_slots_respects_day_hour_and_last_run() -> None:
 
     settings_payload["last_run_slots"] = ["2026-06-22T08"]
     assert sqlite_backup.due_schedule_slots(settings_payload, now) == []
+
+
+def test_due_schedule_slots_respects_explicit_day_hour_slots() -> None:
+    monday = datetime(2026, 6, 22, 8, 15, tzinfo=timezone.utc)
+    tuesday = datetime(2026, 6, 23, 8, 15, tzinfo=timezone.utc)
+    settings_payload = {
+        "enabled": True,
+        "slots": ["mon:8", "tue:13"],
+        "max_copies": 5,
+        "last_run_slots": [],
+    }
+
+    assert sqlite_backup.due_schedule_slots(settings_payload, monday) == ["2026-06-22T08"]
+    assert sqlite_backup.due_schedule_slots(settings_payload, tuesday) == []
 
 
 def test_mark_schedule_slots_run_keeps_recent_slots() -> None:

@@ -235,6 +235,17 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("backupDiffModal", html.ids)
         self.assertIn("backupDiffOutput", html.ids)
 
+    def test_backup_modals_render_above_settings_modal(self) -> None:
+        html = _parse(INDEX_HTML)
+        modal_classes = {
+            attrs.get("id"): set(attrs.get("class", "").split())
+            for tag, attrs in html.tags
+            if tag == "div" and attrs.get("id") in {"backupHistoryModal", "backupDiffModal"}
+        }
+
+        self.assertIn("nested-modal", modal_classes["backupHistoryModal"])
+        self.assertIn("nested-modal", modal_classes["backupDiffModal"])
+
 
 if __name__ == "__main__":
     unittest.main()

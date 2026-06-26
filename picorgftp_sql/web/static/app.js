@@ -5235,7 +5235,7 @@ function backupHistoryButton() {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "secondary-button";
-  button.textContent = "Historia kopii";
+  button.textContent = "Historia wersji";
   button.addEventListener("click", async () => {
     button.disabled = true;
     settingsStatus.textContent = "Wczytywanie historii kopii...";
@@ -5255,8 +5255,16 @@ function backupHistoryButton() {
 function sqliteBackupScheduleGrid(settings = {}) {
   const wrapper = document.createElement("div");
   const grid = document.createElement("div");
-  const selectedDays = new Set(settings.days || []);
-  const selectedHours = new Set((settings.hours || []).map((hour) => Number(hour)));
+  const selectedSlots = new Set(settings.slots || []);
+  if (!selectedSlots.size) {
+    const selectedDays = new Set(settings.days || []);
+    const selectedHours = new Set((settings.hours || []).map((hour) => Number(hour)));
+    for (const day of selectedDays) {
+      for (const hour of selectedHours) {
+        selectedSlots.add(`${day}:${hour}`);
+      }
+    }
+  }
   wrapper.className = "sqlite-backup-settings wide-field";
   wrapper.appendChild(
     checkField(
@@ -5267,42 +5275,30 @@ function sqliteBackupScheduleGrid(settings = {}) {
     )
   );
   grid.className = "sqlite-backup-grid";
-  grid.appendChild(document.createElement("span"));
+  const corner = document.createElement("span");
+  corner.textContent = "Dzien";
+  grid.appendChild(corner);
   for (let hour = 0; hour < 24; hour += 1) {
     const label = document.createElement("span");
     label.textContent = String(hour).padStart(2, "0");
     grid.appendChild(label);
   }
-  const dayTitle = document.createElement("strong");
-  dayTitle.textContent = "Dni";
-  grid.appendChild(dayTitle);
   for (const [key, labelText] of SQLITE_BACKUP_DAYS) {
-    const label = document.createElement("label");
-    const input = document.createElement("input");
-    input.type = "checkbox";
-    input.name = `sqlite_backup_day_${key}`;
-    input.checked = selectedDays.has(key);
-    input.setAttribute("aria-label", `Kopie w dzien ${labelText}`);
-    label.title = labelText;
-    label.append(input, document.createTextNode(labelText));
-    grid.appendChild(label);
-  }
-  for (let index = SQLITE_BACKUP_DAYS.length; index < 24; index += 1) {
-    grid.appendChild(document.createElement("span"));
-  }
-  const hourTitle = document.createElement("strong");
-  hourTitle.textContent = "Godz.";
-  grid.appendChild(hourTitle);
-  for (let hour = 0; hour < 24; hour += 1) {
-    const label = document.createElement("label");
-    const input = document.createElement("input");
-    input.type = "checkbox";
-    input.name = `sqlite_backup_hour_${hour}`;
-    input.checked = selectedHours.has(hour);
-    input.setAttribute("aria-label", `Kopie o godzinie ${hour}`);
-    label.title = `${String(hour).padStart(2, "0")}:00`;
-    label.appendChild(input);
-    grid.appendChild(label);
+    const day = document.createElement("strong");
+    day.textContent = labelText;
+    grid.appendChild(day);
+    for (let hour = 0; hour < 24; hour += 1) {
+      const label = document.createElement("label");
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.name = "sqlite_backup_slot";
+      input.value = `${key}:${hour}`;
+      input.checked = selectedSlots.has(input.value);
+      input.setAttribute("aria-label", `Kopia ${labelText} ${String(hour).padStart(2, "0")}:00`);
+      label.title = `${labelText} ${String(hour).padStart(2, "0")}:00`;
+      label.appendChild(input);
+      grid.appendChild(label);
+    }
   }
   wrapper.appendChild(grid);
   return wrapper;
@@ -5310,17 +5306,20 @@ function sqliteBackupScheduleGrid(settings = {}) {
 
 function collectSqliteBackupSchedule(form) {
   const data = new FormData(form);
-  const days = SQLITE_BACKUP_DAYS
-    .map(([key]) => (data.has(`sqlite_backup_day_${key}`) ? key : ""))
+  const slots = [...form.querySelectorAll('[name="sqlite_backup_slot"]:checked')]
+    .map((input) => input.value)
     .filter(Boolean);
-  const hours = [];
-  for (let hour = 0; hour < 24; hour += 1) {
-    if (data.has(`sqlite_backup_hour_${hour}`)) {
-      hours.push(hour);
-    }
-  }
+  const days = [...new Set(slots.map((slot) => slot.split(":")[0]).filter(Boolean))];
+  const hours = [
+    ...new Set(
+      slots
+        .map((slot) => Number(slot.split(":")[1]))
+        .filter((hour) => Number.isFinite(hour))
+    ),
+  ].sort((a, b) => a - b);
   return {
     enabled: data.has("sqlite_backup_enabled"),
+    slots,
     days,
     hours,
     max_copies: Math.max(1, Math.min(999, Number(data.get("sqlite_backup_max_copies") || 10))),

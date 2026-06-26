@@ -95,6 +95,14 @@ def _segment_key(value: object) -> str:
     return "_"
 
 
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
 def _migrate_web_history_created_at(conn: sqlite3.Connection) -> None:
     columns = {
         row["name"]
@@ -226,12 +234,6 @@ class SqliteStore:
                     applied_at TEXT NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS app_settings (
-                    key TEXT PRIMARY KEY,
-                    value_json TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
                 CREATE TABLE IF NOT EXISTS app_config_values (
                     path TEXT PRIMARY KEY,
                     value_json TEXT NOT NULL,
@@ -346,9 +348,11 @@ class SqliteStore:
             ).fetchall()
             if rows:
                 return _unflatten_config(rows)
-            row = conn.execute(
-                "SELECT value_json FROM app_settings WHERE key = 'config'"
-            ).fetchone()
+            row = None
+            if _table_exists(conn, "app_settings"):
+                row = conn.execute(
+                    "SELECT value_json FROM app_settings WHERE key = 'config'"
+                ).fetchone()
         if not row:
             return {}
         payload = _json_loads(row["value_json"], {})
@@ -361,7 +365,11 @@ class SqliteStore:
         rows = _flatten_config(dict(payload or {}))
         with self.connection() as conn:
             conn.execute("DELETE FROM app_config_values")
-            conn.execute("DELETE FROM app_settings WHERE key = 'config'")
+            if _table_exists(conn, "app_settings"):
+                conn.execute("DELETE FROM app_settings WHERE key = 'config'")
+                row = conn.execute("SELECT COUNT(*) FROM app_settings").fetchone()
+                if int(row[0] or 0) == 0:
+                    conn.execute("DROP TABLE app_settings")
             updated_at = _now_iso()
             for path, value in rows:
                 conn.execute(

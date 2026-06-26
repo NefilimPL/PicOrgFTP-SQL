@@ -25,7 +25,6 @@ def test_schema_creates_expected_tables(tmp_path: Path) -> None:
         }
     assert {
         "schema_version",
-        "app_settings",
         "app_config_values",
         "slot_definitions",
         "sql_column_map",
@@ -74,7 +73,7 @@ def test_config_is_stored_as_readable_path_rows(tmp_path: Path) -> None:
             )
         }
         legacy_config = conn.execute(
-            "SELECT 1 FROM app_settings WHERE key = 'config'"
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_settings'"
         ).fetchone()
 
     assert legacy_config is None
@@ -94,6 +93,15 @@ def test_load_config_falls_back_to_legacy_json_blob(tmp_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             """
+            CREATE TABLE app_settings (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             INSERT INTO app_settings (key, value_json, updated_at)
             VALUES ('config', ?, ?)
             """,
@@ -104,6 +112,38 @@ def test_load_config_falls_back_to_legacy_json_blob(tmp_path: Path) -> None:
         "db_type": "mssql",
         "ftp": {"host": "legacy.example.com"},
     }
+
+
+def test_save_config_drops_legacy_app_settings_when_it_becomes_empty(tmp_path: Path) -> None:
+    db_path = tmp_path / "data.sqlite"
+    store = SqliteStore(str(db_path))
+    store.initialize()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE app_settings (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO app_settings (key, value_json, updated_at)
+            VALUES ('config', ?, ?)
+            """,
+            ('{"db_type": "mssql"}', "2026-06-25T12:00:00.000Z"),
+        )
+
+    store.save_config({"db_type": "mysql"})
+
+    with sqlite3.connect(db_path) as conn:
+        app_settings_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_settings'"
+        ).fetchone()
+
+    assert app_settings_exists is None
 
 
 def test_sqlite_timestamps_are_iso_8601_text(tmp_path: Path) -> None:

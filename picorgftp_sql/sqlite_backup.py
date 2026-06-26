@@ -169,6 +169,14 @@ def due_schedule_slots(
         return []
     day = WEEKDAY_KEYS[value.weekday()]
     hour = value.hour
+    explicit_slots = {str(item).lower() for item in settings_payload.get("slots") or []}
+    if explicit_slots:
+        if f"{day}:{hour}" not in explicit_slots:
+            return []
+        slot = schedule_slot(value)
+        if slot in set(settings_payload.get("last_run_slots") or []):
+            return []
+        return [slot]
     if day not in set(settings_payload.get("days") or []):
         return []
     try:

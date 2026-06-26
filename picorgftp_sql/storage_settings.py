@@ -22,6 +22,7 @@ DEFAULT_SQLITE_FILENAME = "picorgftp_sql.sqlite"
 BACKUP_SETTINGS_KEY = "sqlite_backup"
 BACKUP_DEFAULTS = {
     "enabled": False,
+    "slots": [],
     "days": [],
     "hours": [],
     "max_copies": 10,
@@ -109,12 +110,39 @@ def _normalize_backup_settings(raw: object) -> dict[str, Any]:
             hours.add(max(0, min(23, int(hour))))
         except (TypeError, ValueError):
             continue
+    slots = []
+    seen_slots = set()
+    for slot in payload.get("slots", []):
+        parts = str(slot or "").lower().split(":", 1)
+        if len(parts) != 2 or parts[0] not in BACKUP_WEEKDAYS:
+            continue
+        try:
+            hour = max(0, min(23, int(parts[1])))
+        except (TypeError, ValueError):
+            continue
+        normalized = f"{parts[0]}:{hour}"
+        if normalized not in seen_slots:
+            slots.append(normalized)
+            seen_slots.add(normalized)
+    if not slots and days and hours:
+        for day in days:
+            for hour in sorted(hours):
+                slots.append(f"{day}:{hour}")
+    if slots:
+        days = []
+        hours = set()
+        for slot in slots:
+            day, hour_text = slot.split(":", 1)
+            if day not in days:
+                days.append(day)
+            hours.add(int(hour_text))
     try:
         max_copies = max(1, min(999, int(payload.get("max_copies", 10))))
     except (TypeError, ValueError):
         max_copies = 10
     return {
         "enabled": bool(payload.get("enabled", False)),
+        "slots": slots,
         "days": days,
         "hours": sorted(hours),
         "max_copies": max_copies,
