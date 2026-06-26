@@ -277,6 +277,48 @@ class WebAppFileTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_save_upload_cache_entry_normalizes_browser_extension_webp_named_jpg(self) -> None:
+        if Image is None:
+            self.skipTest("Pillow unavailable")
+        temp_dir = _workspace_temp("web_app_upload_normalize_webp_extension")
+        try:
+            buffer = io.BytesIO()
+            try:
+                Image.new("RGB", (16, 16), "white").save(buffer, format="WEBP")
+            except Exception:
+                self.skipTest("Pillow WebP support unavailable")
+            upload = _MemoryUpload("product.jpg", [buffer.getvalue()], "image/jpeg")
+            with (
+                patch.object(web_app.settings, "AC", str(temp_dir)),
+                patch.object(
+                    web_app.config,
+                    "CONFIG",
+                    {
+                        web_app.SECURITY_SETTINGS_KEY: {
+                            "allowed_upload_extensions": ["jpg", "webp"],
+                            "blocked_upload_extensions": [],
+                            "block_executable_uploads": True,
+                        }
+                    },
+                ),
+            ):
+                saved = asyncio.run(
+                    web_app._save_upload_cache_entry(
+                        upload,
+                        "session",
+                        "web",
+                        normalize_extension=True,
+                    )
+                )
+
+            self.assertTrue(saved.path.endswith(".webp"))
+            self.assertEqual(saved.name, "product.webp")
+            with Image.open(saved.path) as image:
+                self.assertEqual(image.format, "WEBP")
+            self.assertTrue(upload.closed)
+        finally:
+            shutil.rmtree(temp_dir)
+
     def test_save_upload_cache_runs_optional_antivirus_scan(self) -> None:
         if Image is None:
             self.skipTest("Pillow unavailable")

@@ -198,6 +198,12 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("state.webImages.push(image)", source)
         self.assertIn("Odbierz z rozszerzenia", source)
 
+    def test_app_js_uses_cached_preview_for_browser_extension_imports(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("preview_url: cache.thumb_url || cache.url || item?.source_url || \"\"", source)
+        self.assertIn("img.src = image.preview_url || image.thumb_url || image.url;", source)
+
     def test_login_page_keeps_accessible_login_form(self) -> None:
         html = _parse(LOGIN_HTML)
 
