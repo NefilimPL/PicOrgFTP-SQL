@@ -1,5 +1,7 @@
 """Shared constants, imports and helper utilities for PicOrgFTP-SQL."""
 
+from .product_fields import PRODUCT_FIELDS_KEY, default_product_fields
+
 ################################ Aktualne ustawienia startowe aplikacji ################################
 # --- Konfigurowalne ustawienia ---
 # Katalog roboczy aplikacji jest odczytywany z pliku `local_settings.json`.
@@ -316,6 +318,7 @@ DEFAULT_CONFIG.setdefault(
     },
 )
 DEFAULT_CONFIG.setdefault(COLOR_FIELD_LABELS_KEY, {})
+DEFAULT_CONFIG.setdefault(PRODUCT_FIELDS_KEY, default_product_fields())
 DEFAULT_CONFIG.setdefault(
     TRANSLATION_SETTINGS_KEY,
     {

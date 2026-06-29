@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import unittest
+from copy import deepcopy
+from unittest.mock import patch
 
-from picorgftp_sql import common
+from picorgftp_sql import common, config
 from picorgftp_sql.config import (
     _normalize_color_field_labels,
     _normalize_processing_settings,
     _normalize_security_settings,
 )
+from picorgftp_sql.product_fields import PRODUCT_FIELDS_KEY
+from picorgftp_sql.sqlite_store import SqliteStore
 
 
 class DefaultConfigSafetyTests(unittest.TestCase):
@@ -81,6 +85,62 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings["blocked_upload_extensions"], ["exe", "bat"])
         self.assertFalse(settings["block_executable_uploads"])
         self.assertTrue(settings["antivirus_scan_uploads"])
+
+    def test_merge_raw_config_migrates_color_labels_to_product_fields(self) -> None:
+        target = deepcopy(common.DEFAULT_CONFIG)
+
+        merged = config._merge_raw_config(
+            {"color_field_labels": {"color1": "Korpus"}},
+            target,
+        )
+
+        self.assertEqual(merged[PRODUCT_FIELDS_KEY]["color1"]["label"], "Korpus")
+        self.assertTrue(merged[PRODUCT_FIELDS_KEY]["name"]["required"])
+
+    def test_save_config_persists_normalized_product_fields_to_sqlite(self) -> None:
+        payload = deepcopy(common.DEFAULT_CONFIG)
+        payload[PRODUCT_FIELDS_KEY] = {
+            "model": {"enabled": False, "required": True}
+        }
+        store = unittest.mock.Mock(database_path="test.sqlite")
+
+        with patch.object(config, "_active_sqlite_store", return_value=store):
+            config.save_config(payload)
+
+        saved = store.save_config.call_args.args[0][PRODUCT_FIELDS_KEY]
+        self.assertEqual(
+            saved["model"],
+            {"label": "", "enabled": False, "required": False},
+        )
+
+    def test_save_config_roundtrips_product_fields_through_sqlite(self) -> None:
+        from pathlib import Path
+        import shutil
+
+        temp_dir = Path(__file__).resolve().parents[1] / "tmp_test" / "config-product-fields"
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+        temp_dir.mkdir(parents=True)
+        try:
+            payload = deepcopy(common.DEFAULT_CONFIG)
+            payload[PRODUCT_FIELDS_KEY] = {
+                "name": {
+                    "label": "Kolekcja",
+                    "enabled": True,
+                    "required": True,
+                }
+            }
+            store = SqliteStore(temp_dir / "product-fields.sqlite")
+
+            with patch.object(config, "_active_sqlite_store", return_value=store):
+                config.save_config(payload)
+
+            self.assertEqual(
+                store.load_config()[PRODUCT_FIELDS_KEY]["name"]["label"],
+                "Kolekcja",
+            )
+        finally:
+            shutil.rmtree(temp_dir)
 
 
 if __name__ == "__main__":
