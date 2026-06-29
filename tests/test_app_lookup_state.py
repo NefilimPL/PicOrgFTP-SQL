@@ -72,6 +72,17 @@ class _StubProgress(_StubWidget):
         self.stop_calls += 1
 
 
+class _Var:
+    def __init__(self, value="") -> None:
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value) -> None:
+        self.value = value
+
+
 class _ClearSlotsHarness:
     def __init__(self) -> None:
         self.pending_additions = {0: "/tmp/new-main.jpg"}
@@ -253,6 +264,81 @@ class ExistingLookupStateTests(unittest.TestCase):
         self.assertEqual(harness.mark_calls, [(0, AR)])
         self.assertEqual(harness.dashboard_refreshes, 1)
         self.assertEqual(harness.focus_calls, 1)
+
+
+@unittest.skipIf(App is None, f"App import unavailable: {APP_IMPORT_ERROR}")
+class ProductFieldSettingsTests(unittest.TestCase):
+    @staticmethod
+    def _harness(**values):
+        harness = type("Harness", (), {})()
+        defaults = {
+            "name": "",
+            "type": "",
+            "model": "",
+            "color1": "",
+            "color2": "",
+            "color3": "",
+            "extra": "",
+            "ean": "",
+        }
+        defaults.update(values)
+        for key, value in defaults.items():
+            setattr(harness, f"var_{key}", _Var(value))
+        harness._get_form_field_raw_value = lambda key: getattr(
+            harness, f"var_{key}"
+        ).get()
+        harness._default_product_field_name = lambda key: {
+            "name": "Nazwa",
+            "type": "Typ",
+            "model": "Model",
+            "color1": "Kolor 1",
+            "color2": "Kolor 2",
+            "color3": "Kolor 3",
+            "extra": "Dodatek",
+            "ean": "EAN",
+        }[key]
+        harness._product_field_settings = lambda: App._product_field_settings(harness)
+        return harness
+
+    def test_missing_required_fields_use_desktop_custom_label(self) -> None:
+        harness = self._harness(type="KOMODA")
+
+        with patch(
+            "picorgftp_sql.app.D",
+            {
+                "product_fields": {
+                    "name": {
+                        "label": "Kolekcja",
+                        "enabled": True,
+                        "required": True,
+                    },
+                    "type": {"enabled": False},
+                    "model": {"enabled": True, "required": False},
+                    "color1": {"enabled": False},
+                }
+            },
+        ):
+            missing = App._missing_required_product_fields(harness)
+
+        self.assertEqual(missing, ["Kolekcja"])
+
+    def test_effective_desktop_values_clear_disabled_fields(self) -> None:
+        harness = self._harness(
+            name="N",
+            type="KOMODA",
+            model="M",
+            color1="C",
+            extra="LED",
+            ean="5901234567890",
+        )
+
+        with patch(
+            "picorgftp_sql.app.D",
+            {"product_fields": {"type": {"enabled": False}}},
+        ):
+            App._clear_disabled_product_field_values(harness)
+
+        self.assertEqual(harness.var_type.get(), "")
 
 
 if __name__ == "__main__":

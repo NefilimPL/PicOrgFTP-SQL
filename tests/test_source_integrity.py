@@ -9,6 +9,21 @@ import unittest
 
 
 class SourceIntegrityTests(unittest.TestCase):
+    def test_desktop_uses_generic_product_field_settings(self) -> None:
+        app_path = Path(__file__).resolve().parents[1] / "picorgftp_sql" / "app.py"
+        source = app_path.read_text(encoding="utf-8")
+
+        self.assertIn("def _refresh_product_fields", source)
+        self.assertIn("def _missing_required_product_fields", source)
+        self.assertIn("product_field_vars", source)
+        self.assertIn("D[PRODUCT_FIELDS_KEY] = normalize_product_fields", source)
+        self.assertIn("A._refresh_product_fields()", source)
+        self.assertIn("missing_fields = A._missing_required_product_fields()", source)
+        self.assertNotIn(
+            "D[COLOR_FIELD_LABELS_KEY] = A._normalize_color_field_label_overrides",
+            source,
+        )
+
     def test_web_process_applies_active_product_field_settings(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]
