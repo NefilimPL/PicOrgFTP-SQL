@@ -276,7 +276,7 @@ class SourceIntegrityTests(unittest.TestCase):
                 ),
                 ("Indeks lokalny", ['"local_file_index"', "diagnosticButton", "fileIndexRefreshButton"]),
                 ("Widok panelu", ['"user_show_timing_details"']),
-                ("Nazwy pol kolorow", ['"color1"', '"color2"', '"color3"']),
+                ("Pola produktu", ["productFieldsNote", "productFieldSettingsList", "s.product_fields"]),
             ],
             "renderSettingsSecurity": [
                 ("Sekret aplikacji", ['credentialField("app_secret"']),

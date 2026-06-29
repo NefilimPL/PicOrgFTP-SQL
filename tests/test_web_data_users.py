@@ -784,6 +784,31 @@ class WebDataUserTests(unittest.TestCase):
         self.assertEqual(snapshot["product_fields"]["name"]["label"], "Kolekcja")
         self.assertTrue(snapshot["product_fields"]["color1"]["required"])
 
+    def test_find_product_photos_ignores_disabled_identity_fields(self) -> None:
+        cfg = {"product_fields": {"type": {"enabled": False}}}
+
+        with (
+            patch.object(web_data.config, "CONFIG", cfg),
+            patch.object(
+                web_data,
+                "build_product_directory",
+                return_value="C:\\processed\\MAGGIORE",
+            ) as build_directory,
+        ):
+            web_data.find_product_photos(
+                {
+                    "name": "MAGGIORE",
+                    "type_name": "KOMODA",
+                    "model": "MA03",
+                    "color1": "BIALY",
+                },
+                include_local=False,
+                include_ftp=False,
+                include_sql=False,
+            )
+
+        self.assertEqual(build_directory.call_args.args[2], "")
+
     def test_settings_secret_values_returns_current_decrypted_config(self) -> None:
         config_payload = {
             web_data.H: {web_data.N: "ftp-user", web_data.M: "ftp-pass"},

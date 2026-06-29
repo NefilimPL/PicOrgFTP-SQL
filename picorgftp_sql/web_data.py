@@ -1797,6 +1797,11 @@ def find_product_photos(
 ) -> list[dict[str, object]]:
     """Find processed photos and presence flags for a saved web entry."""
 
+    field_settings = normalize_product_fields(
+        config.CONFIG.get(PRODUCT_FIELDS_KEY),
+        legacy_color_labels=config.CONFIG.get(COLOR_FIELD_LABELS_KEY),
+    )
+    entry_payload = effective_product_values(entry_payload, field_settings)
     entry = _entry_from_record(
         {
             PRODUCT_ID_HEADER: entry_payload.get("product_id"),

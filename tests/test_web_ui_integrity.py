@@ -106,6 +106,45 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("entrySelect", html.ids)
         self.assertIn("formStatus", html.ids)
 
+    def test_all_product_fields_have_dynamic_containers_and_labels(self) -> None:
+        html = _parse(INDEX_HTML)
+        canonical = {
+            "name",
+            "type",
+            "model",
+            "color1",
+            "color2",
+            "color3",
+            "extra",
+            "ean",
+        }
+        containers = {
+            attrs.get("data-product-field")
+            for _tag, attrs in html.tags
+            if attrs.get("data-product-field")
+        }
+        labels = {
+            attrs.get("data-product-field-label")
+            for _tag, attrs in html.tags
+            if attrs.get("data-product-field-label")
+        }
+
+        self.assertEqual(canonical - containers, set())
+        self.assertEqual(canonical - labels, set())
+
+    def test_web_settings_builds_vertical_product_field_rows(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        css = (
+            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("function productFieldSettingsList", source)
+        self.assertIn('className = "product-field-settings-list wide-field"', source)
+        self.assertIn('className = "product-field-settings-row"', source)
+        self.assertIn("function collectProductFieldSettings", source)
+        self.assertIn(".product-field-settings-list", css)
+        self.assertIn(".product-field-settings-row", css)
+
     def test_web_images_modal_contains_url_input_filters_and_actions(self) -> None:
         html = _parse(INDEX_HTML)
 
