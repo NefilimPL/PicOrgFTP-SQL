@@ -7,6 +7,7 @@ import os
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone
 
 from .workflow_utils import (
     build_color_segment,
@@ -17,6 +18,12 @@ from .workflow_utils import (
 INDEX_VERSION = 1
 KEY_SEPARATOR = "\x1f"
 NO_EXTRA_VALUE = "NO-LED"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def _directory_names(path: str) -> list[str]:
@@ -175,7 +182,7 @@ class LocalFileIndex:
             return {
                 "version": INDEX_VERSION,
                 "root": self.root_dir,
-                "generated_at": time.time(),
+                "generated_at": _now_iso(),
                 "dirs_scanned": 0,
                 "products_scanned": 0,
                 "names": [],
@@ -251,7 +258,7 @@ class LocalFileIndex:
         return {
             "version": INDEX_VERSION,
             "root": self.root_dir,
-            "generated_at": time.time(),
+            "generated_at": _now_iso(),
             "dirs_scanned": dirs_scanned,
             "products_scanned": products_scanned,
             "names": names,

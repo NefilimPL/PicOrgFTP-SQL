@@ -275,6 +275,10 @@ h2 {
   display: grid;
 }
 
+.modal-view.nested-modal.active {
+  z-index: 40;
+}
+
 .modal-panel {
   width: min(760px, calc(100vw - 32px));
   max-height: calc(100vh - 56px);
@@ -304,6 +308,14 @@ h2 {
 
 .heading-actions select {
   flex: 0 1 220px;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
 }
 
 .subtle-metrics {
@@ -832,7 +844,72 @@ h2 {
   grid-column: 1 / -1;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
+}
+
+.sqlite-backup-settings {
+  display: grid;
+  gap: 10px;
+}
+
+.sqlite-backup-grid {
+  display: grid;
+  grid-template-columns: 56px repeat(24, 32px);
+  gap: 3px;
+  overflow-x: auto;
+  grid-column: 1 / -1;
+  align-items: center;
+  padding-bottom: 4px;
+}
+
+.sqlite-backup-grid label {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-2);
+  font-size: 12px;
+}
+
+.sqlite-backup-grid label:has(input:checked) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface));
+}
+
+.sqlite-backup-grid input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.sqlite-backup-grid span,
+.sqlite-backup-grid strong {
+  min-height: 30px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.backup-history-row,
+.backup-diff-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.backup-history-row small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 .slot-settings-list,

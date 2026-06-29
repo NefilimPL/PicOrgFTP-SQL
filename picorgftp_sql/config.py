@@ -572,7 +572,7 @@ def save_config(config, raw_config=None, preserve_secrets=None):
             M: _pick_secret(K, M, config[K][M]),
         },
         p: config.get(p, K),
-        w: config.get(w, SQL_UPDATE_TEMPLATE),
+        w: config.get(w, ""),
         ft: config.get(ft, True),
         u: config.get(u, True),
         SLOT_DEFS_KEY: config.get(SLOT_DEFS_KEY),

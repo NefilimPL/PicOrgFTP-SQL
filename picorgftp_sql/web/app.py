@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
-from .. import common, config, data_store, settings, storage_settings
+from .. import common, config, data_store, settings, sqlite_backup, storage_settings
 from ..bootstrap import initialize_application_runtime
 from ..common import (
     AUTO_CONTENT_FIT_KEY,
@@ -45,7 +45,6 @@ from ..common import (
     SECURITY_SETTINGS_KEY,
     SQL_AVAILABLE_COLUMNS_KEY,
     SQL_COLUMN_MAP_KEY,
-    SQL_UPDATE_TEMPLATE,
     TRANSLATION_API_KEY,
     TRANSLATION_SETTINGS_KEY,
     ft,
@@ -59,6 +58,7 @@ from ..legacy_import import import_legacy_to_sqlite
 from ..logging_utils import log_error
 from ..services.ftp_service import sync_remote_files
 from ..services.sql_service import detect_available_columns, extract_presence_context
+from ..sqlite_maintenance import repair_sqlite_database
 from ..workflow_utils import build_product_directory, parse_slot_filename, sanitize_path_segment
 from ..web_image_import import (
     ImageImportError,
@@ -147,6 +147,8 @@ _RATE_LIMITS: Dict[str, List[float]] = {}
 _RATE_LIMITS_LOCK = threading.Lock()
 _UPLOAD_SCAN_RESULTS: Dict[str, Dict[str, Any]] = {}
 _UPLOAD_SCAN_RESULTS_LOCK = threading.Lock()
+_BACKUP_SCHEDULER_STOP = threading.Event()
+_BACKUP_SCHEDULER_THREAD: threading.Thread | None = None
 RATE_LIMIT_LOGIN_ATTEMPTS = 20
 RATE_LIMIT_LOGIN_WINDOW_SECONDS = 10 * 60
 RATE_LIMIT_UPLOAD_ATTEMPTS = 80
@@ -1563,7 +1565,11 @@ def _sync_result_to_sql(
                 payload["skipped"] = True
                 payload["reason"] = "nie znaleziono wiersza produktu dla tego EAN"
                 return payload
-        template = config.CONFIG.get(w, SQL_UPDATE_TEMPLATE) or SQL_UPDATE_TEMPLATE
+        template = str(config.CONFIG.get(w, "") or "").strip()
+        if not template:
+            payload["skipped"] = True
+            payload["reason"] = "nie skonfigurowano zapytania SQL"
+            return payload
         for prefix, filename in saved_by_prefix.items():
             column = _safe_sql_identifier(sql_map.get(prefix, ""))
             if not column:
@@ -1572,7 +1578,7 @@ def _sync_result_to_sql(
             if not parsed:
                 continue
             short_name = f"{ean}_{prefix}{parsed.extension}"
-            query = template.format(col=column, filename=short_name, ean=ean)
+            query = template.format(col=column, column=column, filename=short_name, ean=ean)
             cur.execute(query)
             rowcount = _cursor_rowcount(cur)
             if rowcount != 0:
@@ -3258,6 +3264,53 @@ def _enrich_photo_payload(photos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return enriched
 
 
+def _run_due_sqlite_backups_once() -> Dict[str, Any]:
+    settings_payload = storage_settings.load_backup_settings()
+    slots = sqlite_backup.due_schedule_slots(settings_payload)
+    if not slots:
+        return {"created": 0, "slots": []}
+    backup_dir = storage_settings.resolve_backup_dir()
+    result = sqlite_backup.create_backup(
+        storage_settings.resolve_sqlite_path(),
+        backup_dir,
+        reason="scheduled",
+    )
+    sqlite_backup.enforce_retention(backup_dir, settings_payload.get("max_copies", 10))
+    updated = sqlite_backup.mark_schedule_slots_run(settings_payload, slots)
+    storage_settings.save_backup_settings(updated)
+    return {"created": 1, "slots": slots, "backup": result}
+
+
+def _backup_scheduler_loop() -> None:
+    while not _BACKUP_SCHEDULER_STOP.wait(60):
+        try:
+            _run_due_sqlite_backups_once()
+        except Exception as exc:
+            log_error(f"WEB scheduled SQLite backup failed: {exc}\n{traceback.format_exc()}")
+
+
+def _start_backup_scheduler() -> None:
+    global _BACKUP_SCHEDULER_THREAD
+    if _BACKUP_SCHEDULER_THREAD is not None and _BACKUP_SCHEDULER_THREAD.is_alive():
+        return
+    _BACKUP_SCHEDULER_STOP.clear()
+    _BACKUP_SCHEDULER_THREAD = threading.Thread(
+        target=_backup_scheduler_loop,
+        name="picorg-sqlite-backup-scheduler",
+        daemon=True,
+    )
+    _BACKUP_SCHEDULER_THREAD.start()
+
+
+def _stop_backup_scheduler() -> None:
+    global _BACKUP_SCHEDULER_THREAD
+    _BACKUP_SCHEDULER_STOP.set()
+    thread = _BACKUP_SCHEDULER_THREAD
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=2)
+    _BACKUP_SCHEDULER_THREAD = None
+
+
 def create_app() -> FastAPI:
     """Create the LAN web backend."""
 
@@ -3335,9 +3388,11 @@ def create_app() -> FastAPI:
         app.state.runtime_info = runtime_info
         cleanup_web_ftp_cache(force=True)
         cleanup_web_upload_cache(force=True)
+        _start_backup_scheduler()
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
+        _stop_backup_scheduler()
         with _ACTIVE_CLIENTS_LOCK:
             _flush_active_clients_locked(time.time(), force=True)
 
@@ -4009,6 +4064,69 @@ def create_app() -> FastAPI:
         app.state.runtime_info = _runtime_info()
         result["settings"] = settings_snapshot()
         result["message"] = "Zaimportowano stare dane do SQLite i wlaczono tryb SQLite."
+        return JSONResponse(result)
+
+    @app.post("/api/settings/sqlite/repair")
+    async def settings_sqlite_repair(request: Request) -> JSONResponse:
+        _require_admin(request)
+        database_path = storage_settings.resolve_sqlite_path()
+        backup_dir = storage_settings.resolve_backup_dir()
+        result = await run_in_threadpool(
+            repair_sqlite_database,
+            database_path,
+            backup_dir,
+        )
+        data_store.reset_active_store_cache()
+        config.initialize_config(interactive=False)
+        result["settings"] = settings_snapshot()
+        return JSONResponse(result)
+
+    @app.post("/api/settings/sqlite/backup")
+    async def settings_sqlite_backup(request: Request) -> JSONResponse:
+        _require_admin(request)
+        result = await run_in_threadpool(
+            sqlite_backup.create_backup,
+            storage_settings.resolve_sqlite_path(),
+            storage_settings.resolve_backup_dir(),
+            reason="manual",
+        )
+        sqlite_backup.enforce_retention(
+            storage_settings.resolve_backup_dir(),
+            storage_settings.load_backup_settings().get("max_copies", 10),
+        )
+        return JSONResponse(result)
+
+    @app.get("/api/settings/sqlite/backups")
+    def settings_sqlite_backups(request: Request) -> Dict[str, Any]:
+        _require_admin(request)
+        return {"items": sqlite_backup.list_backups(storage_settings.resolve_backup_dir())}
+
+    @app.post("/api/settings/sqlite/backup-diff")
+    async def settings_sqlite_backup_diff(request: Request) -> JSONResponse:
+        _require_admin(request)
+        payload = await request.json()
+        backup_path = str(payload.get("backup_path") if isinstance(payload, dict) else "")
+        result = await run_in_threadpool(
+            sqlite_backup.diff_databases,
+            storage_settings.resolve_sqlite_path(),
+            backup_path,
+        )
+        return JSONResponse(result)
+
+    @app.post("/api/settings/sqlite/restore")
+    async def settings_sqlite_restore(request: Request) -> JSONResponse:
+        _require_admin(request)
+        payload = await request.json()
+        backup_path = str(payload.get("backup_path") if isinstance(payload, dict) else "")
+        result = await run_in_threadpool(
+            sqlite_backup.restore_backup,
+            storage_settings.resolve_sqlite_path(),
+            backup_path,
+            storage_settings.resolve_backup_dir(),
+        )
+        data_store.reset_active_store_cache()
+        config.initialize_config(interactive=False)
+        result["settings"] = settings_snapshot()
         return JSONResponse(result)
 
     @app.post("/api/settings/sql-columns/detect")

@@ -14,7 +14,6 @@ from ..common import (
     N,
     P,
     Q,
-    SQL_UPDATE_TEMPLATE,
     b,
     c,
     p,
@@ -58,6 +57,19 @@ def _safe_identifier(value):
 
 def _quote_sql_literal(value: str) -> str:
     return "'" + str(value or "").replace("'", "''") + "'"
+
+
+def configured_sql_query(config_dict):
+    return str(config_dict.get(w, "") or "").strip()
+
+
+def sql_placeholder_metadata():
+    return [
+        {"token": "{ean}", "description": "Aktualny EAN produktu uzywany w WHERE."},
+        {"token": "{filename}", "description": "Nazwa wygenerowanego pliku zdjecia."},
+        {"token": "{col}", "description": "Kolumna SQL przypisana do slotu."},
+        {"token": "{column}", "description": "Alias dla {col}."},
+    ]
 
 
 def extract_update_table_ref(template):
@@ -186,7 +198,15 @@ def build_column_detection_query(template, db_type):
 def detect_available_columns(config_dict):
     """Detect available SQL columns for the configured UPDATE target."""
 
-    template = config_dict.get(w, SQL_UPDATE_TEMPLATE) or SQL_UPDATE_TEMPLATE
+    template = configured_sql_query(config_dict)
+    if not template:
+        return {
+            "ok": False,
+            "columns": [],
+            "table": "",
+            "preview": "",
+            "message": "Nie skonfigurowano zapytania SQL.",
+        }
     db_type = str(config_dict.get(p, K) or K).lower()
     query_info = build_column_detection_query(template, db_type)
     if query_info is None:
@@ -267,7 +287,9 @@ def extract_presence_context(config_dict, ean):
 
     if not ean:
         return None
-    template = config_dict.get(w, SQL_UPDATE_TEMPLATE) or SQL_UPDATE_TEMPLATE
+    template = configured_sql_query(config_dict)
+    if not template:
+        return None
     table = normalize_table_ref(extract_update_table_ref(template))
     if not table:
         return None

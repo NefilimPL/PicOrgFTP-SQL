@@ -115,4 +115,9 @@ def test_import_legacy_files_to_sqlite(tmp_path: Path) -> None:
     assert store.load_lists()["__ENTRY_RECORDS__"][0]["PRODUCT_ID"] == "PRD-1"
     assert store.load_users()[0]["username"] == "operator"
     assert store.load_history()[0]["id"] == "hist-1"
-    assert store.load_file_index_cache() == {"version": 1, "names": ["MAGGIORE"]}
+    imported_index = store.load_file_index_cache()
+    assert imported_index["version"] == 1
+    assert imported_index["names"] == ["MAGGIORE"]
+    assert isinstance(imported_index["generated_at"], str)
+    assert imported_index["generated_at"].endswith("Z")
+    assert "T" in imported_index["generated_at"]

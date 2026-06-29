@@ -213,6 +213,38 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("password", html.input_names)
         self.assertTrue(html.has_tag("button", type="submit"))
         self.assertEqual(html.duplicate_ids, set())
+        login_source = LOGIN_HTML.read_text(encoding="utf-8")
+        self.assertNotIn('value="admin"', login_source)
+
+    def test_login_js_remembers_last_successful_username(self) -> None:
+        source = (ROOT / "picorgftp_sql" / "web" / "static" / "login.js").read_text(encoding="utf-8")
+
+        self.assertIn('LAST_LOGIN_USERNAME_KEY = "picorg-last-login-username"', source)
+        self.assertIn("localStorage.getItem(LAST_LOGIN_USERNAME_KEY)", source)
+        self.assertIn("localStorage.setItem(LAST_LOGIN_USERNAME_KEY, username)", source)
+        self.assertLess(
+            source.index("localStorage.setItem(LAST_LOGIN_USERNAME_KEY, username)"),
+            source.index('window.location.href = "/"'),
+        )
+
+    def test_backup_history_and_diff_modals_exist(self) -> None:
+        html = _parse(INDEX_HTML)
+
+        self.assertIn("backupHistoryModal", html.ids)
+        self.assertIn("backupHistoryOutput", html.ids)
+        self.assertIn("backupDiffModal", html.ids)
+        self.assertIn("backupDiffOutput", html.ids)
+
+    def test_backup_modals_render_above_settings_modal(self) -> None:
+        html = _parse(INDEX_HTML)
+        modal_classes = {
+            attrs.get("id"): set(attrs.get("class", "").split())
+            for tag, attrs in html.tags
+            if tag == "div" and attrs.get("id") in {"backupHistoryModal", "backupDiffModal"}
+        }
+
+        self.assertIn("nested-modal", modal_classes["backupHistoryModal"])
+        self.assertIn("nested-modal", modal_classes["backupDiffModal"])
 
 
 if __name__ == "__main__":

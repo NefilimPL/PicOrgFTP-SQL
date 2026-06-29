@@ -23,7 +23,7 @@ from .excel_utils import (
     TYPE_HEADER,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 LIST_SHEETS = ("NAZWY", "TYPY", "MODELE", "KOLORY", "DODATKI")
 ENTRY_HEADERS = (
     EAN_HEADER,
@@ -61,6 +61,85 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
         "+00:00", "Z"
     )
+
+
+def _iso_from_timestamp(value: object) -> str:
+    if isinstance(value, str):
+        text = value.strip()
+        if text.endswith("Z") and "T" in text:
+            return text
+        try:
+            value = float(text)
+        except (TypeError, ValueError):
+            return _now_iso()
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return _now_iso()
+    return datetime.fromtimestamp(number, timezone.utc).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+
+
+def _history_created_at(payload: dict[str, object]) -> str:
+    return _iso_from_timestamp(
+        payload.get("created_at") or payload.get("ts") or payload.get("time")
+    )
+
+
+def _segment_key(value: object) -> str:
+    text = _upper(value)
+    for ch in text:
+        if ch.isalnum():
+            return ch if ch.isascii() else "_"
+    return "_"
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _migrate_web_history_created_at(conn: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(web_history)").fetchall()
+    }
+    if "ts" not in columns or "created_at" in columns:
+        return
+    conn.execute("ALTER TABLE web_history RENAME TO web_history_legacy_ts")
+    conn.execute(
+        """
+        CREATE TABLE web_history (
+            id TEXT PRIMARY KEY,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    for row in conn.execute(
+        "SELECT id, payload_json, ts FROM web_history_legacy_ts"
+    ).fetchall():
+        payload = _json_loads(row["payload_json"], {})
+        if not isinstance(payload, dict):
+            payload = {}
+        created_at = _iso_from_timestamp(
+            payload.get("created_at") or payload.get("ts") or row["ts"]
+        )
+        payload["id"] = _text(row["id"]) or f"hist-{uuid.uuid4().hex}"
+        payload["created_at"] = created_at
+        payload["ts"] = created_at
+        conn.execute(
+            """
+            INSERT INTO web_history (id, payload_json, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (payload["id"], _json_dumps(payload), created_at),
+        )
+    conn.execute("DROP TABLE web_history_legacy_ts")
 
 
 def _flatten_config(payload: dict[str, object]) -> list[tuple[str, object]]:
@@ -155,12 +234,6 @@ class SqliteStore:
                     applied_at TEXT NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS app_settings (
-                    key TEXT PRIMARY KEY,
-                    value_json TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
                 CREATE TABLE IF NOT EXISTS app_config_values (
                     path TEXT PRIMARY KEY,
                     value_json TEXT NOT NULL,
@@ -215,7 +288,7 @@ class SqliteStore:
                 CREATE TABLE IF NOT EXISTS web_history (
                     id TEXT PRIMARY KEY,
                     payload_json TEXT NOT NULL,
-                    ts REAL NOT NULL
+                    created_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS file_index_cache (
@@ -223,6 +296,32 @@ class SqliteStore:
                     payload_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS file_index_segments (
+                    segment_key TEXT NOT NULL,
+                    section TEXT NOT NULL,
+                    lookup_key TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (segment_key, section, lookup_key)
+                );
+                """
+            )
+            _migrate_web_history_created_at(conn)
+            conn.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_web_history_created_at
+                    ON web_history(created_at);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_ean
+                    ON product_entries(ean);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_identity
+                    ON product_entries(name, type_name, model);
+                CREATE INDEX IF NOT EXISTS idx_app_config_values_updated_at
+                    ON app_config_values(updated_at);
+                CREATE INDEX IF NOT EXISTS idx_file_index_segments_lookup
+                    ON file_index_segments(segment_key, section, lookup_key);
+                CREATE INDEX IF NOT EXISTS idx_file_index_segments_updated_at
+                    ON file_index_segments(updated_at);
                 """
             )
             version_row = conn.execute(
@@ -249,9 +348,11 @@ class SqliteStore:
             ).fetchall()
             if rows:
                 return _unflatten_config(rows)
-            row = conn.execute(
-                "SELECT value_json FROM app_settings WHERE key = 'config'"
-            ).fetchone()
+            row = None
+            if _table_exists(conn, "app_settings"):
+                row = conn.execute(
+                    "SELECT value_json FROM app_settings WHERE key = 'config'"
+                ).fetchone()
         if not row:
             return {}
         payload = _json_loads(row["value_json"], {})
@@ -264,7 +365,11 @@ class SqliteStore:
         rows = _flatten_config(dict(payload or {}))
         with self.connection() as conn:
             conn.execute("DELETE FROM app_config_values")
-            conn.execute("DELETE FROM app_settings WHERE key = 'config'")
+            if _table_exists(conn, "app_settings"):
+                conn.execute("DELETE FROM app_settings WHERE key = 'config'")
+                row = conn.execute("SELECT COUNT(*) FROM app_settings").fetchone()
+                if int(row[0] or 0) == 0:
+                    conn.execute("DROP TABLE app_settings")
             updated_at = _now_iso()
             for path, value in rows:
                 conn.execute(
@@ -589,7 +694,7 @@ class SqliteStore:
         self.initialize()
         with self.connection() as conn:
             rows = conn.execute(
-                "SELECT payload_json FROM web_history ORDER BY ts, rowid"
+                "SELECT payload_json FROM web_history ORDER BY created_at, rowid"
             ).fetchall()
         records = []
         for row in rows:
@@ -610,19 +715,18 @@ class SqliteStore:
                 record_id = _text(item.get("id")) or f"hist-{uuid.uuid4().hex}"
                 payload = dict(item)
                 payload["id"] = record_id
-                try:
-                    ts = float(payload.get("ts") or 0.0)
-                except (TypeError, ValueError):
-                    ts = 0.0
+                created_at = _history_created_at(payload)
+                payload["created_at"] = created_at
+                payload["ts"] = created_at
                 conn.execute(
                     """
-                    INSERT INTO web_history (id, payload_json, ts)
+                    INSERT INTO web_history (id, payload_json, created_at)
                     VALUES (?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         payload_json = excluded.payload_json,
-                        ts = excluded.ts
+                        created_at = excluded.created_at
                     """,
-                    (record_id, _json_dumps(payload), ts),
+                    (record_id, _json_dumps(payload), created_at),
                 )
 
     def append_history(self, record: dict[str, object]) -> None:
@@ -634,20 +738,19 @@ class SqliteStore:
         record_id = _text(record.get("id")) or f"hist-{uuid.uuid4().hex}"
         payload = dict(record)
         payload["id"] = record_id
-        try:
-            ts = float(payload.get("ts") or 0.0)
-        except (TypeError, ValueError):
-            ts = 0.0
+        created_at = _history_created_at(payload)
+        payload["created_at"] = created_at
+        payload["ts"] = created_at
         with self.connection() as conn:
             conn.execute(
                 """
-                INSERT INTO web_history (id, payload_json, ts)
+                INSERT INTO web_history (id, payload_json, created_at)
                 VALUES (?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     payload_json = excluded.payload_json,
-                    ts = excluded.ts
+                    created_at = excluded.created_at
                 """,
-                (record_id, _json_dumps(payload), ts),
+                (record_id, _json_dumps(payload), created_at),
             )
 
     def load_file_index_cache(self, key: str = "default") -> dict[str, Any]:
@@ -670,6 +773,8 @@ class SqliteStore:
         """Store local file index cache payload."""
 
         self.initialize()
+        snapshot = dict(payload or {})
+        snapshot["generated_at"] = _iso_from_timestamp(snapshot.get("generated_at"))
         with self.connection() as conn:
             conn.execute(
                 """
@@ -679,5 +784,59 @@ class SqliteStore:
                     payload_json = excluded.payload_json,
                     updated_at = excluded.updated_at
                 """,
-                (_text(key) or "default", _json_dumps(payload or {}), _now_iso()),
+                (
+                    _text(key) or "default",
+                    _json_dumps(snapshot),
+                    snapshot["generated_at"],
+                ),
             )
+        self.save_file_index_segments(snapshot)
+
+    def save_file_index_segments(self, snapshot: dict[str, object]) -> int:
+        """Store segmented lookup rows for the local file index cache."""
+
+        self.initialize()
+        generated_at = _iso_from_timestamp(snapshot.get("generated_at"))
+        rows = []
+        names = snapshot.get("names", [])
+        for name in names if isinstance(names, list) else []:
+            rows.append((_segment_key(name), "names", _upper(name), name))
+        for section in ("types", "models", "colors", "extras", "files"):
+            section_payload = snapshot.get(section, {})
+            if not isinstance(section_payload, dict):
+                continue
+            for lookup_key, value in section_payload.items():
+                segment = _segment_key(str(lookup_key).split("\x1f", 1)[0])
+                rows.append((segment, section, str(lookup_key), value))
+        with self.connection() as conn:
+            conn.execute("DELETE FROM file_index_segments")
+            for segment, section, lookup_key, value in rows:
+                conn.execute(
+                    """
+                    INSERT INTO file_index_segments
+                        (segment_key, section, lookup_key, payload_json, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (segment, section, lookup_key, _json_dumps(value), generated_at),
+                )
+        return len(rows)
+
+    def load_file_index_segment(self, segment_key: str, section: str, lookup_key: str):
+        """Return one segmented local file index payload, or None."""
+
+        self.initialize()
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT payload_json FROM file_index_segments
+                WHERE segment_key = ? AND section = ? AND lookup_key = ?
+                """,
+                (
+                    _segment_key(segment_key) if segment_key else "_",
+                    _text(section),
+                    _text(lookup_key),
+                ),
+            ).fetchone()
+        if not row:
+            return None
+        return _json_loads(row["payload_json"], None)

@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import unittest
 
+from picorgftp_sql import common
 from picorgftp_sql.config import (
     _normalize_color_field_labels,
     _normalize_processing_settings,
     _normalize_security_settings,
 )
+
+
+class DefaultConfigSafetyTests(unittest.TestCase):
+    def test_default_sql_query_is_empty_and_contains_no_production_url(self) -> None:
+        self.assertEqual(common.DEFAULT_CONFIG["sql_query"], "")
+        self.assertEqual(common.SQL_UPDATE_TEMPLATE, "")
+        self.assertNotIn("xml.wipmebgroup.pl", repr(common.DEFAULT_CONFIG))
+        self.assertNotIn("object_query_1", repr(common.DEFAULT_CONFIG))
 
 
 class ConfigTests(unittest.TestCase):

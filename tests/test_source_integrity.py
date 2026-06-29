@@ -309,6 +309,43 @@ class SourceIntegrityTests(unittest.TestCase):
                 for field in expected_fields:
                     self.assertIn(field, block)
 
+    def test_web_sql_settings_show_placeholder_help(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+        sql_start = source.index("function renderSettingsSql")
+        slots_start = source.index("function renderSettingsSlots", sql_start)
+        sql_body = source[sql_start:slots_start]
+
+        self.assertIn("sqlPlaceholderHelp", source)
+        self.assertIn("{ean}", sql_body)
+        self.assertIn("{filename}", sql_body)
+        self.assertIn("{col}", sql_body)
+        self.assertIn("{column}", sql_body)
+
+    def test_web_settings_include_sqlite_repair_and_backup_controls(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("repairSqliteDatabaseButton", source)
+        self.assertIn("manualSqliteBackupButton", source)
+        self.assertIn("backupHistoryButton", source)
+        self.assertIn("sqliteBackupScheduleGrid", source)
+        self.assertIn("/api/settings/sqlite/repair", source)
+        self.assertIn("/api/settings/sqlite/backup", source)
+        self.assertIn("/api/settings/sqlite/backups", source)
+        self.assertIn("/api/settings/sqlite/restore", source)
+        self.assertIn("/api/settings/sqlite/backup-diff", source)
+
+    def test_sqlite_backup_schedule_uses_day_hour_slots_and_nested_modal_layer(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        js_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+        css_source = (root / "picorgftp_sql" / "web" / "static" / "app.css").read_text(encoding="utf-8")
+
+        self.assertIn('input.name = "sqlite_backup_slot"', js_source)
+        self.assertIn("input.value = `${key}:${hour}`", js_source)
+        self.assertIn('querySelectorAll(\'[name="sqlite_backup_slot"]:checked\')', js_source)
+        self.assertIn(".modal-view.nested-modal.active", css_source)
+
     def test_web_settings_field_groups_are_full_width_cards(self) -> None:
         css_path = (
             Path(__file__).resolve().parents[1]

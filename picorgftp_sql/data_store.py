@@ -75,6 +75,12 @@ class SqliteDataStoreAdapter:
     def save_file_index_cache(self, payload: dict[str, object]) -> None:
         self.store.save_file_index_cache(payload)
 
+    def save_file_index_segments(self, snapshot: dict[str, object]) -> int:
+        return self.store.save_file_index_segments(snapshot)
+
+    def load_file_index_segment(self, segment_key: str, section: str, lookup_key: str):
+        return self.store.load_file_index_segment(segment_key, section, lookup_key)
+
 
 def reset_active_store_cache() -> None:
     """Clear the cached active store, mainly for tests and runtime switches."""

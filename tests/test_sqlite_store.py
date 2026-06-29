@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -24,7 +25,6 @@ def test_schema_creates_expected_tables(tmp_path: Path) -> None:
         }
     assert {
         "schema_version",
-        "app_settings",
         "app_config_values",
         "slot_definitions",
         "sql_column_map",
@@ -73,7 +73,7 @@ def test_config_is_stored_as_readable_path_rows(tmp_path: Path) -> None:
             )
         }
         legacy_config = conn.execute(
-            "SELECT 1 FROM app_settings WHERE key = 'config'"
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_settings'"
         ).fetchone()
 
     assert legacy_config is None
@@ -93,6 +93,15 @@ def test_load_config_falls_back_to_legacy_json_blob(tmp_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             """
+            CREATE TABLE app_settings (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             INSERT INTO app_settings (key, value_json, updated_at)
             VALUES ('config', ?, ?)
             """,
@@ -103,6 +112,38 @@ def test_load_config_falls_back_to_legacy_json_blob(tmp_path: Path) -> None:
         "db_type": "mssql",
         "ftp": {"host": "legacy.example.com"},
     }
+
+
+def test_save_config_drops_legacy_app_settings_when_it_becomes_empty(tmp_path: Path) -> None:
+    db_path = tmp_path / "data.sqlite"
+    store = SqliteStore(str(db_path))
+    store.initialize()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE app_settings (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO app_settings (key, value_json, updated_at)
+            VALUES ('config', ?, ?)
+            """,
+            ('{"db_type": "mssql"}', "2026-06-25T12:00:00.000Z"),
+        )
+
+    store.save_config({"db_type": "mysql"})
+
+    with sqlite3.connect(db_path) as conn:
+        app_settings_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_settings'"
+        ).fetchone()
+
+    assert app_settings_exists is None
 
 
 def test_sqlite_timestamps_are_iso_8601_text(tmp_path: Path) -> None:
@@ -140,6 +181,94 @@ def test_sqlite_timestamps_are_iso_8601_text(tmp_path: Path) -> None:
         assert isinstance(value, str)
         assert value.endswith("Z")
         assert "T" in value
+
+
+def test_web_history_schema_uses_iso_created_at(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.initialize()
+    store.save_history(
+        [
+            {
+                "id": "hist-1",
+                "ts": 1782392554.3,
+                "time": "2026-06-25 13:02:34",
+                "user": "admin",
+                "ean": "5901234567890",
+            }
+        ]
+    )
+
+    with sqlite3.connect(tmp_path / "data.sqlite") as conn:
+        columns = {row[1]: row[2] for row in conn.execute("PRAGMA table_info(web_history)")}
+        row = conn.execute("SELECT created_at, payload_json FROM web_history WHERE id = 'hist-1'").fetchone()
+
+    assert columns["created_at"].upper() == "TEXT"
+    assert isinstance(row[0], str)
+    assert row[0].endswith("Z")
+    assert "T" in row[0]
+    payload = json.loads(row[1])
+    assert payload["created_at"] == row[0]
+
+
+def test_migration_converts_legacy_web_history_ts_real(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE schema_version (version INTEGER NOT NULL, applied_at TEXT NOT NULL);
+            INSERT INTO schema_version VALUES (2, '2026-06-25T12:00:00.000Z');
+            CREATE TABLE web_history (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, ts REAL NOT NULL);
+            INSERT INTO web_history VALUES (
+                'hist-1',
+                '{"id":"hist-1","ts":1782392554.3,"user":"admin","ean":"5901234567890"}',
+                1782392554.3
+            );
+            """
+        )
+
+    store = SqliteStore(str(db_path))
+    store.initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1]: row[2] for row in conn.execute("PRAGMA table_info(web_history)")}
+        row = conn.execute("SELECT created_at, payload_json FROM web_history WHERE id = 'hist-1'").fetchone()
+
+    assert "created_at" in columns
+    assert row[0].endswith("Z")
+    payload = json.loads(row[1])
+    assert payload["created_at"] == row[0]
+    assert isinstance(payload["ts"], str)
+    assert payload["ts"].endswith("Z")
+
+
+def test_file_index_segments_are_saved_by_name_prefix(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.initialize()
+    snapshot = {
+        "version": 1,
+        "root": "C:/photos",
+        "generated_at": "2026-06-25T13:02:34.300Z",
+        "names": ["LUNA", "MAGGIORE"],
+        "types": {"LUNA": ["SZAFKA"], "MAGGIORE": ["KOMODA"]},
+        "models": {},
+        "colors": {},
+        "extras": {},
+        "files": {},
+    }
+
+    store.save_file_index_cache(snapshot)
+
+    with sqlite3.connect(tmp_path / "data.sqlite") as conn:
+        rows = conn.execute(
+            """
+            SELECT segment_key, section, lookup_key, payload_json
+            FROM file_index_segments
+            ORDER BY segment_key, section, lookup_key
+            """
+        ).fetchall()
+
+    assert ("L", "names", "LUNA", '"LUNA"') in rows
+    assert ("M", "names", "MAGGIORE", '"MAGGIORE"') in rows
 
 
 def test_slots_and_sql_columns_roundtrip(tmp_path: Path) -> None:
