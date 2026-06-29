@@ -51,6 +51,13 @@ class DesktopSmokeCiTests(unittest.TestCase):
     def test_localization_files_are_valid_json(self) -> None:
         localization_dir = ROOT / "picorgftp_sql" / "Localization"
         expected_files = {"pl.json", "eng.json", "ua.json"}
+        required_product_field_keys = {
+            "product_fields_section",
+            "product_fields_hint",
+            "product_field_custom_label",
+            "product_field_enabled",
+            "product_field_required",
+        }
         found_files = {path.name for path in localization_dir.glob("*.json")}
 
         self.assertEqual(expected_files - found_files, set())
@@ -59,6 +66,11 @@ class DesktopSmokeCiTests(unittest.TestCase):
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 self.assertIsInstance(payload, dict)
                 self.assertGreater(len(payload), 10)
+                self.assertEqual(
+                    required_product_field_keys - set(payload),
+                    set(),
+                    path.name,
+                )
 
     def test_required_image_assets_exist_for_desktop_and_web(self) -> None:
         required_assets = [

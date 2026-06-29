@@ -30,6 +30,7 @@ from .common import (
     PROCESSING_SETTINGS_KEY,
     SECURITY_SETTINGS_KEY,
     COLOR_FIELD_LABELS_KEY,
+    PRODUCT_FIELDS_KEY,
     AK,
     SLOT_DEFS_KEY,
     TRANSLATION_API_KEY,
@@ -51,6 +52,7 @@ from .common import (
 )
 from .encryption import decrypt, encrypt
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
+from .product_fields import normalize_product_fields
 from . import settings
 
 CONFIG_PATH = A.path.join(settings.AC, "config.json")
@@ -273,6 +275,10 @@ def _merge_raw_config(raw_config, config_copy):
             config_copy.get(COLOR_FIELD_LABELS_KEY, {}),
         )
     )
+    config_copy[PRODUCT_FIELDS_KEY] = normalize_product_fields(
+        raw_config.get(PRODUCT_FIELDS_KEY),
+        legacy_color_labels=raw_config.get(COLOR_FIELD_LABELS_KEY),
+    )
     raw_slot_defs = raw_config.get(SLOT_DEFS_KEY, config_copy.get(SLOT_DEFS_KEY))
     slot_defs, _ = normalize_slot_definitions(raw_slot_defs)
     config_copy[SLOT_DEFS_KEY] = slot_defs
@@ -376,6 +382,9 @@ def load_config(interactive=I):
                     config_copy.get(SECURITY_SETTINGS_KEY)
                 ),
                 COLOR_FIELD_LABELS_KEY: config_copy.get(COLOR_FIELD_LABELS_KEY, {}),
+                PRODUCT_FIELDS_KEY: normalize_product_fields(
+                    config_copy.get(PRODUCT_FIELDS_KEY),
+                ),
                 TRANSLATION_SETTINGS_KEY: {
                     TRANSLATION_PROVIDER_KEY: translation_defaults.get(
                         TRANSLATION_PROVIDER_KEY, TRANSLATION_PROVIDER_DEFAULT
@@ -447,6 +456,10 @@ def load_config(interactive=I):
                 COLOR_FIELD_LABELS_KEY,
                 config_copy.get(COLOR_FIELD_LABELS_KEY, {}),
             )
+        )
+        config_copy[PRODUCT_FIELDS_KEY] = normalize_product_fields(
+            raw_config.get(PRODUCT_FIELDS_KEY),
+            legacy_color_labels=raw_config.get(COLOR_FIELD_LABELS_KEY),
         )
         raw_slot_defs = raw_config.get(SLOT_DEFS_KEY, config_copy.get(SLOT_DEFS_KEY))
         slot_defs, _ = normalize_slot_definitions(raw_slot_defs)
@@ -590,6 +603,10 @@ def save_config(config, raw_config=None, preserve_secrets=None):
         ),
         COLOR_FIELD_LABELS_KEY: _normalize_color_field_labels(
             config.get(COLOR_FIELD_LABELS_KEY, {})
+        ),
+        PRODUCT_FIELDS_KEY: normalize_product_fields(
+            config.get(PRODUCT_FIELDS_KEY),
+            legacy_color_labels=config.get(COLOR_FIELD_LABELS_KEY),
         ),
         TRANSLATION_SETTINGS_KEY: {
             TRANSLATION_PROVIDER_KEY: translation_settings.get(

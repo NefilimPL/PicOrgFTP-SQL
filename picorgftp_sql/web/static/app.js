@@ -33,7 +33,7 @@ const state = {
   listFilter: "",
   declinedListPrompts: new Set(),
   activeListPromptKeys: new Set(),
-  colorFieldLabels: {},
+  productFields: {},
   ftpPreviewLoading: new Set(),
   ftpPreviewBackgroundLoading: new Set(),
   ftpPreviewCache: new Map(),
@@ -1148,10 +1148,15 @@ const fieldListLabels = {
   extra: "Dodatek",
 };
 
-const defaultColorFieldLabels = {
-  color1: "Kolor 1",
-  color2: "Kolor 2",
-  color3: "Kolor 3",
+const productFieldDefinitions = {
+  name: { input: "name", label: "Nazwa", required: true },
+  type: { input: "type_name", label: "Typ", required: true },
+  model: { input: "model", label: "Model", required: true },
+  color1: { input: "color1", label: "Kolor 1", required: true },
+  color2: { input: "color2", label: "Kolor 2", required: false },
+  color3: { input: "color3", label: "Kolor 3", required: false },
+  extra: { input: "extra", label: "Dodatek", required: false },
+  ean: { input: "ean", label: "EAN", required: false },
 };
 
 function cleanDisplayLabel(value) {
@@ -1162,19 +1167,51 @@ function cleanDisplayLabel(value) {
 }
 
 function productFieldLabel(fieldName) {
-  if (fieldName in defaultColorFieldLabels) {
-    return cleanDisplayLabel(state.colorFieldLabels?.[fieldName]) || defaultColorFieldLabels[fieldName];
+  const key =
+    Object.entries(productFieldDefinitions).find(([_key, item]) => item.input === fieldName)?.[0] ||
+    fieldName;
+  const definition = productFieldDefinitions[key];
+  if (!definition) return fieldListLabels[fieldName] || fieldName;
+  return cleanDisplayLabel(state.productFields?.[key]?.label) || definition.label;
+}
+
+function normalizedProductFields(raw = {}) {
+  return Object.fromEntries(
+    Object.entries(productFieldDefinitions).map(([key, defaults]) => {
+      const item = raw?.[key] || {};
+      const enabled = item.enabled !== false;
+      return [
+        key,
+        {
+          label: cleanDisplayLabel(item.label),
+          enabled,
+          required: enabled && ("required" in item ? Boolean(item.required) : defaults.required),
+        },
+      ];
+    })
+  );
+}
+
+function applyProductFieldSettings() {
+  state.productFields = normalizedProductFields(state.productFields);
+  for (const [key, definition] of Object.entries(productFieldDefinitions)) {
+    const item = state.productFields[key];
+    const container = document.querySelector(`[data-product-field="${key}"]`);
+    const label = document.querySelector(`[data-product-field-label="${key}"]`);
+    const input = productForm.elements[definition.input];
+    if (!container || !label || !input) continue;
+    container.hidden = !item.enabled;
+    input.disabled = !item.enabled;
+    input.required = item.enabled && item.required;
+    if (!item.enabled) input.value = "";
+    label.textContent = `${item.label || definition.label}${item.required ? " *" : ""}`;
   }
-  return fieldListLabels[fieldName] || fieldName;
+  findByEanButton.hidden = !state.productFields.ean.enabled;
+  updateFieldWarnings();
 }
 
 function applyProductFieldLabels() {
-  for (const fieldName of Object.keys(defaultColorFieldLabels)) {
-    const node = document.querySelector(`[data-product-field-label="${fieldName}"]`);
-    if (node) {
-      node.textContent = productFieldLabel(fieldName);
-    }
-  }
+  applyProductFieldSettings();
 }
 
 function listHasValue(listKey, value) {
@@ -4660,13 +4697,14 @@ function fillForm(entry, options = {}) {
   productForm.elements.color3.value = entry.color3 || "";
   productForm.elements.extra.value = entry.extra || "";
   productForm.elements.ean.value = entry.ean || "";
+  applyProductFieldSettings();
   formStatus.textContent = entry.product_id ? `Wczytano ${entry.product_id}` : "Wczytano wpis";
   updateFieldWarnings();
   setTimeout(() => {
     state.suppressAutoSearch = false;
   }, 200);
   if (options.loadPhotos) {
-    loadPhotosForEntry(entry).catch((error) => {
+    loadPhotosForEntry({ ...entry, ...formPayload() }).catch((error) => {
       formStatus.textContent = `Wpis wczytany, ale zdjecia nie: ${error.message}`;
     });
   }
@@ -4678,7 +4716,7 @@ async function refreshData() {
   state.entries = payload.entries || [];
   state.fileIndex = payload.file_index || state.fileIndex;
   state.ftpEnabled = payload.ftp_enabled !== false;
-  state.colorFieldLabels = payload.color_field_labels || state.colorFieldLabels || {};
+  state.productFields = payload.product_fields || state.productFields || {};
   renderDatalists();
   applyProductFieldLabels();
   renderEntrySelect();
@@ -4708,7 +4746,7 @@ async function loadBootstrap(options = {}) {
   state.entries = payload.entries || [];
   state.fileIndex = payload.file_index || null;
   state.ftpEnabled = payload.ftp_enabled !== false;
-  state.colorFieldLabels = payload.color_field_labels || {};
+  state.productFields = payload.product_fields || {};
   state.processing = payload.processing || state.processing || {};
   state.security = payload.security || state.security || {};
   renderDatalists();
@@ -4889,6 +4927,52 @@ function settingsFieldGroup(titleText, ...nodes) {
     if (node) group.appendChild(node);
   }
   return group;
+}
+
+function productFieldSettingsList(settings = {}) {
+  const list = document.createElement("div");
+  list.className = "product-field-settings-list wide-field";
+  const normalized = normalizedProductFields(settings);
+  for (const [key, definition] of Object.entries(productFieldDefinitions)) {
+    const item = normalized[key];
+    const row = document.createElement("div");
+    const title = document.createElement("strong");
+    const labelField = inputField(
+      `product_field_${key}_label`,
+      "Wlasna nazwa",
+      item.label,
+      { placeholder: definition.label }
+    );
+    const enabled = checkField(`product_field_${key}_enabled`, "Aktywne", item.enabled);
+    const required = checkField(`product_field_${key}_required`, "Wymagane", item.required);
+    const enabledInput = enabled.querySelector("input");
+    const requiredInput = required.querySelector("input");
+    row.className = "product-field-settings-row";
+    row.dataset.productFieldSetting = key;
+    title.textContent = definition.label;
+    const syncRequired = () => {
+      requiredInput.disabled = !enabledInput.checked;
+      if (!enabledInput.checked) requiredInput.checked = false;
+    };
+    enabledInput.addEventListener("change", syncRequired);
+    syncRequired();
+    row.append(title, labelField, enabled, required);
+    list.appendChild(row);
+  }
+  return list;
+}
+
+function collectProductFieldSettings(data) {
+  return Object.fromEntries(
+    Object.keys(productFieldDefinitions).map((key) => [
+      key,
+      {
+        label: data.get(`product_field_${key}_label`) || "",
+        enabled: data.has(`product_field_${key}_enabled`),
+        required: data.has(`product_field_${key}_required`),
+      },
+    ])
+  );
 }
 
 function credentialField(name, label, isSet = false, attrs = {}) {
@@ -5499,7 +5583,7 @@ function settingsSaveButton(form, buildPayload) {
       state.ftpEnabled = state.settings.ftp?.enabled !== false;
       state.processing = state.settings.processing || state.processing || {};
       state.security = state.settings.security || state.security || {};
-      state.colorFieldLabels = state.settings.color_field_labels || state.colorFieldLabels || {};
+      state.productFields = state.settings.product_fields || state.productFields || {};
       updateAdminUi();
       if (Array.isArray(state.settings.slots)) {
         renderSlots(state.settings.slots);
@@ -5542,6 +5626,10 @@ function renderSettingsApp() {
   const versionNote = document.createElement("p");
   versionNote.className = "settings-note wide-field";
   versionNote.textContent = `Wersja programu: ${s.version || "dev"}`;
+  const productFieldsNote = document.createElement("p");
+  productFieldsNote.className = "settings-note wide-field";
+  productFieldsNote.textContent =
+    "Pusta nazwa zachowuje etykiete domyslna. Wylaczone pola sa pomijane przy zapisie i przetwarzaniu.";
   form.append(
     settingsFieldGroup("Runtime aplikacji",
       versionNote,
@@ -5598,10 +5686,9 @@ function renderSettingsApp() {
         "Ustawienie tylko dla aktualnego uzytkownika. Pokazuje lub ukrywa blok Pomiary z czasami kolejki i operacji."
       )
     ),
-    settingsFieldGroup("Nazwy pol kolorow",
-      inputField("color1", "Kolor 1", s.color_field_labels?.color1 || ""),
-      inputField("color2", "Kolor 2", s.color_field_labels?.color2 || ""),
-      inputField("color3", "Kolor 3", s.color_field_labels?.color3 || "")
+    settingsFieldGroup("Pola produktu",
+      productFieldsNote,
+      productFieldSettingsList(s.product_fields || {})
     )
   );
   settingsSaveButton(form, (data) => ({
@@ -5611,11 +5698,7 @@ function renderSettingsApp() {
       database_location_mode: data.get("database_location_mode"),
       database_path: data.get("database_path"),
       local_file_index: data.has("local_file_index"),
-      color_field_labels: {
-        color1: data.get("color1"),
-        color2: data.get("color2"),
-        color3: data.get("color3"),
-      },
+      product_fields: collectProductFieldSettings(data),
     },
     sqlite_backup: collectSqliteBackupSchedule(form),
   }));
@@ -6225,7 +6308,7 @@ async function loadSettings() {
   state.ftpEnabled = state.settings.ftp?.enabled !== false;
   state.processing = state.settings.processing || state.processing || {};
   state.security = state.settings.security || state.security || {};
-  state.colorFieldLabels = state.settings.color_field_labels || state.colorFieldLabels || {};
+  state.productFields = state.settings.product_fields || state.productFields || {};
   updateAdminUi();
   applyTimingDetailsVisibility();
   applyProductFieldLabels();
@@ -6495,6 +6578,7 @@ function resetCurrentDraft({ clearOutput = true, status = "" } = {}) {
   window.clearTimeout(state.backgroundFtpPreviewTimer);
   state.loadedEntryOriginal = null;
   state.lastAutoSearchKey = "";
+  applyProductFieldSettings();
   renderSlots();
   renderEntrySelect();
   updateFieldWarnings();

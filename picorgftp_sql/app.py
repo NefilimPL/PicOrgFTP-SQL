@@ -40,6 +40,13 @@ from .product_state import (
     ProductState,
     merge_lookup_state as merge_product_lookup_state,
 )
+from .product_fields import (
+    DEFAULT_PRODUCT_FIELD_LABELS,
+    PRODUCT_FIELD_KEYS,
+    PRODUCT_FIELD_VALUE_KEYS,
+    missing_required_fields,
+    normalize_product_fields,
+)
 from .slot_utils import (
     normalize_slot_definitions,
     normalize_slot_prefix,
@@ -844,7 +851,7 @@ class App(BU.Tk):
                     "Uzupelnij dane produktu, aby przygotowac nowy zestaw zdjec.",
                 )
             )
-        if name_value and type_value and model_value and A.var_color1.get().strip():
+        if not A._missing_required_product_fields():
             storage_text = build_product_directory(
                 l,
                 name_value,
@@ -1324,21 +1331,25 @@ class App(BU.Tk):
     def _normalize_color_vars(A, *, apply_changes=J):
         """Return color slots compacted to the left and optionally update the form."""
 
-        normalized = normalize_color_slots(
-            (
-                A.var_color1.get(),
-                A.var_color2.get(),
-                A.var_color3.get(),
-            )
-        )
+        color_keys = ("color1", "color2", "color3")
+        settings = A._product_field_settings()
+        raw_values = [
+            G(getattr(A, FORM_TRACKED_VAR_ATTRS[key]).get() or B).strip().upper()
+            if settings[key]["enabled"]
+            else B
+            for key in color_keys
+        ]
+        if all(settings[key]["enabled"] for key in color_keys):
+            normalized = normalize_color_slots(raw_values)
+        else:
+            normalized = raw_values
         if apply_changes:
-            current = (
+            current = [
                 G(A.var_color1.get() or B).strip().upper(),
                 G(A.var_color2.get() or B).strip().upper(),
                 G(A.var_color3.get() or B).strip().upper(),
-            )
-            normalized_tuple = tuple(normalized)
-            if current != normalized_tuple:
+            ]
+            if current != normalized:
                 A.suppress_scan = J
                 try:
                     A.var_color1.set(normalized[0])
@@ -1429,22 +1440,35 @@ class App(BU.Tk):
             "extra": A._normalize_entry_part(A.var_extra.get(), extra=J),
         }
 
-    def _default_color_field_name(A, field_key):
-        """Return the localized fallback name for a color field."""
+    def _product_field_settings(A):
+        """Return the normalized product-field configuration."""
+
+        return normalize_product_fields(
+            D.get(PRODUCT_FIELDS_KEY),
+            legacy_color_labels=D.get(COLOR_FIELD_LABELS_KEY),
+        )
+
+    def _default_product_field_name(A, field_key):
+        """Return the localized fallback label for a product field."""
 
         label_map = {
+            "name": NAME_LABEL,
+            "type": TYPE_LABEL,
+            "model": MODEL_LABEL,
             "color1": COLOR1_LABEL,
             "color2": COLOR2_LABEL,
             "color3": COLOR3_LABEL,
-        }
-        fallback_map = {
-            "color1": "Kolor 1",
-            "color2": "Kolor 2",
-            "color3": "Kolor 3",
+            "extra": EXTRA_LABEL,
+            "ean": DEFAULT_PRODUCT_FIELD_LABELS["ean"],
         }
         label_text = G(label_map.get(field_key) or B).strip()
         label_text = label_text.rstrip(":").rstrip("*").strip()
-        return label_text or fallback_map.get(field_key, "Kolor")
+        return label_text or DEFAULT_PRODUCT_FIELD_LABELS.get(field_key, field_key)
+
+    def _default_color_field_name(A, field_key):
+        """Backward-compatible color-label helper."""
+
+        return A._default_product_field_name(field_key)
 
     def _normalize_color_field_label_overrides(A, raw_labels):
         """Normalize custom UI labels for color fields."""
@@ -1464,24 +1488,66 @@ class App(BU.Tk):
     def _get_color_field_label_text(A, field_key):
         """Return the current UI label text for a color field."""
 
-        labels = A._normalize_color_field_label_overrides(
-            D.get(COLOR_FIELD_LABELS_KEY, {})
-        )
-        base_label = labels.get(field_key) or A._default_color_field_name(field_key)
-        return f"{base_label}*:" if field_key == "color1" else f"{base_label}:"
+        return A._product_field_label_text(field_key)
+
+    def _product_field_label_text(A, field_key):
+        item = A._product_field_settings()[field_key]
+        base_label = item["label"] or A._default_product_field_name(field_key)
+        return f"{base_label}{'*' if item['required'] else ''}:"
+
+    def _clear_disabled_product_field_values(A):
+        for field_key, item in A._product_field_settings().items():
+            if item["enabled"]:
+                continue
+            var_attr = FORM_TRACKED_VAR_ATTRS.get(field_key)
+            tracked_var = getattr(A, var_attr, I) if var_attr else I
+            if tracked_var is not I:
+                tracked_var.set(B)
+
+    def _missing_required_product_fields(A):
+        settings = A._product_field_settings()
+        values = {
+            PRODUCT_FIELD_VALUE_KEYS[field_key]: A._get_form_field_raw_value(field_key)
+            for field_key in PRODUCT_FIELD_KEYS
+        }
+        missing = missing_required_fields(values, settings)
+        return [
+            settings[field_key]["label"]
+            or A._default_product_field_name(field_key)
+            for field_key, _label in missing
+        ]
+
+    def _required_product_fields_message(A, base_message):
+        missing_fields = A._missing_required_product_fields()
+        if not missing_fields:
+            return base_message
+        return f"{base_message}\n\n{', '.join(missing_fields)}"
+
+    def _refresh_product_fields(A):
+        A._clear_disabled_product_field_values()
+        settings = A._product_field_settings()
+        for field_key, item in settings.items():
+            meta = Aj(A, "_form_field_meta", {}).get(field_key, {})
+            field_frame = meta.get("frame")
+            label = meta.get("label")
+            if field_frame:
+                try:
+                    if item["enabled"]:
+                        field_frame.grid()
+                    else:
+                        field_frame.grid_remove()
+                except E:
+                    pass
+            if label:
+                try:
+                    label.configure(text=A._product_field_label_text(field_key))
+                except E:
+                    pass
 
     def _refresh_color_field_labels(A):
         """Apply current custom color field labels to the form."""
 
-        for field_key in ("color1", "color2", "color3"):
-            meta = Aj(A, "_form_field_meta", {}).get(field_key, {})
-            label = meta.get("label")
-            if not label:
-                continue
-            try:
-                label.configure(text=A._get_color_field_label_text(field_key))
-            except E:
-                pass
+        A._refresh_product_fields()
 
     def _get_form_field_raw_value(A, field_key):
         """Return the current user-visible value for a tracked form field."""
@@ -1525,12 +1591,7 @@ class App(BU.Tk):
 
         if A.suppress_scan or A._preserve_loaded_binding():
             return h
-        return (
-            bool(A.var_name.get().strip())
-            and bool(A.var_type.get().strip())
-            and bool(A.var_model.get().strip())
-            and bool(A.var_color1.get().strip())
-        )
+        return not A._missing_required_product_fields()
 
     def _register_form_field(A, field_key, field, label, widget, restore_button):
         """Remember widgets that belong to a tracked form field."""
@@ -1980,10 +2041,7 @@ class App(BU.Tk):
         A._queue_dashboard_refresh()
         if (
             keep_values
-            and A.var_name.get().strip()
-            and A.var_type.get().strip()
-            and A.var_model.get().strip()
-            and A.var_color1.get().strip()
+            and not A._missing_required_product_fields()
             and not A.suppress_scan
         ):
             A._schedule_existing_files_lookup()
@@ -3702,7 +3760,7 @@ class App(BU.Tk):
             form_card,
             row=1,
             column=0,
-            label_text=NAME_LABEL,
+            label_text=A._product_field_label_text("name"),
             field_key="name",
             textvariable=A.var_name,
             values=A.lists[n],
@@ -3725,7 +3783,7 @@ class App(BU.Tk):
             form_card,
             row=1,
             column=2,
-            label_text=TYPE_LABEL,
+            label_text=A._product_field_label_text("type"),
             field_key="type",
             textvariable=A.var_type,
             values=A.lists[t],
@@ -3747,7 +3805,7 @@ class App(BU.Tk):
             form_card,
             row=1,
             column=3,
-            label_text=MODEL_LABEL,
+            label_text=A._product_field_label_text("model"),
             field_key="model",
             textvariable=A.var_model,
             values=A.lists[s],
@@ -3823,7 +3881,7 @@ class App(BU.Tk):
             form_card,
             row=2,
             column=3,
-            label_text=EXTRA_LABEL,
+            label_text=A._product_field_label_text("extra"),
             field_key="extra",
             textvariable=A.var_extra,
             values=A.lists[d],
@@ -3873,7 +3931,11 @@ class App(BU.Tk):
         ean_value_field.grid(row=0, column=1, sticky="ew")
         ean_value_field.columnconfigure(0, weight=1)
         ean_value_field.columnconfigure(1, weight=0)
-        N_ = C.Label(ean_value_field, text=EAN_OPTIONAL_LABEL, style="Form.TLabel")
+        N_ = C.Label(
+            ean_value_field,
+            text=A._product_field_label_text("ean"),
+            style="Form.TLabel",
+        )
         N_.grid(row=0, column=0, sticky="w", pady=(0, 2))
         A._add_tooltip(
             N_,
@@ -3906,6 +3968,7 @@ class App(BU.Tk):
         A.entry_ean.bind("<FocusOut>", A._on_ean_focus_out)
         A.entry_ean.bind("<Return>", lambda _event: A._search_current_entry())
         A._register_form_field("ean", ean_value_field, N_, A.entry_ean, ean_restore)
+        A._refresh_product_fields()
 
         actions = C.Frame(form_card, style="Card.TFrame")
         actions.grid(row=3, column=2, columnspan=2, sticky="ew", padx=3, pady=(0, 2))
@@ -6620,13 +6683,12 @@ class App(BU.Tk):
         if A.is_processing:
             O.showwarning(OPERATION_TITLE, PROCESSING_MSG)
             return
-        if not (
-            A.var_name.get().strip()
-            and A.var_type.get().strip()
-            and A.var_model.get().strip()
-            and A.var_color1.get().strip()
-        ):
-            O.showwarning(INCOMPLETE_DATA_MSG, MISSING_FIELDS_MSG)
+        missing_fields = A._missing_required_product_fields()
+        if missing_fields:
+            O.showwarning(
+                INCOMPLETE_DATA_MSG,
+                A._required_product_fields_message(MISSING_FIELDS_MSG),
+            )
             return
         C_ = [
             (FILETYPE_IMAGES_LABEL, "*.jpg *.jpeg *.png *.pdf *.doc *.docx"),
@@ -6639,13 +6701,12 @@ class App(BU.Tk):
     def _on_drop(C, event, idx):
         if C.is_processing:
             return
-        if not (
-            C.var_name.get().strip()
-            and C.var_type.get().strip()
-            and C.var_model.get().strip()
-            and C.var_color1.get().strip()
-        ):
-            O.showwarning(INCOMPLETE_DATA_MSG, MISSING_FIELDS_MSG)
+        missing_fields = C._missing_required_product_fields()
+        if missing_fields:
+            O.showwarning(
+                INCOMPLETE_DATA_MSG,
+                C._required_product_fields_message(MISSING_FIELDS_MSG),
+            )
             return
         if C.dragging_idx is not I:
             source_idx = C.dragging_idx
@@ -7002,20 +7063,20 @@ class App(BU.Tk):
         S = "sql_time"
         P = "sql_error_msg"
         K = "error_set"
-        if not (
-            C.var_name.get().strip()
-            and C.var_type.get().strip()
-            and C.var_model.get().strip()
-            and C.var_color1.get().strip()
-        ):
+        missing_fields = C._missing_required_product_fields()
+        if missing_fields:
             O.showwarning(
                 NO_DATA_MSG,
-                FILL_REQUIRED_BEFORE_SUBMIT_MSG,
+                C._required_product_fields_message(
+                    FILL_REQUIRED_BEFORE_SUBMIT_MSG
+                ),
             )
             return
+        C._clear_disabled_product_field_values()
         if C.var_extra.get().strip() == B:
             C.var_extra.set(L)
-        if not C.var_ean.get().strip():
+        field_settings = C._product_field_settings()
+        if not C.var_ean.get().strip() and field_settings["ean"]["enabled"]:
             Ai_ = BI.askstring(
                 EAN_PROMPT_TITLE,
                 EAN_MISSING_PROMPT,
@@ -7023,6 +7084,8 @@ class App(BU.Tk):
             if Ai_ is I or Ai_.strip() == B:
                 Ai_ = q
             C.var_ean.set(Ai_.strip())
+        elif not field_settings["ean"]["enabled"]:
+            C.var_ean.set(q)
         AE_ = C.var_name.get().strip()
         AF_ = C.var_type.get().strip()
         AG_ = C.var_model.get().strip()
@@ -8151,10 +8214,11 @@ class App(BU.Tk):
         K_ = B.var_color2.get().strip()
         M_ = B.var_color3.get().strip()
         N_ = B.var_extra.get().strip()
-        if not (F_ and G_ and H_ and I_):
+        missing_fields = B._missing_required_product_fields()
+        if missing_fields:
             O.showwarning(
                 NO_DATA_MSG,
-                FILL_REQUIRED_BEFORE_OPEN_MSG,
+                B._required_product_fields_message(FILL_REQUIRED_BEFORE_OPEN_MSG),
             )
             return
         C_ = build_product_directory(
@@ -8540,18 +8604,15 @@ class App(BU.Tk):
         local_file_index_var = F.BooleanVar(
             value=bool(D.get(LOCAL_FILE_INDEX_KEY, J))
         )
-        color_field_labels = A._normalize_color_field_label_overrides(
-            D.get(COLOR_FIELD_LABELS_KEY, {})
-        )
-        color1_label_var = F.StringVar(
-            value=color_field_labels.get("color1") or A._default_color_field_name("color1")
-        )
-        color2_label_var = F.StringVar(
-            value=color_field_labels.get("color2") or A._default_color_field_name("color2")
-        )
-        color3_label_var = F.StringVar(
-            value=color_field_labels.get("color3") or A._default_color_field_name("color3")
-        )
+        product_field_settings = A._product_field_settings()
+        product_field_vars = {
+            field_key: {
+                "label": F.StringVar(value=item["label"]),
+                "enabled": F.BooleanVar(value=item["enabled"]),
+                "required": F.BooleanVar(value=item["required"]),
+            }
+            for field_key, item in product_field_settings.items()
+        }
         system_unlocked = Ay
 
         def _choose_base_dir():
@@ -8759,48 +8820,89 @@ class App(BU.Tk):
         ).grid(row=11, column=1, columnspan=2, padx=5, pady=(6, 0), sticky="w")
         _slabel(
             system_tab,
-            text=LANG.get(
-                "color_field_labels_section",
-                "Własne nazwy pól kolorów",
-            ),
+            text=LANG.get("product_fields_section", "Pola produktu"),
             style="SettingsHeader.TLabel",
         ).grid(row=12, column=0, columnspan=3, padx=5, pady=(10, 4), sticky="w")
-        _slabel(
-            system_tab,
-            text=LANG.get("color1_custom_label", "Pole 1:"),
-        ).grid(row=13, column=0, padx=5, pady=4, sticky=R)
-        C.Entry(system_tab, textvariable=color1_label_var, width=30).grid(
-            row=13, column=1, columnspan=2, padx=5, pady=4, sticky="ew"
+        product_fields_frame = C.Frame(system_tab, style="Settings.TFrame")
+        product_fields_frame.grid(
+            row=13,
+            column=0,
+            columnspan=3,
+            padx=5,
+            pady=(0, 4),
+            sticky="ew",
+        )
+        product_fields_frame.columnconfigure(1, weight=1)
+        _slabel(product_fields_frame, text=LANG.get("field_name_label", "Pole")).grid(
+            row=0, column=0, padx=(0, 8), pady=(0, 2), sticky="w"
         )
         _slabel(
-            system_tab,
-            text=LANG.get("color2_custom_label", "Pole 2:"),
-        ).grid(row=14, column=0, padx=5, pady=4, sticky=R)
-        C.Entry(system_tab, textvariable=color2_label_var, width=30).grid(
-            row=14, column=1, columnspan=2, padx=5, pady=4, sticky="ew"
-        )
+            product_fields_frame,
+            text=LANG.get("product_field_custom_label", "Własna nazwa"),
+        ).grid(row=0, column=1, padx=4, pady=(0, 2), sticky="w")
         _slabel(
-            system_tab,
-            text=LANG.get("color3_custom_label", "Pole 3:"),
-        ).grid(row=15, column=0, padx=5, pady=4, sticky=R)
-        C.Entry(system_tab, textvariable=color3_label_var, width=30).grid(
-            row=15, column=1, columnspan=2, padx=5, pady=4, sticky="ew"
-        )
+            product_fields_frame,
+            text=LANG.get("product_field_enabled", "Aktywne"),
+        ).grid(row=0, column=2, padx=4, pady=(0, 2), sticky="w")
+        _slabel(
+            product_fields_frame,
+            text=LANG.get("product_field_required", "Wymagane"),
+        ).grid(row=0, column=3, padx=4, pady=(0, 2), sticky="w")
+        product_field_required_checks = {}
+
+        def _sync_product_field_required(field_key):
+            variables = product_field_vars[field_key]
+            enabled = bool(variables["enabled"].get())
+            if not enabled:
+                variables["required"].set(Ay)
+            required_check = product_field_required_checks.get(field_key)
+            if required_check:
+                required_check.configure(state=X if enabled else V)
+
+        for field_row, field_key in A0(PRODUCT_FIELD_KEYS, start=1):
+            variables = product_field_vars[field_key]
+            _slabel(
+                product_fields_frame,
+                text=A._default_product_field_name(field_key),
+            ).grid(row=field_row, column=0, padx=(0, 8), pady=3, sticky="w")
+            C.Entry(
+                product_fields_frame,
+                textvariable=variables["label"],
+                width=28,
+            ).grid(row=field_row, column=1, padx=4, pady=3, sticky="ew")
+            C.Checkbutton(
+                product_fields_frame,
+                variable=variables["enabled"],
+                command=lambda key=field_key: _sync_product_field_required(key),
+            ).grid(row=field_row, column=2, padx=4, pady=3, sticky="w")
+            required_check = C.Checkbutton(
+                product_fields_frame,
+                variable=variables["required"],
+            )
+            required_check.grid(
+                row=field_row,
+                column=3,
+                padx=4,
+                pady=3,
+                sticky="w",
+            )
+            product_field_required_checks[field_key] = required_check
+            _sync_product_field_required(field_key)
         _slabel(
             system_tab,
             text=LANG.get(
-                "color_field_labels_hint",
-                "Zmienia tylko nazwy pól w formularzu. Nie zmienia nazw kolumn w Excelu ani SQL.",
+                "product_fields_hint",
+                "Pusta nazwa zachowuje etykietę domyślną. Wyłączone pola są pomijane przy zapisie i przetwarzaniu.",
             ),
             style="SettingsHint.TLabel",
-            wraplength=520,
+            wraplength=620,
             justify="left",
-        ).grid(row=16, column=0, columnspan=3, padx=5, pady=(2, 0), sticky="w")
+        ).grid(row=14, column=0, columnspan=3, padx=5, pady=(2, 0), sticky="w")
         system_admin_btn = C.Button(
             system_tab, text=Ag_, command=_unlock_system_settings
         )
         system_admin_btn.grid(
-            row=17, column=0, columnspan=3, padx=5, pady=(6, 0), sticky="e"
+            row=15, column=0, columnspan=3, padx=5, pady=(6, 0), sticky="e"
         )
         system_tab.columnconfigure(1, weight=1)
         _set_system_state(Ay)
@@ -10202,11 +10304,14 @@ class App(BU.Tk):
             LANG_PREF = new_lang_pref
             localization.LANG_PREF = LANG_PREF
             D[LOCAL_FILE_INDEX_KEY] = bool(local_file_index_var.get())
-            D[COLOR_FIELD_LABELS_KEY] = A._normalize_color_field_label_overrides(
+            D[PRODUCT_FIELDS_KEY] = normalize_product_fields(
                 {
-                    "color1": color1_label_var.get(),
-                    "color2": color2_label_var.get(),
-                    "color3": color3_label_var.get(),
+                    field_key: {
+                        "label": variables["label"].get(),
+                        "enabled": variables["enabled"].get(),
+                        "required": variables["required"].get(),
+                    }
+                    for field_key, variables in product_field_vars.items()
                 }
             )
             D[TRANSLATION_SETTINGS_KEY] = {
@@ -10310,7 +10415,7 @@ class App(BU.Tk):
                     or A._get_slot_preview_path(slot)
                 ):
                     slot["content_fit"] = default_content_fit
-            A._refresh_color_field_labels()
+            A._refresh_product_fields()
             if restart_needed and not language_changed:
                 O.showinfo(SETTINGS_LABEL, APP_SETTINGS_RESTART_MSG)
             A.sql_column_map = updated_sql_map

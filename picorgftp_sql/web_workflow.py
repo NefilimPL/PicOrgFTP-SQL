@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 import os
 import shutil
 import time
@@ -17,6 +17,11 @@ from .common import (
     SLOT_DEFS_KEY,
 )
 from .image_utils import fit_image_to_content
+from .product_fields import (
+    effective_product_values,
+    missing_required_fields,
+    normalize_product_fields,
+)
 from .slot_utils import normalize_slot_definitions
 from .workflow_utils import (
     NO_EAN_PLACEHOLDER,
@@ -200,27 +205,41 @@ def slot_definitions_from_config(config_dict: dict) -> list[dict[str, str]]:
     return slots
 
 
-def validate_product_form(form: WebProductForm) -> list[str]:
+def effective_product_form(
+    form: WebProductForm,
+    field_settings=None,
+) -> WebProductForm:
+    """Return a form with every disabled product value cleared."""
+
+    values = effective_product_values(asdict(form), field_settings)
+    return replace(
+        form,
+        **{key: values[key] for key in asdict(form) if key in values},
+    )
+
+
+def validate_product_form(form: WebProductForm, field_settings=None) -> list[str]:
     """Return validation errors for the browser product form."""
 
-    errors = []
-    if not _clean(form.name):
-        errors.append("Nazwa produktu jest wymagana.")
-    if not _clean(form.type_name):
-        errors.append("Typ produktu jest wymagany.")
-    if not _clean(form.model):
-        errors.append("Model produktu jest wymagany.")
-    if not _clean(form.color1):
-        errors.append("Kolor 1 jest wymagany.")
-    ean = _clean(form.ean)
+    settings = normalize_product_fields(field_settings)
+    effective = effective_product_form(form, settings)
+    errors = [
+        f"Pole „{label}” jest wymagane."
+        for _key, label in missing_required_fields(asdict(effective), settings)
+    ]
+    ean = _clean(effective.ean)
     if ean and ean != NO_EAN_PLACEHOLDER and (not ean.isdigit() or len(ean) != 13):
         errors.append("EAN musi miec 13 cyfr albo zostac pusty.")
     return errors
 
 
-def normalized_product_payload(form: WebProductForm) -> dict[str, object]:
+def normalized_product_payload(
+    form: WebProductForm,
+    field_settings=None,
+) -> dict[str, object]:
     """Normalize product fields in the same direction as the desktop workflow."""
 
+    form = effective_product_form(form, field_settings)
     colors = normalize_color_slots([form.color1, form.color2, form.color3])
     extra = normalize_extra_segment(form.extra, fallback=NO_EXTRA_PLACEHOLDER)
     ean = _clean(form.ean) or NO_EAN_PLACEHOLDER
@@ -367,16 +386,19 @@ def process_web_uploads(
     uploaded_slots: Sequence[WebUploadedSlot],
     options: WebProcessingOptions | None = None,
     allow_empty: bool = False,
+    field_settings=None,
 ) -> WebProcessingResult:
     """Save uploaded slot files into the product folder tree."""
 
-    errors = validate_product_form(form)
+    field_settings = normalize_product_fields(field_settings)
+    form = effective_product_form(form, field_settings)
+    errors = validate_product_form(form, field_settings)
     if errors:
         raise ValueError(" ".join(errors))
     if not uploaded_slots and not allow_empty:
         raise ValueError("Dodaj przynajmniej jeden plik do slotu.")
 
-    payload = normalized_product_payload(form)
+    payload = normalized_product_payload(form, field_settings)
     options = options or WebProcessingOptions()
     output_dir = build_product_directory(
         base_output_dir,

@@ -802,6 +802,30 @@ h2 {
   margin-bottom: 0;
 }
 
+.product-field-settings-list {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.product-field-settings-row {
+  display: grid;
+  grid-template-columns:
+    minmax(110px, 0.6fr)
+    minmax(220px, 1fr)
+    minmax(130px, 0.5fr)
+    minmax(130px, 0.5fr);
+  gap: 10px;
+  align-items: end;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.product-field-settings-row > strong {
+  align-self: center;
+}
+
 .nested-grid {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
@@ -1808,6 +1832,7 @@ button.slot-badge.on:hover {
 
   .entry-match,
   .slot-settings-row,
+  .product-field-settings-row,
   .user-row {
     grid-template-columns: 1fr;
   }

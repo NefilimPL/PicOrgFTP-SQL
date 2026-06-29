@@ -27,6 +27,7 @@ Program actions are logged to `logs/changes_log.txt` and errors to `logs/error_l
 
 ### Features
 - Product form with auto-complete lists (name/type/model/colors/extras) backed by an Excel workbook; prompts to add missing values and includes a list editor.
+- Product fields in desktop and web settings can rename, enable/disable, and require all eight fields (name, type, model, color 1-3, extra, EAN); the normalized settings persist through SQLite data mode or `config.json` in legacy mode.
 - Optional EAN (13-digit) with `BRAK-EAN` fallback; quick "Load" to fetch existing entries and images; "Open folder" shortcut.
 - Drag-and-drop image slots with thumbnails; move images between slots; per-slot status plus LOCAL/FTP/SQL presence badges; clear/reset actions.
 - Automated file organization into `_ZDJECIA PRZEROBIONE_` with a structured folder tree and normalized filenames based on EAN, slot, and product data.
@@ -144,6 +145,7 @@ Działania programu są zapisywane w `logs/changes_log.txt`, a ewentualne błęd
 
 ### Funkcje
 - Formularz danych produktu z listami podpowiedzi (nazwa/typ/model/kolory/dodatki) opartymi o plik Excel; pytania o dodanie nowych pozycji i edytor list.
+- Pola produktu w ustawieniach desktopowych i webowych pozwalają zmienić nazwę, włączać/wyłączać i oznaczać jako wymagane wszystkie osiem pól (nazwa, typ, model, kolory 1-3, dodatek, EAN); znormalizowane ustawienia zapisują się w trybie SQLite albo w `config.json` w trybie legacy.
 - Opcjonalny EAN (13 cyfr) z zamiennikiem `BRAK-EAN`; szybkie wczytywanie danych po EAN i skrót do otwarcia katalogu produktu.
 - Sloty zdjęć z drag-and-drop i miniaturami; przenoszenie zdjęć między slotami; statusy oraz oznaczenia LOCAL/FTP/SQL; czyszczenie/reset.
 - Automatyczna organizacja plików w `_ZDJECIA PRZEROBIONE_` z drzewem katalogów i ustandaryzowaną nazwą opartą o EAN, slot i dane produktu.
