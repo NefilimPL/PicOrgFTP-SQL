@@ -46,6 +46,35 @@ class _MemoryUpload:
 
 
 class WebAppFileTests(unittest.TestCase):
+    def test_output_identity_ignores_disabled_product_fields(self) -> None:
+        first = web_app.WebProductForm(
+            name="MAGGIORE",
+            type_name="KOMODA",
+            model="MA03",
+            color1="BIALY",
+            ean="5901234567890",
+        )
+        second = web_app.WebProductForm(
+            name="MAGGIORE",
+            type_name="STOL",
+            model="MA03",
+            color1="BIALY",
+            ean="5901234567890",
+        )
+
+        with (
+            patch.object(
+                web_app.config,
+                "CONFIG",
+                {"product_fields": {"type": {"enabled": False}}},
+            ),
+            patch.object(web_app.settings, "l", "C:\\processed"),
+        ):
+            self.assertEqual(
+                web_app._output_identity(first),
+                web_app._output_identity(second),
+            )
+
     def test_delete_token_can_be_resolved_after_file_disappears(self) -> None:
         temp_dir = _workspace_temp("web_app_delete_token")
         try:

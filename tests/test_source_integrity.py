@@ -9,6 +9,19 @@ import unittest
 
 
 class SourceIntegrityTests(unittest.TestCase):
+    def test_web_process_applies_active_product_field_settings(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "app.py"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        self.assertIn("field_settings = _active_product_field_settings()", source)
+        self.assertIn("product = effective_product_form(product, field_settings)", source)
+        self.assertIn("field_settings=field_settings", source)
+
     def test_app_imports_all_used_excel_header_constants(self) -> None:
         app_path = Path(__file__).resolve().parents[1] / "picorgftp_sql" / "app.py"
         source = app_path.read_text(encoding="utf-8")

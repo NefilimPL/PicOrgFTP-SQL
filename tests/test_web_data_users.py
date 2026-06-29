@@ -704,6 +704,86 @@ class WebDataUserTests(unittest.TestCase):
         )
         self.assertTrue(saved_config[web_data.SECURITY_SETTINGS_KEY]["antivirus_scan_uploads"])
 
+    def test_update_settings_normalizes_and_saves_product_fields(self) -> None:
+        saved_configs = []
+        cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+
+        with (
+            patch.object(web_data.config, "CONFIG", cfg),
+            patch.object(
+                web_data,
+                "save_config",
+                side_effect=lambda payload, **_kwargs: saved_configs.append(
+                    json.loads(json.dumps(payload))
+                ),
+            ),
+            patch.object(web_data, "settings_snapshot", return_value={}),
+        ):
+            web_data.update_settings(
+                {
+                    "app": {
+                        "product_fields": {
+                            "model": {
+                                "label": "Wersja",
+                                "enabled": False,
+                                "required": True,
+                            }
+                        }
+                    }
+                }
+            )
+
+        self.assertEqual(
+            saved_configs[0]["product_fields"]["model"],
+            {"label": "Wersja", "enabled": False, "required": False},
+        )
+
+    def test_save_web_entry_clears_disabled_values_before_persistence(self) -> None:
+        cfg = {
+            "product_fields": {
+                "type": {"enabled": False},
+            }
+        }
+
+        with (
+            patch.object(web_data.config, "CONFIG", cfg),
+            patch.object(
+                web_data,
+                "save_ean_entry",
+                return_value={"ok": True},
+            ) as save_entry,
+        ):
+            web_data.save_web_entry(
+                {
+                    "name": "N",
+                    "type_name": "KOMODA",
+                    "model": "M",
+                    "color1": "C",
+                }
+            )
+
+        self.assertEqual(save_entry.call_args.args[2], "")
+
+    def test_settings_snapshot_exposes_normalized_product_fields(self) -> None:
+        cfg = {
+            "product_fields": {
+                "name": {
+                    "label": "Kolekcja",
+                    "enabled": True,
+                    "required": True,
+                }
+            }
+        }
+
+        with (
+            patch.object(web_data.config, "CONFIG", cfg),
+            patch.object(web_data, "load_users", return_value=[]),
+        ):
+            snapshot = web_data.settings_snapshot()
+
+        self.assertEqual(snapshot["product_fields"]["name"]["label"], "Kolekcja")
+        self.assertTrue(snapshot["product_fields"]["color1"]["required"])
+
     def test_settings_secret_values_returns_current_decrypted_config(self) -> None:
         config_payload = {
             web_data.H: {web_data.N: "ftp-user", web_data.M: "ftp-pass"},

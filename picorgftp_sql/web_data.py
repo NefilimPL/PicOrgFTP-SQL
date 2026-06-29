@@ -74,6 +74,12 @@ from .services.sql_service import (
 )
 from .file_index import LocalFileIndex
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
+from .product_fields import (
+    PRODUCT_FIELDS_KEY,
+    effective_product_values,
+    missing_required_fields,
+    normalize_product_fields,
+)
 from .workflow_utils import (
     build_product_directory,
     parse_slot_filename,
@@ -273,6 +279,10 @@ def load_web_data() -> dict[str, object]:
         "entries": [entry_to_payload(entry) for entry in entries],
         "file_index": file_index_status(start=True),
         "color_field_labels": dict(config.CONFIG.get(COLOR_FIELD_LABELS_KEY, {}) or {}),
+        "product_fields": normalize_product_fields(
+            config.CONFIG.get(PRODUCT_FIELDS_KEY),
+            legacy_color_labels=config.CONFIG.get(COLOR_FIELD_LABELS_KEY),
+        ),
         "ftp_enabled": bool(config.CONFIG.get(ft, True)),
     }
 
@@ -1277,6 +1287,19 @@ def find_entry_by_identity(*, product_id: str = "", ean: str = "") -> dict[str, 
 def save_web_entry(payload: dict[str, object]) -> dict[str, object]:
     """Create or update an Excel entry using the existing desktop helper."""
 
+    field_settings = normalize_product_fields(
+        config.CONFIG.get(PRODUCT_FIELDS_KEY),
+        legacy_color_labels=config.CONFIG.get(COLOR_FIELD_LABELS_KEY),
+    )
+    payload = effective_product_values(payload, field_settings)
+    missing = missing_required_fields(payload, field_settings)
+    if missing:
+        raise ValueError(
+            " ".join(
+                f"Pole „{label}” jest wymagane."
+                for _key, label in missing
+            )
+        )
     product_id = _text(payload.get("product_id"))
     ean = _text(payload.get("ean"))
     existing = find_entry_by_identity(product_id=product_id) if product_id else None
@@ -1284,7 +1307,7 @@ def save_web_entry(payload: dict[str, object]) -> dict[str, object]:
         existing = find_entry_by_identity(ean=ean)
     if existing:
         product_id = product_id or _text(existing.get("product_id"))
-        if not ean and _text(existing.get("ean")):
+        if field_settings["ean"]["enabled"] and not ean and _text(existing.get("ean")):
             ean = _text(existing.get("ean"))
     result = save_ean_entry(
         ean or NO_EAN_PLACEHOLDER,
@@ -1514,6 +1537,10 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
             for key, value in app_payload[COLOR_FIELD_LABELS_KEY].items()
             if key in {"color1", "color2", "color3"} and _text(value)
         }
+    if PRODUCT_FIELDS_KEY in app_payload:
+        cfg[PRODUCT_FIELDS_KEY] = normalize_product_fields(
+            app_payload.get(PRODUCT_FIELDS_KEY),
+        )
 
     if processing_payload:
         merged_processing = dict(cfg.get(PROCESSING_SETTINGS_KEY, {}) or {})
@@ -1655,6 +1682,10 @@ def settings_snapshot() -> dict[str, object]:
         "sql_available_columns_count": len(cfg.get(SQL_AVAILABLE_COLUMNS_KEY, []) or []),
         "sql_available_columns": cfg.get(SQL_AVAILABLE_COLUMNS_KEY, []) or [],
         "color_field_labels": cfg.get(COLOR_FIELD_LABELS_KEY, {}) or {},
+        "product_fields": normalize_product_fields(
+            cfg.get(PRODUCT_FIELDS_KEY),
+            legacy_color_labels=cfg.get(COLOR_FIELD_LABELS_KEY),
+        ),
         "slots": [
             {
                 "prefix": slot.get("prefix", ""),

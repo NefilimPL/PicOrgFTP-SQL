@@ -196,6 +196,50 @@ class WebWorkflowTests(unittest.TestCase):
 
         self.assertIn("EAN musi miec 13 cyfr albo zostac pusty.", errors)
 
+    def test_validation_uses_custom_required_labels_and_ignores_disabled_fields(
+        self,
+    ) -> None:
+        settings = {
+            "name": {
+                "label": "Kolekcja",
+                "enabled": True,
+                "required": True,
+            },
+            "type": {"enabled": False, "required": True},
+            "model": {"enabled": True, "required": False},
+            "color1": {"enabled": False, "required": True},
+        }
+        form = WebProductForm(
+            name="",
+            type_name="KOMODA",
+            model="",
+            color1="BIALY",
+        )
+
+        self.assertEqual(
+            validate_product_form(form, settings),
+            ["Pole „Kolekcja” jest wymagane."],
+        )
+        payload = normalized_product_payload(form, settings)
+        self.assertEqual(payload["type_name"], "")
+        self.assertEqual(payload["colors"], ["", "", ""])
+
+    def test_disabled_ean_skips_format_validation(self) -> None:
+        settings = {"ean": {"enabled": False, "required": True}}
+        form = WebProductForm(
+            name="N",
+            type_name="T",
+            model="M",
+            color1="C",
+            ean="123",
+        )
+
+        self.assertEqual(validate_product_form(form, settings), [])
+        self.assertEqual(
+            normalized_product_payload(form, settings)["ean"],
+            "BRAK-EAN",
+        )
+
     def test_process_web_uploads_allows_empty_change_when_requested(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:

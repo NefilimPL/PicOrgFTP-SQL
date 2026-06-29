@@ -36,6 +36,7 @@ from .. import common, config, data_store, settings, sqlite_backup, storage_sett
 from ..bootstrap import initialize_application_runtime
 from ..common import (
     AUTO_CONTENT_FIT_KEY,
+    COLOR_FIELD_LABELS_KEY,
     H,
     K,
     M,
@@ -56,6 +57,7 @@ from ..database import connect_db
 from ..image_utils import fit_image_to_content
 from ..legacy_import import import_legacy_to_sqlite
 from ..logging_utils import log_error
+from ..product_fields import PRODUCT_FIELDS_KEY, normalize_product_fields
 from ..services.ftp_service import sync_remote_files
 from ..services.sql_service import detect_available_columns, extract_presence_context
 from ..sqlite_maintenance import repair_sqlite_database
@@ -70,6 +72,7 @@ from ..web_image_import import (
 from ..web_workflow import (
     WebProductForm,
     WebUploadedSlot,
+    effective_product_form,
     preprocess_cached_upload,
     process_web_uploads,
     normalized_product_payload,
@@ -276,6 +279,13 @@ def _timing_payload(stages: List[Dict[str, Any]], started: float) -> Dict[str, A
 def _processing_settings() -> Dict[str, Any]:
     return config._normalize_processing_settings(
         config.CONFIG.get(PROCESSING_SETTINGS_KEY, {})
+    )
+
+
+def _active_product_field_settings() -> Dict[str, Dict[str, object]]:
+    return normalize_product_fields(
+        config.CONFIG.get(PRODUCT_FIELDS_KEY),
+        legacy_color_labels=config.CONFIG.get(COLOR_FIELD_LABELS_KEY),
     )
 
 
@@ -1727,7 +1737,7 @@ def _form_from_entry_payload(entry: Dict[str, Any]) -> WebProductForm:
 
 
 def _output_identity(form: WebProductForm) -> tuple[str, str]:
-    payload = normalized_product_payload(form)
+    payload = normalized_product_payload(form, _active_product_field_settings())
     output_dir = build_product_directory(
         settings.l,
         payload["name"],
@@ -2425,6 +2435,7 @@ def _process_upload_snapshot(
     pending_ftp_slots: List[Dict[str, Any]] = []
     explicit_slot_prefixes: Set[str] = set()
     product: Optional[WebProductForm] = None
+    field_settings = _active_product_field_settings()
     antivirus_scan_result: Dict[str, Any] = {"enabled": False, "scanned": 0, "skipped": 0, "items": []}
     try:
         for prefix, slot in slot_by_prefix.items():
@@ -2503,7 +2514,8 @@ def _process_upload_snapshot(
             ean=str(form.get("ean") or ""),
             product_id=str(form.get("product_id") or ""),
         )
-        errors = validate_product_form(product)
+        product = effective_product_form(product, field_settings)
+        errors = validate_product_form(product, field_settings)
         if errors:
             raise ValueError(" ".join(errors))
         timings.append(
@@ -2525,7 +2537,9 @@ def _process_upload_snapshot(
             existing_entry = find_entry_by_identity(ean=product.ean)
         if existing_entry:
             preserved_product_id = product.product_id or str(existing_entry.get("product_id") or "")
-            preserved_ean = product.ean or str(existing_entry.get("ean") or "")
+            preserved_ean = product.ean
+            if field_settings["ean"]["enabled"]:
+                preserved_ean = preserved_ean or str(existing_entry.get("ean") or "")
             if preserved_product_id != product.product_id or preserved_ean != product.ean:
                 product = WebProductForm(
                     name=product.name,
@@ -2627,6 +2641,7 @@ def _process_upload_snapshot(
             uploaded_slots=uploaded_slots,
             options=processing_options_from_config(config.CONFIG),
             allow_empty=True,
+            field_settings=field_settings,
         )
         timings.append(
             _timing_item(
