@@ -1393,6 +1393,68 @@ class WebAppFileTests(unittest.TestCase):
         self.assertEqual(snapshot["jobs"][1]["username"], "user2")
         self.assertEqual(snapshot["jobs"][1]["queue_position"], 1)
 
+    def test_active_presence_payload_is_disabled_by_default(self) -> None:
+        with patch.object(web_app.config, "CONFIG", {}):
+            payload = web_app._active_presence_payload(
+                [
+                    {
+                        "username": "admin",
+                        "last_seen": "2026-06-30 10:00:00",
+                        "last_seen_epoch": 20,
+                    },
+                ]
+            )
+
+        self.assertEqual(payload, {"enabled": False, "users": []})
+
+    def test_active_presence_payload_sanitizes_and_deduplicates_users(self) -> None:
+        clients = [
+            {
+                "username": "admin",
+                "remote_address": "10.0.0.1",
+                "path": "/api/bootstrap",
+                "last_seen": "old",
+                "last_seen_epoch": 10,
+            },
+            {
+                "username": "operator",
+                "user_agent": "browser",
+                "last_seen": "now",
+                "last_seen_epoch": 30,
+            },
+            {
+                "username": "admin",
+                "remote_port": 1234,
+                "last_seen": "new",
+                "last_seen_epoch": 40,
+            },
+            {
+                "username": "niezalogowany",
+                "last_seen": "anon",
+                "last_seen_epoch": 50,
+            },
+            {
+                "username": "",
+                "last_seen": "blank",
+                "last_seen_epoch": 60,
+            },
+        ]
+        with patch.object(
+            web_app.config,
+            "CONFIG",
+            {web_app.SECURITY_SETTINGS_KEY: {"show_active_web_users": True}},
+        ):
+            payload = web_app._active_presence_payload(clients)
+
+        self.assertTrue(payload["enabled"])
+        self.assertEqual(
+            payload["users"],
+            [
+                {"username": "admin", "last_seen": "new", "last_seen_epoch": 40.0},
+                {"username": "operator", "last_seen": "now", "last_seen_epoch": 30.0},
+            ],
+        )
+
     def test_existing_photo_conflicts_detect_unloaded_replacement(self) -> None:
         upload = web_app.WebUploadedSlot(
             prefix="03",

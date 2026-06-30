@@ -67,12 +67,15 @@ const state = {
   processJobPollTimer: 0,
   processQueue: { jobs: [], active_count: 0, queued_count: 0, current: null },
   acknowledgedProcessAlerts: new Set(),
+  activeUsers: [],
+  activeUsersEnabled: false,
   csrfToken: "",
   pollers: [],
 };
 
 const WEB_IMAGE_CACHE_LIMIT = 2;
 const MAX_AUTOCOMPLETE_OPTIONS = 80;
+const ACTIVE_USERS_VISIBLE_LIMIT = 5;
 const CSRF_HEADER = "X-PicOrg-CSRF";
 const CSRF_SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const SECRET_REVEAL_MS = 60000;
@@ -147,6 +150,10 @@ const entrySelect = document.querySelector("#entrySelect");
 const findByEanButton = document.querySelector("#findByEanButton");
 const findProductButton = document.querySelector("#findProductButton");
 const webImagesButton = document.querySelector("#webImagesButton");
+const activeUsersPresence = document.querySelector("#activeUsersPresence");
+const activeUsersList = document.querySelector("#activeUsersList");
+const activeUsersMoreButton = document.querySelector("#activeUsersMoreButton");
+const activeUsersPopover = document.querySelector("#activeUsersPopover");
 const webImageUrl = document.querySelector("#webImageUrl");
 const scanWebImagesButton = document.querySelector("#scanWebImagesButton");
 const webImagesModal = document.querySelector("#webImagesModal");
@@ -337,7 +344,71 @@ function closeModals() {
   if (logsClearPassword) logsClearPassword.value = "";
   if (logsClearStatus) logsClearStatus.textContent = "";
   closeSecretRevealModal();
+  toggleActiveUsersPopover(false);
   setActiveModalNav("");
+}
+
+function activeUserLastSeenLabel(user = {}) {
+  const text = String(user.last_seen || "").trim();
+  return text ? `Ostatnio: ${text}` : "Aktywny";
+}
+
+function toggleActiveUsersPopover(force) {
+  if (!activeUsersPopover || !activeUsersMoreButton) {
+    return;
+  }
+  const nextOpen = force === undefined ? activeUsersPopover.hidden : Boolean(force);
+  activeUsersPopover.hidden = !nextOpen;
+  activeUsersMoreButton.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+}
+
+function renderActiveUsersPresence(payload = {}) {
+  if (!activeUsersPresence || !activeUsersList || !activeUsersMoreButton || !activeUsersPopover) {
+    return;
+  }
+  const users = Array.isArray(payload.users) ? payload.users : [];
+  const enabled = Boolean(payload.enabled);
+  state.activeUsersEnabled = enabled;
+  state.activeUsers = users;
+  activeUsersList.textContent = "";
+  activeUsersPopover.textContent = "";
+  const visibleUsers = users.slice(0, ACTIVE_USERS_VISIBLE_LIMIT);
+  activeUsersPresence.hidden = !enabled || !users.length;
+  activeUsersMoreButton.hidden = users.length <= ACTIVE_USERS_VISIBLE_LIMIT;
+  if (activeUsersMoreButton.hidden) {
+    toggleActiveUsersPopover(false);
+  }
+  if (!enabled || !users.length) {
+    toggleActiveUsersPopover(false);
+    return;
+  }
+  for (const user of visibleUsers) {
+    const label = document.createElement("span");
+    const dot = document.createElement("span");
+    const name = document.createElement("span");
+    label.className = "presence-user-label";
+    dot.className = "presence-user-dot";
+    dot.setAttribute("aria-hidden", "true");
+    name.textContent = String(user.username || "");
+    label.title = activeUserLastSeenLabel(user);
+    label.append(dot, name);
+    activeUsersList.appendChild(label);
+  }
+  for (const user of users) {
+    const row = document.createElement("div");
+    const name = document.createElement("strong");
+    const seen = document.createElement("span");
+    row.className = "active-users-popover-row";
+    name.textContent = String(user.username || "");
+    seen.textContent = activeUserLastSeenLabel(user);
+    row.append(name, seen);
+    activeUsersPopover.appendChild(row);
+  }
+}
+
+async function refreshActiveUsersPresence() {
+  const payload = await requestJson("/api/server/presence");
+  renderActiveUsersPresence(payload);
 }
 
 function slotFileItem(value) {
@@ -4084,6 +4155,7 @@ function startBackgroundPollers() {
   createPoller("fileIndex", 5000, refreshFileIndexStatus).schedule(5000);
   createPoller("logs", 15000, pollLogStatus).schedule(15000);
   createPoller("processQueue", 2500, refreshProcessQueue).schedule(2500);
+  createPoller("activeUsers", 15000, refreshActiveUsersPresence).schedule(15000);
 }
 
 document.addEventListener("visibilitychange", () => {
@@ -4738,6 +4810,9 @@ async function loadBootstrap(options = {}) {
   logoutButton.hidden = !payload.auth_enabled;
   state.currentUser = payload.current_user || null;
   updateAdminUi();
+  refreshActiveUsersPresence().catch(() => {
+    renderActiveUsersPresence({ enabled: false, users: [] });
+  });
   applyTimingDetailsVisibility();
   pollLogStatus({ initialize: true }).catch(() => {});
   loadRecentProcessJobs().catch(() => {});
@@ -5584,6 +5659,9 @@ function settingsSaveButton(form, buildPayload) {
       state.processing = state.settings.processing || state.processing || {};
       state.security = state.settings.security || state.security || {};
       state.productFields = state.settings.product_fields || state.productFields || {};
+      refreshActiveUsersPresence().catch(() => {
+        renderActiveUsersPresence({ enabled: false, users: [] });
+      });
       updateAdminUi();
       if (Array.isArray(state.settings.slots)) {
         renderSlots(state.settings.slots);
@@ -5884,6 +5962,12 @@ function renderSettingsSecurity() {
         "Skanuj upload Microsoft Defender",
         Boolean(security.antivirus_scan_uploads),
         "Dotyczy tylko plikow wysylanych przez panel lub rozszerzenie; pliki juz lokalne i pobrane z FTP nie sa ponownie skanowane."
+      ),
+      checkField(
+        "show_active_web_users",
+        "Pokaz aktywnych uzytkownikow",
+        Boolean(security.show_active_web_users),
+        "Uzytkownicy zobacza nazwy kont obecnie aktywnych w panelu WWW."
       )
     )
   );
@@ -5896,6 +5980,7 @@ function renderSettingsSecurity() {
       blocked_upload_extensions: data.get("blocked_upload_extensions"),
       block_executable_uploads: data.has("block_executable_uploads"),
       antivirus_scan_uploads: data.has("antivirus_scan_uploads"),
+      show_active_web_users: data.has("show_active_web_users"),
     },
   }));
   settingsOutput.appendChild(form);
@@ -6376,6 +6461,24 @@ processAlertLoadButton?.addEventListener("click", () => {
   const entry = entryFromProcessJob(job);
   fillForm(entry, { loadPhotos: Boolean(entry.product_id || entry.ean) });
   closeProcessAlert();
+});
+
+activeUsersMoreButton?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  toggleActiveUsersPopover();
+});
+
+document.addEventListener("click", (event) => {
+  if (!activeUsersPresence || activeUsersPresence.contains(event.target)) {
+    return;
+  }
+  toggleActiveUsersPopover(false);
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    toggleActiveUsersPopover(false);
+  }
 });
 
 themeToggleButton?.addEventListener("click", () => {

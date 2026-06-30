@@ -3209,6 +3209,38 @@ def _active_clients_snapshot(now: Optional[float] = None) -> List[Dict[str, Any]
         return clients
 
 
+def _active_presence_enabled() -> bool:
+    return bool(_security_settings().get("show_active_web_users", False))
+
+
+def _active_presence_payload(clients: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not _active_presence_enabled():
+        return {"enabled": False, "users": []}
+    by_username: Dict[str, Dict[str, Any]] = {}
+    for client in clients:
+        username = str(client.get("username") or "").strip()
+        if not username or username == "niezalogowany":
+            continue
+        try:
+            last_seen_epoch = float(client.get("last_seen_epoch") or 0)
+        except (TypeError, ValueError):
+            last_seen_epoch = 0.0
+        existing = by_username.get(username)
+        if existing and float(existing.get("last_seen_epoch") or 0) >= last_seen_epoch:
+            continue
+        by_username[username] = {
+            "username": username,
+            "last_seen": str(client.get("last_seen") or ""),
+            "last_seen_epoch": last_seen_epoch,
+        }
+    users = sorted(
+        by_username.values(),
+        key=lambda item: float(item.get("last_seen_epoch") or 0),
+        reverse=True,
+    )[:100]
+    return {"enabled": True, "users": users}
+
+
 def _record_active_client(request: Request, status_code: int) -> None:
     global _ACTIVE_CLIENTS_DIRTY
     path_text = str(request.url.path or "")
@@ -3565,6 +3597,11 @@ def create_app() -> FastAPI:
     def active_users_api(request: Request) -> Dict[str, Any]:
         _require_admin(request)
         return {"clients": _active_clients_snapshot()}
+
+    @app.get("/api/server/presence")
+    def active_presence_api(request: Request) -> Dict[str, Any]:
+        _require_user(request)
+        return _active_presence_payload(_active_clients_snapshot())
 
     @app.post("/api/logs/clear")
     async def logs_clear_api(request: Request) -> JSONResponse:

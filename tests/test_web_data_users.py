@@ -704,6 +704,32 @@ class WebDataUserTests(unittest.TestCase):
         )
         self.assertTrue(saved_config[web_data.SECURITY_SETTINGS_KEY]["antivirus_scan_uploads"])
 
+    def test_security_settings_default_hide_active_web_users(self) -> None:
+        normalized = web_data.config._normalize_security_settings({})
+
+        self.assertFalse(normalized["show_active_web_users"])
+
+    def test_update_settings_stores_active_web_users_security_flag(self) -> None:
+        saved_configs = []
+        cfg = {
+            web_data.SECURITY_SETTINGS_KEY: {"max_upload_mb": 50},
+        }
+
+        def capture_save_config(config_payload, *_args, **_kwargs):
+            saved_configs.append(json.loads(json.dumps(config_payload)))
+
+        with (
+            patch.object(web_data.config, "CONFIG", cfg),
+            patch.object(web_data, "save_config", side_effect=capture_save_config),
+            patch.object(web_data.config, "initialize_config", return_value=cfg),
+            patch.object(web_data, "settings_snapshot", return_value={}),
+        ):
+            web_data.update_settings({"security": {"show_active_web_users": True}})
+
+        self.assertTrue(
+            saved_configs[0][web_data.SECURITY_SETTINGS_KEY]["show_active_web_users"]
+        )
+
     def test_update_settings_normalizes_and_saves_product_fields(self) -> None:
         saved_configs = []
         cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))

@@ -145,6 +145,33 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn(".product-field-settings-list", css)
         self.assertIn(".product-field-settings-row", css)
 
+    def test_topbar_contains_non_button_presence_before_web_images(self) -> None:
+        source = INDEX_HTML.read_text(encoding="utf-8")
+        html = _parse(INDEX_HTML)
+
+        self.assertIn("activeUsersPresence", html.ids)
+        self.assertIn("activeUsersList", html.ids)
+        self.assertLess(
+            source.index('id="activeUsersPresence"'),
+            source.index('id="webImagesButton"'),
+        )
+        self.assertNotIn('activeUsersPresence" type="button', source)
+
+    def test_app_js_renders_active_user_presence(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        css = (
+            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("function renderActiveUsersPresence", source)
+        self.assertIn("function refreshActiveUsersPresence", source)
+        self.assertIn("/api/server/presence", source)
+        self.assertIn("show_active_web_users", source)
+        self.assertIn("Pokaz aktywnych uzytkownikow", source)
+        self.assertIn(".active-users-presence", css)
+        self.assertIn(".presence-user-label", css)
+        self.assertIn(".presence-more-button", css)
+
     def test_web_images_modal_contains_url_input_filters_and_actions(self) -> None:
         html = _parse(INDEX_HTML)
 
