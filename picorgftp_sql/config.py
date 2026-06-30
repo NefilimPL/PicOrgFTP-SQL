@@ -216,6 +216,9 @@ def _normalize_security_settings(raw_settings):
         "antivirus_scan_uploads": bool(
             raw.get("antivirus_scan_uploads", defaults.get("antivirus_scan_uploads", False))
         ),
+        "show_active_web_users": bool(
+            raw.get("show_active_web_users", defaults.get("show_active_web_users", False))
+        ),
     }
 
 

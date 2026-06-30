@@ -14,6 +14,11 @@
         <span id="serverInfo"></span>
       </div>
       <nav class="topnav" aria-label="Widoki">
+        <div id="activeUsersPresence" class="active-users-presence" aria-label="Aktywni uzytkownicy" hidden>
+          <div id="activeUsersList" class="active-users-list"></div>
+          <button id="activeUsersMoreButton" type="button" class="presence-more-button" aria-expanded="false" hidden>...</button>
+          <div id="activeUsersPopover" class="active-users-popover" hidden></div>
+        </div>
         <button id="webImagesButton" type="button" class="nav-button">Zdjecia WWW</button>
         <button type="button" class="nav-button" data-modal="history">Historia</button>
         <button type="button" class="nav-button admin-only" data-modal="logs" hidden>Logi</button>

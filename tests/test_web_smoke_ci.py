@@ -96,6 +96,8 @@ class WebSmokeCiTests(unittest.TestCase):
             "/api/settings/sqlite/backup-diff",
             "/api/settings/sqlite/restore",
             "/api/settings/sql-columns/detect",
+            "/api/server/presence",
+            "/api/server/presence/leave",
             "/api/users",
         }
         self.assertEqual(expected_paths - route_paths, set())
@@ -239,6 +241,9 @@ class WebSmokeCiTests(unittest.TestCase):
             )
             self.assertEqual(login.status_code, 200)
             csrf_headers = {"X-PicOrg-CSRF": login.json()["csrf_token"]}
+            presence = client.get("/api/server/presence")
+            self.assertEqual(presence.status_code, 200)
+            self.assertEqual(presence.json(), {"enabled": False, "users": []})
 
             forged = client.post("/api/logout", headers={"X-PicOrg-CSRF": "bad"})
             self.assertEqual(forged.status_code, 403)

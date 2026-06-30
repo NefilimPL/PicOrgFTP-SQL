@@ -171,6 +171,120 @@ h2 {
   margin-left: auto;
 }
 
+.active-users-presence {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 4px;
+  margin-right: 4px;
+}
+
+.active-users-list {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 4px;
+}
+
+.presence-user-label {
+  display: inline-flex;
+  align-items: center;
+  max-width: 132px;
+  min-height: 28px;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 0 9px;
+  cursor: default;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.presence-user-label span {
+  display: inline;
+  min-width: 0;
+  margin-top: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+  font-size: inherit;
+}
+
+.presence-user-dot {
+  width: 7px;
+  height: 7px;
+  min-width: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.presence-more-button {
+  min-width: 30px;
+  min-height: 28px;
+  border-color: var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  padding: 0 8px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.presence-more-button:hover {
+  border-color: var(--accent);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.active-users-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  display: grid;
+  width: min(260px, calc(100vw - 32px));
+  max-height: min(360px, 70vh);
+  overflow: auto;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: 8px;
+}
+
+.active-users-popover[hidden] {
+  display: none;
+}
+
+.active-users-popover-row {
+  display: grid;
+  gap: 2px;
+  border-bottom: 1px solid var(--surface-2);
+  padding: 6px 4px;
+}
+
+.active-users-popover-row:last-child {
+  border-bottom: 0;
+}
+
+.active-users-popover-row strong,
+.active-users-popover-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active-users-popover-row span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .nav-button,
 .settings-tab {
   min-height: 34px;
@@ -1817,6 +1931,15 @@ button.slot-badge.on:hover {
     grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
     width: 100%;
     margin-left: 0;
+  }
+
+  .active-users-presence {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
+  .active-users-list {
+    flex-wrap: wrap;
   }
 
   .topnav .nav-button {

@@ -315,6 +315,7 @@ DEFAULT_CONFIG.setdefault(
         ],
         "block_executable_uploads": True,
         "antivirus_scan_uploads": False,
+        "show_active_web_users": False,
     },
 )
 DEFAULT_CONFIG.setdefault(COLOR_FIELD_LABELS_KEY, {})
