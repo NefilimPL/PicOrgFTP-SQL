@@ -689,6 +689,26 @@ def current_status(port: int) -> dict[str, Any]:
     }
 
 
+def web_panel_running_for_close(port: int) -> bool:
+    try:
+        status = current_status(port)
+    except Exception:
+        return False
+    return bool(status.get("running") or status.get("web_listeners"))
+
+
+def confirm_close_running_web_panel() -> bool | None:
+    from tkinter import messagebox
+
+    return messagebox.askyesnocancel(
+        "PicOrgFTP-SQL WEB",
+        "Panel webowy nadal dziala.\n\n"
+        "Tak - zatrzymaj panel WWW i zamknij menedzer.\n"
+        "Nie - zostaw panel WWW uruchomiony i schowaj menedzer do zasobnika.\n"
+        "Anuluj - wroc do okna.",
+    )
+
+
 def open_as_admin() -> ActionResult:
     if os.name != "nt":
         return ActionResult(False, "Uruchamianie jako administrator jest dostepne tylko na Windows.")
@@ -810,6 +830,9 @@ class WebManagerApp:
         self.pending_refresh = False
         self.status_override_until = 0.0
         self.tray_icon = None
+        self.closing = False
+        self.close_check_in_progress = False
+        self.close_progress = None
         self._build()
         self.request_refresh(clear_status=True)
         self.root.after(10000, self._auto_refresh)
@@ -823,6 +846,9 @@ class WebManagerApp:
         header = ttk.Frame(main)
         header.pack(fill="x")
         ttk.Label(header, text="PicOrgFTP-SQL WEB", font=("Segoe UI", 15, "bold")).pack(side="left")
+        self.close_progress = ttk.Progressbar(header, mode="indeterminate", length=76)
+        self.close_progress.pack(side="right", padx=(8, 0))
+        self.close_progress.pack_forget()
         ttk.Label(header, textvariable=self.status_var).pack(side="right")
 
         controls = ttk.Frame(main)
@@ -1208,7 +1234,42 @@ class WebManagerApp:
         self.root.lift()
         self.root.focus_force()
 
-    def close_window(self) -> None:
+    def _start_close_feedback(self, message: str) -> None:
+        self.close_check_in_progress = True
+        self.status_override_until = time.time() + 18
+        self.status_var.set(message)
+        progress = getattr(self, "close_progress", None)
+        if progress is not None:
+            try:
+                progress.pack(side="right", padx=(8, 0))
+            except Exception:
+                pass
+            try:
+                progress.start(12)
+            except Exception:
+                pass
+
+    def _start_close_check_feedback(self) -> None:
+        self._start_close_feedback("Sprawdzam, czy panel WWW dziala...")
+
+    def _start_close_stop_feedback(self) -> None:
+        self._start_close_feedback("Zatrzymuje panel WWW...")
+
+    def _stop_close_feedback(self) -> None:
+        self.close_check_in_progress = False
+        progress = getattr(self, "close_progress", None)
+        if progress is not None:
+            try:
+                progress.stop()
+            except Exception:
+                pass
+            try:
+                progress.pack_forget()
+            except Exception:
+                pass
+
+    def _destroy_manager_window(self) -> None:
+        self.closing = True
         icon = self.tray_icon
         self.tray_icon = None
         if icon is not None:
@@ -1217,6 +1278,47 @@ class WebManagerApp:
             except Exception:
                 pass
         self.root.destroy()
+
+    def _check_close_status_worker(self, port: int) -> None:
+        running = web_panel_running_for_close(port)
+        self.root.after(0, lambda: self._finish_close_check(running))
+
+    def _stop_web_for_close_worker(self, port: int) -> None:
+        try:
+            result = stop_web(port)
+        except Exception as exc:
+            result = ActionResult(False, str(exc))
+        self.root.after(0, lambda: self._finish_close_stop(result))
+
+    def _finish_close_check(self, web_panel_running: bool) -> None:
+        self._stop_close_feedback()
+        if web_panel_running:
+            close_choice = confirm_close_running_web_panel()
+            if close_choice is None:
+                return
+            if close_choice is False:
+                self.minimize_to_tray()
+                return
+            port = self._port()
+            self._start_close_stop_feedback()
+            threading.Thread(target=lambda: self._stop_web_for_close_worker(port), daemon=True).start()
+            return
+        self._destroy_manager_window()
+
+    def _finish_close_stop(self, result: ActionResult) -> None:
+        self._stop_close_feedback()
+        if not result.ok:
+            self.status_override_until = time.time() + 12
+            self.status_var.set(result.message)
+            return
+        self._destroy_manager_window()
+
+    def close_window(self) -> None:
+        if getattr(self, "closing", False) or getattr(self, "close_check_in_progress", False):
+            return
+        port = self._port()
+        self._start_close_check_feedback()
+        threading.Thread(target=lambda: self._check_close_status_worker(port), daemon=True).start()
 
     def run(self) -> None:
         self.root.mainloop()
