@@ -1411,6 +1411,7 @@ class WebAppFileTests(unittest.TestCase):
         clients = [
             {
                 "username": "admin",
+                "client_id": "client-a",
                 "remote_address": "10.0.0.1",
                 "path": "/api/bootstrap",
                 "last_seen": "old",
@@ -1418,12 +1419,14 @@ class WebAppFileTests(unittest.TestCase):
             },
             {
                 "username": "operator",
+                "client_id": "client-b",
                 "user_agent": "browser",
                 "last_seen": "now",
                 "last_seen_epoch": 30,
             },
             {
                 "username": "admin",
+                "client_id": "client-a",
                 "remote_port": 1234,
                 "last_seen": "new",
                 "last_seen_epoch": 40,
@@ -1444,7 +1447,7 @@ class WebAppFileTests(unittest.TestCase):
             "CONFIG",
             {web_app.SECURITY_SETTINGS_KEY: {"show_active_web_users": True}},
         ):
-            payload = web_app._active_presence_payload(clients)
+            payload = web_app._active_presence_payload(clients, now=40)
 
         self.assertTrue(payload["enabled"])
         self.assertEqual(
@@ -1453,6 +1456,134 @@ class WebAppFileTests(unittest.TestCase):
                 {"username": "admin", "last_seen": "new", "last_seen_epoch": 40.0},
                 {"username": "operator", "last_seen": "now", "last_seen_epoch": 30.0},
             ],
+        )
+
+    def test_active_presence_payload_requires_browser_client_id(self) -> None:
+        clients = [
+            {
+                "username": "admin",
+                "last_seen": "html request",
+                "last_seen_epoch": 100,
+            },
+            {
+                "username": "operator",
+                "client_id": "client-a",
+                "last_seen": "browser poll",
+                "last_seen_epoch": 100,
+            },
+        ]
+        with patch.object(
+            web_app.config,
+            "CONFIG",
+            {web_app.SECURITY_SETTINGS_KEY: {"show_active_web_users": True}},
+        ):
+            payload = web_app._active_presence_payload(clients, now=100)
+
+        self.assertEqual(
+            payload["users"],
+            [
+                {
+                    "username": "operator",
+                    "last_seen": "browser poll",
+                    "last_seen_epoch": 100.0,
+                }
+            ],
+        )
+
+    def test_active_client_key_prefers_browser_client_id(self) -> None:
+        first = {
+            "username": "admin",
+            "client_id": "client-a",
+            "remote_address": "10.0.0.1",
+            "user_agent": "browser-a",
+        }
+        same_client_new_connection = {
+            "username": "admin",
+            "client_id": "client-a",
+            "remote_address": "10.0.0.2",
+            "user_agent": "browser-b",
+        }
+        other_client = {
+            "username": "admin",
+            "client_id": "client-b",
+            "remote_address": "10.0.0.1",
+            "user_agent": "browser-a",
+        }
+
+        self.assertEqual(
+            web_app._active_client_key(first),
+            web_app._active_client_key(same_client_new_connection),
+        )
+        self.assertNotEqual(
+            web_app._active_client_key(first),
+            web_app._active_client_key(other_client),
+        )
+
+    def test_remove_active_client_removes_only_matching_browser_client(self) -> None:
+        with web_app._ACTIVE_CLIENTS_LOCK:
+            original = dict(web_app._ACTIVE_CLIENTS)
+            original_loaded = web_app._ACTIVE_CLIENTS_LOADED
+            web_app._ACTIVE_CLIENTS.clear()
+            web_app._ACTIVE_CLIENTS_LOADED = True
+            first = {
+                "username": "admin",
+                "client_id": "client-a",
+                "last_seen_epoch": 100.0,
+            }
+            second = {
+                "username": "admin",
+                "client_id": "client-b",
+                "last_seen_epoch": 100.0,
+            }
+            other_user = {
+                "username": "operator",
+                "client_id": "client-a",
+                "last_seen_epoch": 100.0,
+            }
+            web_app._ACTIVE_CLIENTS[web_app._active_client_key(first)] = first
+            web_app._ACTIVE_CLIENTS[web_app._active_client_key(second)] = second
+            web_app._ACTIVE_CLIENTS[web_app._active_client_key(other_user)] = other_user
+        try:
+            removed = web_app._remove_active_client("admin", "client-a", now=100.0)
+            snapshot = web_app._active_clients_snapshot(now=100.0)
+        finally:
+            with web_app._ACTIVE_CLIENTS_LOCK:
+                web_app._ACTIVE_CLIENTS.clear()
+                web_app._ACTIVE_CLIENTS.update(original)
+                web_app._ACTIVE_CLIENTS_LOADED = original_loaded
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(
+            {(item.get("username"), item.get("client_id")) for item in snapshot},
+            {("admin", "client-b"), ("operator", "client-a")},
+        )
+
+    def test_active_presence_payload_hides_stale_browser_clients_quickly(self) -> None:
+        now = 200.0
+        clients = [
+            {
+                "username": "admin",
+                "client_id": "client-a",
+                "last_seen": "stale",
+                "last_seen_epoch": now - web_app.PRESENCE_CLIENT_MAX_AGE_SECONDS - 1,
+            },
+            {
+                "username": "operator",
+                "client_id": "client-b",
+                "last_seen": "fresh",
+                "last_seen_epoch": now,
+            },
+        ]
+        with patch.object(
+            web_app.config,
+            "CONFIG",
+            {web_app.SECURITY_SETTINGS_KEY: {"show_active_web_users": True}},
+        ):
+            payload = web_app._active_presence_payload(clients, now=now)
+
+        self.assertEqual(
+            payload["users"],
+            [{"username": "operator", "last_seen": "fresh", "last_seen_epoch": now}],
         )
 
     def test_existing_photo_conflicts_detect_unloaded_replacement(self) -> None:

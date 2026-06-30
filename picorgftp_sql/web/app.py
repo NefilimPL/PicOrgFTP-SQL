@@ -129,7 +129,9 @@ BROWSER_EXTENSION_TOKEN_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "admin"
 ACTIVE_CLIENT_MAX_AGE_SECONDS = 180
+PRESENCE_CLIENT_MAX_AGE_SECONDS = 45
 ACTIVE_CLIENT_FLUSH_INTERVAL_SECONDS = 15
+PRESENCE_CLIENT_ID_HEADER = "x-picorg-client-id"
 WEB_UPLOAD_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
 WEB_UPLOAD_CACHE_CLEAN_INTERVAL_SECONDS = 30 * 60
 CSRF_HEADER = "x-picorg-csrf"
@@ -3125,7 +3127,30 @@ def _active_clients_log_path() -> Path:
     return Path(settings.LOG_DIR) / "web_active_clients.json"
 
 
+def _clean_presence_client_id(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    cleaned = re.sub(r"[^0-9A-Za-z_.-]+", "", text)[:80]
+    return cleaned
+
+
+def _request_presence_client_id(request: Request) -> str:
+    headers = getattr(request, "headers", {}) or {}
+    value = headers.get(PRESENCE_CLIENT_ID_HEADER) if hasattr(headers, "get") else ""
+    return _clean_presence_client_id(value)
+
+
 def _active_client_key(item: Dict[str, Any]) -> str:
+    client_id = _clean_presence_client_id(item.get("client_id"))
+    if client_id:
+        return "|".join(
+            [
+                str(item.get("username") or ""),
+                "client",
+                client_id,
+            ]
+        )
     return "|".join(
         [
             str(item.get("username") or ""),
@@ -3209,22 +3234,54 @@ def _active_clients_snapshot(now: Optional[float] = None) -> List[Dict[str, Any]
         return clients
 
 
+def _remove_active_client(username: str, client_id: str, now: Optional[float] = None) -> int:
+    global _ACTIVE_CLIENTS_DIRTY
+    clean_username = str(username or "").strip()
+    clean_client_id = _clean_presence_client_id(client_id)
+    if not clean_username or not clean_client_id:
+        return 0
+    now_value = time.time() if now is None else float(now)
+    removed = 0
+    with _ACTIVE_CLIENTS_LOCK:
+        _load_active_clients_from_disk_locked(now_value)
+        _prune_active_clients_locked(now_value)
+        for key, item in list(_ACTIVE_CLIENTS.items()):
+            if (
+                str(item.get("username") or "").strip() == clean_username
+                and _clean_presence_client_id(item.get("client_id")) == clean_client_id
+            ):
+                _ACTIVE_CLIENTS.pop(key, None)
+                removed += 1
+        if removed:
+            _ACTIVE_CLIENTS_DIRTY = True
+            _flush_active_clients_locked(now_value, force=True)
+    return removed
+
+
 def _active_presence_enabled() -> bool:
     return bool(_security_settings().get("show_active_web_users", False))
 
 
-def _active_presence_payload(clients: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _active_presence_payload(
+    clients: List[Dict[str, Any]],
+    now: Optional[float] = None,
+) -> Dict[str, Any]:
     if not _active_presence_enabled():
         return {"enabled": False, "users": []}
+    now_value = time.time() if now is None else float(now)
     by_username: Dict[str, Dict[str, Any]] = {}
     for client in clients:
         username = str(client.get("username") or "").strip()
         if not username or username == "niezalogowany":
             continue
+        if not _clean_presence_client_id(client.get("client_id")):
+            continue
         try:
             last_seen_epoch = float(client.get("last_seen_epoch") or 0)
         except (TypeError, ValueError):
             last_seen_epoch = 0.0
+        if now_value - last_seen_epoch > PRESENCE_CLIENT_MAX_AGE_SECONDS:
+            continue
         existing = by_username.get(username)
         if existing and float(existing.get("last_seen_epoch") or 0) >= last_seen_epoch:
             continue
@@ -3244,7 +3301,11 @@ def _active_presence_payload(clients: List[Dict[str, Any]]) -> Dict[str, Any]:
 def _record_active_client(request: Request, status_code: int) -> None:
     global _ACTIVE_CLIENTS_DIRTY
     path_text = str(request.url.path or "")
-    if path_text.startswith("/static/") or path_text == "/api/health":
+    if path_text.startswith("/static/") or path_text in {
+        "/api/health",
+        "/api/logout",
+        "/api/server/presence/leave",
+    }:
         return
     try:
         username = _current_user(request) or ""
@@ -3258,6 +3319,7 @@ def _record_active_client(request: Request, status_code: int) -> None:
         "remote_address": str(getattr(client, "host", "") or ""),
         "remote_port": int(getattr(client, "port", 0) or 0),
         "user_agent": str(headers.get("user-agent", "") if hasattr(headers, "get") else ""),
+        "client_id": _request_presence_client_id(request),
         "method": str(request.method or ""),
         "path": path_text,
         "status_code": int(status_code or 0),
@@ -3533,7 +3595,8 @@ def create_app() -> FastAPI:
 
     @app.post("/api/logout")
     def logout(request: Request) -> JSONResponse:
-        _require_user(request)
+        username = _require_user(request)
+        _remove_active_client(username, _request_presence_client_id(request))
         response = JSONResponse({"ok": True})
         response.delete_cookie(SESSION_COOKIE)
         return response
@@ -3602,6 +3665,12 @@ def create_app() -> FastAPI:
     def active_presence_api(request: Request) -> Dict[str, Any]:
         _require_user(request)
         return _active_presence_payload(_active_clients_snapshot())
+
+    @app.post("/api/server/presence/leave")
+    def active_presence_leave_api(request: Request) -> Dict[str, Any]:
+        username = _require_user(request)
+        removed = _remove_active_client(username, _request_presence_client_id(request))
+        return {"ok": True, "removed": removed}
 
     @app.post("/api/logs/clear")
     async def logs_clear_api(request: Request) -> JSONResponse:

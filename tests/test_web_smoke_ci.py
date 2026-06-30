@@ -97,6 +97,7 @@ class WebSmokeCiTests(unittest.TestCase):
             "/api/settings/sqlite/restore",
             "/api/settings/sql-columns/detect",
             "/api/server/presence",
+            "/api/server/presence/leave",
             "/api/users",
         }
         self.assertEqual(expected_paths - route_paths, set())

@@ -69,6 +69,7 @@ const state = {
   acknowledgedProcessAlerts: new Set(),
   activeUsers: [],
   activeUsersEnabled: false,
+  activePresenceClientId: "",
   csrfToken: "",
   pollers: [],
 };
@@ -77,6 +78,7 @@ const WEB_IMAGE_CACHE_LIMIT = 2;
 const MAX_AUTOCOMPLETE_OPTIONS = 80;
 const ACTIVE_USERS_VISIBLE_LIMIT = 5;
 const CSRF_HEADER = "X-PicOrg-CSRF";
+const CLIENT_ID_HEADER = "X-PicOrg-Client-Id";
 const CSRF_SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const SECRET_REVEAL_MS = 60000;
 const POLL_HIDDEN_DELAY_MS = 30000;
@@ -226,6 +228,45 @@ function isMutatingRequest(options = {}) {
   return !CSRF_SAFE_METHODS.has(method);
 }
 
+function activePresenceClientId() {
+  if (state.activePresenceClientId) {
+    return state.activePresenceClientId;
+  }
+  const key = "picorg-active-presence-client-id";
+  try {
+    const stored = sessionStorage.getItem(key);
+    if (stored) {
+      state.activePresenceClientId = stored;
+      return stored;
+    }
+  } catch (_error) {
+    // Session storage can be disabled; keep the generated ID in memory for this page.
+  }
+  const generated =
+    window.crypto?.randomUUID?.() ||
+    `client-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  state.activePresenceClientId = generated;
+  try {
+    sessionStorage.setItem(key, generated);
+  } catch (_error) {
+    // In-memory ID is enough when storage is unavailable.
+  }
+  return generated;
+}
+
+function applyClientIdentityHeader(path, fetchOptions) {
+  if (!isSameOriginRequest(path)) {
+    return;
+  }
+  const clientId = activePresenceClientId();
+  if (!clientId) {
+    return;
+  }
+  const headers = new Headers(fetchOptions.headers || {});
+  headers.set(CLIENT_ID_HEADER, clientId);
+  fetchOptions.headers = headers;
+}
+
 function applyPanelRequestHeaders(path, fetchOptions) {
   if (!isMutatingRequest(fetchOptions) || !isSameOriginRequest(path)) {
     return;
@@ -242,6 +283,7 @@ async function requestJson(path, options = {}) {
   const timeoutMs = Number(options.timeoutMs || 0);
   const fetchOptions = { ...options };
   delete fetchOptions.timeoutMs;
+  applyClientIdentityHeader(path, fetchOptions);
   applyPanelRequestHeaders(path, fetchOptions);
   let timeoutId = 0;
   if (timeoutMs > 0 && !fetchOptions.signal) {
@@ -409,6 +451,27 @@ function renderActiveUsersPresence(payload = {}) {
 async function refreshActiveUsersPresence() {
   const payload = await requestJson("/api/server/presence");
   renderActiveUsersPresence(payload);
+}
+
+function notifyActiveUsersPresenceLeave() {
+  const clientId = activePresenceClientId();
+  if (!clientId) {
+    return;
+  }
+  const headers = {
+    "Content-Type": "application/json",
+    "X-Requested-With": "XMLHttpRequest",
+    [CLIENT_ID_HEADER]: clientId,
+  };
+  if (state.csrfToken) {
+    headers[CSRF_HEADER] = state.csrfToken;
+  }
+  fetch("/api/server/presence/leave", {
+    method: "POST",
+    headers,
+    body: "{}",
+    keepalive: true,
+  }).catch(() => {});
 }
 
 function slotFileItem(value) {
@@ -4418,6 +4481,9 @@ function continueBrowserBackNavigation() {
 }
 
 function setupPageExitGuards() {
+  window.addEventListener("pagehide", () => {
+    notifyActiveUsersPresenceLeave();
+  });
   window.addEventListener("beforeunload", (event) => {
     if (!shouldConfirmPageExit()) return;
     event.preventDefault();
@@ -6810,6 +6876,7 @@ logoutButton.addEventListener("click", async () => {
     method: "POST",
     headers: {
       "X-Requested-With": "XMLHttpRequest",
+      [CLIENT_ID_HEADER]: activePresenceClientId(),
       ...(state.csrfToken ? { [CSRF_HEADER]: state.csrfToken } : {}),
     },
   }).catch(() => {});

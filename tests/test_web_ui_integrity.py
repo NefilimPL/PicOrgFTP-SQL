@@ -172,6 +172,16 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn(".presence-user-label", css)
         self.assertIn(".presence-more-button", css)
 
+    def test_app_js_marks_presence_client_and_leaves_on_pagehide(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn('CLIENT_ID_HEADER = "X-PicOrg-Client-Id"', source)
+        self.assertIn("function activePresenceClientId", source)
+        self.assertIn("function notifyActiveUsersPresenceLeave", source)
+        self.assertIn("/api/server/presence/leave", source)
+        self.assertIn('window.addEventListener("pagehide"', source)
+        self.assertIn("keepalive: true", source)
+
     def test_web_images_modal_contains_url_input_filters_and_actions(self) -> None:
         html = _parse(INDEX_HTML)
 
