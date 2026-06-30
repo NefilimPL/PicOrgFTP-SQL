@@ -689,6 +689,26 @@ def current_status(port: int) -> dict[str, Any]:
     }
 
 
+def web_panel_running_for_close(port: int) -> bool:
+    try:
+        status = current_status(port)
+    except Exception:
+        return False
+    return bool(status.get("running") or status.get("web_listeners"))
+
+
+def confirm_close_running_web_panel() -> bool | None:
+    from tkinter import messagebox
+
+    return messagebox.askyesnocancel(
+        "PicOrgFTP-SQL WEB",
+        "Panel webowy nadal dziala.\n\n"
+        "Tak - zatrzymaj panel WWW i zamknij menedzer.\n"
+        "Nie - zostaw panel WWW uruchomiony i schowaj menedzer do zasobnika.\n"
+        "Anuluj - wroc do okna.",
+    )
+
+
 def open_as_admin() -> ActionResult:
     if os.name != "nt":
         return ActionResult(False, "Uruchamianie jako administrator jest dostepne tylko na Windows.")
@@ -810,6 +830,7 @@ class WebManagerApp:
         self.pending_refresh = False
         self.status_override_until = 0.0
         self.tray_icon = None
+        self.closing = False
         self._build()
         self.request_refresh(clear_status=True)
         self.root.after(10000, self._auto_refresh)
@@ -1209,6 +1230,22 @@ class WebManagerApp:
         self.root.focus_force()
 
     def close_window(self) -> None:
+        if getattr(self, "closing", False):
+            return
+        port = self._port()
+        if web_panel_running_for_close(port):
+            close_choice = confirm_close_running_web_panel()
+            if close_choice is None:
+                return
+            if close_choice is False:
+                self.minimize_to_tray()
+                return
+            result = stop_web(port)
+            if not result.ok:
+                self.status_override_until = time.time() + 12
+                self.status_var.set(result.message)
+                return
+        self.closing = True
         icon = self.tray_icon
         self.tray_icon = None
         if icon is not None:
