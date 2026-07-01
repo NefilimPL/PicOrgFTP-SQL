@@ -99,6 +99,9 @@ from ..web_data import (
     mark_browser_extension_token_used,
     history_snapshot,
     ListValueInUseError,
+    parse_pimcore_csv_headers,
+    pimcore_operation_history,
+    pimcore_operation_status,
     refresh_file_index,
     remove_list_value,
     record_history,
@@ -106,6 +109,8 @@ from ..web_data import (
     search_entries,
     settings_snapshot,
     settings_secret_values,
+    start_pimcore_test_create,
+    test_pimcore_settings,
     test_ftp_connection,
     test_local_paths,
     test_sql_connection,
@@ -4158,6 +4163,85 @@ def create_app() -> FastAPI:
             return response
         snapshot["current_user"] = _current_user_payload(request)
         return JSONResponse(snapshot)
+
+    @app.post("/api/settings/pimcore/test")
+    async def pimcore_settings_test_api(request: Request) -> JSONResponse:
+        user = _require_admin(request)
+        raw = await request.body()
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        overrides = payload.get("settings") if isinstance(payload, dict) else None
+        report = await run_in_threadpool(
+            test_pimcore_settings,
+            overrides,
+            str(user.get("username") or "admin"),
+        )
+        return JSONResponse(report)
+
+    @app.post("/api/settings/pimcore/import-csv-headers")
+    async def pimcore_csv_headers_api(request: Request) -> JSONResponse:
+        _require_admin(request)
+        form = await request.form()
+        upload = form.get("file")
+        if not isinstance(upload, UploadFile) or not upload.filename:
+            raise HTTPException(status_code=400, detail="Brak pliku CSV.")
+        content = await upload.read()
+        if len(content) > 2 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Plik CSV jest za duzy.")
+        try:
+            headers = parse_pimcore_csv_headers(content)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse({"headers": headers})
+
+    @app.post("/api/settings/pimcore/test-create-runs")
+    async def pimcore_test_create_start_api(request: Request) -> JSONResponse:
+        user = _require_admin(request)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Niepoprawne dane testu Pimcore.")
+        try:
+            operation = start_pimcore_test_create(
+                payload.get("values"),
+                payload.get("cleanup_policy"),
+                str(user.get("username") or "admin"),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse({"operation": operation})
+
+    @app.get("/api/settings/pimcore/test-create-runs/{operation_id}")
+    def pimcore_test_create_status_api(
+        request: Request,
+        operation_id: str,
+        after_sequence: int = 0,
+    ) -> Dict[str, Any]:
+        _require_admin(request)
+        operation = pimcore_operation_status(operation_id, after_sequence)
+        if not operation:
+            raise HTTPException(status_code=404, detail="Nie znaleziono operacji Pimcore.")
+        return operation
+
+    @app.get("/api/settings/pimcore/operations")
+    def pimcore_operations_api(
+        request: Request,
+        operation_type: str = "",
+        result: str = "",
+        user: str = "",
+        query: str = "",
+        date_from: float = 0,
+        date_to: float = 0,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        _require_admin(request)
+        return pimcore_operation_history(
+            operation_type=operation_type,
+            result=result,
+            user=user,
+            query=query,
+            date_from=date_from,
+            date_to=date_to,
+            limit=limit,
+        )
 
     @app.post("/api/settings/import-legacy")
     async def settings_import_legacy(request: Request) -> JSONResponse:
