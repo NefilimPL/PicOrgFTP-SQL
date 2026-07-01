@@ -228,6 +228,19 @@ class WebUiIntegrityTests(unittest.TestCase):
             )
         )
 
+    def test_settings_include_pimcore_tab(self) -> None:
+        html = _parse(INDEX_HTML)
+
+        self.assertTrue(html.has_tag("button", **{"data-settings-tab": "pimcore"}))
+
+    def test_pimcore_test_and_history_modals_exist(self) -> None:
+        html = _parse(INDEX_HTML)
+
+        self.assertIn("pimcoreTestModal", html.ids)
+        self.assertIn("pimcoreHistoryModal", html.ids)
+        self.assertIn("pimcoreTestForm", html.ids)
+        self.assertIn("pimcoreLiveLog", html.ids)
+
     def test_slot_template_keeps_preview_and_file_input_controls(self) -> None:
         html = _parse(INDEX_HTML)
 

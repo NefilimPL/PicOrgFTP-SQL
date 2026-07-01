@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicOrgFTP-SQL Web</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260526-browser-extension">
+    <link rel="stylesheet" href="/static/app.css?v=20260701-pimcore">
   </head>
   <body class="app-screen">
     <header class="topbar">
@@ -357,10 +357,66 @@
           <button type="button" class="settings-tab" data-settings-tab="security">Bezpieczenstwo</button>
           <button type="button" class="settings-tab" data-settings-tab="ftp">FTP</button>
           <button type="button" class="settings-tab" data-settings-tab="sql">SQL</button>
+          <button type="button" class="settings-tab" data-settings-tab="pimcore">Pimcore</button>
           <button type="button" class="settings-tab" data-settings-tab="slots">Sloty</button>
           <button type="button" class="settings-tab" data-settings-tab="users">Uzytkownicy</button>
         </div>
         <div id="settingsOutput" class="settings-grid"></div>
+      </section>
+    </div>
+
+    <div id="pimcoreTestModal" class="modal-view nested-modal">
+      <section class="manager-panel pimcore-test-panel">
+        <div class="section-heading">
+          <h1>Testowe dodanie obiektu Pimcore</h1>
+          <button id="pimcoreTestCloseButton" type="button" class="ghost-button modal-close">Zamknij</button>
+        </div>
+        <div class="pimcore-test-layout">
+          <form id="pimcoreTestForm" class="pimcore-test-fields"></form>
+          <section class="pimcore-live-log-panel" aria-labelledby="pimcoreLiveLogTitle">
+            <div class="section-heading">
+              <h2 id="pimcoreLiveLogTitle">Log operacji</h2>
+              <span id="pimcoreTestElapsed">0 ms</span>
+            </div>
+            <div id="pimcoreLiveLog" class="pimcore-live-log empty-state" aria-live="polite">Brak operacji.</div>
+          </section>
+        </div>
+        <div class="pimcore-test-actions">
+          <label><input type="radio" name="pimcore_cleanup_policy" value="delete"> Usun po tescie</label>
+          <label><input type="radio" name="pimcore_cleanup_policy" value="keep"> Pozostaw w Pimcore</label>
+          <button id="pimcoreTestSubmitButton" type="button">Wyslij</button>
+          <button id="pimcoreTestClearButton" type="button" class="secondary-button">Wyczysc formularz</button>
+          <span id="pimcoreTestStatus" role="status"></span>
+        </div>
+      </section>
+    </div>
+
+    <div id="pimcoreHistoryModal" class="modal-view nested-modal">
+      <section class="manager-panel">
+        <div class="section-heading">
+          <h1>Historia operacji Pimcore</h1>
+          <button id="pimcoreHistoryCloseButton" type="button" class="ghost-button modal-close">Zamknij</button>
+        </div>
+        <form id="pimcoreHistoryFilters" class="pimcore-history-filters">
+          <select name="operation_type" aria-label="Typ operacji">
+            <option value="">Wszystkie typy</option>
+            <option value="manual">Dodanie reczne</option>
+            <option value="test">Dodanie testowe</option>
+          </select>
+          <select name="result" aria-label="Wynik operacji">
+            <option value="">Wszystkie wyniki</option>
+            <option value="completed">Sukces</option>
+            <option value="duplicate">Duplikat</option>
+            <option value="partial">Czesciowy blad</option>
+            <option value="failed">Blad</option>
+          </select>
+          <input name="user" aria-label="Uzytkownik" placeholder="Uzytkownik">
+          <input name="query" aria-label="EAN, SKU lub klucz" placeholder="EAN, SKU lub klucz">
+          <input name="date_from" type="date" aria-label="Data od">
+          <input name="date_to" type="date" aria-label="Data do">
+          <button type="submit" class="secondary-button">Filtruj</button>
+        </form>
+        <div id="pimcoreHistoryOutput" class="history-output empty-state">Brak operacji.</div>
       </section>
     </div>
 
@@ -406,6 +462,6 @@
       </article>
     </template>
 
-    <script src="/static/app.js?v=20260526-browser-extension"></script>
+    <script src="/static/app.js?v=20260701-pimcore"></script>
   </body>
 </html>

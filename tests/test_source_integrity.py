@@ -364,6 +364,49 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("/api/settings/sqlite/restore", source)
         self.assertIn("/api/settings/sqlite/backup-diff", source)
 
+    def test_pimcore_settings_wires_save_test_and_csv_import(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("function renderSettingsPimcore()", source)
+        self.assertIn('requestJson("/api/settings/pimcore/test"', source)
+        self.assertIn('requestJson("/api/settings/pimcore/import-csv-headers"', source)
+        self.assertIn("field_mappings: collectPimcoreMappings(form)", source)
+
+    def test_pimcore_write_test_keeps_modal_open_and_polls_incrementally(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("function openPimcoreWriteTest()", source)
+        self.assertIn("after_sequence", source)
+        self.assertIn("500", source)
+        self.assertIn("pimcoreTestForm.reset()", source)
+        self.assertNotIn('pimcoreTestModal.classList.remove("active"); // submit', source)
+        self.assertIn("cleanup_policy", source)
+
+    def test_pimcore_live_log_history_uses_dedicated_endpoint(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("/api/settings/pimcore/test-create-runs", source)
+        self.assertIn("/api/settings/pimcore/operations", source)
+        self.assertIn("function appendPimcoreLiveEvents", source)
+
     def test_sqlite_backup_schedule_uses_day_hour_slots_and_nested_modal_layer(self) -> None:
         root = Path(__file__).resolve().parents[1]
         js_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(encoding="utf-8")

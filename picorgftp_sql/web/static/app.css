@@ -986,6 +986,68 @@ h2 {
   gap: 10px;
 }
 
+.pimcore-mapping-list,
+.pimcore-checklist {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pimcore-mapping-row {
+  display: grid;
+  grid-template-columns: 1.2fr 1.2fr 1.2fr 110px 90px 36px 1fr 130px auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 8px 0;
+}
+
+.pimcore-mapping-row > * {
+  min-width: 0;
+}
+
+.pimcore-mapping-row input[type="checkbox"] {
+  justify-self: center;
+}
+
+.pimcore-mapping-row button {
+  padding: 0 10px;
+}
+
+.pimcore-check-row {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border-left: 4px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  padding: 8px 10px;
+}
+
+.pimcore-check-row strong,
+.pimcore-check-row span {
+  overflow-wrap: anywhere;
+}
+
+.pimcore-check-row span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pimcore-check-row.ok,
+.pimcore-check-row.success {
+  border-left-color: var(--accent);
+}
+
+.pimcore-check-row.warning {
+  border-left-color: var(--warn);
+}
+
+.pimcore-check-row.error {
+  border-left-color: var(--danger);
+}
+
 .sqlite-backup-settings {
   display: grid;
   gap: 10px;
@@ -1595,6 +1657,148 @@ button.slot-badge.on:hover {
   min-height: 32px;
 }
 
+.pimcore-test-panel {
+  width: min(1400px, calc(100vw - 32px));
+}
+
+.pimcore-test-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(380px, 1.1fr);
+  min-height: 0;
+  gap: 16px;
+}
+
+.pimcore-test-fields {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.pimcore-test-fields,
+.pimcore-live-log {
+  min-width: 0;
+  max-height: min(68vh, 760px);
+  overflow: auto;
+}
+
+.pimcore-live-log-panel {
+  min-width: 0;
+}
+
+.pimcore-live-log {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 10px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+}
+
+.pimcore-live-event {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border-left: 4px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 8px 10px;
+}
+
+.pimcore-live-event.success {
+  border-left-color: var(--accent);
+}
+
+.pimcore-live-event.warning {
+  border-left-color: var(--warn);
+}
+
+.pimcore-live-event.error,
+.pimcore-live-event.failed {
+  border-left-color: var(--danger);
+}
+
+.pimcore-live-event strong,
+.pimcore-live-event span,
+.pimcore-live-event pre {
+  overflow-wrap: anywhere;
+}
+
+.pimcore-live-event span {
+  color: var(--muted);
+}
+
+.pimcore-live-event pre {
+  max-height: 180px;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  padding: 8px;
+  white-space: pre-wrap;
+}
+
+.pimcore-test-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.pimcore-test-actions label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  min-width: 0;
+}
+
+.pimcore-test-actions input[type="radio"] {
+  width: 17px;
+  min-width: 17px;
+  height: 17px;
+  min-height: 17px;
+}
+
+.pimcore-history-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.pimcore-history-row {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pimcore-history-row .history-summary-row {
+  width: 100%;
+}
+
+.pimcore-history-row strong,
+.pimcore-history-row span,
+.pimcore-history-event-details,
+.pimcore-history-event-details div {
+  overflow-wrap: anywhere;
+}
+
+.pimcore-history-event-details {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .log-category,
 .log-block,
 .log-event {
@@ -1915,6 +2119,15 @@ button.slot-badge.on:hover {
   }
 
   .list-editor-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .pimcore-mapping-row,
+  .pimcore-test-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .pimcore-history-filters {
     grid-template-columns: 1fr;
   }
 }
