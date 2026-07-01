@@ -10,7 +10,9 @@ from picorgftp_sql.services.pimcore_service import (
     PimcoreClient,
     build_create_payload,
     build_ean_condition,
+    create_product,
     extract_object_id,
+    find_product_by_ean,
     run_settings_test,
 )
 
@@ -108,6 +110,86 @@ def test_extract_object_id_accepts_pimcore_response_variants():
     assert extract_object_id({"id": 44}) == 44
     assert extract_object_id({"data": {"id": "45"}}) == 45
     assert extract_object_id({"object": {"id": 46}}) == 46
+
+
+class ProductClient:
+    def __init__(self, existing=None):
+        self.existing = existing or []
+        self.created = []
+
+    def object_list(self, class_name, condition, limit=2):
+        return {"data": self.existing}
+
+    def create_object(self, payload):
+        self.created.append(payload)
+        return {"data": {"id": 91}}
+
+    def object_by_id(self, object_id):
+        return {"data": {"id": object_id, "key": "ABC-1", "fullPath": "/Produkty/ABC-1"}}
+
+
+PRODUCT_CONFIG = {
+    "enabled": True,
+    "class_name": "Product",
+    "parent_id": "123",
+    "published": True,
+    "object_key_template": "{SKU}",
+    "existence_fields": ["EAN", "Towar_powiazany_z_SKU"],
+    "field_mappings": [
+        {
+            "source": "SKU",
+            "pimcore_field": "SKU",
+            "type": "input",
+            "required": True,
+            "parser": "text",
+        },
+        {
+            "source": "EAN",
+            "pimcore_field": "EAN",
+            "type": "input",
+            "required": True,
+            "parser": "text",
+        },
+    ],
+}
+
+
+def test_find_product_by_ean_returns_normalized_identity():
+    client = ProductClient(existing=[{"id": 51, "key": "ABC", "fullPath": "/Produkty/ABC"}])
+
+    result = find_product_by_ean(PRODUCT_CONFIG, "5904804578169", client=client)
+
+    assert result == {"id": 51, "key": "ABC", "path": "/Produkty/ABC"}
+
+
+def test_create_product_rechecks_duplicate_before_post():
+    client = ProductClient(existing=[{"id": 51, "key": "ABC", "fullPath": "/Produkty/ABC"}])
+
+    result = create_product(
+        PRODUCT_CONFIG,
+        {"SKU": "ABC-1", "EAN": "5904804578169"},
+        client=client,
+        emit=lambda *args, **kwargs: None,
+    )
+
+    assert result["duplicate"] is True
+    assert result["object"]["id"] == 51
+    assert client.created == []
+
+
+def test_create_product_posts_when_ean_is_missing():
+    client = ProductClient()
+
+    result = create_product(
+        PRODUCT_CONFIG,
+        {"SKU": "ABC-1", "EAN": "5904804578169"},
+        client=client,
+        emit=lambda *args, **kwargs: None,
+    )
+
+    assert result["created"] is True
+    assert result["object"] == {"id": 91, "key": "ABC-1", "path": "/Produkty/ABC-1"}
+    assert client.created[0]["published"] is True
 
 
 def test_client_reports_status_endpoint_and_response_without_api_key():

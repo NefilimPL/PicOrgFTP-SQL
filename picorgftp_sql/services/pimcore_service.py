@@ -655,6 +655,143 @@ def extract_object_path(payload: object) -> str:
     return ""
 
 
+def normalize_object_identity(record: object) -> dict[str, object]:
+    source = record if isinstance(record, dict) else {}
+    try:
+        object_id = int(source.get("id"))
+    except (TypeError, ValueError):
+        object_id = 0
+    return {
+        "id": object_id,
+        "key": str(source.get("key") or ""),
+        "path": str(source.get("fullPath") or source.get("path") or ""),
+    }
+
+
+def find_product_by_ean(
+    settings: object,
+    ean: object,
+    *,
+    client: PimcoreClient | None = None,
+) -> dict[str, object] | None:
+    config = normalize_pimcore_settings(settings)
+    api = client or PimcoreClient(config)
+    payload = api.object_list(
+        config["class_name"],
+        build_ean_condition(ean, config["existence_fields"]),
+        limit=2,
+    )
+    records = _list_records(payload, ("data", "objects", "items"))
+    return normalize_object_identity(records[0]) if records else None
+
+
+def create_product(
+    settings: object,
+    values: dict[str, object],
+    *,
+    client: PimcoreClient | None = None,
+    emit: Callable[..., None],
+) -> dict[str, object]:
+    config = normalize_pimcore_settings(settings)
+    api = client or PimcoreClient(config)
+    ean = validate_ean(values.get("EAN"))
+    stage_started = time.perf_counter()
+    duplicate = find_product_by_ean(config, ean, client=api)
+    if duplicate:
+        emit(
+            "duplicate_check",
+            "warning",
+            "EAN juz istnieje w Pimcore.",
+            object_id=duplicate["id"],
+            object_path=duplicate["path"],
+            stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
+        )
+        return {
+            "created": False,
+            "duplicate": True,
+            "object": duplicate,
+            "object_id": duplicate["id"],
+        }
+    emit(
+        "duplicate_check",
+        "success",
+        "EAN nie istnieje; mozna utworzyc produkt.",
+        stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
+    )
+
+    stage_started = time.perf_counter()
+    payload = build_create_payload(config, values, published=config["published"], use_defaults=True)
+    emit(
+        "payload",
+        "success",
+        "Zbudowano dane produktu.",
+        payload=payload,
+        stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
+    )
+
+    stage_started = time.perf_counter()
+    try:
+        response = api.create_object(payload)
+        object_id = extract_object_id(response)
+    except PimcoreApiError as exc:
+        emit(
+            "create",
+            "error",
+            str(exc),
+            method="POST",
+            endpoint="/webservice/rest/object",
+            error=exc.as_dict(),
+            stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
+        )
+        raise
+    except ValueError as exc:
+        emit(
+            "create",
+            "error",
+            str(exc),
+            method="POST",
+            endpoint="/webservice/rest/object",
+            response_excerpt=_response_excerpt(json.dumps(response, ensure_ascii=True)),
+            stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
+        )
+        raise
+    emit(
+        "create",
+        "success",
+        "Utworzono produkt Pimcore.",
+        object_id=object_id,
+        method="POST",
+        endpoint="/webservice/rest/object",
+        status_code=_last_status_code(api),
+        response_excerpt=_response_excerpt(json.dumps(response, ensure_ascii=True)),
+        stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
+    )
+
+    stage_started = time.perf_counter()
+    fetched = api.object_by_id(object_id)
+    source = fetched.get("data") if isinstance(fetched, dict) and isinstance(fetched.get("data"), dict) else fetched
+    identity = normalize_object_identity(source)
+    if not identity["id"]:
+        identity["id"] = object_id
+    emit(
+        "verify",
+        "success",
+        "Potwierdzono produkt w Pimcore.",
+        object_id=object_id,
+        endpoint=f"/webservice/rest/object/id/{object_id}",
+        status_code=_last_status_code(api),
+        response_excerpt=_response_excerpt(json.dumps(fetched, ensure_ascii=True)),
+        stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
+    )
+    return {
+        "created": True,
+        "duplicate": False,
+        "object": identity,
+        "object_id": identity["id"],
+        "payload": payload,
+    }
+
+
 def run_test_create(
     settings: object,
     values: dict[str, object],

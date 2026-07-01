@@ -59,6 +59,7 @@ from ..legacy_import import import_legacy_to_sqlite
 from ..logging_utils import log_error
 from ..product_fields import PRODUCT_FIELDS_KEY, normalize_product_fields
 from ..services.ftp_service import sync_remote_files
+from ..services.pimcore_service import PimcoreApiError
 from ..services.sql_service import detect_available_columns, extract_presence_context
 from ..sqlite_maintenance import repair_sqlite_database
 from ..workflow_utils import build_product_directory, parse_slot_filename, sanitize_path_segment
@@ -89,6 +90,7 @@ from ..web_data import (
     cleanup_web_ftp_cache,
     field_suggestions,
     find_entry_by_identity,
+    find_pimcore_product_by_ean,
     find_user,
     find_product_photos,
     file_index_status,
@@ -107,6 +109,7 @@ from ..web_data import (
     record_history,
     save_web_entry,
     search_entries,
+    create_pimcore_product,
     settings_snapshot,
     settings_secret_values,
     start_pimcore_test_create,
@@ -4242,6 +4245,59 @@ def create_app() -> FastAPI:
             date_to=date_to,
             limit=limit,
         )
+
+    @app.get("/api/pimcore/product-status")
+    async def pimcore_product_status_api(request: Request, ean: str) -> JSONResponse:
+        username = _require_user(request)
+        try:
+            result = await run_in_threadpool(find_pimcore_product_by_ean, ean)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except PimcoreApiError as exc:
+            _write_web_event(
+                level="warning",
+                event="PIMCORE_PRODUCT_LOOKUP",
+                username=username,
+                message=str(exc),
+                details={"ean": ean, "error": exc.as_dict()},
+            )
+            return JSONResponse(
+                {
+                    "enabled": True,
+                    "available": False,
+                    "exists": False,
+                    "object": None,
+                    "error": exc.as_dict(),
+                }
+            )
+        result["available"] = True
+        _write_web_event(
+            level="info",
+            event="PIMCORE_PRODUCT_LOOKUP",
+            username=username,
+            message=f"EAN {ean}: {'istnieje' if result.get('exists') else 'brak'}.",
+            details={
+                "ean": ean,
+                "exists": bool(result.get("exists")),
+                "object": result.get("object"),
+            },
+        )
+        return JSONResponse(result)
+
+    @app.post("/api/pimcore/products")
+    async def pimcore_product_create_api(request: Request) -> JSONResponse:
+        username = _require_user(request)
+        payload = await request.json()
+        values = payload.get("values") if isinstance(payload, dict) else None
+        if not isinstance(values, dict):
+            raise HTTPException(status_code=400, detail="Brak danych produktu Pimcore.")
+        try:
+            result = await run_in_threadpool(create_pimcore_product, values, username)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except PimcoreApiError as exc:
+            raise HTTPException(status_code=502, detail=exc.as_dict()) from exc
+        return JSONResponse(result)
 
     @app.post("/api/settings/import-legacy")
     async def settings_import_legacy(request: Request) -> JSONResponse:

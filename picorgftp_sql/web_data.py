@@ -82,7 +82,13 @@ from .pimcore_config import (
     normalize_pimcore_settings,
 )
 from .pimcore_operations import PimcoreOperationRegistry, redact_pimcore_log_value
-from .services.pimcore_service import PimcoreClient, run_settings_test, run_test_create
+from .services.pimcore_service import (
+    PimcoreClient,
+    create_product,
+    find_product_by_ean,
+    run_settings_test,
+    run_test_create,
+)
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
 from .product_fields import (
     PRODUCT_FIELDS_KEY,
@@ -1573,6 +1579,83 @@ def start_pimcore_test_create(
         ),
         persist=_persist_pimcore_operation,
     )
+
+
+def _pimcore_runtime_form_schema(settings_payload: dict[str, object]) -> list[dict[str, object]]:
+    return [
+        {
+            "source": item["source"],
+            "label": item["label"],
+            "required": item["required"],
+            "default": item["default"],
+            "parser": item["parser"],
+        }
+        for item in settings_payload["field_mappings"]
+    ]
+
+
+def find_pimcore_product_by_ean(ean: object) -> dict[str, object]:
+    settings_payload = normalize_pimcore_settings(config.CONFIG.get(PIMCORE_SETTINGS_KEY))
+    if not settings_payload["enabled"]:
+        return {"enabled": False, "exists": False, "object": None, "form_schema": []}
+    found = find_product_by_ean(settings_payload, ean)
+    return {
+        "enabled": True,
+        "exists": bool(found),
+        "object": found,
+        "form_schema": _pimcore_runtime_form_schema(settings_payload),
+    }
+
+
+def create_pimcore_product(values: object, username: str) -> dict[str, object]:
+    submitted = dict(values) if isinstance(values, dict) else {}
+    settings_payload = normalize_pimcore_settings(config.CONFIG.get(PIMCORE_SETTINGS_KEY))
+    if not settings_payload["enabled"]:
+        raise ValueError("Integracja Pimcore jest wylaczona.")
+    operation_id = secrets.token_hex(12)
+    started = time.time()
+    events: list[dict[str, object]] = []
+    result: dict[str, object] = {}
+    status = "failed"
+
+    def emit(stage: str, severity: str, message: str, **details: object) -> None:
+        now = time.time()
+        event = {
+            "sequence": len(events) + 1,
+            "timestamp": now,
+            "elapsed_ms": int(max(0, now - started) * 1000),
+            "stage": stage,
+            "severity": severity,
+            "message": message,
+        }
+        event.update(details)
+        events.append(event)
+
+    try:
+        result = create_product(settings_payload, submitted, emit=emit)
+        status = "duplicate" if result.get("duplicate") else "completed"
+        return result
+    except Exception as exc:
+        status = "failed"
+        emit("finish", "error", str(exc) or exc.__class__.__name__)
+        raise
+    finally:
+        finished = time.time()
+        report = redact_pimcore_log_value(
+            {
+                "operation_id": operation_id,
+                "operation_type": "manual",
+                "username": username,
+                "values": submitted,
+                "status": status,
+                "started_at": started,
+                "finished_at": finished,
+                "total_ms": int(max(0, finished - started) * 1000),
+                "events": events,
+                "result": result,
+            }
+        )
+        _persist_pimcore_operation(report)
 
 
 def pimcore_operation_status(

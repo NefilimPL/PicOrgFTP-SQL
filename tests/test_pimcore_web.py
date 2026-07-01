@@ -218,3 +218,38 @@ def test_pimcore_history_route_forwards_all_filters():
         date_to=20.0,
         limit=25,
     )
+
+
+def test_product_status_returns_disabled_without_network_call():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"]["enabled"] = False
+
+    with patch.object(web_data.config, "CONFIG", cfg):
+        assert web_data.find_pimcore_product_by_ean("5904804578169") == {
+            "enabled": False,
+            "exists": False,
+            "object": None,
+            "form_schema": [],
+        }
+
+
+def test_runtime_create_route_allows_logged_in_user_and_returns_created_object():
+    client = TestClient(web_app.app)
+    expected = {
+        "created": True,
+        "duplicate": False,
+        "object": {"id": 91, "key": "ABC", "path": "/Produkty/ABC"},
+    }
+
+    with (
+        patch.object(web_app, "_require_user", return_value="operator"),
+        patch.object(web_app, "create_pimcore_product", return_value=expected) as create,
+    ):
+        response = client.post(
+            "/api/pimcore/products",
+            json={"values": {"SKU": "ABC", "EAN": "5904804578169"}},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    create.assert_called_once_with({"SKU": "ABC", "EAN": "5904804578169"}, "operator")
