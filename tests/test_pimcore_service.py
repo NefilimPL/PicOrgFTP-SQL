@@ -285,6 +285,26 @@ def test_settings_test_returns_individual_checks_and_missing_field_error():
     assert report["total_ms"] >= 0
 
 
+def test_settings_test_reports_all_local_errors_without_api_key():
+    report = run_settings_test(
+        {
+            "base_url": "http://10.10.0.5",
+            "api_key": "",
+            "parent_id": "",
+            "object_key_template": "{SKU}",
+            "field_mappings": [],
+        }
+    )
+    checks = {item["key"]: item for item in report["checks"]}
+
+    assert report["ok"] is False
+    assert checks["api_key"]["status"] == "error"
+    assert checks["mapping_local"]["status"] == "error"
+    assert checks["parent"]["status"] == "error"
+    assert checks["test_form_schema"]["status"] == "error"
+    assert checks["create_permission"]["status"] == "info"
+
+
 VALID_DIAGNOSTIC_CONFIG = {
     "enabled": True,
     "base_url": "http://10.10.0.5",

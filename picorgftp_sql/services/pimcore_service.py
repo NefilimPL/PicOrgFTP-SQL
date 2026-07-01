@@ -463,6 +463,53 @@ def run_settings_test(
             ),
         )
     )
+    required_sources = {
+        item["source"] for item in config["field_mappings"] if item["required"]
+    }
+    key_sources = set(re.findall(r"\{([^{}]+)\}", config["object_key_template"]))
+    mapped_sources = {item["source"] for item in config["field_mappings"]}
+    local_ok = "EAN" in required_sources and bool(key_sources & mapped_sources)
+    checks.append(
+        _check(
+            "mapping_local",
+            "ok" if local_ok else "error",
+            (
+                "Mapowanie zawiera EAN i zrodlo klucza."
+                if local_ok
+                else "EAN musi byc wymagany, a szablon klucza musi wskazywac mapowane pole."
+            ),
+            suggested_fix=(
+                ""
+                if local_ok
+                else "Oznacz EAN jako wymagany i ustaw szablon np. {SKU} albo {EAN}."
+            ),
+        )
+    )
+    if not config["parent_id"]:
+        checks.append(
+            _check(
+                "parent",
+                "error",
+                "Brak parent_id folderu Produkty.",
+                suggested_fix="Wpisz numeryczne ID folderu Produkty z Pimcore.",
+            )
+        )
+    checks.append(
+        _check(
+            "test_form_schema",
+            "ok" if config["field_mappings"] else "error",
+            (
+                "Formularz testowy moze zostac zbudowany."
+                if config["field_mappings"]
+                else "Brak mapowania pol."
+            ),
+            suggested_fix=(
+                ""
+                if config["field_mappings"]
+                else "Dodaj co najmniej mapowania EAN i pola uzywanego przez szablon klucza."
+            ),
+        )
+    )
     if not base_ok or not key_ok:
         checks.append(
             _check(
@@ -550,42 +597,11 @@ def run_settings_test(
             ),
         )
     )
-    required_sources = {
-        item["source"] for item in config["field_mappings"] if item["required"]
-    }
-    key_sources = set(re.findall(r"\{([^{}]+)\}", config["object_key_template"]))
-    mapped_sources = {item["source"] for item in config["field_mappings"]}
-    local_ok = "EAN" in required_sources and bool(key_sources & mapped_sources)
-    checks.append(
-        _check(
-            "mapping_local",
-            "ok" if local_ok else "error",
-            (
-                "Mapowanie zawiera EAN i zrodlo klucza."
-                if local_ok
-                else "EAN musi byc wymagany, a szablon klucza musi wskazywac mapowane pole."
-            ),
-            suggested_fix=(
-                ""
-                if local_ok
-                else "Oznacz EAN jako wymagany i ustaw szablon np. {SKU} albo {EAN}."
-            ),
-        )
-    )
     if config["parent_id"]:
         timed(
             "parent",
             f"/webservice/rest/object/id/{config['parent_id']}",
             lambda: api.object_by_id(config["parent_id"]),
-        )
-    else:
-        checks.append(
-            _check(
-                "parent",
-                "error",
-                "Brak parent_id folderu Produkty.",
-                suggested_fix="Wpisz numeryczne ID folderu Produkty z Pimcore.",
-            )
         )
     timed(
         "object_list",
@@ -594,22 +610,6 @@ def run_settings_test(
             config["class_name"],
             build_ean_condition("0000000000000", config["existence_fields"]),
         ),
-    )
-    checks.append(
-        _check(
-            "test_form_schema",
-            "ok" if config["field_mappings"] else "error",
-            (
-                "Formularz testowy moze zostac zbudowany."
-                if config["field_mappings"]
-                else "Brak mapowania pol."
-            ),
-            suggested_fix=(
-                ""
-                if config["field_mappings"]
-                else "Dodaj co najmniej mapowania EAN i pola uzywanego przez szablon klucza."
-            ),
-        )
     )
     checks.append(
         _check(

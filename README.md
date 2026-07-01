@@ -10,6 +10,18 @@ Project roadmap / plan rozwoju: [PLAN_ROZWOJU.md](PLAN_ROZWOJU.md)
 <img width="1082" height="812" alt="image" src="https://github.com/user-attachments/assets/48f3f87e-b4bd-402b-bcbf-16d5a160ed0d" />
 <img width="838" height="419" alt="image" src="https://github.com/user-attachments/assets/f5ff136e-213e-4a43-baca-518905c447c6" />
 
+## Pimcore 6.6 REST
+
+1. W Pimcore włącz `Settings > System Settings > Web Service API`.
+2. Utwórz lub wybierz dedykowanego użytkownika Pimcore i skopiuj jego klucz API.
+3. Nadaj temu użytkownikowi uprawnienia odczytu informacji o serwerze, klas, klasy Product oraz docelowego folderu `Produkty`.
+4. Nadaj uprawnienia tworzenia, odczytu i usuwania obiektów, jeżeli test zapisu w ustawieniach ma korzystać z opcji `Usun po tescie`.
+5. W PicOrgFTP-SQL otwórz `Ustawienia > Pimcore`, ustaw bazowy URL, klucz API, nazwę klasy i ID folderu nadrzędnego, a następnie przypisz nagłówki CSV do pól Pimcore.
+6. Uruchom `Sprawdz konfiguracje`. Popraw każdy wiersz z błędem przed włączeniem tworzenia obiektów w głównym formularzu.
+7. Uruchom `Testowo dodaj obiekt`, wpisz odizolowane dane testowe, wybierz sposób sprzątania i sprawdź log na żywo.
+
+Klucz API jest przechowywany w postaci zaszyfrowanej. Standardowy endpoint ustawień ani logi operacji Pimcore nigdy go nie zwracają. Obiekt pozostawiony przez test w Pimcore jest nieopublikowany. Jeżeli automatyczne usuwanie się nie powiedzie, użyj ID, klucza lub ścieżki obiektu z raportu operacji, aby usunąć go ręcznie.
+
 
 
 
