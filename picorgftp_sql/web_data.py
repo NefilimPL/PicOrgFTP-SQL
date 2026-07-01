@@ -73,6 +73,7 @@ from .services.sql_service import (
     should_check_presence,
 )
 from .file_index import LocalFileIndex
+from .pimcore_config import PIMCORE_API_KEY, PIMCORE_SETTINGS_KEY
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
 from .product_fields import (
     PRODUCT_FIELDS_KEY,
@@ -132,6 +133,7 @@ _CONFIG_SECRET_FIELDS = {
     P: {N, M},
     K: {N, M},
     TRANSLATION_SETTINGS_KEY: {TRANSLATION_API_KEY},
+    PIMCORE_SETTINGS_KEY: {PIMCORE_API_KEY},
 }
 
 
@@ -1484,6 +1486,9 @@ def _preserve_unsubmitted_config_secrets(payload: dict[str, object]) -> dict[str
             preserve[section_key].discard(N)
         if _text(section_payload.get("password")):
             preserve[section_key].discard(M)
+    pimcore_payload = payload.get(PIMCORE_SETTINGS_KEY)
+    if isinstance(pimcore_payload, dict) and _text(pimcore_payload.get(PIMCORE_API_KEY)):
+        preserve[PIMCORE_SETTINGS_KEY].discard(PIMCORE_API_KEY)
     return {section: keys for section, keys in preserve.items() if keys}
 
 

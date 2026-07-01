@@ -1,5 +1,6 @@
 """Shared constants, imports and helper utilities for PicOrgFTP-SQL."""
 
+from .pimcore_config import PIMCORE_SETTINGS_KEY, default_pimcore_settings
 from .product_fields import PRODUCT_FIELDS_KEY, default_product_fields
 
 ################################ Aktualne ustawienia startowe aplikacji ################################
@@ -328,6 +329,7 @@ DEFAULT_CONFIG.setdefault(
         TRANSLATION_API_URL: "",
     },
 )
+DEFAULT_CONFIG.setdefault(PIMCORE_SETTINGS_KEY, default_pimcore_settings())
 
 import sys
 import os as A
