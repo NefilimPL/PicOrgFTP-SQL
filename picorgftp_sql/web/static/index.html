@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicOrgFTP-SQL Web</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260701-pimcore">
+    <link rel="stylesheet" href="/static/app.css?v=20260701-pimcore-runtime">
   </head>
   <body class="app-screen">
     <header class="topbar">
@@ -420,6 +420,34 @@
       </section>
     </div>
 
+    <div id="pimcoreMissingModal" class="modal-view">
+      <section class="modal-panel compact-modal">
+        <div class="section-heading">
+          <h1>Brak produktu w Pimcore</h1>
+          <button id="pimcoreMissingCancelButton" type="button" class="ghost-button modal-close">Anuluj</button>
+        </div>
+        <p id="pimcoreMissingMessage"></p>
+        <div class="heading-actions">
+          <button id="pimcoreMissingCreateButton" type="button">Dodaj produkt</button>
+          <button id="pimcoreMissingContinueButton" type="button" class="secondary-button">Kontynuuj bez dodawania</button>
+        </div>
+      </section>
+    </div>
+
+    <div id="pimcoreCreateModal" class="modal-view">
+      <section class="manager-panel pimcore-create-panel">
+        <div class="section-heading">
+          <h1>Nowy produkt Pimcore</h1>
+          <button id="pimcoreCreateCancelButton" type="button" class="ghost-button modal-close">Anuluj</button>
+        </div>
+        <form id="pimcoreCreateForm" class="pimcore-runtime-fields"></form>
+        <div class="heading-actions">
+          <button id="pimcoreCreateSubmitButton" type="submit" form="pimcoreCreateForm">Zapisz</button>
+          <span id="pimcoreCreateStatus" role="status"></span>
+        </div>
+      </section>
+    </div>
+
     <div id="secretRevealModal" class="modal-view">
       <section class="modal-panel compact-modal">
         <div class="section-heading">
@@ -462,6 +490,6 @@
       </article>
     </template>
 
-    <script src="/static/app.js?v=20260701-pimcore"></script>
+    <script src="/static/app.js?v=20260701-pimcore-runtime"></script>
   </body>
 </html>

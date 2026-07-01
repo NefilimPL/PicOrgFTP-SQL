@@ -24,6 +24,11 @@ const state = {
   historyPageSize: 50,
   historySearchTimer: 0,
   pimcoreTestOperation: null,
+  pimcoreLookupTimer: 0,
+  pimcoreLookupRequestId: 0,
+  pimcoreLastCheckedEan: "",
+  pimcoreMissingEan: "",
+  pimcoreCreateSchema: [],
   logs: null,
   settingsSecrets: null,
   theme: localStorage.getItem("picorg-theme") || "light",
@@ -209,6 +214,16 @@ const pimcoreHistoryModal = document.querySelector("#pimcoreHistoryModal");
 const pimcoreHistoryFilters = document.querySelector("#pimcoreHistoryFilters");
 const pimcoreHistoryOutput = document.querySelector("#pimcoreHistoryOutput");
 const pimcoreHistoryCloseButton = document.querySelector("#pimcoreHistoryCloseButton");
+const pimcoreMissingModal = document.querySelector("#pimcoreMissingModal");
+const pimcoreMissingMessage = document.querySelector("#pimcoreMissingMessage");
+const pimcoreMissingCreateButton = document.querySelector("#pimcoreMissingCreateButton");
+const pimcoreMissingContinueButton = document.querySelector("#pimcoreMissingContinueButton");
+const pimcoreMissingCancelButton = document.querySelector("#pimcoreMissingCancelButton");
+const pimcoreCreateModal = document.querySelector("#pimcoreCreateModal");
+const pimcoreCreateForm = document.querySelector("#pimcoreCreateForm");
+const pimcoreCreateSubmitButton = document.querySelector("#pimcoreCreateSubmitButton");
+const pimcoreCreateCancelButton = document.querySelector("#pimcoreCreateCancelButton");
+const pimcoreCreateStatus = document.querySelector("#pimcoreCreateStatus");
 const backupHistoryOutput = document.querySelector("#backupHistoryOutput");
 const backupDiffOutput = document.querySelector("#backupDiffOutput");
 const logsRefreshButton = document.querySelector("#logsRefreshButton");
@@ -6654,6 +6669,87 @@ async function openPimcoreHistory() {
   await loadPimcoreHistory();
 }
 
+function schedulePimcoreStatusLookup() {
+  window.clearTimeout(state.pimcoreLookupTimer);
+  const ean = productForm.elements.ean.value.trim();
+  if (!/^\d{13}$/.test(ean) || ean === state.pimcoreLastCheckedEan) return;
+  state.pimcoreLookupTimer = window.setTimeout(() => {
+    checkPimcoreProductStatus(ean).catch((error) => {
+      formStatus.textContent = `Nie mozna sprawdzic Pimcore: ${error.message}. Mozesz kontynuowac prace.`;
+    });
+  }, 500);
+}
+
+async function checkPimcoreProductStatus(ean) {
+  const requestId = ++state.pimcoreLookupRequestId;
+  const payload = await requestJson(`/api/pimcore/product-status?ean=${encodeURIComponent(ean)}`);
+  if (requestId !== state.pimcoreLookupRequestId || productForm.elements.ean.value.trim() !== ean) {
+    return;
+  }
+  state.pimcoreLastCheckedEan = ean;
+  if (!payload.enabled || payload.exists) return;
+  if (payload.available === false) {
+    formStatus.textContent = `Pimcore niedostepny: ${payload.error?.message || "blad polaczenia"}`;
+    return;
+  }
+  state.pimcoreCreateSchema = Array.isArray(payload.form_schema) ? payload.form_schema : [];
+  state.pimcoreMissingEan = ean;
+  pimcoreMissingMessage.textContent = `EAN ${ean} nie istnieje w Pimcore. Czy dodac produkt?`;
+  pimcoreMissingModal.classList.add("active");
+}
+
+function openPimcoreCreateModal(ean) {
+  if (!pimcoreCreateForm || !pimcoreCreateModal) return;
+  pimcoreCreateForm.textContent = "";
+  for (const mapping of state.pimcoreCreateSchema || []) {
+    const label = document.createElement("label");
+    const title = document.createElement("span");
+    const input = document.createElement("input");
+    title.textContent = `${mapping.label || mapping.source}${mapping.required ? " *" : ""}`;
+    input.name = mapping.source;
+    input.value = mapping.source === "EAN" ? ean : mapping.default || "";
+    input.required = Boolean(mapping.required);
+    input.autocomplete = "off";
+    if (mapping.source === "EAN") {
+      input.readOnly = true;
+      input.id = "pimcoreCreateEan";
+    }
+    label.append(title, input);
+    pimcoreCreateForm.appendChild(label);
+  }
+  const pimcoreCreateEan = pimcoreCreateForm.querySelector("#pimcoreCreateEan");
+  if (pimcoreCreateEan) pimcoreCreateEan.readOnly = true;
+  if (pimcoreCreateStatus) pimcoreCreateStatus.textContent = "";
+  pimcoreMissingModal?.classList.remove("active");
+  pimcoreCreateModal.classList.add("active");
+}
+
+async function submitPimcoreRuntimeCreate(event) {
+  event.preventDefault();
+  if (!pimcoreCreateForm.reportValidity()) return;
+  pimcoreCreateSubmitButton.disabled = true;
+  pimcoreCreateStatus.textContent = "Zapisywanie w Pimcore...";
+  try {
+    const values = Object.fromEntries(new FormData(pimcoreCreateForm).entries());
+    const payload = await requestJson("/api/pimcore/products", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ values }),
+      timeoutMs: 120000,
+    });
+    const object = payload.object || {};
+    pimcoreCreateModal.classList.remove("active");
+    state.pimcoreLastCheckedEan = state.pimcoreMissingEan || values.EAN || "";
+    formStatus.textContent = payload.duplicate
+      ? `EAN juz istnieje w Pimcore: ${object.path || object.id}.`
+      : `Utworzono produkt Pimcore: ${object.path || object.id}. Mozesz kontynuowac dodawanie zdjec.`;
+  } catch (error) {
+    pimcoreCreateStatus.textContent = error.message;
+  } finally {
+    pimcoreCreateSubmitButton.disabled = false;
+  }
+}
+
 function renderSettingsPimcore() {
   const pimcore = state.settings.pimcore || {};
   const form = document.createElement("form");
@@ -7098,6 +7194,24 @@ pimcoreHistoryFilters?.addEventListener("submit", (event) => {
   });
 });
 
+pimcoreMissingCreateButton?.addEventListener("click", () => {
+  openPimcoreCreateModal(state.pimcoreMissingEan);
+});
+
+pimcoreMissingContinueButton?.addEventListener("click", () => {
+  pimcoreMissingModal?.classList.remove("active");
+});
+
+pimcoreMissingCancelButton?.addEventListener("click", () => {
+  pimcoreMissingModal?.classList.remove("active");
+});
+
+pimcoreCreateCancelButton?.addEventListener("click", () => {
+  pimcoreCreateModal?.classList.remove("active");
+});
+
+pimcoreCreateForm?.addEventListener("submit", submitPimcoreRuntimeCreate);
+
 processAlertLoadButton?.addEventListener("click", () => {
   const jobId = processAlertLoadButton.dataset.jobId || "";
   const job = state.processJobs.get(jobId);
@@ -7210,6 +7324,8 @@ entrySelect.addEventListener("change", () => {
 for (const name of ["name", "type_name", "model"]) {
   productForm.elements[name].addEventListener("input", scheduleProductAutoSearch);
 }
+
+productForm.elements.ean?.addEventListener("input", schedulePimcoreStatusLookup);
 
 for (const name of trackedProductFields) {
   productForm.elements[name]?.addEventListener("input", () => scheduleBackgroundFtpLookup());
@@ -7327,6 +7443,13 @@ function resetCurrentDraft({ clearOutput = true, status = "" } = {}) {
   state.photoSourcesLoaded.clear();
   state.backgroundFtpLookupKey = "";
   state.backgroundFtpLookupRequestId += 1;
+  window.clearTimeout(state.pimcoreLookupTimer);
+  state.pimcoreLookupRequestId += 1;
+  state.pimcoreLastCheckedEan = "";
+  state.pimcoreMissingEan = "";
+  state.pimcoreCreateSchema = [];
+  pimcoreMissingModal?.classList.remove("active");
+  pimcoreCreateModal?.classList.remove("active");
   window.clearTimeout(state.backgroundFtpLookupTimer);
   window.clearTimeout(state.backgroundFtpPreviewTimer);
   state.loadedEntryOriginal = null;

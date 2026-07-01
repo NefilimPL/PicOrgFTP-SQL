@@ -241,6 +241,14 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("pimcoreTestForm", html.ids)
         self.assertIn("pimcoreLiveLog", html.ids)
 
+    def test_runtime_pimcore_prompt_and_create_modals_exist(self) -> None:
+        html = _parse(INDEX_HTML)
+
+        self.assertIn("pimcoreMissingModal", html.ids)
+        self.assertIn("pimcoreCreateModal", html.ids)
+        self.assertIn("pimcoreCreateForm", html.ids)
+        self.assertIn("pimcoreMissingCreateButton", html.ids)
+
     def test_slot_template_keeps_preview_and_file_input_controls(self) -> None:
         html = _parse(INDEX_HTML)
 

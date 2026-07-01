@@ -1799,6 +1799,24 @@ button.slot-badge.on:hover {
   font-size: 12px;
 }
 
+.pimcore-create-panel {
+  width: min(960px, calc(100vw - 32px));
+}
+
+.pimcore-runtime-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  max-height: min(68vh, 720px);
+  overflow: auto;
+}
+
+.pimcore-runtime-fields label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
 .log-category,
 .log-block,
 .log-event {
@@ -2128,6 +2146,12 @@ button.slot-badge.on:hover {
   }
 
   .pimcore-history-filters {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 700px) {
+  .pimcore-runtime-fields {
     grid-template-columns: 1fr;
   }
 }
