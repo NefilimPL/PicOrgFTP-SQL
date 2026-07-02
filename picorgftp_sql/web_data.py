@@ -85,6 +85,9 @@ from .pimcore_operations import PimcoreOperationRegistry, redact_pimcore_log_val
 from .services.pimcore_service import (
     PimcoreClient,
     create_product,
+    discover_classes,
+    discover_fields,
+    discover_folders,
     find_product_by_ean,
     run_settings_test,
     run_test_create,
@@ -1514,16 +1517,50 @@ def parse_pimcore_csv_headers(content: bytes) -> list[str]:
     return headers
 
 
-def test_pimcore_settings(
-    overrides: object = None,
-    username: str = "admin",
-) -> dict[str, object]:
+def _merged_pimcore_settings(overrides: object = None) -> dict[str, object]:
     saved = normalize_pimcore_settings(config.CONFIG.get(PIMCORE_SETTINGS_KEY))
     merged = dict(saved)
     if isinstance(overrides, dict):
         merged.update(overrides)
         if not _text(overrides.get(PIMCORE_API_KEY)):
             merged[PIMCORE_API_KEY] = saved[PIMCORE_API_KEY]
+    return normalize_pimcore_settings(merged)
+
+
+def discover_pimcore_classes(overrides: object = None) -> dict[str, object]:
+    settings_payload = _merged_pimcore_settings(overrides)
+    return {"items": discover_classes(PimcoreClient(settings_payload))}
+
+
+def discover_pimcore_fields(overrides: object, class_id: object) -> dict[str, object]:
+    settings_payload = _merged_pimcore_settings(overrides)
+    return {"items": discover_fields(PimcoreClient(settings_payload), class_id)}
+
+
+def discover_pimcore_folders(overrides: object = None) -> dict[str, object]:
+    settings_payload = _merged_pimcore_settings(overrides)
+    return {"items": discover_folders(PimcoreClient(settings_payload))}
+
+
+def complete_pimcore_setup(payload: object, username: str) -> dict[str, object]:
+    submitted = dict(payload) if isinstance(payload, dict) else {}
+    submitted["object_key_template"] = "{EAN}"
+    submitted["published"] = True
+    submitted["setup_complete"] = False
+    report = test_pimcore_settings(submitted, username)
+    if not report.get("ok"):
+        return {"saved": False, "report": report}
+    submitted["setup_complete"] = True
+    submitted["enabled"] = True
+    snapshot = update_settings({PIMCORE_SETTINGS_KEY: submitted})
+    return {"saved": True, "report": report, "settings": snapshot}
+
+
+def test_pimcore_settings(
+    overrides: object = None,
+    username: str = "admin",
+) -> dict[str, object]:
+    merged = _merged_pimcore_settings(overrides)
     report = run_settings_test(merged, client=PimcoreClient(merged))
     audit_report = redact_pimcore_log_value(report)
     record_history(

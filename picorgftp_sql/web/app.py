@@ -88,6 +88,10 @@ from ..web_data import (
     authenticate_user,
     cache_ftp_preview,
     cleanup_web_ftp_cache,
+    complete_pimcore_setup,
+    discover_pimcore_classes,
+    discover_pimcore_fields,
+    discover_pimcore_folders,
     field_suggestions,
     find_entry_by_identity,
     find_pimcore_product_by_ean,
@@ -4179,6 +4183,58 @@ def create_app() -> FastAPI:
             str(user.get("username") or "admin"),
         )
         return JSONResponse(report)
+
+    @app.post("/api/settings/pimcore/discover/classes")
+    async def pimcore_discover_classes_api(request: Request) -> JSONResponse:
+        _require_admin(request)
+        payload = await request.json()
+        settings_payload = payload.get("settings") if isinstance(payload, dict) else None
+        try:
+            result = await run_in_threadpool(discover_pimcore_classes, settings_payload)
+        except PimcoreApiError as exc:
+            raise HTTPException(status_code=502, detail=exc.as_dict()) from exc
+        return JSONResponse(result)
+
+    @app.post("/api/settings/pimcore/discover/fields")
+    async def pimcore_discover_fields_api(request: Request) -> JSONResponse:
+        _require_admin(request)
+        payload = await request.json()
+        if not isinstance(payload, dict) or not str(payload.get("class_id") or "").strip():
+            raise HTTPException(status_code=400, detail="Wybierz klase Pimcore.")
+        try:
+            result = await run_in_threadpool(
+                discover_pimcore_fields,
+                payload.get("settings"),
+                payload.get("class_id"),
+            )
+        except PimcoreApiError as exc:
+            raise HTTPException(status_code=502, detail=exc.as_dict()) from exc
+        return JSONResponse(result)
+
+    @app.post("/api/settings/pimcore/discover/folders")
+    async def pimcore_discover_folders_api(request: Request) -> JSONResponse:
+        _require_admin(request)
+        payload = await request.json()
+        try:
+            result = await run_in_threadpool(
+                discover_pimcore_folders,
+                payload.get("settings") if isinstance(payload, dict) else None,
+            )
+        except PimcoreApiError as exc:
+            raise HTTPException(status_code=502, detail=exc.as_dict()) from exc
+        return JSONResponse(result)
+
+    @app.post("/api/settings/pimcore/setup")
+    async def pimcore_setup_api(request: Request) -> JSONResponse:
+        user = _require_admin(request)
+        payload = await request.json()
+        settings_payload = payload.get("settings") if isinstance(payload, dict) else None
+        result = await run_in_threadpool(
+            complete_pimcore_setup,
+            settings_payload,
+            str(user.get("username") or "admin"),
+        )
+        return JSONResponse(result, status_code=200 if result.get("saved") else 422)
 
     @app.post("/api/settings/pimcore/import-csv-headers")
     async def pimcore_csv_headers_api(request: Request) -> JSONResponse:

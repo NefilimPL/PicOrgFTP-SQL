@@ -1,5 +1,5 @@
 import json
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -116,6 +116,108 @@ def test_settings_diagnostic_persists_full_detail_but_returns_public_report():
     assert "response_detail" not in result["checks"][0]
     persisted = record.call_args.kwargs["details"]["pimcore_settings_test"]
     assert persisted["checks"][0]["response_detail"] == "complete sanitized trace"
+
+
+def test_discovery_uses_unsaved_key_without_persisting_or_returning_it():
+    captured = {}
+    fake_client = Mock()
+    with (
+        patch.object(web_data.config, "CONFIG", {"pimcore": {"api_key": "saved"}}),
+        patch.object(web_data, "PimcoreClient", return_value=fake_client) as client_type,
+        patch.object(
+            web_data,
+            "discover_classes",
+            return_value=[{"id": "7", "name": "product"}],
+        ) as discover,
+    ):
+        client_type.side_effect = lambda settings: (
+            captured.setdefault("settings", settings),
+            fake_client,
+        )[1]
+        result = web_data.discover_pimcore_classes(
+            {"base_url": "http://10.10.0.5", "api_key": "temporary"}
+        )
+
+    assert captured["settings"]["api_key"] == "temporary"
+    assert result == {"items": [{"id": "7", "name": "product"}]}
+    assert "temporary" not in json.dumps(result)
+    discover.assert_called_once_with(fake_client)
+
+
+def test_complete_setup_saves_only_after_successful_report():
+    payload = {
+        "base_url": "http://10.10.0.5",
+        "api_key": "secret",
+        "class_id": "7",
+        "class_name": "product",
+        "parent_id": "6626",
+        "parent_path": "/Produkty",
+        "field_mappings": [
+            {
+                "source": "EAN",
+                "pimcore_field": "EAN",
+                "type": "input",
+                "required": True,
+                "parser": "text",
+            }
+        ],
+    }
+    with (
+        patch.object(web_data, "test_pimcore_settings", return_value={"ok": True, "checks": []}),
+        patch.object(
+            web_data,
+            "update_settings",
+            return_value={"pimcore": {"setup_complete": True}},
+        ) as save,
+    ):
+        result = web_data.complete_pimcore_setup(payload, "admin")
+
+    assert result["saved"] is True
+    saved = save.call_args.args[0]["pimcore"]
+    assert saved["setup_complete"] is True
+    assert saved["enabled"] is True
+    assert saved["object_key_template"] == "{EAN}"
+
+
+def test_complete_setup_does_not_save_after_failed_report():
+    with (
+        patch.object(web_data, "test_pimcore_settings", return_value={"ok": False, "checks": []}),
+        patch.object(web_data, "update_settings") as save,
+    ):
+        result = web_data.complete_pimcore_setup({"api_key": "secret"}, "admin")
+
+    assert result == {"saved": False, "report": {"ok": False, "checks": []}}
+    save.assert_not_called()
+
+
+def test_pimcore_discovery_and_setup_routes_are_admin_only():
+    client = TestClient(web_app.app)
+    admin = {"username": "admin", "role": "admin"}
+    with (
+        patch.object(web_app, "_require_admin", return_value=admin) as require_admin,
+        patch.object(
+            web_app,
+            "discover_pimcore_classes",
+            return_value={"items": [{"id": "7", "name": "product"}]},
+        ),
+        patch.object(web_app, "discover_pimcore_fields", return_value={"items": []}),
+        patch.object(web_app, "discover_pimcore_folders", return_value={"items": []}),
+        patch.object(
+            web_app,
+            "complete_pimcore_setup",
+            return_value={"saved": True, "report": {"ok": True}},
+        ),
+    ):
+        classes = client.post("/api/settings/pimcore/discover/classes", json={"settings": {}})
+        fields = client.post(
+            "/api/settings/pimcore/discover/fields",
+            json={"settings": {}, "class_id": "7"},
+        )
+        folders = client.post("/api/settings/pimcore/discover/folders", json={"settings": {}})
+        saved = client.post("/api/settings/pimcore/setup", json={"settings": {}})
+
+    assert classes.status_code == fields.status_code == folders.status_code == saved.status_code == 200
+    assert require_admin.call_count == 4
 
 
 def test_pimcore_csv_headers_route_parses_uploaded_file():
