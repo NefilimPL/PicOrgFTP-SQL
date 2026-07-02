@@ -238,6 +238,25 @@ def test_folder_discovery_falls_back_to_unfiltered_list_after_server_error():
     assert client.object_list.call_args_list[1].args == ()
 
 
+def test_folder_discovery_preserves_original_error_when_fallback_finds_nothing():
+    original = PimcoreApiError(
+        "Pimcore zwrocil HTTP 500.",
+        "/webservice/rest/object-list",
+        500,
+        response_excerpt="folder filter failed",
+    )
+    client = Mock()
+    client.object_list.side_effect = [
+        original,
+        {"data": [{"id": 1, "type": "object", "fullPath": "/Produkt"}]},
+    ]
+
+    with pytest.raises(PimcoreApiError) as captured:
+        discover_folders(client)
+
+    assert captured.value is original
+
+
 def test_extract_object_id_accepts_pimcore_response_variants():
     assert extract_object_id({"id": 44}) == 44
     assert extract_object_id({"data": {"id": "45"}}) == 45

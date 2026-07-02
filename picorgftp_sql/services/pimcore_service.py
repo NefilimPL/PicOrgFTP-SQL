@@ -448,6 +448,7 @@ def discover_folders(api: PimcoreClient, limit: int = 500) -> list[dict[str, obj
     records: list[dict[str, object]] = []
     page_size = min(100, bounded_limit)
     query_filter: dict[str, object] | None = {"type": "folder"}
+    filter_error: PimcoreApiError | None = None
     try:
         for offset in range(0, bounded_limit, page_size):
             payload = api.object_list(
@@ -462,6 +463,7 @@ def discover_folders(api: PimcoreClient, limit: int = 500) -> list[dict[str, obj
     except PimcoreApiError as exc:
         if not exc.status_code or exc.status_code < 500 or records:
             raise
+        filter_error = exc
         payload = api.object_list(limit=bounded_limit, offset=0)
         records = _list_records(payload, ("data", "objects", "items"))
     folders: list[dict[str, object]] = []
@@ -481,6 +483,8 @@ def discover_folders(api: PimcoreClient, limit: int = 500) -> list[dict[str, obj
         if not key and path:
             key = path.rstrip("/").rsplit("/", 1)[-1]
         folders.append({"id": identity["id"], "path": path, "key": key})
+    if not folders and filter_error is not None:
+        raise filter_error
     return sorted(folders, key=lambda item: str(item["path"] or item["key"]).casefold())
 
 

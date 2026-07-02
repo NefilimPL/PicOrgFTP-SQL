@@ -6832,7 +6832,15 @@ function renderPimcoreLocationStep() {
       }
     }
   });
-  pimcoreSetupBody.append(grid, refresh, pimcoreManualLocationFallback());
+  pimcoreSetupBody.append(grid, refresh);
+  if (!setup.folders.length) {
+    pimcoreSetupBody.append(
+      settingsNote(
+        "Nie wykryto folderow Pimcore. Otworz sekcje ponizej i wpisz ID folderu recznie; sciezka folderu jest opcjonalna."
+      )
+    );
+  }
+  pimcoreSetupBody.append(pimcoreManualLocationFallback());
 }
 
 function renderPimcoreFieldsStep() {

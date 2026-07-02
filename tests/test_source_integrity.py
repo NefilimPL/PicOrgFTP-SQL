@@ -466,6 +466,7 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("Nazwa w formularzu", source)
         self.assertIn("Wymagane", source)
         self.assertIn("function pimcoreDiscoveryErrorText", source)
+        self.assertIn("Nie wykryto folderow Pimcore", source)
 
     def test_ean_input_debounces_pimcore_lookup_and_rechecks_on_create(self) -> None:
         source = (
