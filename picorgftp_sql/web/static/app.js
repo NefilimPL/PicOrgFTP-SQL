@@ -6311,7 +6311,233 @@ function collectPimcoreSettings(form) {
   };
 }
 
-function pimcoreCsvImportButton(mappingList) {
+function pimcoreCompactClassItems(pimcore = {}) {
+  const items = Array.isArray(state.pimcoreSetup?.classes) ? [...state.pimcoreSetup.classes] : [];
+  if (
+    pimcore.class_id &&
+    !items.some((item) => String(item.id) === String(pimcore.class_id))
+  ) {
+    items.push({ id: pimcore.class_id, name: pimcore.class_name || pimcore.class_id });
+  }
+  return items;
+}
+
+function pimcoreCompactFolderItems(pimcore = {}) {
+  const items = Array.isArray(state.pimcoreSetup?.folders) ? [...state.pimcoreSetup.folders] : [];
+  if (
+    pimcore.parent_id &&
+    !items.some((item) => String(item.id) === String(pimcore.parent_id))
+  ) {
+    items.push({
+      id: pimcore.parent_id,
+      key: pimcore.parent_path || pimcore.parent_id,
+      path: pimcore.parent_path || pimcore.parent_id,
+    });
+  }
+  return items;
+}
+
+function pimcoreCompactFields(pimcore = {}) {
+  const discovered = Array.isArray(state.pimcoreSetup?.fields) ? state.pimcoreSetup.fields : [];
+  const fields = discovered.length ? [...discovered] : [];
+  for (const mapping of pimcore.field_mappings || []) {
+    if (
+      mapping.pimcore_field &&
+      !fields.some((field) => field.name === mapping.pimcore_field)
+    ) {
+      fields.push({
+        name: mapping.pimcore_field,
+        label: mapping.label || mapping.pimcore_field,
+        type: mapping.type || "input",
+        parser: mapping.parser || "text",
+        language: mapping.language || "",
+        supported: true,
+      });
+    }
+  }
+  return fields;
+}
+
+function pimcoreSimpleMappingRow(mapping = {}, fields = []) {
+  const row = document.createElement("div");
+  const use = document.createElement("input");
+  const label = document.createElement("input");
+  const target = document.createElement("select");
+  const required = document.createElement("input");
+  const remove = document.createElement("button");
+  const isEan = String(mapping.source || "").toUpperCase() === "EAN";
+  const availableFields = [...fields];
+  row.className = "pimcore-simple-mapping-row";
+  use.type = "checkbox";
+  use.name = "mapping_use";
+  use.checked = true;
+  use.setAttribute("aria-label", "Uzyj pola");
+  label.name = "mapping_label";
+  label.value = mapping.label || mapping.source || "";
+  label.placeholder = "Etykieta";
+  label.setAttribute("aria-label", "Etykieta");
+  target.name = "mapping_target";
+  target.setAttribute("aria-label", "Pole Pimcore");
+  if (
+    mapping.pimcore_field &&
+    !availableFields.some((field) => field.name === mapping.pimcore_field)
+  ) {
+    availableFields.push({
+      name: mapping.pimcore_field,
+      label: mapping.pimcore_field,
+      type: mapping.type || "input",
+      parser: mapping.parser || "text",
+      language: mapping.language || "",
+      supported: true,
+    });
+  }
+  for (const field of availableFields) {
+    const option = document.createElement("option");
+    option.value = field.name;
+    option.textContent = `${field.label || field.name} - ${field.type || "input"}`;
+    option.disabled = field.supported === false;
+    option.selected = field.name === mapping.pimcore_field;
+    option.dataset.type = field.type || "input";
+    option.dataset.parser = field.parser || "text";
+    option.dataset.language = field.language || "";
+    if (field.unsupported_reason) option.title = field.unsupported_reason;
+    target.appendChild(option);
+  }
+  required.type = "checkbox";
+  required.name = "mapping_required";
+  required.checked = isEan || Boolean(mapping.required);
+  required.disabled = isEan;
+  required.setAttribute("aria-label", "Pole wymagane");
+  remove.type = "button";
+  remove.className = "ghost-button";
+  remove.textContent = "Usun";
+  remove.disabled = isEan;
+  remove.addEventListener("click", () => row.remove());
+  row.dataset.source = isEan ? "EAN" : String(mapping.source || mapping.pimcore_field || "");
+  row.append(use, label, target, required, remove);
+  return row;
+}
+
+function collectSimplePimcoreMappings(form) {
+  return [...form.querySelectorAll(".pimcore-simple-mapping-row")]
+    .filter((row) => row.querySelector('[name="mapping_use"]')?.checked)
+    .map((row) => {
+      const select = row.querySelector('[name="mapping_target"]');
+      const option = select?.selectedOptions[0];
+      const source = row.dataset.source || select?.value || "";
+      return {
+        source,
+        label: row.querySelector('[name="mapping_label"]').value.trim() || source,
+        pimcore_field: select?.value || "",
+        type: option?.dataset.type || "input",
+        language: option?.dataset.language || null,
+        required:
+          String(source).toUpperCase() === "EAN" ||
+          row.querySelector('[name="mapping_required"]').checked,
+        default: "",
+        parser: option?.dataset.parser || "text",
+      };
+    })
+    .filter((mapping) => mapping.source && mapping.pimcore_field);
+}
+
+function collectCompactPimcoreSettings(form) {
+  const data = new FormData(form);
+  const classSelect = form.querySelector('[name="class_id"]');
+  const parentSelect = form.querySelector('[name="parent_id"]');
+  const selectedClass = classSelect?.selectedOptions[0];
+  const selectedParent = parentSelect?.selectedOptions[0];
+  const mappings = collectSimplePimcoreMappings(form);
+  const manualClassId = String(data.get("manual_class_id") || "").trim();
+  const manualClassName = String(data.get("manual_class_name") || "").trim();
+  const manualParentId = String(data.get("manual_parent_id") || "").trim();
+  const manualParentPath = String(data.get("manual_parent_path") || "").trim();
+  return {
+    setup_complete: true,
+    enabled: data.has("enabled"),
+    base_url: data.get("base_url"),
+    api_key: data.get("api_key"),
+    class_id: manualClassId || classSelect?.value || "",
+    class_name: manualClassName || selectedClass?.dataset.name || "",
+    parent_id: manualParentId || parentSelect?.value || "",
+    parent_path: manualParentPath || selectedParent?.dataset.path || "",
+    published: true,
+    object_key_template: "{EAN}",
+    existence_fields: mappings
+      .filter((item) => String(item.source).toUpperCase() === "EAN")
+      .map((item) => item.pimcore_field),
+    timeout_seconds: Number(data.get("timeout_seconds") || 30),
+    verify_tls: data.has("verify_tls"),
+    field_mappings: collectSimplePimcoreMappings(form),
+  };
+}
+
+function pimcoreManualCompactLocationFields(pimcore = {}) {
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  const grid = document.createElement("div");
+  summary.textContent = "Wpisz klase i folder recznie";
+  grid.className = "pimcore-setup-grid";
+  grid.append(
+    inputField("manual_class_name", "Nazwa klasy", "", {
+      placeholder: pimcore.class_name || "Product",
+    }),
+    inputField("manual_class_id", "ID klasy", "", {
+      placeholder: pimcore.class_id || "",
+    }),
+    inputField("manual_parent_id", "ID folderu", "", {
+      placeholder: pimcore.parent_id || "",
+    }),
+    inputField("manual_parent_path", "Sciezka folderu", "", {
+      placeholder: pimcore.parent_path || "/Products",
+    })
+  );
+  details.className = "wide-field";
+  details.append(summary, grid);
+  return details;
+}
+
+async function requestPimcoreSettingsDiscovery(kind, settings, extra = {}) {
+  const payload = await requestJson(PIMCORE_DISCOVERY_ENDPOINTS[kind], {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ settings, ...extra }),
+    timeoutMs: 120000,
+  });
+  return Array.isArray(payload.items) ? payload.items : [];
+}
+
+async function refreshCompactPimcoreMetadata(form, button) {
+  const snapshot = collectCompactPimcoreSettings(form);
+  button.disabled = true;
+  settingsStatus.textContent = "Pobieranie klas i folderow Pimcore...";
+  try {
+    const classes = await requestPimcoreSettingsDiscovery("classes", snapshot);
+    const folders = await requestPimcoreSettingsDiscovery("folders", snapshot);
+    const classId = snapshot.class_id || classes[0]?.id || "";
+    const fields = classId
+      ? await requestPimcoreSettingsDiscovery("fields", snapshot, { class_id: classId })
+      : [];
+    state.pimcoreSetup = {
+      ...(state.pimcoreSetup || {}),
+      settings: snapshot,
+      classes,
+      folders,
+      fields,
+      mappings: snapshot.field_mappings || [],
+    };
+    state.settings.pimcore = { ...(state.settings.pimcore || {}), ...snapshot };
+    settingsStatus.textContent =
+      `Pobrano ${classes.length} klas, ${folders.length} folderow i ${fields.length} pol.`;
+    renderSettingsPimcore();
+  } catch (error) {
+    settingsStatus.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function pimcoreCsvImportButton(mappingList, fields = []) {
   const input = document.createElement("input");
   const button = document.createElement("button");
   const wrapper = document.createElement("span");
@@ -6333,11 +6559,16 @@ function pimcoreCsvImportButton(mappingList) {
         body,
       });
       const existing = new Set(
-        [...mappingList.querySelectorAll('[name="mapping_source"]')].map((item) => item.value)
+        [...mappingList.querySelectorAll('[name="mapping_source"], [name="mapping_label"]')]
+          .map((item) => item.value)
       );
       for (const header of payload.headers || []) {
         if (!existing.has(header)) {
-          mappingList.appendChild(pimcoreMappingRow({ source: header, label: header }));
+          if (mappingList.classList.contains("pimcore-simple-mapping-list")) {
+            mappingList.appendChild(pimcoreSimpleMappingRow({ source: header, label: header }, fields));
+          } else {
+            mappingList.appendChild(pimcoreMappingRow({ source: header, label: header }));
+          }
           existing.add(header);
         }
       }
@@ -6757,13 +6988,7 @@ function buildPimcoreSetupPayload() {
 
 async function requestPimcoreDiscovery(kind, extra = {}) {
   const setup = state.pimcoreSetup;
-  const payload = await requestJson(PIMCORE_DISCOVERY_ENDPOINTS[kind], {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ settings: setup.settings, ...extra }),
-    timeoutMs: 120000,
-  });
-  return Array.isArray(payload.items) ? payload.items : [];
+  return requestPimcoreSettingsDiscovery(kind, setup.settings, extra);
 }
 
 async function advancePimcoreSetup() {
@@ -7215,8 +7440,6 @@ async function submitPimcoreRuntimeCreate(event) {
 function renderSettingsPimcore() {
   const pimcore = state.settings.pimcore || {};
   const form = document.createElement("form");
-  const mappings = document.createElement("div");
-  const addMapping = document.createElement("button");
   form.className = "settings-form";
   if (pimcore.setup_complete !== true) {
     form.append(settingsNote("Integracja Pimcore wymaga pierwszej konfiguracji."));
@@ -7232,14 +7455,51 @@ function renderSettingsPimcore() {
     }
     return;
   }
-  mappings.className = "pimcore-mapping-list wide-field";
-  for (const mapping of pimcore.field_mappings || []) {
-    mappings.appendChild(pimcoreMappingRow(mapping));
+  const fields = pimcoreCompactFields(pimcore);
+  const classes = pimcoreCompactClassItems(pimcore);
+  const folders = pimcoreCompactFolderItems(pimcore);
+  const mappings = document.createElement("div");
+  const addMapping = document.createElement("button");
+  const refresh = document.createElement("button");
+  const advanced = document.createElement("details");
+  const advancedSummary = document.createElement("summary");
+  const advancedBody = document.createElement("div");
+  const configuredMappings = pimcore.field_mappings?.length
+    ? pimcore.field_mappings
+    : [{ source: "EAN", label: "EAN", pimcore_field: pimcore.existence_fields?.[0] || "EAN", required: true }];
+  mappings.className = "pimcore-simple-mapping-list wide-field";
+  for (const mapping of configuredMappings) {
+    mappings.appendChild(pimcoreSimpleMappingRow(mapping, fields));
   }
   addMapping.type = "button";
   addMapping.className = "secondary-button";
-  addMapping.textContent = "Dodaj mapowanie";
-  addMapping.addEventListener("click", () => mappings.appendChild(pimcoreMappingRow({})));
+  addMapping.textContent = "Dodaj pole";
+  addMapping.addEventListener("click", () => {
+    mappings.appendChild(pimcoreSimpleMappingRow({}, fields));
+  });
+  refresh.type = "button";
+  refresh.className = "secondary-button";
+  refresh.textContent = "Odswiez klasy i foldery";
+  refresh.addEventListener("click", () => {
+    refreshCompactPimcoreMetadata(form, refresh);
+  });
+  advanced.id = "pimcoreAdvancedSettings";
+  advanced.className = "pimcore-advanced-settings";
+  advanced.open = false;
+  advancedSummary.textContent = "Zaawansowane";
+  advancedBody.className = "settings-field-group";
+  advancedBody.append(
+    inputField("timeout_seconds", "Timeout [s]", pimcore.timeout_seconds || 30, {
+      type: "number",
+      min: "1",
+      max: "120",
+    }),
+    checkField("verify_tls", "Weryfikuj certyfikat TLS", pimcore.verify_tls !== false),
+    pimcoreCsvImportButton(mappings, fields),
+    settingsNote("Klucz obiektu: {EAN}. Pole wyszukiwania EAN wynika z przypisania EAN."),
+    settingsNote("Typ danych wykryty automatycznie na podstawie pola Pimcore.")
+  );
+  advanced.append(advancedSummary, advancedBody);
   form.append(
     settingsFieldGroup(
       "Polaczenie Pimcore",
@@ -7249,34 +7509,46 @@ function renderSettingsPimcore() {
         type: "password",
         secretPath: "pimcore.api_key",
       }),
-      inputField("class_name", "Klasa", pimcore.class_name || "Product"),
-      inputField("parent_id", "ID folderu Produkty", pimcore.parent_id || ""),
-      checkField("published", "Publikuj nowe produkty", pimcore.published),
-      inputField("object_key_template", "Szablon klucza", pimcore.object_key_template || "{SKU}"),
-      inputField("existence_fields", "Pola sprawdzania EAN", (pimcore.existence_fields || []).join(", ")),
-      inputField("timeout_seconds", "Timeout [s]", pimcore.timeout_seconds || 10, {
-        type: "number",
-        min: "1",
-        max: "120",
-      }),
-      checkField("verify_tls", "Weryfikuj certyfikat TLS", pimcore.verify_tls !== false)
+      actionRow(refresh)
     ),
     settingsFieldGroup(
-      "Mapowanie CSV do Pimcore",
+      "Miejsce zapisu",
+      pimcoreSetupSelect(
+        "class_id",
+        "Klasa produktu",
+        classes,
+        pimcore.class_id,
+        "id",
+        (item) => `${item.name} (ID ${item.id})`
+      ),
+      pimcoreSetupSelect(
+        "parent_id",
+        "Folder docelowy",
+        folders,
+        pimcore.parent_id,
+        "id",
+        (item) => `${item.path || item.key} (ID ${item.id})`
+      ),
+      pimcoreManualCompactLocationFields(pimcore)
+    ),
+    settingsFieldGroup(
+      "Pola produktu",
+      settingsNote("Typ danych wykryty automatycznie na podstawie pola Pimcore."),
       mappings,
-      actionRow(addMapping, pimcoreCsvImportButton(mappings))
+      actionRow(addMapping)
     ),
     settingsFieldGroup(
       "Testy integracji",
       actionRow(
-        pimcoreReadOnlyTestButton(() => collectPimcoreSettings(form)),
+        pimcoreReadOnlyTestButton(() => collectCompactPimcoreSettings(form)),
         pimcoreOpenWriteTestButton(),
         pimcoreHistoryButton()
       ),
       pimcoreChecklistElement()
-    )
+    ),
+    advanced
   );
-  settingsSaveButton(form, () => ({ pimcore: collectPimcoreSettings(form) }));
+  settingsSaveButton(form, () => ({ pimcore: collectCompactPimcoreSettings(form) }));
   settingsOutput.appendChild(form);
 }
 

@@ -376,7 +376,22 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("function renderSettingsPimcore()", source)
         self.assertIn('requestJson("/api/settings/pimcore/test"', source)
         self.assertIn('requestJson("/api/settings/pimcore/import-csv-headers"', source)
-        self.assertIn("field_mappings: collectPimcoreMappings(form)", source)
+        self.assertIn("field_mappings: collectSimplePimcoreMappings(form)", source)
+
+    def test_pimcore_compact_settings_hide_technical_controls(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("pimcoreAdvancedSettings", source)
+        self.assertIn("advanced.open = false", source)
+        self.assertIn("Odswiez klasy i foldery", source)
+        self.assertIn("Typ danych wykryty automatycznie", source)
+        self.assertIn("pimcoreCsvImportButton", source)
 
     def test_pimcore_write_test_keeps_modal_open_and_polls_incrementally(self) -> None:
         source = (

@@ -1074,6 +1074,44 @@ h2 {
   padding: 0 10px;
 }
 
+.pimcore-advanced-settings {
+  grid-column: 1 / -1;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  padding: 10px 12px;
+}
+
+.pimcore-advanced-settings > summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.pimcore-advanced-settings .settings-field-group {
+  margin-top: 10px;
+  background: var(--surface);
+}
+
+.pimcore-simple-mapping-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pimcore-simple-mapping-row {
+  display: grid;
+  grid-template-columns: 42px minmax(140px, 1fr) minmax(180px, 1.2fr) 92px auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 8px 0;
+}
+
+.pimcore-simple-mapping-row > * {
+  min-width: 0;
+}
+
 .pimcore-check-row {
   display: grid;
   gap: 4px;
@@ -1742,6 +1780,12 @@ button.slot-badge.on:hover {
 
   .pimcore-setup-body {
     min-height: 0;
+  }
+}
+
+@media (max-width: 920px) {
+  .pimcore-simple-mapping-row {
+    grid-template-columns: 1fr;
   }
 }
 
