@@ -451,6 +451,22 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("/api/settings/pimcore/setup", source)
         self.assertIn("setup_complete", source)
 
+    def test_pimcore_wizard_explains_product_field_controls(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Ktore dane uzytkownik ma wpisywac", source)
+        self.assertIn("Zapisz pole", source)
+        self.assertIn("Pole w Pimcore", source)
+        self.assertIn("Nazwa w formularzu", source)
+        self.assertIn("Wymagane", source)
+        self.assertIn("function pimcoreDiscoveryErrorText", source)
+
     def test_ean_input_debounces_pimcore_lookup_and_rechecks_on_create(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]

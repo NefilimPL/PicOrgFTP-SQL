@@ -447,18 +447,27 @@ def discover_folders(api: PimcoreClient, limit: int = 500) -> list[dict[str, obj
     bounded_limit = min(500, max(1, int(limit)))
     records: list[dict[str, object]] = []
     page_size = min(100, bounded_limit)
-    for offset in range(0, bounded_limit, page_size):
-        payload = api.object_list(
-            {"type": "folder"},
-            limit=min(page_size, bounded_limit - offset),
-            offset=offset,
-        )
-        page = _list_records(payload, ("data", "objects", "items"))
-        records.extend(page)
-        if len(page) < page_size:
-            break
+    query_filter: dict[str, object] | None = {"type": "folder"}
+    try:
+        for offset in range(0, bounded_limit, page_size):
+            payload = api.object_list(
+                query_filter,
+                limit=min(page_size, bounded_limit - offset),
+                offset=offset,
+            )
+            page = _list_records(payload, ("data", "objects", "items"))
+            records.extend(page)
+            if len(page) < page_size:
+                break
+    except PimcoreApiError as exc:
+        if not exc.status_code or exc.status_code < 500 or records:
+            raise
+        payload = api.object_list(limit=bounded_limit, offset=0)
+        records = _list_records(payload, ("data", "objects", "items"))
     folders: list[dict[str, object]] = []
     for record in records:
+        if str(record.get("type") or "").casefold() != "folder":
+            continue
         identity = normalize_object_identity(record)
         if not identity["id"]:
             continue

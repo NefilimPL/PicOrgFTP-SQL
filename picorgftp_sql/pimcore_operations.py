@@ -7,7 +7,18 @@ import time
 from typing import Callable
 
 TERMINAL_STATUSES = {"completed", "partial", "failed"}
-SENSITIVE_LOG_KEYS = {"api_key", "x-api-key", "authorization", "cookie", "set-cookie"}
+SENSITIVE_LOG_KEYS = {
+    "api_key",
+    "x-api-key",
+    "authorization",
+    "cookie",
+    "set-cookie",
+    "secret",
+    "password",
+    "token",
+    "access_token",
+    "refresh_token",
+}
 
 
 def redact_pimcore_log_value(value: object) -> object:

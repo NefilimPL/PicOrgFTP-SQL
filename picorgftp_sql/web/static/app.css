@@ -1037,12 +1037,35 @@ h2 {
 
 .pimcore-setup-field-row {
   display: grid;
-  grid-template-columns: 42px minmax(120px, .8fr) minmax(180px, 1fr) 92px;
+  grid-template-columns: 120px minmax(120px, .8fr) minmax(180px, 1fr) 120px;
   gap: 8px;
   align-items: center;
   min-width: 0;
   border-bottom: 1px solid var(--line);
   padding: 8px 0;
+}
+
+.pimcore-setup-field-header {
+  display: grid;
+  grid-template-columns: 120px minmax(120px, .8fr) minmax(180px, 1fr) 120px;
+  gap: 8px;
+  padding: 8px 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.pimcore-setup-field-row code {
+  overflow-wrap: anywhere;
+}
+
+.pimcore-setup-field-row label {
+  margin: 0;
+}
+
+@media (max-width: 700px) {
+  .pimcore-setup-field-header {
+    display: none;
+  }
 }
 
 .pimcore-mapping-list,

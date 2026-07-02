@@ -6652,6 +6652,15 @@ const PIMCORE_DISCOVERY_ENDPOINTS = {
   fields: "/api/settings/pimcore/discover/fields",
 };
 
+function pimcoreDiscoveryErrorText(error) {
+  const detail = error?.detail && typeof error.detail === "object" ? error.detail : {};
+  const technical = [
+    detail.status_code ? `HTTP ${detail.status_code}` : "",
+    detail.response_excerpt || "",
+  ].filter(Boolean);
+  return technical.length ? `${error.message} Szczegoly: ${technical.join(" | ")}` : error.message;
+}
+
 function settingsNote(text) {
   const note = document.createElement("p");
   note.className = "settings-note wide-field";
@@ -6765,7 +6774,7 @@ function renderPimcoreConnectionStep() {
         pimcoreSetupStatus.textContent = `Pobrano ${setup.classes.length} klas.`;
       }
     } catch (error) {
-      if (pimcoreSetupStatus) pimcoreSetupStatus.textContent = error.message;
+      if (pimcoreSetupStatus) pimcoreSetupStatus.textContent = pimcoreDiscoveryErrorText(error);
     } finally {
       test.disabled = false;
     }
@@ -6819,7 +6828,7 @@ function renderPimcoreLocationStep() {
       renderPimcoreSetupStep();
     } catch (error) {
       if (pimcoreSetupStatus) {
-        pimcoreSetupStatus.textContent = `${error.message}. Wpisz ID folderu recznie.`;
+        pimcoreSetupStatus.textContent = `${pimcoreDiscoveryErrorText(error)} Wpisz ID folderu recznie.`;
       }
     }
   });
@@ -6840,8 +6849,24 @@ function renderPimcoreFieldsStep() {
     "name",
     (item) => `${item.label || item.name} (${item.name})`
   );
+  const intro = document.createElement("p");
+  const eanHelp = document.createElement("p");
+  const header = document.createElement("div");
+  intro.className = "settings-note";
+  intro.textContent =
+    "Ktore dane uzytkownik ma wpisywac podczas dodawania produktu? Zaznacz Zapisz pole tylko dla potrzebnych danych.";
+  eanHelp.className = "settings-note";
+  eanHelp.textContent =
+    "Lista Pole EAN w Pimcore wskazuje kolumne, w ktorej Pimcore przechowuje 13-cyfrowy EAN.";
+  header.className = "pimcore-setup-field-header";
+  for (const text of ["Zapisz pole", "Pole w Pimcore", "Nazwa w formularzu", "Wymagane"]) {
+    const cell = document.createElement("strong");
+    cell.textContent = text;
+    header.appendChild(cell);
+  }
   const table = document.createElement("div");
   table.className = "pimcore-setup-field-list";
+  table.appendChild(header);
   for (const field of setup.fields) {
     table.appendChild(pimcoreSetupFieldRow(field, setup.mappings, setup.eanTarget));
   }
@@ -6852,7 +6877,7 @@ function renderPimcoreFieldsStep() {
     setup.eanTarget = event.target.value;
     renderPimcoreSetupStep();
   });
-  pimcoreSetupBody.append(eanTarget, table);
+  pimcoreSetupBody.append(intro, eanTarget, eanHelp, table);
 }
 
 function renderPimcoreVerifyStep() {
@@ -6913,6 +6938,10 @@ function pimcoreSetupFieldRow(field, mappings, eanTarget) {
   const use = document.createElement("input");
   const label = document.createElement("input");
   const required = document.createElement("input");
+  const useLabel = document.createElement("label");
+  const fieldName = document.createElement("code");
+  const labelWrapper = document.createElement("label");
+  const requiredLabel = document.createElement("label");
   const isEan = field.name === eanTarget;
   row.className = "pimcore-setup-field-row";
   row.dataset.fieldName = field.name;
@@ -6930,7 +6959,13 @@ function pimcoreSetupFieldRow(field, mappings, eanTarget) {
   required.name = "mapping_required";
   required.checked = isEan || Boolean(existing.required);
   required.disabled = isEan || !field.supported;
-  row.append(use, document.createTextNode(field.name), label, required);
+  use.setAttribute("aria-label", `Zapisz pole ${field.name}`);
+  required.setAttribute("aria-label", `Pole ${field.name} wymagane`);
+  useLabel.append(use, document.createTextNode(" Zapisz"));
+  fieldName.textContent = field.name;
+  labelWrapper.append(label);
+  requiredLabel.append(required, document.createTextNode(" Wymagane"));
+  row.append(useLabel, fieldName, labelWrapper, requiredLabel);
   if (!field.supported) row.title = field.unsupported_reason || "Pole nie jest obslugiwane.";
   return row;
 }

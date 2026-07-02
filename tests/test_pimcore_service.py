@@ -219,6 +219,25 @@ def test_discovery_normalizes_classes_fields_and_folders():
     ]
 
 
+def test_folder_discovery_falls_back_to_unfiltered_list_after_server_error():
+    client = Mock()
+    client.object_list.side_effect = [
+        PimcoreApiError("Pimcore zwrocil HTTP 500.", "/webservice/rest/object-list", 500),
+        {
+            "data": [
+                {"id": 1, "type": "object", "fullPath": "/Produkt"},
+                {"id": 6626, "type": "folder", "fullPath": "/Produkty"},
+            ]
+        },
+    ]
+
+    assert discover_folders(client) == [
+        {"id": 6626, "path": "/Produkty", "key": "Produkty"}
+    ]
+    assert client.object_list.call_args_list[0].args == ({"type": "folder"},)
+    assert client.object_list.call_args_list[1].args == ()
+
+
 def test_extract_object_id_accepts_pimcore_response_variants():
     assert extract_object_id({"id": 44}) == 44
     assert extract_object_id({"data": {"id": "45"}}) == 45
