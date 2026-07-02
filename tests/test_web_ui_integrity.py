@@ -241,6 +241,20 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("pimcoreTestForm", html.ids)
         self.assertIn("pimcoreLiveLog", html.ids)
 
+    def test_pimcore_setup_wizard_has_four_steps_and_admin_controls(self) -> None:
+        html = _parse(INDEX_HTML)
+        for element_id in (
+            "pimcoreSetupModal",
+            "pimcoreSetupForm",
+            "pimcoreSetupStepTitle",
+            "pimcoreSetupBody",
+            "pimcoreSetupBackButton",
+            "pimcoreSetupNextButton",
+            "pimcoreSetupCancelButton",
+            "pimcoreSetupStatus",
+        ):
+            self.assertIn(element_id, html.ids)
+
     def test_runtime_pimcore_prompt_and_create_modals_exist(self) -> None:
         html = _parse(INDEX_HTML)
 

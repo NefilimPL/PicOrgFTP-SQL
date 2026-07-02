@@ -986,6 +986,65 @@ h2 {
   gap: 10px;
 }
 
+.pimcore-setup-panel {
+  width: min(1080px, calc(100vw - 32px));
+}
+
+.pimcore-setup-progress {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 0;
+  list-style: none;
+}
+
+.pimcore-setup-progress li {
+  border-bottom: 3px solid var(--line);
+  padding: 8px 4px;
+  color: var(--muted);
+}
+
+.pimcore-setup-progress li.active {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+.pimcore-setup-body {
+  min-height: 420px;
+  overflow: auto;
+}
+
+.pimcore-setup-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.pimcore-setup-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.pimcore-setup-field-list {
+  display: grid;
+  gap: 8px;
+}
+
+.pimcore-setup-field-row {
+  display: grid;
+  grid-template-columns: 42px minmax(120px, .8fr) minmax(180px, 1fr) 92px;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 8px 0;
+}
+
 .pimcore-mapping-list,
 .pimcore-checklist {
   display: grid;
@@ -1672,6 +1731,18 @@ button.slot-badge.on:hover {
 
 .history-item-actions button {
   min-height: 32px;
+}
+
+@media (max-width: 700px) {
+  .pimcore-setup-progress,
+  .pimcore-setup-grid,
+  .pimcore-setup-field-row {
+    grid-template-columns: 1fr;
+  }
+
+  .pimcore-setup-body {
+    min-height: 0;
+  }
 }
 
 .pimcore-test-panel {

@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicOrgFTP-SQL Web</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260701-pimcore-runtime">
+    <link rel="stylesheet" href="/static/app.css?v=20260702-pimcore-setup">
   </head>
   <body class="app-screen">
     <header class="topbar">
@@ -365,6 +365,32 @@
       </section>
     </div>
 
+    <div id="pimcoreSetupModal" class="modal-view nested-modal">
+      <section class="manager-panel pimcore-setup-panel">
+        <div class="section-heading">
+          <div>
+            <h1>Konfiguracja Pimcore</h1>
+            <span id="pimcoreSetupStepTitle">Krok 1 z 4: Polaczenie</span>
+          </div>
+          <button id="pimcoreSetupCancelButton" type="button" class="ghost-button modal-close">Zamknij</button>
+        </div>
+        <ol id="pimcoreSetupProgress" class="pimcore-setup-progress" aria-label="Postep konfiguracji">
+          <li class="active">Polaczenie</li>
+          <li>Miejsce zapisu</li>
+          <li>Pola produktu</li>
+          <li>Test i zapis</li>
+        </ol>
+        <form id="pimcoreSetupForm">
+          <div id="pimcoreSetupBody" class="pimcore-setup-body"></div>
+        </form>
+        <div class="pimcore-setup-actions">
+          <button id="pimcoreSetupBackButton" type="button" class="secondary-button">Wstecz</button>
+          <button id="pimcoreSetupNextButton" type="button">Dalej</button>
+          <span id="pimcoreSetupStatus" role="status"></span>
+        </div>
+      </section>
+    </div>
+
     <div id="pimcoreTestModal" class="modal-view nested-modal">
       <section class="manager-panel pimcore-test-panel">
         <div class="section-heading">
@@ -490,6 +516,6 @@
       </article>
     </template>
 
-    <script src="/static/app.js?v=20260701-pimcore-runtime"></script>
+    <script src="/static/app.js?v=20260702-pimcore-setup"></script>
   </body>
 </html>

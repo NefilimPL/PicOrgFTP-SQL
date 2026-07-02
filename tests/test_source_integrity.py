@@ -420,6 +420,22 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn('document.createElement("summary")', source)
         self.assertIn('status === "skipped"', source)
 
+    def test_pimcore_wizard_discovers_then_completes_setup(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("openPimcoreSetupWizard", source)
+        self.assertIn("/api/settings/pimcore/discover/classes", source)
+        self.assertIn("/api/settings/pimcore/discover/folders", source)
+        self.assertIn("/api/settings/pimcore/discover/fields", source)
+        self.assertIn("/api/settings/pimcore/setup", source)
+        self.assertIn("setup_complete", source)
+
     def test_ean_input_debounces_pimcore_lookup_and_rechecks_on_create(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]
