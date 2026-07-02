@@ -6339,8 +6339,8 @@ function pimcoreChecklistElement() {
   return output;
 }
 
-function renderPimcoreChecklist(report = {}) {
-  const output = document.querySelector("#pimcoreSettingsChecklist");
+function renderPimcoreChecklist(report = {}, target = null) {
+  const output = target || document.querySelector("#pimcoreSettingsChecklist");
   if (!output) return;
   output.textContent = "";
   output.className = "pimcore-checklist";
@@ -6353,11 +6353,13 @@ function renderPimcoreChecklist(report = {}) {
   for (const check of checks) {
     const row = document.createElement("div");
     const title = document.createElement("strong");
-    const detail = document.createElement("span");
     const status = check.status || "info";
     row.className = `pimcore-check-row ${status}`;
+    if (status === "skipped") {
+      row.setAttribute("aria-disabled", "true");
+    }
     title.textContent = `${status}: ${check.message || check.key || "kontrola"}`;
-    detail.textContent = [
+    const technical = [
       check.endpoint,
       check.status_code ? `HTTP ${check.status_code}` : "",
       `${Number(check.elapsed_ms || 0)} ms`,
@@ -6365,8 +6367,16 @@ function renderPimcoreChecklist(report = {}) {
       check.suggested_fix,
     ]
       .filter(Boolean)
-      .join(" | ");
-    row.append(title, detail);
+    row.appendChild(title);
+    if (technical.length) {
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      const detail = document.createElement("pre");
+      summary.textContent = "Szczegoly techniczne";
+      detail.textContent = technical.join("\n");
+      details.append(summary, detail);
+      row.appendChild(details);
+    }
     output.appendChild(row);
   }
 }

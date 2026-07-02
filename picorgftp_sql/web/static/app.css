@@ -1048,6 +1048,23 @@ h2 {
   border-left-color: var(--danger);
 }
 
+.pimcore-check-row.skipped {
+  border-left-color: var(--muted);
+  opacity: .82;
+}
+
+.pimcore-check-row details {
+  margin-top: 6px;
+}
+
+.pimcore-check-row pre {
+  margin: 6px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .sqlite-backup-settings {
   display: grid;
   gap: 10px;

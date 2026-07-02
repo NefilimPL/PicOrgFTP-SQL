@@ -27,23 +27,33 @@ class PimcoreApiError(Exception):
     endpoint: str
     status_code: int | None = None
     response_excerpt: str = ""
+    response_detail: str = ""
     kind: str = "request"
 
     def __str__(self) -> str:
         return self.message
 
-    def as_dict(self) -> dict[str, object]:
-        return {
+    def as_dict(self, *, include_detail: bool = False) -> dict[str, object]:
+        result = {
             "message": self.message,
             "endpoint": self.endpoint,
             "status_code": self.status_code,
             "response_excerpt": self.response_excerpt,
             "kind": self.kind,
         }
+        if include_detail:
+            result["response_detail"] = self.response_detail
+        return result
 
 
 def _response_excerpt(value: object, limit: int = 2000) -> str:
     return str(value or "").replace("\r", " ").replace("\n", " ")[:limit]
+
+
+def _response_detail(value: object, secret: object = "") -> str:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    secret_text = str(secret or "")
+    return text.replace(secret_text, "[REDACTED]") if secret_text else text
 
 
 def _default_opener(request: Request, timeout: int, context: ssl.SSLContext | None):
@@ -93,6 +103,7 @@ class PimcoreClient:
                 status = int(getattr(response, "status", 200) or 200)
         except HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
+            detail = _response_detail(raw, self.settings[PIMCORE_API_KEY])
             self.last_response = {
                 "method": method.upper(),
                 "endpoint": path,
@@ -102,22 +113,27 @@ class PimcoreClient:
                 f"Pimcore zwrocil HTTP {exc.code}.",
                 path,
                 status_code=int(exc.code),
-                response_excerpt=_response_excerpt(raw),
+                response_excerpt=_response_excerpt(detail),
+                response_detail=detail,
                 kind="http",
             ) from exc
         except (URLError, TimeoutError, OSError) as exc:
+            detail = _response_detail(exc, self.settings[PIMCORE_API_KEY])
             raise PimcoreApiError(
                 f"Nie mozna polaczyc sie z Pimcore: {exc}",
                 path,
-                response_excerpt=_response_excerpt(exc),
+                response_excerpt=_response_excerpt(detail),
+                response_detail=detail,
                 kind="network",
             ) from exc
         if status < 200 or status >= 300:
+            detail = _response_detail(raw, self.settings[PIMCORE_API_KEY])
             raise PimcoreApiError(
                 f"Pimcore zwrocil HTTP {status}.",
                 path,
                 status_code=status,
-                response_excerpt=_response_excerpt(raw),
+                response_excerpt=_response_excerpt(detail),
+                response_detail=detail,
                 kind="http",
             )
         self.last_response = {
@@ -128,11 +144,13 @@ class PimcoreClient:
         try:
             payload = json.loads(raw or "{}")
         except json.JSONDecodeError as exc:
+            detail = _response_detail(raw, self.settings[PIMCORE_API_KEY])
             raise PimcoreApiError(
                 "Pimcore zwrocil niepoprawny JSON.",
                 path,
                 status_code=status,
-                response_excerpt=_response_excerpt(raw),
+                response_excerpt=_response_excerpt(detail),
+                response_detail=detail,
                 kind="json",
             ) from exc
         if not isinstance(payload, dict):
@@ -456,6 +474,7 @@ def _check(
     endpoint: str = "local",
     status_code: int | None = None,
     response_excerpt: str = "",
+    response_detail: str = "",
     suggested_fix: str = "",
     elapsed_ms: int = 0,
 ) -> dict[str, object]:
@@ -466,9 +485,19 @@ def _check(
         "endpoint": endpoint,
         "status_code": status_code,
         "response_excerpt": response_excerpt,
+        "response_detail": response_detail,
         "suggested_fix": suggested_fix,
         "elapsed_ms": elapsed_ms,
     }
+
+
+def _skipped(key: str, message: str, suggested_fix: str = "") -> dict[str, object]:
+    return _check(
+        key,
+        "skipped",
+        message,
+        suggested_fix=suggested_fix,
+    )
 
 
 def _last_status_code(api: object) -> int | None:
@@ -478,6 +507,66 @@ def _last_status_code(api: object) -> int | None:
         if isinstance(status_code, int):
             return status_code
     return None
+
+
+def find_class_record(payload: object, class_name: str) -> dict[str, object] | None:
+    return next(
+        (
+            item
+            for item in _list_records(payload, ("data", "classes", "items"))
+            if str(item.get("name") or "") == class_name
+        ),
+        None,
+    )
+
+
+def mapping_field_errors(
+    mappings: list[dict[str, object]], fields: dict[str, str]
+) -> list[str]:
+    targets = [str(item["pimcore_field"]) for item in mappings]
+    missing = [name for name in targets if name not in fields]
+    return (
+        (["Brak pol w klasie: " + ", ".join(missing)] if missing else [])
+        + mapping_compatibility_issues(mappings, fields)
+    )
+
+
+def append_version_check(checks: list[dict[str, object]], server_info: object) -> None:
+    version_text = json.dumps(server_info, ensure_ascii=True, default=str)
+    compatible = "6." in version_text or "version" not in version_text.lower()
+    checks.append(
+        _check(
+            "version",
+            "ok" if compatible else "warning",
+            "Wersja Pimcore jest zgodna."
+            if compatible
+            else "Serwer nie zglosil wersji Pimcore 6.x.",
+        )
+    )
+
+
+def class_exists_check(
+    class_name: str, class_record: dict[str, object] | None
+) -> dict[str, object]:
+    return _check(
+        "class_exists",
+        "ok" if class_record else "error",
+        f"Znaleziono klase {class_name}."
+        if class_record
+        else f"Nie znaleziono klasy {class_name}.",
+        suggested_fix="" if class_record else "Wybierz klase z listy pobranej z Pimcore.",
+    )
+
+
+def mapping_fields_check(errors: list[str]) -> dict[str, object]:
+    return _check(
+        "mapping_fields",
+        "error" if errors else "ok",
+        " | ".join(errors) if errors else "Wszystkie mapowane pola istnieja i maja zgodne typy.",
+        suggested_fix=(
+            "Zmien przypisanie pol zgodnie z definicja klasy Pimcore." if errors else ""
+        ),
+    )
 
 
 def run_settings_test(
@@ -514,6 +603,7 @@ def run_settings_test(
                     endpoint=exc.endpoint,
                     status_code=exc.status_code,
                     response_excerpt=exc.response_excerpt,
+                    response_detail=exc.response_detail,
                     suggested_fix=(
                         "Sprawdz adres, klucz API, Webservice API i uprawnienia "
                         "uzytkownika Pimcore."
@@ -615,108 +705,94 @@ def run_settings_test(
             ),
         )
     )
-    if not base_ok or not key_ok:
-        checks.append(
-            _check(
-                "create_permission",
-                "info",
-                "Uprawnienie tworzenia nie zostalo sprawdzone.",
-            )
+    remote_prerequisites = base_ok and key_ok
+    server_ready = False
+    if not remote_prerequisites:
+        checks.extend(
+            [
+                _skipped("server_info", "Pominieto test serwera z powodu bledow lokalnych."),
+                _skipped("classes", "Pominieto pobieranie klas."),
+                _skipped("class_exists", "Pominieto sprawdzanie klasy."),
+                _skipped("class_definition", "Pominieto pobieranie definicji klasy."),
+                _skipped("mapping_fields", "Pominieto zgodnosc pol klasy."),
+                _skipped("object_list", "Pominieto test wyszukiwania EAN."),
+            ]
         )
-        return {
-            "ok": False,
-            "checks": checks,
-            "total_ms": int((time.perf_counter() - started) * 1000),
-        }
+        if config["parent_id"]:
+            checks.append(_skipped("parent", "Pominieto sprawdzanie folderu docelowego."))
+    else:
+        api = client or PimcoreClient(config)
+        server_info = timed("server_info", "/webservice/rest/server-info", api.server_info)
+        if server_info is None:
+            checks.extend(
+                [
+                    _skipped("classes", "Pominieto pobieranie klas po bledzie serwera."),
+                    _skipped("class_exists", "Pominieto sprawdzanie klasy."),
+                    _skipped("class_definition", "Pominieto pobieranie definicji klasy."),
+                    _skipped("mapping_fields", "Pominieto zgodnosc pol klasy."),
+                    _skipped("object_list", "Pominieto test wyszukiwania EAN."),
+                ]
+            )
+            if config["parent_id"]:
+                checks.append(_skipped("parent", "Pominieto sprawdzanie folderu docelowego."))
+        else:
+            server_ready = True
+            append_version_check(checks, server_info)
+            classes_payload = timed("classes", "/webservice/rest/classes", api.classes)
+            if classes_payload is None:
+                checks.extend(
+                    [
+                        _skipped("class_exists", "Pominieto sprawdzanie klasy."),
+                        _skipped("class_definition", "Pominieto pobieranie definicji klasy."),
+                        _skipped("mapping_fields", "Pominieto zgodnosc pol klasy."),
+                        _skipped("object_list", "Pominieto test wyszukiwania EAN."),
+                    ]
+                )
+            else:
+                class_record = find_class_record(classes_payload, config["class_name"])
+                checks.append(class_exists_check(config["class_name"], class_record))
+                fields: dict[str, str] = {}
+                if class_record:
+                    class_id = class_record.get("id") or class_record.get("classId")
+                    class_payload = timed(
+                        "class_definition",
+                        f"/webservice/rest/class/id/{class_id}",
+                        lambda: api.class_definition(class_id),
+                    )
+                    if class_payload is not None:
+                        fields = extract_class_fields(class_payload)
+                else:
+                    checks.append(_skipped("class_definition", "Klasa nie istnieje."))
 
-    api = client or PimcoreClient(config)
-    server_info = timed("server_info", "/webservice/rest/server-info", api.server_info)
-    if server_info is not None:
-        version_text = json.dumps(server_info, ensure_ascii=True)
-        compatible = "6." in version_text or "version" not in version_text.lower()
-        checks.append(
-            _check(
-                "version",
-                "ok" if compatible else "warning",
-                (
-                    "Wersja Pimcore jest zgodna."
-                    if compatible
-                    else "Serwer nie zglosil wersji Pimcore 6.x."
-                ),
+                mapping_ready = bool(config["field_mappings"]) and local_ok and bool(fields)
+                if fields and config["field_mappings"]:
+                    errors = mapping_field_errors(config["field_mappings"], fields)
+                    checks.append(mapping_fields_check(errors))
+                    mapping_ready = mapping_ready and not errors
+                else:
+                    checks.append(_skipped("mapping_fields", "Brak klasy albo mapowania."))
+
+                if mapping_ready:
+                    timed(
+                        "object_list",
+                        "/webservice/rest/object-list",
+                        lambda: api.object_list(
+                            build_ean_filter("0000000000000", config["existence_fields"]),
+                            object_class=config["class_name"],
+                            limit=2,
+                        ),
+                    )
+                else:
+                    checks.append(
+                        _skipped("object_list", "Klasa lub mapowanie EAN nie jest gotowe.")
+                    )
+
+        if server_ready and config["parent_id"]:
+            timed(
+                "parent",
+                f"/webservice/rest/object/id/{config['parent_id']}",
+                lambda: api.object_by_id(config["parent_id"]),
             )
-        )
-    classes_payload = timed("classes", "/webservice/rest/classes", api.classes)
-    class_records = _list_records(classes_payload, ("data", "classes", "items"))
-    class_record = next(
-        (
-            item
-            for item in class_records
-            if str(item.get("name") or "") == config["class_name"]
-        ),
-        None,
-    )
-    checks.append(
-        _check(
-            "class_exists",
-            "ok" if class_record else "error",
-            (
-                f"Znaleziono klase {config['class_name']}."
-                if class_record
-                else f"Nie znaleziono klasy {config['class_name']}."
-            ),
-            suggested_fix=(
-                "" if class_record else "Wpisz dokladna systemowa nazwe klasy z Pimcore."
-            ),
-        )
-    )
-    fields: dict[str, str] = {}
-    if class_record:
-        class_id = class_record.get("id") or class_record.get("classId")
-        class_payload = timed(
-            "class_definition",
-            f"/webservice/rest/class/id/{class_id}",
-            lambda: api.class_definition(class_id),
-        )
-        fields = extract_class_fields(class_payload)
-    targets = [item["pimcore_field"] for item in config["field_mappings"]]
-    missing = [name for name in targets if name not in fields]
-    incompatible = mapping_compatibility_issues(config["field_mappings"], fields)
-    mapping_errors = (
-        (["Brak pol w klasie: " + ", ".join(missing)] if missing else [])
-        + incompatible
-    )
-    checks.append(
-        _check(
-            "mapping_fields",
-            "error" if mapping_errors else "ok",
-            (
-                " | ".join(mapping_errors)
-                if mapping_errors
-                else "Wszystkie mapowane pola istnieja i maja zgodne typy."
-            ),
-            suggested_fix=(
-                "Zmien nazwy pol lub typy/parsery w mapowaniu zgodnie z definicja "
-                "klasy Pimcore."
-                if mapping_errors
-                else ""
-            ),
-        )
-    )
-    if config["parent_id"]:
-        timed(
-            "parent",
-            f"/webservice/rest/object/id/{config['parent_id']}",
-            lambda: api.object_by_id(config["parent_id"]),
-        )
-    timed(
-        "object_list",
-        "/webservice/rest/object-list",
-        lambda: api.object_list(
-            build_ean_filter("0000000000000", config["existence_fields"]),
-            object_class=config["class_name"],
-            limit=2,
-        ),
-    )
     checks.append(
         _check(
             "create_permission",
@@ -848,7 +924,7 @@ def create_product(
             str(exc),
             method="POST",
             endpoint="/webservice/rest/object",
-            error=exc.as_dict(),
+            error=exc.as_dict(include_detail=True),
             stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
         )
         raise
@@ -918,6 +994,7 @@ def run_test_create(
             "ok": "success",
             "warning": "warning",
             "error": "error",
+            "skipped": "info",
             "info": "info",
         }.get(str(check.get("status")), "info")
         emit(
@@ -1006,7 +1083,7 @@ def run_test_create(
             str(exc),
             method="POST",
             endpoint="/webservice/rest/object",
-            error=exc.as_dict(),
+            error=exc.as_dict(include_detail=True),
             stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
         )
         raise
@@ -1076,7 +1153,7 @@ def run_test_create(
             "error",
             str(exc),
             object_id=object_id,
-            error=exc.as_dict(),
+            error=exc.as_dict(include_detail=True),
             stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
         )
 
@@ -1105,7 +1182,7 @@ def run_test_create(
                 "error",
                 str(exc),
                 object_id=object_id,
-                error=exc.as_dict(),
+                error=exc.as_dict(include_detail=True),
                 stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
             )
     return {

@@ -1525,6 +1525,7 @@ def test_pimcore_settings(
         if not _text(overrides.get(PIMCORE_API_KEY)):
             merged[PIMCORE_API_KEY] = saved[PIMCORE_API_KEY]
     report = run_settings_test(merged, client=PimcoreClient(merged))
+    audit_report = redact_pimcore_log_value(report)
     record_history(
         username=username,
         action="pimcore_settings_test",
@@ -1533,9 +1534,16 @@ def test_pimcore_settings(
             if report["ok"]
             else "Test ustawien Pimcore wykryl bledy."
         ),
-        details={"pimcore_settings_test": report},
+        details={"pimcore_settings_test": audit_report},
     )
-    return report
+    return {
+        **report,
+        "checks": [
+            {key: value for key, value in check.items() if key != "response_detail"}
+            for check in report.get("checks", [])
+            if isinstance(check, dict)
+        ],
+    }
 
 
 def _persist_pimcore_operation(report: dict[str, object]) -> dict[str, object]:

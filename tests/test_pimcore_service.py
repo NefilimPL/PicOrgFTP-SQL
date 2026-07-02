@@ -512,6 +512,65 @@ def test_settings_test_reports_missing_class():
     assert "Product" in item["message"]
 
 
+def test_settings_test_skips_remote_dependents_after_missing_class():
+    class MissingClassClient(DiagnosticClient):
+        def classes(self):
+            return {"data": [{"id": 2, "name": "other"}]}
+
+        def object_list(self, *args, **kwargs):
+            raise AssertionError("object-list must be skipped without a valid class")
+
+    report = run_settings_test(VALID_DIAGNOSTIC_CONFIG, client=MissingClassClient())
+    checks = {item["key"]: item for item in report["checks"]}
+
+    assert checks["class_exists"]["status"] == "error"
+    assert checks["mapping_fields"]["status"] == "skipped"
+    assert checks["object_list"]["status"] == "skipped"
+
+
+def test_settings_test_marks_empty_mapping_as_error_not_success():
+    report = run_settings_test(
+        {
+            "base_url": "http://10.10.0.5",
+            "api_key": "secret",
+            "class_name": "product",
+            "parent_id": "6626",
+            "field_mappings": [],
+        },
+        client=Mock(),
+    )
+    checks = {item["key"]: item for item in report["checks"]}
+
+    assert checks["test_form_schema"]["status"] == "error"
+    assert checks["mapping_fields"]["status"] == "skipped"
+
+
+def test_api_error_keeps_sanitized_audit_detail_out_of_public_dict():
+    secret = "api-secret-value"
+
+    def opener(request, timeout, context):
+        raise HTTPError(
+            request.full_url,
+            500,
+            "failure",
+            {},
+            BytesIO(f"full trace {secret} final-line".encode("utf-8")),
+        )
+
+    client = PimcoreClient(
+        {"base_url": "http://10.10.0.5", "api_key": secret},
+        opener=opener,
+    )
+    with pytest.raises(PimcoreApiError) as captured:
+        client.server_info()
+
+    error = captured.value
+    assert "final-line" in error.response_detail
+    assert secret not in error.response_detail
+    assert "response_detail" not in error.as_dict()
+    assert error.as_dict(include_detail=True)["response_detail"] == error.response_detail
+
+
 def test_settings_test_reports_bad_parent_with_endpoint():
     class BadParentClient(DiagnosticClient):
         def object_by_id(self, object_id):

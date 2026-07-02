@@ -95,6 +95,29 @@ def test_pimcore_settings_test_route_returns_structured_report():
     assert response.json() == report
 
 
+def test_settings_diagnostic_persists_full_detail_but_returns_public_report():
+    report = {
+        "ok": False,
+        "checks": [
+            {
+                "key": "server_info",
+                "status": "error",
+                "response_excerpt": "short trace",
+                "response_detail": "complete sanitized trace",
+            }
+        ],
+    }
+    with (
+        patch.object(web_data, "run_settings_test", return_value=report),
+        patch.object(web_data, "record_history") as record,
+    ):
+        result = web_data.test_pimcore_settings({}, "admin")
+
+    assert "response_detail" not in result["checks"][0]
+    persisted = record.call_args.kwargs["details"]["pimcore_settings_test"]
+    assert persisted["checks"][0]["response_detail"] == "complete sanitized trace"
+
+
 def test_pimcore_csv_headers_route_parses_uploaded_file():
     client = TestClient(web_app.app)
     with patch.object(

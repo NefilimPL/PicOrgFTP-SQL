@@ -407,6 +407,19 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("/api/settings/pimcore/operations", source)
         self.assertIn("function appendPimcoreLiveEvents", source)
 
+    def test_pimcore_diagnostics_use_expandable_details(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('document.createElement("details")', source)
+        self.assertIn('document.createElement("summary")', source)
+        self.assertIn('status === "skipped"', source)
+
     def test_ean_input_debounces_pimcore_lookup_and_rechecks_on_create(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]
