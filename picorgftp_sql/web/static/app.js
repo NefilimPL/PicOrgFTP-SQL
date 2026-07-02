@@ -29,6 +29,8 @@ const state = {
   pimcoreLastCheckedEan: "",
   pimcoreMissingEan: "",
   pimcoreCreateSchema: [],
+  pimcoreRuntimeEnabled: false,
+  pimcoreExistingObject: null,
   pimcoreSetup: {
     step: 1,
     settings: null,
@@ -169,6 +171,7 @@ const themeToggleButton = document.querySelector("#themeToggleButton");
 const entrySelect = document.querySelector("#entrySelect");
 const findByEanButton = document.querySelector("#findByEanButton");
 const findProductButton = document.querySelector("#findProductButton");
+const pimcoreEditButton = document.querySelector("#pimcoreEditButton");
 const webImagesButton = document.querySelector("#webImagesButton");
 const activeUsersPresence = document.querySelector("#activeUsersPresence");
 const activeUsersList = document.querySelector("#activeUsersList");
@@ -4924,6 +4927,7 @@ async function loadBootstrap(options = {}) {
   serverInfo.textContent = payload.processed_dir;
   logoutButton.hidden = !payload.auth_enabled;
   state.currentUser = payload.current_user || null;
+  applyPimcoreRuntimeCapabilities(payload.pimcore);
   updateAdminUi();
   refreshActiveUsersPresence().catch(() => {
     renderActiveUsersPresence({ enabled: false, users: [] });
@@ -7356,7 +7360,25 @@ async function openPimcoreHistory() {
   await loadPimcoreHistory();
 }
 
+function applyPimcoreRuntimeCapabilities(capabilities = {}) {
+  state.pimcoreRuntimeEnabled = capabilities.enabled === true;
+  state.pimcoreExistingObject = null;
+  state.pimcoreLastCheckedEan = "";
+  if (pimcoreEditButton) {
+    pimcoreEditButton.hidden = !state.pimcoreRuntimeEnabled;
+    pimcoreEditButton.disabled = true;
+  }
+}
+
+function handlePimcoreEanInput() {
+  state.pimcoreExistingObject = null;
+  if (pimcoreEditButton) pimcoreEditButton.disabled = true;
+  if (!state.pimcoreRuntimeEnabled) return;
+  schedulePimcoreStatusLookup();
+}
+
 function schedulePimcoreStatusLookup() {
+  if (!state.pimcoreRuntimeEnabled) return;
   window.clearTimeout(state.pimcoreLookupTimer);
   const ean = productForm.elements.ean.value.trim();
   if (!/^\d{13}$/.test(ean) || ean === state.pimcoreLastCheckedEan) return;
@@ -7374,11 +7396,24 @@ async function checkPimcoreProductStatus(ean) {
     return;
   }
   state.pimcoreLastCheckedEan = ean;
-  if (!payload.enabled || payload.exists) return;
+  if (!payload.enabled) {
+    state.pimcoreExistingObject = null;
+    if (pimcoreEditButton) pimcoreEditButton.disabled = true;
+    return;
+  }
   if (payload.available === false) {
+    state.pimcoreExistingObject = null;
+    if (pimcoreEditButton) pimcoreEditButton.disabled = true;
     formStatus.textContent = `Pimcore niedostepny: ${payload.error?.message || "blad polaczenia"}`;
     return;
   }
+  if (payload.exists) {
+    state.pimcoreExistingObject = payload.object || null;
+    if (pimcoreEditButton) pimcoreEditButton.disabled = false;
+    return;
+  }
+  state.pimcoreExistingObject = null;
+  if (pimcoreEditButton) pimcoreEditButton.disabled = true;
   state.pimcoreCreateSchema = Array.isArray(payload.form_schema) ? payload.form_schema : [];
   state.pimcoreMissingEan = ean;
   pimcoreMissingMessage.textContent = `EAN ${ean} nie istnieje w Pimcore. Czy dodac produkt?`;
@@ -8085,7 +8120,7 @@ for (const name of ["name", "type_name", "model"]) {
   productForm.elements[name].addEventListener("input", scheduleProductAutoSearch);
 }
 
-productForm.elements.ean?.addEventListener("input", schedulePimcoreStatusLookup);
+productForm.elements.ean?.addEventListener("input", handlePimcoreEanInput);
 
 for (const name of trackedProductFields) {
   productForm.elements[name]?.addEventListener("input", () => scheduleBackgroundFtpLookup());
@@ -8208,6 +8243,8 @@ function resetCurrentDraft({ clearOutput = true, status = "" } = {}) {
   state.pimcoreLastCheckedEan = "";
   state.pimcoreMissingEan = "";
   state.pimcoreCreateSchema = [];
+  state.pimcoreExistingObject = null;
+  if (pimcoreEditButton) pimcoreEditButton.disabled = true;
   pimcoreMissingModal?.classList.remove("active");
   pimcoreCreateModal?.classList.remove("active");
   window.clearTimeout(state.backgroundFtpLookupTimer);

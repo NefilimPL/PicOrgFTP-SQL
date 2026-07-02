@@ -1639,13 +1639,39 @@ def _pimcore_runtime_form_schema(settings_payload: dict[str, object]) -> list[di
     ]
 
 
+def pimcore_runtime_capabilities() -> dict[str, bool]:
+    settings_payload = normalize_pimcore_settings(config.CONFIG.get(PIMCORE_SETTINGS_KEY))
+    complete = bool(settings_payload["setup_complete"])
+    return {
+        "enabled": bool(settings_payload["enabled"] and complete),
+        "setup_complete": complete,
+    }
+
+
+def _active_pimcore_runtime_settings() -> dict[str, object]:
+    settings_payload = normalize_pimcore_settings(config.CONFIG.get(PIMCORE_SETTINGS_KEY))
+    if not settings_payload["setup_complete"]:
+        raise ValueError("Integracja Pimcore nie zostala skonfigurowana.")
+    if not settings_payload["enabled"]:
+        raise ValueError("Integracja Pimcore jest wylaczona.")
+    return settings_payload
+
+
 def find_pimcore_product_by_ean(ean: object) -> dict[str, object]:
     settings_payload = normalize_pimcore_settings(config.CONFIG.get(PIMCORE_SETTINGS_KEY))
-    if not settings_payload["enabled"]:
-        return {"enabled": False, "exists": False, "object": None, "form_schema": []}
+    setup_complete = bool(settings_payload["setup_complete"])
+    if not settings_payload["enabled"] or not setup_complete:
+        return {
+            "enabled": False,
+            "setup_complete": setup_complete,
+            "exists": False,
+            "object": None,
+            "form_schema": [],
+        }
     found = find_product_by_ean(settings_payload, ean)
     return {
         "enabled": True,
+        "setup_complete": True,
         "exists": bool(found),
         "object": found,
         "form_schema": _pimcore_runtime_form_schema(settings_payload),
@@ -1654,9 +1680,7 @@ def find_pimcore_product_by_ean(ean: object) -> dict[str, object]:
 
 def create_pimcore_product(values: object, username: str) -> dict[str, object]:
     submitted = dict(values) if isinstance(values, dict) else {}
-    settings_payload = normalize_pimcore_settings(config.CONFIG.get(PIMCORE_SETTINGS_KEY))
-    if not settings_payload["enabled"]:
-        raise ValueError("Integracja Pimcore jest wylaczona.")
+    settings_payload = _active_pimcore_runtime_settings()
     operation_id = secrets.token_hex(12)
     started = time.time()
     events: list[dict[str, object]] = []

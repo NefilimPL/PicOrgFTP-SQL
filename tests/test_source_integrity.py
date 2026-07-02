@@ -466,6 +466,24 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("500", source)
         self.assertIn("pimcoreCreateEan.readOnly = true", source)
 
+    def test_pimcore_runtime_gates_lookup_and_cancel_does_not_create(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("function applyPimcoreRuntimeCapabilities", source)
+        self.assertIn("if (!state.pimcoreRuntimeEnabled) return;", source)
+        self.assertIn("productForm.elements.ean?.addEventListener(\"input\", handlePimcoreEanInput)", source)
+        self.assertIn("pimcoreCreateModal.classList.remove(\"active\");", source)
+        self.assertIn("pimcoreCreateCancelButton?.addEventListener(\"click\"", source)
+        cancel_start = source.index("pimcoreCreateCancelButton?.addEventListener")
+        cancel_end = source.index("pimcoreCreateForm?.addEventListener", cancel_start)
+        self.assertNotIn("requestJson", source[cancel_start:cancel_end])
+
     def test_sqlite_backup_schedule_uses_day_hour_slots_and_nested_modal_layer(self) -> None:
         root = Path(__file__).resolve().parents[1]
         js_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(encoding="utf-8")

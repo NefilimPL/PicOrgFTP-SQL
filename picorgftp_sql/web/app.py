@@ -108,6 +108,7 @@ from ..web_data import (
     parse_pimcore_csv_headers,
     pimcore_operation_history,
     pimcore_operation_status,
+    pimcore_runtime_capabilities,
     refresh_file_index,
     remove_list_value,
     record_history,
@@ -3633,6 +3634,7 @@ def create_app() -> FastAPI:
             "current_user": _current_user_payload(request),
             "csrf_token": _csrf_token(request),
             **load_web_data(),
+            "pimcore": pimcore_runtime_capabilities(),
         }
 
     @app.get("/api/data")

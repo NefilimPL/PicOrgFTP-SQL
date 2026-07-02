@@ -352,10 +352,51 @@ def test_product_status_returns_disabled_without_network_call():
     with patch.object(web_data.config, "CONFIG", cfg):
         assert web_data.find_pimcore_product_by_ean("5904804578169") == {
             "enabled": False,
+            "setup_complete": False,
             "exists": False,
             "object": None,
             "form_schema": [],
         }
+
+
+def test_runtime_status_is_disabled_when_setup_is_incomplete():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update({"enabled": True, "setup_complete": False})
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "find_product_by_ean") as lookup,
+    ):
+        result = web_data.find_pimcore_product_by_ean("5904804578169")
+
+    assert result == {
+        "enabled": False,
+        "setup_complete": False,
+        "exists": False,
+        "object": None,
+        "form_schema": [],
+    }
+    lookup.assert_not_called()
+
+
+def test_bootstrap_exposes_only_runtime_pimcore_flags():
+    client = TestClient(web_app.app)
+    with (
+        patch.object(web_app, "_require_user", return_value="operator"),
+        patch.object(
+            web_app,
+            "_current_user_payload",
+            return_value={"username": "operator", "role": "user"},
+        ),
+        patch.object(web_app, "load_web_data", return_value={}),
+        patch.object(
+            web_app,
+            "pimcore_runtime_capabilities",
+            return_value={"enabled": True, "setup_complete": True},
+        ),
+    ):
+        response = client.get("/api/bootstrap")
+
+    assert response.json()["pimcore"] == {"enabled": True, "setup_complete": True}
 
 
 def test_runtime_create_route_allows_logged_in_user_and_returns_created_object():
