@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import re
 import ssl
@@ -44,6 +45,17 @@ class PimcoreApiError(Exception):
         if include_detail:
             result["response_detail"] = self.response_detail
         return result
+
+
+@dataclass
+class PimcoreConflictError(Exception):
+    message: str
+    object_id: int
+    expected_marker: str
+    current_marker: str
+
+    def __str__(self) -> str:
+        return self.message
 
 
 def _response_excerpt(value: object, limit: int = 2000) -> str:
@@ -263,33 +275,38 @@ def render_object_key(template: str, values: dict[str, object]) -> str:
     return _safe_object_key(rendered)
 
 
-def build_create_payload(
-    settings: object,
+def _mapped_elements(
+    config: dict[str, object],
     values: dict[str, object],
     *,
-    published: bool | None = None,
-    use_defaults: bool = True,
-) -> dict[str, object]:
-    config = normalize_pimcore_settings(settings)
+    use_defaults: bool,
+    include_empty: bool = False,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
     errors: list[str] = []
     elements: list[dict[str, object]] = []
     effective_values = dict(values or {})
     for mapping in config["field_mappings"]:
         source = mapping["source"]
+        if source not in effective_values and not use_defaults:
+            continue
         raw = effective_values.get(source)
         if (raw is None or str(raw).strip() == "") and use_defaults:
             raw = mapping["default"]
         if mapping["required"] and (raw is None or str(raw).strip() == ""):
             errors.append(f"Pole {mapping['label']} jest wymagane.")
             continue
-        if (raw is None or str(raw).strip() == "") and mapping["parser"] != "empty_to_null":
+        if (
+            (raw is None or str(raw).strip() == "")
+            and not include_empty
+            and mapping["parser"] != "empty_to_null"
+        ):
             continue
         try:
             parsed = parse_mapping_value(raw, mapping["parser"])
         except (TypeError, ValueError) as exc:
             errors.append(f"Pole {mapping['label']}: {exc}")
             continue
-        effective_values[source] = raw
+        effective_values[source] = parsed
         elements.append(
             {
                 "type": mapping["type"],
@@ -300,6 +317,22 @@ def build_create_payload(
         )
     if errors:
         raise ValueError(" ".join(errors))
+    return elements, effective_values
+
+
+def build_create_payload(
+    settings: object,
+    values: dict[str, object],
+    *,
+    published: bool | None = None,
+    use_defaults: bool = True,
+) -> dict[str, object]:
+    config = normalize_pimcore_settings(settings)
+    elements, effective_values = _mapped_elements(
+        config,
+        values,
+        use_defaults=use_defaults,
+    )
     try:
         parent_id = int(config["parent_id"])
     except (TypeError, ValueError) as exc:
@@ -850,6 +883,114 @@ def normalize_object_identity(record: object) -> dict[str, object]:
     }
 
 
+def _object_data(payload: object) -> dict[str, object]:
+    if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+        return dict(payload["data"])
+    if isinstance(payload, dict) and isinstance(payload.get("object"), dict):
+        return dict(payload["object"])
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _object_marker(data: dict[str, object]) -> str:
+    timestamp = str(data.get("modificationDate") or data.get("modification_date") or "")
+    if timestamp:
+        return timestamp
+    canonical = json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _configured_values(config: dict[str, object], data: dict[str, object]) -> dict[str, object]:
+    elements = data.get("elements") if isinstance(data.get("elements"), list) else []
+    indexed: dict[tuple[str, str], object] = {}
+
+    def visit(node: object) -> None:
+        if isinstance(node, dict):
+            name = str(node.get("name") or "")
+            language = str(node.get("language") or "")
+            if name and "value" in node and not isinstance(node.get("value"), (dict, list)):
+                indexed[(name, language)] = node.get("value")
+            for value in node.values():
+                visit(value)
+        elif isinstance(node, list):
+            for value in node:
+                visit(value)
+
+    visit(elements)
+    return {
+        mapping["source"]: indexed.get(
+            (mapping["pimcore_field"], str(mapping.get("language") or "")),
+            "",
+        )
+        for mapping in config["field_mappings"]
+    }
+
+
+def fetch_product_for_edit(
+    settings: object,
+    object_id: object,
+    *,
+    client: PimcoreClient | None = None,
+) -> dict[str, object]:
+    config = normalize_pimcore_settings(settings)
+    api = client or PimcoreClient(config)
+    data = _object_data(api.object_by_id(object_id))
+    identity = normalize_object_identity(data)
+    return {
+        "object": identity,
+        "marker": _object_marker(data),
+        "values": _configured_values(config, data),
+    }
+
+
+def merge_product_update_payload(
+    settings: object,
+    current_data: dict[str, object],
+    values: dict[str, object],
+) -> dict[str, object]:
+    config = normalize_pimcore_settings(settings)
+    submitted_ean = validate_ean(values.get("EAN"))
+    current_values = _configured_values(config, current_data)
+    if current_values.get("EAN") and str(current_values["EAN"]) != submitted_ean:
+        raise ValueError("EAN istniejacego produktu nie moze zostac zmieniony.")
+    replacements, _effective_values = _mapped_elements(
+        config,
+        values,
+        use_defaults=False,
+        include_empty=True,
+    )
+    replacement_keys = {
+        (item["name"], str(item.get("language") or "")): item for item in replacements
+    }
+    existing = current_data.get("elements") if isinstance(current_data.get("elements"), list) else []
+    used: set[tuple[str, str]] = set()
+
+    def merge_node(raw: object) -> object:
+        if isinstance(raw, list):
+            return [merge_node(item) for item in raw]
+        if not isinstance(raw, dict):
+            return raw
+        item = dict(raw)
+        key = (str(item.get("name") or ""), str(item.get("language") or ""))
+        replacement = replacement_keys.get(key)
+        if replacement:
+            used.add(key)
+            item.update(replacement)
+            return item
+        for field, value in list(item.items()):
+            if isinstance(value, (dict, list)):
+                item[field] = merge_node(value)
+        return item
+
+    merged_elements = [merge_node(item) for item in existing]
+    merged_elements.extend(
+        dict(item) for key, item in replacement_keys.items() if key not in used
+    )
+    payload = dict(current_data)
+    payload["elements"] = merged_elements
+    payload["published"] = True
+    return payload
+
+
 def find_product_by_ean(
     settings: object,
     ean: object,
@@ -973,6 +1114,110 @@ def create_product(
         "object": identity,
         "object_id": identity["id"],
         "payload": payload,
+    }
+
+
+def update_product(
+    settings: object,
+    object_id: object,
+    expected_marker: object,
+    values: dict[str, object],
+    *,
+    client: PimcoreClient | None = None,
+    emit: Callable[..., None],
+) -> dict[str, object]:
+    config = normalize_pimcore_settings(settings)
+    api = client or PimcoreClient(config)
+    numeric_id = int(object_id)
+    stage_started = time.perf_counter()
+    current_payload = api.object_by_id(numeric_id)
+    current_data = _object_data(current_payload)
+    current_marker = _object_marker(current_data)
+    if current_marker != str(expected_marker or ""):
+        emit(
+            "conflict",
+            "warning",
+            "Obiekt zostal zmieniony w Pimcore.",
+            object_id=numeric_id,
+            expected_marker=str(expected_marker or ""),
+            current_marker=current_marker,
+            stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
+        )
+        raise PimcoreConflictError(
+            "Obiekt zostal zmieniony w Pimcore. Otworz go ponownie.",
+            numeric_id,
+            str(expected_marker or ""),
+            current_marker,
+        )
+
+    payload = merge_product_update_payload(config, current_data, values)
+    emit(
+        "payload",
+        "success",
+        "Polaczono zmiany z aktualnym obiektem.",
+        object_id=numeric_id,
+        stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
+    )
+
+    stage_started = time.perf_counter()
+    try:
+        response = api.update_object(numeric_id, payload)
+    except PimcoreApiError as exc:
+        emit(
+            "update",
+            "error",
+            str(exc),
+            method="PUT",
+            endpoint=f"/webservice/rest/object/id/{numeric_id}",
+            error=exc.as_dict(include_detail=True),
+            stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
+        )
+        raise
+    emit(
+        "update",
+        "success",
+        "Zaktualizowano i opublikowano produkt Pimcore.",
+        object_id=numeric_id,
+        method="PUT",
+        endpoint=f"/webservice/rest/object/id/{numeric_id}",
+        status_code=_last_status_code(api),
+        response_excerpt=_response_excerpt(json.dumps(response, ensure_ascii=True)),
+        stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
+    )
+
+    stage_started = time.perf_counter()
+    verified_payload = api.object_by_id(numeric_id)
+    verified_data = _object_data(verified_payload)
+    verified_values = _configured_values(config, verified_data)
+    _elements, expected_values = _mapped_elements(
+        config,
+        values,
+        use_defaults=False,
+        include_empty=True,
+    )
+    mismatches = [
+        source
+        for source, expected in expected_values.items()
+        if str(verified_values.get(source, ""))
+        != str(expected if expected is not None else "")
+    ]
+    if mismatches:
+        raise ValueError(
+            "Pimcore nie potwierdzil zapisanych wartosci: " + ", ".join(mismatches)
+        )
+    identity = normalize_object_identity(verified_data)
+    emit(
+        "verify",
+        "success",
+        "Potwierdzono zapisane wartosci.",
+        object_id=numeric_id,
+        object_path=identity["path"],
+        stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
+    )
+    return {
+        "object": identity,
+        "values": verified_values,
+        "marker": _object_marker(verified_data),
     }
 
 

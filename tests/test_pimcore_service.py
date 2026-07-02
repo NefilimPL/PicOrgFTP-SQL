@@ -9,6 +9,7 @@ import pytest
 from picorgftp_sql.services.pimcore_service import (
     PimcoreApiError,
     PimcoreClient,
+    PimcoreConflictError,
     build_create_payload,
     build_ean_filter,
     create_product,
@@ -16,8 +17,11 @@ from picorgftp_sql.services.pimcore_service import (
     discover_fields,
     discover_folders,
     extract_object_id,
+    fetch_product_for_edit,
     find_product_by_ean,
+    merge_product_update_payload,
     run_settings_test,
+    update_product,
 )
 
 
@@ -261,6 +265,125 @@ PRODUCT_CONFIG = {
         },
     ],
 }
+
+
+EDIT_OBJECT = {
+    "id": 91,
+    "parentId": 6626,
+    "key": "5904804578169",
+    "className": "product",
+    "published": True,
+    "modificationDate": 100,
+    "elements": [
+        {"type": "input", "name": "EAN", "value": "5904804578169", "language": None},
+        {"type": "input", "name": "SKU", "value": "OLD", "language": None},
+        {"type": "input", "name": "untouched", "value": "KEEP", "language": None},
+    ],
+}
+
+
+def test_fetch_product_for_edit_returns_only_configured_values():
+    client = Mock()
+    client.object_by_id.return_value = {"data": EDIT_OBJECT}
+
+    result = fetch_product_for_edit(PRODUCT_CONFIG, 91, client=client)
+
+    assert result["object"]["id"] == 91
+    assert result["marker"] == "100"
+    assert result["values"] == {"SKU": "OLD", "EAN": "5904804578169"}
+
+
+def test_merge_product_update_preserves_parent_and_unconfigured_elements():
+    payload = merge_product_update_payload(
+        PRODUCT_CONFIG,
+        EDIT_OBJECT,
+        {"SKU": "NEW", "EAN": "5904804578169"},
+    )
+
+    by_name = {item["name"]: item for item in payload["elements"]}
+    assert payload["parentId"] == 6626
+    assert payload["key"] == "5904804578169"
+    assert payload["published"] is True
+    assert by_name["SKU"]["value"] == "NEW"
+    assert by_name["untouched"]["value"] == "KEEP"
+
+
+def test_merge_product_update_replaces_nested_localized_value_only():
+    config = json.loads(json.dumps(PRODUCT_CONFIG))
+    config["field_mappings"].append(
+        {
+            "source": "NAME_EN",
+            "label": "Nazwa EN",
+            "pimcore_field": "name",
+            "type": "input",
+            "language": "en",
+            "required": False,
+            "default": "",
+            "parser": "text",
+        }
+    )
+    current = json.loads(json.dumps(EDIT_OBJECT))
+    current["elements"].append(
+        {
+            "type": "localizedfields",
+            "name": "localizedfields",
+            "value": [
+                {"type": "input", "name": "name", "language": "en", "value": "Old"},
+                {"type": "input", "name": "name", "language": "pl", "value": "Bez zmian"},
+            ],
+        }
+    )
+
+    payload = merge_product_update_payload(
+        config,
+        current,
+        {"SKU": "OLD", "EAN": "5904804578169", "NAME_EN": ""},
+    )
+
+    localized = next(item for item in payload["elements"] if item["name"] == "localizedfields")
+    by_language = {item["language"]: item["value"] for item in localized["value"]}
+    assert by_language == {"en": "", "pl": "Bez zmian"}
+
+
+def test_update_product_rejects_changed_marker_before_put():
+    client = Mock()
+    changed = dict(EDIT_OBJECT, modificationDate=101)
+    client.object_by_id.return_value = {"data": changed}
+
+    with pytest.raises(PimcoreConflictError, match="zmieniony"):
+        update_product(
+            PRODUCT_CONFIG,
+            91,
+            "100",
+            {"SKU": "NEW", "EAN": "5904804578169"},
+            client=client,
+            emit=lambda *args, **kwargs: None,
+        )
+
+    client.update_object.assert_not_called()
+
+
+def test_update_product_uses_content_marker_when_timestamp_is_missing():
+    original = {key: value for key, value in EDIT_OBJECT.items() if key != "modificationDate"}
+    load_client = Mock()
+    load_client.object_by_id.return_value = {"data": original}
+    loaded = fetch_product_for_edit(PRODUCT_CONFIG, 91, client=load_client)
+
+    changed = json.loads(json.dumps(original))
+    changed["elements"][1]["value"] = "CHANGED"
+    update_client = Mock()
+    update_client.object_by_id.return_value = {"data": changed}
+    with pytest.raises(PimcoreConflictError, match="zmieniony"):
+        update_product(
+            PRODUCT_CONFIG,
+            91,
+            loaded["marker"],
+            {"SKU": "NEW", "EAN": "5904804578169"},
+            client=update_client,
+            emit=lambda *args, **kwargs: None,
+        )
+
+    update_client.update_object.assert_not_called()
 
 
 def test_find_product_by_ean_returns_normalized_identity():
