@@ -264,6 +264,18 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("pimcoreMissingCreateButton", html.ids)
         self.assertIn("pimcoreEditButton", html.ids)
 
+    def test_runtime_pimcore_edit_modal_exists(self) -> None:
+        html = _parse(INDEX_HTML)
+        for element_id in (
+            "pimcoreEditButton",
+            "pimcoreEditModal",
+            "pimcoreEditForm",
+            "pimcoreEditSubmitButton",
+            "pimcoreEditCancelButton",
+            "pimcoreEditStatus",
+        ):
+            self.assertIn(element_id, html.ids)
+
     def test_slot_template_keeps_preview_and_file_input_controls(self) -> None:
         html = _parse(INDEX_HTML)
 

@@ -63,6 +63,29 @@ def test_registry_redacts_secrets_from_values_events_and_results():
     assert report["result"]["cookie"] == "[REDACTED]"
 
 
+def test_registry_redacts_manual_update_operations():
+    persisted = []
+    registry = PimcoreOperationRegistry(executor=ImmediateExecutor())
+    started = registry.start(
+        operation_type="manual_update",
+        username="operator",
+        values={"EAN": "5904804578169", "api_key": "never-store"},
+        cleanup_policy="",
+        worker=lambda emit: (
+            emit("update", "info", "PUT", authorization="Bearer never-store")
+            or {"status": "completed", "secret": "never-store"}
+        ),
+        persist=persisted.append,
+    )
+
+    report = registry.status(started["operation_id"])
+
+    assert report["operation_type"] == "manual_update"
+    assert report["values"]["api_key"] == "[REDACTED]"
+    assert report["events"][1]["authorization"] == "[REDACTED]"
+    assert report["result"]["secret"] == "[REDACTED]"
+
+
 class PimcoreTestClient:
     def __init__(self, *, delete_error=None):
         self.deleted = []

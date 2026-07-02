@@ -84,13 +84,16 @@ from .pimcore_config import (
 from .pimcore_operations import PimcoreOperationRegistry, redact_pimcore_log_value
 from .services.pimcore_service import (
     PimcoreClient,
+    PimcoreConflictError,
     create_product,
     discover_classes,
     discover_fields,
     discover_folders,
+    fetch_product_for_edit,
     find_product_by_ean,
     run_settings_test,
     run_test_create,
+    update_product,
 )
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
 from .product_fields import (
@@ -1587,8 +1590,11 @@ def _persist_pimcore_operation(report: dict[str, object]) -> dict[str, object]:
     values = report.get("values") if isinstance(report.get("values"), dict) else {}
     result = report.get("result") if isinstance(report.get("result"), dict) else {}
     result_object = result.get("object") if isinstance(result.get("object"), dict) else {}
-    if report.get("operation_type") == "test":
+    operation_type = _text(report.get("operation_type"))
+    if operation_type == "test":
         action = "pimcore_test_create"
+    elif operation_type == "manual_update":
+        action = "pimcore_product_update"
     elif report.get("status") in {"duplicate", "failed"}:
         action = "pimcore_product_create_rejected"
     else:
@@ -1713,7 +1719,7 @@ def create_pimcore_product(values: object, username: str) -> dict[str, object]:
         report = redact_pimcore_log_value(
             {
                 "operation_id": operation_id,
-                "operation_type": "manual",
+                "operation_type": "manual_create",
                 "username": username,
                 "values": submitted,
                 "status": status,
@@ -1725,6 +1731,74 @@ def create_pimcore_product(values: object, username: str) -> dict[str, object]:
             }
         )
         _persist_pimcore_operation(report)
+
+
+def get_pimcore_product_for_edit(object_id: object) -> dict[str, object]:
+    settings_payload = _active_pimcore_runtime_settings()
+    result = fetch_product_for_edit(settings_payload, object_id)
+    result["form_schema"] = _pimcore_runtime_form_schema(settings_payload)
+    return result
+
+
+def update_pimcore_product(
+    object_id: object,
+    marker: object,
+    values: object,
+    username: str,
+) -> dict[str, object]:
+    settings_payload = _active_pimcore_runtime_settings()
+    submitted = dict(values) if isinstance(values, dict) else {}
+    operation_id = secrets.token_hex(12)
+    started = time.time()
+    events: list[dict[str, object]] = []
+    result: dict[str, object] = {}
+    status = "failed"
+
+    def emit(stage: str, severity: str, message: str, **details: object) -> None:
+        now = time.time()
+        event = {
+            "sequence": len(events) + 1,
+            "timestamp": now,
+            "elapsed_ms": int(max(0, now - started) * 1000),
+            "stage": stage,
+            "severity": severity,
+            "message": message,
+        }
+        event.update(details)
+        events.append(event)
+
+    try:
+        result = update_product(
+            settings_payload,
+            object_id,
+            str(marker or ""),
+            submitted,
+            emit=emit,
+        )
+        status = "completed"
+        return result
+    except PimcoreConflictError:
+        status = "conflict"
+        raise
+    except Exception as exc:
+        emit("finish", "error", str(exc) or exc.__class__.__name__)
+        raise
+    finally:
+        finished = time.time()
+        _persist_pimcore_operation(
+            {
+                "operation_id": operation_id,
+                "operation_type": "manual_update",
+                "username": username,
+                "values": submitted,
+                "status": status,
+                "started_at": started,
+                "finished_at": finished,
+                "total_ms": int(max(0, finished - started) * 1000),
+                "events": events,
+                "result": result,
+            }
+        )
 
 
 def pimcore_operation_status(

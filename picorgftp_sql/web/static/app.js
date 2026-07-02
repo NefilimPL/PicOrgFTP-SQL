@@ -31,6 +31,9 @@ const state = {
   pimcoreCreateSchema: [],
   pimcoreRuntimeEnabled: false,
   pimcoreExistingObject: null,
+  pimcoreEditObjectId: 0,
+  pimcoreEditMarker: "",
+  pimcoreEditSchema: [],
   pimcoreSetup: {
     step: 1,
     settings: null,
@@ -239,6 +242,12 @@ const pimcoreCreateForm = document.querySelector("#pimcoreCreateForm");
 const pimcoreCreateSubmitButton = document.querySelector("#pimcoreCreateSubmitButton");
 const pimcoreCreateCancelButton = document.querySelector("#pimcoreCreateCancelButton");
 const pimcoreCreateStatus = document.querySelector("#pimcoreCreateStatus");
+const pimcoreEditModal = document.querySelector("#pimcoreEditModal");
+const pimcoreEditForm = document.querySelector("#pimcoreEditForm");
+const pimcoreEditSubmitButton = document.querySelector("#pimcoreEditSubmitButton");
+const pimcoreEditCancelButton = document.querySelector("#pimcoreEditCancelButton");
+const pimcoreEditStatus = document.querySelector("#pimcoreEditStatus");
+const pimcoreEditObjectInfo = document.querySelector("#pimcoreEditObjectInfo");
 const pimcoreSetupModal = document.querySelector("#pimcoreSetupModal");
 const pimcoreSetupForm = document.querySelector("#pimcoreSetupForm");
 const pimcoreSetupStepTitle = document.querySelector("#pimcoreSetupStepTitle");
@@ -7472,6 +7481,86 @@ async function submitPimcoreRuntimeCreate(event) {
   }
 }
 
+async function openPimcoreEditModal() {
+  const objectId = state.pimcoreExistingObject?.id;
+  if (!objectId || !pimcoreEditForm || !pimcoreEditModal) return;
+  if (pimcoreEditButton) pimcoreEditButton.disabled = true;
+  try {
+    const payload = await requestJson(`/api/pimcore/products/${encodeURIComponent(objectId)}`);
+    pimcoreEditForm.textContent = "";
+    state.pimcoreEditObjectId = Number(payload.object?.id || objectId);
+    state.pimcoreEditMarker = String(payload.marker || "");
+    state.pimcoreEditSchema = Array.isArray(payload.form_schema) ? payload.form_schema : [];
+    for (const mapping of state.pimcoreEditSchema) {
+      const label = document.createElement("label");
+      const title = document.createElement("span");
+      const input = document.createElement("input");
+      title.textContent = `${mapping.label || mapping.source}${mapping.required ? " *" : ""}`;
+      input.name = mapping.source;
+      input.value = payload.values?.[mapping.source] ?? "";
+      input.required = Boolean(mapping.required);
+      input.autocomplete = "off";
+      if (mapping.source === "EAN") input.id = "pimcoreEditEan";
+      label.append(title, input);
+      pimcoreEditForm.appendChild(label);
+    }
+    const pimcoreEditEan = pimcoreEditForm.querySelector("#pimcoreEditEan");
+    if (pimcoreEditEan) pimcoreEditEan.readOnly = true;
+    if (pimcoreEditObjectInfo) {
+      pimcoreEditObjectInfo.textContent = [
+        `ID ${state.pimcoreEditObjectId}`,
+        payload.object?.path || "",
+      ]
+        .filter(Boolean)
+        .join(" - ");
+    }
+    if (pimcoreEditStatus) pimcoreEditStatus.textContent = "";
+    pimcoreEditModal.classList.add("active");
+  } catch (error) {
+    formStatus.textContent = `Nie mozna pobrac danych Pimcore: ${error.message}`;
+  } finally {
+    if (pimcoreEditButton) pimcoreEditButton.disabled = !state.pimcoreExistingObject?.id;
+  }
+}
+
+function closePimcoreEditModal() {
+  pimcoreEditModal?.classList.remove("active");
+  if (pimcoreEditForm) pimcoreEditForm.textContent = "";
+  if (pimcoreEditStatus) pimcoreEditStatus.textContent = "";
+  state.pimcoreEditObjectId = 0;
+  state.pimcoreEditMarker = "";
+  state.pimcoreEditSchema = [];
+}
+
+async function submitPimcoreRuntimeEdit(event) {
+  event.preventDefault();
+  if (!pimcoreEditForm.reportValidity()) return;
+  pimcoreEditSubmitButton.disabled = true;
+  pimcoreEditStatus.textContent = "Zapisywanie i publikowanie...";
+  try {
+    const values = Object.fromEntries(new FormData(pimcoreEditForm).entries());
+    const result = await requestJson(
+      `/api/pimcore/products/${encodeURIComponent(state.pimcoreEditObjectId)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ marker: state.pimcoreEditMarker, values }),
+        timeoutMs: 120000,
+      }
+    );
+    state.pimcoreEditMarker = result.marker || state.pimcoreEditMarker;
+    state.pimcoreExistingObject = result.object || state.pimcoreExistingObject;
+    pimcoreEditStatus.textContent = `Zapisano obiekt ${result.object?.id || state.pimcoreEditObjectId}.`;
+  } catch (error) {
+    pimcoreEditStatus.textContent =
+      error.status === 409
+        ? "Produkt zostal zmieniony w Pimcore. Zamknij okno i otworz go ponownie."
+        : error.message;
+  } finally {
+    pimcoreEditSubmitButton.disabled = false;
+  }
+}
+
 function renderSettingsPimcore() {
   const pimcore = state.settings.pimcore || {};
   const form = document.createElement("form");
@@ -7995,6 +8084,12 @@ pimcoreCreateCancelButton?.addEventListener("click", () => {
 
 pimcoreCreateForm?.addEventListener("submit", submitPimcoreRuntimeCreate);
 
+pimcoreEditButton?.addEventListener("click", openPimcoreEditModal);
+pimcoreEditForm?.addEventListener("submit", submitPimcoreRuntimeEdit);
+pimcoreEditCancelButton?.addEventListener("click", () => {
+  closePimcoreEditModal();
+});
+
 pimcoreSetupNextButton?.addEventListener("click", advancePimcoreSetup);
 pimcoreSetupBackButton?.addEventListener("click", () => {
   capturePimcoreSetupStep();
@@ -8247,6 +8342,7 @@ function resetCurrentDraft({ clearOutput = true, status = "" } = {}) {
   if (pimcoreEditButton) pimcoreEditButton.disabled = true;
   pimcoreMissingModal?.classList.remove("active");
   pimcoreCreateModal?.classList.remove("active");
+  closePimcoreEditModal();
   window.clearTimeout(state.backgroundFtpLookupTimer);
   window.clearTimeout(state.backgroundFtpPreviewTimer);
   state.loadedEntryOriginal = null;

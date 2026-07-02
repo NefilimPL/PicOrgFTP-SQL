@@ -427,13 +427,15 @@
         <form id="pimcoreHistoryFilters" class="pimcore-history-filters">
           <select name="operation_type" aria-label="Typ operacji">
             <option value="">Wszystkie typy</option>
-            <option value="manual">Dodanie reczne</option>
+            <option value="manual_create">Dodanie reczne</option>
+            <option value="manual_update">Edycja reczna</option>
             <option value="test">Dodanie testowe</option>
           </select>
           <select name="result" aria-label="Wynik operacji">
             <option value="">Wszystkie wyniki</option>
             <option value="completed">Sukces</option>
             <option value="duplicate">Duplikat</option>
+            <option value="conflict">Konflikt</option>
             <option value="partial">Czesciowy blad</option>
             <option value="failed">Blad</option>
           </select>
@@ -471,6 +473,23 @@
         <div class="heading-actions">
           <button id="pimcoreCreateSubmitButton" type="submit" form="pimcoreCreateForm">Zapisz i opublikuj</button>
           <span id="pimcoreCreateStatus" role="status"></span>
+        </div>
+      </section>
+    </div>
+
+    <div id="pimcoreEditModal" class="modal-view">
+      <section class="manager-panel pimcore-edit-panel">
+        <div class="section-heading">
+          <div>
+            <h1>Edytuj dane Pimcore</h1>
+            <span id="pimcoreEditObjectInfo"></span>
+          </div>
+          <button id="pimcoreEditCancelButton" type="button" class="ghost-button modal-close">Anuluj</button>
+        </div>
+        <form id="pimcoreEditForm" class="pimcore-runtime-fields"></form>
+        <div class="heading-actions">
+          <button id="pimcoreEditSubmitButton" type="submit" form="pimcoreEditForm">Zapisz i opublikuj</button>
+          <span id="pimcoreEditStatus" role="status"></span>
         </div>
       </section>
     </div>

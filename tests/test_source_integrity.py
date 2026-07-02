@@ -484,6 +484,23 @@ class SourceIntegrityTests(unittest.TestCase):
         cancel_end = source.index("pimcoreCreateForm?.addEventListener", cancel_start)
         self.assertNotIn("requestJson", source[cancel_start:cancel_end])
 
+    def test_pimcore_edit_loads_selected_fields_and_cancel_does_not_put(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("openPimcoreEditModal", source)
+        self.assertIn('requestJson(`/api/pimcore/products/${encodeURIComponent(objectId)}`)', source)
+        self.assertIn('method: "PUT"', source)
+        self.assertIn("pimcoreEditEan.readOnly = true", source)
+        cancel_start = source.index('pimcoreEditCancelButton?.addEventListener("click"')
+        cancel_end = source.index("});", cancel_start)
+        self.assertNotIn("requestJson", source[cancel_start:cancel_end])
+
     def test_sqlite_backup_schedule_uses_day_hour_slots_and_nested_modal_layer(self) -> None:
         root = Path(__file__).resolve().parents[1]
         js_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(encoding="utf-8")

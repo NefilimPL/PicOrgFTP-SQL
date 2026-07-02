@@ -1935,12 +1935,24 @@ button.slot-badge.on:hover {
   width: min(960px, calc(100vw - 32px));
 }
 
+.pimcore-edit-panel {
+  width: min(980px, calc(100vw - 32px));
+}
+
+.lookup-actions #pimcoreEditButton {
+  min-width: 170px;
+}
+
 .pimcore-runtime-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   max-height: min(68vh, 720px);
   overflow: auto;
+}
+
+.pimcore-edit-panel .pimcore-runtime-fields {
+  max-height: min(70vh, 760px);
 }
 
 .pimcore-runtime-fields label {
@@ -2285,6 +2297,10 @@ button.slot-badge.on:hover {
 @media (max-width: 700px) {
   .pimcore-runtime-fields {
     grid-template-columns: 1fr;
+  }
+
+  .lookup-actions #pimcoreEditButton {
+    width: 100%;
   }
 }
 

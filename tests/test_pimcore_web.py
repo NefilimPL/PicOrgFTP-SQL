@@ -1,9 +1,11 @@
 import json
 from unittest.mock import Mock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from picorgftp_sql import web_data
+from picorgftp_sql.services.pimcore_service import PimcoreConflictError
 from picorgftp_sql.web import app as web_app
 
 
@@ -419,3 +421,92 @@ def test_runtime_create_route_allows_logged_in_user_and_returns_created_object()
     assert response.status_code == 200
     assert response.json() == expected
     create.assert_called_once_with({"SKU": "ABC", "EAN": "5904804578169"}, "operator")
+
+
+def test_edit_adapter_requires_enabled_complete_setup():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update({"enabled": False, "setup_complete": True})
+    with patch.object(web_data.config, "CONFIG", cfg):
+        with pytest.raises(ValueError, match="wylaczona"):
+            web_data.get_pimcore_product_for_edit(91)
+
+
+def test_update_adapter_persists_manual_update_audit():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update({"enabled": True, "setup_complete": True})
+    expected = {
+        "object": {"id": 91, "path": "/Produkty/5904"},
+        "values": {"EAN": "5904804578169"},
+    }
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "update_product", return_value=expected),
+        patch.object(web_data, "_persist_pimcore_operation") as persist,
+    ):
+        result = web_data.update_pimcore_product(
+            91,
+            "100",
+            {"EAN": "5904804578169"},
+            "operator",
+        )
+
+    assert result == expected
+    report = persist.call_args.args[0]
+    assert report["operation_type"] == "manual_update"
+    assert report["username"] == "operator"
+
+
+def test_create_adapter_uses_manual_create_operation_kind():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update({"enabled": True, "setup_complete": True})
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(
+            web_data,
+            "create_product",
+            return_value={"created": True, "duplicate": False, "object": {"id": 91}},
+        ),
+        patch.object(web_data, "_persist_pimcore_operation") as persist,
+    ):
+        web_data.create_pimcore_product({"EAN": "5904804578169"}, "operator")
+
+    assert persist.call_args.args[0]["operation_type"] == "manual_create"
+
+
+def test_runtime_edit_routes_allow_logged_in_user():
+    client = TestClient(web_app.app)
+    loaded = {
+        "object": {"id": 91},
+        "marker": "100",
+        "values": {"EAN": "5904804578169"},
+        "form_schema": [],
+    }
+    updated = {"object": {"id": 91}, "values": {"EAN": "5904804578169"}}
+    with (
+        patch.object(web_app, "_require_user", return_value="operator"),
+        patch.object(web_app, "get_pimcore_product_for_edit", return_value=loaded),
+        patch.object(web_app, "update_pimcore_product", return_value=updated),
+    ):
+        get_response = client.get("/api/pimcore/products/91")
+        put_response = client.put(
+            "/api/pimcore/products/91",
+            json={"marker": "100", "values": {"EAN": "5904804578169"}},
+        )
+
+    assert get_response.json() == loaded
+    assert put_response.json() == updated
+
+
+def test_runtime_edit_conflict_returns_409():
+    client = TestClient(web_app.app)
+    error = PimcoreConflictError("Obiekt zostal zmieniony.", 91, "100", "101")
+    with (
+        patch.object(web_app, "_require_user", return_value="operator"),
+        patch.object(web_app, "update_pimcore_product", side_effect=error),
+    ):
+        response = client.put(
+            "/api/pimcore/products/91",
+            json={"marker": "100", "values": {"EAN": "5904804578169"}},
+        )
+    assert response.status_code == 409
+    assert response.json()["detail"]["current_marker"] == "101"
