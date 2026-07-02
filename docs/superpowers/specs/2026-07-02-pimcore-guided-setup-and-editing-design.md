@@ -1,7 +1,7 @@
 # Pimcore Guided Setup And Existing Product Editing Design
 
 **Date:** 2026-07-02
-**Status:** Awaiting written-spec review
+**Status:** Approved for implementation planning
 **Target:** PicOrgFTP-SQL web panel on branch `dev`, Pimcore legacy REST API 6.6.x
 
 ## Context
