@@ -148,6 +148,9 @@ class ConfigTests(unittest.TestCase):
             **payload["pimcore"],
             "enabled": True,
             "api_key": "pimcore-secret",
+            "setup_complete": True,
+            "class_id": "7",
+            "parent_path": "/Produkty",
         }
 
         with (
@@ -159,6 +162,9 @@ class ConfigTests(unittest.TestCase):
         raw = write_atomic.call_args.args[1]
         self.assertNotEqual(raw["pimcore"]["api_key"], "pimcore-secret")
         self.assertEqual(config.decrypt(raw["pimcore"]["api_key"]), "pimcore-secret")
+        self.assertIs(raw["pimcore"]["setup_complete"], True)
+        self.assertEqual(raw["pimcore"]["class_id"], "7")
+        self.assertEqual(raw["pimcore"]["parent_path"], "/Produkty")
 
 
 if __name__ == "__main__":

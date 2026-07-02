@@ -9,17 +9,27 @@ PIMCORE_API_KEY = "api_key"
 PIMCORE_FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SUPPORTED_ELEMENT_TYPES = {"input", "textarea", "numeric", "checkbox", "select"}
 SUPPORTED_PARSERS = {"text", "integer", "decimal_comma", "boolean", "empty_to_null"}
+SUPPORTED_FIELD_PARSERS = {
+    "input": "text",
+    "textarea": "text",
+    "numeric": "decimal_comma",
+    "checkbox": "boolean",
+    "select": "text",
+}
 
 DEFAULT_PIMCORE_SETTINGS: dict[str, Any] = {
+    "setup_complete": False,
     "enabled": False,
     "base_url": "http://10.10.0.5",
     PIMCORE_API_KEY: "",
-    "class_name": "Product",
+    "class_id": "",
+    "class_name": "",
     "parent_id": "",
+    "parent_path": "",
     "published": True,
-    "object_key_template": "{SKU}",
-    "existence_fields": ["EAN", "Towar_powiazany_z_SKU"],
-    "timeout_seconds": 10,
+    "object_key_template": "{EAN}",
+    "existence_fields": ["EAN"],
+    "timeout_seconds": 30,
     "verify_tls": True,
     "field_mappings": [],
 }
@@ -57,6 +67,57 @@ def normalize_field_mapping(raw: object) -> dict[str, Any] | None:
         "default": _text(raw.get("default")),
         "parser": parser,
     }
+
+
+def infer_field_mapping(
+    *,
+    source: object,
+    label: object,
+    pimcore_field: object,
+    field_type: object,
+    language: object = None,
+    required: bool = False,
+) -> dict[str, Any]:
+    source_text = _text(source)
+    target = _text(pimcore_field)
+    normalized_type = _text(field_type).lower()
+    if not source_text or not PIMCORE_FIELD_NAME.fullmatch(target):
+        raise ValueError("Pole formularza i pole Pimcore sa wymagane.")
+    if normalized_type not in SUPPORTED_FIELD_PARSERS:
+        raise ValueError(
+            f"Nieobslugiwany typ pola Pimcore: {normalized_type or '[pusty]'}."
+        )
+    is_ean = source_text.casefold() == "ean"
+    return {
+        "source": "EAN" if is_ean else source_text,
+        "label": _text(label) or source_text,
+        "pimcore_field": target,
+        "type": normalized_type,
+        "language": _text(language) or None,
+        "required": True if is_ean else bool(required),
+        "default": "",
+        "parser": SUPPORTED_FIELD_PARSERS[normalized_type],
+    }
+
+
+def _legacy_setup_is_complete(settings: dict[str, Any]) -> bool:
+    mappings = settings.get("field_mappings") or []
+    ean_mapping = next(
+        (
+            item
+            for item in mappings
+            if str(item.get("source") or "").casefold() == "ean"
+            and bool(item.get("required"))
+        ),
+        None,
+    )
+    return bool(
+        settings.get("base_url")
+        and settings.get(PIMCORE_API_KEY)
+        and settings.get("class_name")
+        and settings.get("parent_id")
+        and ean_mapping
+    )
 
 
 def field_mapping_issues(raw_mappings: object) -> list[str]:
@@ -111,12 +172,12 @@ def normalize_pimcore_settings(raw: object) -> dict[str, Any]:
     settings["enabled"] = bool(source.get("enabled", settings["enabled"]))
     settings["base_url"] = _text(source.get("base_url", settings["base_url"])).rstrip("/")
     settings[PIMCORE_API_KEY] = _text(source.get(PIMCORE_API_KEY))
-    settings["class_name"] = _text(source.get("class_name", settings["class_name"])) or "Product"
+    settings["class_id"] = _text(source.get("class_id"))
+    settings["class_name"] = _text(source.get("class_name", settings["class_name"]))
     settings["parent_id"] = _text(source.get("parent_id"))
+    settings["parent_path"] = _text(source.get("parent_path"))
     settings["published"] = bool(source.get("published", settings["published"]))
-    settings["object_key_template"] = _text(
-        source.get("object_key_template", settings["object_key_template"])
-    ) or "{EAN}"
+    settings["object_key_template"] = "{EAN}"
     fields: list[str] = []
     raw_fields = source.get("existence_fields", settings["existence_fields"])
     if isinstance(raw_fields, str):
@@ -131,7 +192,7 @@ def normalize_pimcore_settings(raw: object) -> dict[str, Any]:
     try:
         timeout = int(source.get("timeout_seconds", settings["timeout_seconds"]))
     except (TypeError, ValueError):
-        timeout = 10
+        timeout = 30
     settings["timeout_seconds"] = max(1, min(120, timeout))
     settings["verify_tls"] = bool(source.get("verify_tls", settings["verify_tls"]))
     mappings: list[dict[str, Any]] = []
@@ -140,6 +201,16 @@ def normalize_pimcore_settings(raw: object) -> dict[str, Any]:
         if normalized:
             mappings.append(normalized)
     settings["field_mappings"] = mappings
+    ean_targets = [
+        item["pimcore_field"]
+        for item in mappings
+        if item["source"].casefold() == "ean"
+    ]
+    settings["existence_fields"] = ean_targets or fields or ["EAN"]
+    if "setup_complete" in source:
+        settings["setup_complete"] = bool(source.get("setup_complete"))
+    else:
+        settings["setup_complete"] = _legacy_setup_is_complete(settings)
     return settings
 
 
