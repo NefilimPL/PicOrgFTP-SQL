@@ -14,6 +14,7 @@ from ..common import SSL_CONTEXT
 from ..pimcore_config import (
     PIMCORE_API_KEY,
     PIMCORE_FIELD_NAME,
+    SUPPORTED_FIELD_PARSERS,
     field_mapping_issues,
     normalize_pimcore_settings,
     parse_mapping_value,
@@ -160,15 +161,37 @@ class PimcoreClient:
             f"/webservice/rest/object/id/{quote(str(object_id))}",
         )
 
-    def object_list(self, class_name: str, condition: str, limit: int = 2) -> dict[str, Any]:
-        return self.request_json(
-            "GET",
-            "/webservice/rest/object-list",
-            query={"className": class_name, "condition": condition, "limit": limit},
-        )
+    def object_list(
+        self,
+        query_filter: dict[str, object] | None = None,
+        *,
+        object_class: str = "",
+        limit: int = 2,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        query: dict[str, object] = {
+            "limit": max(1, min(1000, int(limit))),
+            "offset": max(0, int(offset)),
+        }
+        if query_filter:
+            query["q"] = json.dumps(
+                query_filter,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        if str(object_class or "").strip():
+            query["objectClass"] = str(object_class).strip()
+        return self.request_json("GET", "/webservice/rest/object-list", query=query)
 
     def create_object(self, payload: dict[str, object]) -> dict[str, Any]:
         return self.request_json("POST", "/webservice/rest/object", body=payload)
+
+    def update_object(self, object_id: object, payload: dict[str, object]) -> dict[str, Any]:
+        return self.request_json(
+            "PUT",
+            f"/webservice/rest/object/id/{quote(str(object_id))}",
+            body=payload,
+        )
 
     def delete_object(self, object_id: object) -> dict[str, Any]:
         return self.request_json(
@@ -184,7 +207,7 @@ def validate_ean(ean: object) -> str:
     return value
 
 
-def build_ean_condition(ean: object, field_names: list[str]) -> str:
+def build_ean_filter(ean: object, field_names: list[str]) -> dict[str, object]:
     value = validate_ean(ean)
     fields: list[str] = []
     for field in field_names:
@@ -195,7 +218,8 @@ def build_ean_condition(ean: object, field_names: list[str]) -> str:
             fields.append(name)
     if not fields:
         raise ValueError("Brak pol do sprawdzania EAN.")
-    return "(" + " OR ".join(f"{field} = '{value}'" for field in fields) + ")"
+    clauses = [{name: value} for name in fields]
+    return clauses[0] if len(clauses) == 1 else {"$or": clauses}
 
 
 def _safe_object_key(value: object) -> str:
@@ -317,6 +341,87 @@ def extract_class_fields(payload: object) -> dict[str, str]:
 
     visit(payload)
     return fields
+
+
+def discover_classes(api: PimcoreClient) -> list[dict[str, str]]:
+    records = _list_records(api.classes(), ("data", "classes", "items"))
+    result = [
+        {
+            "id": str(item.get("id") or item.get("classId") or ""),
+            "name": str(item.get("name") or "").strip(),
+        }
+        for item in records
+        if str(item.get("id") or item.get("classId") or "").strip()
+        and str(item.get("name") or "").strip()
+    ]
+    return sorted(result, key=lambda item: item["name"].casefold())
+
+
+def extract_class_field_records(payload: object) -> list[dict[str, object]]:
+    fields: dict[str, dict[str, object]] = {}
+
+    def visit(node: object, language: str | None = None) -> None:
+        if isinstance(node, dict):
+            node_type = str(node.get("fieldtype") or node.get("datatype") or "").lower()
+            name = str(node.get("name") or "").strip()
+            current_language = str(node.get("language") or language or "").strip() or None
+            if name and node_type:
+                parser = SUPPORTED_FIELD_PARSERS.get(node_type, "")
+                fields[name] = {
+                    "name": name,
+                    "label": str(node.get("title") or node.get("label") or name).strip(),
+                    "type": node_type,
+                    "language": current_language,
+                    "parser": parser,
+                    "supported": bool(parser),
+                    "unsupported_reason": (
+                        "" if parser else f"Typ {node_type} nie jest obslugiwany."
+                    ),
+                }
+            for value in node.values():
+                visit(value, current_language)
+        elif isinstance(node, list):
+            for value in node:
+                visit(value, language)
+
+    visit(payload)
+    return sorted(fields.values(), key=lambda item: str(item["name"]).casefold())
+
+
+def discover_fields(api: PimcoreClient, class_id: object) -> list[dict[str, object]]:
+    return extract_class_field_records(api.class_definition(class_id))
+
+
+def discover_folders(api: PimcoreClient, limit: int = 500) -> list[dict[str, object]]:
+    bounded_limit = min(500, max(1, int(limit)))
+    records: list[dict[str, object]] = []
+    page_size = min(100, bounded_limit)
+    for offset in range(0, bounded_limit, page_size):
+        payload = api.object_list(
+            {"type": "folder"},
+            limit=min(page_size, bounded_limit - offset),
+            offset=offset,
+        )
+        page = _list_records(payload, ("data", "objects", "items"))
+        records.extend(page)
+        if len(page) < page_size:
+            break
+    folders: list[dict[str, object]] = []
+    for record in records:
+        identity = normalize_object_identity(record)
+        if not identity["id"]:
+            continue
+        path = identity["path"]
+        key = identity["key"]
+        if not path:
+            detail = api.object_by_id(identity["id"])
+            source = detail.get("data") if isinstance(detail.get("data"), dict) else detail
+            path = extract_object_path(source)
+            key = str(source.get("key") or key) if isinstance(source, dict) else key
+        if not key and path:
+            key = path.rstrip("/").rsplit("/", 1)[-1]
+        folders.append({"id": identity["id"], "path": path, "key": key})
+    return sorted(folders, key=lambda item: str(item["path"] or item["key"]).casefold())
 
 
 def mapping_compatibility_issues(
@@ -607,8 +712,9 @@ def run_settings_test(
         "object_list",
         "/webservice/rest/object-list",
         lambda: api.object_list(
-            config["class_name"],
-            build_ean_condition("0000000000000", config["existence_fields"]),
+            build_ean_filter("0000000000000", config["existence_fields"]),
+            object_class=config["class_name"],
+            limit=2,
         ),
     )
     checks.append(
@@ -677,11 +783,13 @@ def find_product_by_ean(
     config = normalize_pimcore_settings(settings)
     api = client or PimcoreClient(config)
     payload = api.object_list(
-        config["class_name"],
-        build_ean_condition(ean, config["existence_fields"]),
+        build_ean_filter(ean, config["existence_fields"]),
+        object_class=config["class_name"],
         limit=2,
     )
     records = _list_records(payload, ("data", "objects", "items"))
+    if len(records) > 1:
+        raise ValueError("Znaleziono wiele produktow Pimcore z tym samym EAN.")
     return normalize_object_identity(records[0]) if records else None
 
 
@@ -864,8 +972,8 @@ def run_test_create(
     stage_started = time.perf_counter()
     ean = validate_ean(values.get("EAN"))
     duplicates = api.object_list(
-        config["class_name"],
-        build_ean_condition(ean, config["existence_fields"]),
+        build_ean_filter(ean, config["existence_fields"]),
+        object_class=config["class_name"],
         limit=2,
     )
     duplicate_records = _list_records(duplicates, ("data", "objects", "items"))

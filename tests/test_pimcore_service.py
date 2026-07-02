@@ -2,6 +2,7 @@ from io import BytesIO
 import json
 from unittest.mock import Mock
 from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -9,8 +10,11 @@ from picorgftp_sql.services.pimcore_service import (
     PimcoreApiError,
     PimcoreClient,
     build_create_payload,
-    build_ean_condition,
+    build_ean_filter,
     create_product,
+    discover_classes,
+    discover_fields,
+    discover_folders,
     extract_object_id,
     find_product_by_ean,
     run_settings_test,
@@ -61,8 +65,17 @@ def test_build_create_payload_parses_values_and_renders_key():
         "class_name": "Product",
         "parent_id": "123",
         "published": True,
-        "object_key_template": "{SKU}",
+        "object_key_template": "{EAN}",
         "field_mappings": [
+            {
+                "source": "EAN",
+                "pimcore_field": "EAN",
+                "type": "input",
+                "language": None,
+                "required": True,
+                "default": "",
+                "parser": "text",
+            },
             {
                 "source": "SKU",
                 "pimcore_field": "SKU",
@@ -84,26 +97,122 @@ def test_build_create_payload_parses_values_and_renders_key():
         ],
     }
 
-    payload = build_create_payload(config, {"SKU": "ABC-1", "TOTAL WEIGHT": "62,5"})
+    payload = build_create_payload(
+        config,
+        {"EAN": "5904804578169", "SKU": "ABC-1", "TOTAL WEIGHT": "62,5"},
+    )
 
     assert payload == {
         "className": "Product",
         "parentId": 123,
-        "key": "ABC-1",
+        "key": "5904804578169",
         "published": True,
         "elements": [
+            {"type": "input", "name": "EAN", "value": "5904804578169", "language": None},
             {"type": "input", "name": "SKU", "value": "ABC-1", "language": None},
             {"type": "numeric", "name": "TOTAL_WEIGHT", "value": 62.5, "language": None},
         ],
     }
 
 
-def test_ean_condition_rejects_unsafe_field_names():
-    assert build_ean_condition("5904804578169", ["EAN", "Towar_powiazany_z_SKU"]) == (
-        "(EAN = '5904804578169' OR Towar_powiazany_z_SKU = '5904804578169')"
-    )
+def test_ean_filter_is_structured_and_rejects_unsafe_names():
+    assert build_ean_filter("5904804578169", ["EAN"]) == {"EAN": "5904804578169"}
+    assert build_ean_filter(
+        "5904804578169", ["EAN", "Towar_powiazany_z_SKU"]
+    ) == {
+        "$or": [
+            {"EAN": "5904804578169"},
+            {"Towar_powiazany_z_SKU": "5904804578169"},
+        ]
+    }
     with pytest.raises(ValueError, match="Niepoprawna nazwa pola"):
-        build_ean_condition("5904804578169", ["EAN OR 1=1"])
+        build_ean_filter("5904804578169", ["EAN OR 1=1"])
+
+
+def test_object_list_uses_q_and_object_class_not_removed_parameters():
+    captured = {}
+
+    def opener(request, timeout, context):
+        captured["url"] = request.full_url
+        return FakeResponse({"success": True, "data": []})
+
+    client = PimcoreClient(
+        {"base_url": "http://10.10.0.5", "api_key": "secret"},
+        opener=opener,
+    )
+    client.object_list({"EAN": "5904804578169"}, object_class="product", limit=2)
+
+    query = parse_qs(urlsplit(captured["url"]).query)
+    assert json.loads(query["q"][0]) == {"EAN": "5904804578169"}
+    assert query["objectClass"] == ["product"]
+    assert query["limit"] == ["2"]
+    assert "condition" not in query
+    assert "className" not in query
+
+
+class DiscoveryClient:
+    def classes(self):
+        return {"data": [{"id": "7", "name": "product"}, {"id": 3, "name": "category"}]}
+
+    def class_definition(self, class_id):
+        assert str(class_id) == "7"
+        return {
+            "data": {
+                "layoutDefinitions": {
+                    "children": [
+                        {"fieldtype": "input", "name": "EAN", "title": "EAN"},
+                        {"fieldtype": "numeric", "name": "totalWeight", "title": "Waga"},
+                        {"fieldtype": "manyToManyObjectRelation", "name": "related"},
+                    ]
+                }
+            }
+        }
+
+    def object_list(self, query_filter=None, object_class="", limit=100, offset=0):
+        assert query_filter == {"type": "folder"}
+        assert object_class == ""
+        return {"data": [{"id": 6626, "type": "folder", "fullPath": "/Produkty"}]}
+
+
+def test_discovery_normalizes_classes_fields_and_folders():
+    client = DiscoveryClient()
+
+    assert discover_classes(client) == [
+        {"id": "3", "name": "category"},
+        {"id": "7", "name": "product"},
+    ]
+    assert discover_fields(client, "7") == [
+        {
+            "name": "EAN",
+            "label": "EAN",
+            "type": "input",
+            "language": None,
+            "parser": "text",
+            "supported": True,
+            "unsupported_reason": "",
+        },
+        {
+            "name": "related",
+            "label": "related",
+            "type": "manytomanyobjectrelation",
+            "language": None,
+            "parser": "",
+            "supported": False,
+            "unsupported_reason": "Typ manytomanyobjectrelation nie jest obslugiwany.",
+        },
+        {
+            "name": "totalWeight",
+            "label": "Waga",
+            "type": "numeric",
+            "language": None,
+            "parser": "decimal_comma",
+            "supported": True,
+            "unsupported_reason": "",
+        },
+    ]
+    assert discover_folders(client) == [
+        {"id": 6626, "path": "/Produkty", "key": "Produkty"}
+    ]
 
 
 def test_extract_object_id_accepts_pimcore_response_variants():
@@ -117,7 +226,7 @@ class ProductClient:
         self.existing = existing or []
         self.created = []
 
-    def object_list(self, class_name, condition, limit=2):
+    def object_list(self, query_filter=None, object_class="", limit=2, offset=0):
         return {"data": self.existing}
 
     def create_object(self, payload):
@@ -133,7 +242,7 @@ PRODUCT_CONFIG = {
     "class_name": "Product",
     "parent_id": "123",
     "published": True,
-    "object_key_template": "{SKU}",
+    "object_key_template": "{EAN}",
     "existence_fields": ["EAN", "Towar_powiazany_z_SKU"],
     "field_mappings": [
         {
@@ -160,6 +269,23 @@ def test_find_product_by_ean_returns_normalized_identity():
     result = find_product_by_ean(PRODUCT_CONFIG, "5904804578169", client=client)
 
     assert result == {"id": 51, "key": "ABC", "path": "/Produkty/ABC"}
+
+
+def test_find_product_rejects_ambiguous_ean_results():
+    client = Mock()
+    client.object_list.return_value = {
+        "data": [
+            {"id": 91, "key": "5904804578169", "fullPath": "/Produkty/5904804578169"},
+            {"id": 92, "key": "duplicate", "fullPath": "/Produkty/duplicate"},
+        ]
+    }
+
+    with pytest.raises(ValueError, match="wiele produktow"):
+        find_product_by_ean(
+            PRODUCT_CONFIG,
+            "5904804578169",
+            client=client,
+        )
 
 
 def test_create_product_rechecks_duplicate_before_post():
@@ -240,9 +366,9 @@ class DiagnosticClient:
         assert str(object_id) == "123"
         return {"success": True, "data": {"id": 123, "type": "folder"}}
 
-    def object_list(self, class_name, condition, limit=2):
-        assert class_name == "Product"
-        assert "EAN" in condition
+    def object_list(self, query_filter=None, object_class="", limit=2, offset=0):
+        assert object_class == "Product"
+        assert query_filter == {"EAN": "0000000000000"}
         return {"data": []}
 
 
@@ -256,6 +382,13 @@ def test_settings_test_returns_individual_checks_and_missing_field_error():
         "object_key_template": "{SKU}",
         "existence_fields": ["EAN"],
         "field_mappings": [
+            {
+                "source": "EAN",
+                "pimcore_field": "EAN",
+                "type": "input",
+                "required": True,
+                "parser": "text",
+            },
             {
                 "source": "SKU",
                 "pimcore_field": "SKU",

@@ -77,7 +77,12 @@ class PimcoreTestClient:
     def class_definition(self, class_id):
         return {"data": {"children": [{"fieldtype": "input", "name": "EAN"}]}}
 
-    def object_list(self, class_name, condition, limit=2):
+    def object_list(self, query_filter=None, object_class="", limit=2, offset=0):
+        assert object_class == "Product"
+        assert query_filter in (
+            {"EAN": "0000000000000"},
+            {"EAN": "5904804578169"},
+        )
         return {"data": []}
 
     def create_object(self, payload):
