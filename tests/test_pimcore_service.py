@@ -20,6 +20,7 @@ from picorgftp_sql.services.pimcore_service import (
     fetch_product_for_edit,
     find_product_by_ean,
     merge_product_update_payload,
+    normalize_object_identity,
     run_settings_test,
     update_product,
 )
@@ -261,6 +262,46 @@ def test_extract_object_id_accepts_pimcore_response_variants():
     assert extract_object_id({"id": 44}) == 44
     assert extract_object_id({"data": {"id": "45"}}) == 45
     assert extract_object_id({"object": {"id": 46}}) == 46
+
+
+def test_lookup_searches_whole_class_without_parent_filter():
+    client = Mock()
+    client.object_list.return_value = {
+        "data": [{"id": 91, "fullPath": "/Other/5904804578169"}]
+    }
+
+    found = find_product_by_ean(
+        PRODUCT_CONFIG,
+        "5904804578169",
+        client=client,
+    )
+
+    assert found["id"] == 91
+    args, kwargs = client.object_list.call_args
+    assert args == ({"EAN": "5904804578169"},)
+    assert kwargs == {"object_class": "Product", "limit": 2}
+
+
+@pytest.mark.parametrize(
+    "record",
+    [{"id": "91"}, {"o_id": "91"}, {"objectId": "91"}],
+)
+def test_object_identity_accepts_known_id_variants(record):
+    assert normalize_object_identity(record)["id"] == 91
+
+
+def test_lookup_rejects_match_without_positive_object_id():
+    client = Mock()
+    client.object_list.return_value = {
+        "data": [{"fullPath": "/Products/broken"}]
+    }
+
+    with pytest.raises(ValueError, match="ID"):
+        find_product_by_ean(
+            PRODUCT_CONFIG,
+            "5904804578169",
+            client=client,
+        )
 
 
 class ProductClient:

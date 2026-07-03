@@ -82,6 +82,11 @@ from .pimcore_config import (
     normalize_pimcore_settings,
 )
 from .pimcore_operations import PimcoreOperationRegistry, redact_pimcore_log_value
+from .pimcore_templates import (
+    PRODUCT_SOURCES,
+    generate_test_values,
+    render_mapping_templates,
+)
 from .services.pimcore_service import (
     PimcoreClient,
     PimcoreConflictError,
@@ -95,6 +100,7 @@ from .services.pimcore_service import (
     run_test_create,
     update_product,
 )
+from .services.translation_service import translate_text
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
 from .product_fields import (
     PRODUCT_FIELDS_KEY,
@@ -1640,9 +1646,111 @@ def _pimcore_runtime_form_schema(settings_payload: dict[str, object]) -> list[di
             "required": item["required"],
             "default": item["default"],
             "parser": item["parser"],
+            "value_template": item["value_template"],
+            "translate": item["translate"],
+            "target_language": item["target_language"],
         }
         for item in settings_payload["field_mappings"]
     ]
+
+
+def _product_template_values(raw: object) -> dict[str, object]:
+    source = raw if isinstance(raw, dict) else {}
+    return {
+        "name": source.get("name", ""),
+        "type": source.get("type", source.get("type_name", "")),
+        "model": source.get("model", ""),
+        "color1": source.get("color1", ""),
+        "color2": source.get("color2", ""),
+        "color3": source.get("color3", ""),
+        "extra": source.get("extra", ""),
+        "ean": source.get("ean", source.get("EAN", "")),
+    }
+
+
+def _render_templates(
+    settings_payload: dict[str, object],
+    product_values: object,
+    values: object,
+    targets: list[str] | None = None,
+) -> dict[str, object]:
+    submitted = dict(values) if isinstance(values, dict) else {}
+    rendered = render_mapping_templates(
+        settings_payload["field_mappings"],
+        product_values=_product_template_values(product_values),
+        pimcore_values=submitted,
+        targets=targets,
+    )
+    output = dict(submitted)
+    warnings: list[dict[str, object]] = []
+    translation_settings = config.CONFIG.get(TRANSLATION_SETTINGS_KEY, {}) or {}
+    mappings = {
+        item["source"]: item
+        for item in settings_payload["field_mappings"]
+    }
+    for source in rendered.order:
+        mapping = mappings[source]
+        value = rendered.values[source]
+        if mapping.get("translate"):
+            translated = translate_text(
+                value,
+                mapping.get("target_language"),
+                translation_settings,
+            )
+            value = translated.text
+            if translated.warning:
+                warnings.append({"source": source, **translated.warning})
+        output[source] = value
+    return {"values": output, "warnings": warnings}
+
+
+def preview_pimcore_template(payload: object) -> dict[str, object]:
+    source = payload if isinstance(payload, dict) else {}
+    settings_payload = normalize_pimcore_settings(
+        {"field_mappings": source.get("mappings", [])}
+    )
+    target = _text(source.get("target_source"))
+    if not target:
+        raise ValueError("Wybierz pole docelowe szablonu.")
+    return _render_templates(
+        settings_payload,
+        source.get("product_values"),
+        source.get("values"),
+        [target],
+    )
+
+
+def pimcore_test_sample() -> dict[str, object]:
+    settings_payload = normalize_pimcore_settings(config.CONFIG.get(PIMCORE_SETTINGS_KEY))
+    if not settings_payload["setup_complete"]:
+        raise ValueError("Integracja Pimcore nie zostala skonfigurowana.")
+    samples = generate_test_values(settings_payload["field_mappings"])
+    product_samples = generate_test_values(
+        [
+            {"source": source, "type": "input", "parser": "text"}
+            for source in PRODUCT_SOURCES
+        ]
+    )
+    rendered = _render_templates(settings_payload, product_samples, samples)
+    return {
+        "form_schema": _pimcore_runtime_form_schema(settings_payload),
+        **rendered,
+    }
+
+
+def render_saved_pimcore_templates(
+    product_values: object,
+    values: object,
+    targets: object,
+) -> dict[str, object]:
+    settings_payload = _active_pimcore_runtime_settings()
+    selected = [str(item) for item in targets] if isinstance(targets, list) else None
+    return _render_templates(
+        settings_payload,
+        product_values,
+        values,
+        selected,
+    )
 
 
 def pimcore_runtime_capabilities() -> dict[str, bool]:

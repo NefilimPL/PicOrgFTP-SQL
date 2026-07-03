@@ -672,7 +672,7 @@ def run_settings_test(
             suggested_fix=(
                 ""
                 if base_ok
-                else "Wpisz pelny adres panelu Pimcore, np. http://10.10.0.5."
+                else "Wpisz pelny adres panelu Pimcore, np. http://twoj-adres-pimcore.example."
             ),
         )
     )
@@ -885,14 +885,20 @@ def extract_object_path(payload: object) -> str:
 
 def normalize_object_identity(record: object) -> dict[str, object]:
     source = record if isinstance(record, dict) else {}
+    raw_id = source.get("id") or source.get("o_id") or source.get("objectId")
     try:
-        object_id = int(source.get("id"))
+        object_id = int(raw_id)
     except (TypeError, ValueError):
         object_id = 0
     return {
         "id": object_id,
-        "key": str(source.get("key") or ""),
-        "path": str(source.get("fullPath") or source.get("path") or ""),
+        "key": str(source.get("key") or source.get("o_key") or ""),
+        "path": str(
+            source.get("fullPath")
+            or source.get("path")
+            or source.get("o_path")
+            or ""
+        ),
     }
 
 
@@ -1020,7 +1026,10 @@ def find_product_by_ean(
     records = _list_records(payload, ("data", "objects", "items"))
     if len(records) > 1:
         raise ValueError("Znaleziono wiele produktow Pimcore z tym samym EAN.")
-    return normalize_object_identity(records[0]) if records else None
+    identity = normalize_object_identity(records[0]) if records else None
+    if identity is not None and int(identity["id"] or 0) <= 0:
+        raise ValueError("Odpowiedz Pimcore zawiera produkt bez poprawnego ID.")
+    return identity
 
 
 def create_product(
