@@ -4912,6 +4912,7 @@ function fillForm(entry, options = {}) {
   productForm.elements.color3.value = entry.color3 || "";
   productForm.elements.extra.value = entry.extra || "";
   productForm.elements.ean.value = entry.ean || "";
+  handlePimcoreEanInput();
   applyProductFieldSettings();
   formStatus.textContent = entry.product_id ? `Wczytano ${entry.product_id}` : "Wczytano wpis";
   updateFieldWarnings();
@@ -6817,7 +6818,7 @@ async function refreshCompactPimcoreMetadata(form, button) {
     state.settings.pimcore = { ...(state.settings.pimcore || {}), ...snapshot };
     settingsStatus.textContent =
       `Pobrano ${classes.length} klas, ${folders.length} folderow i ${fields.length} pol.`;
-    renderSettingsPimcore();
+    renderSettings();
   } catch (error) {
     settingsStatus.textContent = error.message;
   } finally {
@@ -7809,6 +7810,7 @@ function applyPimcoreRuntimeCapabilities(capabilities = {}) {
 
 function handlePimcoreEanInput() {
   state.pimcoreExistingObject = null;
+  state.pimcoreLastCheckedEan = "";
   if (pimcoreEditButton) pimcoreEditButton.disabled = true;
   if (!state.pimcoreRuntimeEnabled) return;
   schedulePimcoreStatusLookup();
@@ -7928,7 +7930,20 @@ async function submitPimcoreRuntimeCreate(event) {
 }
 
 async function openPimcoreEditModal() {
-  const objectId = Number(state.pimcoreExistingObject?.id || 0);
+  let objectId = Number(state.pimcoreExistingObject?.id || 0);
+  if (objectId <= 0 && state.pimcoreRuntimeEnabled) {
+    const currentEan = productForm.elements.ean.value.trim();
+    if (/^\d{13}$/.test(currentEan)) {
+      formStatus.textContent = "Sprawdzanie produktu Pimcore...";
+      try {
+        await checkPimcoreProductStatus(currentEan);
+      } catch (error) {
+        formStatus.textContent = `Nie mozna sprawdzic Pimcore: ${error.message}.`;
+        return;
+      }
+      objectId = Number(state.pimcoreExistingObject?.id || 0);
+    }
+  }
   if (objectId <= 0) {
     formStatus.textContent = "Nie mozna edytowac produktu Pimcore bez poprawnego ID.";
     return;

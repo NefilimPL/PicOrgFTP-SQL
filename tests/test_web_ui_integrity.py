@@ -328,6 +328,17 @@ class WebUiIntegrityTests(unittest.TestCase):
             body.index("await requestJson"),
         )
 
+    def test_pimcore_edit_click_resolves_current_ean_before_giving_up(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("async function openPimcoreEditModal")
+        end = source.index("function closePimcoreEditModal", start)
+        body = source[start:end]
+
+        self.assertIn("let objectId = Number(state.pimcoreExistingObject?.id || 0);", body)
+        self.assertIn("const currentEan = productForm.elements.ean.value.trim();", body)
+        self.assertIn("await checkPimcoreProductStatus(currentEan);", body)
+        self.assertIn("objectId = Number(state.pimcoreExistingObject?.id || 0);", body)
+
     def test_pimcore_status_enables_edit_only_for_positive_object_id(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         start = source.index("async function checkPimcoreProductStatus")
@@ -337,6 +348,33 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("Number(payload.object?.id || 0)", body)
         self.assertIn("Pimcore zwrocil produkt bez poprawnego ID", body)
         self.assertIn("pimcoreEditButton.disabled = false", body)
+
+    def test_pimcore_ean_input_clears_cached_lookup_before_rechecking(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function handlePimcoreEanInput")
+        end = source.index("function schedulePimcoreStatusLookup", start)
+        body = source[start:end]
+
+        self.assertIn('state.pimcoreLastCheckedEan = "";', body)
+        self.assertIn("schedulePimcoreStatusLookup();", body)
+
+    def test_pimcore_metadata_refresh_replaces_current_settings_form(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("async function refreshCompactPimcoreMetadata")
+        end = source.index("function pimcoreCsvImportButton", start)
+        body = source[start:end]
+
+        self.assertIn("renderSettings();", body)
+        self.assertNotIn("renderSettingsPimcore();", body)
+
+    def test_loading_existing_entry_triggers_pimcore_status_lookup(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function fillForm")
+        end = source.index("async function refreshData", start)
+        body = source[start:end]
+
+        self.assertIn("productForm.elements.ean.value = entry.ean || \"\";", body)
+        self.assertIn("handlePimcoreEanInput();", body)
 
     def test_pimcore_ui_uses_example_placeholder_without_private_default(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
