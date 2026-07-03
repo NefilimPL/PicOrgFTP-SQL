@@ -142,6 +142,30 @@ class ConfigTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_save_config_encrypts_pimcore_api_key(self) -> None:
+        payload = deepcopy(common.DEFAULT_CONFIG)
+        payload["pimcore"] = {
+            **payload["pimcore"],
+            "enabled": True,
+            "api_key": "pimcore-secret",
+            "setup_complete": True,
+            "class_id": "7",
+            "parent_path": "/Produkty",
+        }
+
+        with (
+            patch.object(config, "_active_sqlite_store", return_value=None),
+            patch.object(config, "_write_json_atomic") as write_atomic,
+        ):
+            config.save_config(payload)
+
+        raw = write_atomic.call_args.args[1]
+        self.assertNotEqual(raw["pimcore"]["api_key"], "pimcore-secret")
+        self.assertEqual(config.decrypt(raw["pimcore"]["api_key"]), "pimcore-secret")
+        self.assertIs(raw["pimcore"]["setup_complete"], True)
+        self.assertEqual(raw["pimcore"]["class_id"], "7")
+        self.assertEqual(raw["pimcore"]["parent_path"], "/Produkty")
+
 
 if __name__ == "__main__":
     unittest.main()

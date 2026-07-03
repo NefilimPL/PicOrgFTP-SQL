@@ -59,6 +59,7 @@ from ..legacy_import import import_legacy_to_sqlite
 from ..logging_utils import log_error
 from ..product_fields import PRODUCT_FIELDS_KEY, normalize_product_fields
 from ..services.ftp_service import sync_remote_files
+from ..services.pimcore_service import PimcoreApiError, PimcoreConflictError
 from ..services.sql_service import detect_available_columns, extract_presence_context
 from ..sqlite_maintenance import repair_sqlite_database
 from ..workflow_utils import build_product_directory, parse_slot_filename, sanitize_path_segment
@@ -87,11 +88,17 @@ from ..web_data import (
     authenticate_user,
     cache_ftp_preview,
     cleanup_web_ftp_cache,
+    complete_pimcore_setup,
+    discover_pimcore_classes,
+    discover_pimcore_fields,
+    discover_pimcore_folders,
     field_suggestions,
     find_entry_by_identity,
+    find_pimcore_product_by_ean,
     find_user,
     find_product_photos,
     file_index_status,
+    get_pimcore_product_for_edit,
     invalidate_ftp_preview_cache,
     load_web_data,
     load_users,
@@ -99,16 +106,24 @@ from ..web_data import (
     mark_browser_extension_token_used,
     history_snapshot,
     ListValueInUseError,
+    parse_pimcore_csv_headers,
+    pimcore_operation_history,
+    pimcore_operation_status,
+    pimcore_runtime_capabilities,
     refresh_file_index,
     remove_list_value,
     record_history,
     save_web_entry,
     search_entries,
+    create_pimcore_product,
     settings_snapshot,
     settings_secret_values,
+    start_pimcore_test_create,
+    test_pimcore_settings,
     test_ftp_connection,
     test_local_paths,
     test_sql_connection,
+    update_pimcore_product,
     update_settings,
     update_user,
 )
@@ -3621,6 +3636,7 @@ def create_app() -> FastAPI:
             "current_user": _current_user_payload(request),
             "csrf_token": _csrf_token(request),
             **load_web_data(),
+            "pimcore": pimcore_runtime_capabilities(),
         }
 
     @app.get("/api/data")
@@ -4158,6 +4174,233 @@ def create_app() -> FastAPI:
             return response
         snapshot["current_user"] = _current_user_payload(request)
         return JSONResponse(snapshot)
+
+    @app.post("/api/settings/pimcore/test")
+    async def pimcore_settings_test_api(request: Request) -> JSONResponse:
+        user = _require_admin(request)
+        raw = await request.body()
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        overrides = payload.get("settings") if isinstance(payload, dict) else None
+        report = await run_in_threadpool(
+            test_pimcore_settings,
+            overrides,
+            str(user.get("username") or "admin"),
+        )
+        return JSONResponse(report)
+
+    @app.post("/api/settings/pimcore/discover/classes")
+    async def pimcore_discover_classes_api(request: Request) -> JSONResponse:
+        _require_admin(request)
+        payload = await request.json()
+        settings_payload = payload.get("settings") if isinstance(payload, dict) else None
+        try:
+            result = await run_in_threadpool(discover_pimcore_classes, settings_payload)
+        except PimcoreApiError as exc:
+            raise HTTPException(status_code=502, detail=exc.as_dict()) from exc
+        return JSONResponse(result)
+
+    @app.post("/api/settings/pimcore/discover/fields")
+    async def pimcore_discover_fields_api(request: Request) -> JSONResponse:
+        _require_admin(request)
+        payload = await request.json()
+        if not isinstance(payload, dict) or not str(payload.get("class_id") or "").strip():
+            raise HTTPException(status_code=400, detail="Wybierz klase Pimcore.")
+        try:
+            result = await run_in_threadpool(
+                discover_pimcore_fields,
+                payload.get("settings"),
+                payload.get("class_id"),
+            )
+        except PimcoreApiError as exc:
+            raise HTTPException(status_code=502, detail=exc.as_dict()) from exc
+        return JSONResponse(result)
+
+    @app.post("/api/settings/pimcore/discover/folders")
+    async def pimcore_discover_folders_api(request: Request) -> JSONResponse:
+        _require_admin(request)
+        payload = await request.json()
+        try:
+            result = await run_in_threadpool(
+                discover_pimcore_folders,
+                payload.get("settings") if isinstance(payload, dict) else None,
+            )
+        except PimcoreApiError as exc:
+            raise HTTPException(status_code=502, detail=exc.as_dict()) from exc
+        return JSONResponse(result)
+
+    @app.post("/api/settings/pimcore/setup")
+    async def pimcore_setup_api(request: Request) -> JSONResponse:
+        user = _require_admin(request)
+        payload = await request.json()
+        settings_payload = payload.get("settings") if isinstance(payload, dict) else None
+        result = await run_in_threadpool(
+            complete_pimcore_setup,
+            settings_payload,
+            str(user.get("username") or "admin"),
+        )
+        return JSONResponse(result, status_code=200 if result.get("saved") else 422)
+
+    @app.post("/api/settings/pimcore/import-csv-headers")
+    async def pimcore_csv_headers_api(request: Request) -> JSONResponse:
+        _require_admin(request)
+        form = await request.form()
+        upload = form.get("file")
+        if not isinstance(upload, UploadFile) or not upload.filename:
+            raise HTTPException(status_code=400, detail="Brak pliku CSV.")
+        content = await upload.read()
+        if len(content) > 2 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Plik CSV jest za duzy.")
+        try:
+            headers = parse_pimcore_csv_headers(content)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse({"headers": headers})
+
+    @app.post("/api/settings/pimcore/test-create-runs")
+    async def pimcore_test_create_start_api(request: Request) -> JSONResponse:
+        user = _require_admin(request)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Niepoprawne dane testu Pimcore.")
+        try:
+            operation = start_pimcore_test_create(
+                payload.get("values"),
+                payload.get("cleanup_policy"),
+                str(user.get("username") or "admin"),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse({"operation": operation})
+
+    @app.get("/api/settings/pimcore/test-create-runs/{operation_id}")
+    def pimcore_test_create_status_api(
+        request: Request,
+        operation_id: str,
+        after_sequence: int = 0,
+    ) -> Dict[str, Any]:
+        _require_admin(request)
+        operation = pimcore_operation_status(operation_id, after_sequence)
+        if not operation:
+            raise HTTPException(status_code=404, detail="Nie znaleziono operacji Pimcore.")
+        return operation
+
+    @app.get("/api/settings/pimcore/operations")
+    def pimcore_operations_api(
+        request: Request,
+        operation_type: str = "",
+        result: str = "",
+        user: str = "",
+        query: str = "",
+        date_from: float = 0,
+        date_to: float = 0,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        _require_admin(request)
+        return pimcore_operation_history(
+            operation_type=operation_type,
+            result=result,
+            user=user,
+            query=query,
+            date_from=date_from,
+            date_to=date_to,
+            limit=limit,
+        )
+
+    @app.get("/api/pimcore/product-status")
+    async def pimcore_product_status_api(request: Request, ean: str) -> JSONResponse:
+        username = _require_user(request)
+        try:
+            result = await run_in_threadpool(find_pimcore_product_by_ean, ean)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except PimcoreApiError as exc:
+            _write_web_event(
+                level="warning",
+                event="PIMCORE_PRODUCT_LOOKUP",
+                username=username,
+                message=str(exc),
+                details={"ean": ean, "error": exc.as_dict()},
+            )
+            return JSONResponse(
+                {
+                    "enabled": True,
+                    "available": False,
+                    "exists": False,
+                    "object": None,
+                    "error": exc.as_dict(),
+                }
+            )
+        result["available"] = True
+        _write_web_event(
+            level="info",
+            event="PIMCORE_PRODUCT_LOOKUP",
+            username=username,
+            message=f"EAN {ean}: {'istnieje' if result.get('exists') else 'brak'}.",
+            details={
+                "ean": ean,
+                "exists": bool(result.get("exists")),
+                "object": result.get("object"),
+            },
+        )
+        return JSONResponse(result)
+
+    @app.get("/api/pimcore/products/{object_id}")
+    async def pimcore_product_edit_data_api(request: Request, object_id: int) -> JSONResponse:
+        _require_user(request)
+        try:
+            result = await run_in_threadpool(get_pimcore_product_for_edit, object_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except PimcoreApiError as exc:
+            raise HTTPException(status_code=502, detail=exc.as_dict()) from exc
+        return JSONResponse(result)
+
+    @app.put("/api/pimcore/products/{object_id}")
+    async def pimcore_product_update_api(request: Request, object_id: int) -> JSONResponse:
+        username = _require_user(request)
+        payload = await request.json()
+        values = payload.get("values") if isinstance(payload, dict) else None
+        marker = payload.get("marker") if isinstance(payload, dict) else None
+        if not isinstance(values, dict) or not str(marker or ""):
+            raise HTTPException(status_code=400, detail="Brak danych albo wersji produktu Pimcore.")
+        try:
+            result = await run_in_threadpool(
+                update_pimcore_product,
+                object_id,
+                marker,
+                values,
+                username,
+            )
+        except PimcoreConflictError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": str(exc),
+                    "object_id": exc.object_id,
+                    "expected_marker": exc.expected_marker,
+                    "current_marker": exc.current_marker,
+                },
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except PimcoreApiError as exc:
+            raise HTTPException(status_code=502, detail=exc.as_dict()) from exc
+        return JSONResponse(result)
+
+    @app.post("/api/pimcore/products")
+    async def pimcore_product_create_api(request: Request) -> JSONResponse:
+        username = _require_user(request)
+        payload = await request.json()
+        values = payload.get("values") if isinstance(payload, dict) else None
+        if not isinstance(values, dict):
+            raise HTTPException(status_code=400, detail="Brak danych produktu Pimcore.")
+        try:
+            result = await run_in_threadpool(create_pimcore_product, values, username)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except PimcoreApiError as exc:
+            raise HTTPException(status_code=502, detail=exc.as_dict()) from exc
+        return JSONResponse(result)
 
     @app.post("/api/settings/import-legacy")
     async def settings_import_legacy(request: Request) -> JSONResponse:

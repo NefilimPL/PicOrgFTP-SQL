@@ -364,6 +364,160 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("/api/settings/sqlite/restore", source)
         self.assertIn("/api/settings/sqlite/backup-diff", source)
 
+    def test_pimcore_settings_wires_save_test_and_csv_import(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("function renderSettingsPimcore()", source)
+        self.assertIn('requestJson("/api/settings/pimcore/test"', source)
+        self.assertIn('requestJson("/api/settings/pimcore/import-csv-headers"', source)
+        self.assertIn("field_mappings: collectSimplePimcoreMappings(form)", source)
+
+    def test_pimcore_compact_settings_hide_technical_controls(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("pimcoreAdvancedSettings", source)
+        self.assertIn("advanced.open = false", source)
+        self.assertIn("Odswiez klasy i foldery", source)
+        self.assertIn("Typ danych wykryty automatycznie", source)
+        self.assertIn("pimcoreCsvImportButton", source)
+
+    def test_pimcore_write_test_keeps_modal_open_and_polls_incrementally(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("function openPimcoreWriteTest()", source)
+        self.assertIn("after_sequence", source)
+        self.assertIn("500", source)
+        self.assertIn("pimcoreTestForm.reset()", source)
+        self.assertNotIn('pimcoreTestModal.classList.remove("active"); // submit', source)
+        self.assertIn("cleanup_policy", source)
+
+    def test_pimcore_live_log_history_uses_dedicated_endpoint(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("/api/settings/pimcore/test-create-runs", source)
+        self.assertIn("/api/settings/pimcore/operations", source)
+        self.assertIn("function appendPimcoreLiveEvents", source)
+
+    def test_pimcore_diagnostics_use_expandable_details(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('document.createElement("details")', source)
+        self.assertIn('document.createElement("summary")', source)
+        self.assertIn('status === "skipped"', source)
+
+    def test_pimcore_wizard_discovers_then_completes_setup(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("openPimcoreSetupWizard", source)
+        self.assertIn("/api/settings/pimcore/discover/classes", source)
+        self.assertIn("/api/settings/pimcore/discover/folders", source)
+        self.assertIn("/api/settings/pimcore/discover/fields", source)
+        self.assertIn("/api/settings/pimcore/setup", source)
+        self.assertIn("setup_complete", source)
+
+    def test_pimcore_wizard_explains_product_field_controls(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Ktore dane uzytkownik ma wpisywac", source)
+        self.assertIn("Zapisz pole", source)
+        self.assertIn("Pole w Pimcore", source)
+        self.assertIn("Nazwa w formularzu", source)
+        self.assertIn("Wymagane", source)
+        self.assertIn("function pimcoreDiscoveryErrorText", source)
+        self.assertIn("Nie wykryto folderow Pimcore", source)
+
+    def test_ean_input_debounces_pimcore_lookup_and_rechecks_on_create(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("function schedulePimcoreStatusLookup()", source)
+        self.assertIn("/api/pimcore/product-status", source)
+        self.assertIn('requestJson("/api/pimcore/products"', source)
+        self.assertIn("500", source)
+        self.assertIn("pimcoreCreateEan.readOnly = true", source)
+
+    def test_pimcore_runtime_gates_lookup_and_cancel_does_not_create(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("function applyPimcoreRuntimeCapabilities", source)
+        self.assertIn("if (!state.pimcoreRuntimeEnabled) return;", source)
+        self.assertIn("productForm.elements.ean?.addEventListener(\"input\", handlePimcoreEanInput)", source)
+        self.assertIn("pimcoreCreateModal.classList.remove(\"active\");", source)
+        self.assertIn("pimcoreCreateCancelButton?.addEventListener(\"click\"", source)
+        cancel_start = source.index("pimcoreCreateCancelButton?.addEventListener")
+        cancel_end = source.index("pimcoreCreateForm?.addEventListener", cancel_start)
+        self.assertNotIn("requestJson", source[cancel_start:cancel_end])
+
+    def test_pimcore_edit_loads_selected_fields_and_cancel_does_not_put(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("openPimcoreEditModal", source)
+        self.assertIn('requestJson(`/api/pimcore/products/${encodeURIComponent(objectId)}`)', source)
+        self.assertIn('method: "PUT"', source)
+        self.assertIn("pimcoreEditEan.readOnly = true", source)
+        cancel_start = source.index('pimcoreEditCancelButton?.addEventListener("click"')
+        cancel_end = source.index("});", cancel_start)
+        self.assertNotIn("requestJson", source[cancel_start:cancel_end])
+
     def test_sqlite_backup_schedule_uses_day_hour_slots_and_nested_modal_layer(self) -> None:
         root = Path(__file__).resolve().parents[1]
         js_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(encoding="utf-8")

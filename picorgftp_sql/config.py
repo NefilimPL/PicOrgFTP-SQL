@@ -51,6 +51,11 @@ from .common import (
     require_runtime_modules,
 )
 from .encryption import decrypt, encrypt
+from .pimcore_config import (
+    PIMCORE_API_KEY,
+    PIMCORE_SETTINGS_KEY,
+    normalize_pimcore_settings,
+)
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
 from .product_fields import normalize_product_fields
 from . import settings
@@ -316,6 +321,14 @@ def _merge_raw_config(raw_config, config_copy):
             translation_defaults.get(TRANSLATION_API_URL, B),
         ),
     }
+    raw_pimcore = raw_config.get(PIMCORE_SETTINGS_KEY, {})
+    pimcore_settings = normalize_pimcore_settings(raw_pimcore)
+    pimcore_settings[PIMCORE_API_KEY] = decrypt(
+        raw_pimcore.get(PIMCORE_API_KEY, encrypt(B))
+        if Aq(raw_pimcore, dict)
+        else encrypt(B)
+    )
+    config_copy[PIMCORE_SETTINGS_KEY] = pimcore_settings
     return config_copy
 
 
@@ -347,6 +360,12 @@ def load_config(interactive=I):
             # Persist an initial configuration with encrypted secrets so the
             # application can be used immediately after installation.
             translation_defaults = config_copy.get(TRANSLATION_SETTINGS_KEY, {})
+            pimcore_initial = normalize_pimcore_settings(
+                config_copy.get(PIMCORE_SETTINGS_KEY)
+            )
+            pimcore_initial[PIMCORE_API_KEY] = encrypt(
+                pimcore_initial[PIMCORE_API_KEY]
+            )
             initial = {
                 H: {
                     v: config_copy[H][v],
@@ -399,6 +418,7 @@ def load_config(interactive=I):
                         TRANSLATION_API_URL, B
                     ),
                 },
+                PIMCORE_SETTINGS_KEY: pimcore_initial,
             }
             try:
                 # Ensure the configuration directory exists before writing.
@@ -496,6 +516,14 @@ def load_config(interactive=I):
                 translation_defaults.get(TRANSLATION_API_URL, B),
             ),
         }
+        raw_pimcore = raw_config.get(PIMCORE_SETTINGS_KEY, {})
+        pimcore_settings = normalize_pimcore_settings(raw_pimcore)
+        pimcore_settings[PIMCORE_API_KEY] = decrypt(
+            raw_pimcore.get(PIMCORE_API_KEY, encrypt(B))
+            if Aq(raw_pimcore, dict)
+            else encrypt(B)
+        )
+        config_copy[PIMCORE_SETTINGS_KEY] = pimcore_settings
         try:
             # Saving back the normalised structure keeps missing keys aligned
             # with future versions of the configuration schema.
@@ -504,6 +532,7 @@ def load_config(interactive=I):
                 P: {N, M},
                 K: {N, M},
                 TRANSLATION_SETTINGS_KEY: {TRANSLATION_API_KEY},
+                PIMCORE_SETTINGS_KEY: {PIMCORE_API_KEY},
             }
             save_config(
                 config_copy,
@@ -567,6 +596,13 @@ def save_config(config, raw_config=None, preserve_secrets=None):
                     return raw_value
         return encrypt(value)
 
+    pimcore_settings = normalize_pimcore_settings(config.get(PIMCORE_SETTINGS_KEY))
+    pimcore_payload = dict(pimcore_settings)
+    pimcore_payload[PIMCORE_API_KEY] = _pick_secret(
+        PIMCORE_SETTINGS_KEY,
+        PIMCORE_API_KEY,
+        pimcore_settings[PIMCORE_API_KEY],
+    )
     payload = {
         H: {
             v: config[H][v],
@@ -622,6 +658,7 @@ def save_config(config, raw_config=None, preserve_secrets=None):
             ),
             TRANSLATION_API_URL: translation_settings.get(TRANSLATION_API_URL, B),
         },
+        PIMCORE_SETTINGS_KEY: pimcore_payload,
     }
     sqlite_store = _active_sqlite_store()
     if sqlite_store is not None:

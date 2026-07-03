@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import base64
 import ctypes
 import hashlib
 import hmac
+import io
 import json
 import os
 from pathlib import Path
@@ -73,6 +75,26 @@ from .services.sql_service import (
     should_check_presence,
 )
 from .file_index import LocalFileIndex
+from .pimcore_config import (
+    PIMCORE_API_KEY,
+    PIMCORE_SETTINGS_KEY,
+    field_mapping_issues,
+    normalize_pimcore_settings,
+)
+from .pimcore_operations import PimcoreOperationRegistry, redact_pimcore_log_value
+from .services.pimcore_service import (
+    PimcoreClient,
+    PimcoreConflictError,
+    create_product,
+    discover_classes,
+    discover_fields,
+    discover_folders,
+    fetch_product_for_edit,
+    find_product_by_ean,
+    run_settings_test,
+    run_test_create,
+    update_product,
+)
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
 from .product_fields import (
     PRODUCT_FIELDS_KEY,
@@ -132,7 +154,9 @@ _CONFIG_SECRET_FIELDS = {
     P: {N, M},
     K: {N, M},
     TRANSLATION_SETTINGS_KEY: {TRANSLATION_API_KEY},
+    PIMCORE_SETTINGS_KEY: {PIMCORE_API_KEY},
 }
+_PIMCORE_OPERATIONS = PimcoreOperationRegistry()
 
 
 class ListValueInUseError(ValueError):
@@ -1467,6 +1491,363 @@ def _apply_app_secret_from_web(value: object) -> bool:
     return True
 
 
+def parse_pimcore_csv_headers(content: bytes) -> list[str]:
+    if not content:
+        raise ValueError("Plik CSV jest pusty.")
+    text = ""
+    for encoding in ("utf-8-sig", "cp1250"):
+        try:
+            text = content.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if not text:
+        raise ValueError("Nie mozna odczytac kodowania pliku CSV.")
+    sample = text[:8192]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=";,\t")
+        reader = csv.reader(io.StringIO(text), dialect)
+    except csv.Error:
+        reader = csv.reader(io.StringIO(text), delimiter=";")
+    row = next(reader, [])
+    headers: list[str] = []
+    for value in row:
+        header = str(value or "").strip()
+        if header and header not in headers:
+            headers.append(header)
+    if not headers:
+        raise ValueError("Plik CSV nie zawiera naglowkow.")
+    return headers
+
+
+def _merged_pimcore_settings(overrides: object = None) -> dict[str, object]:
+    saved = normalize_pimcore_settings(config.CONFIG.get(PIMCORE_SETTINGS_KEY))
+    merged = dict(saved)
+    if isinstance(overrides, dict):
+        merged.update(overrides)
+        if not _text(overrides.get(PIMCORE_API_KEY)):
+            merged[PIMCORE_API_KEY] = saved[PIMCORE_API_KEY]
+    return normalize_pimcore_settings(merged)
+
+
+def discover_pimcore_classes(overrides: object = None) -> dict[str, object]:
+    settings_payload = _merged_pimcore_settings(overrides)
+    return {"items": discover_classes(PimcoreClient(settings_payload))}
+
+
+def discover_pimcore_fields(overrides: object, class_id: object) -> dict[str, object]:
+    settings_payload = _merged_pimcore_settings(overrides)
+    return {"items": discover_fields(PimcoreClient(settings_payload), class_id)}
+
+
+def discover_pimcore_folders(overrides: object = None) -> dict[str, object]:
+    settings_payload = _merged_pimcore_settings(overrides)
+    return {"items": discover_folders(PimcoreClient(settings_payload))}
+
+
+def complete_pimcore_setup(payload: object, username: str) -> dict[str, object]:
+    submitted = dict(payload) if isinstance(payload, dict) else {}
+    submitted["object_key_template"] = "{EAN}"
+    submitted["published"] = True
+    submitted["setup_complete"] = False
+    report = test_pimcore_settings(submitted, username)
+    if not report.get("ok"):
+        return {"saved": False, "report": report}
+    submitted["setup_complete"] = True
+    submitted["enabled"] = True
+    snapshot = update_settings({PIMCORE_SETTINGS_KEY: submitted})
+    return {"saved": True, "report": report, "settings": snapshot}
+
+
+def test_pimcore_settings(
+    overrides: object = None,
+    username: str = "admin",
+) -> dict[str, object]:
+    merged = _merged_pimcore_settings(overrides)
+    report = run_settings_test(merged, client=PimcoreClient(merged))
+    audit_report = redact_pimcore_log_value(report)
+    record_history(
+        username=username,
+        action="pimcore_settings_test",
+        summary=(
+            "Test ustawien Pimcore zakonczony poprawnie."
+            if report["ok"]
+            else "Test ustawien Pimcore wykryl bledy."
+        ),
+        details={"pimcore_settings_test": audit_report},
+    )
+    return {
+        **report,
+        "checks": [
+            {key: value for key, value in check.items() if key != "response_detail"}
+            for check in report.get("checks", [])
+            if isinstance(check, dict)
+        ],
+    }
+
+
+def _persist_pimcore_operation(report: dict[str, object]) -> dict[str, object]:
+    values = report.get("values") if isinstance(report.get("values"), dict) else {}
+    result = report.get("result") if isinstance(report.get("result"), dict) else {}
+    result_object = result.get("object") if isinstance(result.get("object"), dict) else {}
+    operation_type = _text(report.get("operation_type"))
+    if operation_type == "test":
+        action = "pimcore_test_create"
+    elif operation_type == "manual_update":
+        action = "pimcore_product_update"
+    elif report.get("status") in {"duplicate", "failed"}:
+        action = "pimcore_product_create_rejected"
+    else:
+        action = "pimcore_product_create"
+    return record_history(
+        username=_text(report.get("username")),
+        action=action,
+        ean=values.get("EAN", ""),
+        product_id=result.get("object_id") or result_object.get("id", ""),
+        summary=f"Pimcore: {report.get('status', 'unknown')}.",
+        details={"pimcore_operation": redact_pimcore_log_value(report)},
+    )
+
+
+def start_pimcore_test_create(
+    values: object,
+    cleanup_policy: object,
+    username: str,
+) -> dict[str, object]:
+    submitted = dict(values) if isinstance(values, dict) else {}
+    policy = _text(cleanup_policy)
+    settings_payload = normalize_pimcore_settings(config.CONFIG.get(PIMCORE_SETTINGS_KEY))
+    return _PIMCORE_OPERATIONS.start(
+        operation_type="test",
+        username=username,
+        values=submitted,
+        cleanup_policy=policy,
+        worker=lambda emit: run_test_create(
+            settings_payload,
+            submitted,
+            policy,
+            emit=emit,
+        ),
+        persist=_persist_pimcore_operation,
+    )
+
+
+def _pimcore_runtime_form_schema(settings_payload: dict[str, object]) -> list[dict[str, object]]:
+    return [
+        {
+            "source": item["source"],
+            "label": item["label"],
+            "required": item["required"],
+            "default": item["default"],
+            "parser": item["parser"],
+        }
+        for item in settings_payload["field_mappings"]
+    ]
+
+
+def pimcore_runtime_capabilities() -> dict[str, bool]:
+    settings_payload = normalize_pimcore_settings(config.CONFIG.get(PIMCORE_SETTINGS_KEY))
+    complete = bool(settings_payload["setup_complete"])
+    return {
+        "enabled": bool(settings_payload["enabled"] and complete),
+        "setup_complete": complete,
+    }
+
+
+def _active_pimcore_runtime_settings() -> dict[str, object]:
+    settings_payload = normalize_pimcore_settings(config.CONFIG.get(PIMCORE_SETTINGS_KEY))
+    if not settings_payload["setup_complete"]:
+        raise ValueError("Integracja Pimcore nie zostala skonfigurowana.")
+    if not settings_payload["enabled"]:
+        raise ValueError("Integracja Pimcore jest wylaczona.")
+    return settings_payload
+
+
+def find_pimcore_product_by_ean(ean: object) -> dict[str, object]:
+    settings_payload = normalize_pimcore_settings(config.CONFIG.get(PIMCORE_SETTINGS_KEY))
+    setup_complete = bool(settings_payload["setup_complete"])
+    if not settings_payload["enabled"] or not setup_complete:
+        return {
+            "enabled": False,
+            "setup_complete": setup_complete,
+            "exists": False,
+            "object": None,
+            "form_schema": [],
+        }
+    found = find_product_by_ean(settings_payload, ean)
+    return {
+        "enabled": True,
+        "setup_complete": True,
+        "exists": bool(found),
+        "object": found,
+        "form_schema": _pimcore_runtime_form_schema(settings_payload),
+    }
+
+
+def create_pimcore_product(values: object, username: str) -> dict[str, object]:
+    submitted = dict(values) if isinstance(values, dict) else {}
+    settings_payload = _active_pimcore_runtime_settings()
+    operation_id = secrets.token_hex(12)
+    started = time.time()
+    events: list[dict[str, object]] = []
+    result: dict[str, object] = {}
+    status = "failed"
+
+    def emit(stage: str, severity: str, message: str, **details: object) -> None:
+        now = time.time()
+        event = {
+            "sequence": len(events) + 1,
+            "timestamp": now,
+            "elapsed_ms": int(max(0, now - started) * 1000),
+            "stage": stage,
+            "severity": severity,
+            "message": message,
+        }
+        event.update(details)
+        events.append(event)
+
+    try:
+        result = create_product(settings_payload, submitted, emit=emit)
+        status = "duplicate" if result.get("duplicate") else "completed"
+        return result
+    except Exception as exc:
+        status = "failed"
+        emit("finish", "error", str(exc) or exc.__class__.__name__)
+        raise
+    finally:
+        finished = time.time()
+        report = redact_pimcore_log_value(
+            {
+                "operation_id": operation_id,
+                "operation_type": "manual_create",
+                "username": username,
+                "values": submitted,
+                "status": status,
+                "started_at": started,
+                "finished_at": finished,
+                "total_ms": int(max(0, finished - started) * 1000),
+                "events": events,
+                "result": result,
+            }
+        )
+        _persist_pimcore_operation(report)
+
+
+def get_pimcore_product_for_edit(object_id: object) -> dict[str, object]:
+    settings_payload = _active_pimcore_runtime_settings()
+    result = fetch_product_for_edit(settings_payload, object_id)
+    result["form_schema"] = _pimcore_runtime_form_schema(settings_payload)
+    return result
+
+
+def update_pimcore_product(
+    object_id: object,
+    marker: object,
+    values: object,
+    username: str,
+) -> dict[str, object]:
+    settings_payload = _active_pimcore_runtime_settings()
+    submitted = dict(values) if isinstance(values, dict) else {}
+    operation_id = secrets.token_hex(12)
+    started = time.time()
+    events: list[dict[str, object]] = []
+    result: dict[str, object] = {}
+    status = "failed"
+
+    def emit(stage: str, severity: str, message: str, **details: object) -> None:
+        now = time.time()
+        event = {
+            "sequence": len(events) + 1,
+            "timestamp": now,
+            "elapsed_ms": int(max(0, now - started) * 1000),
+            "stage": stage,
+            "severity": severity,
+            "message": message,
+        }
+        event.update(details)
+        events.append(event)
+
+    try:
+        result = update_product(
+            settings_payload,
+            object_id,
+            str(marker or ""),
+            submitted,
+            emit=emit,
+        )
+        status = "completed"
+        return result
+    except PimcoreConflictError:
+        status = "conflict"
+        raise
+    except Exception as exc:
+        emit("finish", "error", str(exc) or exc.__class__.__name__)
+        raise
+    finally:
+        finished = time.time()
+        _persist_pimcore_operation(
+            {
+                "operation_id": operation_id,
+                "operation_type": "manual_update",
+                "username": username,
+                "values": submitted,
+                "status": status,
+                "started_at": started,
+                "finished_at": finished,
+                "total_ms": int(max(0, finished - started) * 1000),
+                "events": events,
+                "result": result,
+            }
+        )
+
+
+def pimcore_operation_status(
+    operation_id: str,
+    after_sequence: int = 0,
+) -> dict[str, object] | None:
+    return _PIMCORE_OPERATIONS.status(operation_id, after_sequence=after_sequence)
+
+
+def pimcore_operation_history(
+    *,
+    operation_type: str = "",
+    result: str = "",
+    user: str = "",
+    query: str = "",
+    date_from: float = 0,
+    date_to: float = 0,
+    limit: int = 200,
+) -> dict[str, object]:
+    records = []
+    for item in reversed(_load_history_records()):
+        details = item.get("details") if isinstance(item.get("details"), dict) else {}
+        operation = (
+            details.get("pimcore_operation")
+            if isinstance(details.get("pimcore_operation"), dict)
+            else None
+        )
+        if not operation:
+            continue
+        if operation_type and _text(operation.get("operation_type")) != _text(operation_type):
+            continue
+        if result and _text(operation.get("status")) != _text(result):
+            continue
+        if user and _text(operation.get("username")).casefold() != _text(user).casefold():
+            continue
+        started_at = float(operation.get("started_at") or operation.get("created_at") or 0)
+        if date_from and started_at < float(date_from):
+            continue
+        if date_to and started_at > float(date_to):
+            continue
+        searchable = json.dumps(operation, ensure_ascii=False).casefold()
+        if query and _text(query).casefold() not in searchable:
+            continue
+        records.append(operation)
+        if len(records) >= max(1, min(1000, int(limit or 200))):
+            break
+    return {"items": records, "count": len(records)}
+
+
 def _preserve_unsubmitted_config_secrets(payload: dict[str, object]) -> dict[str, set[str]]:
     preserve = {section: set(keys) for section, keys in _CONFIG_SECRET_FIELDS.items()}
     ftp_payload = payload.get("ftp") if isinstance(payload.get("ftp"), dict) else {}
@@ -1484,6 +1865,9 @@ def _preserve_unsubmitted_config_secrets(payload: dict[str, object]) -> dict[str
             preserve[section_key].discard(N)
         if _text(section_payload.get("password")):
             preserve[section_key].discard(M)
+    pimcore_payload = payload.get(PIMCORE_SETTINGS_KEY)
+    if isinstance(pimcore_payload, dict) and _text(pimcore_payload.get(PIMCORE_API_KEY)):
+        preserve[PIMCORE_SETTINGS_KEY].discard(PIMCORE_API_KEY)
     return {section: keys for section, keys in preserve.items() if keys}
 
 
@@ -1495,6 +1879,7 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
     db_payload = payload.get("database") if isinstance(payload.get("database"), dict) else {}
     processing_payload = payload.get("processing") if isinstance(payload.get("processing"), dict) else {}
     security_payload = payload.get("security") if isinstance(payload.get("security"), dict) else {}
+    pimcore_payload = payload.get(PIMCORE_SETTINGS_KEY)
     backup_payload = payload.get("sqlite_backup") if isinstance(payload.get("sqlite_backup"), dict) else None
     slots_payload = payload.get("slots") if isinstance(payload.get("slots"), list) else None
     runtime_reloaded = False
@@ -1551,6 +1936,18 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
         merged_security = dict(cfg.get(SECURITY_SETTINGS_KEY, {}) or {})
         merged_security.update(security_payload)
         cfg[SECURITY_SETTINGS_KEY] = config._normalize_security_settings(merged_security)
+
+    if isinstance(pimcore_payload, dict):
+        if "field_mappings" in pimcore_payload:
+            issues = field_mapping_issues(pimcore_payload.get("field_mappings"))
+            if issues:
+                raise ValueError(" ".join(issues))
+        current = normalize_pimcore_settings(cfg.get(PIMCORE_SETTINGS_KEY))
+        merged = dict(current)
+        merged.update(pimcore_payload)
+        if not _text(pimcore_payload.get(PIMCORE_API_KEY)):
+            merged[PIMCORE_API_KEY] = current[PIMCORE_API_KEY]
+        cfg[PIMCORE_SETTINGS_KEY] = normalize_pimcore_settings(merged)
 
     if ftp_payload:
         ftp = cfg.setdefault(H, {})
@@ -1626,6 +2023,11 @@ def settings_snapshot() -> dict[str, object]:
     mysql_cfg = cfg.get(K, {})
     slot_defs = cfg.get(SLOT_DEFS_KEY, []) or []
     sql_map = cfg.get(SQL_COLUMN_MAP_KEY, {}) or {}
+    pimcore = normalize_pimcore_settings(cfg.get(PIMCORE_SETTINGS_KEY))
+    pimcore_public = {
+        key: value for key, value in pimcore.items() if key != PIMCORE_API_KEY
+    }
+    pimcore_public["api_key_set"] = bool(_text(pimcore[PIMCORE_API_KEY]))
     return {
         "version": get_display_version(),
         "windows_admin": is_windows_admin_process(),
@@ -1686,6 +2088,7 @@ def settings_snapshot() -> dict[str, object]:
             cfg.get(PRODUCT_FIELDS_KEY),
             legacy_color_labels=cfg.get(COLOR_FIELD_LABELS_KEY),
         ),
+        "pimcore": pimcore_public,
         "slots": [
             {
                 "prefix": slot.get("prefix", ""),

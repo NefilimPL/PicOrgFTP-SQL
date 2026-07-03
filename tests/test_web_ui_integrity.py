@@ -228,6 +228,54 @@ class WebUiIntegrityTests(unittest.TestCase):
             )
         )
 
+    def test_settings_include_pimcore_tab(self) -> None:
+        html = _parse(INDEX_HTML)
+
+        self.assertTrue(html.has_tag("button", **{"data-settings-tab": "pimcore"}))
+
+    def test_pimcore_test_and_history_modals_exist(self) -> None:
+        html = _parse(INDEX_HTML)
+
+        self.assertIn("pimcoreTestModal", html.ids)
+        self.assertIn("pimcoreHistoryModal", html.ids)
+        self.assertIn("pimcoreTestForm", html.ids)
+        self.assertIn("pimcoreLiveLog", html.ids)
+
+    def test_pimcore_setup_wizard_has_four_steps_and_admin_controls(self) -> None:
+        html = _parse(INDEX_HTML)
+        for element_id in (
+            "pimcoreSetupModal",
+            "pimcoreSetupForm",
+            "pimcoreSetupStepTitle",
+            "pimcoreSetupBody",
+            "pimcoreSetupBackButton",
+            "pimcoreSetupNextButton",
+            "pimcoreSetupCancelButton",
+            "pimcoreSetupStatus",
+        ):
+            self.assertIn(element_id, html.ids)
+
+    def test_runtime_pimcore_prompt_and_create_modals_exist(self) -> None:
+        html = _parse(INDEX_HTML)
+
+        self.assertIn("pimcoreMissingModal", html.ids)
+        self.assertIn("pimcoreCreateModal", html.ids)
+        self.assertIn("pimcoreCreateForm", html.ids)
+        self.assertIn("pimcoreMissingCreateButton", html.ids)
+        self.assertIn("pimcoreEditButton", html.ids)
+
+    def test_runtime_pimcore_edit_modal_exists(self) -> None:
+        html = _parse(INDEX_HTML)
+        for element_id in (
+            "pimcoreEditButton",
+            "pimcoreEditModal",
+            "pimcoreEditForm",
+            "pimcoreEditSubmitButton",
+            "pimcoreEditCancelButton",
+            "pimcoreEditStatus",
+        ):
+            self.assertIn(element_id, html.ids)
+
     def test_slot_template_keeps_preview_and_file_input_controls(self) -> None:
         html = _parse(INDEX_HTML)
 

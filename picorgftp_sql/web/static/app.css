@@ -986,6 +986,205 @@ h2 {
   gap: 10px;
 }
 
+.pimcore-setup-panel {
+  width: min(1080px, calc(100vw - 32px));
+}
+
+.pimcore-setup-progress {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 0;
+  list-style: none;
+}
+
+.pimcore-setup-progress li {
+  border-bottom: 3px solid var(--line);
+  padding: 8px 4px;
+  color: var(--muted);
+}
+
+.pimcore-setup-progress li.active {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+.pimcore-setup-body {
+  min-height: 420px;
+  overflow: auto;
+}
+
+.pimcore-setup-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.pimcore-setup-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.pimcore-setup-field-list {
+  display: grid;
+  gap: 8px;
+}
+
+.pimcore-setup-field-row {
+  display: grid;
+  grid-template-columns: 120px minmax(120px, .8fr) minmax(180px, 1fr) 120px;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 8px 0;
+}
+
+.pimcore-setup-field-header {
+  display: grid;
+  grid-template-columns: 120px minmax(120px, .8fr) minmax(180px, 1fr) 120px;
+  gap: 8px;
+  padding: 8px 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.pimcore-setup-field-row code {
+  overflow-wrap: anywhere;
+}
+
+.pimcore-setup-field-row label {
+  margin: 0;
+}
+
+@media (max-width: 700px) {
+  .pimcore-setup-field-header {
+    display: none;
+  }
+}
+
+.pimcore-mapping-list,
+.pimcore-checklist {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pimcore-mapping-row {
+  display: grid;
+  grid-template-columns: 1.2fr 1.2fr 1.2fr 110px 90px 36px 1fr 130px auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 8px 0;
+}
+
+.pimcore-mapping-row > * {
+  min-width: 0;
+}
+
+.pimcore-mapping-row input[type="checkbox"] {
+  justify-self: center;
+}
+
+.pimcore-mapping-row button {
+  padding: 0 10px;
+}
+
+.pimcore-advanced-settings {
+  grid-column: 1 / -1;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  padding: 10px 12px;
+}
+
+.pimcore-advanced-settings > summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.pimcore-advanced-settings .settings-field-group {
+  margin-top: 10px;
+  background: var(--surface);
+}
+
+.pimcore-simple-mapping-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pimcore-simple-mapping-row {
+  display: grid;
+  grid-template-columns: 42px minmax(140px, 1fr) minmax(180px, 1.2fr) 92px auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 8px 0;
+}
+
+.pimcore-simple-mapping-row > * {
+  min-width: 0;
+}
+
+.pimcore-check-row {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border-left: 4px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  padding: 8px 10px;
+}
+
+.pimcore-check-row strong,
+.pimcore-check-row span {
+  overflow-wrap: anywhere;
+}
+
+.pimcore-check-row span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pimcore-check-row.ok,
+.pimcore-check-row.success {
+  border-left-color: var(--accent);
+}
+
+.pimcore-check-row.warning {
+  border-left-color: var(--warn);
+}
+
+.pimcore-check-row.error {
+  border-left-color: var(--danger);
+}
+
+.pimcore-check-row.skipped {
+  border-left-color: var(--muted);
+  opacity: .82;
+}
+
+.pimcore-check-row details {
+  margin-top: 6px;
+}
+
+.pimcore-check-row pre {
+  margin: 6px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .sqlite-backup-settings {
   display: grid;
   gap: 10px;
@@ -1595,6 +1794,196 @@ button.slot-badge.on:hover {
   min-height: 32px;
 }
 
+@media (max-width: 700px) {
+  .pimcore-setup-progress,
+  .pimcore-setup-grid,
+  .pimcore-setup-field-row {
+    grid-template-columns: 1fr;
+  }
+
+  .pimcore-setup-body {
+    min-height: 0;
+  }
+}
+
+@media (max-width: 920px) {
+  .pimcore-simple-mapping-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.pimcore-test-panel {
+  width: min(1400px, calc(100vw - 32px));
+}
+
+.pimcore-test-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(380px, 1.1fr);
+  min-height: 0;
+  gap: 16px;
+}
+
+.pimcore-test-fields {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.pimcore-test-fields,
+.pimcore-live-log {
+  min-width: 0;
+  max-height: min(68vh, 760px);
+  overflow: auto;
+}
+
+.pimcore-live-log-panel {
+  min-width: 0;
+}
+
+.pimcore-live-log {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 10px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+}
+
+.pimcore-live-event {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border-left: 4px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 8px 10px;
+}
+
+.pimcore-live-event.success {
+  border-left-color: var(--accent);
+}
+
+.pimcore-live-event.warning {
+  border-left-color: var(--warn);
+}
+
+.pimcore-live-event.error,
+.pimcore-live-event.failed {
+  border-left-color: var(--danger);
+}
+
+.pimcore-live-event strong,
+.pimcore-live-event span,
+.pimcore-live-event pre {
+  overflow-wrap: anywhere;
+}
+
+.pimcore-live-event span {
+  color: var(--muted);
+}
+
+.pimcore-live-event pre {
+  max-height: 180px;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  padding: 8px;
+  white-space: pre-wrap;
+}
+
+.pimcore-test-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.pimcore-test-actions label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  min-width: 0;
+}
+
+.pimcore-test-actions input[type="radio"] {
+  width: 17px;
+  min-width: 17px;
+  height: 17px;
+  min-height: 17px;
+}
+
+.pimcore-history-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.pimcore-history-row {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pimcore-history-row .history-summary-row {
+  width: 100%;
+}
+
+.pimcore-history-row strong,
+.pimcore-history-row span,
+.pimcore-history-event-details,
+.pimcore-history-event-details div {
+  overflow-wrap: anywhere;
+}
+
+.pimcore-history-event-details {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pimcore-create-panel {
+  width: min(960px, calc(100vw - 32px));
+}
+
+.pimcore-edit-panel {
+  width: min(980px, calc(100vw - 32px));
+}
+
+.lookup-actions #pimcoreEditButton {
+  min-width: 170px;
+}
+
+.pimcore-runtime-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  max-height: min(68vh, 720px);
+  overflow: auto;
+}
+
+.pimcore-edit-panel .pimcore-runtime-fields {
+  max-height: min(70vh, 760px);
+}
+
+.pimcore-runtime-fields label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
 .log-category,
 .log-block,
 .log-event {
@@ -1916,6 +2305,25 @@ button.slot-badge.on:hover {
 
   .list-editor-layout {
     grid-template-columns: 1fr;
+  }
+
+  .pimcore-mapping-row,
+  .pimcore-test-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .pimcore-history-filters {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 700px) {
+  .pimcore-runtime-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .lookup-actions #pimcoreEditButton {
+    width: 100%;
   }
 }
 

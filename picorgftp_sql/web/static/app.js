@@ -23,6 +23,29 @@ const state = {
   historyPage: 1,
   historyPageSize: 50,
   historySearchTimer: 0,
+  pimcoreTestOperation: null,
+  pimcoreLookupTimer: 0,
+  pimcoreLookupRequestId: 0,
+  pimcoreLastCheckedEan: "",
+  pimcoreMissingEan: "",
+  pimcoreCreateSchema: [],
+  pimcoreRuntimeEnabled: false,
+  pimcoreExistingObject: null,
+  pimcoreEditObjectId: 0,
+  pimcoreEditMarker: "",
+  pimcoreEditSchema: [],
+  pimcoreSetup: {
+    step: 1,
+    settings: null,
+    classes: [],
+    folders: [],
+    fields: [],
+    mappings: [],
+    manualLocation: false,
+    eanTarget: "",
+    report: null,
+  },
+  pimcoreSetupPrompted: false,
   logs: null,
   settingsSecrets: null,
   theme: localStorage.getItem("picorg-theme") || "light",
@@ -151,6 +174,7 @@ const themeToggleButton = document.querySelector("#themeToggleButton");
 const entrySelect = document.querySelector("#entrySelect");
 const findByEanButton = document.querySelector("#findByEanButton");
 const findProductButton = document.querySelector("#findProductButton");
+const pimcoreEditButton = document.querySelector("#pimcoreEditButton");
 const webImagesButton = document.querySelector("#webImagesButton");
 const activeUsersPresence = document.querySelector("#activeUsersPresence");
 const activeUsersList = document.querySelector("#activeUsersList");
@@ -196,6 +220,43 @@ const historyDetailTitle = document.querySelector("#historyDetailTitle");
 const historyDetailOutput = document.querySelector("#historyDetailOutput");
 const historyTimingTitle = document.querySelector("#historyTimingTitle");
 const historyTimingOutput = document.querySelector("#historyTimingOutput");
+const pimcoreTestModal = document.querySelector("#pimcoreTestModal");
+const pimcoreTestForm = document.querySelector("#pimcoreTestForm");
+const pimcoreLiveLog = document.querySelector("#pimcoreLiveLog");
+const pimcoreTestElapsed = document.querySelector("#pimcoreTestElapsed");
+const pimcoreTestStatus = document.querySelector("#pimcoreTestStatus");
+const pimcoreTestSubmitButton = document.querySelector("#pimcoreTestSubmitButton");
+const pimcoreTestClearButton = document.querySelector("#pimcoreTestClearButton");
+const pimcoreTestCloseButton = document.querySelector("#pimcoreTestCloseButton");
+const pimcoreHistoryModal = document.querySelector("#pimcoreHistoryModal");
+const pimcoreHistoryFilters = document.querySelector("#pimcoreHistoryFilters");
+const pimcoreHistoryOutput = document.querySelector("#pimcoreHistoryOutput");
+const pimcoreHistoryCloseButton = document.querySelector("#pimcoreHistoryCloseButton");
+const pimcoreMissingModal = document.querySelector("#pimcoreMissingModal");
+const pimcoreMissingMessage = document.querySelector("#pimcoreMissingMessage");
+const pimcoreMissingCreateButton = document.querySelector("#pimcoreMissingCreateButton");
+const pimcoreMissingContinueButton = document.querySelector("#pimcoreMissingContinueButton");
+const pimcoreMissingCancelButton = document.querySelector("#pimcoreMissingCancelButton");
+const pimcoreCreateModal = document.querySelector("#pimcoreCreateModal");
+const pimcoreCreateForm = document.querySelector("#pimcoreCreateForm");
+const pimcoreCreateSubmitButton = document.querySelector("#pimcoreCreateSubmitButton");
+const pimcoreCreateCancelButton = document.querySelector("#pimcoreCreateCancelButton");
+const pimcoreCreateStatus = document.querySelector("#pimcoreCreateStatus");
+const pimcoreEditModal = document.querySelector("#pimcoreEditModal");
+const pimcoreEditForm = document.querySelector("#pimcoreEditForm");
+const pimcoreEditSubmitButton = document.querySelector("#pimcoreEditSubmitButton");
+const pimcoreEditCancelButton = document.querySelector("#pimcoreEditCancelButton");
+const pimcoreEditStatus = document.querySelector("#pimcoreEditStatus");
+const pimcoreEditObjectInfo = document.querySelector("#pimcoreEditObjectInfo");
+const pimcoreSetupModal = document.querySelector("#pimcoreSetupModal");
+const pimcoreSetupForm = document.querySelector("#pimcoreSetupForm");
+const pimcoreSetupStepTitle = document.querySelector("#pimcoreSetupStepTitle");
+const pimcoreSetupBody = document.querySelector("#pimcoreSetupBody");
+const pimcoreSetupProgress = document.querySelector("#pimcoreSetupProgress");
+const pimcoreSetupBackButton = document.querySelector("#pimcoreSetupBackButton");
+const pimcoreSetupNextButton = document.querySelector("#pimcoreSetupNextButton");
+const pimcoreSetupCancelButton = document.querySelector("#pimcoreSetupCancelButton");
+const pimcoreSetupStatus = document.querySelector("#pimcoreSetupStatus");
 const backupHistoryOutput = document.querySelector("#backupHistoryOutput");
 const backupDiffOutput = document.querySelector("#backupDiffOutput");
 const logsRefreshButton = document.querySelector("#logsRefreshButton");
@@ -4875,6 +4936,7 @@ async function loadBootstrap(options = {}) {
   serverInfo.textContent = payload.processed_dir;
   logoutButton.hidden = !payload.auth_enabled;
   state.currentUser = payload.current_user || null;
+  applyPimcoreRuntimeCapabilities(payload.pimcore);
   updateAdminUi();
   refreshActiveUsersPresence().catch(() => {
     renderActiveUsersPresence({ enabled: false, users: [] });
@@ -6170,6 +6232,1493 @@ function renderSettingsSql() {
   settingsOutput.appendChild(form);
 }
 
+function pimcoreMappingRow(mapping = {}) {
+  const row = document.createElement("div");
+  row.className = "pimcore-mapping-row";
+  const textInput = (name, value, label) => {
+    const input = document.createElement("input");
+    input.name = name;
+    input.value = value || "";
+    input.placeholder = label;
+    input.setAttribute("aria-label", label);
+    return input;
+  };
+  const choice = (name, value, values, label) => {
+    const select = document.createElement("select");
+    select.name = name;
+    select.setAttribute("aria-label", label);
+    for (const item of values) {
+      const option = document.createElement("option");
+      option.value = item;
+      option.textContent = item;
+      option.selected = item === value;
+      select.appendChild(option);
+    }
+    return select;
+  };
+  const required = document.createElement("input");
+  required.type = "checkbox";
+  required.name = "mapping_required";
+  required.checked = Boolean(mapping.required);
+  required.setAttribute("aria-label", "Pole wymagane");
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "ghost-button";
+  remove.textContent = "Usun";
+  remove.title = "Usun mapowanie";
+  remove.addEventListener("click", () => row.remove());
+  row.append(
+    textInput("mapping_source", mapping.source, "Kolumna CSV"),
+    textInput("mapping_label", mapping.label, "Etykieta"),
+    textInput("mapping_target", mapping.pimcore_field, "Pole Pimcore"),
+    choice(
+      "mapping_type",
+      mapping.type || "input",
+      ["input", "textarea", "numeric", "checkbox", "select"],
+      "Typ Pimcore"
+    ),
+    textInput("mapping_language", mapping.language, "Jezyk"),
+    required,
+    textInput("mapping_default", mapping.default, "Wartosc domyslna"),
+    choice(
+      "mapping_parser",
+      mapping.parser || "text",
+      ["text", "integer", "decimal_comma", "boolean", "empty_to_null"],
+      "Parser"
+    ),
+    remove
+  );
+  return row;
+}
+
+function collectPimcoreMappings(form) {
+  return [...form.querySelectorAll(".pimcore-mapping-row")].map((row) => ({
+    source: row.querySelector('[name="mapping_source"]').value.trim(),
+    label: row.querySelector('[name="mapping_label"]').value.trim(),
+    pimcore_field: row.querySelector('[name="mapping_target"]').value.trim(),
+    type: row.querySelector('[name="mapping_type"]').value,
+    language: row.querySelector('[name="mapping_language"]').value.trim() || null,
+    required: row.querySelector('[name="mapping_required"]').checked,
+    default: row.querySelector('[name="mapping_default"]').value,
+    parser: row.querySelector('[name="mapping_parser"]').value,
+  }));
+}
+
+function collectPimcoreSettings(form) {
+  const data = new FormData(form);
+  return {
+    enabled: data.has("enabled"),
+    base_url: data.get("base_url"),
+    api_key: data.get("api_key"),
+    class_name: data.get("class_name"),
+    parent_id: data.get("parent_id"),
+    published: data.has("published"),
+    object_key_template: data.get("object_key_template"),
+    existence_fields: String(data.get("existence_fields") || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean),
+    timeout_seconds: Number(data.get("timeout_seconds") || 10),
+    verify_tls: data.has("verify_tls"),
+    field_mappings: collectPimcoreMappings(form),
+  };
+}
+
+function pimcoreCompactClassItems(pimcore = {}) {
+  const items = Array.isArray(state.pimcoreSetup?.classes) ? [...state.pimcoreSetup.classes] : [];
+  if (
+    pimcore.class_id &&
+    !items.some((item) => String(item.id) === String(pimcore.class_id))
+  ) {
+    items.push({ id: pimcore.class_id, name: pimcore.class_name || pimcore.class_id });
+  }
+  return items;
+}
+
+function pimcoreCompactFolderItems(pimcore = {}) {
+  const items = Array.isArray(state.pimcoreSetup?.folders) ? [...state.pimcoreSetup.folders] : [];
+  if (
+    pimcore.parent_id &&
+    !items.some((item) => String(item.id) === String(pimcore.parent_id))
+  ) {
+    items.push({
+      id: pimcore.parent_id,
+      key: pimcore.parent_path || pimcore.parent_id,
+      path: pimcore.parent_path || pimcore.parent_id,
+    });
+  }
+  return items;
+}
+
+function pimcoreCompactFields(pimcore = {}) {
+  const discovered = Array.isArray(state.pimcoreSetup?.fields) ? state.pimcoreSetup.fields : [];
+  const fields = discovered.length ? [...discovered] : [];
+  for (const mapping of pimcore.field_mappings || []) {
+    if (
+      mapping.pimcore_field &&
+      !fields.some((field) => field.name === mapping.pimcore_field)
+    ) {
+      fields.push({
+        name: mapping.pimcore_field,
+        label: mapping.label || mapping.pimcore_field,
+        type: mapping.type || "input",
+        parser: mapping.parser || "text",
+        language: mapping.language || "",
+        supported: true,
+      });
+    }
+  }
+  return fields;
+}
+
+function pimcoreSimpleMappingRow(mapping = {}, fields = []) {
+  const row = document.createElement("div");
+  const use = document.createElement("input");
+  const label = document.createElement("input");
+  const target = document.createElement("select");
+  const required = document.createElement("input");
+  const remove = document.createElement("button");
+  const isEan = String(mapping.source || "").toUpperCase() === "EAN";
+  const availableFields = [...fields];
+  row.className = "pimcore-simple-mapping-row";
+  use.type = "checkbox";
+  use.name = "mapping_use";
+  use.checked = true;
+  use.setAttribute("aria-label", "Uzyj pola");
+  label.name = "mapping_label";
+  label.value = mapping.label || mapping.source || "";
+  label.placeholder = "Etykieta";
+  label.setAttribute("aria-label", "Etykieta");
+  target.name = "mapping_target";
+  target.setAttribute("aria-label", "Pole Pimcore");
+  if (
+    mapping.pimcore_field &&
+    !availableFields.some((field) => field.name === mapping.pimcore_field)
+  ) {
+    availableFields.push({
+      name: mapping.pimcore_field,
+      label: mapping.pimcore_field,
+      type: mapping.type || "input",
+      parser: mapping.parser || "text",
+      language: mapping.language || "",
+      supported: true,
+    });
+  }
+  for (const field of availableFields) {
+    const option = document.createElement("option");
+    option.value = field.name;
+    option.textContent = `${field.label || field.name} - ${field.type || "input"}`;
+    option.disabled = field.supported === false;
+    option.selected = field.name === mapping.pimcore_field;
+    option.dataset.type = field.type || "input";
+    option.dataset.parser = field.parser || "text";
+    option.dataset.language = field.language || "";
+    if (field.unsupported_reason) option.title = field.unsupported_reason;
+    target.appendChild(option);
+  }
+  required.type = "checkbox";
+  required.name = "mapping_required";
+  required.checked = isEan || Boolean(mapping.required);
+  required.disabled = isEan;
+  required.setAttribute("aria-label", "Pole wymagane");
+  remove.type = "button";
+  remove.className = "ghost-button";
+  remove.textContent = "Usun";
+  remove.disabled = isEan;
+  remove.addEventListener("click", () => row.remove());
+  row.dataset.source = isEan ? "EAN" : String(mapping.source || mapping.pimcore_field || "");
+  row.append(use, label, target, required, remove);
+  return row;
+}
+
+function collectSimplePimcoreMappings(form) {
+  return [...form.querySelectorAll(".pimcore-simple-mapping-row")]
+    .filter((row) => row.querySelector('[name="mapping_use"]')?.checked)
+    .map((row) => {
+      const select = row.querySelector('[name="mapping_target"]');
+      const option = select?.selectedOptions[0];
+      const source = row.dataset.source || select?.value || "";
+      return {
+        source,
+        label: row.querySelector('[name="mapping_label"]').value.trim() || source,
+        pimcore_field: select?.value || "",
+        type: option?.dataset.type || "input",
+        language: option?.dataset.language || null,
+        required:
+          String(source).toUpperCase() === "EAN" ||
+          row.querySelector('[name="mapping_required"]').checked,
+        default: "",
+        parser: option?.dataset.parser || "text",
+      };
+    })
+    .filter((mapping) => mapping.source && mapping.pimcore_field);
+}
+
+function collectCompactPimcoreSettings(form) {
+  const data = new FormData(form);
+  const classSelect = form.querySelector('[name="class_id"]');
+  const parentSelect = form.querySelector('[name="parent_id"]');
+  const selectedClass = classSelect?.selectedOptions[0];
+  const selectedParent = parentSelect?.selectedOptions[0];
+  const mappings = collectSimplePimcoreMappings(form);
+  const manualClassId = String(data.get("manual_class_id") || "").trim();
+  const manualClassName = String(data.get("manual_class_name") || "").trim();
+  const manualParentId = String(data.get("manual_parent_id") || "").trim();
+  const manualParentPath = String(data.get("manual_parent_path") || "").trim();
+  return {
+    setup_complete: true,
+    enabled: data.has("enabled"),
+    base_url: data.get("base_url"),
+    api_key: data.get("api_key"),
+    class_id: manualClassId || classSelect?.value || "",
+    class_name: manualClassName || selectedClass?.dataset.name || "",
+    parent_id: manualParentId || parentSelect?.value || "",
+    parent_path: manualParentPath || selectedParent?.dataset.path || "",
+    published: true,
+    object_key_template: "{EAN}",
+    existence_fields: mappings
+      .filter((item) => String(item.source).toUpperCase() === "EAN")
+      .map((item) => item.pimcore_field),
+    timeout_seconds: Number(data.get("timeout_seconds") || 30),
+    verify_tls: data.has("verify_tls"),
+    field_mappings: collectSimplePimcoreMappings(form),
+  };
+}
+
+function pimcoreManualCompactLocationFields(pimcore = {}) {
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  const grid = document.createElement("div");
+  summary.textContent = "Wpisz klase i folder recznie";
+  grid.className = "pimcore-setup-grid";
+  grid.append(
+    inputField("manual_class_name", "Nazwa klasy", "", {
+      placeholder: pimcore.class_name || "Product",
+    }),
+    inputField("manual_class_id", "ID klasy", "", {
+      placeholder: pimcore.class_id || "",
+    }),
+    inputField("manual_parent_id", "ID folderu", "", {
+      placeholder: pimcore.parent_id || "",
+    }),
+    inputField("manual_parent_path", "Sciezka folderu", "", {
+      placeholder: pimcore.parent_path || "/Products",
+    })
+  );
+  details.className = "wide-field";
+  details.append(summary, grid);
+  return details;
+}
+
+async function requestPimcoreSettingsDiscovery(kind, settings, extra = {}) {
+  const payload = await requestJson(PIMCORE_DISCOVERY_ENDPOINTS[kind], {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ settings, ...extra }),
+    timeoutMs: 120000,
+  });
+  return Array.isArray(payload.items) ? payload.items : [];
+}
+
+async function refreshCompactPimcoreMetadata(form, button) {
+  const snapshot = collectCompactPimcoreSettings(form);
+  button.disabled = true;
+  settingsStatus.textContent = "Pobieranie klas i folderow Pimcore...";
+  try {
+    const classes = await requestPimcoreSettingsDiscovery("classes", snapshot);
+    const folders = await requestPimcoreSettingsDiscovery("folders", snapshot);
+    const classId = snapshot.class_id || classes[0]?.id || "";
+    const fields = classId
+      ? await requestPimcoreSettingsDiscovery("fields", snapshot, { class_id: classId })
+      : [];
+    state.pimcoreSetup = {
+      ...(state.pimcoreSetup || {}),
+      settings: snapshot,
+      classes,
+      folders,
+      fields,
+      mappings: snapshot.field_mappings || [],
+    };
+    state.settings.pimcore = { ...(state.settings.pimcore || {}), ...snapshot };
+    settingsStatus.textContent =
+      `Pobrano ${classes.length} klas, ${folders.length} folderow i ${fields.length} pol.`;
+    renderSettingsPimcore();
+  } catch (error) {
+    settingsStatus.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function pimcoreCsvImportButton(mappingList, fields = []) {
+  const input = document.createElement("input");
+  const button = document.createElement("button");
+  const wrapper = document.createElement("span");
+  input.type = "file";
+  input.accept = ".csv,text/csv";
+  input.hidden = true;
+  button.type = "button";
+  button.className = "secondary-button";
+  button.textContent = "Wczytaj naglowki CSV";
+  button.addEventListener("click", () => input.click());
+  input.addEventListener("change", async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      const body = new FormData();
+      body.set("file", file, file.name);
+      const payload = await requestJson("/api/settings/pimcore/import-csv-headers", {
+        method: "POST",
+        body,
+      });
+      const existing = new Set(
+        [...mappingList.querySelectorAll('[name="mapping_source"], [name="mapping_label"]')]
+          .map((item) => item.value)
+      );
+      for (const header of payload.headers || []) {
+        if (!existing.has(header)) {
+          if (mappingList.classList.contains("pimcore-simple-mapping-list")) {
+            mappingList.appendChild(pimcoreSimpleMappingRow({ source: header, label: header }, fields));
+          } else {
+            mappingList.appendChild(pimcoreMappingRow({ source: header, label: header }));
+          }
+          existing.add(header);
+        }
+      }
+      settingsStatus.textContent = `Wczytano ${(payload.headers || []).length} naglowkow CSV.`;
+    } catch (error) {
+      settingsStatus.textContent = error.message;
+    } finally {
+      input.value = "";
+    }
+  });
+  wrapper.append(button, input);
+  return wrapper;
+}
+
+function pimcoreChecklistElement() {
+  const output = document.createElement("div");
+  output.id = "pimcoreSettingsChecklist";
+  output.className = "pimcore-checklist empty-state";
+  output.textContent = "Test nie zostal uruchomiony.";
+  return output;
+}
+
+function renderPimcoreChecklist(report = {}, target = null) {
+  const output = target || document.querySelector("#pimcoreSettingsChecklist");
+  if (!output) return;
+  output.textContent = "";
+  output.className = "pimcore-checklist";
+  const checks = Array.isArray(report.checks) ? report.checks : [];
+  if (!checks.length) {
+    output.className = "pimcore-checklist empty-state";
+    output.textContent = report.ok ? "Test zakonczony bez dodatkowych komunikatow." : "Brak wynikow testu.";
+    return;
+  }
+  for (const check of checks) {
+    const row = document.createElement("div");
+    const title = document.createElement("strong");
+    const status = check.status || "info";
+    row.className = `pimcore-check-row ${status}`;
+    if (status === "skipped") {
+      row.setAttribute("aria-disabled", "true");
+    }
+    title.textContent = `${status}: ${check.message || check.key || "kontrola"}`;
+    const technical = [
+      check.endpoint,
+      check.status_code ? `HTTP ${check.status_code}` : "",
+      `${Number(check.elapsed_ms || 0)} ms`,
+      check.response_excerpt,
+      check.suggested_fix,
+    ]
+      .filter(Boolean);
+    row.appendChild(title);
+    if (technical.length) {
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      const detail = document.createElement("pre");
+      summary.textContent = "Szczegoly techniczne";
+      detail.textContent = technical.join("\n");
+      details.append(summary, detail);
+      row.appendChild(details);
+    }
+    output.appendChild(row);
+  }
+}
+
+const PIMCORE_DISCOVERY_ENDPOINTS = {
+  classes: "/api/settings/pimcore/discover/classes",
+  folders: "/api/settings/pimcore/discover/folders",
+  fields: "/api/settings/pimcore/discover/fields",
+};
+
+function pimcoreDiscoveryErrorText(error) {
+  const detail = error?.detail && typeof error.detail === "object" ? error.detail : {};
+  const technical = [
+    detail.status_code ? `HTTP ${detail.status_code}` : "",
+    detail.response_excerpt || "",
+  ].filter(Boolean);
+  return technical.length ? `${error.message} Szczegoly: ${technical.join(" | ")}` : error.message;
+}
+
+function settingsNote(text) {
+  const note = document.createElement("p");
+  note.className = "settings-note wide-field";
+  note.textContent = text;
+  return note;
+}
+
+function pimcoreSetupInput(name, labelText, value = "", type = "text") {
+  const label = document.createElement("label");
+  const title = document.createElement("span");
+  const input = document.createElement("input");
+  title.textContent = labelText;
+  input.name = name;
+  input.type = type;
+  input.value = value || "";
+  input.autocomplete = type === "password" ? "new-password" : "off";
+  label.append(title, input);
+  return label;
+}
+
+function pimcoreSetupSelect(name, labelText, items, selected, valueKey, textBuilder) {
+  const label = document.createElement("label");
+  const title = document.createElement("span");
+  const select = document.createElement("select");
+  const placeholder = document.createElement("option");
+  title.textContent = labelText;
+  select.name = name;
+  placeholder.value = "";
+  placeholder.textContent = "Wybierz...";
+  placeholder.disabled = true;
+  placeholder.selected = !selected;
+  select.appendChild(placeholder);
+  for (const item of items) {
+    const option = document.createElement("option");
+    option.value = String(item[valueKey] ?? "");
+    option.textContent = textBuilder(item);
+    option.selected = option.value === String(selected || "");
+    if (item.name) option.dataset.name = item.name;
+    if (item.path) option.dataset.path = item.path;
+    select.appendChild(option);
+  }
+  label.append(title, select);
+  return label;
+}
+
+function openPimcoreSetupWizard() {
+  const saved = state.settings?.pimcore || {};
+  state.pimcoreSetup = {
+    step: 1,
+    settings: { ...saved, api_key: "" },
+    classes: [],
+    folders: [],
+    fields: [],
+    mappings: Array.isArray(saved.field_mappings) ? [...saved.field_mappings] : [],
+    manualLocation: false,
+    eanTarget:
+      (saved.field_mappings || []).find((item) => item.source === "EAN")?.pimcore_field || "",
+    report: null,
+  };
+  pimcoreSetupModal?.classList.add("active");
+  renderPimcoreSetupStep();
+}
+
+function renderPimcoreSetupStep() {
+  const setup = state.pimcoreSetup;
+  if (!setup || !pimcoreSetupBody) return;
+  const titles = {
+    1: "Krok 1 z 4: Polaczenie",
+    2: "Krok 2 z 4: Miejsce zapisu",
+    3: "Krok 3 z 4: Pola produktu",
+    4: "Krok 4 z 4: Test i zapis",
+  };
+  pimcoreSetupBody.textContent = "";
+  if (pimcoreSetupStepTitle) pimcoreSetupStepTitle.textContent = titles[setup.step] || titles[1];
+  [...(pimcoreSetupProgress?.children || [])].forEach((item, index) => {
+    item.classList.toggle("active", index + 1 === setup.step);
+  });
+  const renderers = {
+    1: renderPimcoreConnectionStep,
+    2: renderPimcoreLocationStep,
+    3: renderPimcoreFieldsStep,
+    4: renderPimcoreVerifyStep,
+  };
+  renderers[setup.step]();
+  if (pimcoreSetupBackButton) pimcoreSetupBackButton.disabled = setup.step === 1;
+  if (pimcoreSetupNextButton) {
+    pimcoreSetupNextButton.textContent =
+      setup.step === 4 ? "Zapisz i wlacz integracje" : "Dalej";
+  }
+}
+
+function renderPimcoreConnectionStep() {
+  const setup = state.pimcoreSetup;
+  const grid = document.createElement("div");
+  const test = document.createElement("button");
+  const manual = document.createElement("button");
+  grid.className = "pimcore-setup-grid";
+  grid.append(
+    pimcoreSetupInput("base_url", "Adres Pimcore", setup.settings.base_url),
+    pimcoreSetupInput("api_key", "Klucz API", setup.settings.api_key || "", "password")
+  );
+  test.type = "button";
+  test.className = "secondary-button";
+  test.textContent = "Sprawdz polaczenie i pobierz klasy";
+  test.addEventListener("click", async () => {
+    capturePimcoreSetupStep();
+    test.disabled = true;
+    try {
+      setup.classes = await requestPimcoreDiscovery("classes");
+      if (pimcoreSetupStatus) {
+        pimcoreSetupStatus.textContent = `Pobrano ${setup.classes.length} klas.`;
+      }
+    } catch (error) {
+      if (pimcoreSetupStatus) pimcoreSetupStatus.textContent = pimcoreDiscoveryErrorText(error);
+    } finally {
+      test.disabled = false;
+    }
+  });
+  manual.type = "button";
+  manual.className = "ghost-button";
+  manual.textContent = "Kontynuuj z recznym wpisaniem klasy i folderu";
+  manual.addEventListener("click", () => {
+    capturePimcoreSetupStep();
+    if (!setup.settings.base_url || (!setup.settings.api_key && !state.settings?.pimcore?.api_key_set)) {
+      if (pimcoreSetupStatus) pimcoreSetupStatus.textContent = "Podaj adres Pimcore i klucz API.";
+      return;
+    }
+    setup.manualLocation = true;
+    setup.step = 2;
+    renderPimcoreSetupStep();
+  });
+  pimcoreSetupBody.append(grid, actionRow(test, manual));
+}
+
+function renderPimcoreLocationStep() {
+  const setup = state.pimcoreSetup;
+  const grid = document.createElement("div");
+  const refresh = document.createElement("button");
+  grid.className = "pimcore-setup-grid";
+  grid.append(
+    pimcoreSetupSelect(
+      "class_id",
+      "Klasa produktu",
+      setup.classes,
+      setup.settings.class_id,
+      "id",
+      (item) => `${item.name} (ID ${item.id})`
+    ),
+    pimcoreSetupSelect(
+      "parent_id",
+      "Folder docelowy",
+      setup.folders,
+      setup.settings.parent_id,
+      "id",
+      (item) => `${item.path || item.key} (ID ${item.id})`
+    )
+  );
+  refresh.type = "button";
+  refresh.className = "secondary-button";
+  refresh.textContent = "Odswiez foldery";
+  refresh.addEventListener("click", async () => {
+    capturePimcoreSetupStep();
+    try {
+      setup.folders = await requestPimcoreDiscovery("folders");
+      renderPimcoreSetupStep();
+    } catch (error) {
+      if (pimcoreSetupStatus) {
+        pimcoreSetupStatus.textContent = `${pimcoreDiscoveryErrorText(error)} Wpisz ID folderu recznie.`;
+      }
+    }
+  });
+  pimcoreSetupBody.append(grid, refresh);
+  if (!setup.folders.length) {
+    pimcoreSetupBody.append(
+      settingsNote(
+        "Nie wykryto folderow Pimcore. Otworz sekcje ponizej i wpisz ID folderu recznie; sciezka folderu jest opcjonalna."
+      )
+    );
+  }
+  pimcoreSetupBody.append(pimcoreManualLocationFallback());
+}
+
+function renderPimcoreFieldsStep() {
+  const setup = state.pimcoreSetup;
+  const supported = setup.fields.filter((field) => field.supported);
+  if (!setup.eanTarget) {
+    setup.eanTarget = supported.find((field) => field.name.toUpperCase() === "EAN")?.name || "";
+  }
+  const eanTarget = pimcoreSetupSelect(
+    "ean_target",
+    "Pole EAN w Pimcore",
+    supported,
+    setup.eanTarget,
+    "name",
+    (item) => `${item.label || item.name} (${item.name})`
+  );
+  const intro = document.createElement("p");
+  const eanHelp = document.createElement("p");
+  const header = document.createElement("div");
+  intro.className = "settings-note";
+  intro.textContent =
+    "Ktore dane uzytkownik ma wpisywac podczas dodawania produktu? Zaznacz Zapisz pole tylko dla potrzebnych danych.";
+  eanHelp.className = "settings-note";
+  eanHelp.textContent =
+    "Lista Pole EAN w Pimcore wskazuje kolumne, w ktorej Pimcore przechowuje 13-cyfrowy EAN.";
+  header.className = "pimcore-setup-field-header";
+  for (const text of ["Zapisz pole", "Pole w Pimcore", "Nazwa w formularzu", "Wymagane"]) {
+    const cell = document.createElement("strong");
+    cell.textContent = text;
+    header.appendChild(cell);
+  }
+  const table = document.createElement("div");
+  table.className = "pimcore-setup-field-list";
+  table.appendChild(header);
+  for (const field of setup.fields) {
+    table.appendChild(pimcoreSetupFieldRow(field, setup.mappings, setup.eanTarget));
+  }
+  eanTarget.querySelector("select").addEventListener("change", (event) => {
+    setup.mappings = collectPimcoreSetupMappings(pimcoreSetupBody).filter(
+      (item) => item.source !== "EAN"
+    );
+    setup.eanTarget = event.target.value;
+    renderPimcoreSetupStep();
+  });
+  pimcoreSetupBody.append(intro, eanTarget, eanHelp, table);
+}
+
+function renderPimcoreVerifyStep() {
+  const run = document.createElement("button");
+  const output = document.createElement("div");
+  output.className = "pimcore-checklist empty-state";
+  output.textContent = "Test nie zostal uruchomiony.";
+  run.type = "button";
+  run.className = "secondary-button";
+  run.textContent = "Sprawdz konfiguracje";
+  run.addEventListener("click", async () => {
+    const report = await requestJson("/api/settings/pimcore/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ settings: buildPimcoreSetupPayload() }),
+      timeoutMs: 120000,
+    });
+    state.pimcoreSetup.report = report;
+    renderPimcoreChecklist(report, output);
+    if (pimcoreSetupNextButton) pimcoreSetupNextButton.disabled = !report.ok;
+  });
+  if (pimcoreSetupNextButton) {
+    pimcoreSetupNextButton.disabled = !state.pimcoreSetup.report?.ok;
+  }
+  pimcoreSetupBody.append(run, output);
+}
+
+function pimcoreManualLocationFallback() {
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  const grid = document.createElement("div");
+  const setup = state.pimcoreSetup;
+  const classKnown = setup.classes.some(
+    (item) => String(item.id) === String(setup.settings.class_id || "")
+  );
+  const folderKnown = setup.folders.some(
+    (item) => String(item.id) === String(setup.settings.parent_id || "")
+  );
+  summary.textContent = "Wpisz wartosci recznie";
+  grid.className = "pimcore-setup-grid";
+  grid.append(
+    pimcoreSetupInput("manual_class_name", "Nazwa klasy", classKnown ? "" : setup.settings.class_name),
+    pimcoreSetupInput("manual_class_id", "ID klasy", classKnown ? "" : setup.settings.class_id),
+    pimcoreSetupInput("manual_parent_id", "ID folderu", folderKnown ? "" : setup.settings.parent_id),
+    pimcoreSetupInput(
+      "manual_parent_path",
+      "Sciezka folderu",
+      folderKnown ? "" : setup.settings.parent_path
+    )
+  );
+  details.append(summary, grid);
+  return details;
+}
+
+function pimcoreSetupFieldRow(field, mappings, eanTarget) {
+  const existing = mappings.find((item) => item.pimcore_field === field.name) || {};
+  const row = document.createElement("div");
+  const use = document.createElement("input");
+  const label = document.createElement("input");
+  const required = document.createElement("input");
+  const useLabel = document.createElement("label");
+  const fieldName = document.createElement("code");
+  const labelWrapper = document.createElement("label");
+  const requiredLabel = document.createElement("label");
+  const isEan = field.name === eanTarget;
+  row.className = "pimcore-setup-field-row";
+  row.dataset.fieldName = field.name;
+  row.dataset.fieldType = field.type;
+  row.dataset.fieldLanguage = field.language || "";
+  row.dataset.fieldParser = field.parser || "";
+  use.type = "checkbox";
+  use.name = "mapping_use";
+  use.checked = isEan || Boolean(existing.pimcore_field);
+  use.disabled = !field.supported || isEan;
+  label.name = "mapping_label";
+  label.value = existing.label || field.label || field.name;
+  label.disabled = !field.supported;
+  required.type = "checkbox";
+  required.name = "mapping_required";
+  required.checked = isEan || Boolean(existing.required);
+  required.disabled = isEan || !field.supported;
+  use.setAttribute("aria-label", `Zapisz pole ${field.name}`);
+  required.setAttribute("aria-label", `Pole ${field.name} wymagane`);
+  useLabel.append(use, document.createTextNode(" Zapisz"));
+  fieldName.textContent = field.name;
+  labelWrapper.append(label);
+  requiredLabel.append(required, document.createTextNode(" Wymagane"));
+  row.append(useLabel, fieldName, labelWrapper, requiredLabel);
+  if (!field.supported) row.title = field.unsupported_reason || "Pole nie jest obslugiwane.";
+  return row;
+}
+
+function collectPimcoreSetupMappings(container) {
+  const eanTarget =
+    container.querySelector('[name="ean_target"]')?.value || state.pimcoreSetup.eanTarget;
+  return [...container.querySelectorAll(".pimcore-setup-field-row")]
+    .filter(
+      (row) =>
+        row.dataset.fieldName === eanTarget ||
+        row.querySelector('[name="mapping_use"]')?.checked
+    )
+    .map((row) => {
+      const source = row.dataset.fieldName === eanTarget ? "EAN" : row.dataset.fieldName;
+      return {
+        source,
+        label: row.querySelector('[name="mapping_label"]').value.trim() || source,
+        pimcore_field: row.dataset.fieldName,
+        type: row.dataset.fieldType,
+        language: row.dataset.fieldLanguage || null,
+        required: source === "EAN" || row.querySelector('[name="mapping_required"]').checked,
+        default: "",
+        parser: row.dataset.fieldParser,
+      };
+    });
+}
+
+function capturePimcoreSetupStep() {
+  const setup = state.pimcoreSetup;
+  if (!setup || !pimcoreSetupForm) return;
+  const data = new FormData(pimcoreSetupForm);
+  for (const key of ["base_url", "api_key", "class_id", "parent_id"]) {
+    if (data.has(key)) setup.settings[key] = String(data.get(key) || "").trim();
+  }
+  if (setup.step === 2) {
+    const selectedClass = setup.classes.find((item) => String(item.id) === setup.settings.class_id);
+    const selectedFolder = setup.folders.find((item) => String(item.id) === setup.settings.parent_id);
+    if (selectedClass) setup.settings.class_name = selectedClass.name;
+    if (selectedFolder) setup.settings.parent_path = selectedFolder.path;
+    const manualClassId = String(data.get("manual_class_id") || "").trim();
+    const manualClassName = String(data.get("manual_class_name") || "").trim();
+    const manualParentId = String(data.get("manual_parent_id") || "").trim();
+    const manualParentPath = String(data.get("manual_parent_path") || "").trim();
+    if (manualClassId || manualClassName) {
+      setup.settings.class_id = manualClassId;
+      setup.settings.class_name = manualClassName;
+    }
+    if (manualParentId) {
+      setup.settings.parent_id = manualParentId;
+      setup.settings.parent_path = manualParentPath;
+    }
+  }
+  if (setup.step === 3) setup.mappings = collectPimcoreSetupMappings(pimcoreSetupBody);
+}
+
+function buildPimcoreSetupPayload() {
+  const setup = state.pimcoreSetup;
+  return {
+    ...setup.settings,
+    enabled: true,
+    setup_complete: false,
+    published: true,
+    object_key_template: "{EAN}",
+    field_mappings: setup.mappings,
+  };
+}
+
+async function requestPimcoreDiscovery(kind, extra = {}) {
+  const setup = state.pimcoreSetup;
+  return requestPimcoreSettingsDiscovery(kind, setup.settings, extra);
+}
+
+async function advancePimcoreSetup() {
+  const setup = state.pimcoreSetup;
+  if (!setup) return;
+  if (pimcoreSetupStatus) pimcoreSetupStatus.textContent = "";
+  capturePimcoreSetupStep();
+  try {
+    if (setup.step === 1) {
+      if (!setup.settings.base_url || (!setup.settings.api_key && !state.settings?.pimcore?.api_key_set)) {
+        throw new Error("Podaj adres Pimcore i klucz API.");
+      }
+      if (!setup.classes.length) {
+        setup.classes = await requestPimcoreDiscovery("classes");
+      }
+      if (!setup.classes.length) throw new Error("Nie znaleziono klas Pimcore.");
+      try {
+        setup.folders = await requestPimcoreDiscovery("folders");
+      } catch (error) {
+        setup.folders = [];
+        if (pimcoreSetupStatus) {
+          pimcoreSetupStatus.textContent = `Nie pobrano folderow: ${error.message}. Wpisz folder recznie.`;
+        }
+      }
+      setup.step = 2;
+    } else if (setup.step === 2) {
+      if (!setup.settings.class_id || !setup.settings.class_name || !setup.settings.parent_id) {
+        throw new Error("Wybierz klase produktu i folder docelowy albo wpisz je recznie.");
+      }
+      setup.fields = await requestPimcoreDiscovery("fields", {
+        class_id: setup.settings.class_id,
+      });
+      if (!setup.fields.length) throw new Error("Klasa nie udostepnia pol do przypisania.");
+      setup.step = 3;
+    } else if (setup.step === 3) {
+      const ean = setup.mappings.find((item) => item.source === "EAN" && item.required);
+      if (!ean) throw new Error("Wybierz wymagane pole EAN.");
+      setup.report = null;
+      setup.step = 4;
+    } else {
+      await savePimcoreSetup();
+      return;
+    }
+    renderPimcoreSetupStep();
+  } catch (error) {
+    if (pimcoreSetupStatus) pimcoreSetupStatus.textContent = error.message;
+  }
+}
+
+async function savePimcoreSetup() {
+  if (pimcoreSetupNextButton) pimcoreSetupNextButton.disabled = true;
+  if (pimcoreSetupStatus) pimcoreSetupStatus.textContent = "Zapisywanie konfiguracji...";
+  try {
+    const result = await requestJson("/api/settings/pimcore/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ settings: buildPimcoreSetupPayload() }),
+      timeoutMs: 120000,
+    });
+    state.settings = result.settings || state.settings;
+    pimcoreSetupModal?.classList.remove("active");
+    renderSettingsPimcore();
+  } catch (error) {
+    if (pimcoreSetupStatus) pimcoreSetupStatus.textContent = error.message;
+  } finally {
+    if (pimcoreSetupNextButton) pimcoreSetupNextButton.disabled = false;
+  }
+}
+
+function pimcoreReadOnlyTestButton(getSettings) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary-button";
+  button.textContent = "Sprawdz konfiguracje";
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    settingsStatus.textContent = "Testowanie Pimcore...";
+    try {
+      const report = await requestJson("/api/settings/pimcore/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ settings: getSettings() }),
+        timeoutMs: 120000,
+      });
+      renderPimcoreChecklist(report);
+      settingsStatus.textContent = report.ok
+        ? "Test konfiguracji Pimcore zakonczony powodzeniem."
+        : "Test konfiguracji Pimcore wykryl problemy.";
+    } catch (error) {
+      settingsStatus.textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
+function pimcoreOpenWriteTestButton() {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary-button";
+  button.textContent = "Testowo dodaj obiekt";
+  button.addEventListener("click", openPimcoreWriteTest);
+  return button;
+}
+
+function pimcoreHistoryButton() {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary-button";
+  button.textContent = "Historia Pimcore";
+  button.addEventListener("click", () => {
+    openPimcoreHistory().catch((error) => {
+      if (pimcoreHistoryOutput) {
+        pimcoreHistoryOutput.className = "history-output empty-state";
+        pimcoreHistoryOutput.textContent = error.message;
+      }
+    });
+  });
+  return button;
+}
+
+function openPimcoreWriteTest() {
+  if (!pimcoreTestForm || !pimcoreTestModal) return;
+  pimcoreTestForm.textContent = "";
+  for (const mapping of state.settings?.pimcore?.field_mappings || []) {
+    const label = document.createElement("label");
+    const title = document.createElement("span");
+    const input = document.createElement("input");
+    title.textContent = `${mapping.label || mapping.source}${mapping.required ? " *" : ""}`;
+    input.name = mapping.source;
+    input.value = "";
+    input.required = Boolean(mapping.required);
+    input.autocomplete = "off";
+    label.append(title, input);
+    pimcoreTestForm.appendChild(label);
+  }
+  pimcoreTestModal.querySelectorAll('[name="pimcore_cleanup_policy"]').forEach((item) => {
+    item.checked = false;
+  });
+  clearPimcoreLiveLog();
+  pimcoreTestSubmitButton.disabled = false;
+  pimcoreTestClearButton.disabled = false;
+  pimcoreTestModal.classList.add("active");
+}
+
+function collectPimcoreTestValues() {
+  if (!pimcoreTestForm) return {};
+  return Object.fromEntries(
+    [...pimcoreTestForm.querySelectorAll("input[name]")].map((input) => [input.name, input.value])
+  );
+}
+
+function clearPimcoreLiveLog() {
+  if (!pimcoreLiveLog || !pimcoreTestElapsed || !pimcoreTestStatus) return;
+  pimcoreLiveLog.textContent = "Brak operacji.";
+  pimcoreLiveLog.className = "pimcore-live-log empty-state";
+  pimcoreTestElapsed.textContent = "0 ms";
+  pimcoreTestStatus.textContent = "";
+}
+
+function appendPimcoreLiveEvents(events) {
+  if (!pimcoreLiveLog) return;
+  const wasAtBottom =
+    pimcoreLiveLog.scrollHeight - pimcoreLiveLog.scrollTop - pimcoreLiveLog.clientHeight < 24;
+  if (pimcoreLiveLog.classList.contains("empty-state")) {
+    pimcoreLiveLog.textContent = "";
+    pimcoreLiveLog.className = "pimcore-live-log";
+  }
+  for (const event of events || []) {
+    const row = document.createElement("div");
+    const heading = document.createElement("strong");
+    const detail = document.createElement("span");
+    const diagnostic = document.createElement("pre");
+    row.className = `pimcore-live-event ${event.severity || "info"}`;
+    const eventTime = Number(event.timestamp || 0) * 1000 || Date.now();
+    heading.textContent =
+      `[${new Date(eventTime).toLocaleTimeString()}] ${event.stage || "etap"}: ${event.message || ""}`;
+    detail.textContent = [
+      event.method,
+      event.endpoint,
+      event.status_code ? `HTTP ${event.status_code}` : "",
+      `od startu ${Number(event.elapsed_ms || 0)} ms`,
+      event.stage_elapsed_ms !== undefined ? `etap ${Number(event.stage_elapsed_ms || 0)} ms` : "",
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    diagnostic.textContent = [
+      event.response_excerpt,
+      event.suggested_fix,
+      event.error ? JSON.stringify(event.error, null, 2) : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    row.append(heading, detail);
+    if (diagnostic.textContent) row.appendChild(diagnostic);
+    pimcoreLiveLog.appendChild(row);
+  }
+  if (wasAtBottom) pimcoreLiveLog.scrollTop = pimcoreLiveLog.scrollHeight;
+}
+
+function pimcoreTestObjectKey(template, values) {
+  const missing = [];
+  const rendered = String(template || "{EAN}").replace(/\{([^{}]+)\}/g, (_match, source) => {
+    const value = String(values[source] || "").trim();
+    if (!value) missing.push(source);
+    return value;
+  });
+  if (missing.length) {
+    throw new Error(`Brak wartosci dla klucza: ${[...new Set(missing)].join(", ")}`);
+  }
+  const key = rendered.replace(/[^0-9A-Za-z_.-]+/g, "-").replace(/^[.-]+|[.-]+$/g, "");
+  if (!key) throw new Error("Nie mozna zbudowac klucza obiektu Pimcore.");
+  return key.slice(0, 190);
+}
+
+async function submitPimcoreWriteTest() {
+  if (!pimcoreTestForm || !pimcoreTestModal) return;
+  if (!pimcoreTestForm.reportValidity()) return;
+  const cleanup =
+    pimcoreTestModal.querySelector('[name="pimcore_cleanup_policy"]:checked')?.value || "";
+  if (!cleanup) {
+    throw new Error("Wybierz, czy obiekt ma zostac usuniety po tescie.");
+  }
+  const values = collectPimcoreTestValues();
+  const target = state.settings?.pimcore || {};
+  const objectKey = pimcoreTestObjectKey(target.object_key_template, values);
+  if (
+    !window.confirm(
+      `Wyslac obiekt do ${target.base_url}, klasa ${target.class_name}, parent ${target.parent_id}, klucz ${objectKey}, tryb ${cleanup}?`
+    )
+  ) {
+    return;
+  }
+  pimcoreTestSubmitButton.disabled = true;
+  pimcoreTestClearButton.disabled = true;
+  clearPimcoreLiveLog();
+  const payload = await requestJson("/api/settings/pimcore/test-create-runs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ values, cleanup_policy: cleanup }),
+  });
+  state.pimcoreTestOperation = {
+    operationId: payload.operation.operation_id,
+    lastSequence: 0,
+    active: true,
+  };
+  await pollPimcoreTestOperation();
+}
+
+async function pollPimcoreTestOperation() {
+  const tracked = state.pimcoreTestOperation;
+  if (!tracked?.active) return;
+  try {
+    const params = new URLSearchParams({ after_sequence: String(tracked.lastSequence || 0) });
+    const payload = await requestJson(
+      `/api/settings/pimcore/test-create-runs/${encodeURIComponent(tracked.operationId)}?${params.toString()}`
+    );
+    appendPimcoreLiveEvents(payload.events || []);
+    for (const event of payload.events || []) {
+      tracked.lastSequence = Math.max(tracked.lastSequence, Number(event.sequence || 0));
+    }
+    if (pimcoreTestElapsed) {
+      pimcoreTestElapsed.textContent = formatDuration(payload.total_ms || 0);
+    }
+    if (["completed", "partial", "failed"].includes(payload.status)) {
+      tracked.active = false;
+      pimcoreTestSubmitButton.disabled = false;
+      pimcoreTestClearButton.disabled = false;
+      pimcoreTestStatus.textContent = `Wynik: ${payload.status}. Operacja ${payload.operation_id}.`;
+      return;
+    }
+  } catch (error) {
+    appendPimcoreLiveEvents([
+      {
+        sequence: tracked.lastSequence,
+        severity: "warning",
+        stage: "poll",
+        message: `Utrata polaczenia z logiem: ${error.message}`,
+      },
+    ]);
+  }
+  window.setTimeout(pollPimcoreTestOperation, 500);
+}
+
+function renderPimcoreHistory(items) {
+  if (!pimcoreHistoryOutput) return;
+  const rows = Array.isArray(items) ? items : [];
+  pimcoreHistoryOutput.textContent = "";
+  pimcoreHistoryOutput.className = rows.length ? "history-output" : "history-output empty-state";
+  if (!rows.length) {
+    pimcoreHistoryOutput.textContent = "Brak operacji Pimcore dla wybranego filtra.";
+    return;
+  }
+  for (const item of rows) {
+    const row = document.createElement("div");
+    const toggle = document.createElement("button");
+    const title = document.createElement("strong");
+    const meta = document.createElement("span");
+    const details = document.createElement("div");
+    const resultPayload = item.result?.payload || {};
+    row.className = "pimcore-history-row";
+    toggle.type = "button";
+    toggle.className = "history-summary-row";
+    title.textContent = `${item.operation_type || "operacja"} | ${item.status || "unknown"} | ${
+      item.operation_id || ""
+    }`;
+    meta.textContent = [
+      item.started_at ? new Date(Number(item.started_at) * 1000).toLocaleString() : "",
+      item.username,
+      `${Number(item.total_ms || 0)} ms`,
+      `klasa ${resultPayload.className || "brak"}`,
+      `parent ${resultPayload.parentId || "brak"}`,
+      `obiekt ${item.result?.object_id || item.result?.object?.id || "brak"}`,
+      item.result?.object_path || item.result?.object?.path || "",
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    details.className = "pimcore-history-event-details";
+    details.hidden = true;
+    for (const event of item.events || []) {
+      const line = document.createElement("div");
+      line.textContent = [
+        `${event.sequence}. ${event.stage}: ${event.message}`,
+        event.method,
+        event.endpoint,
+        event.status_code ? `HTTP ${event.status_code}` : "",
+        `od startu ${Number(event.elapsed_ms || 0)} ms`,
+        event.stage_elapsed_ms !== undefined ? `etap ${Number(event.stage_elapsed_ms || 0)} ms` : "",
+        event.response_excerpt,
+        event.suggested_fix,
+      ]
+        .filter(Boolean)
+        .join(" | ");
+      details.appendChild(line);
+    }
+    toggle.addEventListener("click", () => {
+      details.hidden = !details.hidden;
+    });
+    toggle.append(title, meta);
+    row.append(toggle, details);
+    pimcoreHistoryOutput.appendChild(row);
+  }
+}
+
+async function loadPimcoreHistory() {
+  if (!pimcoreHistoryFilters) return;
+  const data = new FormData(pimcoreHistoryFilters);
+  const params = new URLSearchParams();
+  for (const key of ["operation_type", "result", "user", "query"]) {
+    const value = String(data.get(key) || "").trim();
+    if (value) params.set(key, value);
+  }
+  const from = String(data.get("date_from") || "");
+  const to = String(data.get("date_to") || "");
+  if (from) params.set("date_from", String(new Date(`${from}T00:00:00`).getTime() / 1000));
+  if (to) params.set("date_to", String(new Date(`${to}T23:59:59`).getTime() / 1000));
+  const payload = await requestJson(`/api/settings/pimcore/operations?${params.toString()}`);
+  renderPimcoreHistory(payload.items || []);
+}
+
+async function openPimcoreHistory() {
+  if (!pimcoreHistoryModal) return;
+  pimcoreHistoryModal.classList.add("active");
+  await loadPimcoreHistory();
+}
+
+function applyPimcoreRuntimeCapabilities(capabilities = {}) {
+  state.pimcoreRuntimeEnabled = capabilities.enabled === true;
+  state.pimcoreExistingObject = null;
+  state.pimcoreLastCheckedEan = "";
+  if (pimcoreEditButton) {
+    pimcoreEditButton.hidden = !state.pimcoreRuntimeEnabled;
+    pimcoreEditButton.disabled = true;
+  }
+}
+
+function handlePimcoreEanInput() {
+  state.pimcoreExistingObject = null;
+  if (pimcoreEditButton) pimcoreEditButton.disabled = true;
+  if (!state.pimcoreRuntimeEnabled) return;
+  schedulePimcoreStatusLookup();
+}
+
+function schedulePimcoreStatusLookup() {
+  if (!state.pimcoreRuntimeEnabled) return;
+  window.clearTimeout(state.pimcoreLookupTimer);
+  const ean = productForm.elements.ean.value.trim();
+  if (!/^\d{13}$/.test(ean) || ean === state.pimcoreLastCheckedEan) return;
+  state.pimcoreLookupTimer = window.setTimeout(() => {
+    checkPimcoreProductStatus(ean).catch((error) => {
+      formStatus.textContent = `Nie mozna sprawdzic Pimcore: ${error.message}. Mozesz kontynuowac prace.`;
+    });
+  }, 500);
+}
+
+async function checkPimcoreProductStatus(ean) {
+  const requestId = ++state.pimcoreLookupRequestId;
+  const payload = await requestJson(`/api/pimcore/product-status?ean=${encodeURIComponent(ean)}`);
+  if (requestId !== state.pimcoreLookupRequestId || productForm.elements.ean.value.trim() !== ean) {
+    return;
+  }
+  state.pimcoreLastCheckedEan = ean;
+  if (!payload.enabled) {
+    state.pimcoreExistingObject = null;
+    if (pimcoreEditButton) pimcoreEditButton.disabled = true;
+    return;
+  }
+  if (payload.available === false) {
+    state.pimcoreExistingObject = null;
+    if (pimcoreEditButton) pimcoreEditButton.disabled = true;
+    formStatus.textContent = `Pimcore niedostepny: ${payload.error?.message || "blad polaczenia"}`;
+    return;
+  }
+  if (payload.exists) {
+    state.pimcoreExistingObject = payload.object || null;
+    if (pimcoreEditButton) pimcoreEditButton.disabled = false;
+    return;
+  }
+  state.pimcoreExistingObject = null;
+  if (pimcoreEditButton) pimcoreEditButton.disabled = true;
+  state.pimcoreCreateSchema = Array.isArray(payload.form_schema) ? payload.form_schema : [];
+  state.pimcoreMissingEan = ean;
+  pimcoreMissingMessage.textContent = `EAN ${ean} nie istnieje w Pimcore. Czy dodac produkt?`;
+  pimcoreMissingModal.classList.add("active");
+}
+
+function openPimcoreCreateModal(ean) {
+  if (!pimcoreCreateForm || !pimcoreCreateModal) return;
+  pimcoreCreateForm.textContent = "";
+  for (const mapping of state.pimcoreCreateSchema || []) {
+    const label = document.createElement("label");
+    const title = document.createElement("span");
+    const input = document.createElement("input");
+    title.textContent = `${mapping.label || mapping.source}${mapping.required ? " *" : ""}`;
+    input.name = mapping.source;
+    input.value = mapping.source === "EAN" ? ean : mapping.default || "";
+    input.required = Boolean(mapping.required);
+    input.autocomplete = "off";
+    if (mapping.source === "EAN") {
+      input.readOnly = true;
+      input.id = "pimcoreCreateEan";
+    }
+    label.append(title, input);
+    pimcoreCreateForm.appendChild(label);
+  }
+  const pimcoreCreateEan = pimcoreCreateForm.querySelector("#pimcoreCreateEan");
+  if (pimcoreCreateEan) pimcoreCreateEan.readOnly = true;
+  if (pimcoreCreateStatus) pimcoreCreateStatus.textContent = "";
+  pimcoreMissingModal?.classList.remove("active");
+  pimcoreCreateModal.classList.add("active");
+}
+
+async function submitPimcoreRuntimeCreate(event) {
+  event.preventDefault();
+  if (!pimcoreCreateForm.reportValidity()) return;
+  pimcoreCreateSubmitButton.disabled = true;
+  pimcoreCreateStatus.textContent = "Zapisywanie w Pimcore...";
+  try {
+    const values = Object.fromEntries(new FormData(pimcoreCreateForm).entries());
+    const payload = await requestJson("/api/pimcore/products", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ values }),
+      timeoutMs: 120000,
+    });
+    const object = payload.object || {};
+    pimcoreCreateModal.classList.remove("active");
+    state.pimcoreLastCheckedEan = state.pimcoreMissingEan || values.EAN || "";
+    formStatus.textContent = payload.duplicate
+      ? `EAN juz istnieje w Pimcore: ${object.path || object.id}.`
+      : `Utworzono produkt Pimcore: ${object.path || object.id}. Mozesz kontynuowac dodawanie zdjec.`;
+  } catch (error) {
+    pimcoreCreateStatus.textContent = error.message;
+  } finally {
+    pimcoreCreateSubmitButton.disabled = false;
+  }
+}
+
+async function openPimcoreEditModal() {
+  const objectId = state.pimcoreExistingObject?.id;
+  if (!objectId || !pimcoreEditForm || !pimcoreEditModal) return;
+  if (pimcoreEditButton) pimcoreEditButton.disabled = true;
+  try {
+    const payload = await requestJson(`/api/pimcore/products/${encodeURIComponent(objectId)}`);
+    pimcoreEditForm.textContent = "";
+    state.pimcoreEditObjectId = Number(payload.object?.id || objectId);
+    state.pimcoreEditMarker = String(payload.marker || "");
+    state.pimcoreEditSchema = Array.isArray(payload.form_schema) ? payload.form_schema : [];
+    for (const mapping of state.pimcoreEditSchema) {
+      const label = document.createElement("label");
+      const title = document.createElement("span");
+      const input = document.createElement("input");
+      title.textContent = `${mapping.label || mapping.source}${mapping.required ? " *" : ""}`;
+      input.name = mapping.source;
+      input.value = payload.values?.[mapping.source] ?? "";
+      input.required = Boolean(mapping.required);
+      input.autocomplete = "off";
+      if (mapping.source === "EAN") input.id = "pimcoreEditEan";
+      label.append(title, input);
+      pimcoreEditForm.appendChild(label);
+    }
+    const pimcoreEditEan = pimcoreEditForm.querySelector("#pimcoreEditEan");
+    if (pimcoreEditEan) pimcoreEditEan.readOnly = true;
+    if (pimcoreEditObjectInfo) {
+      pimcoreEditObjectInfo.textContent = [
+        `ID ${state.pimcoreEditObjectId}`,
+        payload.object?.path || "",
+      ]
+        .filter(Boolean)
+        .join(" - ");
+    }
+    if (pimcoreEditStatus) pimcoreEditStatus.textContent = "";
+    pimcoreEditModal.classList.add("active");
+  } catch (error) {
+    formStatus.textContent = `Nie mozna pobrac danych Pimcore: ${error.message}`;
+  } finally {
+    if (pimcoreEditButton) pimcoreEditButton.disabled = !state.pimcoreExistingObject?.id;
+  }
+}
+
+function closePimcoreEditModal() {
+  pimcoreEditModal?.classList.remove("active");
+  if (pimcoreEditForm) pimcoreEditForm.textContent = "";
+  if (pimcoreEditStatus) pimcoreEditStatus.textContent = "";
+  state.pimcoreEditObjectId = 0;
+  state.pimcoreEditMarker = "";
+  state.pimcoreEditSchema = [];
+}
+
+async function submitPimcoreRuntimeEdit(event) {
+  event.preventDefault();
+  if (!pimcoreEditForm.reportValidity()) return;
+  pimcoreEditSubmitButton.disabled = true;
+  pimcoreEditStatus.textContent = "Zapisywanie i publikowanie...";
+  try {
+    const values = Object.fromEntries(new FormData(pimcoreEditForm).entries());
+    const result = await requestJson(
+      `/api/pimcore/products/${encodeURIComponent(state.pimcoreEditObjectId)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ marker: state.pimcoreEditMarker, values }),
+        timeoutMs: 120000,
+      }
+    );
+    state.pimcoreEditMarker = result.marker || state.pimcoreEditMarker;
+    state.pimcoreExistingObject = result.object || state.pimcoreExistingObject;
+    pimcoreEditStatus.textContent = `Zapisano obiekt ${result.object?.id || state.pimcoreEditObjectId}.`;
+  } catch (error) {
+    pimcoreEditStatus.textContent =
+      error.status === 409
+        ? "Produkt zostal zmieniony w Pimcore. Zamknij okno i otworz go ponownie."
+        : error.message;
+  } finally {
+    pimcoreEditSubmitButton.disabled = false;
+  }
+}
+
+function renderSettingsPimcore() {
+  const pimcore = state.settings.pimcore || {};
+  const form = document.createElement("form");
+  form.className = "settings-form";
+  if (pimcore.setup_complete !== true) {
+    form.append(settingsNote("Integracja Pimcore wymaga pierwszej konfiguracji."));
+    const start = document.createElement("button");
+    start.type = "button";
+    start.textContent = "Uruchom kreator";
+    start.addEventListener("click", openPimcoreSetupWizard);
+    form.appendChild(start);
+    settingsOutput.appendChild(form);
+    if (state.currentUser?.role === "admin" && !state.pimcoreSetupPrompted) {
+      state.pimcoreSetupPrompted = true;
+      queueMicrotask(openPimcoreSetupWizard);
+    }
+    return;
+  }
+  const fields = pimcoreCompactFields(pimcore);
+  const classes = pimcoreCompactClassItems(pimcore);
+  const folders = pimcoreCompactFolderItems(pimcore);
+  const mappings = document.createElement("div");
+  const addMapping = document.createElement("button");
+  const refresh = document.createElement("button");
+  const advanced = document.createElement("details");
+  const advancedSummary = document.createElement("summary");
+  const advancedBody = document.createElement("div");
+  const configuredMappings = pimcore.field_mappings?.length
+    ? pimcore.field_mappings
+    : [{ source: "EAN", label: "EAN", pimcore_field: pimcore.existence_fields?.[0] || "EAN", required: true }];
+  mappings.className = "pimcore-simple-mapping-list wide-field";
+  for (const mapping of configuredMappings) {
+    mappings.appendChild(pimcoreSimpleMappingRow(mapping, fields));
+  }
+  addMapping.type = "button";
+  addMapping.className = "secondary-button";
+  addMapping.textContent = "Dodaj pole";
+  addMapping.addEventListener("click", () => {
+    mappings.appendChild(pimcoreSimpleMappingRow({}, fields));
+  });
+  refresh.type = "button";
+  refresh.className = "secondary-button";
+  refresh.textContent = "Odswiez klasy i foldery";
+  refresh.addEventListener("click", () => {
+    refreshCompactPimcoreMetadata(form, refresh);
+  });
+  advanced.id = "pimcoreAdvancedSettings";
+  advanced.className = "pimcore-advanced-settings";
+  advanced.open = false;
+  advancedSummary.textContent = "Zaawansowane";
+  advancedBody.className = "settings-field-group";
+  advancedBody.append(
+    inputField("timeout_seconds", "Timeout [s]", pimcore.timeout_seconds || 30, {
+      type: "number",
+      min: "1",
+      max: "120",
+    }),
+    checkField("verify_tls", "Weryfikuj certyfikat TLS", pimcore.verify_tls !== false),
+    pimcoreCsvImportButton(mappings, fields),
+    settingsNote("Klucz obiektu: {EAN}. Pole wyszukiwania EAN wynika z przypisania EAN."),
+    settingsNote("Typ danych wykryty automatycznie na podstawie pola Pimcore.")
+  );
+  advanced.append(advancedSummary, advancedBody);
+  form.append(
+    settingsFieldGroup(
+      "Polaczenie Pimcore",
+      checkField("enabled", "Integracja wlaczona", pimcore.enabled),
+      inputField("base_url", "Adres Pimcore", pimcore.base_url || "http://10.10.0.5"),
+      credentialField("api_key", "Klucz API", pimcore.api_key_set, {
+        type: "password",
+        secretPath: "pimcore.api_key",
+      }),
+      actionRow(refresh)
+    ),
+    settingsFieldGroup(
+      "Miejsce zapisu",
+      pimcoreSetupSelect(
+        "class_id",
+        "Klasa produktu",
+        classes,
+        pimcore.class_id,
+        "id",
+        (item) => `${item.name} (ID ${item.id})`
+      ),
+      pimcoreSetupSelect(
+        "parent_id",
+        "Folder docelowy",
+        folders,
+        pimcore.parent_id,
+        "id",
+        (item) => `${item.path || item.key} (ID ${item.id})`
+      ),
+      pimcoreManualCompactLocationFields(pimcore)
+    ),
+    settingsFieldGroup(
+      "Pola produktu",
+      settingsNote("Typ danych wykryty automatycznie na podstawie pola Pimcore."),
+      mappings,
+      actionRow(addMapping)
+    ),
+    settingsFieldGroup(
+      "Testy integracji",
+      actionRow(
+        pimcoreReadOnlyTestButton(() => collectCompactPimcoreSettings(form)),
+        pimcoreOpenWriteTestButton(),
+        pimcoreHistoryButton()
+      ),
+      pimcoreChecklistElement()
+    ),
+    advanced
+  );
+  settingsSaveButton(form, () => ({ pimcore: collectCompactPimcoreSettings(form) }));
+  settingsOutput.appendChild(form);
+}
+
 function renderSettingsSlots() {
   ensureSqlColumnsDatalist();
   const form = document.createElement("form");
@@ -6447,6 +7996,7 @@ function renderSettings() {
   if (state.activeSettingsTab === "security") renderSettingsSecurity();
   if (state.activeSettingsTab === "ftp") renderSettingsFtp();
   if (state.activeSettingsTab === "sql") renderSettingsSql();
+  if (state.activeSettingsTab === "pimcore") renderSettingsPimcore();
   if (state.activeSettingsTab === "slots") renderSettingsSlots();
   if (state.activeSettingsTab === "users") renderSettingsUsers();
 }
@@ -6512,6 +8062,87 @@ document.querySelectorAll("[data-close-secret-reveal]").forEach((button) => {
 
 document.querySelectorAll("[data-close-process-alert]").forEach((button) => {
   button.addEventListener("click", closeProcessAlert);
+});
+
+pimcoreTestSubmitButton?.addEventListener("click", () => {
+  submitPimcoreWriteTest().catch((error) => {
+    if (pimcoreTestStatus) {
+      pimcoreTestStatus.textContent = error.message;
+    }
+    if (pimcoreTestSubmitButton) {
+      pimcoreTestSubmitButton.disabled = false;
+    }
+    if (pimcoreTestClearButton) {
+      pimcoreTestClearButton.disabled = false;
+    }
+  });
+});
+
+pimcoreTestClearButton?.addEventListener("click", () => {
+  if (state.pimcoreTestOperation?.active) return;
+  pimcoreTestForm.reset();
+  pimcoreTestModal.querySelectorAll('[name="pimcore_cleanup_policy"]').forEach((item) => {
+    item.checked = false;
+  });
+  clearPimcoreLiveLog();
+});
+
+pimcoreTestCloseButton?.addEventListener("click", () => {
+  if (pimcoreTestModal) {
+    pimcoreTestModal.classList.remove("active");
+  }
+});
+
+pimcoreHistoryCloseButton?.addEventListener("click", () => {
+  if (pimcoreHistoryModal) {
+    pimcoreHistoryModal.classList.remove("active");
+  }
+});
+
+pimcoreHistoryFilters?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  loadPimcoreHistory().catch((error) => {
+    if (pimcoreHistoryOutput) {
+      pimcoreHistoryOutput.className = "history-output empty-state";
+      pimcoreHistoryOutput.textContent = error.message;
+    }
+  });
+});
+
+pimcoreMissingCreateButton?.addEventListener("click", () => {
+  openPimcoreCreateModal(state.pimcoreMissingEan);
+});
+
+pimcoreMissingContinueButton?.addEventListener("click", () => {
+  pimcoreMissingModal?.classList.remove("active");
+});
+
+pimcoreMissingCancelButton?.addEventListener("click", () => {
+  pimcoreMissingModal?.classList.remove("active");
+});
+
+pimcoreCreateCancelButton?.addEventListener("click", () => {
+  pimcoreCreateModal?.classList.remove("active");
+});
+
+pimcoreCreateForm?.addEventListener("submit", submitPimcoreRuntimeCreate);
+
+pimcoreEditButton?.addEventListener("click", openPimcoreEditModal);
+pimcoreEditForm?.addEventListener("submit", submitPimcoreRuntimeEdit);
+pimcoreEditCancelButton?.addEventListener("click", () => {
+  closePimcoreEditModal();
+});
+
+pimcoreSetupNextButton?.addEventListener("click", advancePimcoreSetup);
+pimcoreSetupBackButton?.addEventListener("click", () => {
+  capturePimcoreSetupStep();
+  if (!state.pimcoreSetup) return;
+  state.pimcoreSetup.step = Math.max(1, state.pimcoreSetup.step - 1);
+  renderPimcoreSetupStep();
+});
+pimcoreSetupCancelButton?.addEventListener("click", () => {
+  pimcoreSetupModal?.classList.remove("active");
+  state.pimcoreSetup = null;
 });
 
 processAlertLoadButton?.addEventListener("click", () => {
@@ -6626,6 +8257,8 @@ entrySelect.addEventListener("change", () => {
 for (const name of ["name", "type_name", "model"]) {
   productForm.elements[name].addEventListener("input", scheduleProductAutoSearch);
 }
+
+productForm.elements.ean?.addEventListener("input", handlePimcoreEanInput);
 
 for (const name of trackedProductFields) {
   productForm.elements[name]?.addEventListener("input", () => scheduleBackgroundFtpLookup());
@@ -6743,6 +8376,16 @@ function resetCurrentDraft({ clearOutput = true, status = "" } = {}) {
   state.photoSourcesLoaded.clear();
   state.backgroundFtpLookupKey = "";
   state.backgroundFtpLookupRequestId += 1;
+  window.clearTimeout(state.pimcoreLookupTimer);
+  state.pimcoreLookupRequestId += 1;
+  state.pimcoreLastCheckedEan = "";
+  state.pimcoreMissingEan = "";
+  state.pimcoreCreateSchema = [];
+  state.pimcoreExistingObject = null;
+  if (pimcoreEditButton) pimcoreEditButton.disabled = true;
+  pimcoreMissingModal?.classList.remove("active");
+  pimcoreCreateModal?.classList.remove("active");
+  closePimcoreEditModal();
   window.clearTimeout(state.backgroundFtpLookupTimer);
   window.clearTimeout(state.backgroundFtpPreviewTimer);
   state.loadedEntryOriginal = null;

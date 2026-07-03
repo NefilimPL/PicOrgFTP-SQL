@@ -10,8 +10,36 @@ Project roadmap / plan rozwoju: [PLAN_ROZWOJU.md](PLAN_ROZWOJU.md)
 <img width="1082" height="812" alt="image" src="https://github.com/user-attachments/assets/48f3f87e-b4bd-402b-bcbf-16d5a160ed0d" />
 <img width="838" height="419" alt="image" src="https://github.com/user-attachments/assets/f5ff136e-213e-4a43-baca-518905c447c6" />
 
+## Pimcore 6.6 REST
+
+1. W Pimcore wlacz `Settings > System Settings > Web Service API`.
+2. Utworz lub wybierz dedykowanego uzytkownika Pimcore i skopiuj jego klucz API.
+3. Nadaj temu uzytkownikowi uprawnienia REST do odczytu informacji o serwerze, listy klas, definicji klasy, folderow i obiektow. Do pracy runtime wymagane sa tez uprawnienia tworzenia i aktualizacji obiektow. Uprawnienie usuwania jest potrzebne tylko dla testu zapisu z opcja `Usun po tescie`.
+4. W PicOrgFTP-SQL otworz `Ustawienia > Pimcore`. Pierwsza konfiguracja jest czteroetapowym kreatorem tylko dla administratora: polaczenie, klasa i folder obiektow, pola produktu oraz test i zapis.
+5. Kreator potrafi pobrac klasy, foldery z drzewa `Objects` oraz pola klasy. Reczne wpisanie klasy albo parenta jest tylko awaryjnym fallbackiem. Folder docelowy oznacza parent w drzewie obiektow Pimcore, nie katalog zdjec, assetow ani folder systemu plikow.
+6. EAN musi byc mapowany jako wymagane pole. Pole wyszukiwania EAN i klucz obiektu sa wyprowadzane z mapowania, a zwykly ekran ustawien ukrywa techniczne pola w `Zaawansowane`. Import naglowkow CSV jest opcjonalny i znajduje sie w tej sekcji.
+7. `Sprawdz konfiguracje` wykonuje test read-only i pokazuje szczegoly techniczne w rozwijanych blokach. `Testowo dodaj obiekt` tworzy obiekt nieopublikowany; opcja `Usun po tescie` probuje go potem usunac.
+8. Normalne tworzenie brakujacego produktu z glownego panelu publikuje obiekt od razu. Edycja istniejacego produktu publikuje aktualizacje od razu, zmienia tylko skonfigurowane pola i odrzuca zapis, jezeli obiekt zostal w miedzyczasie zmieniony w Pimcore.
+9. Zwykli uzytkownicy nie widza kreatora ani ustawien Pimcore. Gdy integracja jest wylaczona albo konfiguracja jest niekompletna, panel nie pokazuje kontrolek runtime Pimcore, nie odpala lookupu EAN i nie pokazuje promptu tworzenia produktu.
+
+Klucz API jest przechowywany w postaci zaszyfrowanej. Standardowy endpoint ustawien ani logi operacji Pimcore nigdy go nie zwracaja. Operacje tworzenia, testu i edycji zapisuja zredagowany audyt z ID, kluczem albo sciezka obiektu, gdy sa znane. Jezeli automatyczne usuwanie obiektu testowego sie nie powiedzie, uzyj danych z raportu operacji, aby usunac go recznie w Pimcore.
+
+<!-- Legacy pre-guided-setup instructions retained only for source history.
+
+1. W Pimcore włącz `Settings > System Settings > Web Service API`.
+2. Utwórz lub wybierz dedykowanego użytkownika Pimcore i skopiuj jego klucz API.
+3. Nadaj temu użytkownikowi uprawnienia odczytu informacji o serwerze, klas, klasy Product oraz docelowego folderu `Produkty`.
+4. Nadaj uprawnienia tworzenia, odczytu i usuwania obiektów, jeżeli test zapisu w ustawieniach ma korzystać z opcji `Usun po tescie`.
+5. W PicOrgFTP-SQL otwórz `Ustawienia > Pimcore`, ustaw bazowy URL, klucz API, nazwę klasy i ID folderu nadrzędnego, a następnie przypisz nagłówki CSV do pól Pimcore.
+6. Uruchom `Sprawdz konfiguracje`. Popraw każdy wiersz z błędem przed włączeniem tworzenia obiektów w głównym formularzu.
+7. Uruchom `Testowo dodaj obiekt`, wpisz odizolowane dane testowe, wybierz sposób sprzątania i sprawdź log na żywo.
+
+Klucz API jest przechowywany w postaci zaszyfrowanej. Standardowy endpoint ustawień ani logi operacji Pimcore nigdy go nie zwracają. Obiekt pozostawiony przez test w Pimcore jest nieopublikowany. Jeżeli automatyczne usuwanie się nie powiedzie, użyj ID, klucza lub ścieżki obiektu z raportu operacji, aby usunąć go ręcznie.
 
 
+
+
+-->
 
 ## English
 
