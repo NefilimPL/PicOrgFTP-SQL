@@ -132,6 +132,7 @@ def test_delete_cleanup_creates_verifies_and_deletes():
     events = []
     result = run_test_create(
         {
+            "base_url": "http://pimcore.test",
             "api_key": "test-key",
             "class_name": "Product",
             "parent_id": "123",
@@ -173,6 +174,7 @@ def test_delete_failure_is_partial_and_keeps_manual_cleanup_identity():
 
     result = run_test_create(
         {
+            "base_url": "http://pimcore.test",
             "api_key": "test-key",
             "class_name": "Product",
             "parent_id": "123",
@@ -215,6 +217,7 @@ def test_fetch_failure_is_partial_but_still_runs_selected_delete():
     client = FetchFailureClient()
     result = run_test_create(
         {
+            "base_url": "http://pimcore.test",
             "api_key": "test-key",
             "class_name": "Product",
             "parent_id": "123",
@@ -244,6 +247,7 @@ def test_keep_cleanup_retains_unpublished_object():
     client = PimcoreTestClient()
     result = run_test_create(
         {
+            "base_url": "http://pimcore.test",
             "api_key": "test-key",
             "class_name": "Product",
             "parent_id": "123",

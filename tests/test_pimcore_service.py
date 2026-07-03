@@ -20,6 +20,7 @@ from picorgftp_sql.services.pimcore_service import (
     fetch_product_for_edit,
     find_product_by_ean,
     merge_product_update_payload,
+    normalize_object_identity,
     run_settings_test,
     update_product,
 )
@@ -119,6 +120,67 @@ def test_build_create_payload_parses_values_and_renders_key():
     }
 
 
+def test_build_create_payload_nests_localized_field_values():
+    config = {
+        "enabled": True,
+        "class_name": "Product",
+        "parent_id": "123",
+        "published": True,
+        "object_key_template": "{EAN}",
+        "existence_fields": ["EAN"],
+        "field_mappings": [
+            {
+                "source": "EAN",
+                "pimcore_field": "EAN",
+                "type": "input",
+                "language": None,
+                "required": True,
+                "default": "",
+                "parser": "text",
+            },
+            {
+                "source": "NAME_EN",
+                "pimcore_field": "name",
+                "type": "input",
+                "language": "en",
+                "required": False,
+                "default": "",
+                "parser": "text",
+            },
+            {
+                "source": "NAME_PL",
+                "pimcore_field": "name",
+                "type": "input",
+                "language": "pl",
+                "required": False,
+                "default": "",
+                "parser": "text",
+            },
+        ],
+    }
+
+    payload = build_create_payload(
+        config,
+        {
+            "EAN": "5904804578169",
+            "NAME_EN": "Vivo sideboard",
+            "NAME_PL": "Komoda Vivo",
+        },
+    )
+
+    assert payload["elements"] == [
+        {"type": "input", "name": "EAN", "value": "5904804578169", "language": None},
+        {
+            "type": "localizedfields",
+            "name": "localizedfields",
+            "value": [
+                {"type": "input", "name": "name", "value": "Vivo sideboard", "language": "en"},
+                {"type": "input", "name": "name", "value": "Komoda Vivo", "language": "pl"},
+            ],
+        },
+    ]
+
+
 def test_ean_filter_is_structured_and_rejects_unsafe_names():
     assert build_ean_filter("5904804578169", ["EAN"]) == {"EAN": "5904804578169"}
     assert build_ean_filter(
@@ -166,6 +228,17 @@ class DiscoveryClient:
                     "children": [
                         {"fieldtype": "input", "name": "EAN", "title": "EAN"},
                         {"fieldtype": "numeric", "name": "totalWeight", "title": "Waga"},
+                        {
+                            "fieldtype": "localizedfields",
+                            "name": "localizedfields",
+                            "children": [
+                                {
+                                    "fieldtype": "input",
+                                    "name": "MANUFACTURER_NAME",
+                                    "title": "Producent",
+                                }
+                            ],
+                        },
                         {"fieldtype": "manyToManyObjectRelation", "name": "related"},
                     ]
                 }
@@ -191,6 +264,24 @@ def test_discovery_normalizes_classes_fields_and_folders():
             "label": "EAN",
             "type": "input",
             "language": None,
+            "parser": "text",
+            "supported": True,
+            "unsupported_reason": "",
+        },
+        {
+            "name": "MANUFACTURER_NAME",
+            "label": "Producent [en]",
+            "type": "input",
+            "language": "en",
+            "parser": "text",
+            "supported": True,
+            "unsupported_reason": "",
+        },
+        {
+            "name": "MANUFACTURER_NAME",
+            "label": "Producent [pl]",
+            "type": "input",
+            "language": "pl",
             "parser": "text",
             "supported": True,
             "unsupported_reason": "",
@@ -238,7 +329,7 @@ def test_folder_discovery_falls_back_to_unfiltered_list_after_server_error():
     assert client.object_list.call_args_list[1].args == ()
 
 
-def test_folder_discovery_preserves_original_error_when_fallback_finds_nothing():
+def test_folder_discovery_returns_empty_list_when_fallback_finds_nothing():
     original = PimcoreApiError(
         "Pimcore zwrocil HTTP 500.",
         "/webservice/rest/object-list",
@@ -251,16 +342,53 @@ def test_folder_discovery_preserves_original_error_when_fallback_finds_nothing()
         {"data": [{"id": 1, "type": "object", "fullPath": "/Produkt"}]},
     ]
 
-    with pytest.raises(PimcoreApiError) as captured:
-        discover_folders(client)
-
-    assert captured.value is original
+    assert discover_folders(client) == []
 
 
 def test_extract_object_id_accepts_pimcore_response_variants():
     assert extract_object_id({"id": 44}) == 44
     assert extract_object_id({"data": {"id": "45"}}) == 45
     assert extract_object_id({"object": {"id": 46}}) == 46
+
+
+def test_lookup_searches_whole_class_without_parent_filter():
+    client = Mock()
+    client.object_list.return_value = {
+        "data": [{"id": 91, "fullPath": "/Other/5904804578169"}]
+    }
+
+    found = find_product_by_ean(
+        PRODUCT_CONFIG,
+        "5904804578169",
+        client=client,
+    )
+
+    assert found["id"] == 91
+    args, kwargs = client.object_list.call_args
+    assert args == ({"EAN": "5904804578169"},)
+    assert kwargs == {"object_class": "Product", "limit": 2}
+
+
+@pytest.mark.parametrize(
+    "record",
+    [{"id": "91"}, {"o_id": "91"}, {"objectId": "91"}],
+)
+def test_object_identity_accepts_known_id_variants(record):
+    assert normalize_object_identity(record)["id"] == 91
+
+
+def test_lookup_rejects_match_without_positive_object_id():
+    client = Mock()
+    client.object_list.return_value = {
+        "data": [{"fullPath": "/Products/broken"}]
+    }
+
+    with pytest.raises(ValueError, match="ID"):
+        find_product_by_ean(
+            PRODUCT_CONFIG,
+            "5904804578169",
+            client=client,
+        )
 
 
 class ProductClient:
@@ -381,6 +509,57 @@ def test_merge_product_update_replaces_nested_localized_value_only():
     localized = next(item for item in payload["elements"] if item["name"] == "localizedfields")
     by_language = {item["language"]: item["value"] for item in localized["value"]}
     assert by_language == {"en": "", "pl": "Bez zmian"}
+
+
+def test_merge_product_update_adds_missing_localized_value_under_container():
+    config = json.loads(json.dumps(PRODUCT_CONFIG))
+    config["field_mappings"].append(
+        {
+            "source": "MANUFACTURER_NAME_EN",
+            "label": "Producent EN",
+            "pimcore_field": "MANUFACTURER_NAME",
+            "type": "input",
+            "language": "en",
+            "required": False,
+            "default": "",
+            "parser": "text",
+        }
+    )
+    current = json.loads(json.dumps(EDIT_OBJECT))
+    current["elements"].append(
+        {
+            "type": "localizedfields",
+            "name": "localizedfields",
+            "value": [
+                {
+                    "type": "input",
+                    "name": "MANUFACTURER_NAME",
+                    "language": "pl",
+                    "value": "Stary producent",
+                }
+            ],
+        }
+    )
+
+    payload = merge_product_update_payload(
+        config,
+        current,
+        {
+            "SKU": "OLD",
+            "EAN": "5904804578169",
+            "MANUFACTURER_NAME_EN": "New manufacturer",
+        },
+    )
+
+    top_level_names = [
+        item["name"]
+        for item in payload["elements"]
+        if item.get("name") == "MANUFACTURER_NAME"
+    ]
+    localized = next(item for item in payload["elements"] if item["name"] == "localizedfields")
+    by_language = {item["language"]: item["value"] for item in localized["value"]}
+    assert top_level_names == []
+    assert by_language == {"pl": "Stary producent", "en": "New manufacturer"}
 
 
 def test_update_product_rejects_changed_marker_before_put():

@@ -21,6 +21,8 @@ from ..pimcore_config import (
     parse_mapping_value,
 )
 
+LOCALIZED_FIELD_LANGUAGES = ("en", "pl")
+
 
 @dataclass
 class PimcoreApiError(Exception):
@@ -281,9 +283,11 @@ def _mapped_elements(
     *,
     use_defaults: bool,
     include_empty: bool = False,
+    nest_localized: bool = False,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     errors: list[str] = []
     elements: list[dict[str, object]] = []
+    localized: list[dict[str, object]] = []
     effective_values = dict(values or {})
     for mapping in config["field_mappings"]:
         source = mapping["source"]
@@ -307,16 +311,26 @@ def _mapped_elements(
             errors.append(f"Pole {mapping['label']}: {exc}")
             continue
         effective_values[source] = parsed
-        elements.append(
-            {
-                "type": mapping["type"],
-                "name": mapping["pimcore_field"],
-                "value": parsed,
-                "language": mapping["language"],
-            }
-        )
+        element = {
+            "type": mapping["type"],
+            "name": mapping["pimcore_field"],
+            "value": parsed,
+            "language": mapping["language"],
+        }
+        if nest_localized and str(mapping.get("language") or "").strip():
+            localized.append(element)
+        else:
+            elements.append(element)
     if errors:
         raise ValueError(" ".join(errors))
+    if localized:
+        elements.append(
+            {
+                "type": "localizedfields",
+                "name": "localizedfields",
+                "value": localized,
+            }
+        )
     return elements, effective_values
 
 
@@ -332,6 +346,7 @@ def build_create_payload(
         config,
         values,
         use_defaults=use_defaults,
+        nest_localized=True,
     )
     try:
         parent_id = int(config["parent_id"])
@@ -409,34 +424,68 @@ def discover_classes(api: PimcoreClient) -> list[dict[str, str]]:
 
 
 def extract_class_field_records(payload: object) -> list[dict[str, object]]:
-    fields: dict[str, dict[str, object]] = {}
+    fields: dict[tuple[str, str], dict[str, object]] = {}
 
-    def visit(node: object, language: str | None = None) -> None:
+    def add_field(
+        *,
+        name: str,
+        label: str,
+        node_type: str,
+        language: str | None,
+    ) -> None:
+        parser = SUPPORTED_FIELD_PARSERS.get(node_type, "")
+        field_label = f"{label} [{language}]" if language else label
+        fields[(name, language or "")] = {
+            "name": name,
+            "label": field_label,
+            "type": node_type,
+            "language": language,
+            "parser": parser,
+            "supported": bool(parser),
+            "unsupported_reason": (
+                "" if parser else f"Typ {node_type} nie jest obslugiwany."
+            ),
+        }
+
+    def visit(
+        node: object,
+        language: str | None = None,
+        localized: bool = False,
+    ) -> None:
         if isinstance(node, dict):
             node_type = str(node.get("fieldtype") or node.get("datatype") or "").lower()
             name = str(node.get("name") or "").strip()
             current_language = str(node.get("language") or language or "").strip() or None
-            if name and node_type:
-                parser = SUPPORTED_FIELD_PARSERS.get(node_type, "")
-                fields[name] = {
-                    "name": name,
-                    "label": str(node.get("title") or node.get("label") or name).strip(),
-                    "type": node_type,
-                    "language": current_language,
-                    "parser": parser,
-                    "supported": bool(parser),
-                    "unsupported_reason": (
-                        "" if parser else f"Typ {node_type} nie jest obslugiwany."
-                    ),
-                }
+            is_localized_container = node_type == "localizedfields"
+            inside_localized = localized or is_localized_container
+            if name and node_type and not is_localized_container:
+                label = str(node.get("title") or node.get("label") or name).strip()
+                if inside_localized and not current_language:
+                    for item_language in LOCALIZED_FIELD_LANGUAGES:
+                        add_field(
+                            name=name,
+                            label=label,
+                            node_type=node_type,
+                            language=item_language,
+                        )
+                else:
+                    add_field(
+                        name=name,
+                        label=label,
+                        node_type=node_type,
+                        language=current_language,
+                    )
             for value in node.values():
-                visit(value, current_language)
+                visit(value, current_language, inside_localized)
         elif isinstance(node, list):
             for value in node:
-                visit(value, language)
+                visit(value, language, localized)
 
     visit(payload)
-    return sorted(fields.values(), key=lambda item: str(item["name"]).casefold())
+    return sorted(
+        fields.values(),
+        key=lambda item: (str(item["name"]).casefold(), str(item.get("language") or "")),
+    )
 
 
 def discover_fields(api: PimcoreClient, class_id: object) -> list[dict[str, object]]:
@@ -448,7 +497,6 @@ def discover_folders(api: PimcoreClient, limit: int = 500) -> list[dict[str, obj
     records: list[dict[str, object]] = []
     page_size = min(100, bounded_limit)
     query_filter: dict[str, object] | None = {"type": "folder"}
-    filter_error: PimcoreApiError | None = None
     try:
         for offset in range(0, bounded_limit, page_size):
             payload = api.object_list(
@@ -463,7 +511,6 @@ def discover_folders(api: PimcoreClient, limit: int = 500) -> list[dict[str, obj
     except PimcoreApiError as exc:
         if not exc.status_code or exc.status_code < 500 or records:
             raise
-        filter_error = exc
         payload = api.object_list(limit=bounded_limit, offset=0)
         records = _list_records(payload, ("data", "objects", "items"))
     folders: list[dict[str, object]] = []
@@ -476,15 +523,16 @@ def discover_folders(api: PimcoreClient, limit: int = 500) -> list[dict[str, obj
         path = identity["path"]
         key = identity["key"]
         if not path:
-            detail = api.object_by_id(identity["id"])
+            try:
+                detail = api.object_by_id(identity["id"])
+            except PimcoreApiError:
+                continue
             source = detail.get("data") if isinstance(detail.get("data"), dict) else detail
             path = extract_object_path(source)
             key = str(source.get("key") or key) if isinstance(source, dict) else key
         if not key and path:
             key = path.rstrip("/").rsplit("/", 1)[-1]
         folders.append({"id": identity["id"], "path": path, "key": key})
-    if not folders and filter_error is not None:
-        raise filter_error
     return sorted(folders, key=lambda item: str(item["path"] or item["key"]).casefold())
 
 
@@ -672,7 +720,7 @@ def run_settings_test(
             suggested_fix=(
                 ""
                 if base_ok
-                else "Wpisz pelny adres panelu Pimcore, np. http://10.10.0.5."
+                else "Wpisz pelny adres panelu Pimcore, np. http://twoj-adres-pimcore.example."
             ),
         )
     )
@@ -885,14 +933,20 @@ def extract_object_path(payload: object) -> str:
 
 def normalize_object_identity(record: object) -> dict[str, object]:
     source = record if isinstance(record, dict) else {}
+    raw_id = source.get("id") or source.get("o_id") or source.get("objectId")
     try:
-        object_id = int(source.get("id"))
+        object_id = int(raw_id)
     except (TypeError, ValueError):
         object_id = 0
     return {
         "id": object_id,
-        "key": str(source.get("key") or ""),
-        "path": str(source.get("fullPath") or source.get("path") or ""),
+        "key": str(source.get("key") or source.get("o_key") or ""),
+        "path": str(
+            source.get("fullPath")
+            or source.get("path")
+            or source.get("o_path")
+            or ""
+        ),
     }
 
 
@@ -977,27 +1031,60 @@ def merge_product_update_payload(
     existing = current_data.get("elements") if isinstance(current_data.get("elements"), list) else []
     used: set[tuple[str, str]] = set()
 
-    def merge_node(raw: object) -> object:
+    def merge_node(raw: object, *, in_localized: bool = False) -> object:
         if isinstance(raw, list):
-            return [merge_node(item) for item in raw]
+            return [merge_node(item, in_localized=in_localized) for item in raw]
         if not isinstance(raw, dict):
             return raw
         item = dict(raw)
+        is_localized_container = (
+            str(item.get("type") or "").casefold() == "localizedfields"
+            or str(item.get("name") or "").casefold() == "localizedfields"
+        )
         key = (str(item.get("name") or ""), str(item.get("language") or ""))
         replacement = replacement_keys.get(key)
-        if replacement:
+        replacement_language = str(replacement.get("language") or "") if replacement else ""
+        if replacement and (not replacement_language or in_localized):
             used.add(key)
             item.update(replacement)
             return item
         for field, value in list(item.items()):
             if isinstance(value, (dict, list)):
-                item[field] = merge_node(value)
+                item[field] = merge_node(
+                    value,
+                    in_localized=in_localized or is_localized_container,
+                )
         return item
 
     merged_elements = [merge_node(item) for item in existing]
-    merged_elements.extend(
-        dict(item) for key, item in replacement_keys.items() if key not in used
-    )
+
+    def localized_container() -> dict[str, object]:
+        for item in merged_elements:
+            if not isinstance(item, dict):
+                continue
+            if (
+                str(item.get("type") or "").casefold() == "localizedfields"
+                or str(item.get("name") or "").casefold() == "localizedfields"
+            ):
+                if not isinstance(item.get("value"), list):
+                    item["value"] = []
+                return item
+        item = {"type": "localizedfields", "name": "localizedfields", "value": []}
+        merged_elements.append(item)
+        return item
+
+    for key, item in replacement_keys.items():
+        if key in used:
+            continue
+        if str(item.get("language") or ""):
+            container = localized_container()
+            value = container.get("value")
+            if not isinstance(value, list):
+                value = []
+                container["value"] = value
+            value.append(dict(item))
+        else:
+            merged_elements.append(dict(item))
     payload = dict(current_data)
     payload["elements"] = merged_elements
     payload["published"] = True
@@ -1020,7 +1107,10 @@ def find_product_by_ean(
     records = _list_records(payload, ("data", "objects", "items"))
     if len(records) > 1:
         raise ValueError("Znaleziono wiele produktow Pimcore z tym samym EAN.")
-    return normalize_object_identity(records[0]) if records else None
+    identity = normalize_object_identity(records[0]) if records else None
+    if identity is not None and int(identity["id"] or 0) <= 0:
+        raise ValueError("Odpowiedz Pimcore zawiera produkt bez poprawnego ID.")
+    return identity
 
 
 def create_product(
@@ -1376,9 +1466,15 @@ def run_test_create(
         stage_started = time.perf_counter()
         fetched = api.object_by_id(object_id)
         object_path = extract_object_path(fetched)
-        actual = extract_object_values(fetched)
-        expected = {item["name"]: item["value"] for item in payload["elements"]}
-        mismatched = [name for name, value in expected.items() if actual.get(name) != value]
+        fetched_data = _object_data(fetched)
+        actual = _configured_values(config, fetched_data)
+        expected = _configured_values(config, {"elements": payload["elements"]})
+        mismatched = [
+            source
+            for source, value in expected.items()
+            if str(actual.get(source, ""))
+            != str(value if value is not None else "")
+        ]
         if mismatched:
             status = "partial"
             error = "Nie potwierdzono pol: " + ", ".join(mismatched)

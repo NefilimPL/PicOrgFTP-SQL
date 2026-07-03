@@ -17,10 +17,19 @@ Project roadmap / plan rozwoju: [PLAN_ROZWOJU.md](PLAN_ROZWOJU.md)
 3. Nadaj temu uzytkownikowi uprawnienia REST do odczytu informacji o serwerze, listy klas, definicji klasy, folderow i obiektow. Do pracy runtime wymagane sa tez uprawnienia tworzenia i aktualizacji obiektow. Uprawnienie usuwania jest potrzebne tylko dla testu zapisu z opcja `Usun po tescie`.
 4. W PicOrgFTP-SQL otworz `Ustawienia > Pimcore`. Pierwsza konfiguracja jest czteroetapowym kreatorem tylko dla administratora: polaczenie, klasa i folder obiektow, pola produktu oraz test i zapis.
 5. Kreator potrafi pobrac klasy, foldery z drzewa `Objects` oraz pola klasy. Reczne wpisanie klasy albo parenta jest tylko awaryjnym fallbackiem. Folder docelowy oznacza parent w drzewie obiektow Pimcore, nie katalog zdjec, assetow ani folder systemu plikow.
-6. EAN musi byc mapowany jako wymagane pole. Pole wyszukiwania EAN i klucz obiektu sa wyprowadzane z mapowania, a zwykly ekran ustawien ukrywa techniczne pola w `Zaawansowane`. Import naglowkow CSV jest opcjonalny i znajduje sie w tej sekcji.
-7. `Sprawdz konfiguracje` wykonuje test read-only i pokazuje szczegoly techniczne w rozwijanych blokach. `Testowo dodaj obiekt` tworzy obiekt nieopublikowany; opcja `Usun po tescie` probuje go potem usunac.
-8. Normalne tworzenie brakujacego produktu z glownego panelu publikuje obiekt od razu. Edycja istniejacego produktu publikuje aktualizacje od razu, zmienia tylko skonfigurowane pola i odrzuca zapis, jezeli obiekt zostal w miedzyczasie zmieniony w Pimcore.
-9. Zwykli uzytkownicy nie widza kreatora ani ustawien Pimcore. Gdy integracja jest wylaczona albo konfiguracja jest niekompletna, panel nie pokazuje kontrolek runtime Pimcore, nie odpala lookupu EAN i nie pokazuje promptu tworzenia produktu.
+6. EAN musi byc mapowany jako wymagane pole. Wyszukiwanie EAN obejmuje cala skonfigurowana klase, niezaleznie od folderu. Folder docelowy jest uzywany tylko podczas tworzenia nowego obiektu.
+7. Dla tekstowego pola mapowania przycisk `Konstruuj` otwiera kreator automatycznej wartosci. Szablon moze korzystac z danych produktu i innych mapowan Pimcore, funkcji tekstowych, grup warunkowych oraz opcjonalnego tlumaczenia. Zmiany sa zapisywane razem z ustawieniami Pimcore.
+8. `Sprawdz konfiguracje` wykonuje test read-only i pokazuje szczegoly techniczne w rozwijanych blokach. `Testowo dodaj obiekt` pobiera za kazdym razem nowe, unikalne i nadal edytowalne wartosci; opcja `Usun po tescie` probuje potem usunac obiekt.
+9. Normalne tworzenie brakujacego produktu z glownego panelu automatycznie przelicza zapisane szablony i publikuje obiekt. Edycja pokazuje aktualne wartosci bez ich nadpisania; tylko `Przelicz pole` stosuje szablon do wybranego pola. Zapis odrzuca zmiane, jezeli obiekt zostal w miedzyczasie zmieniony w Pimcore.
+10. Zwykli uzytkownicy nie widza kreatora ani ustawien Pimcore. Gdy integracja jest wylaczona albo konfiguracja jest niekompletna, panel nie pokazuje kontrolek runtime Pimcore, nie odpala lookupu EAN i nie pokazuje promptu tworzenia produktu.
+
+Przyklad szablonu:
+
+```text
+{NAZWA} - {TYP} {KOLOR 1}(/{KOLOR 2})(/{KOLOR 3})
+```
+
+Tekst i dowolne znaki poza placeholderami sa kopiowane do wyniku. Grupa `(...)` znika w calosci, jezeli ktorys zawarty w niej placeholder jest pusty. Wielkosc zapisu aliasu steruje wielkoscia liter (`{NAZWA}`, `{Nazwa}`, `{nazwa}`), a funkcje dopisuje sie po `|`, np. `{Nazwa|trim|upper}`. Dostepne funkcje: `keep`, `trim`, `normalize_spaces`, `upper`, `lower`, `title`, `capitalize`, `replace`, `default`, `substring`, `truncate`, `strip_diacritics`, `slug` i `number`.
 
 Klucz API jest przechowywany w postaci zaszyfrowanej. Standardowy endpoint ustawien ani logi operacji Pimcore nigdy go nie zwracaja. Operacje tworzenia, testu i edycji zapisuja zredagowany audyt z ID, kluczem albo sciezka obiektu, gdy sa znane. Jezeli automatyczne usuwanie obiektu testowego sie nie powiedzie, uzyj danych z raportu operacji, aby usunac go recznie w Pimcore.
 

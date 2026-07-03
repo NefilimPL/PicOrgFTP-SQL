@@ -412,8 +412,58 @@
           <label><input type="radio" name="pimcore_cleanup_policy" value="delete"> Usun po tescie</label>
           <label><input type="radio" name="pimcore_cleanup_policy" value="keep"> Pozostaw w Pimcore</label>
           <button id="pimcoreTestSubmitButton" type="button">Wyslij</button>
+          <button id="pimcoreTestRegenerateButton" type="button" class="secondary-button">Wygeneruj nowe dane</button>
           <button id="pimcoreTestClearButton" type="button" class="secondary-button">Wyczysc formularz</button>
           <span id="pimcoreTestStatus" role="status"></span>
+        </div>
+      </section>
+    </div>
+
+    <div id="pimcoreTemplateModal" class="modal-view nested-modal">
+      <section class="manager-panel pimcore-template-panel">
+        <div class="section-heading">
+          <div>
+            <h1>Budowanie wartosci pola Pimcore</h1>
+            <span id="pimcoreTemplateTarget"></span>
+          </div>
+          <button id="pimcoreTemplateCancelButton" type="button" class="ghost-button modal-close">Anuluj</button>
+        </div>
+        <div class="pimcore-template-layout">
+          <section>
+            <label class="pimcore-template-editor">
+              Szablon
+              <textarea id="pimcoreTemplateText" rows="5" spellcheck="false" placeholder="{NAZWA} - {TYP} {KOLOR 1}(/{KOLOR 2})"></textarea>
+            </label>
+            <p class="settings-note">
+              Tekst i znaki poza nawiasami sa wstawiane bez zmian. Grupa w nawiasach, np. (/{KOLOR 2}), znika, gdy jej placeholder jest pusty. Wielkosc nazwy placeholdera ustala wielkosc wyniku.
+            </p>
+            <div class="pimcore-template-translation">
+              <label><input id="pimcoreTemplateTranslate" type="checkbox"> Przetlumacz gotowy wynik</label>
+              <label>
+                Jezyk docelowy
+                <input id="pimcoreTemplateLanguage" type="text" maxlength="16" placeholder="np. en, de, pl">
+              </label>
+            </div>
+          </section>
+          <aside>
+            <h2>Dostepne dane</h2>
+            <div id="pimcoreTemplateSources" class="pimcore-template-tokens"></div>
+            <h2>Funkcje</h2>
+            <div id="pimcoreTemplateFunctions" class="pimcore-template-tokens"></div>
+            <p class="settings-note">Funkcje dopisuj wewnatrz placeholdera, np. {NAZWA|trim|upper}. Dostepne sa tez replace, default, substring, truncate, strip_diacritics, slug i number.</p>
+          </aside>
+        </div>
+        <section class="pimcore-template-result">
+          <div class="section-heading">
+            <h2>Podglad</h2>
+            <button id="pimcoreTemplatePreviewButton" type="button" class="secondary-button">Przelicz podglad</button>
+          </div>
+          <output id="pimcoreTemplatePreview" class="pimcore-template-preview">Wpisz szablon i uruchom podglad.</output>
+          <span id="pimcoreTemplateStatus" role="status"></span>
+        </section>
+        <div class="heading-actions">
+          <button id="pimcoreTemplateSaveButton" type="button">Zastosuj do pola</button>
+          <button id="pimcoreTemplateClearButton" type="button" class="ghost-button">Usun szablon</button>
         </div>
       </section>
     </div>
@@ -488,6 +538,7 @@
         </div>
         <form id="pimcoreEditForm" class="pimcore-runtime-fields"></form>
         <div class="heading-actions">
+          <button id="pimcoreEditRecalculateAllButton" type="button" class="secondary-button" disabled>Przelicz wszystkie</button>
           <button id="pimcoreEditSubmitButton" type="submit" form="pimcoreEditForm">Zapisz i opublikuj</button>
           <span id="pimcoreEditStatus" role="status"></span>
         </div>
@@ -536,6 +587,6 @@
       </article>
     </template>
 
-    <script src="/static/app.js?v=20260702-pimcore-setup"></script>
+    <script src="/static/app.js?v=20260703-pimcore-templates"></script>
   </body>
 </html>

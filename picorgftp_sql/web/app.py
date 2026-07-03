@@ -58,6 +58,7 @@ from ..image_utils import fit_image_to_content
 from ..legacy_import import import_legacy_to_sqlite
 from ..logging_utils import log_error
 from ..product_fields import PRODUCT_FIELDS_KEY, normalize_product_fields
+from ..pimcore_templates import TemplateError
 from ..services.ftp_service import sync_remote_files
 from ..services.pimcore_service import PimcoreApiError, PimcoreConflictError
 from ..services.sql_service import detect_available_columns, extract_presence_context
@@ -107,15 +108,18 @@ from ..web_data import (
     history_snapshot,
     ListValueInUseError,
     parse_pimcore_csv_headers,
+    pimcore_test_sample,
     pimcore_operation_history,
     pimcore_operation_status,
     pimcore_runtime_capabilities,
     refresh_file_index,
+    render_saved_pimcore_templates,
     remove_list_value,
     record_history,
     save_web_entry,
     search_entries,
     create_pimcore_product,
+    preview_pimcore_template,
     settings_snapshot,
     settings_secret_values,
     start_pimcore_test_create,
@@ -4188,6 +4192,32 @@ def create_app() -> FastAPI:
         )
         return JSONResponse(report)
 
+    @app.post("/api/settings/pimcore/template-preview")
+    async def pimcore_template_preview_api(request: Request) -> JSONResponse:
+        _require_admin(request)
+        payload = await request.json()
+        try:
+            result = await run_in_threadpool(preview_pimcore_template, payload)
+        except (TemplateError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": getattr(exc, "code", "invalid_template"),
+                    "message": str(exc),
+                    "position": getattr(exc, "position", 0),
+                },
+            ) from exc
+        return JSONResponse(result)
+
+    @app.post("/api/settings/pimcore/test-sample")
+    async def pimcore_test_sample_api(request: Request) -> JSONResponse:
+        _require_admin(request)
+        try:
+            result = await run_in_threadpool(pimcore_test_sample)
+        except (TemplateError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(result)
+
     @app.post("/api/settings/pimcore/discover/classes")
     async def pimcore_discover_classes_api(request: Request) -> JSONResponse:
         _require_admin(request)
@@ -4225,7 +4255,7 @@ def create_app() -> FastAPI:
                 payload.get("settings") if isinstance(payload, dict) else None,
             )
         except PimcoreApiError as exc:
-            raise HTTPException(status_code=502, detail=exc.as_dict()) from exc
+            return JSONResponse({"items": [], "warning": exc.as_dict()})
         return JSONResponse(result)
 
     @app.post("/api/settings/pimcore/setup")
@@ -4342,6 +4372,22 @@ def create_app() -> FastAPI:
                 "object": result.get("object"),
             },
         )
+        return JSONResponse(result)
+
+    @app.post("/api/pimcore/render-templates")
+    async def pimcore_render_templates_api(request: Request) -> JSONResponse:
+        _require_user(request)
+        payload = await request.json()
+        source = payload if isinstance(payload, dict) else {}
+        try:
+            result = await run_in_threadpool(
+                render_saved_pimcore_templates,
+                source.get("product_values"),
+                source.get("values"),
+                source.get("targets"),
+            )
+        except (TemplateError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(result)
 
     @app.get("/api/pimcore/products/{object_id}")

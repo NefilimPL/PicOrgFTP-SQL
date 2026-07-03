@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from picorgftp_sql import web_data
-from picorgftp_sql.services.pimcore_service import PimcoreConflictError
+from picorgftp_sql.services.pimcore_service import PimcoreApiError, PimcoreConflictError
 from picorgftp_sql.web import app as web_app
 
 
@@ -220,6 +220,24 @@ def test_pimcore_discovery_and_setup_routes_are_admin_only():
 
     assert classes.status_code == fields.status_code == folders.status_code == saved.status_code == 200
     assert require_admin.call_count == 4
+
+
+def test_folder_discovery_route_degrades_to_empty_list_on_pimcore_error():
+    client = TestClient(web_app.app)
+    error = PimcoreApiError(
+        "Pimcore zwrocil HTTP 502.",
+        "/webservice/rest/object-list",
+        status_code=502,
+    )
+    with (
+        patch.object(web_app, "_require_admin", return_value={"username": "admin", "role": "admin"}),
+        patch.object(web_app, "discover_pimcore_folders", side_effect=error),
+    ):
+        response = client.post("/api/settings/pimcore/discover/folders", json={"settings": {}})
+
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+    assert response.json()["warning"]["status_code"] == 502
 
 
 def test_pimcore_csv_headers_route_parses_uploaded_file():
@@ -510,3 +528,175 @@ def test_runtime_edit_conflict_returns_409():
         )
     assert response.status_code == 409
     assert response.json()["detail"]["current_marker"] == "101"
+
+
+def test_admin_can_preview_unsaved_pimcore_template():
+    client = TestClient(web_app.app)
+    payload = {
+        "mappings": [],
+        "target_source": "TITLE",
+        "product_values": {},
+        "values": {},
+    }
+    expected = {"values": {"TITLE": "VIVO"}, "warnings": []}
+    with (
+        patch.object(web_app, "_require_admin", return_value="admin"),
+        patch.object(
+            web_app,
+            "preview_pimcore_template",
+            return_value=expected,
+            create=True,
+        ),
+    ):
+        response = client.post(
+            "/api/settings/pimcore/template-preview",
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+
+
+def test_template_preview_fills_missing_product_placeholders_from_saved_entry():
+    payload = {
+        "mappings": [
+            {
+                "source": "TITLE",
+                "label": "Nazwa",
+                "pimcore_field": "title",
+                "type": "input",
+                "parser": "text",
+                "value_template": "{PRODUCT:name|keep} - {PRODUCT:type|keep}",
+            }
+        ],
+        "target_source": "TITLE",
+        "product_values": {},
+        "values": {},
+    }
+    records = {
+        web_data.ENTRY_RECORDS_KEY: [
+            {
+                web_data.NAME_HEADER: "Vivo",
+                web_data.TYPE_HEADER: "Komoda",
+                web_data.MODEL_HEADER: "M1",
+                web_data.COLOR1_HEADER: "bialy",
+                web_data.EAN_HEADER: "5904804578169",
+            }
+        ]
+    }
+
+    with patch.object(web_data, "prepare_excel_lists", return_value=records):
+        result = web_data.preview_pimcore_template(payload)
+
+    assert result["values"]["TITLE"] == "Vivo - Komoda"
+
+
+def test_admin_test_sample_route_returns_fresh_editable_values():
+    client = TestClient(web_app.app)
+    expected = {
+        "form_schema": [{"source": "EAN"}],
+        "values": {"EAN": "5904804578169"},
+        "warnings": [],
+    }
+    with (
+        patch.object(web_app, "_require_admin", return_value="admin"),
+        patch.object(
+            web_app,
+            "pimcore_test_sample",
+            return_value=expected,
+            create=True,
+        ),
+    ):
+        response = client.post("/api/settings/pimcore/test-sample")
+
+    assert response.status_code == 200
+    assert response.json() == expected
+
+
+def test_test_sample_renders_product_placeholders_from_saved_entry_when_available():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update(
+        {
+            "enabled": True,
+            "setup_complete": True,
+            "field_mappings": [
+                {
+                    "source": "TITLE",
+                    "label": "Title",
+                    "pimcore_field": "title",
+                    "type": "input",
+                    "parser": "text",
+                    "value_template": "{PRODUCT:name|keep} - {PRODUCT:type|keep}",
+                }
+            ],
+        }
+    )
+    records = {
+        web_data.ENTRY_RECORDS_KEY: [
+            {
+                web_data.NAME_HEADER: "Vivo",
+                web_data.TYPE_HEADER: "Komoda",
+                web_data.MODEL_HEADER: "M1",
+                web_data.COLOR1_HEADER: "bialy",
+                web_data.EAN_HEADER: "5904804578169",
+            }
+        ]
+    }
+
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "prepare_excel_lists", return_value=records),
+    ):
+        sample = web_data.pimcore_test_sample()
+
+    assert sample["values"]["TITLE"] == "Vivo - Komoda"
+
+
+def test_test_sample_is_available_when_complete_integration_is_temporarily_disabled():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update(
+        {
+            "enabled": False,
+            "setup_complete": True,
+            "field_mappings": [
+                {
+                    "source": "SKU",
+                    "label": "SKU",
+                    "pimcore_field": "sku",
+                    "type": "input",
+                    "parser": "text",
+                }
+            ],
+        }
+    )
+
+    with patch.object(web_data.config, "CONFIG", cfg):
+        sample = web_data.pimcore_test_sample()
+
+    assert sample["values"]["SKU"].startswith("TEST_SKU_")
+
+
+def test_logged_in_user_can_render_only_saved_templates():
+    client = TestClient(web_app.app)
+    expected = {"values": {"TITLE": "VIVO"}, "warnings": []}
+    with (
+        patch.object(web_app, "_require_user", return_value="operator"),
+        patch.object(
+            web_app,
+            "render_saved_pimcore_templates",
+            return_value=expected,
+            create=True,
+        ) as render,
+    ):
+        response = client.post(
+            "/api/pimcore/render-templates",
+            json={
+                "product_values": {"name": "Vivo"},
+                "values": {},
+                "targets": ["TITLE"],
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    render.assert_called_once_with({"name": "Vivo"}, {}, ["TITLE"])

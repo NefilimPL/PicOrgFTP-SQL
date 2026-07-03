@@ -240,6 +240,7 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("pimcoreHistoryModal", html.ids)
         self.assertIn("pimcoreTestForm", html.ids)
         self.assertIn("pimcoreLiveLog", html.ids)
+        self.assertIn("pimcoreTestRegenerateButton", html.button_ids)
 
     def test_pimcore_setup_wizard_has_four_steps_and_admin_controls(self) -> None:
         html = _parse(INDEX_HTML)
@@ -271,10 +272,126 @@ class WebUiIntegrityTests(unittest.TestCase):
             "pimcoreEditModal",
             "pimcoreEditForm",
             "pimcoreEditSubmitButton",
+            "pimcoreEditRecalculateAllButton",
             "pimcoreEditCancelButton",
             "pimcoreEditStatus",
         ):
             self.assertIn(element_id, html.ids)
+
+    def test_pimcore_template_builder_modal_has_preview_and_translation_controls(self) -> None:
+        html = _parse(INDEX_HTML)
+
+        for element_id in (
+            "pimcoreTemplateModal",
+            "pimcoreTemplateText",
+            "pimcoreTemplateSources",
+            "pimcoreTemplatePreview",
+            "pimcoreTemplateTranslate",
+            "pimcoreTemplateLanguage",
+            "pimcoreTemplatePreviewButton",
+            "pimcoreTemplateSaveButton",
+        ):
+            self.assertIn(element_id, html.ids)
+
+    def test_app_js_persists_and_previews_pimcore_mapping_templates(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("function openPimcoreTemplateBuilder", source)
+        self.assertIn("function previewPimcoreTemplate", source)
+        self.assertIn("function insertPimcoreTemplateFunction", source)
+        self.assertIn("/api/settings/pimcore/template-preview", source)
+        self.assertIn("row.dataset.valueTemplate", source)
+        self.assertIn("row.dataset.translate", source)
+        self.assertIn("row.dataset.targetLanguage", source)
+        self.assertIn('["Nazwa", "PRODUCT:name"]', source)
+        self.assertIn('insertPimcoreTemplateText(`{${source}|keep}`)', source)
+
+    def test_runtime_pimcore_forms_load_samples_and_recalculate_saved_templates(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("function populatePimcoreRuntimeForm", source)
+        self.assertIn("async function loadPimcoreTestSample", source)
+        self.assertIn("/api/settings/pimcore/test-sample", source)
+        self.assertIn("/api/pimcore/render-templates", source)
+        self.assertIn("Przelicz pole", source)
+        self.assertIn("pimcore-recalculate-field", source)
+        self.assertIn("async function recalculateAllPimcoreEditFields", source)
+        self.assertIn("pimcoreEditRecalculateAllButton", source)
+
+    def test_pimcore_edit_modal_opens_before_remote_object_load(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("async function openPimcoreEditModal")
+        end = source.index("function closePimcoreEditModal", start)
+        body = source[start:end]
+
+        self.assertIn("++state.pimcoreEditRequestId", body)
+        self.assertIn("Number(state.pimcoreExistingObject?.id || 0)", body)
+        self.assertIn("Nie mozna edytowac produktu Pimcore bez poprawnego ID.", body)
+        self.assertLess(
+            body.index('pimcoreEditModal.classList.add("active")'),
+            body.index("await requestJson"),
+        )
+
+    def test_pimcore_edit_click_resolves_current_ean_before_giving_up(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("async function openPimcoreEditModal")
+        end = source.index("function closePimcoreEditModal", start)
+        body = source[start:end]
+
+        self.assertIn("let objectId = Number(state.pimcoreExistingObject?.id || 0);", body)
+        self.assertIn("const currentEan = productForm.elements.ean.value.trim();", body)
+        self.assertIn("await checkPimcoreProductStatus(currentEan);", body)
+        self.assertIn("objectId = Number(state.pimcoreExistingObject?.id || 0);", body)
+
+    def test_pimcore_status_enables_edit_only_for_positive_object_id(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("async function checkPimcoreProductStatus")
+        end = source.index("function openPimcoreCreateModal", start)
+        body = source[start:end]
+
+        self.assertIn("Number(payload.object?.id || 0)", body)
+        self.assertIn("Pimcore zwrocil produkt bez poprawnego ID", body)
+        self.assertIn("pimcoreEditButton.disabled = false", body)
+
+    def test_pimcore_ean_input_clears_cached_lookup_before_rechecking(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function handlePimcoreEanInput")
+        end = source.index("function schedulePimcoreStatusLookup", start)
+        body = source[start:end]
+
+        self.assertIn('state.pimcoreLastCheckedEan = "";', body)
+        self.assertIn("schedulePimcoreStatusLookup();", body)
+
+    def test_pimcore_metadata_refresh_replaces_current_settings_form(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("async function refreshCompactPimcoreMetadata")
+        end = source.index("function pimcoreCsvImportButton", start)
+        body = source[start:end]
+
+        self.assertIn("renderSettings();", body)
+        self.assertNotIn("renderSettingsPimcore();", body)
+
+    def test_loading_existing_entry_triggers_pimcore_status_lookup(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function fillForm")
+        end = source.index("async function refreshData", start)
+        body = source[start:end]
+
+        self.assertIn("productForm.elements.ean.value = entry.ean || \"\";", body)
+        self.assertIn("handlePimcoreEanInput();", body)
+
+    def test_pimcore_ui_uses_example_placeholder_without_private_default(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        html_source = INDEX_HTML.read_text(encoding="utf-8")
+        css = (ROOT / "picorgftp_sql" / "web" / "static" / "app.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn("http://10.10.0.5", source)
+        self.assertIn("http://twoj-adres-pimcore.example", source)
+        self.assertIn("20260703-pimcore-templates", html_source)
+        self.assertIn("flex-wrap: wrap", css[css.index(".lookup-actions"):])
+        self.assertNotIn(".lookup-actions #pimcoreEditButton {\n  min-width", css)
 
     def test_slot_template_keeps_preview_and_file_input_controls(self) -> None:
         html = _parse(INDEX_HTML)

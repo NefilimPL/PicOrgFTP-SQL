@@ -490,9 +490,14 @@ h2 {
 }
 
 .lookup-actions {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+.lookup-actions > button {
+  flex: 1 1 150px;
+  min-width: 0;
 }
 
 .entry-select-field {
@@ -1037,7 +1042,7 @@ h2 {
 
 .pimcore-setup-field-row {
   display: grid;
-  grid-template-columns: 120px minmax(120px, .8fr) minmax(180px, 1fr) 120px;
+  grid-template-columns: 120px minmax(120px, .8fr) minmax(180px, 1fr) 120px 120px;
   gap: 8px;
   align-items: center;
   min-width: 0;
@@ -1047,7 +1052,7 @@ h2 {
 
 .pimcore-setup-field-header {
   display: grid;
-  grid-template-columns: 120px minmax(120px, .8fr) minmax(180px, 1fr) 120px;
+  grid-template-columns: 120px minmax(120px, .8fr) minmax(180px, 1fr) 120px 120px;
   gap: 8px;
   padding: 8px 0;
   color: var(--muted);
@@ -1077,7 +1082,7 @@ h2 {
 
 .pimcore-mapping-row {
   display: grid;
-  grid-template-columns: 1.2fr 1.2fr 1.2fr 110px 90px 36px 1fr 130px auto;
+  grid-template-columns: 1.2fr 1.2fr 1.2fr 110px 90px 36px 1fr 130px 120px auto;
   align-items: center;
   gap: 8px;
   min-width: 0;
@@ -1123,7 +1128,7 @@ h2 {
 
 .pimcore-simple-mapping-row {
   display: grid;
-  grid-template-columns: 42px minmax(140px, 1fr) minmax(180px, 1.2fr) 92px auto;
+  grid-template-columns: 42px minmax(140px, 1fr) minmax(180px, 1.2fr) 92px 120px auto;
   gap: 8px;
   align-items: center;
   min-width: 0;
@@ -1807,13 +1812,84 @@ button.slot-badge.on:hover {
 }
 
 @media (max-width: 920px) {
-  .pimcore-simple-mapping-row {
+  .pimcore-simple-mapping-row,
+  .pimcore-template-layout,
+  .pimcore-template-translation {
     grid-template-columns: 1fr;
   }
 }
 
 .pimcore-test-panel {
   width: min(1400px, calc(100vw - 32px));
+}
+
+.pimcore-template-panel {
+  width: min(1180px, calc(100vw - 32px));
+}
+
+.pimcore-template-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(280px, .75fr);
+  gap: 18px;
+  min-height: 0;
+}
+
+.pimcore-template-layout > *,
+.pimcore-template-editor,
+.pimcore-template-translation {
+  min-width: 0;
+}
+
+.pimcore-template-editor {
+  display: grid;
+  gap: 6px;
+}
+
+.pimcore-template-editor textarea {
+  width: 100%;
+  min-height: 130px;
+  resize: vertical;
+  font-family: Consolas, "Courier New", monospace;
+}
+
+.pimcore-template-translation {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(180px, .7fr);
+  align-items: end;
+  gap: 12px;
+}
+
+.pimcore-template-tokens {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 180px;
+  overflow: auto;
+  margin-bottom: 12px;
+}
+
+.pimcore-template-tokens button {
+  min-height: 32px;
+  padding: 5px 8px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+}
+
+.pimcore-template-result {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.pimcore-template-preview {
+  display: block;
+  min-height: 48px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .pimcore-test-layout {
@@ -1962,10 +2038,6 @@ button.slot-badge.on:hover {
   width: min(980px, calc(100vw - 32px));
 }
 
-.lookup-actions #pimcoreEditButton {
-  min-width: 170px;
-}
-
 .pimcore-runtime-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1982,6 +2054,25 @@ button.slot-badge.on:hover {
   display: grid;
   gap: 6px;
   min-width: 0;
+}
+
+.pimcore-runtime-field-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+.pimcore-runtime-field-row input {
+  min-width: 0;
+}
+
+.pimcore-recalculate-field {
+  width: 34px;
+  min-width: 34px;
+  min-height: 34px;
+  color: var(--text);
 }
 
 .log-category,
