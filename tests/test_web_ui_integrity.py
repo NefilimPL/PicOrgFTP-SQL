@@ -307,6 +307,7 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn('insertPimcoreTemplateText(`{${source}|keep}`)', source)
         self.assertIn("PIMCORE_TEMPLATE_MATH_TOKENS", source)
         self.assertIn('["Mnoz", "*"]', source)
+        self.assertIn('["Oblicz", "oblicz()"]', source)
         self.assertIn("insertPimcoreTemplateText(token)", source)
 
     def test_runtime_pimcore_forms_load_samples_and_recalculate_saved_templates(self) -> None:

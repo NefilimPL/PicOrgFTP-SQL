@@ -51,6 +51,12 @@ class GroupNode:
     position: int
 
 
+@dataclass(frozen=True)
+class CalcNode:
+    children: tuple[object, ...]
+    position: int
+
+
 def _split_quoted(value: str, delimiter: str) -> list[str]:
     parts: list[str] = []
     current: list[str] = []
@@ -102,6 +108,7 @@ def _arguments(value: str, position: int) -> tuple[str, ...]:
 
 
 MATH_LITERAL_CHARS = frozenset("0123456789+-*/()., \t\r\n")
+CALC_FUNCTION_NAMES = ("oblicz", "calc")
 
 
 def _literal_text(nodes: tuple[object, ...]) -> str | None:
@@ -118,6 +125,19 @@ def _is_math_literal_group(text: str) -> bool:
     return bool(stripped) and any(char.isdigit() for char in stripped) and all(
         char in MATH_LITERAL_CHARS for char in stripped
     )
+
+
+def _calc_literal_prefix(literal: list[str]) -> str | None:
+    text = "".join(literal)
+    folded = text.casefold()
+    for name in CALC_FUNCTION_NAMES:
+        if not folded.endswith(name):
+            continue
+        prefix = text[: -len(name)]
+        if prefix and (prefix[-1].isalnum() or prefix[-1] == "_"):
+            continue
+        return prefix
+    return None
 
 
 def _placeholder(content: str, position: int) -> PlaceholderNode:
@@ -189,6 +209,23 @@ class _Parser:
                 nodes.append(self._read_placeholder())
                 continue
             if char == "(":
+                calc_prefix = _calc_literal_prefix(literal)
+                if calc_prefix is not None:
+                    if calc_prefix:
+                        nodes.append(LiteralNode(calc_prefix))
+                    literal = []
+                    start = self.index
+                    self.index += 1
+                    children = self._sequence(")", depth + 1)
+                    if self.index >= len(self.template):
+                        raise TemplateError(
+                            "unclosed_calc",
+                            "Niezamknieta funkcja oblicz.",
+                            start,
+                        )
+                    self.index += 1
+                    nodes.append(CalcNode(children, start))
+                    continue
                 if literal:
                     nodes.append(LiteralNode("".join(literal)))
                     literal = []
@@ -529,6 +566,8 @@ def _math_skeleton(nodes: tuple[object, ...]) -> str:
             output.append("(")
             output.append(_math_skeleton(node.children))
             output.append(")")
+        elif isinstance(node, CalcNode):
+            output.append("1")
     return "".join(output)
 
 
@@ -540,9 +579,14 @@ def render_template(template: object, resolver: Callable[[str], object]) -> str:
     nodes = parse_template(template)
     preserve_math_groups = _is_math_template(nodes)
 
-    def render_nodes(nodes: tuple[object, ...]) -> tuple[str, list[str]]:
+    def render_nodes(
+        nodes: tuple[object, ...],
+        *,
+        force_math_groups: bool = False,
+    ) -> tuple[str, list[str]]:
         output: list[str] = []
         resolved: list[str] = []
+        keep_group_parentheses = preserve_math_groups or force_math_groups
         for node in nodes:
             if isinstance(node, LiteralNode):
                 output.append(node.value)
@@ -555,15 +599,29 @@ def render_template(template: object, resolver: Callable[[str], object]) -> str:
                 output.append(value)
                 resolved.append(value)
             elif isinstance(node, GroupNode):
-                value, group_values = render_nodes(node.children)
+                value, group_values = render_nodes(
+                    node.children,
+                    force_math_groups=force_math_groups,
+                )
                 group_has_values = bool(group_values) and all(
                     item.strip() for item in group_values
                 )
                 if group_has_values:
-                    output.append(f"({value})" if preserve_math_groups else value)
+                    output.append(f"({value})" if keep_group_parentheses else value)
                 else:
                     output.append("")
                 resolved.extend(group_values)
+            elif isinstance(node, CalcNode):
+                value, calc_values = render_nodes(
+                    node.children,
+                    force_math_groups=True,
+                )
+                calculated = _evaluate_math_expression(value)
+                if calculated is None:
+                    raise _math_error(node.position)
+                output.append(calculated)
+                resolved.extend(calc_values)
+                resolved.append(calculated)
         text = "".join(output)
         if len(text) > MAX_OUTPUT_LENGTH:
             raise TemplateError(
@@ -588,7 +646,7 @@ def placeholder_sources(template: object) -> tuple[str, ...]:
         for node in nodes:
             if isinstance(node, PlaceholderNode) and node.source not in sources:
                 sources.append(node.source)
-            elif isinstance(node, GroupNode):
+            elif isinstance(node, (GroupNode, CalcNode)):
                 visit(node.children)
 
     visit(parse_template(template))

@@ -89,6 +89,40 @@ def test_render_template_rejects_math_division_by_zero():
     assert captured.value.code == "math_division_by_zero"
 
 
+def test_render_template_calculates_oblicz_block_inside_mixed_text():
+    template = (
+        'oblicz(2*(5415413+{PIMCORE:parcel_11_weight|keep|default:"1110"})) '
+        '(/{PRODUCT:model|keep})'
+    )
+
+    assert render_template(
+        template,
+        resolver(
+            {
+                "pimcore:parcel_11_weight": "",
+                "product:model": "M-20",
+            }
+        ),
+    ) == "10833046 /M-20"
+
+
+def test_render_template_calculates_calc_alias():
+    assert render_template(
+        "calc(2*(2+{PIMCORE:parcel_11_weight|keep}))",
+        resolver({"pimcore:parcel_11_weight": "3"}),
+    ) == "10"
+
+
+def test_render_template_rejects_text_inside_oblicz_block():
+    with pytest.raises(TemplateError) as captured:
+        render_template(
+            "oblicz(2+{PRODUCT:model|keep})",
+            resolver({"product:model": "M-20"}),
+        )
+
+    assert captured.value.code == "invalid_math_expression"
+
+
 @pytest.mark.parametrize(
     ("template", "code"),
     [

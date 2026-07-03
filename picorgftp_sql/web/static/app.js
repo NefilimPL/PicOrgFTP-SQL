@@ -6279,6 +6279,7 @@ const PIMCORE_TEMPLATE_FUNCTIONS = [
 ];
 
 const PIMCORE_TEMPLATE_MATH_TOKENS = [
+  ["Oblicz", "oblicz()"],
   ["Dodaj", "+"],
   ["Odejmij", "-"],
   ["Mnoz", "*"],
