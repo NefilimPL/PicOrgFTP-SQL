@@ -21,6 +21,8 @@ from ..pimcore_config import (
     parse_mapping_value,
 )
 
+LOCALIZED_FIELD_LANGUAGES = ("en", "pl")
+
 
 @dataclass
 class PimcoreApiError(Exception):
@@ -422,34 +424,68 @@ def discover_classes(api: PimcoreClient) -> list[dict[str, str]]:
 
 
 def extract_class_field_records(payload: object) -> list[dict[str, object]]:
-    fields: dict[str, dict[str, object]] = {}
+    fields: dict[tuple[str, str], dict[str, object]] = {}
 
-    def visit(node: object, language: str | None = None) -> None:
+    def add_field(
+        *,
+        name: str,
+        label: str,
+        node_type: str,
+        language: str | None,
+    ) -> None:
+        parser = SUPPORTED_FIELD_PARSERS.get(node_type, "")
+        field_label = f"{label} [{language}]" if language else label
+        fields[(name, language or "")] = {
+            "name": name,
+            "label": field_label,
+            "type": node_type,
+            "language": language,
+            "parser": parser,
+            "supported": bool(parser),
+            "unsupported_reason": (
+                "" if parser else f"Typ {node_type} nie jest obslugiwany."
+            ),
+        }
+
+    def visit(
+        node: object,
+        language: str | None = None,
+        localized: bool = False,
+    ) -> None:
         if isinstance(node, dict):
             node_type = str(node.get("fieldtype") or node.get("datatype") or "").lower()
             name = str(node.get("name") or "").strip()
             current_language = str(node.get("language") or language or "").strip() or None
-            if name and node_type:
-                parser = SUPPORTED_FIELD_PARSERS.get(node_type, "")
-                fields[name] = {
-                    "name": name,
-                    "label": str(node.get("title") or node.get("label") or name).strip(),
-                    "type": node_type,
-                    "language": current_language,
-                    "parser": parser,
-                    "supported": bool(parser),
-                    "unsupported_reason": (
-                        "" if parser else f"Typ {node_type} nie jest obslugiwany."
-                    ),
-                }
+            is_localized_container = node_type == "localizedfields"
+            inside_localized = localized or is_localized_container
+            if name and node_type and not is_localized_container:
+                label = str(node.get("title") or node.get("label") or name).strip()
+                if inside_localized and not current_language:
+                    for item_language in LOCALIZED_FIELD_LANGUAGES:
+                        add_field(
+                            name=name,
+                            label=label,
+                            node_type=node_type,
+                            language=item_language,
+                        )
+                else:
+                    add_field(
+                        name=name,
+                        label=label,
+                        node_type=node_type,
+                        language=current_language,
+                    )
             for value in node.values():
-                visit(value, current_language)
+                visit(value, current_language, inside_localized)
         elif isinstance(node, list):
             for value in node:
-                visit(value, language)
+                visit(value, language, localized)
 
     visit(payload)
-    return sorted(fields.values(), key=lambda item: str(item["name"]).casefold())
+    return sorted(
+        fields.values(),
+        key=lambda item: (str(item["name"]).casefold(), str(item.get("language") or "")),
+    )
 
 
 def discover_fields(api: PimcoreClient, class_id: object) -> list[dict[str, object]]:
@@ -995,27 +1031,60 @@ def merge_product_update_payload(
     existing = current_data.get("elements") if isinstance(current_data.get("elements"), list) else []
     used: set[tuple[str, str]] = set()
 
-    def merge_node(raw: object) -> object:
+    def merge_node(raw: object, *, in_localized: bool = False) -> object:
         if isinstance(raw, list):
-            return [merge_node(item) for item in raw]
+            return [merge_node(item, in_localized=in_localized) for item in raw]
         if not isinstance(raw, dict):
             return raw
         item = dict(raw)
+        is_localized_container = (
+            str(item.get("type") or "").casefold() == "localizedfields"
+            or str(item.get("name") or "").casefold() == "localizedfields"
+        )
         key = (str(item.get("name") or ""), str(item.get("language") or ""))
         replacement = replacement_keys.get(key)
-        if replacement:
+        replacement_language = str(replacement.get("language") or "") if replacement else ""
+        if replacement and (not replacement_language or in_localized):
             used.add(key)
             item.update(replacement)
             return item
         for field, value in list(item.items()):
             if isinstance(value, (dict, list)):
-                item[field] = merge_node(value)
+                item[field] = merge_node(
+                    value,
+                    in_localized=in_localized or is_localized_container,
+                )
         return item
 
     merged_elements = [merge_node(item) for item in existing]
-    merged_elements.extend(
-        dict(item) for key, item in replacement_keys.items() if key not in used
-    )
+
+    def localized_container() -> dict[str, object]:
+        for item in merged_elements:
+            if not isinstance(item, dict):
+                continue
+            if (
+                str(item.get("type") or "").casefold() == "localizedfields"
+                or str(item.get("name") or "").casefold() == "localizedfields"
+            ):
+                if not isinstance(item.get("value"), list):
+                    item["value"] = []
+                return item
+        item = {"type": "localizedfields", "name": "localizedfields", "value": []}
+        merged_elements.append(item)
+        return item
+
+    for key, item in replacement_keys.items():
+        if key in used:
+            continue
+        if str(item.get("language") or ""):
+            container = localized_container()
+            value = container.get("value")
+            if not isinstance(value, list):
+                value = []
+                container["value"] = value
+            value.append(dict(item))
+        else:
+            merged_elements.append(dict(item))
     payload = dict(current_data)
     payload["elements"] = merged_elements
     payload["published"] = True

@@ -2056,6 +2056,25 @@ button.slot-badge.on:hover {
   min-width: 0;
 }
 
+.pimcore-runtime-field-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+.pimcore-runtime-field-row input {
+  min-width: 0;
+}
+
+.pimcore-recalculate-field {
+  width: 34px;
+  min-width: 34px;
+  min-height: 34px;
+  color: var(--text);
+}
+
 .log-category,
 .log-block,
 .log-event {

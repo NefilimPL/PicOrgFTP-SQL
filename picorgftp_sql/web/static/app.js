@@ -261,6 +261,7 @@ const pimcoreCreateStatus = document.querySelector("#pimcoreCreateStatus");
 const pimcoreEditModal = document.querySelector("#pimcoreEditModal");
 const pimcoreEditForm = document.querySelector("#pimcoreEditForm");
 const pimcoreEditSubmitButton = document.querySelector("#pimcoreEditSubmitButton");
+const pimcoreEditRecalculateAllButton = document.querySelector("#pimcoreEditRecalculateAllButton");
 const pimcoreEditCancelButton = document.querySelector("#pimcoreEditCancelButton");
 const pimcoreEditStatus = document.querySelector("#pimcoreEditStatus");
 const pimcoreEditObjectInfo = document.querySelector("#pimcoreEditObjectInfo");
@@ -6277,6 +6278,49 @@ const PIMCORE_TEMPLATE_FUNCTIONS = [
   ["Liczba", '|number:2,","," "'],
 ];
 
+function pimcoreFieldLanguage(value = {}) {
+  return String(value?.language || "").trim();
+}
+
+function pimcoreFieldSource(name, language) {
+  const fieldName = String(name || "").trim();
+  const fieldLanguage = String(language || "").trim();
+  if (!fieldName || !fieldLanguage) return fieldName;
+  const suffix = `_${fieldLanguage.toUpperCase()}`;
+  return fieldName.toUpperCase().endsWith(suffix) ? fieldName : `${fieldName}${suffix}`;
+}
+
+function pimcoreFieldOptionText(field = {}) {
+  const language = pimcoreFieldLanguage(field);
+  const label = field.label || field.name || "";
+  const localized =
+    language && !String(label).includes(`[${language}]`) ? ` [${language}]` : "";
+  return `${label}${localized} - ${field.type || "input"}`;
+}
+
+function pimcoreFieldsMatch(field = {}, mapping = {}) {
+  return (
+    String(field.name || "") === String(mapping.pimcore_field || "") &&
+    pimcoreFieldLanguage(field) === pimcoreFieldLanguage(mapping)
+  );
+}
+
+function pimcoreSelectedMappingSource(select) {
+  const option = select?.selectedOptions?.[0];
+  return pimcoreFieldSource(select?.value || "", option?.dataset.language || "");
+}
+
+function pimcoreTemplateLanguageForRow(row) {
+  if (!row) return "";
+  if (row.classList.contains("pimcore-setup-field-row")) {
+    return row.dataset.fieldLanguage || "";
+  }
+  if (row.classList.contains("pimcore-simple-mapping-row")) {
+    return row.querySelector('[name="mapping_target"]')?.selectedOptions[0]?.dataset.language || "";
+  }
+  return row.querySelector('[name="mapping_language"]')?.value.trim() || "";
+}
+
 function pimcoreTemplateBuilderButton(row) {
   const button = document.createElement("button");
   button.type = "button";
@@ -6312,10 +6356,15 @@ function pimcoreTemplateSource(row) {
     const eanTarget =
       row.closest(".pimcore-setup-body")?.querySelector('[name="ean_target"]')?.value ||
       state.pimcoreSetup?.eanTarget;
-    return row.dataset.fieldName === eanTarget ? "EAN" : row.dataset.fieldName || "";
+    return row.dataset.fieldName === eanTarget
+      ? "EAN"
+      : pimcoreFieldSource(row.dataset.fieldName, row.dataset.fieldLanguage);
   }
   if (row.classList.contains("pimcore-simple-mapping-row")) {
-    return row.dataset.source || row.querySelector('[name="mapping_target"]')?.value || "";
+    return (
+      row.dataset.source ||
+      pimcoreSelectedMappingSource(row.querySelector('[name="mapping_target"]'))
+    );
   }
   return row.querySelector('[name="mapping_source"]')?.value.trim() || "";
 }
@@ -6415,7 +6464,7 @@ function openPimcoreTemplateBuilder(row) {
   state.pimcoreTemplateRow = row;
   pimcoreTemplateText.value = row.dataset.valueTemplate || "";
   pimcoreTemplateTranslate.checked = row.dataset.translate === "true";
-  pimcoreTemplateLanguage.value = row.dataset.targetLanguage || "";
+  pimcoreTemplateLanguage.value = row.dataset.targetLanguage || pimcoreTemplateLanguageForRow(row);
   pimcoreTemplateLanguage.disabled = !pimcoreTemplateTranslate.checked;
   pimcoreTemplateTarget.textContent = `Pole: ${pimcoreTemplateSource(row) || "nowe mapowanie"}`;
   pimcoreTemplatePreview.textContent = "Wpisz szablon i uruchom podglad.";
@@ -6433,7 +6482,8 @@ function pimcoreTemplatePreviewPayload() {
   if (!target) throw new Error("Najpierw wybierz pole Pimcore dla tego mapowania.");
   target.value_template = pimcoreTemplateText.value;
   target.translate = pimcoreTemplateTranslate.checked;
-  target.target_language = pimcoreTemplateLanguage.value.trim() || null;
+  target.target_language =
+    pimcoreTemplateLanguage.value.trim() || pimcoreTemplateLanguageForRow(row) || null;
   return {
     mappings,
     target_source: targetSource,
@@ -6470,7 +6520,7 @@ function savePimcoreTemplateBuilder() {
   if (!row) return;
   const template = pimcoreTemplateText.value.trim();
   const translate = pimcoreTemplateTranslate.checked;
-  const language = pimcoreTemplateLanguage.value.trim();
+  const language = pimcoreTemplateLanguage.value.trim() || pimcoreTemplateLanguageForRow(row);
   if (translate && !template) {
     pimcoreTemplateStatus.textContent = "Tlumaczenie wymaga szablonu.";
     return;
@@ -6481,7 +6531,8 @@ function savePimcoreTemplateBuilder() {
   }
   row.dataset.valueTemplate = template;
   row.dataset.translate = translate ? "true" : "false";
-  row.dataset.targetLanguage = language;
+  row.dataset.targetLanguage = translate ? language : "";
+  if (translate) pimcoreTemplateLanguage.value = language;
   updatePimcoreTemplateButton(row);
   closePimcoreTemplateBuilder();
 }
@@ -6623,7 +6674,7 @@ function pimcoreCompactFields(pimcore = {}) {
   for (const mapping of pimcore.field_mappings || []) {
     if (
       mapping.pimcore_field &&
-      !fields.some((field) => field.name === mapping.pimcore_field)
+      !fields.some((field) => pimcoreFieldsMatch(field, mapping))
     ) {
       fields.push({
         name: mapping.pimcore_field,
@@ -6661,7 +6712,7 @@ function pimcoreSimpleMappingRow(mapping = {}, fields = []) {
   target.setAttribute("aria-label", "Pole Pimcore");
   if (
     mapping.pimcore_field &&
-    !availableFields.some((field) => field.name === mapping.pimcore_field)
+    !availableFields.some((field) => pimcoreFieldsMatch(field, mapping))
   ) {
     availableFields.push({
       name: mapping.pimcore_field,
@@ -6675,9 +6726,9 @@ function pimcoreSimpleMappingRow(mapping = {}, fields = []) {
   for (const field of availableFields) {
     const option = document.createElement("option");
     option.value = field.name;
-    option.textContent = `${field.label || field.name} - ${field.type || "input"}`;
+    option.textContent = pimcoreFieldOptionText(field);
     option.disabled = field.supported === false;
-    option.selected = field.name === mapping.pimcore_field;
+    option.selected = pimcoreFieldsMatch(field, mapping);
     option.dataset.type = field.type || "input";
     option.dataset.parser = field.parser || "text";
     option.dataset.language = field.language || "";
@@ -6698,7 +6749,12 @@ function pimcoreSimpleMappingRow(mapping = {}, fields = []) {
   row.dataset.valueTemplate = mapping.value_template || "";
   row.dataset.translate = mapping.translate ? "true" : "false";
   row.dataset.targetLanguage = mapping.target_language || "";
-  target.addEventListener("change", () => updatePimcoreTemplateButton(row));
+  target.addEventListener("change", () => {
+    if (!row.dataset.source && !label.value.trim()) {
+      label.value = pimcoreSelectedMappingSource(target);
+    }
+    updatePimcoreTemplateButton(row);
+  });
   row.append(use, label, target, required, template, remove);
   updatePimcoreTemplateButton(row);
   return row;
@@ -6710,7 +6766,7 @@ function collectSimplePimcoreMappings(form) {
     .map((row) => {
       const select = row.querySelector('[name="mapping_target"]');
       const option = select?.selectedOptions[0];
-      const source = row.dataset.source || select?.value || "";
+      const source = row.dataset.source || pimcoreSelectedMappingSource(select);
       return {
         source,
         label: row.querySelector('[name="mapping_label"]').value.trim() || source,
@@ -7224,7 +7280,7 @@ function pimcoreManualLocationFallback() {
 }
 
 function pimcoreSetupFieldRow(field, mappings, eanTarget) {
-  const existing = mappings.find((item) => item.pimcore_field === field.name) || {};
+  const existing = mappings.find((item) => pimcoreFieldsMatch(field, item)) || {};
   const row = document.createElement("div");
   const use = document.createElement("input");
   const label = document.createElement("input");
@@ -7256,7 +7312,7 @@ function pimcoreSetupFieldRow(field, mappings, eanTarget) {
   use.setAttribute("aria-label", `Zapisz pole ${field.name}`);
   required.setAttribute("aria-label", `Pole ${field.name} wymagane`);
   useLabel.append(use, document.createTextNode(" Zapisz"));
-  fieldName.textContent = field.name;
+  fieldName.textContent = field.language ? `${field.name} [${field.language}]` : field.name;
   labelWrapper.append(label);
   requiredLabel.append(required, document.createTextNode(" Wymagane"));
   const template = pimcoreTemplateBuilderButton(row);
@@ -7276,7 +7332,10 @@ function collectPimcoreSetupMappings(container) {
         row.querySelector('[name="mapping_use"]')?.checked
     )
     .map((row) => {
-      const source = row.dataset.fieldName === eanTarget ? "EAN" : row.dataset.fieldName;
+      const source =
+        row.dataset.fieldName === eanTarget
+          ? "EAN"
+          : pimcoreFieldSource(row.dataset.fieldName, row.dataset.fieldLanguage);
       return {
         source,
         label: row.querySelector('[name="mapping_label"]').value.trim() || source,
@@ -7471,7 +7530,7 @@ function populatePimcoreRuntimeForm(
     const label = document.createElement("label");
     const heading = document.createElement("span");
     const input = document.createElement("input");
-    const actions = document.createElement("span");
+    const fieldRow = document.createElement("span");
     label.className = "pimcore-runtime-field";
     heading.textContent = `${mapping.label || mapping.source}${mapping.required ? " *" : ""}`;
     input.name = mapping.source;
@@ -7487,12 +7546,15 @@ function populatePimcoreRuntimeForm(
       mapping.source === "EAN" && legacyEanIds[idPrefix]
         ? legacyEanIds[idPrefix]
         : `${idPrefix}-${String(mapping.source || "field").replace(/[^A-Za-z0-9_-]/g, "-")}`;
-    actions.className = "pimcore-runtime-field-actions";
+    fieldRow.className = "pimcore-runtime-field-row";
+    fieldRow.appendChild(input);
     if (allowRecalculate && mapping.value_template) {
       const recalculate = document.createElement("button");
       recalculate.type = "button";
-      recalculate.className = "ghost-button";
-      recalculate.textContent = "Przelicz pole";
+      recalculate.className = "ghost-button icon-button pimcore-recalculate-field";
+      recalculate.textContent = "↻";
+      recalculate.title = `Przelicz pole ${mapping.label || mapping.source}`;
+      recalculate.setAttribute("aria-label", recalculate.title);
       recalculate.addEventListener("click", async () => {
         recalculate.disabled = true;
         if (status) status.textContent = `Przeliczanie pola ${mapping.label || mapping.source}...`;
@@ -7505,10 +7567,9 @@ function populatePimcoreRuntimeForm(
           recalculate.disabled = false;
         }
       });
-      actions.appendChild(recalculate);
+      fieldRow.appendChild(recalculate);
     }
-    label.append(heading, input);
-    if (actions.childElementCount) label.appendChild(actions);
+    label.append(heading, fieldRow);
     form.appendChild(label);
   }
 }
@@ -7538,6 +7599,28 @@ async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
     }
   }
   return result;
+}
+
+function pimcoreEditHasRuntimeTemplates() {
+  return (state.pimcoreEditSchema || []).some((mapping) => mapping.value_template);
+}
+
+async function recalculateAllPimcoreEditFields() {
+  if (!pimcoreEditForm || !pimcoreEditHasRuntimeTemplates()) return;
+  if (pimcoreEditRecalculateAllButton) pimcoreEditRecalculateAllButton.disabled = true;
+  if (pimcoreEditStatus) pimcoreEditStatus.textContent = "Przeliczanie wszystkich pol...";
+  try {
+    const result = await renderPimcoreRuntimeTemplates(pimcoreEditForm, state.pimcoreEditSchema);
+    if (pimcoreEditStatus) {
+      pimcoreEditStatus.textContent = pimcoreRuntimeWarnings(result.warnings);
+    }
+  } catch (error) {
+    if (pimcoreEditStatus) pimcoreEditStatus.textContent = error.message;
+  } finally {
+    if (pimcoreEditRecalculateAllButton) {
+      pimcoreEditRecalculateAllButton.disabled = !pimcoreEditHasRuntimeTemplates();
+    }
+  }
 }
 
 function openPimcoreWriteTest() {
@@ -7957,6 +8040,7 @@ async function openPimcoreEditModal() {
   pimcoreEditObjectInfo.textContent = `ID ${objectId}`;
   pimcoreEditStatus.textContent = "Pobieranie danych Pimcore...";
   pimcoreEditSubmitButton.disabled = true;
+  if (pimcoreEditRecalculateAllButton) pimcoreEditRecalculateAllButton.disabled = true;
   pimcoreEditModal.classList.add("active");
   try {
     const payload = await requestJson(`/api/pimcore/products/${encodeURIComponent(objectId)}`);
@@ -7990,6 +8074,9 @@ async function openPimcoreEditModal() {
     }
     if (pimcoreEditStatus) pimcoreEditStatus.textContent = "";
     pimcoreEditSubmitButton.disabled = false;
+    if (pimcoreEditRecalculateAllButton) {
+      pimcoreEditRecalculateAllButton.disabled = !pimcoreEditHasRuntimeTemplates();
+    }
   } catch (error) {
     if (requestId !== state.pimcoreEditRequestId) return;
     pimcoreEditForm.textContent = "";
@@ -8001,6 +8088,7 @@ async function openPimcoreEditModal() {
     pimcoreEditForm.appendChild(retry);
     pimcoreEditStatus.textContent = `Nie mozna pobrac danych Pimcore: ${error.message}`;
     formStatus.textContent = pimcoreEditStatus.textContent;
+    if (pimcoreEditRecalculateAllButton) pimcoreEditRecalculateAllButton.disabled = true;
   } finally {
     if (requestId === state.pimcoreEditRequestId && !state.pimcoreEditObjectId) {
       pimcoreEditSubmitButton.disabled = true;
@@ -8016,6 +8104,7 @@ function closePimcoreEditModal() {
   pimcoreEditModal?.classList.remove("active");
   if (pimcoreEditForm) pimcoreEditForm.textContent = "";
   if (pimcoreEditStatus) pimcoreEditStatus.textContent = "";
+  if (pimcoreEditRecalculateAllButton) pimcoreEditRecalculateAllButton.disabled = true;
   state.pimcoreEditObjectId = 0;
   state.pimcoreEditMarker = "";
   state.pimcoreEditSchema = [];
@@ -8552,7 +8641,12 @@ pimcoreTestRegenerateButton?.addEventListener("click", () => {
 
 pimcoreTemplateTranslate?.addEventListener("change", () => {
   pimcoreTemplateLanguage.disabled = !pimcoreTemplateTranslate.checked;
-  if (pimcoreTemplateTranslate.checked) pimcoreTemplateLanguage.focus();
+  if (pimcoreTemplateTranslate.checked) {
+    if (!pimcoreTemplateLanguage.value.trim()) {
+      pimcoreTemplateLanguage.value = pimcoreTemplateLanguageForRow(state.pimcoreTemplateRow);
+    }
+    pimcoreTemplateLanguage.focus();
+  }
 });
 
 pimcoreTemplatePreviewButton?.addEventListener("click", previewPimcoreTemplate);
@@ -8602,6 +8696,7 @@ pimcoreCreateForm?.addEventListener("submit", submitPimcoreRuntimeCreate);
 
 pimcoreEditButton?.addEventListener("click", openPimcoreEditModal);
 pimcoreEditForm?.addEventListener("submit", submitPimcoreRuntimeEdit);
+pimcoreEditRecalculateAllButton?.addEventListener("click", recalculateAllPimcoreEditFields);
 pimcoreEditCancelButton?.addEventListener("click", () => {
   closePimcoreEditModal();
 });

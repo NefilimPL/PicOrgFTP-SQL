@@ -234,6 +234,29 @@ def test_translation_requires_template_and_target_language():
     assert issues == ["Mapowanie 1: wybierz jezyk docelowy tlumaczenia."]
 
 
+def test_field_mapping_issues_allow_same_target_for_different_languages():
+    issues = field_mapping_issues(
+        [
+            {
+                "source": "NAME_EN",
+                "pimcore_field": "name",
+                "type": "input",
+                "parser": "text",
+                "language": "en",
+            },
+            {
+                "source": "NAME_PL",
+                "pimcore_field": "name",
+                "type": "input",
+                "parser": "text",
+                "language": "pl",
+            },
+        ]
+    )
+
+    assert issues == []
+
+
 def test_incomplete_legacy_default_url_is_cleared():
     result = normalize_pimcore_settings({"base_url": "http://10.10.0.5"})
 

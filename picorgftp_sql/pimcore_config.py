@@ -67,7 +67,7 @@ def normalize_field_mapping(raw: object) -> dict[str, Any] | None:
         element_type = "input"
     if parser not in SUPPORTED_PARSERS:
         parser = "text"
-    language = _text(raw.get("language")) or None
+    language = _text(raw.get("language")).lower() or None
     return {
         "source": source,
         "label": _text(raw.get("label")) or source,
@@ -107,7 +107,7 @@ def infer_field_mapping(
         "label": _text(label) or source_text,
         "pimcore_field": target,
         "type": normalized_type,
-        "language": _text(language) or None,
+        "language": _text(language).lower() or None,
         "required": True if is_ean else bool(required),
         "default": "",
         "parser": SUPPORTED_FIELD_PARSERS[normalized_type],
@@ -149,13 +149,14 @@ def field_mapping_issues(raw_mappings: object) -> list[str]:
     }
     issues: list[str] = []
     sources: set[str] = set()
-    targets: set[str] = set()
+    targets: set[tuple[str, str]] = set()
     for index, raw in enumerate(raw_mappings, start=1):
         if not isinstance(raw, dict):
             issues.append(f"Mapowanie {index}: niepoprawny format wiersza.")
             continue
         source = _text(raw.get("source"))
         target = _text(raw.get("pimcore_field"))
+        language = _text(raw.get("language")).lower()
         element_type = _text(raw.get("type")).lower() or "input"
         parser = _text(raw.get("parser")).lower() or "text"
         template = _text(raw.get("value_template"))
@@ -169,8 +170,9 @@ def field_mapping_issues(raw_mappings: object) -> list[str]:
             issues.append(
                 f"Mapowanie {index}: niepoprawne pole Pimcore {target or '[puste]'}."
             )
-        elif target in targets:
-            issues.append(f"Mapowanie {index}: zduplikowane pole Pimcore {target}.")
+        elif (target, language) in targets:
+            suffix = f" ({language})" if language else ""
+            issues.append(f"Mapowanie {index}: zduplikowane pole Pimcore {target}{suffix}.")
         if element_type not in SUPPORTED_ELEMENT_TYPES:
             issues.append(f"Mapowanie {index}: nieobslugiwany typ {element_type}.")
         if parser not in SUPPORTED_PARSERS:
@@ -192,7 +194,7 @@ def field_mapping_issues(raw_mappings: object) -> list[str]:
         if source:
             sources.add(source)
         if PIMCORE_FIELD_NAME.fullmatch(target):
-            targets.add(target)
+            targets.add((target, language))
     try:
         catalog = build_source_catalog(raw_mappings)
         for index, raw in enumerate(raw_mappings, start=1):

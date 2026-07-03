@@ -228,6 +228,17 @@ class DiscoveryClient:
                     "children": [
                         {"fieldtype": "input", "name": "EAN", "title": "EAN"},
                         {"fieldtype": "numeric", "name": "totalWeight", "title": "Waga"},
+                        {
+                            "fieldtype": "localizedfields",
+                            "name": "localizedfields",
+                            "children": [
+                                {
+                                    "fieldtype": "input",
+                                    "name": "MANUFACTURER_NAME",
+                                    "title": "Producent",
+                                }
+                            ],
+                        },
                         {"fieldtype": "manyToManyObjectRelation", "name": "related"},
                     ]
                 }
@@ -253,6 +264,24 @@ def test_discovery_normalizes_classes_fields_and_folders():
             "label": "EAN",
             "type": "input",
             "language": None,
+            "parser": "text",
+            "supported": True,
+            "unsupported_reason": "",
+        },
+        {
+            "name": "MANUFACTURER_NAME",
+            "label": "Producent [en]",
+            "type": "input",
+            "language": "en",
+            "parser": "text",
+            "supported": True,
+            "unsupported_reason": "",
+        },
+        {
+            "name": "MANUFACTURER_NAME",
+            "label": "Producent [pl]",
+            "type": "input",
+            "language": "pl",
             "parser": "text",
             "supported": True,
             "unsupported_reason": "",
@@ -480,6 +509,57 @@ def test_merge_product_update_replaces_nested_localized_value_only():
     localized = next(item for item in payload["elements"] if item["name"] == "localizedfields")
     by_language = {item["language"]: item["value"] for item in localized["value"]}
     assert by_language == {"en": "", "pl": "Bez zmian"}
+
+
+def test_merge_product_update_adds_missing_localized_value_under_container():
+    config = json.loads(json.dumps(PRODUCT_CONFIG))
+    config["field_mappings"].append(
+        {
+            "source": "MANUFACTURER_NAME_EN",
+            "label": "Producent EN",
+            "pimcore_field": "MANUFACTURER_NAME",
+            "type": "input",
+            "language": "en",
+            "required": False,
+            "default": "",
+            "parser": "text",
+        }
+    )
+    current = json.loads(json.dumps(EDIT_OBJECT))
+    current["elements"].append(
+        {
+            "type": "localizedfields",
+            "name": "localizedfields",
+            "value": [
+                {
+                    "type": "input",
+                    "name": "MANUFACTURER_NAME",
+                    "language": "pl",
+                    "value": "Stary producent",
+                }
+            ],
+        }
+    )
+
+    payload = merge_product_update_payload(
+        config,
+        current,
+        {
+            "SKU": "OLD",
+            "EAN": "5904804578169",
+            "MANUFACTURER_NAME_EN": "New manufacturer",
+        },
+    )
+
+    top_level_names = [
+        item["name"]
+        for item in payload["elements"]
+        if item.get("name") == "MANUFACTURER_NAME"
+    ]
+    localized = next(item for item in payload["elements"] if item["name"] == "localizedfields")
+    by_language = {item["language"]: item["value"] for item in localized["value"]}
+    assert top_level_names == []
+    assert by_language == {"pl": "Stary producent", "en": "New manufacturer"}
 
 
 def test_update_product_rejects_changed_marker_before_put():

@@ -272,6 +272,7 @@ class WebUiIntegrityTests(unittest.TestCase):
             "pimcoreEditModal",
             "pimcoreEditForm",
             "pimcoreEditSubmitButton",
+            "pimcoreEditRecalculateAllButton",
             "pimcoreEditCancelButton",
             "pimcoreEditStatus",
         ):
@@ -313,6 +314,9 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("/api/settings/pimcore/test-sample", source)
         self.assertIn("/api/pimcore/render-templates", source)
         self.assertIn("Przelicz pole", source)
+        self.assertIn("pimcore-recalculate-field", source)
+        self.assertIn("async function recalculateAllPimcoreEditFields", source)
+        self.assertIn("pimcoreEditRecalculateAllButton", source)
 
     def test_pimcore_edit_modal_opens_before_remote_object_load(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
