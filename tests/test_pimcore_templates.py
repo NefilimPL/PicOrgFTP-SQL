@@ -43,6 +43,52 @@ def test_render_template_supports_literals_groups_case_and_functions(template, v
     assert render_template(template, resolver(values)) == expected
 
 
+def test_render_template_evaluates_math_expression_with_pimcore_placeholders():
+    template = (
+        "{PIMCORE:parcel_1_weight|keep}+"
+        "({PIMCORE:parcel_1_width|keep}/"
+        "{PIMCORE:parcel_1_depth|keep}/"
+        "{PIMCORE:parcel_1_height|keep})*4"
+    )
+
+    assert render_template(
+        template,
+        resolver(
+            {
+                "pimcore:parcel_1_weight": "10",
+                "pimcore:parcel_1_width": "8",
+                "pimcore:parcel_1_depth": "2",
+                "pimcore:parcel_1_height": "2",
+            }
+        ),
+    ) == "18"
+
+
+def test_render_template_keeps_math_parentheses_for_precedence():
+    assert render_template(
+        "({A|keep}+{B|keep})*{C|keep}",
+        resolver({"a": "2", "b": "3", "c": "4"}),
+    ) == "20"
+
+
+def test_render_template_accepts_decimal_comma_in_math_expression():
+    assert render_template(
+        "{A|keep}+{B|keep}",
+        resolver({"a": "1,5", "b": "2.25"}),
+    ) == "3.75"
+
+
+def test_render_template_leaves_non_math_text_with_operator_unchanged():
+    assert render_template("Waga: {A|keep}+2", resolver({"a": "3"})) == "Waga: 3+2"
+
+
+def test_render_template_rejects_math_division_by_zero():
+    with pytest.raises(TemplateError) as captured:
+        render_template("{A|keep}/{B|keep}", resolver({"a": "1", "b": "0"}))
+
+    assert captured.value.code == "math_division_by_zero"
+
+
 @pytest.mark.parametrize(
     ("template", "code"),
     [

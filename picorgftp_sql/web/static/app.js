@@ -6278,6 +6278,13 @@ const PIMCORE_TEMPLATE_FUNCTIONS = [
   ["Liczba", '|number:2,","," "'],
 ];
 
+const PIMCORE_TEMPLATE_MATH_TOKENS = [
+  ["Dodaj", "+"],
+  ["Odejmij", "-"],
+  ["Mnoz", "*"],
+  ["Dziel", "/"],
+];
+
 function pimcoreFieldLanguage(value = {}) {
   return String(value?.language || "").trim();
 }
@@ -6445,9 +6452,19 @@ function renderPimcoreTemplateTokens(row) {
   const group = document.createElement("button");
   group.type = "button";
   group.className = "ghost-button";
-  group.textContent = "Grupa warunkowa (...)";
+  group.textContent = "Nawiasy (...)";
+  group.title = "Grupa warunkowa albo nawiasy dzialania";
   group.addEventListener("click", () => insertPimcoreTemplateText("", { wrap: true }));
   pimcoreTemplateFunctions.appendChild(group);
+  for (const [label, token] of PIMCORE_TEMPLATE_MATH_TOKENS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ghost-button";
+    button.textContent = label;
+    button.title = token;
+    button.addEventListener("click", () => insertPimcoreTemplateText(token));
+    pimcoreTemplateFunctions.appendChild(button);
+  }
   for (const [label, token] of PIMCORE_TEMPLATE_FUNCTIONS) {
     const button = document.createElement("button");
     button.type = "button";

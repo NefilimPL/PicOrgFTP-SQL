@@ -305,6 +305,9 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("row.dataset.targetLanguage", source)
         self.assertIn('["Nazwa", "PRODUCT:name"]', source)
         self.assertIn('insertPimcoreTemplateText(`{${source}|keep}`)', source)
+        self.assertIn("PIMCORE_TEMPLATE_MATH_TOKENS", source)
+        self.assertIn('["Mnoz", "*"]', source)
+        self.assertIn("insertPimcoreTemplateText(token)", source)
 
     def test_runtime_pimcore_forms_load_samples_and_recalculate_saved_templates(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
