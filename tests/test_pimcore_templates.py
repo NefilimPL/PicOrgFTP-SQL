@@ -1,6 +1,13 @@
 import pytest
 
-from picorgftp_sql.pimcore_templates import TemplateError, render_template
+from picorgftp_sql.pimcore_templates import (
+    SourceDefinition,
+    TemplateError,
+    build_source_catalog,
+    generate_test_values,
+    render_mapping_templates,
+    render_template,
+)
 
 
 def resolver(values):
@@ -52,3 +59,104 @@ def test_invalid_templates_raise_structured_errors(template, code):
 
     assert captured.value.code == code
     assert captured.value.position >= 0
+
+
+MAPPINGS = [
+    {
+        "source": "EAN",
+        "label": "EAN",
+        "type": "input",
+        "parser": "text",
+        "value_template": "",
+    },
+    {
+        "source": "COLOR",
+        "label": "Kolor",
+        "type": "input",
+        "parser": "text",
+        "value_template": "{KOLOR 1}(/{KOLOR 2})",
+    },
+    {
+        "source": "TITLE",
+        "label": "Tytul",
+        "type": "input",
+        "parser": "text",
+        "value_template": "{NAZWA} - {PIMCORE:COLOR}",
+    },
+]
+
+
+def test_catalog_supports_friendly_technical_and_qualified_sources():
+    catalog = build_source_catalog(MAPPINGS)
+
+    assert catalog.resolve("NAZWA") == "PRODUCT:name"
+    assert catalog.resolve("PIMCORE:TITLE") == "PIMCORE:TITLE"
+    assert catalog.resolve("title") == "PIMCORE:TITLE"
+
+
+def test_mapping_templates_render_in_dependency_order():
+    result = render_mapping_templates(
+        MAPPINGS,
+        product_values={
+            "name": "Vivo",
+            "color1": "white",
+            "color2": "black",
+        },
+        pimcore_values={"EAN": "5904804578169"},
+    )
+
+    assert result.values["COLOR"] == "WHITE/BLACK"
+    assert result.values["TITLE"] == "VIVO - WHITE/BLACK"
+    assert result.order == ("COLOR", "TITLE")
+
+
+def test_mapping_cycle_is_rejected_with_sources():
+    mappings = [
+        {"source": "A", "type": "input", "value_template": "{PIMCORE:B}"},
+        {"source": "B", "type": "input", "value_template": "{PIMCORE:A}"},
+    ]
+
+    with pytest.raises(TemplateError) as captured:
+        render_mapping_templates(mappings, product_values={}, pimcore_values={})
+
+    assert captured.value.code == "dependency_cycle"
+    assert "A" in captured.value.message
+    assert "B" in captured.value.message
+
+
+def test_external_provider_can_register_source_without_template_changes():
+    mappings = [
+        {
+            "source": "STOCK_TEXT",
+            "type": "input",
+            "value_template": "Stan: {SQL:STOCK}",
+        }
+    ]
+    source = SourceDefinition("SQL:stock", "Stan SQL", "sql", ("SQL:STOCK",))
+
+    result = render_mapping_templates(
+        mappings,
+        product_values={},
+        pimcore_values={},
+        extra_sources=[source],
+        extra_values={"SQL:stock": "12"},
+    )
+
+    assert result.values["STOCK_TEXT"] == "Stan: 12"
+
+
+def test_test_values_are_fresh_field_specific_and_type_compatible():
+    mappings = MAPPINGS + [
+        {"source": "WEIGHT", "type": "numeric", "parser": "decimal_comma"},
+        {"source": "ACTIVE", "type": "checkbox", "parser": "boolean"},
+    ]
+
+    first = generate_test_values(mappings)
+    second = generate_test_values(mappings)
+
+    assert first["EAN"].isdigit()
+    assert len(first["EAN"]) == 13
+    assert first["EAN"] != second["EAN"]
+    assert first["COLOR"] != first["TITLE"]
+    assert "," in first["WEIGHT"]
+    assert first["ACTIVE"] in {"tak", "nie"}

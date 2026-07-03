@@ -5,8 +5,10 @@ from decimal import Decimal, InvalidOperation
 import csv
 import io
 import re
+import secrets
+import time
 import unicodedata
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping
 
 
 MAX_TEMPLATE_LENGTH = 4000
@@ -394,3 +396,218 @@ def placeholder_sources(template: object) -> tuple[str, ...]:
 
     visit(parse_template(template))
     return tuple(sources)
+
+
+PRODUCT_SOURCES = {
+    "name": ("Nazwa", "NAZWA", "name"),
+    "type": ("Typ", "TYP", "type", "type_name"),
+    "model": ("Model", "MODEL", "model"),
+    "color1": ("Kolor 1", "KOLOR 1", "color1"),
+    "color2": ("Kolor 2", "KOLOR 2", "color2"),
+    "color3": ("Kolor 3", "KOLOR 3", "color3"),
+    "extra": ("Dodatek", "DODATEK", "extra"),
+    "ean": ("EAN", "ean"),
+}
+
+
+@dataclass(frozen=True)
+class SourceDefinition:
+    key: str
+    label: str
+    provider: str
+    aliases: tuple[str, ...] = ()
+
+
+class SourceCatalog:
+    def __init__(self, definitions: Iterable[SourceDefinition]):
+        self.definitions = tuple(definitions)
+        aliases: dict[str, set[str]] = {}
+        for definition in self.definitions:
+            for alias in (definition.key, definition.label, *definition.aliases):
+                aliases.setdefault(alias.casefold(), set()).add(definition.key)
+        self._aliases = aliases
+
+    def resolve(self, source: str) -> str:
+        matches = self._aliases.get(str(source).strip().casefold(), set())
+        if not matches:
+            raise TemplateError(
+                "unknown_source",
+                f"Nieznane zrodlo {source}.",
+                0,
+            )
+        if len(matches) > 1:
+            raise TemplateError(
+                "ambiguous_source",
+                f"Niejednoznaczne zrodlo {source}.",
+                0,
+            )
+        return next(iter(matches))
+
+    def public_items(self) -> list[dict[str, object]]:
+        return [
+            {
+                "key": item.key,
+                "label": item.label,
+                "provider": item.provider,
+                "aliases": list(item.aliases),
+            }
+            for item in self.definitions
+        ]
+
+
+@dataclass(frozen=True)
+class RenderedMappings:
+    values: dict[str, object]
+    order: tuple[str, ...]
+
+
+def build_source_catalog(
+    mappings: Iterable[Mapping[str, object]],
+    extra_sources: Iterable[SourceDefinition] = (),
+) -> SourceCatalog:
+    definitions = [
+        SourceDefinition(
+            f"PRODUCT:{key}",
+            values[0],
+            "product",
+            tuple(values[1:]),
+        )
+        for key, values in PRODUCT_SOURCES.items()
+    ]
+    for mapping in mappings:
+        source = str(mapping.get("source") or "").strip()
+        if not source:
+            continue
+        definitions.append(
+            SourceDefinition(
+                f"PIMCORE:{source}",
+                str(mapping.get("label") or source),
+                "pimcore",
+                (source,),
+            )
+        )
+    definitions.extend(extra_sources)
+    return SourceCatalog(definitions)
+
+
+def render_mapping_templates(
+    mappings: Iterable[Mapping[str, object]],
+    *,
+    product_values: Mapping[str, object],
+    pimcore_values: Mapping[str, object],
+    targets: Iterable[str] | None = None,
+    extra_sources: Iterable[SourceDefinition] = (),
+    extra_values: Mapping[str, object] | None = None,
+) -> RenderedMappings:
+    rows = {
+        str(item.get("source") or ""): dict(item)
+        for item in mappings
+        if str(item.get("source") or "")
+    }
+    catalog = build_source_catalog(rows.values(), extra_sources)
+    values = {
+        f"PRODUCT:{key}": value
+        for key, value in product_values.items()
+    }
+    values.update(
+        {f"PIMCORE:{key}": value for key, value in pimcore_values.items()}
+    )
+    values.update(dict(extra_values or {}))
+
+    templated = [
+        source
+        for source, row in rows.items()
+        if str(row.get("value_template") or "")
+    ]
+    dependencies: dict[str, list[str]] = {}
+    for source in templated:
+        dependencies[source] = []
+        for name in placeholder_sources(rows[source]["value_template"]):
+            resolved = catalog.resolve(name)
+            if not resolved.startswith("PIMCORE:"):
+                continue
+            dependency = resolved.split(":", 1)[1]
+            if dependency in templated and dependency not in dependencies[source]:
+                dependencies[source].append(dependency)
+
+    selected = list(targets) if targets is not None else list(templated)
+    order: list[str] = []
+    active: list[str] = []
+    complete: set[str] = set()
+
+    def visit(source: str) -> None:
+        if source in complete:
+            return
+        if source not in rows:
+            raise TemplateError(
+                "unknown_target",
+                f"Nieznane pole docelowe {source}.",
+                0,
+            )
+        if source not in templated:
+            return
+        if source in active:
+            cycle = active[active.index(source) :] + [source]
+            raise TemplateError(
+                "dependency_cycle",
+                "Cykliczne pola: " + " -> ".join(cycle),
+                0,
+            )
+        active.append(source)
+        for dependency in dependencies[source]:
+            visit(dependency)
+        active.pop()
+        complete.add(source)
+        order.append(source)
+
+    for source in selected:
+        visit(source)
+
+    for source in order:
+        values[f"PIMCORE:{source}"] = render_template(
+            rows[source]["value_template"],
+            lambda name: values.get(catalog.resolve(name), ""),
+        )
+
+    return RenderedMappings(
+        {
+            source: values.get(f"PIMCORE:{source}", "")
+            for source in rows
+        },
+        tuple(order),
+    )
+
+
+def _gtin13(seed: int) -> str:
+    body = f"{seed % 10**12:012d}"
+    total = sum(
+        int(char) * (1 if index % 2 == 0 else 3)
+        for index, char in enumerate(body)
+    )
+    return body + str((-total) % 10)
+
+
+def generate_test_values(
+    mappings: Iterable[Mapping[str, object]],
+) -> dict[str, object]:
+    token = f"{int(time.time() * 1000):x}{secrets.randbelow(0x10000):04x}"
+    result: dict[str, object] = {}
+    for index, mapping in enumerate(mappings, start=1):
+        source = str(mapping.get("source") or "")
+        parser = str(mapping.get("parser") or "text")
+        element_type = str(mapping.get("type") or "input")
+        if source.casefold() == "ean":
+            value = _gtin13(time.time_ns() + index)
+        elif parser == "integer":
+            value = str(1000 + index)
+        elif parser == "decimal_comma":
+            value = f"{1000 + index},{index % 10}"
+        elif parser == "boolean" or element_type == "checkbox":
+            value = "tak" if index % 2 else "nie"
+        elif element_type == "select" and str(mapping.get("default") or ""):
+            value = str(mapping["default"])
+        else:
+            safe = re.sub(r"[^0-9A-Za-z]+", "_", source).strip("_")
+            value = f"TEST_{safe or f'FIELD_{index}'}_{token}_{index}"
+        result[source] = value
+    return result
