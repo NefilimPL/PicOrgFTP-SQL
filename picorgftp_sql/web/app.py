@@ -4255,7 +4255,7 @@ def create_app() -> FastAPI:
                 payload.get("settings") if isinstance(payload, dict) else None,
             )
         except PimcoreApiError as exc:
-            raise HTTPException(status_code=502, detail=exc.as_dict()) from exc
+            return JSONResponse({"items": [], "warning": exc.as_dict()})
         return JSONResponse(result)
 
     @app.post("/api/settings/pimcore/setup")

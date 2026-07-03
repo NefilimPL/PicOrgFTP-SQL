@@ -1654,9 +1654,71 @@ def _pimcore_runtime_form_schema(settings_payload: dict[str, object]) -> list[di
     ]
 
 
-def _product_template_values(raw: object) -> dict[str, object]:
-    source = raw if isinstance(raw, dict) else {}
+def _generated_product_template_values() -> dict[str, object]:
+    generated = generate_test_values(
+        [
+            {"source": source.upper(), "type": "input", "parser": "text"}
+            for source in PRODUCT_SOURCES
+        ]
+    )
     return {
+        source: generated.get(source.upper(), "")
+        for source in PRODUCT_SOURCES
+    }
+
+
+def _entry_product_template_values(entry: WebEntry) -> dict[str, object]:
+    return {
+        "name": entry.name,
+        "type": entry.type_name,
+        "model": entry.model,
+        "color1": entry.color1,
+        "color2": entry.color2,
+        "color3": entry.color3,
+        "extra": entry.extra,
+        "ean": entry.ean,
+    }
+
+
+def _sample_product_template_values() -> dict[str, object]:
+    try:
+        records = prepare_excel_lists().get(ENTRY_RECORDS_KEY, [])
+    except Exception:
+        records = []
+    entries = [
+        _entry_from_record(item)
+        for item in records
+        if isinstance(item, dict)
+    ]
+    entries = [
+        entry
+        for entry in entries
+        if any(
+            (
+                entry.name,
+                entry.type_name,
+                entry.model,
+                entry.color1,
+                entry.color2,
+                entry.color3,
+                entry.extra,
+                entry.ean,
+            )
+        )
+    ]
+    if entries:
+        selected = _entry_product_template_values(entries[secrets.randbelow(len(entries))])
+        generated = _generated_product_template_values()
+        return {
+            key: value if _text(value) else generated.get(key, "")
+            for key, value in selected.items()
+        }
+    return _generated_product_template_values()
+
+
+def _product_template_values(raw: object, *, fill_missing: bool = False) -> dict[str, object]:
+    source = raw if isinstance(raw, dict) else {}
+    values = {
         "name": source.get("name", ""),
         "type": source.get("type", source.get("type_name", "")),
         "model": source.get("model", ""),
@@ -1666,6 +1728,13 @@ def _product_template_values(raw: object) -> dict[str, object]:
         "extra": source.get("extra", ""),
         "ean": source.get("ean", source.get("EAN", "")),
     }
+    if fill_missing and any(not _text(value) for value in values.values()):
+        sample = _sample_product_template_values()
+        values = {
+            key: value if _text(value) else sample.get(key, "")
+            for key, value in values.items()
+        }
+    return values
 
 
 def _render_templates(
@@ -1673,11 +1742,16 @@ def _render_templates(
     product_values: object,
     values: object,
     targets: list[str] | None = None,
+    *,
+    fill_missing_product_values: bool = False,
 ) -> dict[str, object]:
     submitted = dict(values) if isinstance(values, dict) else {}
     rendered = render_mapping_templates(
         settings_payload["field_mappings"],
-        product_values=_product_template_values(product_values),
+        product_values=_product_template_values(
+            product_values,
+            fill_missing=fill_missing_product_values,
+        ),
         pimcore_values=submitted,
         targets=targets,
     )
@@ -1717,6 +1791,7 @@ def preview_pimcore_template(payload: object) -> dict[str, object]:
         source.get("product_values"),
         source.get("values"),
         [target],
+        fill_missing_product_values=True,
     )
 
 
@@ -1725,12 +1800,7 @@ def pimcore_test_sample() -> dict[str, object]:
     if not settings_payload["setup_complete"]:
         raise ValueError("Integracja Pimcore nie zostala skonfigurowana.")
     samples = generate_test_values(settings_payload["field_mappings"])
-    product_samples = generate_test_values(
-        [
-            {"source": source, "type": "input", "parser": "text"}
-            for source in PRODUCT_SOURCES
-        ]
-    )
+    product_samples = _sample_product_template_values()
     rendered = _render_templates(settings_payload, product_samples, samples)
     return {
         "form_schema": _pimcore_runtime_form_schema(settings_payload),

@@ -302,6 +302,8 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("row.dataset.valueTemplate", source)
         self.assertIn("row.dataset.translate", source)
         self.assertIn("row.dataset.targetLanguage", source)
+        self.assertIn('["Nazwa", "PRODUCT:name"]', source)
+        self.assertIn('insertPimcoreTemplateText(`{${source}|keep}`)', source)
 
     def test_runtime_pimcore_forms_load_samples_and_recalculate_saved_templates(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -319,10 +321,22 @@ class WebUiIntegrityTests(unittest.TestCase):
         body = source[start:end]
 
         self.assertIn("++state.pimcoreEditRequestId", body)
+        self.assertIn("Number(state.pimcoreExistingObject?.id || 0)", body)
+        self.assertIn("Nie mozna edytowac produktu Pimcore bez poprawnego ID.", body)
         self.assertLess(
             body.index('pimcoreEditModal.classList.add("active")'),
             body.index("await requestJson"),
         )
+
+    def test_pimcore_status_enables_edit_only_for_positive_object_id(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("async function checkPimcoreProductStatus")
+        end = source.index("function openPimcoreCreateModal", start)
+        body = source[start:end]
+
+        self.assertIn("Number(payload.object?.id || 0)", body)
+        self.assertIn("Pimcore zwrocil produkt bez poprawnego ID", body)
+        self.assertIn("pimcoreEditButton.disabled = false", body)
 
     def test_pimcore_ui_uses_example_placeholder_without_private_default(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")

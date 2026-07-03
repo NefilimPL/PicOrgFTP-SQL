@@ -6249,14 +6249,14 @@ function renderSettingsSql() {
 }
 
 const PIMCORE_TEMPLATE_PRODUCT_SOURCES = [
-  ["Nazwa", "Nazwa"],
-  ["Typ", "Typ"],
-  ["Model", "Model"],
-  ["Kolor 1", "Kolor 1"],
-  ["Kolor 2", "Kolor 2"],
-  ["Kolor 3", "Kolor 3"],
-  ["Dodatek", "Dodatek"],
-  ["EAN", "EAN"],
+  ["Nazwa", "PRODUCT:name"],
+  ["Typ", "PRODUCT:type"],
+  ["Model", "PRODUCT:model"],
+  ["Kolor 1", "PRODUCT:color1"],
+  ["Kolor 2", "PRODUCT:color2"],
+  ["Kolor 3", "PRODUCT:color3"],
+  ["Dodatek", "PRODUCT:extra"],
+  ["EAN", "PRODUCT:ean"],
 ];
 
 const PIMCORE_TEMPLATE_FUNCTIONS = [
@@ -6376,7 +6376,7 @@ function renderPimcoreTemplateTokens(row) {
     button.type = "button";
     button.className = "ghost-button";
     button.textContent = `{${label}}`;
-    button.addEventListener("click", () => insertPimcoreTemplateText(`{${source}}`));
+    button.addEventListener("click", () => insertPimcoreTemplateText(`{${source}|keep}`));
     pimcoreTemplateSources.appendChild(button);
   }
   const targetSource = pimcoreTemplateSource(row);
@@ -7845,8 +7845,15 @@ async function checkPimcoreProductStatus(ean) {
     return;
   }
   if (payload.exists) {
-    state.pimcoreExistingObject = payload.object || null;
-    if (pimcoreEditButton) pimcoreEditButton.disabled = false;
+    const objectId = Number(payload.object?.id || 0);
+    if (objectId > 0) {
+      state.pimcoreExistingObject = payload.object || null;
+      if (pimcoreEditButton) pimcoreEditButton.disabled = false;
+      return;
+    }
+    state.pimcoreExistingObject = null;
+    if (pimcoreEditButton) pimcoreEditButton.disabled = true;
+    formStatus.textContent = "Pimcore zwrocil produkt bez poprawnego ID. Edycja jest niedostepna.";
     return;
   }
   state.pimcoreExistingObject = null;
@@ -7921,8 +7928,12 @@ async function submitPimcoreRuntimeCreate(event) {
 }
 
 async function openPimcoreEditModal() {
-  const objectId = state.pimcoreExistingObject?.id;
-  if (!objectId || !pimcoreEditForm || !pimcoreEditModal) return;
+  const objectId = Number(state.pimcoreExistingObject?.id || 0);
+  if (objectId <= 0) {
+    formStatus.textContent = "Nie mozna edytowac produktu Pimcore bez poprawnego ID.";
+    return;
+  }
+  if (!pimcoreEditForm || !pimcoreEditModal) return;
   const requestId = ++state.pimcoreEditRequestId;
   if (pimcoreEditButton) pimcoreEditButton.disabled = true;
   state.pimcoreEditObjectId = 0;
@@ -7979,7 +7990,9 @@ async function openPimcoreEditModal() {
     if (requestId === state.pimcoreEditRequestId && !state.pimcoreEditObjectId) {
       pimcoreEditSubmitButton.disabled = true;
     }
-    if (pimcoreEditButton) pimcoreEditButton.disabled = !state.pimcoreExistingObject?.id;
+    if (pimcoreEditButton) {
+      pimcoreEditButton.disabled = Number(state.pimcoreExistingObject?.id || 0) <= 0;
+    }
   }
 }
 

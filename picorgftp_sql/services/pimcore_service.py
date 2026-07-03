@@ -281,9 +281,11 @@ def _mapped_elements(
     *,
     use_defaults: bool,
     include_empty: bool = False,
+    nest_localized: bool = False,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     errors: list[str] = []
     elements: list[dict[str, object]] = []
+    localized: list[dict[str, object]] = []
     effective_values = dict(values or {})
     for mapping in config["field_mappings"]:
         source = mapping["source"]
@@ -307,16 +309,26 @@ def _mapped_elements(
             errors.append(f"Pole {mapping['label']}: {exc}")
             continue
         effective_values[source] = parsed
-        elements.append(
-            {
-                "type": mapping["type"],
-                "name": mapping["pimcore_field"],
-                "value": parsed,
-                "language": mapping["language"],
-            }
-        )
+        element = {
+            "type": mapping["type"],
+            "name": mapping["pimcore_field"],
+            "value": parsed,
+            "language": mapping["language"],
+        }
+        if nest_localized and str(mapping.get("language") or "").strip():
+            localized.append(element)
+        else:
+            elements.append(element)
     if errors:
         raise ValueError(" ".join(errors))
+    if localized:
+        elements.append(
+            {
+                "type": "localizedfields",
+                "name": "localizedfields",
+                "value": localized,
+            }
+        )
     return elements, effective_values
 
 
@@ -332,6 +344,7 @@ def build_create_payload(
         config,
         values,
         use_defaults=use_defaults,
+        nest_localized=True,
     )
     try:
         parent_id = int(config["parent_id"])
@@ -448,7 +461,6 @@ def discover_folders(api: PimcoreClient, limit: int = 500) -> list[dict[str, obj
     records: list[dict[str, object]] = []
     page_size = min(100, bounded_limit)
     query_filter: dict[str, object] | None = {"type": "folder"}
-    filter_error: PimcoreApiError | None = None
     try:
         for offset in range(0, bounded_limit, page_size):
             payload = api.object_list(
@@ -463,7 +475,6 @@ def discover_folders(api: PimcoreClient, limit: int = 500) -> list[dict[str, obj
     except PimcoreApiError as exc:
         if not exc.status_code or exc.status_code < 500 or records:
             raise
-        filter_error = exc
         payload = api.object_list(limit=bounded_limit, offset=0)
         records = _list_records(payload, ("data", "objects", "items"))
     folders: list[dict[str, object]] = []
@@ -476,15 +487,16 @@ def discover_folders(api: PimcoreClient, limit: int = 500) -> list[dict[str, obj
         path = identity["path"]
         key = identity["key"]
         if not path:
-            detail = api.object_by_id(identity["id"])
+            try:
+                detail = api.object_by_id(identity["id"])
+            except PimcoreApiError:
+                continue
             source = detail.get("data") if isinstance(detail.get("data"), dict) else detail
             path = extract_object_path(source)
             key = str(source.get("key") or key) if isinstance(source, dict) else key
         if not key and path:
             key = path.rstrip("/").rsplit("/", 1)[-1]
         folders.append({"id": identity["id"], "path": path, "key": key})
-    if not folders and filter_error is not None:
-        raise filter_error
     return sorted(folders, key=lambda item: str(item["path"] or item["key"]).casefold())
 
 
@@ -1385,9 +1397,15 @@ def run_test_create(
         stage_started = time.perf_counter()
         fetched = api.object_by_id(object_id)
         object_path = extract_object_path(fetched)
-        actual = extract_object_values(fetched)
-        expected = {item["name"]: item["value"] for item in payload["elements"]}
-        mismatched = [name for name, value in expected.items() if actual.get(name) != value]
+        fetched_data = _object_data(fetched)
+        actual = _configured_values(config, fetched_data)
+        expected = _configured_values(config, {"elements": payload["elements"]})
+        mismatched = [
+            source
+            for source, value in expected.items()
+            if str(actual.get(source, ""))
+            != str(value if value is not None else "")
+        ]
         if mismatched:
             status = "partial"
             error = "Nie potwierdzono pol: " + ", ".join(mismatched)

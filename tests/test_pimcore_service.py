@@ -120,6 +120,67 @@ def test_build_create_payload_parses_values_and_renders_key():
     }
 
 
+def test_build_create_payload_nests_localized_field_values():
+    config = {
+        "enabled": True,
+        "class_name": "Product",
+        "parent_id": "123",
+        "published": True,
+        "object_key_template": "{EAN}",
+        "existence_fields": ["EAN"],
+        "field_mappings": [
+            {
+                "source": "EAN",
+                "pimcore_field": "EAN",
+                "type": "input",
+                "language": None,
+                "required": True,
+                "default": "",
+                "parser": "text",
+            },
+            {
+                "source": "NAME_EN",
+                "pimcore_field": "name",
+                "type": "input",
+                "language": "en",
+                "required": False,
+                "default": "",
+                "parser": "text",
+            },
+            {
+                "source": "NAME_PL",
+                "pimcore_field": "name",
+                "type": "input",
+                "language": "pl",
+                "required": False,
+                "default": "",
+                "parser": "text",
+            },
+        ],
+    }
+
+    payload = build_create_payload(
+        config,
+        {
+            "EAN": "5904804578169",
+            "NAME_EN": "Vivo sideboard",
+            "NAME_PL": "Komoda Vivo",
+        },
+    )
+
+    assert payload["elements"] == [
+        {"type": "input", "name": "EAN", "value": "5904804578169", "language": None},
+        {
+            "type": "localizedfields",
+            "name": "localizedfields",
+            "value": [
+                {"type": "input", "name": "name", "value": "Vivo sideboard", "language": "en"},
+                {"type": "input", "name": "name", "value": "Komoda Vivo", "language": "pl"},
+            ],
+        },
+    ]
+
+
 def test_ean_filter_is_structured_and_rejects_unsafe_names():
     assert build_ean_filter("5904804578169", ["EAN"]) == {"EAN": "5904804578169"}
     assert build_ean_filter(
@@ -239,7 +300,7 @@ def test_folder_discovery_falls_back_to_unfiltered_list_after_server_error():
     assert client.object_list.call_args_list[1].args == ()
 
 
-def test_folder_discovery_preserves_original_error_when_fallback_finds_nothing():
+def test_folder_discovery_returns_empty_list_when_fallback_finds_nothing():
     original = PimcoreApiError(
         "Pimcore zwrocil HTTP 500.",
         "/webservice/rest/object-list",
@@ -252,10 +313,7 @@ def test_folder_discovery_preserves_original_error_when_fallback_finds_nothing()
         {"data": [{"id": 1, "type": "object", "fullPath": "/Produkt"}]},
     ]
 
-    with pytest.raises(PimcoreApiError) as captured:
-        discover_folders(client)
-
-    assert captured.value is original
+    assert discover_folders(client) == []
 
 
 def test_extract_object_id_accepts_pimcore_response_variants():
