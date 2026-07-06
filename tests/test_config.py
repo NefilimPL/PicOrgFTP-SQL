@@ -166,6 +166,31 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(raw["pimcore"]["class_id"], "7")
         self.assertEqual(raw["pimcore"]["parent_path"], "/Produkty")
 
+    def test_save_config_encrypts_additional_sql_profile_passwords(self) -> None:
+        payload = deepcopy(common.DEFAULT_CONFIG)
+        payload["sql_profiles"] = [
+            {
+                "id": "stock",
+                "label": "Stock",
+                "type": "mysql",
+                "host": "mysql.local",
+                "database": "catalog",
+                "user": "reader",
+                "password": "profile-secret",
+                "enabled": True,
+            }
+        ]
+
+        with (
+            patch.object(config, "_active_sqlite_store", return_value=None),
+            patch.object(config, "_write_json_atomic") as write_atomic,
+        ):
+            config.save_config(payload)
+
+        raw_profiles = write_atomic.call_args.args[1]["sql_profiles"]
+        self.assertNotEqual(raw_profiles[0]["password"], "profile-secret")
+        self.assertEqual(config.decrypt(raw_profiles[0]["password"]), "profile-secret")
+
 
 if __name__ == "__main__":
     unittest.main()
