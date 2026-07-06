@@ -362,6 +362,24 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn('mode: form.dataset.pimcoreMode || "create"', source)
         self.assertIn("if (!input.value)", source)
 
+    def test_pimcore_edit_recalculation_blocks_submit_until_resolved(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        css = (ROOT / "picorgftp_sql" / "web" / "static" / "app.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("function hasBlockingPimcoreRuntimeDifferences", source)
+        self.assertIn("function focusFirstPimcoreRuntimeDifference", source)
+        self.assertIn("function updatePimcoreEditSubmitState", source)
+        self.assertIn("pimcore-runtime-conflict", source)
+        self.assertIn("pimcore-runtime-pulse", source)
+        self.assertIn("Cofnij zmiany", source)
+        self.assertIn("Oryginalnie:", source)
+        self.assertIn("pimcore-runtime-original", source)
+        self.assertIn("pimcore-runtime-conflict", css)
+        self.assertIn("body[data-theme=\"dark\"] .pimcore-runtime-conflict input", css)
+        self.assertIn("@keyframes pimcore-runtime-pulse", css)
+
     def test_pimcore_history_has_submission_export_actions(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         html = INDEX_HTML.read_text(encoding="utf-8")

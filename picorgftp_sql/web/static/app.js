@@ -7765,7 +7765,7 @@ function populatePimcoreRuntimeForm(
         if (status) status.textContent = `Przeliczanie pola ${mapping.label || mapping.source}...`;
         try {
           const result = await renderPimcoreRuntimeTemplates(form, schema, [mapping.source]);
-          if (status) status.textContent = pimcoreRuntimeWarnings(result.warnings);
+          if (status) status.textContent = pimcoreRuntimeRecalculateStatus(form, result);
         } catch (error) {
           if (status) status.textContent = error.message;
         } finally {
@@ -7786,12 +7786,91 @@ function pimcoreRuntimeWarnings(warnings = []) {
     .join(" ");
 }
 
-function updatePimcoreRuntimeFieldChangeState(input) {
+function clearPimcoreRuntimeConflict(field) {
+  if (!field) return;
+  field.classList.remove("pimcore-runtime-conflict", "pimcore-runtime-pulse");
+  const info = field.querySelector(".pimcore-runtime-calculated");
+  if (info) info.hidden = true;
+}
+
+function updatePimcoreRuntimeOriginalState(input) {
   const form = input?.form;
   const field = input?.closest(".pimcore-runtime-field");
   if (!form || !field) return;
   const changed = form.dataset.pimcoreMode === "edit" && input.value !== input.dataset.originalValue;
   field.classList.toggle("pimcore-runtime-different", changed);
+  let original = field.querySelector(".pimcore-runtime-original");
+  if (!original) {
+    original = document.createElement("span");
+    original.className = "pimcore-runtime-original";
+    const text = document.createElement("span");
+    const undo = document.createElement("button");
+    undo.type = "button";
+    undo.className = "ghost-button";
+    undo.textContent = "Cofnij zmiany";
+    undo.addEventListener("click", () => {
+      input.value = input.dataset.originalValue || "";
+      clearPimcoreRuntimeConflict(field);
+      updatePimcoreRuntimeFieldChangeState(input, { userInput: false });
+    });
+    original.append(text, undo);
+    field.appendChild(original);
+  }
+  original.querySelector("span").textContent = `Oryginalnie: ${input.dataset.originalValue || "(puste)"}`;
+  original.hidden = !changed;
+}
+
+function hasBlockingPimcoreRuntimeDifferences(form = pimcoreEditForm) {
+  return Boolean(form?.querySelector(".pimcore-runtime-conflict"));
+}
+
+function pimcoreRuntimeDifferenceCount(form) {
+  return form?.querySelectorAll(".pimcore-runtime-conflict").length || 0;
+}
+
+function focusFirstPimcoreRuntimeDifference(form = pimcoreEditForm) {
+  const field = form?.querySelector(".pimcore-runtime-conflict");
+  if (!field) return false;
+  field.scrollIntoView({ behavior: "smooth", block: "center" });
+  field.classList.remove("pimcore-runtime-pulse");
+  void field.offsetWidth;
+  field.classList.add("pimcore-runtime-pulse");
+  const input = field.querySelector("input");
+  if (input) input.focus({ preventScroll: true });
+  window.setTimeout(() => field.classList.remove("pimcore-runtime-pulse"), 1800);
+  return true;
+}
+
+function updatePimcoreRuntimeSubmitState(form, button) {
+  if (!button || button.dataset.busy === "1") return;
+  const blocked = hasBlockingPimcoreRuntimeDifferences(form);
+  button.classList.toggle("pimcore-submit-blocked", blocked);
+  button.setAttribute("aria-disabled", blocked ? "true" : "false");
+  button.title = blocked
+    ? "Najpierw zastosuj wyliczona wartosc albo cofnij zmiany w oznaczonej komorce."
+    : "";
+}
+
+function updatePimcoreEditSubmitState() {
+  updatePimcoreRuntimeSubmitState(pimcoreEditForm, pimcoreEditSubmitButton);
+}
+
+function updatePimcoreCreateSubmitState() {
+  updatePimcoreRuntimeSubmitState(pimcoreCreateForm, pimcoreCreateSubmitButton);
+}
+
+function updatePimcoreRuntimeFieldChangeState(input, { userInput = true } = {}) {
+  const field = input?.closest(".pimcore-runtime-field");
+  updatePimcoreRuntimeOriginalState(input);
+  if (userInput && field?.classList.contains("pimcore-runtime-conflict")) {
+    const calculated = String(input.dataset.calculatedValue ?? "");
+    const original = String(input.dataset.originalValue ?? "");
+    if (String(input.value ?? "") === calculated || String(input.value ?? "") === original) {
+      clearPimcoreRuntimeConflict(field);
+    }
+  }
+  updatePimcoreCreateSubmitState();
+  updatePimcoreEditSubmitState();
 }
 
 function updatePimcoreRuntimeCalculatedState(form, result = {}) {
@@ -7814,17 +7893,49 @@ function updatePimcoreRuntimeCalculatedState(form, result = {}) {
       apply.textContent = "Zastosuj wyliczone";
       apply.addEventListener("click", () => {
         input.value = input.dataset.calculatedValue || "";
-        updatePimcoreRuntimeFieldChangeState(input);
+        clearPimcoreRuntimeConflict(field);
+        updatePimcoreRuntimeFieldChangeState(input, { userInput: false });
         info.hidden = true;
       });
-      info.append(text, apply);
+      const undo = document.createElement("button");
+      undo.type = "button";
+      undo.className = "ghost-button";
+      undo.textContent = "Cofnij zmiany";
+      undo.addEventListener("click", () => {
+        input.value = input.dataset.originalValue || "";
+        clearPimcoreRuntimeConflict(field);
+        updatePimcoreRuntimeFieldChangeState(input, { userInput: false });
+      });
+      info.append(text, apply, undo);
       field.appendChild(info);
     }
     info.querySelector("span").textContent = `Wyliczone: ${value ?? ""}`;
     const isDifferent = changed[source] === true && String(input.value) !== String(value ?? "");
-    updatePimcoreRuntimeFieldChangeState(input);
+    field.classList.toggle("pimcore-runtime-conflict", isDifferent);
+    updatePimcoreRuntimeOriginalState(input);
     info.hidden = !isDifferent;
   }
+  updatePimcoreCreateSubmitState();
+  updatePimcoreEditSubmitState();
+}
+
+function pimcoreRuntimeRecalculateStatus(form, result = {}) {
+  const warnings = pimcoreRuntimeWarnings(result.warnings);
+  if (warnings) return warnings;
+  const count = pimcoreRuntimeDifferenceCount(form);
+  return count
+    ? `Roznice po przeliczeniu: ${count}. Zastosuj wyliczone albo cofnij zmiany.`
+    : "";
+}
+
+function blockPimcoreRuntimeSubmitIfNeeded(form, status) {
+  if (!hasBlockingPimcoreRuntimeDifferences(form)) return false;
+  focusFirstPimcoreRuntimeDifference(form);
+  if (status) {
+    status.textContent =
+      "Najpierw zastosuj wyliczona wartosc albo cofnij zmiany w oznaczonej komorce.";
+  }
+  return true;
 }
 
 async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
@@ -7869,7 +7980,7 @@ async function recalculateAllPimcoreEditFields() {
   try {
     const result = await renderPimcoreRuntimeTemplates(pimcoreEditForm, state.pimcoreEditSchema);
     if (pimcoreEditStatus) {
-      pimcoreEditStatus.textContent = pimcoreRuntimeWarnings(result.warnings);
+      pimcoreEditStatus.textContent = pimcoreRuntimeRecalculateStatus(pimcoreEditForm, result);
     }
   } catch (error) {
     if (pimcoreEditStatus) pimcoreEditStatus.textContent = error.message;
@@ -8246,6 +8357,7 @@ function openPimcoreCreateModal(ean) {
       idPrefix: "pimcoreCreate",
     }
   );
+  updatePimcoreCreateSubmitState();
   const pimcoreCreateEan = pimcoreCreateForm.querySelector("#pimcoreCreateEan");
   if (pimcoreCreateEan) pimcoreCreateEan.readOnly = true;
   if (pimcoreCreateStatus) pimcoreCreateStatus.textContent = "";
@@ -8254,7 +8366,7 @@ function openPimcoreCreateModal(ean) {
   renderPimcoreRuntimeTemplates(pimcoreCreateForm, state.pimcoreCreateSchema)
     .then((result) => {
       if (pimcoreCreateStatus) {
-        pimcoreCreateStatus.textContent = pimcoreRuntimeWarnings(result.warnings);
+        pimcoreCreateStatus.textContent = pimcoreRuntimeRecalculateStatus(pimcoreCreateForm, result);
       }
     })
     .catch((error) => {
@@ -8267,6 +8379,7 @@ function openPimcoreCreateModal(ean) {
 async function submitPimcoreRuntimeCreate(event) {
   event.preventDefault();
   if (!pimcoreCreateForm.reportValidity()) return;
+  if (blockPimcoreRuntimeSubmitIfNeeded(pimcoreCreateForm, pimcoreCreateStatus)) return;
   pimcoreCreateSubmitButton.disabled = true;
   pimcoreCreateStatus.textContent = "Zapisywanie w Pimcore...";
   try {
@@ -8353,6 +8466,7 @@ async function openPimcoreEditModal() {
     }
     if (pimcoreEditStatus) pimcoreEditStatus.textContent = "";
     pimcoreEditSubmitButton.disabled = false;
+    updatePimcoreEditSubmitState();
     if (pimcoreEditRecalculateAllButton) {
       pimcoreEditRecalculateAllButton.disabled = !pimcoreEditHasRuntimeTemplates();
     }
@@ -8384,6 +8498,9 @@ function closePimcoreEditModal() {
   if (pimcoreEditForm) pimcoreEditForm.textContent = "";
   if (pimcoreEditStatus) pimcoreEditStatus.textContent = "";
   if (pimcoreEditRecalculateAllButton) pimcoreEditRecalculateAllButton.disabled = true;
+  pimcoreEditSubmitButton?.classList.remove("pimcore-submit-blocked");
+  pimcoreEditSubmitButton?.removeAttribute("aria-disabled");
+  if (pimcoreEditSubmitButton) pimcoreEditSubmitButton.title = "";
   state.pimcoreEditObjectId = 0;
   state.pimcoreEditMarker = "";
   state.pimcoreEditSchema = [];
@@ -8392,6 +8509,7 @@ function closePimcoreEditModal() {
 async function submitPimcoreRuntimeEdit(event) {
   event.preventDefault();
   if (!pimcoreEditForm.reportValidity()) return;
+  if (blockPimcoreRuntimeSubmitIfNeeded(pimcoreEditForm, pimcoreEditStatus)) return;
   pimcoreEditSubmitButton.disabled = true;
   pimcoreEditStatus.textContent = "Zapisywanie i publikowanie...";
   try {

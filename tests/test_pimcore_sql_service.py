@@ -55,6 +55,34 @@ def test_bind_sql_value_query_uses_mssql_parameters_and_empty_missing_values():
     assert params == ("5901234567890", "")
 
 
+def test_bind_sql_value_query_uses_template_placeholder_catalog_and_functions():
+    query, params = bind_sql_value_query(
+        (
+            "SELECT stock FROM product "
+            "WHERE name = {Nazwa|title} "
+            "AND model = {PRODUCT:model|upper} "
+            "AND sku = {PIMCORE:SKU|keep} "
+            "AND title = {Tytul Pimcore|lower}"
+        ),
+        {"name": "vivo szafka", "model": "ab-12"},
+        {"SKU": "SKU-1", "TITLE": "Duzy Stolik"},
+        "mysql",
+        mappings=[
+            {"source": "SKU", "label": "SKU"},
+            {"source": "TITLE", "label": "Tytul Pimcore"},
+        ],
+    )
+
+    assert query == (
+        "SELECT stock FROM product "
+        "WHERE name = %s "
+        "AND model = %s "
+        "AND sku = %s "
+        "AND title = %s"
+    )
+    assert params == ("Vivo Szafka", "AB-12", "SKU-1", "duzy stolik")
+
+
 def test_execute_sql_value_query_returns_first_value_and_multiple_row_warning():
     class Cursor:
         def execute(self, query, params):

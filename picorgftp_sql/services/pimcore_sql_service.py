@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import re
 
 from ..common import E, K, M, N, b, c, mysql, pyodbc
+from ..pimcore_templates import TemplateError, build_source_catalog, render_template
 from ..settings import BW
 from ..workflow_utils import normalize_sql_value
 
@@ -30,6 +31,16 @@ class SqlValueResult:
 
 def _text(value: object) -> str:
     return str(value or "").strip()
+
+
+def _lookup(mapping: dict[str, object], key: str) -> object:
+    if key in mapping:
+        return mapping[key]
+    folded = key.casefold()
+    for item_key, value in mapping.items():
+        if str(item_key).casefold() == folded:
+            return value
+    return ""
 
 
 def _strip_sql_comments(query: str) -> str:
@@ -59,18 +70,75 @@ def _placeholder_value(
     token: str,
     product_values: dict[str, object],
     pimcore_values: dict[str, object],
+    mappings: Sequence[dict[str, object]] | None = None,
 ) -> str:
     key = _text(token)
-    folded = key.casefold()
-    if folded.startswith("pimcore:"):
-        return _text(pimcore_values.get(key.split(":", 1)[1]))
-    if folded == "ean":
-        return _text(
-            product_values.get("ean")
-            or product_values.get("EAN")
-            or pimcore_values.get("EAN")
+    raw_source = key.split("|", 1)[0].strip()
+    catalog_rows: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in mappings or ():
+        if not isinstance(item, dict):
+            continue
+        source = _text(item.get("source"))
+        if not source or source in seen:
+            continue
+        catalog_rows.append(
+            {
+                "source": source,
+                "label": _text(item.get("label")) or source,
+            }
         )
-    return _text(product_values.get(folded) or product_values.get(key) or pimcore_values.get(key))
+        seen.add(source)
+    for source in pimcore_values:
+        source_text = _text(source)
+        if source_text and source_text not in seen:
+            catalog_rows.append({"source": source_text, "label": source_text})
+            seen.add(source_text)
+    catalog = build_source_catalog(catalog_rows)
+
+    def resolve(source: str) -> object:
+        source_text = _text(source)
+        folded = source_text.casefold()
+        if folded == "ean":
+            return _lookup(product_values, "ean") or _lookup(product_values, "EAN")
+        if folded.startswith("product:"):
+            product_key = source_text.split(":", 1)[1]
+            if product_key == "type":
+                return _lookup(product_values, "type") or _lookup(
+                    product_values,
+                    "type_name",
+                )
+            return _lookup(product_values, product_key)
+        if folded.startswith("pimcore:"):
+            return _lookup(pimcore_values, source_text.split(":", 1)[1])
+        try:
+            resolved = catalog.resolve(source_text)
+        except TemplateError as exc:
+            if exc.code != "unknown_source":
+                raise
+            return (
+                _lookup(product_values, source_text)
+                or _lookup(product_values, folded)
+                or _lookup(pimcore_values, source_text)
+            )
+        if resolved.startswith("PRODUCT:"):
+            product_key = resolved.split(":", 1)[1]
+            if product_key == "type":
+                return _lookup(product_values, "type") or _lookup(
+                    product_values,
+                    "type_name",
+                )
+            return _lookup(product_values, product_key)
+        if resolved.startswith("PIMCORE:"):
+            return _lookup(pimcore_values, resolved.split(":", 1)[1])
+        return ""
+
+    try:
+        return render_template("{" + key + "}", resolve)
+    except TemplateError as exc:
+        raise SqlValueError(
+            f"Niepoprawny placeholder SQL {raw_source or key}: {exc.message}"
+        ) from exc
 
 
 def bind_sql_value_query(
@@ -78,6 +146,8 @@ def bind_sql_value_query(
     product_values: dict[str, object],
     pimcore_values: dict[str, object],
     db_type: str,
+    *,
+    mappings: Sequence[dict[str, object]] | None = None,
 ) -> tuple[str, Sequence[str]]:
     """Bind supported ``{token}`` placeholders as DB parameters."""
 
@@ -86,7 +156,14 @@ def bind_sql_value_query(
     params: list[str] = []
 
     def replace(match: re.Match[str]) -> str:
-        params.append(_placeholder_value(match.group(1), product_values, pimcore_values))
+        params.append(
+            _placeholder_value(
+                match.group(1),
+                product_values,
+                pimcore_values,
+                mappings,
+            )
+        )
         return marker
 
     return PLACEHOLDER_RE.sub(replace, safe_query), tuple(params)
@@ -130,6 +207,7 @@ def execute_sql_value_query(
     product_values: dict[str, object],
     pimcore_values: dict[str, object],
     *,
+    mappings: Sequence[dict[str, object]] | None = None,
     connector: Callable[[dict[str, object]], object] = connect_profile,
 ) -> SqlValueResult:
     """Execute a SQL value lookup and return the first column of the first row."""
@@ -139,6 +217,7 @@ def execute_sql_value_query(
         product_values,
         pimcore_values,
         str(profile.get("type") or K),
+        mappings=mappings,
     )
     conn = None
     cursor = None

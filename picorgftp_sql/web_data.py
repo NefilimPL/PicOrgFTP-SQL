@@ -1890,6 +1890,7 @@ def _render_templates(
                 mapping.get("sql_query"),
                 product_context,
                 output,
+                mappings=mappings_list,
             )
         except Exception as exc:
             warnings.append({"source": source, "code": "sql_error", "message": str(exc)})
@@ -1938,6 +1939,7 @@ def _render_templates(
                 mapping.get("sql_query"),
                 product_context,
                 output,
+                mappings=mappings_list,
             )
         except Exception as exc:
             warnings.append({"source": source, "code": "sql_error", "message": str(exc)})
