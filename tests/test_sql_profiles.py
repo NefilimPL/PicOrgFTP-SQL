@@ -59,5 +59,8 @@ def test_additional_profiles_are_cleaned_and_public_view_hides_passwords():
     assert stock["locked"] is False
     assert stock["enabled"] is True
     assert public[1]["id"] == "stock-db"
+    assert public[1]["user_set"] is True
     assert public[1]["password_set"] is True
+    assert "reader" not in str(public[1])
+    assert "user" not in public[1]
     assert "password" not in public[1]

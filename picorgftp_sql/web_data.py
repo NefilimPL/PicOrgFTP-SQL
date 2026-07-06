@@ -2311,7 +2311,9 @@ def _preserve_unsubmitted_config_secrets(payload: dict[str, object]) -> dict[str
         if not isinstance(item, dict):
             continue
         profile_id = _text(item.get("id"))
-        if profile_id in existing_profiles and not _text(item.get("password")):
+        if profile_id in existing_profiles and (
+            not _text(item.get("user")) or not _text(item.get("password"))
+        ):
             profile_preserve.add(profile_id)
     if profile_preserve:
         preserve[SQL_PROFILES_KEY] = profile_preserve
@@ -2339,12 +2341,11 @@ def _merged_sql_profiles_from_settings_payload(
             continue
         profile = dict(item)
         profile_id = _text(profile.get("id"))
-        if (
-            profile_id
-            and not _text(profile.get("password"))
-            and profile_id in current_profiles
-        ):
-            profile["password"] = current_profiles[profile_id].get("password", "")
+        if profile_id and profile_id in current_profiles:
+            if not _text(profile.get("user")):
+                profile["user"] = current_profiles[profile_id].get("user", "")
+            if not _text(profile.get("password")):
+                profile["password"] = current_profiles[profile_id].get("password", "")
         merged_profiles.append(profile)
     return additional_sql_profiles({SQL_PROFILES_KEY: merged_profiles})
 
@@ -2570,7 +2571,7 @@ def settings_snapshot() -> dict[str, object]:
                 "user_set": bool(_text(mysql_cfg.get(N))),
                 "password_set": bool(_text(mysql_cfg.get(M))),
             },
-            "profiles": public_sql_profiles(normalize_sql_profiles(cfg)),
+            "profiles": public_sql_profiles(additional_sql_profiles(cfg)),
         },
         "slot_count": len(slot_defs),
         "sql_map_count": len(sql_map),
@@ -2602,6 +2603,13 @@ def settings_secret_values() -> dict[str, object]:
     ftp = cfg.get(H, {}) if isinstance(cfg.get(H), dict) else {}
     mssql_cfg = cfg.get(P, {}) if isinstance(cfg.get(P), dict) else {}
     mysql_cfg = cfg.get(K, {}) if isinstance(cfg.get(K), dict) else {}
+    profiles = {
+        profile["id"]: {
+            "user": _text(profile.get("user")),
+            "password": _text(profile.get("password")),
+        }
+        for profile in additional_sql_profiles(cfg)
+    }
     return {
         "app_secret": _text(common.APP_SECRET),
         "ftp": {
@@ -2617,6 +2625,7 @@ def settings_secret_values() -> dict[str, object]:
                 "user": _text(mysql_cfg.get(N)),
                 "password": _text(mysql_cfg.get(M)),
             },
+            "profiles": profiles,
         },
     }
 

@@ -306,9 +306,22 @@ class SourceIntegrityTests(unittest.TestCase):
                 ("Dane logowania FTP", ['credentialField("user"', 'credentialField("password"']),
             ],
             "renderSettingsSql": [
-                ("Tryb SQL", ['"type"', '"sql_update_enabled"', '"query"', "diagnosticButton"]),
-                ("MS SQL", ['"mssql_server"', '"mssql_database"', 'credentialField("mssql_user"']),
-                ("MySQL", ['"mysql_server"', '"mysql_database"', 'credentialField("mysql_user"']),
+                (
+                    "Tryb SQL",
+                    [
+                        '"type"',
+                        '"sql_update_enabled"',
+                        '"query"',
+                        "diagnosticButton",
+                        '"mssql_server"',
+                        '"mssql_database"',
+                        'credentialField("mssql_user"',
+                        '"mysql_server"',
+                        '"mysql_database"',
+                        'credentialField("mysql_user"',
+                    ],
+                ),
+                ("Profile dodatkowe SQL", ["additionalSqlProfiles", "addProfile"]),
             ],
             "renderSettingsSlots": [
                 ("Lista slotow", ["note", "list", "addButton", "detectSqlColumnsButton"]),

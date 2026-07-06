@@ -93,7 +93,12 @@ def normalize_sql_profiles(config_dict: dict[str, Any]) -> list[dict[str, Any]]:
 def public_sql_profiles(profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
     public_profiles: list[dict[str, Any]] = []
     for profile in profiles:
-        item = {key: value for key, value in profile.items() if key != "password"}
+        item = {
+            key: value
+            for key, value in profile.items()
+            if key not in {"user", "password"}
+        }
+        item["user_set"] = bool(_text(profile.get("user")))
         item["password_set"] = bool(_text(profile.get("password")))
         public_profiles.append(item)
     return public_profiles

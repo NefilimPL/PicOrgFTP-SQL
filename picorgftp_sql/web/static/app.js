@@ -6268,7 +6268,7 @@ function renderSettingsSql() {
     ["{column}", "Alias dla {col}"],
   ];
   profiles.className = "sql-profile-list wide-field";
-  for (const profile of db.profiles || []) {
+  for (const profile of additionalSqlProfiles(db)) {
     profiles.appendChild(sqlProfileRow(profile));
   }
   addProfile.type = "button";
@@ -6296,9 +6296,8 @@ function renderSettingsSql() {
       ),
       inputField("query", "Zapytanie SQL", db.query, { textarea: true }),
       sqlPlaceholderHelp(placeholderItems),
-      actionRow(diagnosticButton("sql", "Test SQL"))
-    ),
-    settingsFieldGroup("MS SQL",
+      actionRow(diagnosticButton("sql", "Test SQL")),
+      settingsNote("Domyslne polaczenie dla zdjec i slotow."),
       inputField("mssql_server", "MS SQL server", db.mssql.server),
       inputField("mssql_database", "MS SQL database", db.mssql.database),
       credentialField("mssql_user", "MS SQL user", db.mssql.user_set, {
@@ -6307,9 +6306,7 @@ function renderSettingsSql() {
       credentialField("mssql_password", "MS SQL haslo", db.mssql.password_set, {
         type: "password",
         secretPath: "database.mssql.password",
-      })
-    ),
-    settingsFieldGroup("MySQL",
+      }),
       inputField("mysql_server", "MySQL server", db.mysql.server),
       inputField("mysql_database", "MySQL database", db.mysql.database),
       credentialField("mysql_user", "MySQL user", db.mysql.user_set, {
@@ -6320,9 +6317,8 @@ function renderSettingsSql() {
         secretPath: "database.mysql.password",
       })
     ),
-    settingsFieldGroup(
-      "Profile SQL",
-      settingsNote("Profil domyslny jest zawsze uzywany przez Sloty."),
+    settingsFieldGroup("Profile dodatkowe SQL",
+      settingsNote("Niezalezne profile uzywane tylko po wybraniu w builderze wartosci pola Pimcore."),
       profiles,
       actionRow(addProfile)
     )
@@ -6698,9 +6694,13 @@ function closePimcoreTemplateBuilder() {
   state.pimcoreTemplateRow = null;
 }
 
+function additionalSqlProfiles(db = {}) {
+  return (db.profiles || []).filter((profile) => profile.usage === "pimcore_sql");
+}
+
 function sqlProfileOptions(selected = "") {
-  const options = (state.settings?.database?.profiles || [])
-    .filter((profile) => profile.usage === "pimcore_sql" && profile.enabled !== false)
+  const options = additionalSqlProfiles(state.settings?.database || {})
+    .filter((profile) => profile.enabled !== false)
     .map((profile) => [profile.id, profile.label || profile.id]);
   if (selected && !options.some(([id]) => id === selected)) {
     options.push([selected, selected]);
