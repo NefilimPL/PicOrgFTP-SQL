@@ -664,6 +664,83 @@ class WebDataUserTests(unittest.TestCase):
         self.assertEqual(preserve[web_data.P], {web_data.N, web_data.M})
         self.assertEqual(preserve[web_data.K], {web_data.M})
 
+    def test_settings_snapshot_exposes_public_sql_profiles(self) -> None:
+        cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+        cfg["sql_profiles"] = [
+            {
+                "id": "stock",
+                "label": "Stock",
+                "type": "mysql",
+                "host": "mysql.local",
+                "database": "catalog",
+                "user": "reader",
+                "password": "stock-password-value",
+                "enabled": True,
+            }
+        ]
+
+        with (
+            patch.object(web_data.config, "CONFIG", cfg),
+            patch.object(web_data, "load_users", return_value=[]),
+        ):
+            snapshot = web_data.settings_snapshot()
+
+        self.assertEqual(snapshot["database"]["profiles"][0]["id"], "default")
+        self.assertEqual(snapshot["database"]["profiles"][0]["usage"], "slots")
+        self.assertEqual(snapshot["database"]["profiles"][1]["id"], "stock")
+        self.assertTrue(snapshot["database"]["profiles"][1]["password_set"])
+        self.assertNotIn("stock-password-value", json.dumps(snapshot))
+
+    def test_update_settings_saves_additional_sql_profiles_and_preserves_blank_password(self) -> None:
+        cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+        cfg["sql_profiles"] = [
+            {
+                "id": "stock",
+                "label": "Stock",
+                "type": "mysql",
+                "host": "old.local",
+                "database": "catalog",
+                "user": "reader",
+                "password": "saved-secret",
+                "enabled": True,
+            }
+        ]
+        saved = []
+
+        with (
+            patch.object(web_data.config, "CONFIG", cfg),
+            patch.object(
+                web_data,
+                "save_config",
+                side_effect=lambda payload, **kwargs: saved.append(
+                    json.loads(json.dumps(payload))
+                ),
+            ),
+            patch.object(web_data.config, "initialize_config", return_value=cfg),
+            patch.object(web_data, "settings_snapshot", return_value={}),
+        ):
+            web_data.update_settings(
+                {
+                    "database": {
+                        "profiles": [
+                            {
+                                "id": "stock",
+                                "label": "Stock",
+                                "type": "mysql",
+                                "host": "new.local",
+                                "database": "catalog",
+                                "user": "reader",
+                                "password": "",
+                                "enabled": True,
+                            }
+                        ]
+                    }
+                }
+            )
+
+        self.assertEqual(saved[0]["sql_profiles"][0]["host"], "new.local")
+        self.assertEqual(saved[0]["sql_profiles"][0]["password"], "saved-secret")
+
     def test_update_settings_stores_security_payload_separately_from_processing(self) -> None:
         saved_configs = []
         cfg = {

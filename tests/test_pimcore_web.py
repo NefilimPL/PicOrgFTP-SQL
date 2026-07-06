@@ -97,6 +97,28 @@ def test_pimcore_settings_test_route_returns_structured_report():
     assert response.json() == report
 
 
+def test_admin_can_test_sql_profile_route():
+    client = TestClient(web_app.app)
+    expected = {"ok": True, "message": "Polaczenie SQL dziala."}
+    with (
+        patch.object(
+            web_app,
+            "_require_admin",
+            return_value={"username": "admin", "role": "admin"},
+        ),
+        patch.object(
+            web_app,
+            "test_sql_profile_connection",
+            return_value=expected,
+        ) as test_profile,
+    ):
+        response = client.post("/api/settings/sql-profiles/stock/test")
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    test_profile.assert_called_once_with("stock")
+
+
 def test_settings_diagnostic_persists_full_detail_but_returns_public_report():
     report = {
         "ok": False,

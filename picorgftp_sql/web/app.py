@@ -127,6 +127,7 @@ from ..web_data import (
     test_ftp_connection,
     test_local_paths,
     test_sql_connection,
+    test_sql_profile_connection,
     update_pimcore_product,
     update_settings,
     update_user,
@@ -4178,6 +4179,15 @@ def create_app() -> FastAPI:
             return response
         snapshot["current_user"] = _current_user_payload(request)
         return JSONResponse(snapshot)
+
+    @app.post("/api/settings/sql-profiles/{profile_id}/test")
+    async def settings_sql_profile_test(
+        request: Request,
+        profile_id: str,
+    ) -> JSONResponse:
+        _require_admin(request)
+        result = await run_in_threadpool(test_sql_profile_connection, profile_id)
+        return JSONResponse(result)
 
     @app.post("/api/settings/pimcore/test")
     async def pimcore_settings_test_api(request: Request) -> JSONResponse:

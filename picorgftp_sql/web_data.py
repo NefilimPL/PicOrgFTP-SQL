@@ -74,6 +74,7 @@ from .services.sql_service import (
     query_presence_details,
     should_check_presence,
 )
+from .services.pimcore_sql_service import connect_profile
 from .file_index import LocalFileIndex
 from .pimcore_config import (
     PIMCORE_API_KEY,
@@ -102,6 +103,13 @@ from .services.pimcore_service import (
 )
 from .services.translation_service import translate_text
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
+from .sql_profiles import (
+    SQL_PROFILES_KEY,
+    additional_sql_profiles,
+    normalize_sql_profiles,
+    public_sql_profiles,
+    resolve_sql_profile,
+)
 from .product_fields import (
     PRODUCT_FIELDS_KEY,
     effective_product_values,
@@ -2045,10 +2053,57 @@ def _preserve_unsubmitted_config_secrets(payload: dict[str, object]) -> dict[str
             preserve[section_key].discard(N)
         if _text(section_payload.get("password")):
             preserve[section_key].discard(M)
+    profile_preserve = set()
+    submitted_profiles = (
+        db_payload.get("profiles")
+        if isinstance(db_payload.get("profiles"), list)
+        else []
+    )
+    existing_profiles = {
+        _text(item.get("id")): item
+        for item in config.CONFIG.get(SQL_PROFILES_KEY, [])
+        if isinstance(item, dict) and _text(item.get("id"))
+    }
+    for item in submitted_profiles:
+        if not isinstance(item, dict):
+            continue
+        profile_id = _text(item.get("id"))
+        if profile_id in existing_profiles and not _text(item.get("password")):
+            profile_preserve.add(profile_id)
+    if profile_preserve:
+        preserve[SQL_PROFILES_KEY] = profile_preserve
     pimcore_payload = payload.get(PIMCORE_SETTINGS_KEY)
     if isinstance(pimcore_payload, dict) and _text(pimcore_payload.get(PIMCORE_API_KEY)):
         preserve[PIMCORE_SETTINGS_KEY].discard(PIMCORE_API_KEY)
     return {section: keys for section, keys in preserve.items() if keys}
+
+
+def _merged_sql_profiles_from_settings_payload(
+    cfg: dict[str, object],
+    db_payload: dict[str, object],
+) -> list[dict[str, object]]:
+    submitted_profiles = db_payload.get("profiles")
+    if not isinstance(submitted_profiles, list):
+        return additional_sql_profiles(cfg)
+    current_profiles = {
+        _text(item.get("id")): item
+        for item in cfg.get(SQL_PROFILES_KEY, [])
+        if isinstance(item, dict) and _text(item.get("id"))
+    }
+    merged_profiles = []
+    for item in submitted_profiles:
+        if not isinstance(item, dict):
+            continue
+        profile = dict(item)
+        profile_id = _text(profile.get("id"))
+        if (
+            profile_id
+            and not _text(profile.get("password"))
+            and profile_id in current_profiles
+        ):
+            profile["password"] = current_profiles[profile_id].get("password", "")
+        merged_profiles.append(profile)
+    return additional_sql_profiles({SQL_PROFILES_KEY: merged_profiles})
 
 
 def update_settings(payload: dict[str, object]) -> dict[str, object]:
@@ -2119,7 +2174,16 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
 
     if isinstance(pimcore_payload, dict):
         if "field_mappings" in pimcore_payload:
-            issues = field_mapping_issues(pimcore_payload.get("field_mappings"))
+            profile_cfg = dict(cfg)
+            if isinstance(db_payload.get("profiles"), list):
+                profile_cfg[SQL_PROFILES_KEY] = _merged_sql_profiles_from_settings_payload(
+                    cfg,
+                    db_payload,
+                )
+            issues = field_mapping_issues(
+                pimcore_payload.get("field_mappings"),
+                sql_profiles=normalize_sql_profiles(profile_cfg),
+            )
             if issues:
                 raise ValueError(" ".join(issues))
         current = normalize_pimcore_settings(cfg.get(PIMCORE_SETTINGS_KEY))
@@ -2174,6 +2238,11 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
                     if key in {"user", "password"} and not value:
                         continue
                     section[cfg_key] = value
+        if isinstance(db_payload.get("profiles"), list):
+            cfg[SQL_PROFILES_KEY] = _merged_sql_profiles_from_settings_payload(
+                cfg,
+                db_payload,
+            )
 
     if slots_payload is not None:
         slot_defs, _slot_issues = normalize_slot_definitions(slots_payload)
@@ -2258,6 +2327,7 @@ def settings_snapshot() -> dict[str, object]:
                 "user_set": bool(_text(mysql_cfg.get(N))),
                 "password_set": bool(_text(mysql_cfg.get(M))),
             },
+            "profiles": public_sql_profiles(normalize_sql_profiles(cfg)),
         },
         "slot_count": len(slot_defs),
         "sql_map_count": len(sql_map),
@@ -2369,6 +2439,39 @@ def test_sql_connection() -> dict[str, object]:
         return {"ok": True, "message": "Polaczenie SQL dziala."}
     except Exception as exc:
         return {"ok": False, "message": str(exc)}
+
+
+def test_sql_profile_connection(profile_id: object) -> dict[str, object]:
+    """Check database connectivity using one configured SQL profile."""
+
+    try:
+        profile = resolve_sql_profile(normalize_sql_profiles(config.CONFIG), profile_id)
+    except KeyError:
+        return {"ok": False, "message": "Nieznany profil SQL."}
+    if profile.get("id") == "default":
+        return test_sql_connection()
+
+    conn = None
+    cursor = None
+    try:
+        conn = connect_profile(profile)
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1")
+        cursor.fetchone()
+        return {"ok": True, "message": "Polaczenie SQL dziala."}
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def find_product_photos(
