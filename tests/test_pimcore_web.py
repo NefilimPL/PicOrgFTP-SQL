@@ -538,6 +538,35 @@ def test_create_adapter_uses_manual_create_operation_kind():
     assert persist.call_args.args[0]["operation_type"] == "manual_create"
 
 
+def test_create_adapter_persists_detailed_sqlite_submission_when_store_active():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update({"enabled": True, "setup_complete": True})
+    store = Mock()
+
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "_active_sqlite_store", return_value=store),
+        patch.object(
+            web_data,
+            "create_product",
+            return_value={
+                "created": True,
+                "duplicate": False,
+                "object": {"id": 91},
+                "payload": {"className": "Product"},
+            },
+        ),
+        patch.object(web_data, "_persist_pimcore_operation"),
+    ):
+        web_data.create_pimcore_product({"EAN": "5904804578169"}, "operator")
+
+    submitted = store.append_pimcore_submission.call_args.args[0]
+    assert submitted["operation_type"] == "manual_create"
+    assert submitted["username"] == "operator"
+    assert submitted["values"]["EAN"] == "5904804578169"
+    assert submitted["payload"]["className"] == "Product"
+
+
 def test_runtime_edit_routes_allow_logged_in_user():
     client = TestClient(web_app.app)
     loaded = {

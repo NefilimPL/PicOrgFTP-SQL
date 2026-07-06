@@ -23,7 +23,7 @@ from .excel_utils import (
     TYPE_HEADER,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 LIST_SHEETS = ("NAZWY", "TYPY", "MODELE", "KOLORY", "DODATKI")
 ENTRY_HEADERS = (
     EAN_HEADER,
@@ -305,6 +305,22 @@ class SqliteStore:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (segment_key, section, lookup_key)
                 );
+
+                CREATE TABLE IF NOT EXISTS pimcore_submissions (
+                    id TEXT PRIMARY KEY,
+                    operation_id TEXT NOT NULL DEFAULT '',
+                    operation_type TEXT NOT NULL,
+                    username TEXT NOT NULL DEFAULT '',
+                    ean TEXT NOT NULL DEFAULT '',
+                    object_id TEXT NOT NULL DEFAULT '',
+                    object_path TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    values_json TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    warnings_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 """
             )
             _migrate_web_history_created_at(conn)
@@ -322,6 +338,12 @@ class SqliteStore:
                     ON file_index_segments(segment_key, section, lookup_key);
                 CREATE INDEX IF NOT EXISTS idx_file_index_segments_updated_at
                     ON file_index_segments(updated_at);
+                CREATE INDEX IF NOT EXISTS idx_pimcore_submissions_created_at
+                    ON pimcore_submissions(created_at);
+                CREATE INDEX IF NOT EXISTS idx_pimcore_submissions_ean
+                    ON pimcore_submissions(ean);
+                CREATE INDEX IF NOT EXISTS idx_pimcore_submissions_user
+                    ON pimcore_submissions(username);
                 """
             )
             version_row = conn.execute(
@@ -379,6 +401,143 @@ class SqliteStore:
                     """,
                     (path, _json_dumps(value), updated_at),
                 )
+
+    def append_pimcore_submission(self, record: dict[str, object]) -> dict[str, Any]:
+        """Persist one Pimcore submission audit record."""
+
+        self.initialize()
+        record_id = _text(record.get("id")) or f"pim-{uuid.uuid4().hex}"
+        created_at = _iso_from_timestamp(record.get("created_at") or _now_iso())
+        payload = {
+            "id": record_id,
+            "operation_id": _text(record.get("operation_id")),
+            "operation_type": _text(record.get("operation_type")),
+            "username": _text(record.get("username")),
+            "ean": _text(record.get("ean")),
+            "object_id": _text(record.get("object_id")),
+            "object_path": _text(record.get("object_path")),
+            "status": _text(record.get("status")),
+            "values": record.get("values") if isinstance(record.get("values"), dict) else {},
+            "payload": record.get("payload") if isinstance(record.get("payload"), dict) else {},
+            "result": record.get("result") if isinstance(record.get("result"), dict) else {},
+            "warnings": record.get("warnings") if isinstance(record.get("warnings"), list) else [],
+            "created_at": created_at,
+        }
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO pimcore_submissions (
+                    id, operation_id, operation_type, username, ean, object_id,
+                    object_path, status, values_json, payload_json, result_json,
+                    warnings_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    operation_id = excluded.operation_id,
+                    operation_type = excluded.operation_type,
+                    username = excluded.username,
+                    ean = excluded.ean,
+                    object_id = excluded.object_id,
+                    object_path = excluded.object_path,
+                    status = excluded.status,
+                    values_json = excluded.values_json,
+                    payload_json = excluded.payload_json,
+                    result_json = excluded.result_json,
+                    warnings_json = excluded.warnings_json,
+                    created_at = excluded.created_at
+                """,
+                (
+                    payload["id"],
+                    payload["operation_id"],
+                    payload["operation_type"],
+                    payload["username"],
+                    payload["ean"],
+                    payload["object_id"],
+                    payload["object_path"],
+                    payload["status"],
+                    _json_dumps(payload["values"]),
+                    _json_dumps(payload["payload"]),
+                    _json_dumps(payload["result"]),
+                    _json_dumps(payload["warnings"]),
+                    payload["created_at"],
+                ),
+            )
+        return payload
+
+    def query_pimcore_submissions(
+        self,
+        *,
+        operation_type: str = "",
+        status: str = "",
+        user: str = "",
+        query: str = "",
+        date_from: str = "",
+        date_to: str = "",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return persisted Pimcore submission audit records."""
+
+        self.initialize()
+        clauses = []
+        params: list[object] = []
+        if _text(operation_type):
+            clauses.append("operation_type = ?")
+            params.append(_text(operation_type))
+        if _text(status):
+            clauses.append("status = ?")
+            params.append(_text(status))
+        if _text(user):
+            clauses.append("LOWER(username) = LOWER(?)")
+            params.append(_text(user))
+        if _text(date_from):
+            clauses.append("created_at >= ?")
+            params.append(_text(date_from))
+        if _text(date_to):
+            clauses.append("created_at <= ?")
+            params.append(_text(date_to))
+        if _text(query):
+            needle = f"%{_text(query)}%"
+            clauses.append(
+                "(ean LIKE ? OR object_id LIKE ? OR object_path LIKE ? OR values_json LIKE ?)"
+            )
+            params.extend([needle, needle, needle, needle])
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        try:
+            limit_value = int(limit or 200)
+        except (TypeError, ValueError):
+            limit_value = 200
+        bounded_limit = max(1, min(1000, limit_value))
+        with self.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM pimcore_submissions
+                {where}
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?
+                """,
+                (*params, bounded_limit),
+            ).fetchall()
+        result = []
+        for row in rows:
+            result.append(
+                {
+                    "id": row["id"],
+                    "operation_id": row["operation_id"],
+                    "operation_type": row["operation_type"],
+                    "username": row["username"],
+                    "ean": row["ean"],
+                    "object_id": row["object_id"],
+                    "object_path": row["object_path"],
+                    "status": row["status"],
+                    "values": _json_loads(row["values_json"], {}),
+                    "payload": _json_loads(row["payload_json"], {}),
+                    "result": _json_loads(row["result_json"], {}),
+                    "warnings": _json_loads(row["warnings_json"], []),
+                    "created_at": row["created_at"],
+                }
+            )
+        return result
 
     def load_slots(self) -> tuple[list[dict[str, str]], dict[str, str]]:
         """Return slot definitions and SQL column mappings."""

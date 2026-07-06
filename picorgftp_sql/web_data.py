@@ -68,6 +68,7 @@ from .excel_utils import (
     save_ean_entry,
     NO_EAN_PLACEHOLDER,
 )
+from .logging_utils import log_error
 from .services.ftp_service import connect_ftp, list_remote_files_for_ean, list_remote_filenames
 from .services.sql_service import (
     extract_presence_context,
@@ -1627,6 +1628,50 @@ def _persist_pimcore_operation(report: dict[str, object]) -> dict[str, object]:
     )
 
 
+def _pimcore_submission_record(report: dict[str, object]) -> dict[str, object]:
+    values = report.get("values") if isinstance(report.get("values"), dict) else {}
+    result = report.get("result") if isinstance(report.get("result"), dict) else {}
+    result_object = result.get("object") if isinstance(result.get("object"), dict) else {}
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    result_warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
+    report_warnings = report.get("warnings") if isinstance(report.get("warnings"), list) else []
+    return {
+        "operation_id": _text(report.get("operation_id")),
+        "operation_type": _text(report.get("operation_type")),
+        "username": _text(report.get("username")),
+        "ean": _text(values.get("EAN") or values.get("ean")),
+        "object_id": _text(
+            result.get("object_id")
+            or result.get("id")
+            or result_object.get("id")
+        ),
+        "object_path": _text(
+            result.get("object_path")
+            or result.get("path")
+            or result_object.get("path")
+            or result_object.get("fullPath")
+        ),
+        "status": _text(report.get("status")),
+        "values": values,
+        "payload": payload,
+        "result": result,
+        "warnings": report_warnings + result_warnings,
+        "created_at": report.get("finished_at") or report.get("started_at") or time.time(),
+    }
+
+
+def _persist_pimcore_submission(report: dict[str, object]) -> None:
+    store = _active_sqlite_store()
+    if store is None:
+        return
+    try:
+        store.append_pimcore_submission(
+            redact_pimcore_log_value(_pimcore_submission_record(report))
+        )
+    except Exception as exc:
+        log_error(f"Failed to persist Pimcore submission: {exc}")
+
+
 def start_pimcore_test_create(
     values: object,
     cleanup_policy: object,
@@ -1984,6 +2029,7 @@ def create_pimcore_product(values: object, username: str) -> dict[str, object]:
             }
         )
         _persist_pimcore_operation(report)
+        _persist_pimcore_submission(report)
 
 
 def get_pimcore_product_for_edit(object_id: object) -> dict[str, object]:
@@ -2038,20 +2084,20 @@ def update_pimcore_product(
         raise
     finally:
         finished = time.time()
-        _persist_pimcore_operation(
-            {
-                "operation_id": operation_id,
-                "operation_type": "manual_update",
-                "username": username,
-                "values": submitted,
-                "status": status,
-                "started_at": started,
-                "finished_at": finished,
-                "total_ms": int(max(0, finished - started) * 1000),
-                "events": events,
-                "result": result,
-            }
-        )
+        report = {
+            "operation_id": operation_id,
+            "operation_type": "manual_update",
+            "username": username,
+            "values": submitted,
+            "status": status,
+            "started_at": started,
+            "finished_at": finished,
+            "total_ms": int(max(0, finished - started) * 1000),
+            "events": events,
+            "result": result,
+        }
+        _persist_pimcore_operation(report)
+        _persist_pimcore_submission(report)
 
 
 def pimcore_operation_status(

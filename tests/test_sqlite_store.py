@@ -34,7 +34,37 @@ def test_schema_creates_expected_tables(tmp_path: Path) -> None:
         "web_users",
         "web_history",
         "file_index_cache",
+        "pimcore_submissions",
     } <= tables
+
+
+def test_pimcore_submissions_roundtrip_and_filter(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.initialize()
+
+    store.append_pimcore_submission(
+        {
+            "operation_id": "op-1",
+            "operation_type": "manual_create",
+            "username": "operator",
+            "ean": "5901234567890",
+            "object_id": "91",
+            "object_path": "/Produkty/91",
+            "status": "completed",
+            "values": {"EAN": "5901234567890", "STOCK": "12"},
+            "payload": {"className": "Product"},
+            "result": {"object_id": 91},
+            "warnings": [],
+        }
+    )
+
+    rows = store.query_pimcore_submissions(user="operator", query="590123", limit=20)
+
+    assert len(rows) == 1
+    assert rows[0]["operation_id"] == "op-1"
+    assert rows[0]["values"]["STOCK"] == "12"
+    assert rows[0]["payload"]["className"] == "Product"
+    assert rows[0]["created_at"].endswith("Z")
 
 
 def test_config_roundtrip_preserves_payload(tmp_path: Path) -> None:
