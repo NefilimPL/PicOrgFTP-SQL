@@ -31,6 +31,16 @@ Przyklad szablonu:
 
 Tekst i dowolne znaki poza placeholderami sa kopiowane do wyniku. Grupa `(...)` znika w calosci, jezeli ktorys zawarty w niej placeholder jest pusty. Wielkosc zapisu aliasu steruje wielkoscia liter (`{NAZWA}`, `{Nazwa}`, `{nazwa}`), a funkcje dopisuje sie po `|`, np. `{Nazwa|trim|upper}`. Dostepne funkcje: `keep`, `trim`, `normalize_spaces`, `upper`, `lower`, `title`, `capitalize`, `replace`, `default`, `substring`, `truncate`, `strip_diacritics`, `slug` i `number`.
 
+### Pimcore SQL profiles
+
+The default SQL profile is always used by Sloty. Additional SQL profiles can be
+created in the SQL settings tab and selected only by Pimcore mappings whose
+template field is set to `SQL`. In that mode the mapping uses the separate SQL
+query field and writes the first column of the first row into the Pimcore form.
+Create and test forms apply SQL results only to empty fields; edit forms require
+explicit recalculation and show manual differences before applying a calculated
+value.
+
 Klucz API jest przechowywany w postaci zaszyfrowanej. Standardowy endpoint ustawien ani logi operacji Pimcore nigdy go nie zwracaja. Operacje tworzenia, testu i edycji zapisuja zredagowany audyt z ID, kluczem albo sciezka obiektu, gdy sa znane. Jezeli automatyczne usuwanie obiektu testowego sie nie powiedzie, uzyj danych z raportu operacji, aby usunac go recznie w Pimcore.
 
 <!-- Legacy pre-guided-setup instructions retained only for source history.
