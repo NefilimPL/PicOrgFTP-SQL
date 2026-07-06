@@ -13,6 +13,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import tempfile
 import threading
@@ -90,7 +91,10 @@ from .pimcore_config import (
 from .pimcore_operations import PimcoreOperationRegistry, redact_pimcore_log_value
 from .pimcore_templates import (
     PRODUCT_SOURCES,
+    SourceDefinition,
+    TemplateError,
     generate_test_values,
+    placeholder_sources,
     render_mapping_templates,
 )
 from .services.pimcore_service import (
@@ -1796,6 +1800,31 @@ def _product_template_values(raw: object, *, fill_missing: bool = False) -> dict
     return values
 
 
+def _template_uses_sql_source(template: object) -> bool:
+    try:
+        return any(source.casefold() == "sql" for source in placeholder_sources(template))
+    except TemplateError:
+        return False
+
+
+def _sql_template_source(source: object) -> str:
+    return f"SQL:{_text(source)}"
+
+
+def _rewrite_sql_template_source(template: object, source: object) -> str:
+    replacement = _sql_template_source(source)
+
+    def replace(match):
+        content = match.group(1)
+        parts = content.split("|", 1)
+        if _text(parts[0]).casefold() != "sql":
+            return match.group(0)
+        suffix = f"|{parts[1]}" if len(parts) == 2 else ""
+        return "{" + replacement + suffix + "}"
+
+    return re.sub(r"\{([^{}]+)\}", replace, str(template or ""))
+
+
 def _render_templates(
     settings_payload: dict[str, object],
     product_values: object,
@@ -1812,12 +1841,20 @@ def _render_templates(
         for item in mappings_list
         if str(item.get("value_template") or "").strip().casefold() == "sql"
     }
+    sql_template_sources = {
+        item["source"]
+        for item in mappings_list
+        if item["source"] not in sql_sources
+        and _template_uses_sql_source(item.get("value_template"))
+    }
     selected_targets = set(targets or [item["source"] for item in mappings_list])
     template_mappings = [
         {
             **item,
             "value_template": ""
             if item["source"] in sql_sources
+            else _rewrite_sql_template_source(item.get("value_template", ""), item["source"])
+            if item["source"] in sql_template_sources
             else item.get("value_template", ""),
         }
         for item in mappings_list
@@ -1826,21 +1863,49 @@ def _render_templates(
         product_values,
         fill_missing=fill_missing_product_values,
     )
+    output = dict(submitted)
+    warnings: list[dict[str, object]] = []
+    calculated_values: dict[str, object] = {}
+    changed: dict[str, bool] = {}
+    profiles = normalize_sql_profiles(config.CONFIG)
+    mappings = {
+        item["source"]: item
+        for item in mappings_list
+    }
+    extra_sources: list[SourceDefinition] = []
+    extra_values: dict[str, object] = {}
+    for source in sql_template_sources:
+        mapping = mappings[source]
+        sql_key = _sql_template_source(source)
+        extra_sources.append(
+            SourceDefinition(sql_key, f"SQL {mapping.get('label') or source}", "sql", (sql_key,))
+        )
+        try:
+            profile = resolve_sql_profile(profiles, mapping.get("sql_profile_id"))
+            if not profile.get("enabled", True):
+                label = profile.get("label") or profile.get("id")
+                raise ValueError(f"Profil SQL {label} jest wylaczony.")
+            sql_result = execute_sql_value_query(
+                profile,
+                mapping.get("sql_query"),
+                product_context,
+                output,
+            )
+        except Exception as exc:
+            warnings.append({"source": source, "code": "sql_error", "message": str(exc)})
+            extra_values[sql_key] = ""
+        else:
+            extra_values[sql_key] = sql_result.value
+            warnings.extend({"source": source, **warning} for warning in sql_result.warnings)
     rendered = render_mapping_templates(
         template_mappings,
         product_values=product_context,
         pimcore_values=submitted,
         targets=targets,
+        extra_sources=extra_sources,
+        extra_values=extra_values,
     )
-    output = dict(submitted)
-    warnings: list[dict[str, object]] = []
-    calculated_values: dict[str, object] = {}
-    changed: dict[str, bool] = {}
     translation_settings = config.CONFIG.get(TRANSLATION_SETTINGS_KEY, {}) or {}
-    mappings = {
-        item["source"]: item
-        for item in mappings_list
-    }
     for source in rendered.order:
         mapping = mappings[source]
         value = rendered.values[source]
@@ -1854,7 +1919,6 @@ def _render_templates(
             if translated.warning:
                 warnings.append({"source": source, **translated.warning})
         output[source] = value
-    profiles = normalize_sql_profiles(config.CONFIG)
     for mapping in mappings_list:
         source = mapping["source"]
         if source not in selected_targets:

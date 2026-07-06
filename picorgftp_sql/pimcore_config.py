@@ -6,6 +6,7 @@ from typing import Any
 
 from .pimcore_templates import (
     PRODUCT_SOURCES,
+    SourceDefinition,
     TemplateError,
     build_source_catalog,
     generate_test_values,
@@ -141,6 +142,13 @@ def _legacy_setup_is_complete(settings: dict[str, Any]) -> bool:
     )
 
 
+def _template_uses_sql_source(template: object) -> bool:
+    try:
+        return any(source.casefold() == "sql" for source in placeholder_sources(template))
+    except TemplateError:
+        return False
+
+
 def field_mapping_issues(
     raw_mappings: object,
     *,
@@ -176,6 +184,7 @@ def field_mapping_issues(
         parser = _text(raw.get("parser")).lower() or "text"
         template = _text(raw.get("value_template"))
         is_sql_mode = template.casefold() == "sql"
+        uses_sql_source = not is_sql_mode and _template_uses_sql_source(template)
         translate = bool(raw.get("translate"))
         target_language = _text(raw.get("target_language"))
         if not source:
@@ -199,7 +208,7 @@ def field_mapping_issues(
             )
         if template and element_type not in {"input", "textarea", "select"}:
             issues.append(f"Mapowanie {index}: szablon wymaga pola tekstowego.")
-        if is_sql_mode:
+        if is_sql_mode or uses_sql_source:
             sql_query = _text(raw.get("sql_query"))
             profile_id = _text(raw.get("sql_profile_id"))
             if not sql_query:
@@ -233,7 +242,8 @@ def field_mapping_issues(
             else raw
             for raw in raw_mappings
         ]
-        catalog = build_source_catalog(template_mappings)
+        sql_template_source = SourceDefinition("SQL", "SQL", "sql", ("SQL",))
+        catalog = build_source_catalog(template_mappings, [sql_template_source])
         for index, raw in enumerate(raw_mappings, start=1):
             if not isinstance(raw, dict):
                 continue
@@ -247,6 +257,8 @@ def field_mapping_issues(
             template_mappings,
             product_values={key: "1" for key in PRODUCT_SOURCES},
             pimcore_values=generate_test_values(template_mappings),
+            extra_sources=[sql_template_source],
+            extra_values={"SQL": "1"},
         )
     except TemplateError as exc:
         issues.append(f"Mapowanie {index}: {exc.message}")

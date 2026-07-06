@@ -336,12 +336,20 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("mapping_sql_profile_id", source)
         self.assertIn("pimcore-runtime-calculated", source)
         self.assertIn("pimcore-runtime-different", css)
+        self.assertIn("pimcore-template-sql-controls", source)
+        self.assertIn("insertPimcoreTemplateSqlToken", source)
+        self.assertNotIn("row.append(use, label, target, required, template, remove, pimcoreSqlMappingControls", source)
+        self.assertNotIn("row.appendChild(pimcoreSqlMappingControls", source)
+        self.assertIn(".sql-profile-card", css)
+        self.assertIn(".sql-profile-card + .sql-profile-card", css)
         self.assertIn("20260706-sql-profiles", html)
 
     def test_pimcore_runtime_difference_ui_preserves_manual_values(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
 
         self.assertIn("function updatePimcoreRuntimeCalculatedState", source)
+        self.assertIn("function updatePimcoreRuntimeFieldChangeState", source)
+        self.assertIn("dataset.originalValue", source)
         self.assertIn("dataset.calculatedValue", source)
         self.assertIn("pimcore-runtime-different", source)
         self.assertIn("Zastosuj wyliczone", source)

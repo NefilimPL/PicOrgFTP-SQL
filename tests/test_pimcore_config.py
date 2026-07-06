@@ -271,6 +271,47 @@ def test_field_mapping_issues_require_sql_query_and_profile_for_sql_mode():
     ]
 
 
+def test_field_mapping_issues_require_sql_query_and_profile_for_sql_placeholder():
+    issues = field_mapping_issues(
+        [
+            {
+                "source": "STOCK",
+                "pimcore_field": "stock",
+                "type": "input",
+                "parser": "text",
+                "value_template": "Stan: {SQL|number:0}",
+                "sql_query": "",
+                "sql_profile_id": "",
+            }
+        ],
+        sql_profiles=[{"id": "stock-db"}],
+    )
+
+    assert issues == [
+        "Mapowanie 1: SQL wymaga zapytania.",
+        "Mapowanie 1: wybierz profil SQL.",
+    ]
+
+
+def test_field_mapping_issues_accept_sql_placeholder_as_template_source():
+    issues = field_mapping_issues(
+        [
+            {
+                "source": "STOCK",
+                "pimcore_field": "stock",
+                "type": "input",
+                "parser": "text",
+                "value_template": "Stan: {SQL|number:0}",
+                "sql_query": "SELECT qty FROM stock WHERE ean = {ean}",
+                "sql_profile_id": "stock-db",
+            }
+        ],
+        sql_profiles=[{"id": "stock-db"}],
+    )
+
+    assert issues == []
+
+
 def test_invalid_template_is_reported_by_mapping_validation():
     issues = field_mapping_issues(
         [

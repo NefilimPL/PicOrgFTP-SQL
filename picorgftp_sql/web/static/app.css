@@ -961,6 +961,17 @@ h2 {
   gap: 10px;
 }
 
+.sql-profile-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 12px;
+}
+
+.sql-profile-card + .sql-profile-card {
+  margin-top: 4px;
+}
+
 .sql-profile-row {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr)) auto auto;
@@ -969,9 +980,18 @@ h2 {
 }
 
 .pimcore-sql-mapping-controls {
-  grid-column: 1 / -1;
   grid-template-columns: minmax(0, 1fr) minmax(180px, 260px);
   align-items: end;
+}
+
+.pimcore-template-sql-controls {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 10px;
 }
 
 .settings-form textarea {
