@@ -945,6 +945,59 @@ def test_render_saved_pimcore_templates_uses_sql_as_template_source():
     execute_sql.assert_called_once()
 
 
+def test_render_saved_pimcore_templates_marks_sql_template_source_difference_for_edit():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update(
+        {
+            "enabled": True,
+            "setup_complete": True,
+            "field_mappings": [
+                {
+                    "source": "SKU",
+                    "label": "SKU",
+                    "pimcore_field": "sku",
+                    "type": "input",
+                    "parser": "text",
+                    "value_template": "{SQL|keep}",
+                    "sql_query": "SELECT TOP 1 sku FROM product WHERE ean = '{PRODUCT:ean|keep}'",
+                    "sql_profile_id": "stock",
+                }
+            ],
+        }
+    )
+    cfg["sql_profiles"] = [
+        {
+            "id": "stock",
+            "label": "Stock",
+            "type": "mssql",
+            "host": "sql.local",
+            "database": "catalog",
+            "user": "reader",
+            "password": "secret",
+            "enabled": True,
+        }
+    ]
+
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(
+            web_data,
+            "execute_sql_value_query",
+            return_value=web_data.SqlValueResult("SKU-NEW", []),
+        ),
+    ):
+        result = web_data.render_saved_pimcore_templates(
+            {"ean": "5907763645590"},
+            {"SKU": "SKU-OLD"},
+            ["SKU"],
+            mode="edit",
+        )
+
+    assert result["values"]["SKU"] == "SKU-NEW"
+    assert result["calculated_values"]["SKU"] == "SKU-NEW"
+    assert result["changed"]["SKU"] is True
+
+
 def test_render_saved_pimcore_templates_for_edit_does_not_auto_apply_sql():
     cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
     cfg["pimcore"].update(

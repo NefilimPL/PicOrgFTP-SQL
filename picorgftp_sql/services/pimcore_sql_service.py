@@ -17,6 +17,7 @@ UNSAFE_SQL_RE = re.compile(
     re.I,
 )
 PLACEHOLDER_RE = re.compile(r"\{([^{}]+)\}")
+SQL_PARAMETER_PLACEHOLDER_RE = re.compile(r"(?:N)?'\{([^{}]+)\}'|\{([^{}]+)\}", re.I)
 
 
 class SqlValueError(ValueError):
@@ -156,9 +157,10 @@ def bind_sql_value_query(
     params: list[str] = []
 
     def replace(match: re.Match[str]) -> str:
+        token = match.group(1) or match.group(2) or ""
         params.append(
             _placeholder_value(
-                match.group(1),
+                token,
                 product_values,
                 pimcore_values,
                 mappings,
@@ -166,7 +168,7 @@ def bind_sql_value_query(
         )
         return marker
 
-    return PLACEHOLDER_RE.sub(replace, safe_query), tuple(params)
+    return SQL_PARAMETER_PLACEHOLDER_RE.sub(replace, safe_query), tuple(params)
 
 
 def connect_profile(profile: dict[str, object]):

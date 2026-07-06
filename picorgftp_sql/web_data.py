@@ -1927,7 +1927,7 @@ def _render_templates(
         if source not in sql_sources:
             if source in output:
                 calculated_values[source] = output[source]
-                changed[source] = False
+                changed[source] = str(submitted.get(source, "")) != str(output[source])
             continue
         try:
             profile = resolve_sql_profile(profiles, mapping.get("sql_profile_id"))

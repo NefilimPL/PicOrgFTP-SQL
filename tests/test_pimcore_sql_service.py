@@ -83,6 +83,28 @@ def test_bind_sql_value_query_uses_template_placeholder_catalog_and_functions():
     assert params == ("Vivo Szafka", "AB-12", "SKU-1", "duzy stolik")
 
 
+def test_bind_sql_value_query_removes_quotes_around_placeholder_parameter():
+    query, params = bind_sql_value_query(
+        (
+            "SELECT TOP 1 t.tw_Symbol AS SKU "
+            "FROM dbo.tw__Towar t "
+            "WHERE LTRIM(RTRIM(CONVERT(varchar(50), t.tw_PodstKodKresk))) = "
+            "'{PRODUCT:ean|keep}'"
+        ),
+        {"ean": "5907763645590"},
+        {},
+        "mssql",
+    )
+
+    assert query == (
+        "SELECT TOP 1 t.tw_Symbol AS SKU "
+        "FROM dbo.tw__Towar t "
+        "WHERE LTRIM(RTRIM(CONVERT(varchar(50), t.tw_PodstKodKresk))) = "
+        "?"
+    )
+    assert params == ("5907763645590",)
+
+
 def test_execute_sql_value_query_returns_first_value_and_multiple_row_warning():
     class Cursor:
         def execute(self, query, params):
