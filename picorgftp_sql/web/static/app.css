@@ -955,6 +955,25 @@ h2 {
   font-size: 13px;
 }
 
+.sql-profile-list,
+.pimcore-sql-mapping-controls {
+  display: grid;
+  gap: 10px;
+}
+
+.sql-profile-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.pimcore-sql-mapping-controls {
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 260px);
+  align-items: end;
+}
+
 .settings-form textarea {
   width: 100%;
   min-height: 110px;
@@ -2066,6 +2085,20 @@ button.slot-badge.on:hover {
 
 .pimcore-runtime-field-row input {
   min-width: 0;
+}
+
+.pimcore-runtime-different input {
+  border-color: #d8a300;
+  background: #fff8d6;
+}
+
+.pimcore-runtime-calculated {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  color: #6b5300;
+  font-size: 0.9rem;
 }
 
 .pimcore-recalculate-field {

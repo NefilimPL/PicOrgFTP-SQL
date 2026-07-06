@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicOrgFTP-SQL Web</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260702-pimcore-setup">
+    <link rel="stylesheet" href="/static/app.css?v=20260706-sql-profiles">
   </head>
   <body class="app-screen">
     <header class="topbar">
@@ -494,6 +494,8 @@
           <input name="date_from" type="date" aria-label="Data od">
           <input name="date_to" type="date" aria-label="Data do">
           <button type="submit" class="secondary-button">Filtruj</button>
+          <button id="pimcoreHistoryExportCsvButton" type="button" class="secondary-button">Eksport CSV</button>
+          <button id="pimcoreHistoryExportJsonButton" type="button" class="secondary-button">Eksport JSON</button>
         </form>
         <div id="pimcoreHistoryOutput" class="history-output empty-state">Brak operacji.</div>
       </section>
@@ -587,6 +589,6 @@
       </article>
     </template>
 
-    <script src="/static/app.js?v=20260703-pimcore-templates"></script>
+    <script src="/static/app.js?v=20260706-sql-profiles"></script>
   </body>
 </html>

@@ -322,6 +322,41 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("async function recalculateAllPimcoreEditFields", source)
         self.assertIn("pimcoreEditRecalculateAllButton", source)
 
+    def test_sql_profile_ui_and_pimcore_sql_mapping_controls_exist(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        css = (ROOT / "picorgftp_sql" / "web" / "static" / "app.css").read_text(
+            encoding="utf-8"
+        )
+        html = INDEX_HTML.read_text(encoding="utf-8")
+
+        self.assertIn("Profil domyslny jest zawsze uzywany przez Sloty", source)
+        self.assertIn("function sqlProfileRow", source)
+        self.assertIn("/api/settings/sql-profiles/", source)
+        self.assertIn("mapping_sql_query", source)
+        self.assertIn("mapping_sql_profile_id", source)
+        self.assertIn("pimcore-runtime-calculated", source)
+        self.assertIn("pimcore-runtime-different", css)
+        self.assertIn("20260706-sql-profiles", html)
+
+    def test_pimcore_runtime_difference_ui_preserves_manual_values(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("function updatePimcoreRuntimeCalculatedState", source)
+        self.assertIn("dataset.calculatedValue", source)
+        self.assertIn("pimcore-runtime-different", source)
+        self.assertIn("Zastosuj wyliczone", source)
+        self.assertIn('mode: form.dataset.pimcoreMode || "create"', source)
+        self.assertIn("if (!input.value)", source)
+
+    def test_pimcore_history_has_submission_export_actions(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        html = INDEX_HTML.read_text(encoding="utf-8")
+
+        self.assertIn("exportPimcoreSubmissions", source)
+        self.assertIn("/api/settings/pimcore/submissions/export", source)
+        self.assertIn("Eksport CSV", html)
+        self.assertIn("pimcoreHistoryExportCsvButton", html)
+
     def test_pimcore_edit_modal_opens_before_remote_object_load(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         start = source.index("async function openPimcoreEditModal")
@@ -393,7 +428,7 @@ class WebUiIntegrityTests(unittest.TestCase):
 
         self.assertNotIn("http://10.10.0.5", source)
         self.assertIn("http://twoj-adres-pimcore.example", source)
-        self.assertIn("20260703-pimcore-templates", html_source)
+        self.assertIn("20260706-sql-profiles", html_source)
         self.assertIn("flex-wrap: wrap", css[css.index(".lookup-actions"):])
         self.assertNotIn(".lookup-actions #pimcoreEditButton {\n  min-width", css)
 
