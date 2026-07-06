@@ -78,6 +78,8 @@ def normalize_field_mapping(raw: object) -> dict[str, Any] | None:
         "default": _text(raw.get("default")),
         "parser": parser,
         "value_template": _text(raw.get("value_template")),
+        "sql_query": _text(raw.get("sql_query")),
+        "sql_profile_id": _text(raw.get("sql_profile_id")),
         "translate": bool(raw.get("translate")),
         "target_language": _text(raw.get("target_language")) or None,
     }
@@ -112,6 +114,8 @@ def infer_field_mapping(
         "default": "",
         "parser": SUPPORTED_FIELD_PARSERS[normalized_type],
         "value_template": "",
+        "sql_query": "",
+        "sql_profile_id": "",
         "translate": False,
         "target_language": None,
     }
@@ -137,7 +141,11 @@ def _legacy_setup_is_complete(settings: dict[str, Any]) -> bool:
     )
 
 
-def field_mapping_issues(raw_mappings: object) -> list[str]:
+def field_mapping_issues(
+    raw_mappings: object,
+    *,
+    sql_profiles: object = None,
+) -> list[str]:
     if not isinstance(raw_mappings, list):
         return ["Mapowanie pol musi byc lista."]
     parser_types = {
@@ -150,6 +158,13 @@ def field_mapping_issues(raw_mappings: object) -> list[str]:
     issues: list[str] = []
     sources: set[str] = set()
     targets: set[tuple[str, str]] = set()
+    sql_profile_ids: set[str] | None = None
+    if isinstance(sql_profiles, list):
+        sql_profile_ids = {
+            _text(item.get("id"))
+            for item in sql_profiles
+            if isinstance(item, dict) and _text(item.get("id"))
+        }
     for index, raw in enumerate(raw_mappings, start=1):
         if not isinstance(raw, dict):
             issues.append(f"Mapowanie {index}: niepoprawny format wiersza.")
@@ -160,6 +175,7 @@ def field_mapping_issues(raw_mappings: object) -> list[str]:
         element_type = _text(raw.get("type")).lower() or "input"
         parser = _text(raw.get("parser")).lower() or "text"
         template = _text(raw.get("value_template"))
+        is_sql_mode = template.casefold() == "sql"
         translate = bool(raw.get("translate"))
         target_language = _text(raw.get("target_language"))
         if not source:
@@ -183,6 +199,15 @@ def field_mapping_issues(raw_mappings: object) -> list[str]:
             )
         if template and element_type not in {"input", "textarea", "select"}:
             issues.append(f"Mapowanie {index}: szablon wymaga pola tekstowego.")
+        if is_sql_mode:
+            sql_query = _text(raw.get("sql_query"))
+            profile_id = _text(raw.get("sql_profile_id"))
+            if not sql_query:
+                issues.append(f"Mapowanie {index}: SQL wymaga zapytania.")
+            if not profile_id:
+                issues.append(f"Mapowanie {index}: wybierz profil SQL.")
+            elif sql_profile_ids is not None and profile_id not in sql_profile_ids:
+                issues.append(f"Mapowanie {index}: nieznany profil SQL {profile_id}.")
         if translate and not template:
             issues.append(
                 f"Mapowanie {index}: tlumaczenie wymaga szablonu wartosci."
@@ -196,20 +221,32 @@ def field_mapping_issues(raw_mappings: object) -> list[str]:
         if PIMCORE_FIELD_NAME.fullmatch(target):
             targets.add((target, language))
     try:
-        catalog = build_source_catalog(raw_mappings)
+        template_mappings = [
+            {
+                **raw,
+                "value_template": ""
+                if isinstance(raw, dict)
+                and _text(raw.get("value_template")).casefold() == "sql"
+                else raw.get("value_template", ""),
+            }
+            if isinstance(raw, dict)
+            else raw
+            for raw in raw_mappings
+        ]
+        catalog = build_source_catalog(template_mappings)
         for index, raw in enumerate(raw_mappings, start=1):
             if not isinstance(raw, dict):
                 continue
             template = _text(raw.get("value_template"))
-            if not template:
+            if not template or template.casefold() == "sql":
                 continue
             parse_template(template)
             for source in placeholder_sources(template):
                 catalog.resolve(source)
         render_mapping_templates(
-            raw_mappings,
+            template_mappings,
             product_values={key: "1" for key in PRODUCT_SOURCES},
-            pimcore_values=generate_test_values(raw_mappings),
+            pimcore_values=generate_test_values(template_mappings),
         )
     except TemplateError as exc:
         issues.append(f"Mapowanie {index}: {exc.message}")

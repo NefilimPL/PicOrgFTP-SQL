@@ -1647,6 +1647,8 @@ def _pimcore_runtime_form_schema(settings_payload: dict[str, object]) -> list[di
             "default": item["default"],
             "parser": item["parser"],
             "value_template": item["value_template"],
+            "sql_query": item.get("sql_query", ""),
+            "sql_profile_id": item.get("sql_profile_id", ""),
             "translate": item["translate"],
             "target_language": item["target_language"],
         }

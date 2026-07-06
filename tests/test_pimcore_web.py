@@ -379,6 +379,31 @@ def test_product_status_returns_disabled_without_network_call():
         }
 
 
+def test_runtime_form_schema_includes_sql_mapping_metadata():
+    settings_payload = web_data.normalize_pimcore_settings(
+        {
+            "field_mappings": [
+                {
+                    "source": "STOCK",
+                    "label": "Stan",
+                    "pimcore_field": "stock",
+                    "type": "input",
+                    "parser": "text",
+                    "value_template": "SQL",
+                    "sql_query": "SELECT qty FROM stock WHERE ean = {ean}",
+                    "sql_profile_id": "stock-db",
+                }
+            ]
+        }
+    )
+
+    schema = web_data._pimcore_runtime_form_schema(settings_payload)
+
+    assert schema[0]["value_template"] == "SQL"
+    assert schema[0]["sql_query"] == "SELECT qty FROM stock WHERE ean = {ean}"
+    assert schema[0]["sql_profile_id"] == "stock-db"
+
+
 def test_runtime_status_is_disabled_when_setup_is_incomplete():
     cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
     cfg["pimcore"].update({"enabled": True, "setup_complete": False})
