@@ -387,6 +387,61 @@ def test_pimcore_history_route_forwards_all_filters():
     )
 
 
+def test_admin_can_export_pimcore_submissions_as_json():
+    client = TestClient(web_app.app)
+    expected = {"items": [{"operation_id": "op-1"}], "format": "json"}
+    with (
+        patch.object(
+            web_app,
+            "_require_admin",
+            return_value={"username": "admin", "role": "admin"},
+        ),
+        patch.object(
+            web_app,
+            "export_pimcore_submissions",
+            return_value=expected,
+        ) as export,
+    ):
+        response = client.get(
+            "/api/settings/pimcore/submissions/export?format=json&user=operator"
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    export.assert_called_once()
+
+
+def test_export_pimcore_submissions_as_csv_contains_common_columns():
+    store = Mock()
+    store.query_pimcore_submissions.return_value = [
+        {
+            "operation_id": "op-1",
+            "operation_type": "manual_create",
+            "username": "operator",
+            "ean": "5901234567890",
+            "status": "completed",
+            "values": {"STOCK": "12"},
+            "payload": {"className": "Product"},
+            "result": {"object_id": 91},
+            "warnings": [],
+            "created_at": "2026-07-06T12:00:00.000Z",
+        }
+    ]
+
+    with patch.object(web_data, "_active_sqlite_store", return_value=store):
+        exported = web_data.export_pimcore_submissions(export_format="csv")
+
+    assert exported["format"] == "csv"
+    assert (
+        "operation_id,operation_type,username,ean,status,created_at"
+        in exported["content"]
+    )
+    assert (
+        "op-1,manual_create,operator,5901234567890,completed,2026-07-06T12:00:00.000Z"
+        in exported["content"]
+    )
+
+
 def test_product_status_returns_disabled_without_network_call():
     cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
     cfg["pimcore"]["enabled"] = False

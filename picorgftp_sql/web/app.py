@@ -93,6 +93,7 @@ from ..web_data import (
     discover_pimcore_classes,
     discover_pimcore_fields,
     discover_pimcore_folders,
+    export_pimcore_submissions,
     field_suggestions,
     find_entry_by_identity,
     find_pimcore_product_by_ean,
@@ -4345,6 +4346,39 @@ def create_app() -> FastAPI:
             date_to=date_to,
             limit=limit,
         )
+
+    @app.get("/api/settings/pimcore/submissions/export")
+    def pimcore_submissions_export_api(
+        request: Request,
+        format: str = "json",
+        operation_type: str = "",
+        status: str = "",
+        user: str = "",
+        query: str = "",
+        date_from: str = "",
+        date_to: str = "",
+        limit: int = 1000,
+    ):
+        _require_admin(request)
+        result = export_pimcore_submissions(
+            export_format=format,
+            operation_type=operation_type,
+            status=status,
+            user=user,
+            query=query,
+            date_from=date_from,
+            date_to=date_to,
+            limit=limit,
+        )
+        if result.get("format") == "csv":
+            return Response(
+                str(result.get("content") or ""),
+                media_type="text/csv; charset=utf-8",
+                headers={
+                    "Content-Disposition": "attachment; filename=pimcore-submissions.csv"
+                },
+            )
+        return JSONResponse(result)
 
     @app.get("/api/pimcore/product-status")
     async def pimcore_product_status_api(request: Request, ean: str) -> JSONResponse:

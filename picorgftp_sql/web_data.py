@@ -2147,6 +2147,74 @@ def pimcore_operation_history(
     return {"items": records, "count": len(records)}
 
 
+def export_pimcore_submissions(
+    *,
+    export_format: str = "json",
+    operation_type: str = "",
+    status: str = "",
+    user: str = "",
+    query: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    limit: int = 1000,
+) -> dict[str, object]:
+    """Export persisted Pimcore SQLite submission records."""
+
+    fmt = _text(export_format).lower() or "json"
+    store = _active_sqlite_store()
+    if store is None:
+        if fmt == "csv":
+            return {"format": "csv", "items": [], "content": "", "count": 0}
+        return {"format": "json", "items": [], "count": 0}
+    rows = store.query_pimcore_submissions(
+        operation_type=operation_type,
+        status=status,
+        user=user,
+        query=query,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+    )
+    if fmt == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow(
+            [
+                "operation_id",
+                "operation_type",
+                "username",
+                "ean",
+                "status",
+                "created_at",
+                "object_id",
+                "object_path",
+                "values_json",
+                "payload_json",
+                "result_json",
+                "warnings_json",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    row.get("operation_id", ""),
+                    row.get("operation_type", ""),
+                    row.get("username", ""),
+                    row.get("ean", ""),
+                    row.get("status", ""),
+                    row.get("created_at", ""),
+                    row.get("object_id", ""),
+                    row.get("object_path", ""),
+                    json.dumps(row.get("values", {}), ensure_ascii=False, sort_keys=True),
+                    json.dumps(row.get("payload", {}), ensure_ascii=False, sort_keys=True),
+                    json.dumps(row.get("result", {}), ensure_ascii=False, sort_keys=True),
+                    json.dumps(row.get("warnings", []), ensure_ascii=False, sort_keys=True),
+                ]
+            )
+        return {"format": "csv", "content": output.getvalue(), "count": len(rows)}
+    return {"format": "json", "items": rows, "count": len(rows)}
+
+
 def _preserve_unsubmitted_config_secrets(payload: dict[str, object]) -> dict[str, set[str]]:
     preserve = {section: set(keys) for section, keys in _CONFIG_SECRET_FIELDS.items()}
     ftp_payload = payload.get("ftp") if isinstance(payload.get("ftp"), dict) else {}
