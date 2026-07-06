@@ -51,6 +51,12 @@ class GroupNode:
     position: int
 
 
+@dataclass(frozen=True)
+class CalcNode:
+    children: tuple[object, ...]
+    position: int
+
+
 def _split_quoted(value: str, delimiter: str) -> list[str]:
     parts: list[str] = []
     current: list[str] = []
@@ -99,6 +105,39 @@ def _arguments(value: str, position: int) -> tuple[str, ...]:
             position,
         ) from exc
     return tuple(row)
+
+
+MATH_LITERAL_CHARS = frozenset("0123456789+-*/()., \t\r\n")
+CALC_FUNCTION_NAMES = ("oblicz", "calc")
+
+
+def _literal_text(nodes: tuple[object, ...]) -> str | None:
+    parts: list[str] = []
+    for node in nodes:
+        if not isinstance(node, LiteralNode):
+            return None
+        parts.append(node.value)
+    return "".join(parts)
+
+
+def _is_math_literal_group(text: str) -> bool:
+    stripped = text.strip()
+    return bool(stripped) and any(char.isdigit() for char in stripped) and all(
+        char in MATH_LITERAL_CHARS for char in stripped
+    )
+
+
+def _calc_literal_prefix(literal: list[str]) -> str | None:
+    text = "".join(literal)
+    folded = text.casefold()
+    for name in CALC_FUNCTION_NAMES:
+        if not folded.endswith(name):
+            continue
+        prefix = text[: -len(name)]
+        if prefix and (prefix[-1].isalnum() or prefix[-1] == "_"):
+            continue
+        return prefix
+    return None
 
 
 def _placeholder(content: str, position: int) -> PlaceholderNode:
@@ -170,6 +209,23 @@ class _Parser:
                 nodes.append(self._read_placeholder())
                 continue
             if char == "(":
+                calc_prefix = _calc_literal_prefix(literal)
+                if calc_prefix is not None:
+                    if calc_prefix:
+                        nodes.append(LiteralNode(calc_prefix))
+                    literal = []
+                    start = self.index
+                    self.index += 1
+                    children = self._sequence(")", depth + 1)
+                    if self.index >= len(self.template):
+                        raise TemplateError(
+                            "unclosed_calc",
+                            "Niezamknieta funkcja oblicz.",
+                            start,
+                        )
+                    self.index += 1
+                    nodes.append(CalcNode(children, start))
+                    continue
                 if literal:
                     nodes.append(LiteralNode("".join(literal)))
                     literal = []
@@ -187,6 +243,10 @@ class _Parser:
                     isinstance(node, (PlaceholderNode, GroupNode))
                     for node in children
                 ):
+                    literal_text = _literal_text(children)
+                    if literal_text is not None and _is_math_literal_group(literal_text):
+                        nodes.append(LiteralNode(f"({literal_text})"))
+                        continue
                     raise TemplateError(
                         "condition_without_placeholder",
                         "Grupa nie zawiera placeholdera.",
@@ -351,10 +411,182 @@ def _apply(value: str, call: FunctionCall, position: int) -> str:
     )
 
 
+def _math_error(position: int) -> TemplateError:
+    return TemplateError(
+        "invalid_math_expression",
+        "Niepoprawne wyrazenie matematyczne.",
+        position,
+    )
+
+
+class _MathExpressionParser:
+    def __init__(self, text: str, *, allow_division_by_zero: bool = False):
+        self.text = text
+        self.index = 0
+        self.operations = 0
+        self.allow_division_by_zero = allow_division_by_zero
+
+    def parse(self) -> Decimal:
+        value = self._expression()
+        self._skip_spaces()
+        if self.index != len(self.text):
+            raise _math_error(self.index)
+        return value
+
+    def _skip_spaces(self) -> None:
+        while self.index < len(self.text) and self.text[self.index].isspace():
+            self.index += 1
+
+    def _expression(self) -> Decimal:
+        value = self._term()
+        while True:
+            self._skip_spaces()
+            if self.index >= len(self.text) or self.text[self.index] not in "+-":
+                return value
+            operator = self.text[self.index]
+            self.index += 1
+            right = self._term()
+            self.operations += 1
+            value = value + right if operator == "+" else value - right
+
+    def _term(self) -> Decimal:
+        value = self._factor()
+        while True:
+            self._skip_spaces()
+            if self.index >= len(self.text) or self.text[self.index] not in "*/":
+                return value
+            operator = self.text[self.index]
+            self.index += 1
+            right = self._factor()
+            self.operations += 1
+            if operator == "*":
+                value *= right
+                continue
+            if right == 0:
+                if self.allow_division_by_zero:
+                    value = Decimal(0)
+                    continue
+                raise TemplateError(
+                    "math_division_by_zero",
+                    "Dzielenie przez zero w wyrazeniu matematycznym.",
+                    self.index,
+                )
+            value /= right
+
+    def _factor(self) -> Decimal:
+        self._skip_spaces()
+        if self.index >= len(self.text):
+            raise _math_error(self.index)
+        char = self.text[self.index]
+        if char in "+-":
+            self.index += 1
+            value = self._factor()
+            return value if char == "+" else -value
+        if char == "(":
+            start = self.index
+            self.index += 1
+            value = self._expression()
+            self._skip_spaces()
+            if self.index >= len(self.text) or self.text[self.index] != ")":
+                raise _math_error(start)
+            self.index += 1
+            return value
+        return self._number()
+
+    def _number(self) -> Decimal:
+        start = self.index
+        separator = ""
+        digits = 0
+        while self.index < len(self.text):
+            char = self.text[self.index]
+            if char.isdigit():
+                digits += 1
+                self.index += 1
+                continue
+            if char in ".,":
+                if separator:
+                    raise _math_error(self.index)
+                separator = char
+                self.index += 1
+                continue
+            break
+        if digits == 0:
+            raise _math_error(start)
+        token = self.text[start:self.index].replace(",", ".")
+        try:
+            return Decimal(token)
+        except InvalidOperation as exc:
+            raise _math_error(start) from exc
+
+
+def _format_math_decimal(value: Decimal) -> str:
+    if value == 0:
+        return "0"
+    if value == value.to_integral_value():
+        return str(value.quantize(Decimal(1)))
+    rendered = format(value.normalize(), "f")
+    return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
+
+
+def _evaluate_math_expression(
+    text: str,
+    *,
+    syntax_only: bool = False,
+) -> str | None:
+    stripped = text.strip()
+    if not stripped or not any(char.isdigit() for char in stripped):
+        return None
+    if any(char not in MATH_LITERAL_CHARS for char in stripped):
+        return None
+    parser = _MathExpressionParser(
+        stripped,
+        allow_division_by_zero=syntax_only,
+    )
+    try:
+        value = parser.parse()
+    except TemplateError:
+        if syntax_only:
+            return None
+        raise
+    if parser.operations == 0:
+        return None
+    if syntax_only:
+        return "0"
+    return _format_math_decimal(value)
+
+
+def _math_skeleton(nodes: tuple[object, ...]) -> str:
+    output: list[str] = []
+    for node in nodes:
+        if isinstance(node, LiteralNode):
+            output.append(node.value)
+        elif isinstance(node, PlaceholderNode):
+            output.append("1")
+        elif isinstance(node, GroupNode):
+            output.append("(")
+            output.append(_math_skeleton(node.children))
+            output.append(")")
+        elif isinstance(node, CalcNode):
+            output.append("1")
+    return "".join(output)
+
+
+def _is_math_template(nodes: tuple[object, ...]) -> bool:
+    return _evaluate_math_expression(_math_skeleton(nodes), syntax_only=True) is not None
+
+
 def render_template(template: object, resolver: Callable[[str], object]) -> str:
-    def render_nodes(nodes: tuple[object, ...]) -> tuple[str, list[str]]:
+    nodes = parse_template(template)
+    preserve_math_groups = _is_math_template(nodes)
+
+    def render_nodes(
+        nodes: tuple[object, ...],
+        *,
+        force_math_groups: bool = False,
+    ) -> tuple[str, list[str]]:
         output: list[str] = []
         resolved: list[str] = []
+        keep_group_parentheses = preserve_math_groups or force_math_groups
         for node in nodes:
             if isinstance(node, LiteralNode):
                 output.append(node.value)
@@ -367,11 +599,29 @@ def render_template(template: object, resolver: Callable[[str], object]) -> str:
                 output.append(value)
                 resolved.append(value)
             elif isinstance(node, GroupNode):
-                value, group_values = render_nodes(node.children)
-                output.append(
-                    value if group_values and all(item.strip() for item in group_values) else ""
+                value, group_values = render_nodes(
+                    node.children,
+                    force_math_groups=force_math_groups,
                 )
+                group_has_values = bool(group_values) and all(
+                    item.strip() for item in group_values
+                )
+                if group_has_values:
+                    output.append(f"({value})" if keep_group_parentheses else value)
+                else:
+                    output.append("")
                 resolved.extend(group_values)
+            elif isinstance(node, CalcNode):
+                value, calc_values = render_nodes(
+                    node.children,
+                    force_math_groups=True,
+                )
+                calculated = _evaluate_math_expression(value)
+                if calculated is None:
+                    raise _math_error(node.position)
+                output.append(calculated)
+                resolved.extend(calc_values)
+                resolved.append(calculated)
         text = "".join(output)
         if len(text) > MAX_OUTPUT_LENGTH:
             raise TemplateError(
@@ -381,7 +631,12 @@ def render_template(template: object, resolver: Callable[[str], object]) -> str:
             )
         return text, resolved
 
-    return render_nodes(parse_template(template))[0]
+    rendered = render_nodes(nodes)[0]
+    if preserve_math_groups:
+        calculated = _evaluate_math_expression(rendered)
+        if calculated is not None:
+            return calculated
+    return rendered
 
 
 def placeholder_sources(template: object) -> tuple[str, ...]:
@@ -391,7 +646,7 @@ def placeholder_sources(template: object) -> tuple[str, ...]:
         for node in nodes:
             if isinstance(node, PlaceholderNode) and node.source not in sources:
                 sources.append(node.source)
-            elif isinstance(node, GroupNode):
+            elif isinstance(node, (GroupNode, CalcNode)):
                 visit(node.children)
 
     visit(parse_template(template))
