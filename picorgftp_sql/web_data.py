@@ -74,7 +74,11 @@ from .services.sql_service import (
     query_presence_details,
     should_check_presence,
 )
-from .services.pimcore_sql_service import connect_profile
+from .services.pimcore_sql_service import (
+    SqlValueResult,
+    connect_profile,
+    execute_sql_value_query,
+)
 from .file_index import LocalFileIndex
 from .pimcore_config import (
     PIMCORE_API_KEY,
@@ -1754,23 +1758,43 @@ def _render_templates(
     targets: list[str] | None = None,
     *,
     fill_missing_product_values: bool = False,
+    mode: str = "create",
 ) -> dict[str, object]:
     submitted = dict(values) if isinstance(values, dict) else {}
+    mappings_list = list(settings_payload["field_mappings"])
+    sql_sources = {
+        item["source"]
+        for item in mappings_list
+        if str(item.get("value_template") or "").strip().casefold() == "sql"
+    }
+    selected_targets = set(targets or [item["source"] for item in mappings_list])
+    template_mappings = [
+        {
+            **item,
+            "value_template": ""
+            if item["source"] in sql_sources
+            else item.get("value_template", ""),
+        }
+        for item in mappings_list
+    ]
+    product_context = _product_template_values(
+        product_values,
+        fill_missing=fill_missing_product_values,
+    )
     rendered = render_mapping_templates(
-        settings_payload["field_mappings"],
-        product_values=_product_template_values(
-            product_values,
-            fill_missing=fill_missing_product_values,
-        ),
+        template_mappings,
+        product_values=product_context,
         pimcore_values=submitted,
         targets=targets,
     )
     output = dict(submitted)
     warnings: list[dict[str, object]] = []
+    calculated_values: dict[str, object] = {}
+    changed: dict[str, bool] = {}
     translation_settings = config.CONFIG.get(TRANSLATION_SETTINGS_KEY, {}) or {}
     mappings = {
         item["source"]: item
-        for item in settings_payload["field_mappings"]
+        for item in mappings_list
     }
     for source in rendered.order:
         mapping = mappings[source]
@@ -1785,7 +1809,45 @@ def _render_templates(
             if translated.warning:
                 warnings.append({"source": source, **translated.warning})
         output[source] = value
-    return {"values": output, "warnings": warnings}
+    profiles = normalize_sql_profiles(config.CONFIG)
+    for mapping in mappings_list:
+        source = mapping["source"]
+        if source not in selected_targets:
+            continue
+        if source not in sql_sources:
+            if source in output:
+                calculated_values[source] = output[source]
+                changed[source] = False
+            continue
+        try:
+            profile = resolve_sql_profile(profiles, mapping.get("sql_profile_id"))
+            if not profile.get("enabled", True):
+                label = profile.get("label") or profile.get("id")
+                raise ValueError(f"Profil SQL {label} jest wylaczony.")
+            sql_result = execute_sql_value_query(
+                profile,
+                mapping.get("sql_query"),
+                product_context,
+                output,
+            )
+        except Exception as exc:
+            warnings.append({"source": source, "code": "sql_error", "message": str(exc)})
+            calculated = ""
+        else:
+            calculated = sql_result.value
+            warnings.extend({"source": source, **warning} for warning in sql_result.warnings)
+        calculated_values[source] = calculated
+        current = str(submitted.get(source, ""))
+        changed[source] = current != str(calculated)
+        if (mode in {"create", "test", "preview"} and not _text(current)) or mode == "apply":
+            output[source] = calculated
+            changed[source] = False
+    return {
+        "values": output,
+        "calculated_values": calculated_values,
+        "warnings": warnings,
+        "changed": changed,
+    }
 
 
 def preview_pimcore_template(payload: object) -> dict[str, object]:
@@ -1802,6 +1864,7 @@ def preview_pimcore_template(payload: object) -> dict[str, object]:
         source.get("values"),
         [target],
         fill_missing_product_values=True,
+        mode="preview",
     )
 
 
@@ -1811,7 +1874,7 @@ def pimcore_test_sample() -> dict[str, object]:
         raise ValueError("Integracja Pimcore nie zostala skonfigurowana.")
     samples = generate_test_values(settings_payload["field_mappings"])
     product_samples = _sample_product_template_values()
-    rendered = _render_templates(settings_payload, product_samples, samples)
+    rendered = _render_templates(settings_payload, product_samples, samples, mode="test")
     return {
         "form_schema": _pimcore_runtime_form_schema(settings_payload),
         **rendered,
@@ -1822,6 +1885,7 @@ def render_saved_pimcore_templates(
     product_values: object,
     values: object,
     targets: object,
+    mode: str = "create",
 ) -> dict[str, object]:
     settings_payload = _active_pimcore_runtime_settings()
     selected = [str(item) for item in targets] if isinstance(targets, list) else None
@@ -1830,6 +1894,7 @@ def render_saved_pimcore_templates(
         product_values,
         values,
         selected,
+        mode=mode,
     )
 
 

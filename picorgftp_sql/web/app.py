@@ -4395,6 +4395,7 @@ def create_app() -> FastAPI:
                 source.get("product_values"),
                 source.get("values"),
                 source.get("targets"),
+                source.get("mode", "create"),
             )
         except (TemplateError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
