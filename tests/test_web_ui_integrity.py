@@ -141,9 +141,17 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("function productFieldSettingsList", source)
         self.assertIn('className = "product-field-settings-list wide-field"', source)
         self.assertIn('className = "product-field-settings-row"', source)
+        self.assertIn("function productFieldSettingsOrder", source)
+        self.assertIn("function renderProductFieldLayout", source)
+        self.assertIn("function moveProductFieldSettingsRow", source)
+        self.assertIn("product_field_${key}_group", source)
+        self.assertIn("product_field_${key}_order", source)
+        self.assertIn("product-field-order-actions", source)
         self.assertIn("function collectProductFieldSettings", source)
         self.assertIn(".product-field-settings-list", css)
         self.assertIn(".product-field-settings-row", css)
+        self.assertIn(".product-field-group-heading", css)
+        self.assertIn(".product-field-order-actions", css)
 
     def test_topbar_contains_non_button_presence_before_web_images(self) -> None:
         source = INDEX_HTML.read_text(encoding="utf-8")
@@ -263,6 +271,7 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("pimcoreCreateModal", html.ids)
         self.assertIn("pimcoreCreateForm", html.ids)
         self.assertIn("pimcoreMissingCreateButton", html.ids)
+        self.assertIn("pimcoreCreateRecalculateAllButton", html.ids)
         self.assertIn("pimcoreEditButton", html.ids)
 
     def test_runtime_pimcore_edit_modal_exists(self) -> None:
@@ -321,6 +330,33 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("pimcore-recalculate-field", source)
         self.assertIn("async function recalculateAllPimcoreEditFields", source)
         self.assertIn("pimcoreEditRecalculateAllButton", source)
+
+    def test_runtime_pimcore_create_modal_recalculates_and_reopens_for_missing_product(
+        self,
+    ) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        status_start = source.index("async function checkPimcoreProductStatus")
+        status_end = source.index("function openPimcoreCreateModal", status_start)
+        status_body = source[status_start:status_end]
+        edit_start = source.index("async function openPimcoreEditModal")
+        edit_end = source.index("function closePimcoreEditModal", edit_start)
+        edit_body = source[edit_start:edit_end]
+
+        self.assertIn("const pimcoreCreateRecalculateAllButton", source)
+        self.assertIn("async function recalculateAllPimcoreCreateFields", source)
+        self.assertIn(
+            "pimcoreCreateRecalculateAllButton?.addEventListener("
+            '"click", recalculateAllPimcoreCreateFields);',
+            source,
+        )
+        self.assertIn(
+            "pimcoreEditButton.disabled = state.pimcoreCreateSchema.length === 0;",
+            status_body,
+        )
+        self.assertIn(
+            "openPimcoreCreateModal(state.pimcoreMissingEan || currentEan);",
+            edit_body,
+        )
 
     def test_sql_profile_ui_and_pimcore_sql_mapping_controls_exist(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")

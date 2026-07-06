@@ -840,7 +840,13 @@ class WebDataUserTests(unittest.TestCase):
 
         self.assertEqual(
             saved_configs[0]["product_fields"]["model"],
-            {"label": "Wersja", "enabled": False, "required": False},
+            {
+                "label": "Wersja",
+                "enabled": False,
+                "required": False,
+                "group": "",
+                "order": 2,
+            },
         )
 
     def test_save_web_entry_clears_disabled_values_before_persistence(self) -> None:

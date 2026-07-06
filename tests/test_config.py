@@ -110,7 +110,13 @@ class ConfigTests(unittest.TestCase):
         saved = store.save_config.call_args.args[0][PRODUCT_FIELDS_KEY]
         self.assertEqual(
             saved["model"],
-            {"label": "", "enabled": False, "required": False},
+            {
+                "label": "",
+                "enabled": False,
+                "required": False,
+                "group": "",
+                "order": 2,
+            },
         )
 
     def test_save_config_roundtrips_product_fields_through_sqlite(self) -> None:

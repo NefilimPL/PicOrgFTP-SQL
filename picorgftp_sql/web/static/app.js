@@ -259,6 +259,7 @@ const pimcoreMissingCancelButton = document.querySelector("#pimcoreMissingCancel
 const pimcoreCreateModal = document.querySelector("#pimcoreCreateModal");
 const pimcoreCreateForm = document.querySelector("#pimcoreCreateForm");
 const pimcoreCreateSubmitButton = document.querySelector("#pimcoreCreateSubmitButton");
+const pimcoreCreateRecalculateAllButton = document.querySelector("#pimcoreCreateRecalculateAllButton");
 const pimcoreCreateCancelButton = document.querySelector("#pimcoreCreateCancelButton");
 const pimcoreCreateStatus = document.querySelector("#pimcoreCreateStatus");
 const pimcoreEditModal = document.querySelector("#pimcoreEditModal");
@@ -1390,21 +1391,66 @@ function productFieldLabel(fieldName) {
   return cleanDisplayLabel(state.productFields?.[key]?.label) || definition.label;
 }
 
+function productFieldDefaultOrder(key) {
+  return Math.max(0, Object.keys(productFieldDefinitions).indexOf(key));
+}
+
+function productFieldOrderValue(value, fallback) {
+  const order = Number.parseInt(value, 10);
+  return Number.isFinite(order) ? Math.max(0, order) : fallback;
+}
+
+function productFieldSettingsOrder(settings = state.productFields) {
+  return Object.keys(productFieldDefinitions)
+    .map((key) => ({
+      key,
+      order: productFieldOrderValue(settings?.[key]?.order, productFieldDefaultOrder(key)),
+    }))
+    .sort((left, right) => left.order - right.order || productFieldDefaultOrder(left.key) - productFieldDefaultOrder(right.key));
+}
+
 function normalizedProductFields(raw = {}) {
   return Object.fromEntries(
     Object.entries(productFieldDefinitions).map(([key, defaults]) => {
       const item = raw?.[key] || {};
       const enabled = item.enabled !== false;
+      const fallbackOrder = productFieldDefaultOrder(key);
       return [
         key,
         {
           label: cleanDisplayLabel(item.label),
           enabled,
           required: enabled && ("required" in item ? Boolean(item.required) : defaults.required),
+          group: cleanDisplayLabel(item.group),
+          order: productFieldOrderValue(item.order, fallbackOrder),
         },
       ];
     })
   );
+}
+
+function renderProductFieldLayout() {
+  if (!productForm) return;
+  const anchor = productForm.querySelector(".lookup-actions");
+  if (!anchor) return;
+  productForm.querySelectorAll(".product-field-group-heading").forEach((node) => node.remove());
+  let currentGroup = "";
+  for (const { key } of productFieldSettingsOrder(state.productFields)) {
+    const item = state.productFields[key];
+    const container = productForm.querySelector(`[data-product-field="${key}"]`);
+    if (!container) continue;
+    const group = item?.enabled ? cleanDisplayLabel(item.group) : "";
+    if (group && group !== currentGroup) {
+      const heading = document.createElement("div");
+      heading.className = "product-field-group-heading";
+      heading.textContent = group;
+      productForm.insertBefore(heading, anchor);
+      currentGroup = group;
+    } else if (!group) {
+      currentGroup = "";
+    }
+    productForm.insertBefore(container, anchor);
+  }
 }
 
 function applyProductFieldSettings() {
@@ -1421,6 +1467,7 @@ function applyProductFieldSettings() {
     if (!item.enabled) input.value = "";
     label.textContent = `${item.label || definition.label}${item.required ? " *" : ""}`;
   }
+  renderProductFieldLayout();
   findByEanButton.hidden = !state.productFields.ean.enabled;
   updateFieldWarnings();
 }
@@ -5153,36 +5200,87 @@ function settingsFieldGroup(titleText, ...nodes) {
   return group;
 }
 
+function updateProductFieldOrderInputs(list) {
+  const rows = [...list.querySelectorAll("[data-product-field-setting]")];
+  rows.forEach((row, index) => {
+    const key = row.dataset.productFieldSetting;
+    const input = row.querySelector(`[name="product_field_${key}_order"]`);
+    if (input) input.value = String(index);
+    const up = row.querySelector("[data-product-field-move-up]");
+    const down = row.querySelector("[data-product-field-move-down]");
+    if (up) up.disabled = index === 0;
+    if (down) down.disabled = index === rows.length - 1;
+  });
+}
+
+function moveProductFieldSettingsRow(row, direction) {
+  const list = row?.parentElement;
+  if (!list) return;
+  if (direction < 0 && row.previousElementSibling) {
+    list.insertBefore(row, row.previousElementSibling);
+  } else if (direction > 0 && row.nextElementSibling) {
+    list.insertBefore(row.nextElementSibling, row);
+  }
+  updateProductFieldOrderInputs(list);
+}
+
 function productFieldSettingsList(settings = {}) {
   const list = document.createElement("div");
   list.className = "product-field-settings-list wide-field";
   const normalized = normalizedProductFields(settings);
-  for (const [key, definition] of Object.entries(productFieldDefinitions)) {
+  for (const { key } of productFieldSettingsOrder(normalized)) {
+    const definition = productFieldDefinitions[key];
     const item = normalized[key];
     const row = document.createElement("div");
     const title = document.createElement("strong");
+    const orderInput = document.createElement("input");
     const labelField = inputField(
       `product_field_${key}_label`,
       "Wlasna nazwa",
       item.label,
       { placeholder: definition.label }
     );
+    const groupField = inputField(
+      `product_field_${key}_group`,
+      "Grupa",
+      item.group,
+      { placeholder: "np. Identyfikacja" }
+    );
     const enabled = checkField(`product_field_${key}_enabled`, "Aktywne", item.enabled);
     const required = checkField(`product_field_${key}_required`, "Wymagane", item.required);
+    const orderActions = document.createElement("div");
+    const moveUp = document.createElement("button");
+    const moveDown = document.createElement("button");
     const enabledInput = enabled.querySelector("input");
     const requiredInput = required.querySelector("input");
     row.className = "product-field-settings-row";
     row.dataset.productFieldSetting = key;
     title.textContent = definition.label;
+    orderInput.type = "hidden";
+    orderInput.name = `product_field_${key}_order`;
+    orderInput.value = String(item.order);
+    orderActions.className = "product-field-order-actions";
+    moveUp.type = "button";
+    moveUp.className = "secondary-button";
+    moveUp.textContent = "Gora";
+    moveUp.dataset.productFieldMoveUp = "1";
+    moveUp.addEventListener("click", () => moveProductFieldSettingsRow(row, -1));
+    moveDown.type = "button";
+    moveDown.className = "secondary-button";
+    moveDown.textContent = "Dol";
+    moveDown.dataset.productFieldMoveDown = "1";
+    moveDown.addEventListener("click", () => moveProductFieldSettingsRow(row, 1));
+    orderActions.append(moveUp, moveDown);
     const syncRequired = () => {
       requiredInput.disabled = !enabledInput.checked;
       if (!enabledInput.checked) requiredInput.checked = false;
     };
     enabledInput.addEventListener("change", syncRequired);
     syncRequired();
-    row.append(title, labelField, enabled, required);
+    row.append(title, labelField, groupField, enabled, required, orderActions, orderInput);
     list.appendChild(row);
   }
+  updateProductFieldOrderInputs(list);
   return list;
 }
 
@@ -5194,6 +5292,11 @@ function collectProductFieldSettings(data) {
         label: data.get(`product_field_${key}_label`) || "",
         enabled: data.has(`product_field_${key}_enabled`),
         required: data.has(`product_field_${key}_required`),
+        group: data.get(`product_field_${key}_group`) || "",
+        order: productFieldOrderValue(
+          data.get(`product_field_${key}_order`),
+          productFieldDefaultOrder(key)
+        ),
       },
     ])
   );
@@ -7973,6 +8076,28 @@ function pimcoreEditHasRuntimeTemplates() {
   return (state.pimcoreEditSchema || []).some((mapping) => mapping.value_template);
 }
 
+function pimcoreCreateHasRuntimeTemplates() {
+  return (state.pimcoreCreateSchema || []).some((mapping) => mapping.value_template);
+}
+
+async function recalculateAllPimcoreCreateFields() {
+  if (!pimcoreCreateForm || !pimcoreCreateHasRuntimeTemplates()) return;
+  if (pimcoreCreateRecalculateAllButton) pimcoreCreateRecalculateAllButton.disabled = true;
+  if (pimcoreCreateStatus) pimcoreCreateStatus.textContent = "Przeliczanie wszystkich pol...";
+  try {
+    const result = await renderPimcoreRuntimeTemplates(pimcoreCreateForm, state.pimcoreCreateSchema);
+    if (pimcoreCreateStatus) {
+      pimcoreCreateStatus.textContent = pimcoreRuntimeRecalculateStatus(pimcoreCreateForm, result);
+    }
+  } catch (error) {
+    if (pimcoreCreateStatus) pimcoreCreateStatus.textContent = error.message;
+  } finally {
+    if (pimcoreCreateRecalculateAllButton) {
+      pimcoreCreateRecalculateAllButton.disabled = !pimcoreCreateHasRuntimeTemplates();
+    }
+  }
+}
+
 async function recalculateAllPimcoreEditFields() {
   if (!pimcoreEditForm || !pimcoreEditHasRuntimeTemplates()) return;
   if (pimcoreEditRecalculateAllButton) pimcoreEditRecalculateAllButton.disabled = true;
@@ -8273,16 +8398,24 @@ function applyPimcoreRuntimeCapabilities(capabilities = {}) {
   state.pimcoreRuntimeEnabled = capabilities.enabled === true;
   state.pimcoreExistingObject = null;
   state.pimcoreLastCheckedEan = "";
+  state.pimcoreMissingEan = "";
+  state.pimcoreCreateSchema = [];
   if (pimcoreEditButton) {
     pimcoreEditButton.hidden = !state.pimcoreRuntimeEnabled;
     pimcoreEditButton.disabled = true;
+    pimcoreEditButton.title = "";
   }
 }
 
 function handlePimcoreEanInput() {
   state.pimcoreExistingObject = null;
   state.pimcoreLastCheckedEan = "";
-  if (pimcoreEditButton) pimcoreEditButton.disabled = true;
+  state.pimcoreMissingEan = "";
+  state.pimcoreCreateSchema = [];
+  if (pimcoreEditButton) {
+    pimcoreEditButton.disabled = true;
+    pimcoreEditButton.title = "";
+  }
   if (!state.pimcoreRuntimeEnabled) return;
   schedulePimcoreStatusLookup();
 }
@@ -8308,12 +8441,18 @@ async function checkPimcoreProductStatus(ean) {
   state.pimcoreLastCheckedEan = ean;
   if (!payload.enabled) {
     state.pimcoreExistingObject = null;
-    if (pimcoreEditButton) pimcoreEditButton.disabled = true;
+    if (pimcoreEditButton) {
+      pimcoreEditButton.disabled = true;
+      pimcoreEditButton.title = "";
+    }
     return;
   }
   if (payload.available === false) {
     state.pimcoreExistingObject = null;
-    if (pimcoreEditButton) pimcoreEditButton.disabled = true;
+    if (pimcoreEditButton) {
+      pimcoreEditButton.disabled = true;
+      pimcoreEditButton.title = "";
+    }
     formStatus.textContent = `Pimcore niedostepny: ${payload.error?.message || "blad polaczenia"}`;
     return;
   }
@@ -8321,18 +8460,29 @@ async function checkPimcoreProductStatus(ean) {
     const objectId = Number(payload.object?.id || 0);
     if (objectId > 0) {
       state.pimcoreExistingObject = payload.object || null;
-      if (pimcoreEditButton) pimcoreEditButton.disabled = false;
+      if (pimcoreEditButton) {
+        pimcoreEditButton.disabled = false;
+        pimcoreEditButton.title = "";
+      }
       return;
     }
     state.pimcoreExistingObject = null;
-    if (pimcoreEditButton) pimcoreEditButton.disabled = true;
+    if (pimcoreEditButton) {
+      pimcoreEditButton.disabled = true;
+      pimcoreEditButton.title = "";
+    }
     formStatus.textContent = "Pimcore zwrocil produkt bez poprawnego ID. Edycja jest niedostepna.";
     return;
   }
   state.pimcoreExistingObject = null;
-  if (pimcoreEditButton) pimcoreEditButton.disabled = true;
   state.pimcoreCreateSchema = Array.isArray(payload.form_schema) ? payload.form_schema : [];
   state.pimcoreMissingEan = ean;
+  if (pimcoreEditButton) {
+    pimcoreEditButton.disabled = state.pimcoreCreateSchema.length === 0;
+    pimcoreEditButton.title = state.pimcoreCreateSchema.length
+      ? "Otworz formularz dodania produktu Pimcore."
+      : "";
+  }
   pimcoreMissingMessage.textContent = `EAN ${ean} nie istnieje w Pimcore. Czy dodac produkt?`;
   pimcoreMissingModal.classList.add("active");
 }
@@ -8360,6 +8510,9 @@ function openPimcoreCreateModal(ean) {
   updatePimcoreCreateSubmitState();
   const pimcoreCreateEan = pimcoreCreateForm.querySelector("#pimcoreCreateEan");
   if (pimcoreCreateEan) pimcoreCreateEan.readOnly = true;
+  if (pimcoreCreateRecalculateAllButton) {
+    pimcoreCreateRecalculateAllButton.disabled = !pimcoreCreateHasRuntimeTemplates();
+  }
   if (pimcoreCreateStatus) pimcoreCreateStatus.textContent = "";
   pimcoreMissingModal?.classList.remove("active");
   pimcoreCreateModal.classList.add("active");
@@ -8405,8 +8558,8 @@ async function submitPimcoreRuntimeCreate(event) {
 
 async function openPimcoreEditModal() {
   let objectId = Number(state.pimcoreExistingObject?.id || 0);
+  const currentEan = productForm.elements.ean.value.trim();
   if (objectId <= 0 && state.pimcoreRuntimeEnabled) {
-    const currentEan = productForm.elements.ean.value.trim();
     if (/^\d{13}$/.test(currentEan)) {
       formStatus.textContent = "Sprawdzanie produktu Pimcore...";
       try {
@@ -8417,6 +8570,14 @@ async function openPimcoreEditModal() {
       }
       objectId = Number(state.pimcoreExistingObject?.id || 0);
     }
+  }
+  if (
+    objectId <= 0 &&
+    state.pimcoreCreateSchema.length &&
+    /^\d{13}$/.test(state.pimcoreMissingEan || currentEan)
+  ) {
+    openPimcoreCreateModal(state.pimcoreMissingEan || currentEan);
+    return;
   }
   if (objectId <= 0) {
     formStatus.textContent = "Nie mozna edytowac produktu Pimcore bez poprawnego ID.";
@@ -8487,7 +8648,8 @@ async function openPimcoreEditModal() {
       pimcoreEditSubmitButton.disabled = true;
     }
     if (pimcoreEditButton) {
-      pimcoreEditButton.disabled = Number(state.pimcoreExistingObject?.id || 0) <= 0;
+      pimcoreEditButton.disabled =
+        Number(state.pimcoreExistingObject?.id || 0) <= 0 && state.pimcoreCreateSchema.length === 0;
     }
   }
 }
@@ -9097,6 +9259,7 @@ pimcoreCreateCancelButton?.addEventListener("click", () => {
 });
 
 pimcoreCreateForm?.addEventListener("submit", submitPimcoreRuntimeCreate);
+pimcoreCreateRecalculateAllButton?.addEventListener("click", recalculateAllPimcoreCreateFields);
 
 pimcoreEditButton?.addEventListener("click", openPimcoreEditModal);
 pimcoreEditForm?.addEventListener("submit", submitPimcoreRuntimeEdit);
@@ -9354,7 +9517,10 @@ function resetCurrentDraft({ clearOutput = true, status = "" } = {}) {
   state.pimcoreMissingEan = "";
   state.pimcoreCreateSchema = [];
   state.pimcoreExistingObject = null;
-  if (pimcoreEditButton) pimcoreEditButton.disabled = true;
+  if (pimcoreEditButton) {
+    pimcoreEditButton.disabled = true;
+    pimcoreEditButton.title = "";
+  }
   pimcoreMissingModal?.classList.remove("active");
   pimcoreCreateModal?.classList.remove("active");
   closePimcoreEditModal();
