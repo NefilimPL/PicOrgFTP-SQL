@@ -240,3 +240,18 @@ def test_test_values_are_fresh_field_specific_and_type_compatible():
     assert first["COLOR"] != first["TITLE"]
     assert "," in first["WEIGHT"]
     assert first["ACTIVE"] in {"tak", "nie"}
+
+
+def test_test_values_keep_ean_fresh_when_clock_does_not_advance(monkeypatch):
+    monkeypatch.setattr(
+        "picorgftp_sql.pimcore_templates.time.time_ns",
+        lambda: 1234567890,
+    )
+    mappings = [{"source": "EAN", "type": "input", "parser": "text"}]
+
+    first = generate_test_values(mappings)
+    second = generate_test_values(mappings)
+
+    assert first["EAN"].isdigit()
+    assert len(first["EAN"]) == 13
+    assert first["EAN"] != second["EAN"]
