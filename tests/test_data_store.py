@@ -54,6 +54,34 @@ def test_sqlite_store_adapter_persists_config(tmp_path: Path) -> None:
     assert store.load_config()["db_type"] == "mysql"
 
 
+def test_sqlite_store_adapter_persists_pimcore_submissions(tmp_path: Path) -> None:
+    with patch.object(
+        storage_settings,
+        "load_bootstrap_settings",
+        return_value={
+            "data_mode": "sqlite",
+            "database_location_mode": "custom",
+            "database_path": str(tmp_path / "data.sqlite"),
+        },
+    ):
+        store = data_store.get_active_store()
+        stored = store.append_pimcore_submission(
+            {
+                "id": "pim-1",
+                "operation_type": "create",
+                "username": "operator",
+                "ean": "5901234567890",
+                "status": "success",
+                "values": {"SKU": "SKU-1"},
+            }
+        )
+        rows = store.query_pimcore_submissions(user="operator", query="590123", limit=10)
+
+    assert stored["id"] == "pim-1"
+    assert rows[0]["ean"] == "5901234567890"
+    assert rows[0]["values"]["SKU"] == "SKU-1"
+
+
 def test_excel_helpers_use_sqlite_store_in_sqlite_mode(tmp_path: Path) -> None:
     workbook_path = tmp_path / "lists.xlsx"
     with (

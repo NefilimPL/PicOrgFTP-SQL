@@ -13,6 +13,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import tempfile
 import threading
@@ -68,11 +69,17 @@ from .excel_utils import (
     save_ean_entry,
     NO_EAN_PLACEHOLDER,
 )
+from .logging_utils import log_error
 from .services.ftp_service import connect_ftp, list_remote_files_for_ean, list_remote_filenames
 from .services.sql_service import (
     extract_presence_context,
     query_presence_details,
     should_check_presence,
+)
+from .services.pimcore_sql_service import (
+    SqlValueResult,
+    connect_profile,
+    execute_sql_value_query,
 )
 from .file_index import LocalFileIndex
 from .pimcore_config import (
@@ -84,7 +91,10 @@ from .pimcore_config import (
 from .pimcore_operations import PimcoreOperationRegistry, redact_pimcore_log_value
 from .pimcore_templates import (
     PRODUCT_SOURCES,
+    SourceDefinition,
+    TemplateError,
     generate_test_values,
+    placeholder_sources,
     render_mapping_templates,
 )
 from .services.pimcore_service import (
@@ -102,6 +112,13 @@ from .services.pimcore_service import (
 )
 from .services.translation_service import translate_text
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
+from .sql_profiles import (
+    SQL_PROFILES_KEY,
+    additional_sql_profiles,
+    normalize_sql_profiles,
+    public_sql_profiles,
+    resolve_sql_profile,
+)
 from .product_fields import (
     PRODUCT_FIELDS_KEY,
     effective_product_values,
@@ -1615,6 +1632,50 @@ def _persist_pimcore_operation(report: dict[str, object]) -> dict[str, object]:
     )
 
 
+def _pimcore_submission_record(report: dict[str, object]) -> dict[str, object]:
+    values = report.get("values") if isinstance(report.get("values"), dict) else {}
+    result = report.get("result") if isinstance(report.get("result"), dict) else {}
+    result_object = result.get("object") if isinstance(result.get("object"), dict) else {}
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    result_warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
+    report_warnings = report.get("warnings") if isinstance(report.get("warnings"), list) else []
+    return {
+        "operation_id": _text(report.get("operation_id")),
+        "operation_type": _text(report.get("operation_type")),
+        "username": _text(report.get("username")),
+        "ean": _text(values.get("EAN") or values.get("ean")),
+        "object_id": _text(
+            result.get("object_id")
+            or result.get("id")
+            or result_object.get("id")
+        ),
+        "object_path": _text(
+            result.get("object_path")
+            or result.get("path")
+            or result_object.get("path")
+            or result_object.get("fullPath")
+        ),
+        "status": _text(report.get("status")),
+        "values": values,
+        "payload": payload,
+        "result": result,
+        "warnings": report_warnings + result_warnings,
+        "created_at": report.get("finished_at") or report.get("started_at") or time.time(),
+    }
+
+
+def _persist_pimcore_submission(report: dict[str, object]) -> None:
+    store = _active_sqlite_store()
+    if store is None:
+        return
+    try:
+        store.append_pimcore_submission(
+            redact_pimcore_log_value(_pimcore_submission_record(report))
+        )
+    except Exception as exc:
+        log_error(f"Failed to persist Pimcore submission: {exc}")
+
+
 def start_pimcore_test_create(
     values: object,
     cleanup_policy: object,
@@ -1647,10 +1708,20 @@ def _pimcore_runtime_form_schema(settings_payload: dict[str, object]) -> list[di
             "default": item["default"],
             "parser": item["parser"],
             "value_template": item["value_template"],
+            "sql_query": item.get("sql_query", ""),
+            "sql_profile_id": item.get("sql_profile_id", ""),
             "translate": item["translate"],
             "target_language": item["target_language"],
+            "layout_group": item.get("layout_group", ""),
+            "layout_order": item.get("layout_order", 0),
         }
-        for item in settings_payload["field_mappings"]
+        for _index, item in sorted(
+            enumerate(settings_payload["field_mappings"]),
+            key=lambda pair: (
+                int(pair[1].get("layout_order", pair[0])),
+                pair[0],
+            ),
+        )
     ]
 
 
@@ -1737,6 +1808,31 @@ def _product_template_values(raw: object, *, fill_missing: bool = False) -> dict
     return values
 
 
+def _template_uses_sql_source(template: object) -> bool:
+    try:
+        return any(source.casefold() == "sql" for source in placeholder_sources(template))
+    except TemplateError:
+        return False
+
+
+def _sql_template_source(source: object) -> str:
+    return f"SQL:{_text(source)}"
+
+
+def _rewrite_sql_template_source(template: object, source: object) -> str:
+    replacement = _sql_template_source(source)
+
+    def replace(match):
+        content = match.group(1)
+        parts = content.split("|", 1)
+        if _text(parts[0]).casefold() != "sql":
+            return match.group(0)
+        suffix = f"|{parts[1]}" if len(parts) == 2 else ""
+        return "{" + replacement + suffix + "}"
+
+    return re.sub(r"\{([^{}]+)\}", replace, str(template or ""))
+
+
 def _render_templates(
     settings_payload: dict[str, object],
     product_values: object,
@@ -1744,24 +1840,81 @@ def _render_templates(
     targets: list[str] | None = None,
     *,
     fill_missing_product_values: bool = False,
+    mode: str = "create",
 ) -> dict[str, object]:
     submitted = dict(values) if isinstance(values, dict) else {}
-    rendered = render_mapping_templates(
-        settings_payload["field_mappings"],
-        product_values=_product_template_values(
-            product_values,
-            fill_missing=fill_missing_product_values,
-        ),
-        pimcore_values=submitted,
-        targets=targets,
+    mappings_list = list(settings_payload["field_mappings"])
+    sql_sources = {
+        item["source"]
+        for item in mappings_list
+        if str(item.get("value_template") or "").strip().casefold() == "sql"
+    }
+    sql_template_sources = {
+        item["source"]
+        for item in mappings_list
+        if item["source"] not in sql_sources
+        and _template_uses_sql_source(item.get("value_template"))
+    }
+    selected_targets = set(targets or [item["source"] for item in mappings_list])
+    template_mappings = [
+        {
+            **item,
+            "value_template": ""
+            if item["source"] in sql_sources
+            else _rewrite_sql_template_source(item.get("value_template", ""), item["source"])
+            if item["source"] in sql_template_sources
+            else item.get("value_template", ""),
+        }
+        for item in mappings_list
+    ]
+    product_context = _product_template_values(
+        product_values,
+        fill_missing=fill_missing_product_values,
     )
     output = dict(submitted)
     warnings: list[dict[str, object]] = []
-    translation_settings = config.CONFIG.get(TRANSLATION_SETTINGS_KEY, {}) or {}
+    calculated_values: dict[str, object] = {}
+    changed: dict[str, bool] = {}
+    profiles = normalize_sql_profiles(config.CONFIG)
     mappings = {
         item["source"]: item
-        for item in settings_payload["field_mappings"]
+        for item in mappings_list
     }
+    extra_sources: list[SourceDefinition] = []
+    extra_values: dict[str, object] = {}
+    for source in sql_template_sources:
+        mapping = mappings[source]
+        sql_key = _sql_template_source(source)
+        extra_sources.append(
+            SourceDefinition(sql_key, f"SQL {mapping.get('label') or source}", "sql", (sql_key,))
+        )
+        try:
+            profile = resolve_sql_profile(profiles, mapping.get("sql_profile_id"))
+            if not profile.get("enabled", True):
+                label = profile.get("label") or profile.get("id")
+                raise ValueError(f"Profil SQL {label} jest wylaczony.")
+            sql_result = execute_sql_value_query(
+                profile,
+                mapping.get("sql_query"),
+                product_context,
+                output,
+                mappings=mappings_list,
+            )
+        except Exception as exc:
+            warnings.append({"source": source, "code": "sql_error", "message": str(exc)})
+            extra_values[sql_key] = ""
+        else:
+            extra_values[sql_key] = sql_result.value
+            warnings.extend({"source": source, **warning} for warning in sql_result.warnings)
+    rendered = render_mapping_templates(
+        template_mappings,
+        product_values=product_context,
+        pimcore_values=submitted,
+        targets=targets,
+        extra_sources=extra_sources,
+        extra_values=extra_values,
+    )
+    translation_settings = config.CONFIG.get(TRANSLATION_SETTINGS_KEY, {}) or {}
     for source in rendered.order:
         mapping = mappings[source]
         value = rendered.values[source]
@@ -1775,7 +1928,45 @@ def _render_templates(
             if translated.warning:
                 warnings.append({"source": source, **translated.warning})
         output[source] = value
-    return {"values": output, "warnings": warnings}
+    for mapping in mappings_list:
+        source = mapping["source"]
+        if source not in selected_targets:
+            continue
+        if source not in sql_sources:
+            if source in output:
+                calculated_values[source] = output[source]
+                changed[source] = str(submitted.get(source, "")) != str(output[source])
+            continue
+        try:
+            profile = resolve_sql_profile(profiles, mapping.get("sql_profile_id"))
+            if not profile.get("enabled", True):
+                label = profile.get("label") or profile.get("id")
+                raise ValueError(f"Profil SQL {label} jest wylaczony.")
+            sql_result = execute_sql_value_query(
+                profile,
+                mapping.get("sql_query"),
+                product_context,
+                output,
+                mappings=mappings_list,
+            )
+        except Exception as exc:
+            warnings.append({"source": source, "code": "sql_error", "message": str(exc)})
+            calculated = ""
+        else:
+            calculated = sql_result.value
+            warnings.extend({"source": source, **warning} for warning in sql_result.warnings)
+        calculated_values[source] = calculated
+        current = str(submitted.get(source, ""))
+        changed[source] = current != str(calculated)
+        if (mode in {"create", "test", "preview"} and not _text(current)) or mode == "apply":
+            output[source] = calculated
+            changed[source] = False
+    return {
+        "values": output,
+        "calculated_values": calculated_values,
+        "warnings": warnings,
+        "changed": changed,
+    }
 
 
 def preview_pimcore_template(payload: object) -> dict[str, object]:
@@ -1792,6 +1983,7 @@ def preview_pimcore_template(payload: object) -> dict[str, object]:
         source.get("values"),
         [target],
         fill_missing_product_values=True,
+        mode="preview",
     )
 
 
@@ -1801,7 +1993,7 @@ def pimcore_test_sample() -> dict[str, object]:
         raise ValueError("Integracja Pimcore nie zostala skonfigurowana.")
     samples = generate_test_values(settings_payload["field_mappings"])
     product_samples = _sample_product_template_values()
-    rendered = _render_templates(settings_payload, product_samples, samples)
+    rendered = _render_templates(settings_payload, product_samples, samples, mode="test")
     return {
         "form_schema": _pimcore_runtime_form_schema(settings_payload),
         **rendered,
@@ -1812,6 +2004,7 @@ def render_saved_pimcore_templates(
     product_values: object,
     values: object,
     targets: object,
+    mode: str = "create",
 ) -> dict[str, object]:
     settings_payload = _active_pimcore_runtime_settings()
     selected = [str(item) for item in targets] if isinstance(targets, list) else None
@@ -1820,6 +2013,7 @@ def render_saved_pimcore_templates(
         product_values,
         values,
         selected,
+        mode=mode,
     )
 
 
@@ -1909,6 +2103,7 @@ def create_pimcore_product(values: object, username: str) -> dict[str, object]:
             }
         )
         _persist_pimcore_operation(report)
+        _persist_pimcore_submission(report)
 
 
 def get_pimcore_product_for_edit(object_id: object) -> dict[str, object]:
@@ -1963,20 +2158,20 @@ def update_pimcore_product(
         raise
     finally:
         finished = time.time()
-        _persist_pimcore_operation(
-            {
-                "operation_id": operation_id,
-                "operation_type": "manual_update",
-                "username": username,
-                "values": submitted,
-                "status": status,
-                "started_at": started,
-                "finished_at": finished,
-                "total_ms": int(max(0, finished - started) * 1000),
-                "events": events,
-                "result": result,
-            }
-        )
+        report = {
+            "operation_id": operation_id,
+            "operation_type": "manual_update",
+            "username": username,
+            "values": submitted,
+            "status": status,
+            "started_at": started,
+            "finished_at": finished,
+            "total_ms": int(max(0, finished - started) * 1000),
+            "events": events,
+            "result": result,
+        }
+        _persist_pimcore_operation(report)
+        _persist_pimcore_submission(report)
 
 
 def pimcore_operation_status(
@@ -2026,6 +2221,74 @@ def pimcore_operation_history(
     return {"items": records, "count": len(records)}
 
 
+def export_pimcore_submissions(
+    *,
+    export_format: str = "json",
+    operation_type: str = "",
+    status: str = "",
+    user: str = "",
+    query: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    limit: int = 1000,
+) -> dict[str, object]:
+    """Export persisted Pimcore SQLite submission records."""
+
+    fmt = _text(export_format).lower() or "json"
+    store = _active_sqlite_store()
+    if store is None:
+        if fmt == "csv":
+            return {"format": "csv", "items": [], "content": "", "count": 0}
+        return {"format": "json", "items": [], "count": 0}
+    rows = store.query_pimcore_submissions(
+        operation_type=operation_type,
+        status=status,
+        user=user,
+        query=query,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+    )
+    if fmt == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow(
+            [
+                "operation_id",
+                "operation_type",
+                "username",
+                "ean",
+                "status",
+                "created_at",
+                "object_id",
+                "object_path",
+                "values_json",
+                "payload_json",
+                "result_json",
+                "warnings_json",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    row.get("operation_id", ""),
+                    row.get("operation_type", ""),
+                    row.get("username", ""),
+                    row.get("ean", ""),
+                    row.get("status", ""),
+                    row.get("created_at", ""),
+                    row.get("object_id", ""),
+                    row.get("object_path", ""),
+                    json.dumps(row.get("values", {}), ensure_ascii=False, sort_keys=True),
+                    json.dumps(row.get("payload", {}), ensure_ascii=False, sort_keys=True),
+                    json.dumps(row.get("result", {}), ensure_ascii=False, sort_keys=True),
+                    json.dumps(row.get("warnings", []), ensure_ascii=False, sort_keys=True),
+                ]
+            )
+        return {"format": "csv", "content": output.getvalue(), "count": len(rows)}
+    return {"format": "json", "items": rows, "count": len(rows)}
+
+
 def _preserve_unsubmitted_config_secrets(payload: dict[str, object]) -> dict[str, set[str]]:
     preserve = {section: set(keys) for section, keys in _CONFIG_SECRET_FIELDS.items()}
     ftp_payload = payload.get("ftp") if isinstance(payload.get("ftp"), dict) else {}
@@ -2043,10 +2306,58 @@ def _preserve_unsubmitted_config_secrets(payload: dict[str, object]) -> dict[str
             preserve[section_key].discard(N)
         if _text(section_payload.get("password")):
             preserve[section_key].discard(M)
+    profile_preserve = set()
+    submitted_profiles = (
+        db_payload.get("profiles")
+        if isinstance(db_payload.get("profiles"), list)
+        else []
+    )
+    existing_profiles = {
+        _text(item.get("id")): item
+        for item in config.CONFIG.get(SQL_PROFILES_KEY, [])
+        if isinstance(item, dict) and _text(item.get("id"))
+    }
+    for item in submitted_profiles:
+        if not isinstance(item, dict):
+            continue
+        profile_id = _text(item.get("id"))
+        if profile_id in existing_profiles and (
+            not _text(item.get("user")) or not _text(item.get("password"))
+        ):
+            profile_preserve.add(profile_id)
+    if profile_preserve:
+        preserve[SQL_PROFILES_KEY] = profile_preserve
     pimcore_payload = payload.get(PIMCORE_SETTINGS_KEY)
     if isinstance(pimcore_payload, dict) and _text(pimcore_payload.get(PIMCORE_API_KEY)):
         preserve[PIMCORE_SETTINGS_KEY].discard(PIMCORE_API_KEY)
     return {section: keys for section, keys in preserve.items() if keys}
+
+
+def _merged_sql_profiles_from_settings_payload(
+    cfg: dict[str, object],
+    db_payload: dict[str, object],
+) -> list[dict[str, object]]:
+    submitted_profiles = db_payload.get("profiles")
+    if not isinstance(submitted_profiles, list):
+        return additional_sql_profiles(cfg)
+    current_profiles = {
+        _text(item.get("id")): item
+        for item in cfg.get(SQL_PROFILES_KEY, [])
+        if isinstance(item, dict) and _text(item.get("id"))
+    }
+    merged_profiles = []
+    for item in submitted_profiles:
+        if not isinstance(item, dict):
+            continue
+        profile = dict(item)
+        profile_id = _text(profile.get("id"))
+        if profile_id and profile_id in current_profiles:
+            if not _text(profile.get("user")):
+                profile["user"] = current_profiles[profile_id].get("user", "")
+            if not _text(profile.get("password")):
+                profile["password"] = current_profiles[profile_id].get("password", "")
+        merged_profiles.append(profile)
+    return additional_sql_profiles({SQL_PROFILES_KEY: merged_profiles})
 
 
 def update_settings(payload: dict[str, object]) -> dict[str, object]:
@@ -2117,7 +2428,16 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
 
     if isinstance(pimcore_payload, dict):
         if "field_mappings" in pimcore_payload:
-            issues = field_mapping_issues(pimcore_payload.get("field_mappings"))
+            profile_cfg = dict(cfg)
+            if isinstance(db_payload.get("profiles"), list):
+                profile_cfg[SQL_PROFILES_KEY] = _merged_sql_profiles_from_settings_payload(
+                    cfg,
+                    db_payload,
+                )
+            issues = field_mapping_issues(
+                pimcore_payload.get("field_mappings"),
+                sql_profiles=normalize_sql_profiles(profile_cfg),
+            )
             if issues:
                 raise ValueError(" ".join(issues))
         current = normalize_pimcore_settings(cfg.get(PIMCORE_SETTINGS_KEY))
@@ -2172,6 +2492,11 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
                     if key in {"user", "password"} and not value:
                         continue
                     section[cfg_key] = value
+        if isinstance(db_payload.get("profiles"), list):
+            cfg[SQL_PROFILES_KEY] = _merged_sql_profiles_from_settings_payload(
+                cfg,
+                db_payload,
+            )
 
     if slots_payload is not None:
         slot_defs, _slot_issues = normalize_slot_definitions(slots_payload)
@@ -2256,6 +2581,7 @@ def settings_snapshot() -> dict[str, object]:
                 "user_set": bool(_text(mysql_cfg.get(N))),
                 "password_set": bool(_text(mysql_cfg.get(M))),
             },
+            "profiles": public_sql_profiles(additional_sql_profiles(cfg)),
         },
         "slot_count": len(slot_defs),
         "sql_map_count": len(sql_map),
@@ -2287,6 +2613,13 @@ def settings_secret_values() -> dict[str, object]:
     ftp = cfg.get(H, {}) if isinstance(cfg.get(H), dict) else {}
     mssql_cfg = cfg.get(P, {}) if isinstance(cfg.get(P), dict) else {}
     mysql_cfg = cfg.get(K, {}) if isinstance(cfg.get(K), dict) else {}
+    profiles = {
+        profile["id"]: {
+            "user": _text(profile.get("user")),
+            "password": _text(profile.get("password")),
+        }
+        for profile in additional_sql_profiles(cfg)
+    }
     return {
         "app_secret": _text(common.APP_SECRET),
         "ftp": {
@@ -2302,6 +2635,7 @@ def settings_secret_values() -> dict[str, object]:
                 "user": _text(mysql_cfg.get(N)),
                 "password": _text(mysql_cfg.get(M)),
             },
+            "profiles": profiles,
         },
     }
 
@@ -2367,6 +2701,39 @@ def test_sql_connection() -> dict[str, object]:
         return {"ok": True, "message": "Polaczenie SQL dziala."}
     except Exception as exc:
         return {"ok": False, "message": str(exc)}
+
+
+def test_sql_profile_connection(profile_id: object) -> dict[str, object]:
+    """Check database connectivity using one configured SQL profile."""
+
+    try:
+        profile = resolve_sql_profile(normalize_sql_profiles(config.CONFIG), profile_id)
+    except KeyError:
+        return {"ok": False, "message": "Nieznany profil SQL."}
+    if profile.get("id") == "default":
+        return test_sql_connection()
+
+    conn = None
+    cursor = None
+    try:
+        conn = connect_profile(profile)
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1")
+        cursor.fetchone()
+        return {"ok": True, "message": "Polaczenie SQL dziala."}
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def find_product_photos(

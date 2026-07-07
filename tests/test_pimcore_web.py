@@ -97,6 +97,28 @@ def test_pimcore_settings_test_route_returns_structured_report():
     assert response.json() == report
 
 
+def test_admin_can_test_sql_profile_route():
+    client = TestClient(web_app.app)
+    expected = {"ok": True, "message": "Polaczenie SQL dziala."}
+    with (
+        patch.object(
+            web_app,
+            "_require_admin",
+            return_value={"username": "admin", "role": "admin"},
+        ),
+        patch.object(
+            web_app,
+            "test_sql_profile_connection",
+            return_value=expected,
+        ) as test_profile,
+    ):
+        response = client.post("/api/settings/sql-profiles/stock/test")
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    test_profile.assert_called_once_with("stock")
+
+
 def test_settings_diagnostic_persists_full_detail_but_returns_public_report():
     report = {
         "ok": False,
@@ -365,6 +387,61 @@ def test_pimcore_history_route_forwards_all_filters():
     )
 
 
+def test_admin_can_export_pimcore_submissions_as_json():
+    client = TestClient(web_app.app)
+    expected = {"items": [{"operation_id": "op-1"}], "format": "json"}
+    with (
+        patch.object(
+            web_app,
+            "_require_admin",
+            return_value={"username": "admin", "role": "admin"},
+        ),
+        patch.object(
+            web_app,
+            "export_pimcore_submissions",
+            return_value=expected,
+        ) as export,
+    ):
+        response = client.get(
+            "/api/settings/pimcore/submissions/export?format=json&user=operator"
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    export.assert_called_once()
+
+
+def test_export_pimcore_submissions_as_csv_contains_common_columns():
+    store = Mock()
+    store.query_pimcore_submissions.return_value = [
+        {
+            "operation_id": "op-1",
+            "operation_type": "manual_create",
+            "username": "operator",
+            "ean": "5901234567890",
+            "status": "completed",
+            "values": {"STOCK": "12"},
+            "payload": {"className": "Product"},
+            "result": {"object_id": 91},
+            "warnings": [],
+            "created_at": "2026-07-06T12:00:00.000Z",
+        }
+    ]
+
+    with patch.object(web_data, "_active_sqlite_store", return_value=store):
+        exported = web_data.export_pimcore_submissions(export_format="csv")
+
+    assert exported["format"] == "csv"
+    assert (
+        "operation_id,operation_type,username,ean,status,created_at"
+        in exported["content"]
+    )
+    assert (
+        "op-1,manual_create,operator,5901234567890,completed,2026-07-06T12:00:00.000Z"
+        in exported["content"]
+    )
+
+
 def test_product_status_returns_disabled_without_network_call():
     cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
     cfg["pimcore"]["enabled"] = False
@@ -377,6 +454,67 @@ def test_product_status_returns_disabled_without_network_call():
             "object": None,
             "form_schema": [],
         }
+
+
+def test_runtime_form_schema_includes_sql_mapping_metadata():
+    settings_payload = web_data.normalize_pimcore_settings(
+        {
+            "field_mappings": [
+                {
+                    "source": "STOCK",
+                    "label": "Stan",
+                    "pimcore_field": "stock",
+                    "type": "input",
+                    "parser": "text",
+                    "value_template": "SQL",
+                    "sql_query": "SELECT qty FROM stock WHERE ean = {ean}",
+                    "sql_profile_id": "stock-db",
+                }
+            ]
+        }
+    )
+
+    schema = web_data._pimcore_runtime_form_schema(settings_payload)
+
+    assert schema[0]["value_template"] == "SQL"
+    assert schema[0]["sql_query"] == "SELECT qty FROM stock WHERE ean = {ean}"
+    assert schema[0]["sql_profile_id"] == "stock-db"
+
+
+def test_runtime_form_schema_includes_layout_and_display_order():
+    settings_payload = web_data.normalize_pimcore_settings(
+        {
+            "field_mappings": [
+                {
+                    "source": "DESCRIPTION",
+                    "label": "Opis",
+                    "pimcore_field": "description",
+                    "type": "textarea",
+                    "parser": "text",
+                    "layout_group": "Opis",
+                    "layout_order": 20,
+                },
+                {
+                    "source": "TITLE",
+                    "label": "Tytul",
+                    "pimcore_field": "title",
+                    "type": "input",
+                    "parser": "text",
+                    "layout_group": "Dane podstawowe",
+                    "layout_order": 10,
+                },
+            ]
+        }
+    )
+
+    schema = web_data._pimcore_runtime_form_schema(settings_payload)
+
+    assert [item["source"] for item in schema] == ["TITLE", "DESCRIPTION"]
+    assert schema[0]["layout_group"] == "Dane podstawowe"
+    assert schema[0]["layout_order"] == 10
+    assert "layout_width" not in schema[0]
+    assert schema[1]["layout_group"] == "Opis"
+    assert "layout_width" not in schema[1]
 
 
 def test_runtime_status_is_disabled_when_setup_is_incomplete():
@@ -489,6 +627,35 @@ def test_create_adapter_uses_manual_create_operation_kind():
         web_data.create_pimcore_product({"EAN": "5904804578169"}, "operator")
 
     assert persist.call_args.args[0]["operation_type"] == "manual_create"
+
+
+def test_create_adapter_persists_detailed_sqlite_submission_when_store_active():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update({"enabled": True, "setup_complete": True})
+    store = Mock()
+
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "_active_sqlite_store", return_value=store),
+        patch.object(
+            web_data,
+            "create_product",
+            return_value={
+                "created": True,
+                "duplicate": False,
+                "object": {"id": 91},
+                "payload": {"className": "Product"},
+            },
+        ),
+        patch.object(web_data, "_persist_pimcore_operation"),
+    ):
+        web_data.create_pimcore_product({"EAN": "5904804578169"}, "operator")
+
+    submitted = store.append_pimcore_submission.call_args.args[0]
+    assert submitted["operation_type"] == "manual_create"
+    assert submitted["username"] == "operator"
+    assert submitted["values"]["EAN"] == "5904804578169"
+    assert submitted["payload"]["className"] == "Product"
 
 
 def test_runtime_edit_routes_allow_logged_in_user():
@@ -699,4 +866,222 @@ def test_logged_in_user_can_render_only_saved_templates():
 
     assert response.status_code == 200
     assert response.json() == expected
-    render.assert_called_once_with({"name": "Vivo"}, {}, ["TITLE"])
+    render.assert_called_once_with({"name": "Vivo"}, {}, ["TITLE"], "create")
+
+
+def test_render_saved_pimcore_templates_auto_applies_sql_only_when_empty():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update(
+        {
+            "enabled": True,
+            "setup_complete": True,
+            "field_mappings": [
+                {
+                    "source": "STOCK",
+                    "label": "Stan",
+                    "pimcore_field": "stockText",
+                    "type": "input",
+                    "parser": "text",
+                    "value_template": "SQL",
+                    "sql_query": "SELECT stock FROM product WHERE ean = {ean}",
+                    "sql_profile_id": "stock",
+                }
+            ],
+        }
+    )
+    cfg["sql_profiles"] = [
+        {
+            "id": "stock",
+            "label": "Stock",
+            "type": "mysql",
+            "host": "mysql.local",
+            "database": "catalog",
+            "user": "reader",
+            "password": "secret",
+            "enabled": True,
+        }
+    ]
+
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(
+            web_data,
+            "execute_sql_value_query",
+            return_value=web_data.SqlValueResult("12", []),
+        ),
+    ):
+        empty = web_data.render_saved_pimcore_templates(
+            {"ean": "5901234567890"},
+            {"STOCK": ""},
+            ["STOCK"],
+        )
+        manual = web_data.render_saved_pimcore_templates(
+            {"ean": "5901234567890"},
+            {"STOCK": "manual"},
+            ["STOCK"],
+        )
+
+    assert empty["values"]["STOCK"] == "12"
+    assert empty["calculated_values"]["STOCK"] == "12"
+    assert empty["changed"]["STOCK"] is False
+    assert manual["values"]["STOCK"] == "manual"
+    assert manual["calculated_values"]["STOCK"] == "12"
+    assert manual["changed"]["STOCK"] is True
+
+
+def test_render_saved_pimcore_templates_uses_sql_as_template_source():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update(
+        {
+            "enabled": True,
+            "setup_complete": True,
+            "field_mappings": [
+                {
+                    "source": "STOCK_LABEL",
+                    "label": "Stan",
+                    "pimcore_field": "stockText",
+                    "type": "input",
+                    "parser": "text",
+                    "value_template": "Stan: {SQL|number:0}",
+                    "sql_query": "SELECT stock FROM product WHERE ean = {ean}",
+                    "sql_profile_id": "stock",
+                }
+            ],
+        }
+    )
+    cfg["sql_profiles"] = [
+        {
+            "id": "stock",
+            "label": "Stock",
+            "type": "mysql",
+            "host": "mysql.local",
+            "database": "catalog",
+            "user": "reader",
+            "password": "secret",
+            "enabled": True,
+        }
+    ]
+
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(
+            web_data,
+            "execute_sql_value_query",
+            return_value=web_data.SqlValueResult("12.4", []),
+        ) as execute_sql,
+    ):
+        result = web_data.render_saved_pimcore_templates(
+            {"ean": "5901234567890"},
+            {"STOCK_LABEL": ""},
+            ["STOCK_LABEL"],
+        )
+
+    assert result["values"]["STOCK_LABEL"] == "Stan: 12"
+    assert result["calculated_values"]["STOCK_LABEL"] == "Stan: 12"
+    execute_sql.assert_called_once()
+
+
+def test_render_saved_pimcore_templates_marks_sql_template_source_difference_for_edit():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update(
+        {
+            "enabled": True,
+            "setup_complete": True,
+            "field_mappings": [
+                {
+                    "source": "SKU",
+                    "label": "SKU",
+                    "pimcore_field": "sku",
+                    "type": "input",
+                    "parser": "text",
+                    "value_template": "{SQL|keep}",
+                    "sql_query": "SELECT TOP 1 sku FROM product WHERE ean = '{PRODUCT:ean|keep}'",
+                    "sql_profile_id": "stock",
+                }
+            ],
+        }
+    )
+    cfg["sql_profiles"] = [
+        {
+            "id": "stock",
+            "label": "Stock",
+            "type": "mssql",
+            "host": "sql.local",
+            "database": "catalog",
+            "user": "reader",
+            "password": "secret",
+            "enabled": True,
+        }
+    ]
+
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(
+            web_data,
+            "execute_sql_value_query",
+            return_value=web_data.SqlValueResult("SKU-NEW", []),
+        ),
+    ):
+        result = web_data.render_saved_pimcore_templates(
+            {"ean": "5907763645590"},
+            {"SKU": "SKU-OLD"},
+            ["SKU"],
+            mode="edit",
+        )
+
+    assert result["values"]["SKU"] == "SKU-NEW"
+    assert result["calculated_values"]["SKU"] == "SKU-NEW"
+    assert result["changed"]["SKU"] is True
+
+
+def test_render_saved_pimcore_templates_for_edit_does_not_auto_apply_sql():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update(
+        {
+            "enabled": True,
+            "setup_complete": True,
+            "field_mappings": [
+                {
+                    "source": "STOCK",
+                    "label": "Stan",
+                    "pimcore_field": "stockText",
+                    "type": "input",
+                    "parser": "text",
+                    "value_template": "SQL",
+                    "sql_query": "SELECT stock FROM product WHERE ean = {ean}",
+                    "sql_profile_id": "stock",
+                }
+            ],
+        }
+    )
+    cfg["sql_profiles"] = [
+        {
+            "id": "stock",
+            "label": "Stock",
+            "type": "mysql",
+            "host": "mysql.local",
+            "database": "catalog",
+            "user": "reader",
+            "password": "secret",
+            "enabled": True,
+        }
+    ]
+
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(
+            web_data,
+            "execute_sql_value_query",
+            return_value=web_data.SqlValueResult("12", []),
+        ),
+    ):
+        result = web_data.render_saved_pimcore_templates(
+            {"ean": "5901234567890"},
+            {"STOCK": "existing"},
+            ["STOCK"],
+            mode="edit",
+        )
+
+    assert result["values"]["STOCK"] == "existing"
+    assert result["calculated_values"]["STOCK"] == "12"
+    assert result["changed"]["STOCK"] is True

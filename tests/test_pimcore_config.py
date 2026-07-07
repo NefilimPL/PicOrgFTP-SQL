@@ -46,8 +46,12 @@ def test_normalize_pimcore_settings_cleans_mappings_and_bounds_timeout():
             "default": "",
             "parser": "text",
             "value_template": "",
+            "sql_query": "",
+            "sql_profile_id": "",
             "translate": False,
             "target_language": None,
+            "layout_group": "",
+            "layout_order": 0,
         }
     ]
 
@@ -145,10 +149,49 @@ def test_infer_field_mapping_uses_class_type_and_locks_ean():
         "default": "",
         "parser": "text",
         "value_template": "",
+        "sql_query": "",
+        "sql_profile_id": "",
         "translate": False,
         "target_language": None,
+        "layout_group": "",
+        "layout_order": 0,
     }
     assert weight["parser"] == "decimal_comma"
+
+
+def test_mapping_layout_options_round_trip_and_ignore_obsolete_width():
+    result = normalize_pimcore_settings(
+        {
+            "field_mappings": [
+                {
+                    "source": "TITLE",
+                    "label": "Tytul",
+                    "pimcore_field": "title",
+                    "type": "input",
+                    "parser": "text",
+                    "layout_group": " Dane podstawowe*: ",
+                    "layout_order": "2",
+                    "layout_width": "half",
+                },
+                {
+                    "source": "DESCRIPTION",
+                    "label": "Opis",
+                    "pimcore_field": "description",
+                    "type": "textarea",
+                    "parser": "text",
+                    "layout_order": "bledna",
+                    "layout_width": "wide",
+                },
+            ]
+        }
+    )
+
+    assert result["field_mappings"][0]["layout_group"] == "Dane podstawowe"
+    assert result["field_mappings"][0]["layout_order"] == 2
+    assert "layout_width" not in result["field_mappings"][0]
+    assert result["field_mappings"][1]["layout_group"] == ""
+    assert result["field_mappings"][1]["layout_order"] == 1
+    assert "layout_width" not in result["field_mappings"][1]
 
 
 def test_field_mapping_issues_report_exact_row_and_problem():
@@ -196,8 +239,116 @@ def test_mapping_template_options_round_trip():
 
     mapping = result["field_mappings"][0]
     assert mapping["value_template"] == "{NAZWA} - {TYP}"
+    assert mapping["sql_query"] == ""
+    assert mapping["sql_profile_id"] == ""
     assert mapping["translate"] is True
     assert mapping["target_language"] == "en"
+
+
+def test_sql_mapping_options_round_trip():
+    result = normalize_pimcore_settings(
+        {
+            "field_mappings": [
+                {
+                    "source": "STOCK",
+                    "label": "Stan",
+                    "pimcore_field": "stock",
+                    "type": "input",
+                    "parser": "text",
+                    "value_template": " SQL ",
+                    "sql_query": " SELECT qty FROM stock WHERE ean = {ean} ",
+                    "sql_profile_id": " stock-db ",
+                }
+            ]
+        }
+    )
+
+    mapping = result["field_mappings"][0]
+    assert mapping["value_template"] == "SQL"
+    assert mapping["sql_query"] == "SELECT qty FROM stock WHERE ean = {ean}"
+    assert mapping["sql_profile_id"] == "stock-db"
+
+
+def test_field_mapping_issues_validate_sql_mode_and_skip_template_parser():
+    issues = field_mapping_issues(
+        [
+            {
+                "source": "STOCK",
+                "pimcore_field": "stock",
+                "type": "input",
+                "parser": "text",
+                "value_template": "SQL",
+                "sql_query": "SELECT qty FROM stock WHERE ean = {ean}",
+                "sql_profile_id": "stock-db",
+            }
+        ],
+        sql_profiles=[{"id": "stock-db"}],
+    )
+
+    assert issues == []
+
+
+def test_field_mapping_issues_require_sql_query_and_profile_for_sql_mode():
+    issues = field_mapping_issues(
+        [
+            {
+                "source": "STOCK",
+                "pimcore_field": "stock",
+                "type": "input",
+                "parser": "text",
+                "value_template": "SQL",
+                "sql_query": "",
+                "sql_profile_id": "missing",
+            }
+        ],
+        sql_profiles=[{"id": "stock-db"}],
+    )
+
+    assert issues == [
+        "Mapowanie 1: SQL wymaga zapytania.",
+        "Mapowanie 1: nieznany profil SQL missing.",
+    ]
+
+
+def test_field_mapping_issues_require_sql_query_and_profile_for_sql_placeholder():
+    issues = field_mapping_issues(
+        [
+            {
+                "source": "STOCK",
+                "pimcore_field": "stock",
+                "type": "input",
+                "parser": "text",
+                "value_template": "Stan: {SQL|number:0}",
+                "sql_query": "",
+                "sql_profile_id": "",
+            }
+        ],
+        sql_profiles=[{"id": "stock-db"}],
+    )
+
+    assert issues == [
+        "Mapowanie 1: SQL wymaga zapytania.",
+        "Mapowanie 1: wybierz profil SQL.",
+    ]
+
+
+def test_field_mapping_issues_accept_sql_placeholder_as_template_source():
+    issues = field_mapping_issues(
+        [
+            {
+                "source": "STOCK",
+                "pimcore_field": "stock",
+                "type": "input",
+                "parser": "text",
+                "value_template": "Stan: {SQL|number:0}",
+                "sql_query": "SELECT qty FROM stock WHERE ean = {ean}",
+                "sql_profile_id": "stock-db",
+            }
+        ],
+        sql_profiles=[{"id": "stock-db"}],
+    )
+
+    assert issues == []
 
 
 def test_invalid_template_is_reported_by_mapping_validation():

@@ -69,6 +69,30 @@ class SqliteDataStoreAdapter:
     def append_history(self, record: dict[str, object]) -> None:
         self.store.append_history(record)
 
+    def append_pimcore_submission(self, record: dict[str, object]) -> dict[str, Any]:
+        return self.store.append_pimcore_submission(record)
+
+    def query_pimcore_submissions(
+        self,
+        *,
+        operation_type: str = "",
+        status: str = "",
+        user: str = "",
+        query: str = "",
+        date_from: str = "",
+        date_to: str = "",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        return self.store.query_pimcore_submissions(
+            operation_type=operation_type,
+            status=status,
+            user=user,
+            query=query,
+            date_from=date_from,
+            date_to=date_to,
+            limit=limit,
+        )
+
     def load_file_index_cache(self) -> dict[str, Any]:
         return self.store.load_file_index_cache()
 

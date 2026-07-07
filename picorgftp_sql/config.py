@@ -25,6 +25,7 @@ from .common import (
     SQL_UPDATE_TEMPLATE,
     SQL_COLUMN_MAP_KEY,
     SQL_AVAILABLE_COLUMNS_KEY,
+    SQL_PROFILES_KEY,
     LOCAL_FILE_INDEX_KEY,
     AUTO_CONTENT_FIT_KEY,
     PROCESSING_SETTINGS_KEY,
@@ -58,6 +59,7 @@ from .pimcore_config import (
 )
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
 from .product_fields import normalize_product_fields
+from .sql_profiles import additional_sql_profiles
 from . import settings
 
 CONFIG_PATH = A.path.join(settings.AC, "config.json")
@@ -127,6 +129,62 @@ def _normalize_sql_columns(raw_columns):
         cleaned.append(text)
         seen.add(text)
     return cleaned
+
+
+def _load_sql_profiles(raw_profiles):
+    """Return additional SQL profiles with decrypted passwords."""
+
+    if not Aq(raw_profiles, list):
+        return []
+    profiles = []
+    for raw in raw_profiles:
+        if not Aq(raw, dict):
+            continue
+        item = dict(raw)
+        item["password"] = decrypt(item.get("password", B))
+        profiles.append(item)
+    return additional_sql_profiles({SQL_PROFILES_KEY: profiles})
+
+
+def _profile_preserve_ids(preserve_secrets):
+    profile_ids = preserve_secrets.get(SQL_PROFILES_KEY, set())
+    if Aq(profile_ids, dict):
+        profile_ids = profile_ids.keys()
+    try:
+        return {
+            str(profile_id).strip()
+            for profile_id in profile_ids
+            if str(profile_id).strip()
+        }
+    except TypeError:
+        return set()
+
+
+def _saved_sql_profiles(config_dict, raw_config, preserve_secrets):
+    """Return additional SQL profiles prepared for persisted config payloads."""
+
+    profiles = additional_sql_profiles(config_dict)
+    raw_profiles = raw_config.get(SQL_PROFILES_KEY, [])
+    raw_by_id = {}
+    if Aq(raw_profiles, list):
+        for raw in raw_profiles:
+            if not Aq(raw, dict):
+                continue
+            raw_id = str(raw.get("id") or "").strip()
+            if raw_id:
+                raw_by_id[raw_id] = raw
+    preserve_ids = _profile_preserve_ids(preserve_secrets)
+    payload = []
+    for profile in profiles:
+        item = dict(profile)
+        item.pop("usage", None)
+        item.pop("locked", None)
+        if profile["id"] in preserve_ids and profile["id"] in raw_by_id:
+            item["password"] = raw_by_id[profile["id"]].get("password", B)
+        else:
+            item["password"] = encrypt(profile.get("password", B))
+        payload.append(item)
+    return payload
 
 
 def _normalize_color_field_labels(raw_labels):
@@ -297,6 +355,9 @@ def _merge_raw_config(raw_config, config_copy):
         SQL_AVAILABLE_COLUMNS_KEY, config_copy.get(SQL_AVAILABLE_COLUMNS_KEY)
     )
     config_copy[SQL_AVAILABLE_COLUMNS_KEY] = _normalize_sql_columns(raw_columns)
+    config_copy[SQL_PROFILES_KEY] = _load_sql_profiles(
+        raw_config.get(SQL_PROFILES_KEY, config_copy.get(SQL_PROFILES_KEY, []))
+    )
     raw_translation = raw_config.get(
         TRANSLATION_SETTINGS_KEY, config_copy.get(TRANSLATION_SETTINGS_KEY, {})
     )
@@ -393,6 +454,7 @@ def load_config(interactive=I):
                 SLOT_DEFS_KEY: config_copy.get(SLOT_DEFS_KEY),
                 SQL_COLUMN_MAP_KEY: config_copy.get(SQL_COLUMN_MAP_KEY),
                 SQL_AVAILABLE_COLUMNS_KEY: config_copy.get(SQL_AVAILABLE_COLUMNS_KEY),
+                SQL_PROFILES_KEY: _saved_sql_profiles(config_copy, {}, {}),
                 LOCAL_FILE_INDEX_KEY: config_copy.get(LOCAL_FILE_INDEX_KEY, True),
                 AUTO_CONTENT_FIT_KEY: bool(
                     config_copy.get(AUTO_CONTENT_FIT_KEY, False)
@@ -494,6 +556,9 @@ def load_config(interactive=I):
             SQL_AVAILABLE_COLUMNS_KEY, config_copy.get(SQL_AVAILABLE_COLUMNS_KEY)
         )
         config_copy[SQL_AVAILABLE_COLUMNS_KEY] = _normalize_sql_columns(raw_columns)
+        config_copy[SQL_PROFILES_KEY] = _load_sql_profiles(
+            raw_config.get(SQL_PROFILES_KEY, config_copy.get(SQL_PROFILES_KEY, []))
+        )
         raw_translation = raw_config.get(
             TRANSLATION_SETTINGS_KEY, config_copy.get(TRANSLATION_SETTINGS_KEY, {})
         )
@@ -632,6 +697,7 @@ def save_config(config, raw_config=None, preserve_secrets=None):
         SQL_AVAILABLE_COLUMNS_KEY: _normalize_sql_columns(
             config.get(SQL_AVAILABLE_COLUMNS_KEY, [])
         ),
+        SQL_PROFILES_KEY: _saved_sql_profiles(config, raw_config, preserve_secrets),
         LOCAL_FILE_INDEX_KEY: bool(config.get(LOCAL_FILE_INDEX_KEY, True)),
         AUTO_CONTENT_FIT_KEY: bool(config.get(AUTO_CONTENT_FIT_KEY, False)),
         PROCESSING_SETTINGS_KEY: _normalize_processing_settings(

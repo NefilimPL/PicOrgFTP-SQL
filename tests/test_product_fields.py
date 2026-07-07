@@ -21,6 +21,7 @@ def test_defaults_preserve_current_form_contract() -> None:
         "model",
         "color1",
     ]
+    assert all(set(item) == {"label", "enabled", "required"} for item in settings.values())
 
 
 def test_normalization_migrates_legacy_labels_and_rejects_unknown_fields() -> None:
@@ -45,6 +46,18 @@ def test_normalization_migrates_legacy_labels_and_rejects_unknown_fields() -> No
     }
     assert settings["color2"]["label"] == "Front"
     assert "unknown" not in settings
+
+
+def test_normalization_ignores_obsolete_group_and_order() -> None:
+    settings = normalize_product_fields(
+        {
+            "ean": {"group": " Identyfikacja*: ", "order": "1"},
+            "color2": {"group": "Kolory", "order": 4},
+            "model": {"order": "bledna"},
+        }
+    )
+
+    assert all("group" not in item and "order" not in item for item in settings.values())
 
 
 def test_explicit_empty_label_takes_precedence_over_legacy_label() -> None:

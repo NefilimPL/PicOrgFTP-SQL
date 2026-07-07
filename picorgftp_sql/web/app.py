@@ -93,6 +93,7 @@ from ..web_data import (
     discover_pimcore_classes,
     discover_pimcore_fields,
     discover_pimcore_folders,
+    export_pimcore_submissions,
     field_suggestions,
     find_entry_by_identity,
     find_pimcore_product_by_ean,
@@ -127,6 +128,7 @@ from ..web_data import (
     test_ftp_connection,
     test_local_paths,
     test_sql_connection,
+    test_sql_profile_connection,
     update_pimcore_product,
     update_settings,
     update_user,
@@ -4179,6 +4181,15 @@ def create_app() -> FastAPI:
         snapshot["current_user"] = _current_user_payload(request)
         return JSONResponse(snapshot)
 
+    @app.post("/api/settings/sql-profiles/{profile_id}/test")
+    async def settings_sql_profile_test(
+        request: Request,
+        profile_id: str,
+    ) -> JSONResponse:
+        _require_admin(request)
+        result = await run_in_threadpool(test_sql_profile_connection, profile_id)
+        return JSONResponse(result)
+
     @app.post("/api/settings/pimcore/test")
     async def pimcore_settings_test_api(request: Request) -> JSONResponse:
         user = _require_admin(request)
@@ -4336,6 +4347,39 @@ def create_app() -> FastAPI:
             limit=limit,
         )
 
+    @app.get("/api/settings/pimcore/submissions/export")
+    def pimcore_submissions_export_api(
+        request: Request,
+        format: str = "json",
+        operation_type: str = "",
+        status: str = "",
+        user: str = "",
+        query: str = "",
+        date_from: str = "",
+        date_to: str = "",
+        limit: int = 1000,
+    ):
+        _require_admin(request)
+        result = export_pimcore_submissions(
+            export_format=format,
+            operation_type=operation_type,
+            status=status,
+            user=user,
+            query=query,
+            date_from=date_from,
+            date_to=date_to,
+            limit=limit,
+        )
+        if result.get("format") == "csv":
+            return Response(
+                str(result.get("content") or ""),
+                media_type="text/csv; charset=utf-8",
+                headers={
+                    "Content-Disposition": "attachment; filename=pimcore-submissions.csv"
+                },
+            )
+        return JSONResponse(result)
+
     @app.get("/api/pimcore/product-status")
     async def pimcore_product_status_api(request: Request, ean: str) -> JSONResponse:
         username = _require_user(request)
@@ -4385,6 +4429,7 @@ def create_app() -> FastAPI:
                 source.get("product_values"),
                 source.get("values"),
                 source.get("targets"),
+                source.get("mode", "create"),
             )
         except (TemplateError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

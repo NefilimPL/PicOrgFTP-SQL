@@ -142,8 +142,16 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn('className = "product-field-settings-list wide-field"', source)
         self.assertIn('className = "product-field-settings-row"', source)
         self.assertIn("function collectProductFieldSettings", source)
+        self.assertNotIn("function productFieldSettingsOrder", source)
+        self.assertNotIn("function renderProductFieldLayout", source)
+        self.assertNotIn("function moveProductFieldSettingsRow", source)
+        self.assertNotIn("product_field_${key}_group", source)
+        self.assertNotIn("product_field_${key}_order", source)
+        self.assertNotIn("product-field-order-actions", source)
         self.assertIn(".product-field-settings-list", css)
         self.assertIn(".product-field-settings-row", css)
+        self.assertNotIn(".product-field-group-heading", css)
+        self.assertNotIn(".product-field-order-actions", css)
 
     def test_topbar_contains_non_button_presence_before_web_images(self) -> None:
         source = INDEX_HTML.read_text(encoding="utf-8")
@@ -263,6 +271,7 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("pimcoreCreateModal", html.ids)
         self.assertIn("pimcoreCreateForm", html.ids)
         self.assertIn("pimcoreMissingCreateButton", html.ids)
+        self.assertIn("pimcoreCreateRecalculateAllButton", html.ids)
         self.assertIn("pimcoreEditButton", html.ids)
 
     def test_runtime_pimcore_edit_modal_exists(self) -> None:
@@ -321,6 +330,121 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("pimcore-recalculate-field", source)
         self.assertIn("async function recalculateAllPimcoreEditFields", source)
         self.assertIn("pimcoreEditRecalculateAllButton", source)
+
+    def test_runtime_pimcore_create_modal_recalculates_and_reopens_for_missing_product(
+        self,
+    ) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        status_start = source.index("async function checkPimcoreProductStatus")
+        status_end = source.index("function openPimcoreCreateModal", status_start)
+        status_body = source[status_start:status_end]
+        edit_start = source.index("async function openPimcoreEditModal")
+        edit_end = source.index("function closePimcoreEditModal", edit_start)
+        edit_body = source[edit_start:edit_end]
+
+        self.assertIn("const pimcoreCreateRecalculateAllButton", source)
+        self.assertIn("async function recalculateAllPimcoreCreateFields", source)
+        self.assertIn(
+            "pimcoreCreateRecalculateAllButton?.addEventListener("
+            '"click", recalculateAllPimcoreCreateFields);',
+            source,
+        )
+        self.assertIn(
+            "pimcoreEditButton.disabled = state.pimcoreCreateSchema.length === 0;",
+            status_body,
+        )
+        self.assertIn(
+            "openPimcoreCreateModal(state.pimcoreMissingEan || currentEan);",
+            edit_body,
+        )
+
+    def test_sql_profile_ui_and_pimcore_sql_mapping_controls_exist(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        css = (ROOT / "picorgftp_sql" / "web" / "static" / "app.css").read_text(
+            encoding="utf-8"
+        )
+        html = INDEX_HTML.read_text(encoding="utf-8")
+
+        self.assertIn("function additionalSqlProfiles", source)
+        self.assertIn('profile.usage === "pimcore_sql"', source)
+        self.assertIn("Profile dodatkowe SQL", source)
+        self.assertIn("Domyslne polaczenie dla zdjec i slotow", source)
+        self.assertNotIn('settingsFieldGroup("MS SQL"', source)
+        self.assertNotIn('settingsFieldGroup("MySQL"', source)
+        self.assertNotIn("Profil domyslny jest zawsze uzywany przez Sloty", source)
+        self.assertIn("function sqlProfileRow", source)
+        self.assertIn("/api/settings/sql-profiles/", source)
+        self.assertIn("mapping_sql_query", source)
+        self.assertIn("mapping_sql_profile_id", source)
+        self.assertIn("pimcore-runtime-calculated", source)
+        self.assertIn("pimcore-runtime-different", css)
+        self.assertIn("pimcore-template-sql-controls", source)
+        self.assertIn("insertPimcoreTemplateSqlToken", source)
+        self.assertNotIn("row.append(use, label, target, required, template, remove, pimcoreSqlMappingControls", source)
+        self.assertNotIn("row.appendChild(pimcoreSqlMappingControls", source)
+        self.assertIn(".sql-profile-card", css)
+        self.assertIn(".sql-profile-card + .sql-profile-card", css)
+        self.assertIn("20260706-sql-profiles", html)
+
+    def test_pimcore_mapping_layout_controls_and_runtime_sections_exist(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        css = (ROOT / "picorgftp_sql" / "web" / "static" / "app.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("mapping_layout_group", source)
+        self.assertIn("mapping_layout_order", source)
+        self.assertNotIn("mapping_layout_width", source)
+        self.assertIn("layout_group:", source)
+        self.assertIn("layout_order:", source)
+        self.assertNotIn("layout_width:", source)
+        self.assertNotIn("pimcoreRuntimeFieldWidth", source)
+        self.assertIn("function pimcoreRuntimeLayoutGroups", source)
+        self.assertIn("pimcore-runtime-section", source)
+        self.assertIn("pimcore-runtime-row", source)
+        self.assertIn("--pimcore-runtime-columns", source)
+        self.assertIn(".pimcore-runtime-section", css)
+        self.assertIn(".pimcore-runtime-row", css)
+        self.assertIn("border-left: 4px solid var(--accent)", css)
+
+    def test_pimcore_runtime_difference_ui_preserves_manual_values(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("function updatePimcoreRuntimeCalculatedState", source)
+        self.assertIn("function updatePimcoreRuntimeFieldChangeState", source)
+        self.assertIn("dataset.originalValue", source)
+        self.assertIn("dataset.calculatedValue", source)
+        self.assertIn("pimcore-runtime-different", source)
+        self.assertIn("Zastosuj wyliczone", source)
+        self.assertIn('mode: form.dataset.pimcoreMode || "create"', source)
+        self.assertIn("if (!input.value)", source)
+
+    def test_pimcore_edit_recalculation_blocks_submit_until_resolved(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        css = (ROOT / "picorgftp_sql" / "web" / "static" / "app.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("function hasBlockingPimcoreRuntimeDifferences", source)
+        self.assertIn("function focusFirstPimcoreRuntimeDifference", source)
+        self.assertIn("function updatePimcoreEditSubmitState", source)
+        self.assertIn("pimcore-runtime-conflict", source)
+        self.assertIn("pimcore-runtime-pulse", source)
+        self.assertIn("Cofnij zmiany", source)
+        self.assertIn("Oryginalnie:", source)
+        self.assertIn("pimcore-runtime-original", source)
+        self.assertIn("pimcore-runtime-conflict", css)
+        self.assertIn("body[data-theme=\"dark\"] .pimcore-runtime-conflict input", css)
+        self.assertIn("@keyframes pimcore-runtime-pulse", css)
+
+    def test_pimcore_history_has_submission_export_actions(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        html = INDEX_HTML.read_text(encoding="utf-8")
+
+        self.assertIn("exportPimcoreSubmissions", source)
+        self.assertIn("/api/settings/pimcore/submissions/export", source)
+        self.assertIn("Eksport CSV", html)
+        self.assertIn("pimcoreHistoryExportCsvButton", html)
 
     def test_pimcore_edit_modal_opens_before_remote_object_load(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -393,7 +517,7 @@ class WebUiIntegrityTests(unittest.TestCase):
 
         self.assertNotIn("http://10.10.0.5", source)
         self.assertIn("http://twoj-adres-pimcore.example", source)
-        self.assertIn("20260703-pimcore-templates", html_source)
+        self.assertIn("20260706-sql-profiles", html_source)
         self.assertIn("flex-wrap: wrap", css[css.index(".lookup-actions"):])
         self.assertNotIn(".lookup-actions #pimcoreEditButton {\n  min-width", css)
 

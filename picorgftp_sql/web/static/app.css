@@ -955,6 +955,45 @@ h2 {
   font-size: 13px;
 }
 
+.sql-profile-list,
+.pimcore-sql-mapping-controls {
+  display: grid;
+  gap: 10px;
+}
+
+.sql-profile-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 12px;
+}
+
+.sql-profile-card + .sql-profile-card {
+  margin-top: 4px;
+}
+
+.sql-profile-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.pimcore-sql-mapping-controls {
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 260px);
+  align-items: end;
+}
+
+.pimcore-template-sql-controls {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 10px;
+}
+
 .settings-form textarea {
   width: 100%;
   min-height: 110px;
@@ -1042,7 +1081,7 @@ h2 {
 
 .pimcore-setup-field-row {
   display: grid;
-  grid-template-columns: 120px minmax(120px, .8fr) minmax(180px, 1fr) 120px 120px;
+  grid-template-columns: 120px minmax(120px, .75fr) minmax(180px, 1fr) 120px minmax(220px, 1fr) 120px;
   gap: 8px;
   align-items: center;
   min-width: 0;
@@ -1052,7 +1091,7 @@ h2 {
 
 .pimcore-setup-field-header {
   display: grid;
-  grid-template-columns: 120px minmax(120px, .8fr) minmax(180px, 1fr) 120px 120px;
+  grid-template-columns: 120px minmax(120px, .75fr) minmax(180px, 1fr) 120px minmax(220px, 1fr) 120px;
   gap: 8px;
   padding: 8px 0;
   color: var(--muted);
@@ -1082,7 +1121,7 @@ h2 {
 
 .pimcore-mapping-row {
   display: grid;
-  grid-template-columns: 1.2fr 1.2fr 1.2fr 110px 90px 36px 1fr 130px 120px auto;
+  grid-template-columns: 1.1fr 1.1fr 1.1fr 100px 80px 36px 1fr 120px minmax(220px, 1fr) 110px auto;
   align-items: center;
   gap: 8px;
   min-width: 0;
@@ -1128,7 +1167,7 @@ h2 {
 
 .pimcore-simple-mapping-row {
   display: grid;
-  grid-template-columns: 42px minmax(140px, 1fr) minmax(180px, 1.2fr) 92px 120px auto;
+  grid-template-columns: 42px minmax(140px, 1fr) minmax(180px, 1.2fr) 92px minmax(220px, 1fr) 120px auto;
   gap: 8px;
   align-items: center;
   min-width: 0;
@@ -1137,6 +1176,14 @@ h2 {
 }
 
 .pimcore-simple-mapping-row > * {
+  min-width: 0;
+}
+
+.pimcore-layout-controls {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(84px, .45fr);
+  gap: 6px;
+  align-items: end;
   min-width: 0;
 }
 
@@ -2040,8 +2087,8 @@ button.slot-badge.on:hover {
 
 .pimcore-runtime-fields {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  grid-template-columns: 1fr;
+  gap: 14px;
   max-height: min(68vh, 720px);
   overflow: auto;
 }
@@ -2050,9 +2097,38 @@ button.slot-badge.on:hover {
   max-height: min(70vh, 760px);
 }
 
+.pimcore-runtime-section {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-2));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
+  padding: 12px;
+}
+
+.pimcore-runtime-section h3 {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.25;
+}
+
 .pimcore-runtime-fields label {
   display: grid;
   gap: 6px;
+  min-width: 0;
+}
+
+.pimcore-runtime-row {
+  display: grid;
+  grid-template-columns: repeat(var(--pimcore-runtime-columns, 1), minmax(0, 1fr));
+  gap: 12px;
   min-width: 0;
 }
 
@@ -2066,6 +2142,68 @@ button.slot-badge.on:hover {
 
 .pimcore-runtime-field-row input {
   min-width: 0;
+}
+
+.pimcore-runtime-different input {
+  border-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, var(--surface));
+  color: var(--text);
+}
+
+.pimcore-runtime-conflict input {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 14%, var(--surface));
+  color: var(--text);
+}
+
+body[data-theme="dark"] .pimcore-runtime-conflict input {
+  background: color-mix(in srgb, var(--danger) 20%, var(--surface));
+  color: var(--text);
+}
+
+.pimcore-runtime-calculated,
+.pimcore-runtime-original {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 6px;
+  align-items: center;
+  color: var(--warn);
+  font-size: 0.9rem;
+}
+
+.pimcore-runtime-calculated {
+  color: var(--danger);
+}
+
+.pimcore-runtime-calculated[hidden],
+.pimcore-runtime-original[hidden] {
+  display: none;
+}
+
+.pimcore-runtime-calculated button,
+.pimcore-runtime-original button {
+  min-height: 28px;
+  padding: 0 8px;
+}
+
+.pimcore-submit-blocked {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+  color: var(--danger);
+}
+
+.pimcore-runtime-pulse {
+  animation: pimcore-runtime-pulse 1.1s ease-in-out 2;
+}
+
+@keyframes pimcore-runtime-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--danger) 0%, transparent);
+  }
+  45% {
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--danger) 34%, transparent);
+  }
 }
 
 .pimcore-recalculate-field {
@@ -2410,6 +2548,14 @@ button.slot-badge.on:hover {
 
 @media (max-width: 700px) {
   .pimcore-runtime-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .pimcore-runtime-section {
+    grid-template-columns: 1fr;
+  }
+
+  .pimcore-runtime-row {
     grid-template-columns: 1fr;
   }
 
