@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 import csv
+import itertools
 import io
 import re
 import secrets
@@ -14,6 +15,7 @@ from typing import Callable, Iterable, Mapping
 MAX_TEMPLATE_LENGTH = 4000
 MAX_TEMPLATE_DEPTH = 8
 MAX_OUTPUT_LENGTH = 16000
+_TEST_VALUE_SEQUENCE = itertools.count(1)
 TRANSLITERATION = str.maketrans({"ł": "l", "Ł": "L", "đ": "d", "Đ": "D"})
 
 
@@ -845,14 +847,15 @@ def _gtin13(seed: int) -> str:
 def generate_test_values(
     mappings: Iterable[Mapping[str, object]],
 ) -> dict[str, object]:
-    token = f"{int(time.time() * 1000):x}{secrets.randbelow(0x10000):04x}"
+    sequence = next(_TEST_VALUE_SEQUENCE)
+    token = f"{int(time.time() * 1000):x}{sequence:x}{secrets.randbelow(0x10000):04x}"
     result: dict[str, object] = {}
     for index, mapping in enumerate(mappings, start=1):
         source = str(mapping.get("source") or "")
         parser = str(mapping.get("parser") or "text")
         element_type = str(mapping.get("type") or "input")
         if source.casefold() == "ean":
-            value = _gtin13(time.time_ns() + index)
+            value = _gtin13(time.time_ns() + sequence * 1000 + index)
         elif parser == "integer":
             value = str(1000 + index)
         elif parser == "decimal_comma":
