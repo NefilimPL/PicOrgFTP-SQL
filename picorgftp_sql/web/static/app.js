@@ -7919,8 +7919,10 @@ function updatePimcoreRuntimeOriginalState(input) {
     const text = document.createElement("span");
     const undo = document.createElement("button");
     undo.type = "button";
-    undo.className = "ghost-button";
-    undo.textContent = "Cofnij zmiany";
+    undo.className = "ghost-button pimcore-runtime-action-button pimcore-runtime-undo-action";
+    undo.textContent = "\u00d7";
+    undo.title = "Cofnij zmiany";
+    undo.setAttribute("aria-label", undo.title);
     undo.addEventListener("click", () => {
       input.value = input.dataset.originalValue || "";
       clearPimcoreRuntimeConflict(field);
@@ -8002,8 +8004,10 @@ function updatePimcoreRuntimeCalculatedState(form, result = {}) {
       const text = document.createElement("span");
       const apply = document.createElement("button");
       apply.type = "button";
-      apply.className = "ghost-button";
-      apply.textContent = "Zastosuj wyliczone";
+      apply.className = "ghost-button pimcore-runtime-action-button pimcore-runtime-apply-action";
+      apply.textContent = "\u2713";
+      apply.title = "Zastosuj wyliczone";
+      apply.setAttribute("aria-label", apply.title);
       apply.addEventListener("click", () => {
         input.value = input.dataset.calculatedValue || "";
         clearPimcoreRuntimeConflict(field);
@@ -8012,8 +8016,10 @@ function updatePimcoreRuntimeCalculatedState(form, result = {}) {
       });
       const undo = document.createElement("button");
       undo.type = "button";
-      undo.className = "ghost-button";
-      undo.textContent = "Cofnij zmiany";
+      undo.className = "ghost-button pimcore-runtime-action-button pimcore-runtime-undo-action";
+      undo.textContent = "\u00d7";
+      undo.title = "Cofnij zmiany";
+      undo.setAttribute("aria-label", undo.title);
       undo.addEventListener("click", () => {
         input.value = input.dataset.originalValue || "";
         clearPimcoreRuntimeConflict(field);
