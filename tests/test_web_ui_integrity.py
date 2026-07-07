@@ -419,6 +419,27 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn('mode: form.dataset.pimcoreMode || "create"', source)
         self.assertIn("if (!input.value)", source)
 
+    def test_pimcore_runtime_difference_actions_stack_below_message(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        css = (ROOT / "picorgftp_sql" / "web" / "static" / "app.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('className = "pimcore-runtime-actions"', source)
+        self.assertIn(".pimcore-runtime-actions", css)
+        runtime_state_start = css.index(".pimcore-runtime-calculated,")
+        runtime_state_end = css.index(".pimcore-runtime-calculated {", runtime_state_start)
+        runtime_state_block = css[runtime_state_start:runtime_state_end]
+
+        self.assertIn("grid-template-columns: 1fr;", runtime_state_block)
+        self.assertNotIn(
+            "grid-template-columns: minmax(0, 1fr) auto auto;",
+            runtime_state_block,
+        )
+        actions_block = css[css.index(".pimcore-runtime-actions") :]
+        self.assertIn("display: flex;", actions_block)
+        self.assertIn("flex-wrap: wrap;", actions_block)
+
     def test_pimcore_edit_recalculation_blocks_submit_until_resolved(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         css = (ROOT / "picorgftp_sql" / "web" / "static" / "app.css").read_text(

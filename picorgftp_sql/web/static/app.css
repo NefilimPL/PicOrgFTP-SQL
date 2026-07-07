@@ -2164,9 +2164,9 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
 .pimcore-runtime-calculated,
 .pimcore-runtime-original {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: 1fr;
   gap: 6px;
-  align-items: center;
+  align-items: start;
   color: var(--warn);
   font-size: 0.9rem;
 }
@@ -2175,13 +2175,26 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
   color: var(--danger);
 }
 
+.pimcore-runtime-calculated > span:first-child,
+.pimcore-runtime-original > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pimcore-runtime-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
 .pimcore-runtime-calculated[hidden],
 .pimcore-runtime-original[hidden] {
   display: none;
 }
 
-.pimcore-runtime-calculated button,
-.pimcore-runtime-original button {
+.pimcore-runtime-actions button {
   min-height: 28px;
   padding: 0 8px;
 }

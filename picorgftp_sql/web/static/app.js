@@ -7899,6 +7899,13 @@ function clearPimcoreRuntimeConflict(field) {
   if (info) info.hidden = true;
 }
 
+function pimcoreRuntimeActions(...buttons) {
+  const actions = document.createElement("span");
+  actions.className = "pimcore-runtime-actions";
+  actions.append(...buttons);
+  return actions;
+}
+
 function updatePimcoreRuntimeOriginalState(input) {
   const form = input?.form;
   const field = input?.closest(".pimcore-runtime-field");
@@ -7919,7 +7926,7 @@ function updatePimcoreRuntimeOriginalState(input) {
       clearPimcoreRuntimeConflict(field);
       updatePimcoreRuntimeFieldChangeState(input, { userInput: false });
     });
-    original.append(text, undo);
+    original.append(text, pimcoreRuntimeActions(undo));
     field.appendChild(original);
   }
   original.querySelector("span").textContent = `Oryginalnie: ${input.dataset.originalValue || "(puste)"}`;
@@ -8012,7 +8019,7 @@ function updatePimcoreRuntimeCalculatedState(form, result = {}) {
         clearPimcoreRuntimeConflict(field);
         updatePimcoreRuntimeFieldChangeState(input, { userInput: false });
       });
-      info.append(text, apply, undo);
+      info.append(text, pimcoreRuntimeActions(apply, undo));
       field.appendChild(info);
     }
     info.querySelector("span").textContent = `Wyliczone: ${value ?? ""}`;
