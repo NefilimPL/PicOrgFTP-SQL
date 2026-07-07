@@ -52,7 +52,6 @@ def test_normalize_pimcore_settings_cleans_mappings_and_bounds_timeout():
             "target_language": None,
             "layout_group": "",
             "layout_order": 0,
-            "layout_width": "full",
         }
     ]
 
@@ -156,12 +155,11 @@ def test_infer_field_mapping_uses_class_type_and_locks_ean():
         "target_language": None,
         "layout_group": "",
         "layout_order": 0,
-        "layout_width": "full",
     }
     assert weight["parser"] == "decimal_comma"
 
 
-def test_mapping_layout_options_round_trip_and_normalize_defaults():
+def test_mapping_layout_options_round_trip_and_ignore_obsolete_width():
     result = normalize_pimcore_settings(
         {
             "field_mappings": [
@@ -190,10 +188,10 @@ def test_mapping_layout_options_round_trip_and_normalize_defaults():
 
     assert result["field_mappings"][0]["layout_group"] == "Dane podstawowe"
     assert result["field_mappings"][0]["layout_order"] == 2
-    assert result["field_mappings"][0]["layout_width"] == "half"
+    assert "layout_width" not in result["field_mappings"][0]
     assert result["field_mappings"][1]["layout_group"] == ""
     assert result["field_mappings"][1]["layout_order"] == 1
-    assert result["field_mappings"][1]["layout_width"] == "full"
+    assert "layout_width" not in result["field_mappings"][1]
 
 
 def test_field_mapping_issues_report_exact_row_and_problem():

@@ -45,7 +45,7 @@
 
 **Interfaces:**
 - Consumes: raw Pimcore mapping dictionaries.
-- Produces: normalized mappings and runtime schema entries with `layout_group`, `layout_order`, and `layout_width`.
+- Produces: normalized mappings and runtime schema entries with `layout_group` and `layout_order`; fields sharing one row/order are rendered as equal-width columns.
 
 - [ ] Write failing tests for normalized mapping layout metadata and runtime schema ordering.
 - [ ] Run targeted pytest commands and confirm failure.

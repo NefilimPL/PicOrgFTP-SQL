@@ -493,7 +493,6 @@ def test_runtime_form_schema_includes_layout_and_display_order():
                     "parser": "text",
                     "layout_group": "Opis",
                     "layout_order": 20,
-                    "layout_width": "full",
                 },
                 {
                     "source": "TITLE",
@@ -503,7 +502,6 @@ def test_runtime_form_schema_includes_layout_and_display_order():
                     "parser": "text",
                     "layout_group": "Dane podstawowe",
                     "layout_order": 10,
-                    "layout_width": "half",
                 },
             ]
         }
@@ -514,9 +512,9 @@ def test_runtime_form_schema_includes_layout_and_display_order():
     assert [item["source"] for item in schema] == ["TITLE", "DESCRIPTION"]
     assert schema[0]["layout_group"] == "Dane podstawowe"
     assert schema[0]["layout_order"] == 10
-    assert schema[0]["layout_width"] == "half"
+    assert "layout_width" not in schema[0]
     assert schema[1]["layout_group"] == "Opis"
-    assert schema[1]["layout_width"] == "full"
+    assert "layout_width" not in schema[1]
 
 
 def test_runtime_status_is_disabled_when_setup_is_incomplete():

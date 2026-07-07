@@ -394,15 +394,18 @@ class WebUiIntegrityTests(unittest.TestCase):
 
         self.assertIn("mapping_layout_group", source)
         self.assertIn("mapping_layout_order", source)
-        self.assertIn("mapping_layout_width", source)
+        self.assertNotIn("mapping_layout_width", source)
         self.assertIn("layout_group:", source)
         self.assertIn("layout_order:", source)
-        self.assertIn("layout_width:", source)
-        self.assertIn("function pimcoreRuntimeSortedSchema", source)
+        self.assertNotIn("layout_width:", source)
+        self.assertNotIn("pimcoreRuntimeFieldWidth", source)
+        self.assertIn("function pimcoreRuntimeLayoutGroups", source)
         self.assertIn("pimcore-runtime-section", source)
-        self.assertIn("pimcore-runtime-field--full", source)
+        self.assertIn("pimcore-runtime-row", source)
+        self.assertIn("--pimcore-runtime-columns", source)
         self.assertIn(".pimcore-runtime-section", css)
-        self.assertIn(".pimcore-runtime-field--full", css)
+        self.assertIn(".pimcore-runtime-row", css)
+        self.assertIn("border-left: 4px solid var(--accent)", css)
 
     def test_pimcore_runtime_difference_ui_preserves_manual_values(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")

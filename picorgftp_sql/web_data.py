@@ -1714,7 +1714,6 @@ def _pimcore_runtime_form_schema(settings_payload: dict[str, object]) -> list[di
             "target_language": item["target_language"],
             "layout_group": item.get("layout_group", ""),
             "layout_order": item.get("layout_order", 0),
-            "layout_width": item.get("layout_width", "full"),
         }
         for _index, item in sorted(
             enumerate(settings_payload["field_mappings"]),

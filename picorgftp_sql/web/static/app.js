@@ -6714,10 +6714,6 @@ function pimcoreLayoutOrderValue(value, fallback = 0) {
   return Number.isFinite(order) ? Math.max(0, order) : fallback;
 }
 
-function pimcoreLayoutWidthValue(value) {
-  return value === "half" ? "half" : "full";
-}
-
 function pimcoreMappingLayoutControls(mapping = {}) {
   const wrapper = document.createElement("div");
   wrapper.className = "pimcore-layout-controls";
@@ -6725,14 +6721,10 @@ function pimcoreMappingLayoutControls(mapping = {}) {
     inputField("mapping_layout_group", "Grupa w formularzu", mapping.layout_group || "", {
       placeholder: "np. Dane podstawowe",
     }),
-    inputField("mapping_layout_order", "Kolejnosc", mapping.layout_order ?? "", {
+    inputField("mapping_layout_order", "Wiersz", mapping.layout_order ?? "", {
       type: "number",
       min: 0,
-    }),
-    selectField("mapping_layout_width", "Szerokosc", pimcoreLayoutWidthValue(mapping.layout_width), [
-      ["full", "Caly wiersz"],
-      ["half", "Pol wiersza"],
-    ])
+    })
   );
   return wrapper;
 }
@@ -6743,9 +6735,6 @@ function collectPimcoreLayout(row, fallbackOrder = 0) {
     layout_order: pimcoreLayoutOrderValue(
       row.querySelector('[name="mapping_layout_order"]')?.value,
       fallbackOrder
-    ),
-    layout_width: pimcoreLayoutWidthValue(
-      row.querySelector('[name="mapping_layout_width"]')?.value
     ),
   };
 }
@@ -7768,28 +7757,48 @@ function pimcoreHistoryButton() {
   return button;
 }
 
-function pimcoreRuntimeSortedSchema(schema = []) {
-  return (Array.isArray(schema) ? schema : [])
+function pimcoreRuntimeLayoutGroups(schema = []) {
+  const groups = new Map();
+  const fields = (Array.isArray(schema) ? schema : [])
     .map((mapping, index) => ({
       mapping,
       index,
-      order: pimcoreLayoutOrderValue(mapping?.layout_order, index),
+      groupName: cleanDisplayLabel(mapping?.layout_group),
+      rowOrder: pimcoreLayoutOrderValue(mapping?.layout_order, index),
     }))
-    .sort((left, right) => left.order - right.order || left.index - right.index)
-    .map((item) => item.mapping);
-}
-
-function pimcoreRuntimeFieldWidth(mapping = {}) {
-  return pimcoreLayoutWidthValue(mapping.layout_width);
-}
-
-const pimcoreRuntimeFieldWidthClasses = {
-  full: "pimcore-runtime-field--full",
-  half: "pimcore-runtime-field--half",
-};
-
-function pimcoreRuntimeFieldWidthClass(mapping = {}) {
-  return pimcoreRuntimeFieldWidthClasses[pimcoreRuntimeFieldWidth(mapping)];
+    .sort((left, right) => left.rowOrder - right.rowOrder || left.index - right.index);
+  for (const field of fields) {
+    const groupKey = field.groupName || "";
+    let group = groups.get(groupKey);
+    if (!group) {
+      group = {
+        name: field.groupName,
+        firstOrder: field.rowOrder,
+        firstIndex: field.index,
+        rows: new Map(),
+      };
+      groups.set(groupKey, group);
+    }
+    const rowKey = String(field.rowOrder);
+    let row = group.rows.get(rowKey);
+    if (!row) {
+      row = {
+        order: field.rowOrder,
+        firstIndex: field.index,
+        fields: [],
+      };
+      group.rows.set(rowKey, row);
+    }
+    row.fields.push(field.mapping);
+  }
+  return [...groups.values()]
+    .sort((left, right) => left.firstOrder - right.firstOrder || left.firstIndex - right.firstIndex)
+    .map((group) => ({
+      ...group,
+      rows: [...group.rows.values()].sort(
+        (left, right) => left.order - right.order || left.firstIndex - right.firstIndex
+      ),
+    }));
 }
 
 function pimcoreRuntimeSection(form, groupName) {
@@ -7802,6 +7811,15 @@ function pimcoreRuntimeSection(form, groupName) {
   return section;
 }
 
+function pimcoreRuntimeRow(container, fieldCount) {
+  const row = document.createElement("div");
+  const columns = Math.max(1, Number(fieldCount || 0));
+  row.className = "pimcore-runtime-row";
+  row.style.setProperty("--pimcore-runtime-columns", String(columns));
+  container.appendChild(row);
+  return row;
+}
+
 function populatePimcoreRuntimeForm(
   form,
   schema,
@@ -7811,64 +7829,59 @@ function populatePimcoreRuntimeForm(
   if (!form) return;
   form.textContent = "";
   const readOnly = new Set(readOnlySources);
-  let currentGroup = "";
-  let container = form;
-  for (const mapping of pimcoreRuntimeSortedSchema(schema)) {
-    const group = cleanDisplayLabel(mapping.layout_group);
-    if (group && group !== currentGroup) {
-      container = pimcoreRuntimeSection(form, group);
-      currentGroup = group;
-    } else if (!group) {
-      container = form;
-      currentGroup = "";
-    }
-    const label = document.createElement("label");
-    const heading = document.createElement("span");
-    const input = document.createElement("input");
-    const fieldRow = document.createElement("span");
-    label.className = "pimcore-runtime-field";
-    label.classList.add(pimcoreRuntimeFieldWidthClass(mapping));
-    heading.textContent = `${mapping.label || mapping.source}${mapping.required ? " *" : ""}`;
-    input.name = mapping.source;
-    input.value = values?.[mapping.source] ?? mapping.default ?? "";
-    input.dataset.originalValue = input.value;
-    input.required = Boolean(mapping.required);
-    input.readOnly = readOnly.has(mapping.source);
-    input.autocomplete = "off";
-    const legacyEanIds = {
-      pimcoreCreate: "pimcoreCreateEan",
-      pimcoreEdit: "pimcoreEditEan",
-    };
-    input.id =
-      mapping.source === "EAN" && legacyEanIds[idPrefix]
-        ? legacyEanIds[idPrefix]
-        : `${idPrefix}-${String(mapping.source || "field").replace(/[^A-Za-z0-9_-]/g, "-")}`;
-    input.addEventListener("input", () => updatePimcoreRuntimeFieldChangeState(input));
-    fieldRow.className = "pimcore-runtime-field-row";
-    fieldRow.appendChild(input);
-    if (allowRecalculate && mapping.value_template) {
-      const recalculate = document.createElement("button");
-      recalculate.type = "button";
-      recalculate.className = "ghost-button icon-button pimcore-recalculate-field";
-      recalculate.textContent = "↻";
-      recalculate.title = `Przelicz pole ${mapping.label || mapping.source}`;
-      recalculate.setAttribute("aria-label", recalculate.title);
-      recalculate.addEventListener("click", async () => {
-        recalculate.disabled = true;
-        if (status) status.textContent = `Przeliczanie pola ${mapping.label || mapping.source}...`;
-        try {
-          const result = await renderPimcoreRuntimeTemplates(form, schema, [mapping.source]);
-          if (status) status.textContent = pimcoreRuntimeRecalculateStatus(form, result);
-        } catch (error) {
-          if (status) status.textContent = error.message;
-        } finally {
-          recalculate.disabled = false;
+  for (const group of pimcoreRuntimeLayoutGroups(schema)) {
+    const groupContainer = group.name ? pimcoreRuntimeSection(form, group.name) : form;
+    for (const layoutRow of group.rows) {
+      const rowContainer = pimcoreRuntimeRow(groupContainer, layoutRow.fields.length);
+      for (const mapping of layoutRow.fields) {
+        const label = document.createElement("label");
+        const heading = document.createElement("span");
+        const input = document.createElement("input");
+        const fieldRow = document.createElement("span");
+        label.className = "pimcore-runtime-field";
+        heading.textContent = `${mapping.label || mapping.source}${mapping.required ? " *" : ""}`;
+        input.name = mapping.source;
+        input.value = values?.[mapping.source] ?? mapping.default ?? "";
+        input.dataset.originalValue = input.value;
+        input.required = Boolean(mapping.required);
+        input.readOnly = readOnly.has(mapping.source);
+        input.autocomplete = "off";
+        const legacyEanIds = {
+          pimcoreCreate: "pimcoreCreateEan",
+          pimcoreEdit: "pimcoreEditEan",
+        };
+        input.id =
+          mapping.source === "EAN" && legacyEanIds[idPrefix]
+            ? legacyEanIds[idPrefix]
+            : `${idPrefix}-${String(mapping.source || "field").replace(/[^A-Za-z0-9_-]/g, "-")}`;
+        input.addEventListener("input", () => updatePimcoreRuntimeFieldChangeState(input));
+        fieldRow.className = "pimcore-runtime-field-row";
+        fieldRow.appendChild(input);
+        if (allowRecalculate && mapping.value_template) {
+          const recalculate = document.createElement("button");
+          recalculate.type = "button";
+          recalculate.className = "ghost-button icon-button pimcore-recalculate-field";
+          recalculate.textContent = "↻";
+          recalculate.title = `Przelicz pole ${mapping.label || mapping.source}`;
+          recalculate.setAttribute("aria-label", recalculate.title);
+          recalculate.addEventListener("click", async () => {
+            recalculate.disabled = true;
+            if (status) status.textContent = `Przeliczanie pola ${mapping.label || mapping.source}...`;
+            try {
+              const result = await renderPimcoreRuntimeTemplates(form, schema, [mapping.source]);
+              if (status) status.textContent = pimcoreRuntimeRecalculateStatus(form, result);
+            } catch (error) {
+              if (status) status.textContent = error.message;
+            } finally {
+              recalculate.disabled = false;
+            }
+          });
+          fieldRow.appendChild(recalculate);
         }
-      });
-      fieldRow.appendChild(recalculate);
+        label.append(heading, fieldRow);
+        rowContainer.appendChild(label);
+      }
     }
-    label.append(heading, fieldRow);
-    container.appendChild(label);
   }
 }
 

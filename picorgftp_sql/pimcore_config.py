@@ -20,7 +20,6 @@ PIMCORE_API_KEY = "api_key"
 PIMCORE_FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SUPPORTED_ELEMENT_TYPES = {"input", "textarea", "numeric", "checkbox", "select"}
 SUPPORTED_PARSERS = {"text", "integer", "decimal_comma", "boolean", "empty_to_null"}
-SUPPORTED_LAYOUT_WIDTHS = {"full", "half"}
 SUPPORTED_FIELD_PARSERS = {
     "input": "text",
     "textarea": "text",
@@ -65,11 +64,6 @@ def _layout_order(value: object, default: int) -> int:
         return default
 
 
-def _layout_width(value: object) -> str:
-    width = _text(value).lower()
-    return width if width in SUPPORTED_LAYOUT_WIDTHS else "full"
-
-
 def default_pimcore_settings() -> dict[str, Any]:
     return deepcopy(DEFAULT_PIMCORE_SETTINGS)
 
@@ -104,7 +98,6 @@ def normalize_field_mapping(raw: object, *, default_order: int = 0) -> dict[str,
         "target_language": _text(raw.get("target_language")) or None,
         "layout_group": _clean_layout_group(raw.get("layout_group")),
         "layout_order": _layout_order(raw.get("layout_order"), default_order),
-        "layout_width": _layout_width(raw.get("layout_width")),
     }
 
 
@@ -143,7 +136,6 @@ def infer_field_mapping(
         "target_language": None,
         "layout_group": "",
         "layout_order": 0,
-        "layout_width": "full",
     }
 
 
