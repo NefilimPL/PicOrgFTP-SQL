@@ -61,25 +61,14 @@ def _bool_value(value: object, default: bool) -> bool:
     return default
 
 
-def _order_value(value: object, default: int) -> int:
-    try:
-        if isinstance(value, bool):
-            raise ValueError
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return default
-
-
 def default_product_fields() -> dict[str, dict[str, object]]:
     return {
         key: {
             "label": "",
             "enabled": True,
             "required": key in DEFAULT_REQUIRED_FIELDS,
-            "group": "",
-            "order": index,
         }
-        for index, key in enumerate(PRODUCT_FIELD_KEYS)
+        for key in PRODUCT_FIELD_KEYS
     }
 
 
@@ -91,7 +80,7 @@ def normalize_product_fields(
     raw = raw_settings if isinstance(raw_settings, Mapping) else {}
     legacy = legacy_color_labels if isinstance(legacy_color_labels, Mapping) else {}
     normalized = default_product_fields()
-    for index, key in enumerate(PRODUCT_FIELD_KEYS):
+    for key in PRODUCT_FIELD_KEYS:
         item = raw.get(key)
         item = item if isinstance(item, Mapping) else {}
         if "label" in item:
@@ -109,8 +98,6 @@ def normalize_product_fields(
             "label": label,
             "enabled": enabled,
             "required": required,
-            "group": _clean_label(item.get("group")),
-            "order": _order_value(item.get("order"), index),
         }
     return normalized
 

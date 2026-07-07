@@ -481,6 +481,44 @@ def test_runtime_form_schema_includes_sql_mapping_metadata():
     assert schema[0]["sql_profile_id"] == "stock-db"
 
 
+def test_runtime_form_schema_includes_layout_and_display_order():
+    settings_payload = web_data.normalize_pimcore_settings(
+        {
+            "field_mappings": [
+                {
+                    "source": "DESCRIPTION",
+                    "label": "Opis",
+                    "pimcore_field": "description",
+                    "type": "textarea",
+                    "parser": "text",
+                    "layout_group": "Opis",
+                    "layout_order": 20,
+                    "layout_width": "full",
+                },
+                {
+                    "source": "TITLE",
+                    "label": "Tytul",
+                    "pimcore_field": "title",
+                    "type": "input",
+                    "parser": "text",
+                    "layout_group": "Dane podstawowe",
+                    "layout_order": 10,
+                    "layout_width": "half",
+                },
+            ]
+        }
+    )
+
+    schema = web_data._pimcore_runtime_form_schema(settings_payload)
+
+    assert [item["source"] for item in schema] == ["TITLE", "DESCRIPTION"]
+    assert schema[0]["layout_group"] == "Dane podstawowe"
+    assert schema[0]["layout_order"] == 10
+    assert schema[0]["layout_width"] == "half"
+    assert schema[1]["layout_group"] == "Opis"
+    assert schema[1]["layout_width"] == "full"
+
+
 def test_runtime_status_is_disabled_when_setup_is_incomplete():
     cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
     cfg["pimcore"].update({"enabled": True, "setup_complete": False})

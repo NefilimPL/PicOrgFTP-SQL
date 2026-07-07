@@ -50,6 +50,9 @@ def test_normalize_pimcore_settings_cleans_mappings_and_bounds_timeout():
             "sql_profile_id": "",
             "translate": False,
             "target_language": None,
+            "layout_group": "",
+            "layout_order": 0,
+            "layout_width": "full",
         }
     ]
 
@@ -151,8 +154,46 @@ def test_infer_field_mapping_uses_class_type_and_locks_ean():
         "sql_profile_id": "",
         "translate": False,
         "target_language": None,
+        "layout_group": "",
+        "layout_order": 0,
+        "layout_width": "full",
     }
     assert weight["parser"] == "decimal_comma"
+
+
+def test_mapping_layout_options_round_trip_and_normalize_defaults():
+    result = normalize_pimcore_settings(
+        {
+            "field_mappings": [
+                {
+                    "source": "TITLE",
+                    "label": "Tytul",
+                    "pimcore_field": "title",
+                    "type": "input",
+                    "parser": "text",
+                    "layout_group": " Dane podstawowe*: ",
+                    "layout_order": "2",
+                    "layout_width": "half",
+                },
+                {
+                    "source": "DESCRIPTION",
+                    "label": "Opis",
+                    "pimcore_field": "description",
+                    "type": "textarea",
+                    "parser": "text",
+                    "layout_order": "bledna",
+                    "layout_width": "wide",
+                },
+            ]
+        }
+    )
+
+    assert result["field_mappings"][0]["layout_group"] == "Dane podstawowe"
+    assert result["field_mappings"][0]["layout_order"] == 2
+    assert result["field_mappings"][0]["layout_width"] == "half"
+    assert result["field_mappings"][1]["layout_group"] == ""
+    assert result["field_mappings"][1]["layout_order"] == 1
+    assert result["field_mappings"][1]["layout_width"] == "full"
 
 
 def test_field_mapping_issues_report_exact_row_and_problem():

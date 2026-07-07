@@ -20,6 +20,7 @@ PIMCORE_API_KEY = "api_key"
 PIMCORE_FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SUPPORTED_ELEMENT_TYPES = {"input", "textarea", "numeric", "checkbox", "select"}
 SUPPORTED_PARSERS = {"text", "integer", "decimal_comma", "boolean", "empty_to_null"}
+SUPPORTED_LAYOUT_WIDTHS = {"full", "half"}
 SUPPORTED_FIELD_PARSERS = {
     "input": "text",
     "textarea": "text",
@@ -51,11 +52,29 @@ def _text(value: object) -> str:
     return str(value or "").strip()
 
 
+def _clean_layout_group(value: object) -> str:
+    return _text(value).rstrip(":*").strip()
+
+
+def _layout_order(value: object, default: int) -> int:
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _layout_width(value: object) -> str:
+    width = _text(value).lower()
+    return width if width in SUPPORTED_LAYOUT_WIDTHS else "full"
+
+
 def default_pimcore_settings() -> dict[str, Any]:
     return deepcopy(DEFAULT_PIMCORE_SETTINGS)
 
 
-def normalize_field_mapping(raw: object) -> dict[str, Any] | None:
+def normalize_field_mapping(raw: object, *, default_order: int = 0) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
     source = _text(raw.get("source"))
@@ -83,6 +102,9 @@ def normalize_field_mapping(raw: object) -> dict[str, Any] | None:
         "sql_profile_id": _text(raw.get("sql_profile_id")),
         "translate": bool(raw.get("translate")),
         "target_language": _text(raw.get("target_language")) or None,
+        "layout_group": _clean_layout_group(raw.get("layout_group")),
+        "layout_order": _layout_order(raw.get("layout_order"), default_order),
+        "layout_width": _layout_width(raw.get("layout_width")),
     }
 
 
@@ -119,6 +141,9 @@ def infer_field_mapping(
         "sql_profile_id": "",
         "translate": False,
         "target_language": None,
+        "layout_group": "",
+        "layout_order": 0,
+        "layout_width": "full",
     }
 
 
@@ -307,8 +332,8 @@ def normalize_pimcore_settings(raw: object) -> dict[str, Any]:
     settings["timeout_seconds"] = max(1, min(120, timeout))
     settings["verify_tls"] = bool(source.get("verify_tls", settings["verify_tls"]))
     mappings: list[dict[str, Any]] = []
-    for item in source.get("field_mappings", []):
-        normalized = normalize_field_mapping(item)
+    for index, item in enumerate(source.get("field_mappings", [])):
+        normalized = normalize_field_mapping(item, default_order=index)
         if normalized:
             mappings.append(normalized)
     settings["field_mappings"] = mappings

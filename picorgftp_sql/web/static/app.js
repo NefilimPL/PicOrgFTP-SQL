@@ -1391,66 +1391,21 @@ function productFieldLabel(fieldName) {
   return cleanDisplayLabel(state.productFields?.[key]?.label) || definition.label;
 }
 
-function productFieldDefaultOrder(key) {
-  return Math.max(0, Object.keys(productFieldDefinitions).indexOf(key));
-}
-
-function productFieldOrderValue(value, fallback) {
-  const order = Number.parseInt(value, 10);
-  return Number.isFinite(order) ? Math.max(0, order) : fallback;
-}
-
-function productFieldSettingsOrder(settings = state.productFields) {
-  return Object.keys(productFieldDefinitions)
-    .map((key) => ({
-      key,
-      order: productFieldOrderValue(settings?.[key]?.order, productFieldDefaultOrder(key)),
-    }))
-    .sort((left, right) => left.order - right.order || productFieldDefaultOrder(left.key) - productFieldDefaultOrder(right.key));
-}
-
 function normalizedProductFields(raw = {}) {
   return Object.fromEntries(
     Object.entries(productFieldDefinitions).map(([key, defaults]) => {
       const item = raw?.[key] || {};
       const enabled = item.enabled !== false;
-      const fallbackOrder = productFieldDefaultOrder(key);
       return [
         key,
         {
           label: cleanDisplayLabel(item.label),
           enabled,
           required: enabled && ("required" in item ? Boolean(item.required) : defaults.required),
-          group: cleanDisplayLabel(item.group),
-          order: productFieldOrderValue(item.order, fallbackOrder),
         },
       ];
     })
   );
-}
-
-function renderProductFieldLayout() {
-  if (!productForm) return;
-  const anchor = productForm.querySelector(".lookup-actions");
-  if (!anchor) return;
-  productForm.querySelectorAll(".product-field-group-heading").forEach((node) => node.remove());
-  let currentGroup = "";
-  for (const { key } of productFieldSettingsOrder(state.productFields)) {
-    const item = state.productFields[key];
-    const container = productForm.querySelector(`[data-product-field="${key}"]`);
-    if (!container) continue;
-    const group = item?.enabled ? cleanDisplayLabel(item.group) : "";
-    if (group && group !== currentGroup) {
-      const heading = document.createElement("div");
-      heading.className = "product-field-group-heading";
-      heading.textContent = group;
-      productForm.insertBefore(heading, anchor);
-      currentGroup = group;
-    } else if (!group) {
-      currentGroup = "";
-    }
-    productForm.insertBefore(container, anchor);
-  }
 }
 
 function applyProductFieldSettings() {
@@ -1467,7 +1422,6 @@ function applyProductFieldSettings() {
     if (!item.enabled) input.value = "";
     label.textContent = `${item.label || definition.label}${item.required ? " *" : ""}`;
   }
-  renderProductFieldLayout();
   findByEanButton.hidden = !state.productFields.ean.enabled;
   updateFieldWarnings();
 }
@@ -5200,87 +5154,36 @@ function settingsFieldGroup(titleText, ...nodes) {
   return group;
 }
 
-function updateProductFieldOrderInputs(list) {
-  const rows = [...list.querySelectorAll("[data-product-field-setting]")];
-  rows.forEach((row, index) => {
-    const key = row.dataset.productFieldSetting;
-    const input = row.querySelector(`[name="product_field_${key}_order"]`);
-    if (input) input.value = String(index);
-    const up = row.querySelector("[data-product-field-move-up]");
-    const down = row.querySelector("[data-product-field-move-down]");
-    if (up) up.disabled = index === 0;
-    if (down) down.disabled = index === rows.length - 1;
-  });
-}
-
-function moveProductFieldSettingsRow(row, direction) {
-  const list = row?.parentElement;
-  if (!list) return;
-  if (direction < 0 && row.previousElementSibling) {
-    list.insertBefore(row, row.previousElementSibling);
-  } else if (direction > 0 && row.nextElementSibling) {
-    list.insertBefore(row.nextElementSibling, row);
-  }
-  updateProductFieldOrderInputs(list);
-}
-
 function productFieldSettingsList(settings = {}) {
   const list = document.createElement("div");
   list.className = "product-field-settings-list wide-field";
   const normalized = normalizedProductFields(settings);
-  for (const { key } of productFieldSettingsOrder(normalized)) {
-    const definition = productFieldDefinitions[key];
+  for (const [key, definition] of Object.entries(productFieldDefinitions)) {
     const item = normalized[key];
     const row = document.createElement("div");
     const title = document.createElement("strong");
-    const orderInput = document.createElement("input");
     const labelField = inputField(
       `product_field_${key}_label`,
       "Wlasna nazwa",
       item.label,
       { placeholder: definition.label }
     );
-    const groupField = inputField(
-      `product_field_${key}_group`,
-      "Grupa",
-      item.group,
-      { placeholder: "np. Identyfikacja" }
-    );
     const enabled = checkField(`product_field_${key}_enabled`, "Aktywne", item.enabled);
     const required = checkField(`product_field_${key}_required`, "Wymagane", item.required);
-    const orderActions = document.createElement("div");
-    const moveUp = document.createElement("button");
-    const moveDown = document.createElement("button");
     const enabledInput = enabled.querySelector("input");
     const requiredInput = required.querySelector("input");
     row.className = "product-field-settings-row";
     row.dataset.productFieldSetting = key;
     title.textContent = definition.label;
-    orderInput.type = "hidden";
-    orderInput.name = `product_field_${key}_order`;
-    orderInput.value = String(item.order);
-    orderActions.className = "product-field-order-actions";
-    moveUp.type = "button";
-    moveUp.className = "secondary-button";
-    moveUp.textContent = "Gora";
-    moveUp.dataset.productFieldMoveUp = "1";
-    moveUp.addEventListener("click", () => moveProductFieldSettingsRow(row, -1));
-    moveDown.type = "button";
-    moveDown.className = "secondary-button";
-    moveDown.textContent = "Dol";
-    moveDown.dataset.productFieldMoveDown = "1";
-    moveDown.addEventListener("click", () => moveProductFieldSettingsRow(row, 1));
-    orderActions.append(moveUp, moveDown);
     const syncRequired = () => {
       requiredInput.disabled = !enabledInput.checked;
       if (!enabledInput.checked) requiredInput.checked = false;
     };
     enabledInput.addEventListener("change", syncRequired);
     syncRequired();
-    row.append(title, labelField, groupField, enabled, required, orderActions, orderInput);
+    row.append(title, labelField, enabled, required);
     list.appendChild(row);
   }
-  updateProductFieldOrderInputs(list);
   return list;
 }
 
@@ -5292,11 +5195,6 @@ function collectProductFieldSettings(data) {
         label: data.get(`product_field_${key}_label`) || "",
         enabled: data.has(`product_field_${key}_enabled`),
         required: data.has(`product_field_${key}_required`),
-        group: data.get(`product_field_${key}_group`) || "",
-        order: productFieldOrderValue(
-          data.get(`product_field_${key}_order`),
-          productFieldDefaultOrder(key)
-        ),
       },
     ])
   );
@@ -6811,6 +6709,47 @@ function sqlProfileOptions(selected = "") {
   return options;
 }
 
+function pimcoreLayoutOrderValue(value, fallback = 0) {
+  const order = Number.parseInt(value, 10);
+  return Number.isFinite(order) ? Math.max(0, order) : fallback;
+}
+
+function pimcoreLayoutWidthValue(value) {
+  return value === "half" ? "half" : "full";
+}
+
+function pimcoreMappingLayoutControls(mapping = {}) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "pimcore-layout-controls";
+  wrapper.append(
+    inputField("mapping_layout_group", "Grupa w formularzu", mapping.layout_group || "", {
+      placeholder: "np. Dane podstawowe",
+    }),
+    inputField("mapping_layout_order", "Kolejnosc", mapping.layout_order ?? "", {
+      type: "number",
+      min: 0,
+    }),
+    selectField("mapping_layout_width", "Szerokosc", pimcoreLayoutWidthValue(mapping.layout_width), [
+      ["full", "Caly wiersz"],
+      ["half", "Pol wiersza"],
+    ])
+  );
+  return wrapper;
+}
+
+function collectPimcoreLayout(row, fallbackOrder = 0) {
+  return {
+    layout_group: row.querySelector('[name="mapping_layout_group"]')?.value.trim() || "",
+    layout_order: pimcoreLayoutOrderValue(
+      row.querySelector('[name="mapping_layout_order"]')?.value,
+      fallbackOrder
+    ),
+    layout_width: pimcoreLayoutWidthValue(
+      row.querySelector('[name="mapping_layout_width"]')?.value
+    ),
+  };
+}
+
 function pimcoreSqlMappingControls(row, mapping = {}) {
   const wrapper = document.createElement("div");
   const query = inputField("mapping_sql_query", "Zapytanie SQL", mapping.sql_query || "", {
@@ -6887,6 +6826,7 @@ function pimcoreMappingRow(mapping = {}) {
       ["text", "integer", "decimal_comma", "boolean", "empty_to_null"],
       "Parser"
     ),
+    pimcoreMappingLayoutControls(mapping),
     template,
     remove
   );
@@ -6894,7 +6834,7 @@ function pimcoreMappingRow(mapping = {}) {
 }
 
 function collectPimcoreMappings(form) {
-  return [...form.querySelectorAll(".pimcore-mapping-row")].map((row) => ({
+  return [...form.querySelectorAll(".pimcore-mapping-row")].map((row, index) => ({
     source: row.querySelector('[name="mapping_source"]').value.trim(),
     label: row.querySelector('[name="mapping_label"]').value.trim(),
     pimcore_field: row.querySelector('[name="mapping_target"]').value.trim(),
@@ -6909,6 +6849,7 @@ function collectPimcoreMappings(form) {
       row.querySelector('[name="mapping_sql_profile_id"]')?.value || row.dataset.sqlProfileId || "",
     translate: row.dataset.translate === "true",
     target_language: row.dataset.targetLanguage || null,
+    ...collectPimcoreLayout(row, index),
   }));
 }
 
@@ -6987,6 +6928,7 @@ function pimcoreSimpleMappingRow(mapping = {}, fields = []) {
   const required = document.createElement("input");
   const remove = document.createElement("button");
   const template = pimcoreTemplateBuilderButton(row);
+  const layout = pimcoreMappingLayoutControls(mapping);
   const isEan = String(mapping.source || "").toUpperCase() === "EAN";
   const availableFields = [...fields];
   row.className = "pimcore-simple-mapping-row";
@@ -7047,7 +6989,7 @@ function pimcoreSimpleMappingRow(mapping = {}, fields = []) {
     }
     updatePimcoreTemplateButton(row);
   });
-  row.append(use, label, target, required, template, remove);
+  row.append(use, label, target, required, layout, template, remove);
   updatePimcoreTemplateButton(row);
   return row;
 }
@@ -7055,7 +6997,7 @@ function pimcoreSimpleMappingRow(mapping = {}, fields = []) {
 function collectSimplePimcoreMappings(form) {
   return [...form.querySelectorAll(".pimcore-simple-mapping-row")]
     .filter((row) => row.querySelector('[name="mapping_use"]')?.checked)
-    .map((row) => {
+    .map((row, index) => {
       const select = row.querySelector('[name="mapping_target"]');
       const option = select?.selectedOptions[0];
       const source = row.dataset.source || pimcoreSelectedMappingSource(select);
@@ -7079,6 +7021,7 @@ function collectSimplePimcoreMappings(form) {
           "",
         translate: row.dataset.translate === "true",
         target_language: row.dataset.targetLanguage || null,
+        ...collectPimcoreLayout(row, index),
       };
     })
     .filter((mapping) => mapping.source && mapping.pimcore_field);
@@ -7504,7 +7447,7 @@ function renderPimcoreFieldsStep() {
   eanHelp.textContent =
     "Lista Pole EAN w Pimcore wskazuje kolumne, w ktorej Pimcore przechowuje 13-cyfrowy EAN.";
   header.className = "pimcore-setup-field-header";
-  for (const text of ["Zapisz pole", "Pole w Pimcore", "Nazwa w formularzu", "Wymagane", "Wartosc"]) {
+  for (const text of ["Zapisz pole", "Pole w Pimcore", "Nazwa w formularzu", "Wymagane", "Układ", "Wartosc"]) {
     const cell = document.createElement("strong");
     cell.textContent = text;
     header.appendChild(cell);
@@ -7587,6 +7530,7 @@ function pimcoreSetupFieldRow(field, mappings, eanTarget) {
   const fieldName = document.createElement("code");
   const labelWrapper = document.createElement("label");
   const requiredLabel = document.createElement("label");
+  const layout = pimcoreMappingLayoutControls(existing);
   const isEan = field.name === eanTarget;
   row.className = "pimcore-setup-field-row";
   row.dataset.fieldName = field.name;
@@ -7616,7 +7560,7 @@ function pimcoreSetupFieldRow(field, mappings, eanTarget) {
   labelWrapper.append(label);
   requiredLabel.append(required, document.createTextNode(" Wymagane"));
   const template = pimcoreTemplateBuilderButton(row);
-  row.append(useLabel, fieldName, labelWrapper, requiredLabel, template);
+  row.append(useLabel, fieldName, labelWrapper, requiredLabel, layout, template);
   updatePimcoreTemplateButton(row);
   if (!field.supported) row.title = field.unsupported_reason || "Pole nie jest obslugiwane.";
   return row;
@@ -7631,7 +7575,7 @@ function collectPimcoreSetupMappings(container) {
         row.dataset.fieldName === eanTarget ||
         row.querySelector('[name="mapping_use"]')?.checked
     )
-    .map((row) => {
+    .map((row, index) => {
       const source =
         row.dataset.fieldName === eanTarget
           ? "EAN"
@@ -7654,6 +7598,7 @@ function collectPimcoreSetupMappings(container) {
           "",
         translate: row.dataset.translate === "true",
         target_language: row.dataset.targetLanguage || null,
+        ...collectPimcoreLayout(row, index),
       };
     });
 }
@@ -7823,6 +7768,40 @@ function pimcoreHistoryButton() {
   return button;
 }
 
+function pimcoreRuntimeSortedSchema(schema = []) {
+  return (Array.isArray(schema) ? schema : [])
+    .map((mapping, index) => ({
+      mapping,
+      index,
+      order: pimcoreLayoutOrderValue(mapping?.layout_order, index),
+    }))
+    .sort((left, right) => left.order - right.order || left.index - right.index)
+    .map((item) => item.mapping);
+}
+
+function pimcoreRuntimeFieldWidth(mapping = {}) {
+  return pimcoreLayoutWidthValue(mapping.layout_width);
+}
+
+const pimcoreRuntimeFieldWidthClasses = {
+  full: "pimcore-runtime-field--full",
+  half: "pimcore-runtime-field--half",
+};
+
+function pimcoreRuntimeFieldWidthClass(mapping = {}) {
+  return pimcoreRuntimeFieldWidthClasses[pimcoreRuntimeFieldWidth(mapping)];
+}
+
+function pimcoreRuntimeSection(form, groupName) {
+  const section = document.createElement("section");
+  const title = document.createElement("h3");
+  section.className = "pimcore-runtime-section";
+  title.textContent = groupName;
+  section.appendChild(title);
+  form.appendChild(section);
+  return section;
+}
+
 function populatePimcoreRuntimeForm(
   form,
   schema,
@@ -7832,12 +7811,23 @@ function populatePimcoreRuntimeForm(
   if (!form) return;
   form.textContent = "";
   const readOnly = new Set(readOnlySources);
-  for (const mapping of schema || []) {
+  let currentGroup = "";
+  let container = form;
+  for (const mapping of pimcoreRuntimeSortedSchema(schema)) {
+    const group = cleanDisplayLabel(mapping.layout_group);
+    if (group && group !== currentGroup) {
+      container = pimcoreRuntimeSection(form, group);
+      currentGroup = group;
+    } else if (!group) {
+      container = form;
+      currentGroup = "";
+    }
     const label = document.createElement("label");
     const heading = document.createElement("span");
     const input = document.createElement("input");
     const fieldRow = document.createElement("span");
     label.className = "pimcore-runtime-field";
+    label.classList.add(pimcoreRuntimeFieldWidthClass(mapping));
     heading.textContent = `${mapping.label || mapping.source}${mapping.required ? " *" : ""}`;
     input.name = mapping.source;
     input.value = values?.[mapping.source] ?? mapping.default ?? "";
@@ -7878,7 +7868,7 @@ function populatePimcoreRuntimeForm(
       fieldRow.appendChild(recalculate);
     }
     label.append(heading, fieldRow);
-    form.appendChild(label);
+    container.appendChild(label);
   }
 }
 

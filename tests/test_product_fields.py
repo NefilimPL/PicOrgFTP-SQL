@@ -21,10 +21,7 @@ def test_defaults_preserve_current_form_contract() -> None:
         "model",
         "color1",
     ]
-    assert [item["order"] for item in settings.values()] == list(
-        range(len(PRODUCT_FIELD_KEYS))
-    )
-    assert all(item["group"] == "" for item in settings.values())
+    assert all(set(item) == {"label", "enabled", "required"} for item in settings.values())
 
 
 def test_normalization_migrates_legacy_labels_and_rejects_unknown_fields() -> None:
@@ -41,21 +38,17 @@ def test_normalization_migrates_legacy_labels_and_rejects_unknown_fields() -> No
         "label": "Produkt",
         "enabled": True,
         "required": True,
-        "group": "",
-        "order": 0,
     }
     assert settings["color1"] == {
         "label": "Korpus",
         "enabled": False,
         "required": False,
-        "group": "",
-        "order": 3,
     }
     assert settings["color2"]["label"] == "Front"
     assert "unknown" not in settings
 
 
-def test_normalization_keeps_group_and_order() -> None:
+def test_normalization_ignores_obsolete_group_and_order() -> None:
     settings = normalize_product_fields(
         {
             "ean": {"group": " Identyfikacja*: ", "order": "1"},
@@ -64,11 +57,7 @@ def test_normalization_keeps_group_and_order() -> None:
         }
     )
 
-    assert settings["ean"]["group"] == "Identyfikacja"
-    assert settings["ean"]["order"] == 1
-    assert settings["color2"]["group"] == "Kolory"
-    assert settings["color2"]["order"] == 4
-    assert settings["model"]["order"] == 2
+    assert all("group" not in item and "order" not in item for item in settings.values())
 
 
 def test_explicit_empty_label_takes_precedence_over_legacy_label() -> None:

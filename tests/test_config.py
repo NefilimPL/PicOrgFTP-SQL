@@ -114,8 +114,6 @@ class ConfigTests(unittest.TestCase):
                 "label": "",
                 "enabled": False,
                 "required": False,
-                "group": "",
-                "order": 2,
             },
         )
 

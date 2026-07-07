@@ -844,8 +844,6 @@ class WebDataUserTests(unittest.TestCase):
                 "label": "Wersja",
                 "enabled": False,
                 "required": False,
-                "group": "",
-                "order": 2,
             },
         )
 

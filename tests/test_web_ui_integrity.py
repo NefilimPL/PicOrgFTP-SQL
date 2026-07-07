@@ -141,17 +141,17 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("function productFieldSettingsList", source)
         self.assertIn('className = "product-field-settings-list wide-field"', source)
         self.assertIn('className = "product-field-settings-row"', source)
-        self.assertIn("function productFieldSettingsOrder", source)
-        self.assertIn("function renderProductFieldLayout", source)
-        self.assertIn("function moveProductFieldSettingsRow", source)
-        self.assertIn("product_field_${key}_group", source)
-        self.assertIn("product_field_${key}_order", source)
-        self.assertIn("product-field-order-actions", source)
         self.assertIn("function collectProductFieldSettings", source)
+        self.assertNotIn("function productFieldSettingsOrder", source)
+        self.assertNotIn("function renderProductFieldLayout", source)
+        self.assertNotIn("function moveProductFieldSettingsRow", source)
+        self.assertNotIn("product_field_${key}_group", source)
+        self.assertNotIn("product_field_${key}_order", source)
+        self.assertNotIn("product-field-order-actions", source)
         self.assertIn(".product-field-settings-list", css)
         self.assertIn(".product-field-settings-row", css)
-        self.assertIn(".product-field-group-heading", css)
-        self.assertIn(".product-field-order-actions", css)
+        self.assertNotIn(".product-field-group-heading", css)
+        self.assertNotIn(".product-field-order-actions", css)
 
     def test_topbar_contains_non_button_presence_before_web_images(self) -> None:
         source = INDEX_HTML.read_text(encoding="utf-8")
@@ -385,6 +385,24 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn(".sql-profile-card", css)
         self.assertIn(".sql-profile-card + .sql-profile-card", css)
         self.assertIn("20260706-sql-profiles", html)
+
+    def test_pimcore_mapping_layout_controls_and_runtime_sections_exist(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        css = (ROOT / "picorgftp_sql" / "web" / "static" / "app.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("mapping_layout_group", source)
+        self.assertIn("mapping_layout_order", source)
+        self.assertIn("mapping_layout_width", source)
+        self.assertIn("layout_group:", source)
+        self.assertIn("layout_order:", source)
+        self.assertIn("layout_width:", source)
+        self.assertIn("function pimcoreRuntimeSortedSchema", source)
+        self.assertIn("pimcore-runtime-section", source)
+        self.assertIn("pimcore-runtime-field--full", source)
+        self.assertIn(".pimcore-runtime-section", css)
+        self.assertIn(".pimcore-runtime-field--full", css)
 
     def test_pimcore_runtime_difference_ui_preserves_manual_values(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
