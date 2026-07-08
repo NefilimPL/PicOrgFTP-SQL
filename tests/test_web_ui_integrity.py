@@ -486,6 +486,17 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("/api/settings/pimcore/submissions/export", source)
         self.assertIn("Eksport CSV", html)
         self.assertIn("pimcoreHistoryExportCsvButton", html)
+        self.assertIn("Eksport XLSX", html)
+        self.assertIn("pimcoreHistoryExportXlsxButton", html)
+
+    def test_pimcore_settings_has_prompted_submission_export_action(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("function pimcoreSettingsExportButton", source)
+        self.assertIn("function promptPimcoreSubmissionExportFormat", source)
+        self.assertIn("Eksport danych Pimcore", source)
+        self.assertIn("CSV lub XLSX", source)
+        self.assertIn("pimcoreSettingsExportButton()", source)
 
     def test_pimcore_edit_modal_opens_before_remote_object_load(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")

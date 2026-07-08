@@ -250,7 +250,7 @@ const pimcoreHistoryFilters = document.querySelector("#pimcoreHistoryFilters");
 const pimcoreHistoryOutput = document.querySelector("#pimcoreHistoryOutput");
 const pimcoreHistoryCloseButton = document.querySelector("#pimcoreHistoryCloseButton");
 const pimcoreHistoryExportCsvButton = document.querySelector("#pimcoreHistoryExportCsvButton");
-const pimcoreHistoryExportJsonButton = document.querySelector("#pimcoreHistoryExportJsonButton");
+const pimcoreHistoryExportXlsxButton = document.querySelector("#pimcoreHistoryExportXlsxButton");
 const pimcoreMissingModal = document.querySelector("#pimcoreMissingModal");
 const pimcoreMissingMessage = document.querySelector("#pimcoreMissingMessage");
 const pimcoreMissingCreateButton = document.querySelector("#pimcoreMissingCreateButton");
@@ -7757,6 +7757,17 @@ function pimcoreHistoryButton() {
   return button;
 }
 
+function pimcoreSettingsExportButton() {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary-button";
+  button.textContent = "Eksport danych Pimcore";
+  button.addEventListener("click", () => {
+    exportPimcoreSubmissions("", { includeFilters: false });
+  });
+  return button;
+}
+
 function pimcoreRuntimeLayoutGroups(schema = []) {
   const groups = new Map();
   const fields = (Array.isArray(schema) ? schema : [])
@@ -8385,9 +8396,18 @@ async function loadPimcoreHistory() {
   renderPimcoreHistory(payload.items || []);
 }
 
-function pimcoreHistoryExportParams(format) {
-  const data = new FormData(pimcoreHistoryFilters);
+function promptPimcoreSubmissionExportFormat() {
+  return window.confirm("Format eksportu danych Pimcore: CSV lub XLSX. OK = XLSX, Anuluj = CSV")
+    ? "xlsx"
+    : "csv";
+}
+
+function pimcoreHistoryExportParams(format, options = {}) {
   const params = new URLSearchParams({ format });
+  if (options.includeFilters === false || !pimcoreHistoryFilters) {
+    return params;
+  }
+  const data = new FormData(pimcoreHistoryFilters);
   for (const key of ["operation_type", "result", "user", "query"]) {
     const value = String(data.get(key) || "").trim();
     if (value) params.set(key === "result" ? "status" : key, value);
@@ -8399,8 +8419,10 @@ function pimcoreHistoryExportParams(format) {
   return params;
 }
 
-function exportPimcoreSubmissions(format) {
-  const params = pimcoreHistoryExportParams(format);
+function exportPimcoreSubmissions(format = "", options = {}) {
+  const selectedFormat = format || promptPimcoreSubmissionExportFormat();
+  if (!selectedFormat) return;
+  const params = pimcoreHistoryExportParams(selectedFormat, options);
   window.location.href = `/api/settings/pimcore/submissions/export?${params.toString()}`;
 }
 
@@ -8824,6 +8846,10 @@ function renderSettingsPimcore() {
         pimcoreHistoryButton()
       ),
       pimcoreChecklistElement()
+    ),
+    settingsFieldGroup(
+      "Dane lokalne Pimcore",
+      actionRow(pimcoreSettingsExportButton())
     ),
     advanced
   );
@@ -9256,7 +9282,7 @@ pimcoreHistoryFilters?.addEventListener("submit", (event) => {
 });
 
 pimcoreHistoryExportCsvButton?.addEventListener("click", () => exportPimcoreSubmissions("csv"));
-pimcoreHistoryExportJsonButton?.addEventListener("click", () => exportPimcoreSubmissions("json"));
+pimcoreHistoryExportXlsxButton?.addEventListener("click", () => exportPimcoreSubmissions("xlsx"));
 
 pimcoreMissingCreateButton?.addEventListener("click", () => {
   openPimcoreCreateModal(state.pimcoreMissingEan);

@@ -4378,6 +4378,20 @@ def create_app() -> FastAPI:
                     "Content-Disposition": "attachment; filename=pimcore-submissions.csv"
                 },
             )
+        if result.get("format") == "xlsx":
+            content = result.get("content") or b""
+            if not isinstance(content, (bytes, bytearray)):
+                content = str(content).encode("utf-8")
+            return Response(
+                bytes(content),
+                media_type=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                headers={
+                    "Content-Disposition": "attachment; filename=pimcore-submissions.xlsx"
+                },
+            )
         return JSONResponse(result)
 
     @app.get("/api/pimcore/product-status")
@@ -4437,9 +4451,13 @@ def create_app() -> FastAPI:
 
     @app.get("/api/pimcore/products/{object_id}")
     async def pimcore_product_edit_data_api(request: Request, object_id: int) -> JSONResponse:
-        _require_user(request)
+        username = _require_user(request)
         try:
-            result = await run_in_threadpool(get_pimcore_product_for_edit, object_id)
+            result = await run_in_threadpool(
+                get_pimcore_product_for_edit,
+                object_id,
+                username,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except PimcoreApiError as exc:

@@ -20,6 +20,8 @@ import threading
 import time
 import unicodedata
 
+from openpyxl import Workbook
+
 from . import common, config, data_store, settings, storage_settings
 from . import encryption
 from .common import (
@@ -97,6 +99,7 @@ from .pimcore_templates import (
     placeholder_sources,
     render_mapping_templates,
 )
+from .sqlite_store import SqliteStore
 from .services.pimcore_service import (
     PimcoreClient,
     PimcoreConflictError,
@@ -180,6 +183,20 @@ _CONFIG_SECRET_FIELDS = {
     PIMCORE_SETTINGS_KEY: {PIMCORE_API_KEY},
 }
 _PIMCORE_OPERATIONS = PimcoreOperationRegistry()
+PIMCORE_SUBMISSION_EXPORT_COLUMNS = (
+    "operation_id",
+    "operation_type",
+    "username",
+    "ean",
+    "status",
+    "created_at",
+    "object_id",
+    "object_path",
+    "values_json",
+    "payload_json",
+    "result_json",
+    "warnings_json",
+)
 
 
 class ListValueInUseError(ValueError):
@@ -232,6 +249,18 @@ def _active_sqlite_store():
     except Exception:
         return None
     return None
+
+
+def _pimcore_submission_store():
+    """Return the SQLite store used for Pimcore audit records."""
+
+    active_store = _active_sqlite_store()
+    if active_store is not None:
+        return active_store
+    database_path = storage_settings.resolve_sqlite_path()
+    if not _text(database_path):
+        return None
+    return SqliteStore(database_path)
 
 
 def _norm(value: object) -> str:
@@ -1665,7 +1694,7 @@ def _pimcore_submission_record(report: dict[str, object]) -> dict[str, object]:
 
 
 def _persist_pimcore_submission(report: dict[str, object]) -> None:
-    store = _active_sqlite_store()
+    store = _pimcore_submission_store()
     if store is None:
         return
     try:
@@ -1674,6 +1703,11 @@ def _persist_pimcore_submission(report: dict[str, object]) -> None:
         )
     except Exception as exc:
         log_error(f"Failed to persist Pimcore submission: {exc}")
+
+
+def _persist_pimcore_audit(report: dict[str, object]) -> None:
+    _persist_pimcore_operation(report)
+    _persist_pimcore_submission(report)
 
 
 def start_pimcore_test_create(
@@ -1695,7 +1729,7 @@ def start_pimcore_test_create(
             policy,
             emit=emit,
         ),
-        persist=_persist_pimcore_operation,
+        persist=_persist_pimcore_audit,
     )
 
 
@@ -2106,11 +2140,66 @@ def create_pimcore_product(values: object, username: str) -> dict[str, object]:
         _persist_pimcore_submission(report)
 
 
-def get_pimcore_product_for_edit(object_id: object) -> dict[str, object]:
+def get_pimcore_product_for_edit(
+    object_id: object,
+    username: str = "",
+) -> dict[str, object]:
     settings_payload = _active_pimcore_runtime_settings()
-    result = fetch_product_for_edit(settings_payload, object_id)
-    result["form_schema"] = _pimcore_runtime_form_schema(settings_payload)
-    return result
+    operation_id = secrets.token_hex(12)
+    started = time.time()
+    result: dict[str, object] = {}
+    status = "failed"
+    events: list[dict[str, object]] = []
+    try:
+        result = fetch_product_for_edit(settings_payload, object_id)
+        result["form_schema"] = _pimcore_runtime_form_schema(settings_payload)
+        status = "completed"
+        return result
+    except Exception as exc:
+        now = time.time()
+        events.append(
+            {
+                "sequence": 1,
+                "timestamp": now,
+                "elapsed_ms": int(max(0, now - started) * 1000),
+                "stage": "load",
+                "severity": "error",
+                "message": str(exc) or exc.__class__.__name__,
+            }
+        )
+        raise
+    finally:
+        finished = time.time()
+        if status == "completed":
+            result_object = (
+                result.get("object") if isinstance(result.get("object"), dict) else {}
+            )
+            events.append(
+                {
+                    "sequence": 1,
+                    "timestamp": finished,
+                    "elapsed_ms": int(max(0, finished - started) * 1000),
+                    "stage": "load",
+                    "severity": "success",
+                    "message": "Wczytano dane produktu Pimcore.",
+                    "object_id": result_object.get("id", object_id),
+                    "object_path": result_object.get("path", ""),
+                }
+            )
+        values = result.get("values") if isinstance(result.get("values"), dict) else {}
+        report = {
+            "operation_id": operation_id,
+            "operation_type": "manual_load",
+            "username": username,
+            "values": values,
+            "status": status,
+            "started_at": started,
+            "finished_at": finished,
+            "total_ms": int(max(0, finished - started) * 1000),
+            "events": events,
+            "result": result,
+        }
+        _persist_pimcore_audit(report)
 
 
 def update_pimcore_product(
@@ -2235,57 +2324,54 @@ def export_pimcore_submissions(
     """Export persisted Pimcore SQLite submission records."""
 
     fmt = _text(export_format).lower() or "json"
-    store = _active_sqlite_store()
-    if store is None:
-        if fmt == "csv":
-            return {"format": "csv", "items": [], "content": "", "count": 0}
-        return {"format": "json", "items": [], "count": 0}
-    rows = store.query_pimcore_submissions(
-        operation_type=operation_type,
-        status=status,
-        user=user,
-        query=query,
-        date_from=date_from,
-        date_to=date_to,
-        limit=limit,
+    store = _pimcore_submission_store()
+    rows = (
+        store.query_pimcore_submissions(
+            operation_type=operation_type,
+            status=status,
+            user=user,
+            query=query,
+            date_from=date_from,
+            date_to=date_to,
+            limit=limit,
+        )
+        if store is not None
+        else []
     )
+
+    def export_row(row: dict[str, object]) -> list[object]:
+        return [
+            row.get("operation_id", ""),
+            row.get("operation_type", ""),
+            row.get("username", ""),
+            row.get("ean", ""),
+            row.get("status", ""),
+            row.get("created_at", ""),
+            row.get("object_id", ""),
+            row.get("object_path", ""),
+            json.dumps(row.get("values", {}), ensure_ascii=False, sort_keys=True),
+            json.dumps(row.get("payload", {}), ensure_ascii=False, sort_keys=True),
+            json.dumps(row.get("result", {}), ensure_ascii=False, sort_keys=True),
+            json.dumps(row.get("warnings", []), ensure_ascii=False, sort_keys=True),
+        ]
+
     if fmt == "csv":
         output = io.StringIO()
         writer = csv.writer(output, lineterminator="\n")
-        writer.writerow(
-            [
-                "operation_id",
-                "operation_type",
-                "username",
-                "ean",
-                "status",
-                "created_at",
-                "object_id",
-                "object_path",
-                "values_json",
-                "payload_json",
-                "result_json",
-                "warnings_json",
-            ]
-        )
+        writer.writerow(PIMCORE_SUBMISSION_EXPORT_COLUMNS)
         for row in rows:
-            writer.writerow(
-                [
-                    row.get("operation_id", ""),
-                    row.get("operation_type", ""),
-                    row.get("username", ""),
-                    row.get("ean", ""),
-                    row.get("status", ""),
-                    row.get("created_at", ""),
-                    row.get("object_id", ""),
-                    row.get("object_path", ""),
-                    json.dumps(row.get("values", {}), ensure_ascii=False, sort_keys=True),
-                    json.dumps(row.get("payload", {}), ensure_ascii=False, sort_keys=True),
-                    json.dumps(row.get("result", {}), ensure_ascii=False, sort_keys=True),
-                    json.dumps(row.get("warnings", []), ensure_ascii=False, sort_keys=True),
-                ]
-            )
+            writer.writerow(export_row(row))
         return {"format": "csv", "content": output.getvalue(), "count": len(rows)}
+    if fmt == "xlsx":
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Pimcore"
+        sheet.append(list(PIMCORE_SUBMISSION_EXPORT_COLUMNS))
+        for row in rows:
+            sheet.append(export_row(row))
+        output = io.BytesIO()
+        workbook.save(output)
+        return {"format": "xlsx", "content": output.getvalue(), "count": len(rows)}
     return {"format": "json", "items": rows, "count": len(rows)}
 
 
