@@ -167,16 +167,16 @@ h2 {
 .topbar-brand {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   min-width: 0;
 }
 
 .github-status-button {
   display: inline-grid;
-  width: 34px;
-  min-width: 34px;
-  height: 34px;
-  min-height: 34px;
+  width: 42px;
+  min-width: 42px;
+  height: 42px;
+  min-height: 42px;
   place-items: center;
   border-color: var(--line);
   background: var(--surface);
