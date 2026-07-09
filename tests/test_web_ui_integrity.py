@@ -165,6 +165,21 @@ class WebUiIntegrityTests(unittest.TestCase):
         )
         self.assertNotIn('activeUsersPresence" type="button', source)
 
+    def test_github_status_button_and_modal_exist(self) -> None:
+        html = _parse(INDEX_HTML)
+        css = (
+            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("githubStatusButton", html.button_ids)
+        self.assertIn("githubStatusModal", html.ids)
+        self.assertIn("githubStatusOutput", html.ids)
+        self.assertIn("githubStatusCheckedAt", html.ids)
+        self.assertTrue(html.has_tag("button", id="githubStatusButton", type="button"))
+        self.assertIn(".github-status-button", css)
+        self.assertIn(".github-status-button.update-available", css)
+        self.assertIn("@keyframes github-status-pulse", css)
+
     def test_app_js_renders_active_user_presence(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         css = (
