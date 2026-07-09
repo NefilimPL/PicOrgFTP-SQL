@@ -183,7 +183,7 @@ _CONFIG_SECRET_FIELDS = {
     PIMCORE_SETTINGS_KEY: {PIMCORE_API_KEY},
 }
 _PIMCORE_OPERATIONS = PimcoreOperationRegistry()
-PIMCORE_SUBMISSION_EXPORT_COLUMNS = (
+PIMCORE_SUBMISSION_BASE_EXPORT_COLUMNS = (
     "operation_id",
     "operation_type",
     "username",
@@ -192,10 +192,6 @@ PIMCORE_SUBMISSION_EXPORT_COLUMNS = (
     "created_at",
     "object_id",
     "object_path",
-    "values_json",
-    "payload_json",
-    "result_json",
-    "warnings_json",
 )
 
 
@@ -2310,6 +2306,52 @@ def pimcore_operation_history(
     return {"items": records, "count": len(records)}
 
 
+def _pimcore_export_cell(value: object) -> object:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float, str)):
+        return value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _flatten_pimcore_export_block(prefix: str, value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        items: dict[str, object] = {}
+        for key in sorted(value.keys(), key=lambda item: str(item)):
+            child_key = f"{prefix}.{key}"
+            items.update(_flatten_pimcore_export_block(child_key, value.get(key)))
+        return items
+    if isinstance(value, list):
+        items = {}
+        for index, item in enumerate(value):
+            child_key = f"{prefix}[{index}]"
+            items.update(_flatten_pimcore_export_block(child_key, item))
+        return items
+    return {prefix: _pimcore_export_cell(value)}
+
+
+def _pimcore_submission_export_table(
+    rows: list[dict[str, object]],
+) -> tuple[list[str], list[list[object]]]:
+    records: list[dict[str, object]] = []
+    dynamic_columns: set[str] = set()
+    for row in rows:
+        record = {
+            column: _pimcore_export_cell(row.get(column, ""))
+            for column in PIMCORE_SUBMISSION_BASE_EXPORT_COLUMNS
+        }
+        for block in ("values", "payload", "result", "warnings"):
+            flattened = _flatten_pimcore_export_block(block, row.get(block, {}))
+            record.update(flattened)
+            dynamic_columns.update(flattened.keys())
+        records.append(record)
+
+    columns = list(PIMCORE_SUBMISSION_BASE_EXPORT_COLUMNS) + sorted(dynamic_columns)
+    return columns, [[record.get(column, "") for column in columns] for record in records]
+
+
 def export_pimcore_submissions(
     *,
     export_format: str = "json",
@@ -2339,36 +2381,22 @@ def export_pimcore_submissions(
         else []
     )
 
-    def export_row(row: dict[str, object]) -> list[object]:
-        return [
-            row.get("operation_id", ""),
-            row.get("operation_type", ""),
-            row.get("username", ""),
-            row.get("ean", ""),
-            row.get("status", ""),
-            row.get("created_at", ""),
-            row.get("object_id", ""),
-            row.get("object_path", ""),
-            json.dumps(row.get("values", {}), ensure_ascii=False, sort_keys=True),
-            json.dumps(row.get("payload", {}), ensure_ascii=False, sort_keys=True),
-            json.dumps(row.get("result", {}), ensure_ascii=False, sort_keys=True),
-            json.dumps(row.get("warnings", []), ensure_ascii=False, sort_keys=True),
-        ]
+    columns, table_rows = _pimcore_submission_export_table(rows)
 
     if fmt == "csv":
         output = io.StringIO()
         writer = csv.writer(output, lineterminator="\n")
-        writer.writerow(PIMCORE_SUBMISSION_EXPORT_COLUMNS)
-        for row in rows:
-            writer.writerow(export_row(row))
+        writer.writerow(columns)
+        for row in table_rows:
+            writer.writerow(row)
         return {"format": "csv", "content": output.getvalue(), "count": len(rows)}
     if fmt == "xlsx":
         workbook = Workbook()
         sheet = workbook.active
         sheet.title = "Pimcore"
-        sheet.append(list(PIMCORE_SUBMISSION_EXPORT_COLUMNS))
-        for row in rows:
-            sheet.append(export_row(row))
+        sheet.append(columns)
+        for row in table_rows:
+            sheet.append(row)
         output = io.BytesIO()
         workbook.save(output)
         return {"format": "xlsx", "content": output.getvalue(), "count": len(rows)}

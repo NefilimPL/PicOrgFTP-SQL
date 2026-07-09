@@ -1,3 +1,4 @@
+import csv
 import io
 import json
 from unittest.mock import Mock, patch
@@ -471,6 +472,48 @@ def test_export_pimcore_submissions_as_xlsx_contains_common_columns():
     assert sheet["A1"].value == "operation_id"
     assert sheet["B2"].value == "manual_create"
     assert sheet["D2"].value == "5901234567890"
+
+
+def test_export_pimcore_submissions_flattens_blocks_into_columns():
+    store = Mock()
+    store.query_pimcore_submissions.return_value = [
+        {
+            "operation_id": "op-1",
+            "operation_type": "manual_create",
+            "username": "operator",
+            "ean": "5901234567890",
+            "status": "completed",
+            "values": {"EAN": "5901234567890", "STOCK": "12"},
+            "payload": {
+                "className": "Product",
+                "elements": [{"name": "EAN", "value": "5901234567890"}],
+            },
+            "result": {"object_id": 91, "object": {"path": "/Produkty/5901234567890"}},
+            "warnings": [{"code": "missing_sql", "message": "Brak danych SQL"}],
+            "created_at": "2026-07-06T12:00:00.000Z",
+        }
+    ]
+
+    with patch.object(web_data, "_active_sqlite_store", return_value=store):
+        exported = web_data.export_pimcore_submissions(export_format="csv")
+
+    rows = list(csv.reader(io.StringIO(exported["content"])))
+    header = rows[0]
+    values = dict(zip(header, rows[1]))
+
+    assert "values_json" not in header
+    assert "payload_json" not in header
+    assert "result_json" not in header
+    assert "warnings_json" not in header
+    assert values["values.EAN"] == "5901234567890"
+    assert values["values.STOCK"] == "12"
+    assert values["payload.className"] == "Product"
+    assert values["payload.elements[0].name"] == "EAN"
+    assert values["payload.elements[0].value"] == "5901234567890"
+    assert values["result.object_id"] == "91"
+    assert values["result.object.path"] == "/Produkty/5901234567890"
+    assert values["warnings[0].code"] == "missing_sql"
+    assert values["warnings[0].message"] == "Brak danych SQL"
 
 
 def test_admin_can_export_pimcore_submissions_as_xlsx_response():
