@@ -54,6 +54,7 @@ from ..common import (
     w,
 )
 from ..database import connect_db
+from ..github_status import github_repository_status
 from ..image_utils import fit_image_to_content
 from ..legacy_import import import_legacy_to_sqlite
 from ..logging_utils import log_error
@@ -3827,6 +3828,11 @@ def create_app() -> FastAPI:
             **load_web_data(),
             "pimcore": pimcore_runtime_capabilities(),
         }
+
+    @app.get("/api/github/repository")
+    def github_repository_api(request: Request) -> Dict[str, Any]:
+        _require_user(request)
+        return github_repository_status(get_display_version())
 
     @app.get("/api/data")
     def data(request: Request) -> Dict[str, Any]:

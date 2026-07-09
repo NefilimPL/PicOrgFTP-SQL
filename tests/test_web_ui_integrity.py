@@ -165,6 +165,29 @@ class WebUiIntegrityTests(unittest.TestCase):
         )
         self.assertNotIn('activeUsersPresence" type="button', source)
 
+    def test_github_status_button_and_modal_exist(self) -> None:
+        source = INDEX_HTML.read_text(encoding="utf-8")
+        html = _parse(INDEX_HTML)
+        css = (
+            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("githubStatusButton", html.button_ids)
+        self.assertIn("githubStatusModal", html.ids)
+        self.assertIn("githubStatusOutput", html.ids)
+        self.assertIn("githubStatusCheckedAt", html.ids)
+        self.assertTrue(html.has_tag("button", id="githubStatusButton", type="button"))
+        self.assertLess(
+            source.index('id="githubStatusButton"'),
+            source.index("<strong>PicOrgFTP-SQL Web</strong>"),
+        )
+        self.assertIn('viewBox="0 0 16 16" width="24" height="24"', source)
+        self.assertIn(".github-status-button", css)
+        self.assertRegex(css, r"\.github-status-button\s*\{[^}]*width:\s*42px;")
+        self.assertRegex(css, r"\.github-status-button\s*\{[^}]*height:\s*42px;")
+        self.assertIn(".github-status-button.update-available", css)
+        self.assertIn("@keyframes github-status-pulse", css)
+
     def test_app_js_renders_active_user_presence(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         css = (
@@ -179,6 +202,18 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn(".active-users-presence", css)
         self.assertIn(".presence-user-label", css)
         self.assertIn(".presence-more-button", css)
+
+    def test_app_js_loads_and_renders_github_status(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn('const githubStatusButton = document.querySelector("#githubStatusButton")', source)
+        self.assertIn('const githubStatusModal = document.querySelector("#githubStatusModal")', source)
+        self.assertIn('const githubStatusOutput = document.querySelector("#githubStatusOutput")', source)
+        self.assertIn("function renderGithubStatus", source)
+        self.assertIn("async function refreshGithubStatus", source)
+        self.assertIn('requestJson("/api/github/repository"', source)
+        self.assertIn('githubStatusButton.classList.toggle("update-available"', source)
+        self.assertIn('document.querySelectorAll("[data-close-github-status]")', source)
 
     def test_app_js_marks_presence_client_and_leaves_on_pagehide(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")

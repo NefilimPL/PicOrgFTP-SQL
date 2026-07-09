@@ -75,6 +75,7 @@ class WebSmokeCiTests(unittest.TestCase):
             "/api/logout",
             "/api/bootstrap",
             "/api/data",
+            "/api/github/repository",
             "/api/process",
             "/api/upload-cache",
             "/api/browser-extension/download",
@@ -101,6 +102,28 @@ class WebSmokeCiTests(unittest.TestCase):
             "/api/users",
         }
         self.assertEqual(expected_paths - route_paths, set())
+
+    def test_github_repository_endpoint_returns_status_payload(self) -> None:
+        client = TestClient(web_app.app)
+        payload = {
+            "available": True,
+            "private": False,
+            "repository": {"full_name": "NefilimPL/PicOrgFTP-SQL"},
+            "latest_release": {"tag_name": "v1.2.3"},
+            "license": {"spdx_id": "MIT"},
+            "owner": {"login": "NefilimPL"},
+            "contributors": [],
+            "current_version": "dev",
+            "update_available": True,
+            "message": "",
+            "checked_at": "2026-07-09T00:00:00Z",
+        }
+
+        with patch.object(web_app, "github_repository_status", return_value=payload):
+            response = client.get("/api/github/repository")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), payload)
 
     def test_legacy_import_endpoint_switches_to_sqlite(self) -> None:
         client = TestClient(web_app.app)
