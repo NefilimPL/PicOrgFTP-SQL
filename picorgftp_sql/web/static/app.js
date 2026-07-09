@@ -97,6 +97,8 @@ const state = {
   activePresenceClientId: "",
   csrfToken: "",
   pollers: [],
+  githubStatus: null,
+  githubStatusLoading: false,
 };
 
 const WEB_IMAGE_CACHE_LIMIT = 2;
@@ -169,6 +171,10 @@ const fileIndexInfo = document.querySelector("#fileIndexInfo");
 const latencyInfo = document.querySelector("#latencyInfo");
 const serverInfo = document.querySelector("#serverInfo");
 const versionInfo = document.querySelector("#versionInfo");
+const githubStatusButton = document.querySelector("#githubStatusButton");
+const githubStatusModal = document.querySelector("#githubStatusModal");
+const githubStatusOutput = document.querySelector("#githubStatusOutput");
+const githubStatusCheckedAt = document.querySelector("#githubStatusCheckedAt");
 const submitButton = document.querySelector("#submitButton");
 const clearButton = document.querySelector("#clearButton");
 const logoutButton = document.querySelector("#logoutButton");
@@ -464,6 +470,103 @@ function openModal(name) {
     loadLogs().catch((error) => {
       logsOutput.textContent = error.message;
     });
+  }
+}
+
+function githubRow(label, value, url = "") {
+  const row = document.createElement("div");
+  row.className = "github-status-row";
+  const title = document.createElement("strong");
+  title.textContent = label;
+  if (url) {
+    const link = document.createElement("a");
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = value || url;
+    row.append(title, link);
+  } else {
+    const text = document.createElement("span");
+    text.textContent = value || "Brak informacji";
+    row.append(title, text);
+  }
+  return row;
+}
+
+function renderGithubStatus(payload = {}) {
+  state.githubStatus = payload || {};
+  if (githubStatusButton) {
+    githubStatusButton.classList.toggle("update-available", Boolean(payload.update_available));
+    githubStatusButton.title = payload.update_available
+      ? "Dostepna jest nowsza wersja na GitHub"
+      : "Informacje o repozytorium GitHub";
+  }
+  if (!githubStatusOutput) return;
+  githubStatusOutput.textContent = "";
+  if (!payload.available) {
+    githubStatusOutput.classList.add("empty-state");
+    githubStatusOutput.appendChild(
+      githubRow("Status", payload.message || "Repozytorium jest prywatne albo niedostepne.")
+    );
+  } else {
+    githubStatusOutput.classList.remove("empty-state");
+    const repo = payload.repository || {};
+    const release = payload.latest_release || {};
+    const license = payload.license || {};
+    const owner = payload.owner || {};
+    const contributors = Array.isArray(payload.contributors) ? payload.contributors : [];
+    githubStatusOutput.append(
+      githubRow("Repozytorium", repo.full_name || "PicOrgFTP-SQL", repo.html_url || ""),
+      githubRow("Wersja lokalna", payload.current_version || "dev"),
+      githubRow(
+        payload.update_available ? "Aktualizacja" : "Najnowszy release",
+        release.tag_name
+          ? `${release.tag_name}${release.published_at ? ` (${release.published_at})` : ""}`
+          : "Brak publicznego release",
+        release.html_url || ""
+      ),
+      githubRow("Licencja", license.spdx_id || license.name || "Brak informacji"),
+      githubRow("Wlasciciel", owner.login || "Brak informacji", owner.html_url || ""),
+      githubRow(
+        "Contributors",
+        contributors.length
+          ? contributors.map((item) => `${item.login} (${item.contributions || 0})`).join(", ")
+          : "Brak dodatkowych contributors"
+      )
+    );
+  }
+  if (githubStatusCheckedAt) {
+    githubStatusCheckedAt.textContent = payload.checked_at ? `Sprawdzono: ${payload.checked_at}` : "";
+  }
+}
+
+async function refreshGithubStatus(options = {}) {
+  if (state.githubStatusLoading) return state.githubStatus;
+  state.githubStatusLoading = true;
+  try {
+    const payload = await requestJson("/api/github/repository", options);
+    renderGithubStatus(payload);
+    return payload;
+  } catch (error) {
+    const payload = {
+      available: false,
+      private: false,
+      message: error.message || "Nie udalo sie pobrac danych GitHub.",
+      update_available: false,
+    };
+    renderGithubStatus(payload);
+    return payload;
+  } finally {
+    state.githubStatusLoading = false;
+  }
+}
+
+function openGithubStatusModal() {
+  closeAutocompletePanels();
+  githubStatusModal?.classList.add("active");
+  if (!state.githubStatus) {
+    if (githubStatusOutput) githubStatusOutput.textContent = "Pobieranie danych GitHub...";
+    refreshGithubStatus().catch(() => {});
   }
 }
 
@@ -5041,6 +5144,7 @@ async function loadBootstrap(options = {}) {
   pollLogStatus({ initialize: true }).catch(() => {});
   loadRecentProcessJobs().catch(() => {});
   refreshProcessQueue().catch(() => {});
+  refreshGithubStatus().catch(() => {});
   state.lists = payload.lists || {};
   state.entries = payload.entries || [];
   state.fileIndex = payload.file_index || null;
@@ -9245,6 +9349,12 @@ document.querySelectorAll("[data-close-web-images]").forEach((button) => {
   button.addEventListener("click", closeWebImagesModal);
 });
 
+document.querySelectorAll("[data-close-github-status]").forEach((button) => {
+  button.addEventListener("click", () => {
+    githubStatusModal?.classList.remove("active");
+  });
+});
+
 document.querySelectorAll("[data-close-history-detail]").forEach((button) => {
   button.addEventListener("click", () => {
     document.querySelector("#historyDetailModal")?.classList.remove("active");
@@ -9446,6 +9556,11 @@ document.addEventListener("keydown", (event) => {
 themeToggleButton?.addEventListener("click", () => {
   state.theme = state.theme === "dark" ? "light" : "dark";
   applyTheme();
+});
+
+githubStatusButton?.addEventListener("click", () => {
+  openGithubStatusModal();
+  refreshGithubStatus().catch(() => {});
 });
 
 document.querySelectorAll(".settings-tab").forEach((button) => {

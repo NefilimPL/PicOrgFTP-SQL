@@ -195,6 +195,18 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn(".presence-user-label", css)
         self.assertIn(".presence-more-button", css)
 
+    def test_app_js_loads_and_renders_github_status(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn('const githubStatusButton = document.querySelector("#githubStatusButton")', source)
+        self.assertIn('const githubStatusModal = document.querySelector("#githubStatusModal")', source)
+        self.assertIn('const githubStatusOutput = document.querySelector("#githubStatusOutput")', source)
+        self.assertIn("function renderGithubStatus", source)
+        self.assertIn("async function refreshGithubStatus", source)
+        self.assertIn('requestJson("/api/github/repository"', source)
+        self.assertIn('githubStatusButton.classList.toggle("update-available"', source)
+        self.assertIn('document.querySelectorAll("[data-close-github-status]")', source)
+
     def test_app_js_marks_presence_client_and_leaves_on_pagehide(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
 
