@@ -869,9 +869,17 @@ def _upload_signature_matches(extension: str, header: bytes) -> bool:
     if extension in JPEG2000_UPLOAD_EXTENSIONS:
         return _is_jpeg2000_header(header)
     if extension == "ico":
-        return header.startswith(b"\x00\x00\x01\x00")
+        return (
+            len(header) >= 6
+            and header.startswith(b"\x00\x00\x01\x00")
+            and int.from_bytes(header[4:6], "little", signed=False) > 0
+        )
     if extension == "cur":
-        return header.startswith(b"\x00\x00\x02\x00")
+        return (
+            len(header) >= 6
+            and header.startswith(b"\x00\x00\x02\x00")
+            and int.from_bytes(header[4:6], "little", signed=False) > 0
+        )
     if extension == "tga":
         return _is_tga_header(header)
     if extension in PNM_UPLOAD_EXTENSIONS:
@@ -1506,7 +1514,7 @@ async def _save_upload_cache_entry(
 
 
 async def _save_upload_cache(upload: UploadFile, cache_scope: str, prefix: str) -> tuple[str, int]:
-    saved = await _save_upload_cache_entry(upload, cache_scope, prefix)
+    saved = await _save_upload_cache_entry(upload, cache_scope, prefix, normalize_extension=True)
     return saved.path, saved.size
 
 
@@ -3952,18 +3960,25 @@ def create_app() -> FastAPI:
         prefix = str(form.get("prefix") or "slot").strip() or "slot"
         cleanup_web_upload_cache()
         save_started = time.perf_counter()
-        path, size = await _save_upload_cache(upload, _user_cache_scope(request, username), prefix)
+        saved_cache = await _save_upload_cache_entry(
+            upload,
+            _user_cache_scope(request, username),
+            prefix,
+            normalize_extension=True,
+        )
+        path = saved_cache.path
+        size = saved_cache.size
         save_ms = _elapsed_ms(save_started)
         preprocess_ms = 0
         preprocessed = False
-        display_name = _safe_upload_name(original_name, os.path.basename(path))
+        display_name = _safe_upload_name(saved_cache.name or original_name, os.path.basename(path))
         if _upload_processing_mode() == "host":
             preprocess_started = time.perf_counter()
             original_scan_path = path
             path, display_name, preprocessed = await run_in_threadpool(
                 preprocess_cached_upload,
                 path,
-                original_name,
+                display_name,
                 processing_options_from_config(config.CONFIG),
             )
             _copy_upload_scan_result(original_scan_path, path)

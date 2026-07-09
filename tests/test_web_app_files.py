@@ -487,6 +487,80 @@ class WebAppFileTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_save_upload_cache_normalizes_misnamed_jfif_to_detected_image_format(self) -> None:
+        if Image is None:
+            self.skipTest("Pillow unavailable")
+        temp_dir = _workspace_temp("web_app_upload_normalize_jfif_extension")
+        try:
+            buffer = io.BytesIO()
+            try:
+                Image.new("RGB", (16, 16), "white").save(buffer, format="WEBP")
+            except Exception:
+                self.skipTest("Pillow WebP support unavailable")
+            upload = _MemoryUpload("product.jfif", [buffer.getvalue()], "image/jpeg")
+            with (
+                patch.object(web_app.settings, "AC", str(temp_dir)),
+                patch.object(
+                    web_app.config,
+                    "CONFIG",
+                    {
+                        web_app.SECURITY_SETTINGS_KEY: {
+                            "allowed_upload_extensions": ["jfif", "webp"],
+                            "blocked_upload_extensions": [],
+                            "block_executable_uploads": True,
+                        }
+                    },
+                ),
+            ):
+                path, _size = asyncio.run(web_app._save_upload_cache(upload, "session", "01"))
+
+            self.assertTrue(path.endswith(".webp"))
+            with Image.open(path) as image:
+                self.assertEqual(image.format, "WEBP")
+            self.assertTrue(upload.closed)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_save_upload_cache_entry_returns_detected_name_for_misnamed_jfif(self) -> None:
+        if Image is None:
+            self.skipTest("Pillow unavailable")
+        temp_dir = _workspace_temp("web_app_upload_normalize_jfif_name")
+        try:
+            buffer = io.BytesIO()
+            try:
+                Image.new("RGB", (16, 16), "white").save(buffer, format="WEBP")
+            except Exception:
+                self.skipTest("Pillow WebP support unavailable")
+            upload = _MemoryUpload("product.jfif", [buffer.getvalue()], "image/jpeg")
+            with (
+                patch.object(web_app.settings, "AC", str(temp_dir)),
+                patch.object(
+                    web_app.config,
+                    "CONFIG",
+                    {
+                        web_app.SECURITY_SETTINGS_KEY: {
+                            "allowed_upload_extensions": ["jfif", "webp"],
+                            "blocked_upload_extensions": [],
+                            "block_executable_uploads": True,
+                        }
+                    },
+                ),
+            ):
+                saved = asyncio.run(
+                    web_app._save_upload_cache_entry(
+                        upload,
+                        "session",
+                        "01",
+                        normalize_extension=True,
+                    )
+                )
+
+            self.assertTrue(saved.path.endswith(".webp"))
+            self.assertEqual(saved.name, "product.webp")
+            self.assertTrue(upload.closed)
+        finally:
+            shutil.rmtree(temp_dir)
+
     def test_save_upload_cache_runs_optional_antivirus_scan(self) -> None:
         if Image is None:
             self.skipTest("Pillow unavailable")
