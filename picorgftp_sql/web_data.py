@@ -183,16 +183,6 @@ _CONFIG_SECRET_FIELDS = {
     PIMCORE_SETTINGS_KEY: {PIMCORE_API_KEY},
 }
 _PIMCORE_OPERATIONS = PimcoreOperationRegistry()
-PIMCORE_SUBMISSION_BASE_EXPORT_COLUMNS = (
-    "operation_id",
-    "operation_type",
-    "username",
-    "ean",
-    "status",
-    "created_at",
-    "object_id",
-    "object_path",
-)
 
 
 class ListValueInUseError(ValueError):
@@ -2316,40 +2306,52 @@ def _pimcore_export_cell(value: object) -> object:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
-def _flatten_pimcore_export_block(prefix: str, value: object) -> dict[str, object]:
-    if isinstance(value, dict):
-        items: dict[str, object] = {}
-        for key in sorted(value.keys(), key=lambda item: str(item)):
-            child_key = f"{prefix}.{key}"
-            items.update(_flatten_pimcore_export_block(child_key, value.get(key)))
-        return items
-    if isinstance(value, list):
-        items = {}
-        for index, item in enumerate(value):
-            child_key = f"{prefix}[{index}]"
-            items.update(_flatten_pimcore_export_block(child_key, item))
-        return items
-    return {prefix: _pimcore_export_cell(value)}
+def _pimcore_submission_export_mappings() -> list[tuple[str, str]]:
+    settings_payload = normalize_pimcore_settings(config.CONFIG.get(PIMCORE_SETTINGS_KEY))
+    columns: list[tuple[str, str]] = []
+    for mapping in settings_payload.get("field_mappings", []):
+        source = _text(mapping.get("source"))
+        if not source:
+            continue
+        columns.append((source, _text(mapping.get("label")) or source))
+    return columns
+
+
+def _pimcore_submission_values(row: dict[str, object]) -> dict[str, object]:
+    values = row.get("values") if isinstance(row.get("values"), dict) else {}
+    if not values:
+        result = row.get("result") if isinstance(row.get("result"), dict) else {}
+        values = result.get("values") if isinstance(result.get("values"), dict) else {}
+    if row.get("ean") and not any(str(key).casefold() == "ean" for key in values):
+        values = {**values, "EAN": row.get("ean")}
+    return values
+
+
+def _pimcore_mapping_value(values: dict[str, object], source: str) -> object:
+    if source in values:
+        return values[source]
+    normalized_source = source.casefold()
+    for key, value in values.items():
+        if str(key).casefold() == normalized_source:
+            return value
+    return ""
 
 
 def _pimcore_submission_export_table(
     rows: list[dict[str, object]],
 ) -> tuple[list[str], list[list[object]]]:
-    records: list[dict[str, object]] = []
-    dynamic_columns: set[str] = set()
+    mappings = _pimcore_submission_export_mappings()
+    columns = [label for _source, label in mappings]
+    table_rows: list[list[object]] = []
     for row in rows:
-        record = {
-            column: _pimcore_export_cell(row.get(column, ""))
-            for column in PIMCORE_SUBMISSION_BASE_EXPORT_COLUMNS
-        }
-        for block in ("values", "payload", "result", "warnings"):
-            flattened = _flatten_pimcore_export_block(block, row.get(block, {}))
-            record.update(flattened)
-            dynamic_columns.update(flattened.keys())
-        records.append(record)
-
-    columns = list(PIMCORE_SUBMISSION_BASE_EXPORT_COLUMNS) + sorted(dynamic_columns)
-    return columns, [[record.get(column, "") for column in columns] for record in records]
+        values = _pimcore_submission_values(row)
+        table_rows.append(
+            [
+                _pimcore_export_cell(_pimcore_mapping_value(values, source))
+                for source, _label in mappings
+            ]
+        )
+    return columns, table_rows
 
 
 def export_pimcore_submissions(
