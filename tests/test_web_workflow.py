@@ -121,6 +121,124 @@ class WebWorkflowTests(unittest.TestCase):
             self.assertEqual(result.saved_files[0].operation, "copy_unsupported_image")
             self.assertTrue(result.saved_files[0].filename.endswith(".avif"))
 
+    def test_process_web_uploads_accepts_jfif_as_jpeg_alias(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            source_jpg = Path(temp_dir) / "source.jpg"
+            source = Path(temp_dir) / "source.jfif"
+            self._make_image(source_jpg)
+            source_jpg.rename(source)
+
+            result = process_web_uploads(
+                base_output_dir=str(Path(temp_dir) / "processed"),
+                form=WebProductForm(
+                    name="Maggiore",
+                    type_name="komoda",
+                    model="MA03",
+                    color1="bialy",
+                    ean="5901234567890",
+                ),
+                uploaded_slots=[
+                    WebUploadedSlot(
+                        prefix="03",
+                        label="DETAIL_pic",
+                        source_path=str(source),
+                        original_filename="front.jfif",
+                    )
+                ],
+                options=WebProcessingOptions(resize_enabled=False),
+            )
+
+            self.assertEqual(result.saved_files[0].operation, "copy_without_processing")
+            self.assertTrue(result.saved_files[0].filename.endswith(".jpg"))
+
+    def test_process_web_uploads_accepts_additional_image_aliases_and_variants(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        aliases = {"jpe": "jpg", "peg": "jpg"}
+        passthrough = (
+            "apng",
+            "dib",
+            "avifs",
+            "heic",
+            "heif",
+            "hif",
+            "jp2",
+            "j2k",
+            "jpc",
+            "jpx",
+            "ico",
+            "cur",
+            "tga",
+            "ppm",
+            "pgm",
+            "pbm",
+            "pnm",
+            "pcx",
+        )
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            for extension, saved_extension in [*aliases.items(), *((ext, ext) for ext in passthrough)]:
+                with self.subTest(extension=extension):
+                    source = Path(temp_dir) / f"source.{extension}"
+                    if extension in aliases:
+                        source_jpg = Path(temp_dir) / f"source-{extension}.jpg"
+                        self._make_image(source_jpg)
+                        source_jpg.rename(source)
+                    else:
+                        source.write_bytes(b"image-payload")
+
+                    result = process_web_uploads(
+                        base_output_dir=str(Path(temp_dir) / f"processed-{extension}"),
+                        form=WebProductForm(
+                            name="Maggiore",
+                            type_name="komoda",
+                            model="MA03",
+                            color1="bialy",
+                            ean="5901234567890",
+                        ),
+                        uploaded_slots=[
+                            WebUploadedSlot(
+                                prefix="03",
+                                label="DETAIL_pic",
+                                source_path=str(source),
+                                original_filename=f"front.{extension}",
+                            )
+                        ],
+                        options=WebProcessingOptions(resize_enabled=False),
+                    )
+
+                    self.assertTrue(result.saved_files[0].filename.endswith(f".{saved_extension}"))
+
+    def test_process_web_uploads_accepts_default_graphic_passthrough_extensions(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            for extension in ("psd", "eps", "ai"):
+                with self.subTest(extension=extension):
+                    source = Path(temp_dir) / f"source.{extension}"
+                    source.write_bytes(b"graphic-payload")
+
+                    result = process_web_uploads(
+                        base_output_dir=str(Path(temp_dir) / f"processed-{extension}"),
+                        form=WebProductForm(
+                            name="Maggiore",
+                            type_name="komoda",
+                            model="MA03",
+                            color1="bialy",
+                            ean="5901234567890",
+                        ),
+                        uploaded_slots=[
+                            WebUploadedSlot(
+                                prefix="03",
+                                label="DETAIL_pic",
+                                source_path=str(source),
+                                original_filename=f"front.{extension}",
+                            )
+                        ],
+                    )
+
+                    saved = result.saved_files[0]
+                    self.assertEqual(saved.operation, "copy_document")
+                    self.assertTrue(saved.filename.endswith(f".{extension}"))
+
     def test_process_web_uploads_uses_filename_label_independent_from_display_label(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:

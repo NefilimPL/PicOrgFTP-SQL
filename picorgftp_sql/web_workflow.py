@@ -39,22 +39,41 @@ except Exception:  # pragma: no cover - handled when image processing is request
 
 
 IMAGE_EXTENSIONS = {
+    ".apng",
     ".avif",
+    ".avifs",
     ".bmp",
+    ".cur",
+    ".dib",
     ".gif",
+    ".heic",
+    ".heif",
+    ".hif",
+    ".ico",
+    ".j2k",
+    ".jpc",
     ".jpg",
     ".jpeg",
+    ".jp2",
+    ".jpx",
+    ".pbm",
+    ".pcx",
+    ".pgm",
     ".png",
+    ".pnm",
+    ".ppm",
+    ".tga",
     ".tif",
     ".tiff",
     ".webp",
 }
 IMAGE_EXTENSION_ALIASES = {
+    ".jfif": ".jpg",
     ".jpe": ".jpg",
     ".jpeg": ".jpg",
     ".peg": ".jpg",
 }
-ALLOWED_DOCUMENT_EXTENSIONS = {".pdf"}
+ALLOWED_DOCUMENT_EXTENSIONS = {".ai", ".eps", ".pdf", ".psd"}
 
 CONVERT_FORMATS = {
     "JPG": ("JPEG", ".jpg"),

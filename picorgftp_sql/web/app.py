@@ -200,16 +200,50 @@ GENERIC_UPLOAD_MIME_TYPES = {
     "application/octet-stream",
     "binary/octet-stream",
 }
+JPEG_UPLOAD_EXTENSIONS = {"jpg", "jpeg", "jfif", "jpe", "peg"}
+PNG_UPLOAD_EXTENSIONS = {"png", "apng"}
+BMP_UPLOAD_EXTENSIONS = {"bmp", "dib"}
+TIFF_UPLOAD_EXTENSIONS = {"tif", "tiff"}
+AVIF_UPLOAD_EXTENSIONS = {"avif", "avifs"}
+HEIF_UPLOAD_EXTENSIONS = {"heic", "heif", "hif"}
+JPEG2000_UPLOAD_EXTENSIONS = {"jp2", "j2k", "jpc", "jpx"}
+PNM_UPLOAD_EXTENSIONS = {"ppm", "pgm", "pbm", "pnm"}
 UPLOAD_MIME_TYPES = {
     "jpg": {"image/jpeg", "image/jpg", "image/pjpeg"},
     "jpeg": {"image/jpeg", "image/jpg", "image/pjpeg"},
+    "jfif": {"image/jpeg", "image/jpg", "image/pjpeg"},
+    "jpe": {"image/jpeg", "image/jpg", "image/pjpeg"},
+    "peg": {"image/jpeg", "image/jpg", "image/pjpeg"},
     "png": {"image/png"},
+    "apng": {"image/apng", "image/png"},
     "webp": {"image/webp"},
     "gif": {"image/gif"},
     "bmp": {"image/bmp", "image/x-ms-bmp", "image/x-windows-bmp"},
+    "dib": {"image/bmp", "image/x-dib", "image/x-ms-bmp", "image/x-windows-bmp"},
     "tif": {"image/tiff", "image/tif"},
     "tiff": {"image/tiff", "image/tif"},
     "avif": {"image/avif", "image/heif", "image/heic"},
+    "avifs": {"image/avif-sequence", "image/avif"},
+    "heic": {"image/heic", "image/heic-sequence", "image/heif"},
+    "heif": {"image/heif", "image/heif-sequence", "image/heic"},
+    "hif": {"image/heif", "image/heic"},
+    "jp2": {"image/jp2", "image/jpeg2000", "image/jpeg2000-image", "image/x-jpeg2000-image"},
+    "j2k": {"image/j2k", "image/jp2", "image/jpeg2000", "image/x-jpeg2000-image"},
+    "jpc": {"image/jpc", "image/jp2", "image/jpeg2000", "image/x-jpeg2000-image"},
+    "jpx": {"image/jpx", "image/jp2", "image/jpeg2000", "image/x-jpeg2000-image"},
+    "ico": {"image/x-icon", "image/vnd.microsoft.icon", "image/ico"},
+    "cur": {"image/x-icon", "image/vnd.microsoft.icon", "image/cur"},
+    "tga": {"image/x-tga", "image/tga", "image/targa"},
+    "ppm": {"image/x-portable-pixmap"},
+    "pgm": {"image/x-portable-graymap"},
+    "pbm": {"image/x-portable-bitmap"},
+    "pnm": {
+        "image/x-portable-anymap",
+        "image/x-portable-bitmap",
+        "image/x-portable-graymap",
+        "image/x-portable-pixmap",
+    },
+    "pcx": {"image/x-pcx", "image/pcx", "image/x-pc-paintbrush"},
     "psd": {"image/vnd.adobe.photoshop", "image/x-photoshop", "image/psd"},
     "pdf": {"application/pdf", "application/x-pdf"},
     "eps": {"application/postscript", "application/eps", "image/eps"},
@@ -223,26 +257,64 @@ UPLOAD_MIME_TYPES = {
 IMAGE_UPLOAD_EXTENSIONS = {
     "jpg",
     "jpeg",
+    "jfif",
+    "jpe",
+    "peg",
     "png",
+    "apng",
     "webp",
     "gif",
     "bmp",
+    "dib",
     "tif",
     "tiff",
     "avif",
+    "avifs",
+    "jp2",
+    "j2k",
+    "jpc",
+    "jpx",
+    "ico",
+    "tga",
+    "ppm",
+    "pgm",
+    "pbm",
+    "pnm",
+    "pcx",
     "psd",
 }
-METADATA_STRIP_UPLOAD_EXTENSIONS = {"jpg", "jpeg", "png"}
+METADATA_STRIP_UPLOAD_EXTENSIONS = {"jpg", "jpeg", "jfif", "jpe", "peg", "png", "apng"}
 UPLOAD_EXTENSION_MIME_TYPE = {
     "jpg": "image/jpeg",
     "jpeg": "image/jpeg",
+    "jfif": "image/jpeg",
+    "jpe": "image/jpeg",
+    "peg": "image/jpeg",
     "png": "image/png",
+    "apng": "image/apng",
     "webp": "image/webp",
     "gif": "image/gif",
     "bmp": "image/bmp",
+    "dib": "image/bmp",
     "tif": "image/tiff",
     "tiff": "image/tiff",
     "avif": "image/avif",
+    "avifs": "image/avif-sequence",
+    "heic": "image/heic",
+    "heif": "image/heif",
+    "hif": "image/heif",
+    "jp2": "image/jp2",
+    "j2k": "image/j2k",
+    "jpc": "image/jpc",
+    "jpx": "image/jpx",
+    "ico": "image/x-icon",
+    "cur": "image/x-icon",
+    "tga": "image/x-tga",
+    "ppm": "image/x-portable-pixmap",
+    "pgm": "image/x-portable-graymap",
+    "pbm": "image/x-portable-bitmap",
+    "pnm": "image/x-portable-anymap",
+    "pcx": "image/x-pcx",
 }
 IMAGE_SIGNATURE_EXTENSIONS = (
     "jpg",
@@ -250,8 +322,19 @@ IMAGE_SIGNATURE_EXTENSIONS = (
     "webp",
     "gif",
     "bmp",
+    "dib",
     "tif",
     "avif",
+    "heic",
+    "jp2",
+    "j2k",
+    "ico",
+    "cur",
+    "tga",
+    "ppm",
+    "pgm",
+    "pbm",
+    "pcx",
 )
 
 
@@ -698,21 +781,111 @@ def _is_iso_base_media_brand(header: bytes, allowed_brands: Set[bytes]) -> bool:
     return any(brand in allowed_brands for brand in brands)
 
 
+def _is_dib_header(header: bytes) -> bool:
+    if len(header) < 16:
+        return False
+    header_size = int.from_bytes(header[:4], "little", signed=False)
+    if header_size not in {12, 40, 52, 56, 64, 108, 124}:
+        return False
+    if header_size == 12:
+        width = int.from_bytes(header[4:6], "little", signed=False)
+        height = int.from_bytes(header[6:8], "little", signed=False)
+        planes = int.from_bytes(header[8:10], "little", signed=False)
+        bit_count = int.from_bytes(header[10:12], "little", signed=False)
+    else:
+        width = int.from_bytes(header[4:8], "little", signed=True)
+        height = int.from_bytes(header[8:12], "little", signed=True)
+        planes = int.from_bytes(header[12:14], "little", signed=False)
+        bit_count = int.from_bytes(header[14:16], "little", signed=False)
+    return width != 0 and height != 0 and planes == 1 and bit_count in {1, 2, 4, 8, 16, 24, 32}
+
+
+def _is_jpeg2000_header(header: bytes) -> bool:
+    return header.startswith(b"\x00\x00\x00\x0cjP  \r\n\x87\n") or header.startswith(b"\xff\x4f\xff\x51")
+
+
+def _is_tga_header(header: bytes) -> bool:
+    if len(header) < 18:
+        return False
+    color_map_type = header[1]
+    image_type = header[2]
+    width = int.from_bytes(header[12:14], "little", signed=False)
+    height = int.from_bytes(header[14:16], "little", signed=False)
+    pixel_depth = header[16]
+    return (
+        color_map_type in {0, 1}
+        and image_type in {1, 2, 3, 9, 10, 11}
+        and width > 0
+        and height > 0
+        and pixel_depth in {8, 15, 16, 24, 32}
+    )
+
+
+def _is_pnm_header(header: bytes, extension: str) -> bool:
+    if len(header) < 3 or header[:1] != b"P" or header[2:3] not in {b" ", b"\t", b"\r", b"\n"}:
+        return False
+    magic = header[1:2]
+    if extension == "pbm":
+        return magic in {b"1", b"4"}
+    if extension == "pgm":
+        return magic in {b"2", b"5"}
+    if extension == "ppm":
+        return magic in {b"3", b"6"}
+    return magic in {b"1", b"2", b"3", b"4", b"5", b"6"}
+
+
+def _is_pcx_header(header: bytes) -> bool:
+    return (
+        len(header) >= 4
+        and header[0] == 0x0A
+        and header[1] in {0, 2, 3, 5}
+        and header[2] == 1
+        and header[3] in {1, 2, 4, 8}
+    )
+
+
 def _upload_signature_matches(extension: str, header: bytes) -> bool:
-    if extension in {"jpg", "jpeg"}:
+    if extension in JPEG_UPLOAD_EXTENSIONS:
         return header.startswith(b"\xff\xd8\xff")
-    if extension == "png":
+    if extension in PNG_UPLOAD_EXTENSIONS:
         return header.startswith(b"\x89PNG\r\n\x1a\n")
     if extension == "gif":
         return header.startswith((b"GIF87a", b"GIF89a"))
     if extension == "bmp":
         return header.startswith(b"BM")
-    if extension in {"tif", "tiff"}:
+    if extension == "dib":
+        return _is_dib_header(header)
+    if extension in TIFF_UPLOAD_EXTENSIONS:
         return header.startswith((b"II*\x00", b"MM\x00*"))
     if extension == "webp":
         return len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP"
-    if extension == "avif":
+    if extension in AVIF_UPLOAD_EXTENSIONS:
         return _is_iso_base_media_brand(header, {b"avif", b"avis"})
+    if extension in HEIF_UPLOAD_EXTENSIONS:
+        return _is_iso_base_media_brand(
+            header,
+            {b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"hevm", b"hevs", b"mif1", b"msf1"},
+        )
+    if extension in JPEG2000_UPLOAD_EXTENSIONS:
+        return _is_jpeg2000_header(header)
+    if extension == "ico":
+        return (
+            len(header) >= 6
+            and header.startswith(b"\x00\x00\x01\x00")
+            and int.from_bytes(header[4:6], "little", signed=False) > 0
+        )
+    if extension == "cur":
+        return (
+            len(header) >= 6
+            and header.startswith(b"\x00\x00\x02\x00")
+            and int.from_bytes(header[4:6], "little", signed=False) > 0
+        )
+    if extension == "tga":
+        return _is_tga_header(header)
+    if extension in PNM_UPLOAD_EXTENSIONS:
+        return _is_pnm_header(header, extension)
+    if extension == "pcx":
+        return _is_pcx_header(header)
     if extension == "pdf":
         return header.startswith(b"%PDF-")
     if extension == "eps":
@@ -734,7 +907,17 @@ def _upload_extension_from_signature(header: bytes) -> str:
 def _upload_extensions_equivalent(current: str, detected: str) -> bool:
     if current == detected:
         return True
-    return {current, detected} <= {"jpg", "jpeg"} or {current, detected} <= {"tif", "tiff"}
+    equivalence_groups = (
+        JPEG_UPLOAD_EXTENSIONS,
+        PNG_UPLOAD_EXTENSIONS,
+        BMP_UPLOAD_EXTENSIONS,
+        TIFF_UPLOAD_EXTENSIONS,
+        AVIF_UPLOAD_EXTENSIONS,
+        HEIF_UPLOAD_EXTENSIONS,
+        JPEG2000_UPLOAD_EXTENSIONS,
+        PNM_UPLOAD_EXTENSIONS,
+    )
+    return any({current, detected} <= group for group in equivalence_groups)
 
 
 def _upload_name_with_extension(filename: str, extension: str) -> str:
@@ -846,7 +1029,7 @@ def _strip_upload_metadata(path: str, filename: object) -> None:
                 work = ImageOps.exif_transpose(work)
             except Exception:
                 pass
-        if extension in {"jpg", "jpeg"}:
+        if extension in JPEG_UPLOAD_EXTENSIONS:
             work = _jpeg_safe_image(work)
             work.save(temp_path, format="JPEG", quality=95, optimize=True)
         else:
@@ -1331,7 +1514,7 @@ async def _save_upload_cache_entry(
 
 
 async def _save_upload_cache(upload: UploadFile, cache_scope: str, prefix: str) -> tuple[str, int]:
-    saved = await _save_upload_cache_entry(upload, cache_scope, prefix)
+    saved = await _save_upload_cache_entry(upload, cache_scope, prefix, normalize_extension=True)
     return saved.path, saved.size
 
 
@@ -3777,18 +3960,25 @@ def create_app() -> FastAPI:
         prefix = str(form.get("prefix") or "slot").strip() or "slot"
         cleanup_web_upload_cache()
         save_started = time.perf_counter()
-        path, size = await _save_upload_cache(upload, _user_cache_scope(request, username), prefix)
+        saved_cache = await _save_upload_cache_entry(
+            upload,
+            _user_cache_scope(request, username),
+            prefix,
+            normalize_extension=True,
+        )
+        path = saved_cache.path
+        size = saved_cache.size
         save_ms = _elapsed_ms(save_started)
         preprocess_ms = 0
         preprocessed = False
-        display_name = _safe_upload_name(original_name, os.path.basename(path))
+        display_name = _safe_upload_name(saved_cache.name or original_name, os.path.basename(path))
         if _upload_processing_mode() == "host":
             preprocess_started = time.perf_counter()
             original_scan_path = path
             path, display_name, preprocessed = await run_in_threadpool(
                 preprocess_cached_upload,
                 path,
-                original_name,
+                display_name,
                 processing_options_from_config(config.CONFIG),
             )
             _copy_upload_scan_result(original_scan_path, path)

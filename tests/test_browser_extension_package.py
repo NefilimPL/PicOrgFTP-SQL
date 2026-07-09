@@ -82,6 +82,36 @@ def test_browser_extension_popup_has_wider_progress_layout() -> None:
     assert ".image-row.queued" in css
 
 
+def test_browser_extension_knows_supported_image_extensions() -> None:
+    popup = (EXTENSION_DIR / "popup.js").read_text(encoding="utf-8")
+    background = (EXTENSION_DIR / "background.js").read_text(encoding="utf-8")
+
+    for extension in (
+        "jpe",
+        "jfif",
+        "apng",
+        "dib",
+        "avifs",
+        "heic",
+        "heif",
+        "hif",
+        "jp2",
+        "j2k",
+        "jpc",
+        "jpx",
+        "ico",
+        "cur",
+        "tga",
+        "ppm",
+        "pgm",
+        "pbm",
+        "pnm",
+        "pcx",
+    ):
+        assert extension in popup
+        assert extension in background
+
+
 def test_browser_extension_download_endpoint_returns_zip() -> None:
     from fastapi.testclient import TestClient
 

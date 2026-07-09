@@ -187,7 +187,9 @@
   }
 
   function collectImagesFromPage() {
-    const imageExtensions = /\.(jpe?g|png|webp|gif|bmp|tiff?|avif)(\?|#|$)/i;
+    const imageExtensionPattern =
+      "jpe?g|jfif|jpe|peg|png|apng|webp|gif|bmp|dib|tiff?|avif|avifs|heic|heif|hif|jp2|j2k|jpc|jpx|ico|cur|tga|ppm|pgm|pbm|pnm|pcx";
+    const imageExtensions = new RegExp(`\\.(${imageExtensionPattern})(\\?|#|$)`, "i");
     const ignored = /^(data:|javascript:|mailto:|tel:)/i;
     const seen = new Set();
     const result = [];
@@ -284,10 +286,18 @@
     });
 
     const html = document.documentElement.innerHTML.replace(/\\\//g, "/");
-    for (const match of html.matchAll(/(?:https?:)?\/\/[^"'<>\s\\)]+?\.(?:jpe?g|png|webp|gif|bmp|tiff?|avif)(?:\?[^"'<>\s\\)]*)?/gi)) {
+    const absoluteImageUrl = new RegExp(
+      `(?:https?:)?//[^"'<>'\\s\\\\)]+?\\.(?:${imageExtensionPattern})(?:\\?[^"'<>'\\s\\\\)]*)?`,
+      "gi"
+    );
+    const relativeImageUrl = new RegExp(
+      `["'](/[^"'<>'\\s\\\\]+?\\.(?:${imageExtensionPattern})(?:\\?[^"'<>'\\s\\\\]*)?)["']`,
+      "gi"
+    );
+    for (const match of html.matchAll(absoluteImageUrl)) {
       add(match[0], "html.url");
     }
-    for (const match of html.matchAll(/["'](\/[^"'<>\s\\]+?\.(?:jpe?g|png|webp|gif|bmp|tiff?|avif)(?:\?[^"'<>\s\\]*)?)["']/gi)) {
+    for (const match of html.matchAll(relativeImageUrl)) {
       add(match[1], "html.relative-url");
     }
 

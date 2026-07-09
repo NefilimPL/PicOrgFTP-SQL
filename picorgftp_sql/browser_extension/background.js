@@ -4,6 +4,38 @@ const STATUS_KEY = "uploadStatus";
 const ALARM_NAME = "picorg-upload-queue";
 const UPLOAD_CONCURRENCY = 3;
 const RECENT_TASK_LIMIT = 160;
+const IMAGE_MIME_BY_EXTENSION = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  jfif: "image/jpeg",
+  jpe: "image/jpeg",
+  peg: "image/jpeg",
+  png: "image/png",
+  apng: "image/apng",
+  webp: "image/webp",
+  gif: "image/gif",
+  bmp: "image/bmp",
+  dib: "image/bmp",
+  tif: "image/tiff",
+  tiff: "image/tiff",
+  avif: "image/avif",
+  avifs: "image/avif-sequence",
+  heic: "image/heic",
+  heif: "image/heif",
+  hif: "image/heif",
+  jp2: "image/jp2",
+  j2k: "image/j2k",
+  jpc: "image/jpc",
+  jpx: "image/jpx",
+  ico: "image/x-icon",
+  cur: "image/x-icon",
+  tga: "image/x-tga",
+  ppm: "image/x-portable-pixmap",
+  pgm: "image/x-portable-graymap",
+  pbm: "image/x-portable-bitmap",
+  pnm: "image/x-portable-anymap",
+  pcx: "image/x-pcx",
+};
 
 let processing = false;
 let storageMutation = Promise.resolve();
@@ -42,12 +74,8 @@ function imageFilename(url, fallback = "web-image.jpg") {
 
 function imageMimeType(url, fallback = "image/jpeg") {
   const lower = String(url || "").toLowerCase().split("?", 1)[0];
-  if (lower.endsWith(".png")) return "image/png";
-  if (lower.endsWith(".webp")) return "image/webp";
-  if (lower.endsWith(".gif")) return "image/gif";
-  if (lower.endsWith(".bmp")) return "image/bmp";
-  if (lower.endsWith(".avif")) return "image/avif";
-  return fallback;
+  const extension = lower.match(/\.([a-z0-9]+)$/)?.[1] || "";
+  return IMAGE_MIME_BY_EXTENSION[extension] || fallback;
 }
 
 function queueItemUrl(item) {
