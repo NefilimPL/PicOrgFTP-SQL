@@ -596,6 +596,37 @@ class WebUiIntegrityTests(unittest.TestCase):
             )
         )
 
+    def test_app_js_treats_additional_image_formats_as_uploads(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        for extension in (
+            ".jfif",
+            ".jpe",
+            ".peg",
+            ".apng",
+            ".dib",
+            ".avifs",
+            ".heic",
+            ".heif",
+            ".hif",
+            ".jp2",
+            ".j2k",
+            ".jpc",
+            ".jpx",
+            ".ico",
+            ".cur",
+            ".tga",
+            ".ppm",
+            ".pgm",
+            ".pbm",
+            ".pnm",
+            ".pcx",
+        ):
+            self.assertIn(f'"{extension}"', source)
+        for extension in ("jpe", "peg", "jfif"):
+            self.assertIn(f'sourceExt === "{extension}"', source)
+        self.assertIn('sourceExt === "apng"', source)
+
     def test_app_js_swaps_two_occupied_slots_on_slot_drop(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
 

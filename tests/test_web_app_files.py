@@ -46,6 +46,23 @@ class _MemoryUpload:
 
 
 class WebAppFileTests(unittest.TestCase):
+    def _image_bytes(self, image_format: str, mode: str = "RGB") -> bytes:
+        if Image is None:
+            self.skipTest("Pillow unavailable")
+        buffer = io.BytesIO()
+        color = 1 if mode == "1" else 255 if mode == "L" else "white"
+        Image.new(mode, (16, 16), color).save(buffer, format=image_format)
+        return buffer.getvalue()
+
+    def _optional_image_bytes(self, image_format: str, mode: str = "RGB") -> bytes | None:
+        try:
+            return self._image_bytes(image_format, mode)
+        except Exception:
+            return None
+
+    def _ftyp_payload(self, brand: bytes) -> bytes:
+        return b"\x00\x00\x00\x18ftyp" + brand + b"\x00\x00\x00\x00" + brand + b"mif1"
+
     def test_output_identity_ignores_disabled_product_fields(self) -> None:
         first = web_app.WebProductForm(
             name="MAGGIORE",
@@ -303,6 +320,128 @@ class WebAppFileTests(unittest.TestCase):
             with Image.open(path) as saved:
                 self.assertEqual(dict(saved.getexif()), {})
             self.assertTrue(upload.closed)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_save_upload_cache_accepts_jfif_jpeg_when_allowed(self) -> None:
+        if Image is None:
+            self.skipTest("Pillow unavailable")
+        temp_dir = _workspace_temp("web_app_upload_jfif")
+        try:
+            buffer = io.BytesIO()
+            Image.new("RGB", (16, 16), "white").save(buffer, format="JPEG")
+            upload = _MemoryUpload("photo.jfif", [buffer.getvalue()], "image/jpeg")
+            with (
+                patch.object(web_app.settings, "AC", str(temp_dir)),
+                patch.object(
+                    web_app.config,
+                    "CONFIG",
+                    {
+                        web_app.SECURITY_SETTINGS_KEY: {
+                            "allowed_upload_extensions": ["jfif"],
+                            "blocked_upload_extensions": [],
+                            "block_executable_uploads": True,
+                        }
+                    },
+                ),
+            ):
+                path, _size = asyncio.run(web_app._save_upload_cache(upload, "session", "01"))
+
+            self.assertTrue(path.endswith(".jfif"))
+            with Image.open(path) as image:
+                self.assertEqual(image.format, "JPEG")
+            self.assertTrue(upload.closed)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_save_upload_cache_accepts_additional_image_formats_when_allowed(self) -> None:
+        if Image is None:
+            self.skipTest("Pillow unavailable")
+        temp_dir = _workspace_temp("web_app_upload_additional_image_formats")
+        cases = [
+            ("photo.jpe", "image/jpeg", self._image_bytes("JPEG")),
+            ("photo.peg", "image/jpeg", self._image_bytes("JPEG")),
+            ("photo.apng", "image/apng", self._image_bytes("PNG")),
+            ("photo.dib", "image/bmp", self._image_bytes("DIB")),
+            ("photo.ico", "image/x-icon", self._image_bytes("ICO", "RGBA")),
+            ("photo.tga", "image/x-tga", self._image_bytes("TGA")),
+            ("photo.ppm", "image/x-portable-pixmap", self._image_bytes("PPM")),
+            ("photo.pgm", "image/x-portable-graymap", self._image_bytes("PPM", "L")),
+            ("photo.pbm", "image/x-portable-bitmap", self._image_bytes("PPM", "1")),
+            ("photo.pnm", "image/x-portable-anymap", self._image_bytes("PPM")),
+            ("photo.pcx", "image/x-pcx", self._image_bytes("PCX")),
+        ]
+        avif_payload = self._optional_image_bytes("AVIF")
+        if avif_payload is not None:
+            cases.append(("photo.avifs", "image/avif-sequence", avif_payload))
+        jpeg2000_payload = self._optional_image_bytes("JPEG2000")
+        if jpeg2000_payload is not None:
+            cases.extend(
+                [
+                    ("photo.jp2", "image/jp2", jpeg2000_payload),
+                    ("photo.j2k", "image/jp2", jpeg2000_payload),
+                    ("photo.jpc", "image/jp2", jpeg2000_payload),
+                    ("photo.jpx", "image/jpx", jpeg2000_payload),
+                ]
+            )
+
+        try:
+            for filename, content_type, payload in cases:
+                with self.subTest(filename=filename):
+                    extension = filename.rsplit(".", 1)[1]
+                    upload = _MemoryUpload(filename, [payload], content_type)
+                    with (
+                        patch.object(web_app.settings, "AC", str(temp_dir)),
+                        patch.object(
+                            web_app.config,
+                            "CONFIG",
+                            {
+                                web_app.SECURITY_SETTINGS_KEY: {
+                                    "allowed_upload_extensions": [extension],
+                                    "blocked_upload_extensions": [],
+                                    "block_executable_uploads": True,
+                                }
+                            },
+                        ),
+                    ):
+                        path, _size = asyncio.run(web_app._save_upload_cache(upload, "session", "01"))
+
+                    self.assertTrue(path.endswith(f".{extension}"))
+                    self.assertTrue(upload.closed)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_save_upload_cache_accepts_heif_family_and_cursor_passthrough_when_allowed(self) -> None:
+        temp_dir = _workspace_temp("web_app_upload_heif_passthrough")
+        cases = [
+            ("photo.heic", "image/heic", self._ftyp_payload(b"heic")),
+            ("photo.heif", "image/heif", self._ftyp_payload(b"mif1")),
+            ("photo.hif", "image/heif", self._ftyp_payload(b"heic")),
+            ("photo.cur", "image/x-icon", b"\x00\x00\x02\x00\x01\x00" + b"\x00" * 64),
+        ]
+        try:
+            for filename, content_type, payload in cases:
+                with self.subTest(filename=filename):
+                    extension = filename.rsplit(".", 1)[1]
+                    upload = _MemoryUpload(filename, [payload], content_type)
+                    with (
+                        patch.object(web_app.settings, "AC", str(temp_dir)),
+                        patch.object(
+                            web_app.config,
+                            "CONFIG",
+                            {
+                                web_app.SECURITY_SETTINGS_KEY: {
+                                    "allowed_upload_extensions": [extension],
+                                    "blocked_upload_extensions": [],
+                                    "block_executable_uploads": True,
+                                }
+                            },
+                        ),
+                    ):
+                        path, _size = asyncio.run(web_app._save_upload_cache(upload, "session", "01"))
+
+                    self.assertTrue(path.endswith(f".{extension}"))
+                    self.assertTrue(upload.closed)
         finally:
             shutil.rmtree(temp_dir)
 

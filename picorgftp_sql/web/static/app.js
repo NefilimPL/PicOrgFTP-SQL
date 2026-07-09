@@ -1257,7 +1257,36 @@ function uploadAcceptAttribute() {
       ? pickerAllowed.map((extension) => `.${extension}`).join(",")
       : ".picorg-no-allowed-upload";
   }
-  return "image/*,.pdf,.eps,.psd,.ai,.tif,.tiff";
+  return [
+    "image/*",
+    ".jfif",
+    ".jpe",
+    ".peg",
+    ".apng",
+    ".dib",
+    ".avifs",
+    ".heic",
+    ".heif",
+    ".hif",
+    ".jp2",
+    ".j2k",
+    ".jpc",
+    ".jpx",
+    ".ico",
+    ".cur",
+    ".tga",
+    ".ppm",
+    ".pgm",
+    ".pbm",
+    ".pnm",
+    ".pcx",
+    ".pdf",
+    ".eps",
+    ".psd",
+    ".ai",
+    ".tif",
+    ".tiff",
+  ].join(",");
 }
 
 function uploadProcessingMode() {
@@ -1903,9 +1932,41 @@ function isFileImageLike(file) {
   const name = String(slotFileName(file) || "").toLowerCase();
   return (
     String(slotFileType(file) || "").startsWith("image/") ||
-    [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".psd", ".eps", ".ai"].some((ext) =>
-      name.endsWith(ext)
-    )
+    [
+      ".jpg",
+      ".jpeg",
+      ".jfif",
+      ".jpe",
+      ".peg",
+      ".png",
+      ".apng",
+      ".gif",
+      ".bmp",
+      ".dib",
+      ".webp",
+      ".tif",
+      ".tiff",
+      ".avif",
+      ".avifs",
+      ".heic",
+      ".heif",
+      ".hif",
+      ".jp2",
+      ".j2k",
+      ".jpc",
+      ".jpx",
+      ".ico",
+      ".cur",
+      ".tga",
+      ".ppm",
+      ".pgm",
+      ".pbm",
+      ".pnm",
+      ".pcx",
+      ".psd",
+      ".eps",
+      ".ai",
+    ].some((ext) => name.endsWith(ext))
   );
 }
 
@@ -2284,10 +2345,19 @@ function clientTargetFormatInfo(file) {
     if (target === "PNG") return { type: "image/png", ext: "png" };
     if (target === "WEBP") return { type: "image/webp", ext: "webp" };
   }
-  if (sourceType === "image/jpeg" || sourceExt === "jpg" || sourceExt === "jpeg") {
+  if (
+    sourceType === "image/jpeg" ||
+    sourceExt === "jpg" ||
+    sourceExt === "jpeg" ||
+    sourceExt === "jfif" ||
+    sourceExt === "jpe" ||
+    sourceExt === "peg"
+  ) {
     return { type: "image/jpeg", ext: "jpg" };
   }
-  if (sourceType === "image/png" || sourceExt === "png") return { type: "image/png", ext: "png" };
+  if (sourceType === "image/png" || sourceType === "image/apng" || sourceExt === "png" || sourceExt === "apng") {
+    return { type: "image/png", ext: "png" };
+  }
   if (sourceType === "image/webp" || sourceExt === "webp") return { type: "image/webp", ext: "webp" };
   return null;
 }
