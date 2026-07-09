@@ -496,9 +496,22 @@
           <input name="date_to" type="date" aria-label="Data do">
           <button type="submit" class="secondary-button">Filtruj</button>
           <button id="pimcoreHistoryExportCsvButton" type="button" class="secondary-button">Eksport CSV</button>
-          <button id="pimcoreHistoryExportJsonButton" type="button" class="secondary-button">Eksport JSON</button>
+          <button id="pimcoreHistoryExportXlsxButton" type="button" class="secondary-button">Eksport XLSX</button>
         </form>
         <div id="pimcoreHistoryOutput" class="history-output empty-state">Brak operacji.</div>
+      </section>
+    </div>
+
+    <div id="pimcoreExportModal" class="modal-view nested-modal">
+      <section class="modal-panel compact-modal">
+        <div class="section-heading">
+          <h1>Eksport danych Pimcore</h1>
+          <button id="pimcoreExportCloseButton" type="button" class="ghost-button modal-close">Zamknij</button>
+        </div>
+        <div class="heading-actions">
+          <button id="pimcoreExportCsvButton" type="button" class="secondary-button">CSV</button>
+          <button id="pimcoreExportXlsxButton" type="button">XLSX</button>
+        </div>
       </section>
     </div>
 

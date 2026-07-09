@@ -1,11 +1,15 @@
+import csv
+import io
 import json
 from unittest.mock import Mock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 
 from picorgftp_sql import web_data
 from picorgftp_sql.services.pimcore_service import PimcoreApiError, PimcoreConflictError
+from picorgftp_sql.sqlite_store import SqliteStore
 from picorgftp_sql.web import app as web_app
 
 
@@ -411,7 +415,72 @@ def test_admin_can_export_pimcore_submissions_as_json():
     export.assert_called_once()
 
 
-def test_export_pimcore_submissions_as_csv_contains_common_columns():
+def test_export_pimcore_submissions_as_csv_uses_pimcore_field_labels_only():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"]["field_mappings"] = [
+        {
+            "source": "EAN",
+            "label": "Kod EAN",
+            "pimcore_field": "ean",
+            "type": "input",
+            "parser": "text",
+        },
+        {
+            "source": "STOCK",
+            "label": "Stan",
+            "pimcore_field": "stock",
+            "type": "numeric",
+            "parser": "integer",
+        },
+    ]
+    store = Mock()
+    store.query_pimcore_submissions.return_value = [
+        {
+            "operation_id": "op-1",
+            "operation_type": "manual_create",
+            "username": "operator",
+            "ean": "5901234567890",
+            "status": "completed",
+            "values": {"EAN": "5901234567890", "STOCK": "12", "UNMAPPED": "hidden"},
+            "payload": {"className": "Product"},
+            "result": {"object_id": 91},
+            "warnings": [{"message": "hidden"}],
+            "created_at": "2026-07-06T12:00:00.000Z",
+        }
+    ]
+
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "_active_sqlite_store", return_value=store),
+    ):
+        exported = web_data.export_pimcore_submissions(export_format="csv")
+
+    assert exported["format"] == "csv"
+    rows = list(csv.reader(io.StringIO(exported["content"])))
+    assert rows == [["Kod EAN", "Stan"], ["5901234567890", "12"]]
+    assert "operation_id" not in exported["content"]
+    assert "payload" not in exported["content"]
+    assert "UNMAPPED" not in exported["content"]
+
+
+def test_export_pimcore_submissions_as_xlsx_uses_pimcore_field_labels_only():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"]["field_mappings"] = [
+        {
+            "source": "EAN",
+            "label": "Kod EAN",
+            "pimcore_field": "ean",
+            "type": "input",
+            "parser": "text",
+        },
+        {
+            "source": "STOCK",
+            "label": "Stan",
+            "pimcore_field": "stock",
+            "type": "numeric",
+            "parser": "integer",
+        },
+    ]
     store = Mock()
     store.query_pimcore_submissions.return_value = [
         {
@@ -428,18 +497,92 @@ def test_export_pimcore_submissions_as_csv_contains_common_columns():
         }
     ]
 
-    with patch.object(web_data, "_active_sqlite_store", return_value=store):
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "_active_sqlite_store", return_value=store),
+    ):
+        exported = web_data.export_pimcore_submissions(export_format="xlsx")
+
+    assert exported["format"] == "xlsx"
+    workbook = load_workbook(io.BytesIO(exported["content"]))
+    sheet = workbook.active
+    assert [cell.value for cell in sheet[1]] == ["Kod EAN", "Stan"]
+    assert [cell.value for cell in sheet[2]] == ["5901234567890", "12"]
+
+
+def test_export_pimcore_submissions_ignores_technical_blocks():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"]["field_mappings"] = [
+        {
+            "source": "EAN",
+            "label": "Kod EAN",
+            "pimcore_field": "ean",
+            "type": "input",
+            "parser": "text",
+        },
+        {
+            "source": "STOCK",
+            "label": "Stan",
+            "pimcore_field": "stock",
+            "type": "numeric",
+            "parser": "integer",
+        },
+    ]
+    store = Mock()
+    store.query_pimcore_submissions.return_value = [
+        {
+            "operation_id": "op-1",
+            "operation_type": "manual_create",
+            "username": "operator",
+            "ean": "5901234567890",
+            "status": "completed",
+            "values": {"EAN": "5901234567890", "STOCK": "12"},
+            "payload": {
+                "className": "Product",
+                "elements": [{"name": "EAN", "value": "5901234567890"}],
+            },
+            "result": {"object_id": 91, "object": {"path": "/Produkty/5901234567890"}},
+            "warnings": [{"code": "missing_sql", "message": "Brak danych SQL"}],
+            "created_at": "2026-07-06T12:00:00.000Z",
+        }
+    ]
+
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "_active_sqlite_store", return_value=store),
+    ):
         exported = web_data.export_pimcore_submissions(export_format="csv")
 
-    assert exported["format"] == "csv"
-    assert (
-        "operation_id,operation_type,username,ean,status,created_at"
-        in exported["content"]
+    rows = list(csv.reader(io.StringIO(exported["content"])))
+    assert rows == [["Kod EAN", "Stan"], ["5901234567890", "12"]]
+    assert all("payload." not in column for column in rows[0])
+    assert all("result." not in column for column in rows[0])
+    assert all("warnings" not in column for column in rows[0])
+
+
+def test_admin_can_export_pimcore_submissions_as_xlsx_response():
+    client = TestClient(web_app.app)
+    with (
+        patch.object(
+            web_app,
+            "_require_admin",
+            return_value={"username": "admin", "role": "admin"},
+        ),
+        patch.object(
+            web_app,
+            "export_pimcore_submissions",
+            return_value={"format": "xlsx", "content": b"xlsx-bytes", "count": 1},
+        ) as export,
+    ):
+        response = client.get("/api/settings/pimcore/submissions/export?format=xlsx")
+
+    assert response.status_code == 200
+    assert response.content == b"xlsx-bytes"
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-    assert (
-        "op-1,manual_create,operator,5901234567890,completed,2026-07-06T12:00:00.000Z"
-        in exported["content"]
-    )
+    assert "pimcore-submissions.xlsx" in response.headers["content-disposition"]
+    export.assert_called_once()
 
 
 def test_product_status_returns_disabled_without_network_call():
@@ -656,6 +799,121 @@ def test_create_adapter_persists_detailed_sqlite_submission_when_store_active():
     assert submitted["username"] == "operator"
     assert submitted["values"]["EAN"] == "5904804578169"
     assert submitted["payload"]["className"] == "Product"
+
+
+def test_create_adapter_persists_sqlite_submission_in_legacy_mode(tmp_path):
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update({"enabled": True, "setup_complete": True})
+    database_path = tmp_path / "pimcore-audit.sqlite"
+
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(
+            web_data.data_store,
+            "get_active_store",
+            return_value=web_data.data_store.LegacyDataStore(),
+        ),
+        patch.object(
+            web_data.storage_settings,
+            "resolve_sqlite_path",
+            return_value=str(database_path),
+        ),
+        patch.object(
+            web_data,
+            "create_product",
+            return_value={
+                "created": True,
+                "duplicate": False,
+                "object": {"id": 91, "path": "/Produkty/5904"},
+                "payload": {"className": "Product"},
+            },
+        ),
+        patch.object(web_data, "_persist_pimcore_operation"),
+    ):
+        web_data.create_pimcore_product({"EAN": "5904804578169"}, "operator")
+
+    rows = SqliteStore(str(database_path)).query_pimcore_submissions(
+        user="operator",
+        query="5904804578169",
+        limit=10,
+    )
+    assert len(rows) == 1
+    assert rows[0]["operation_type"] == "manual_create"
+    assert rows[0]["payload"]["className"] == "Product"
+
+
+def test_test_create_persists_sqlite_submission_when_operation_finishes():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update({"enabled": True, "setup_complete": True})
+    store = Mock()
+
+    class ImmediateRegistry:
+        def start(self, *, persist, **kwargs):
+            report = {
+                "operation_id": "op-test",
+                "operation_type": kwargs["operation_type"],
+                "username": kwargs["username"],
+                "values": kwargs["values"],
+                "status": "completed",
+                "started_at": 1.0,
+                "finished_at": 2.0,
+                "events": [],
+                "result": {"object_id": 77, "payload": {"className": "Product"}},
+            }
+            persist(report)
+            return {"operation_id": "op-test", "status": "queued"}
+
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "_PIMCORE_OPERATIONS", ImmediateRegistry()),
+        patch.object(web_data, "_active_sqlite_store", return_value=store),
+        patch.object(web_data, "_persist_pimcore_operation") as persist_operation,
+    ):
+        result = web_data.start_pimcore_test_create(
+            {"EAN": "5904804578169"},
+            "keep",
+            "operator",
+        )
+
+    assert result == {"operation_id": "op-test", "status": "queued"}
+    persist_operation.assert_called_once()
+    submitted = store.append_pimcore_submission.call_args.args[0]
+    assert submitted["operation_type"] == "test"
+    assert submitted["username"] == "operator"
+
+
+def test_edit_adapter_persists_loaded_product_to_sqlite(tmp_path):
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update({"enabled": True, "setup_complete": True})
+    database_path = tmp_path / "pimcore-audit.sqlite"
+    loaded = {
+        "object": {"id": 91, "path": "/Produkty/5904"},
+        "marker": "100",
+        "values": {"EAN": "5904804578169"},
+    }
+
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(
+            web_data.storage_settings,
+            "resolve_sqlite_path",
+            return_value=str(database_path),
+        ),
+        patch.object(web_data, "fetch_product_for_edit", return_value=loaded),
+        patch.object(web_data, "_persist_pimcore_operation"),
+    ):
+        result = web_data.get_pimcore_product_for_edit(91, "operator")
+
+    assert result["object"]["id"] == 91
+    rows = SqliteStore(str(database_path)).query_pimcore_submissions(
+        operation_type="manual_load",
+        user="operator",
+        query="5904804578169",
+        limit=10,
+    )
+    assert len(rows) == 1
+    assert rows[0]["status"] == "completed"
+    assert rows[0]["values"]["EAN"] == "5904804578169"
 
 
 def test_runtime_edit_routes_allow_logged_in_user():
