@@ -51,30 +51,31 @@ jobs:
                 },
               );
               const requiredLabels = selfHostedLabels.map((label) => label.toLowerCase());
-              const availableRunners = runners.filter((runner) => {
+              const onlineRunners = runners.filter((runner) => {
                 const labels = new Set(
                   (runner.labels || []).map((label) => String(label.name).toLowerCase()),
                 );
                 return (
                   runner.status === "online" &&
-                  runner.busy === false &&
                   requiredLabels.every((label) => labels.has(label))
                 );
               });
 
-              if (availableRunners.length === 0) {
+              if (onlineRunners.length === 0) {
                 useFallback(
-                  'No idle online self-hosted Windows X64 runner was found. Falling back to windows-latest.',
+                  'No online self-hosted Windows X64 runner was found. Falling back to windows-latest.',
                 );
                 return;
               }
 
-              const runnerNames = availableRunners.map((runner) => runner.name).join(', ');
-              core.notice(`Using ${availableRunners.length} self-hosted runner(s): ${runnerNames}`);
+              const runnerNames = onlineRunners
+                .map((runner) => `${runner.name}${runner.busy ? ' (busy)' : ''}`)
+                .join(', ');
+              core.notice(`Using ${onlineRunners.length} online self-hosted runner(s): ${runnerNames}`);
               core.setOutput('runs_on', JSON.stringify(selfHostedLabels));
               core.setOutput('runner_names', runnerNames);
               core.setOutput('using_self_hosted', 'true');
-              core.setOutput('available_count', String(availableRunners.length));
+              core.setOutput('available_count', String(onlineRunners.length));
             } catch (error) {
               useFallback(
                 `Could not query self-hosted runners. Falling back to windows-latest. ${error.message}`,
@@ -88,7 +89,7 @@ jobs:
             echo "### Runner selection"
             echo ""
             echo "- Runners: ${{ steps.select.outputs.runner_names }}"
-            echo "- Available self-hosted runners: ${{ steps.select.outputs.available_count }}"
+            echo "- Online matching self-hosted runners: ${{ steps.select.outputs.available_count }}"
             echo "- Self-hosted: ${{ steps.select.outputs.using_self_hosted }}"
             echo "- runs-on: \`${{ steps.select.outputs.runs_on }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
