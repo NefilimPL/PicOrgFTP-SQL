@@ -7,10 +7,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "build-exe.yml"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 
 
 def workflow_source() -> str:
     return WORKFLOW.read_text(encoding="utf-8")
+
+
+def ci_workflow_source() -> str:
+    return CI_WORKFLOW.read_text(encoding="utf-8")
 
 
 def test_build_workflow_selects_self_hosted_runner_before_build() -> None:
@@ -22,11 +27,20 @@ def test_build_workflow_selects_self_hosted_runner_before_build() -> None:
     assert "secrets.ACTIONS_RUNNER_READ_TOKEN || github.token" in source
     assert "github.rest.actions.listSelfHostedRunnersForRepo" in source
     assert "runner.status === \"online\"" in source
-    assert "runner.busy === false" in source
+    assert "runner.busy === false" not in source
+    assert "No online self-hosted Windows X64 runner was found" in source
     assert "['self-hosted', 'Windows', 'X64']" in source
     assert "JSON.stringify(selfHostedLabels)" in source
     assert "core.setOutput('runs_on'" in source
     assert "core.setOutput('available_count'" in source
+
+
+def test_pull_request_ci_keeps_github_hosted_windows_runners() -> None:
+    source = ci_workflow_source()
+
+    assert "pull_request:" in source
+    assert source.count("runs-on: windows-latest") >= 2
+    assert "self-hosted" not in source
 
 
 def test_build_job_uses_selected_runner_or_github_hosted_fallback() -> None:
