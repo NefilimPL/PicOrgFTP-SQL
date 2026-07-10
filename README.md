@@ -41,7 +41,6 @@ Na Windows możesz też użyć `START_WEB.bat` i `STOP_WEB.bat`.
 | Panel webowy w LAN | [docs/web-panel.md](docs/web-panel.md) |
 | Konfiguracja Pimcore REST | [docs/pimcore.md](docs/pimcore.md) |
 | Budowanie EXE i GitHub Actions | [docs/building-exe.md](docs/building-exe.md) |
-| Plan rozwoju | [PLAN_ROZWOJU.md](PLAN_ROZWOJU.md) |
 | Wkład w projekt | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | Bezpieczeństwo | [SECURITY.md](SECURITY.md) |
 | Zasady zachowania | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) |
