@@ -1,0 +1,415 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+import pytest
+
+from picorgftp_sql import observability
+
+
+UTC = timezone.utc
+
+
+class FakeStore:
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+        self.jobs: list[dict[str, object]] = []
+        self.incidents: dict[str, dict[str, object]] = {}
+        self.prune_boundaries: list[str] = []
+
+    def append_operational_event(
+        self, event: dict[str, object]
+    ) -> dict[str, object]:
+        stored = dict(event)
+        self.events.append(stored)
+        return stored
+
+    def upsert_job_run(self, job: dict[str, object]) -> dict[str, object]:
+        stored = dict(job)
+        self.jobs.append(stored)
+        return stored
+
+    def find_open_incident(self, fingerprint: str) -> dict[str, object] | None:
+        incident = self.incidents.get(fingerprint)
+        return dict(incident) if incident else None
+
+    def upsert_incident(self, incident: dict[str, object]) -> dict[str, object]:
+        stored = dict(incident)
+        self.incidents[str(stored["fingerprint"])] = stored
+        return dict(stored)
+
+    def query_operational_events(self, **filters: object) -> dict[str, object]:
+        events = list(reversed(self.events))
+        job_id = str(filters.get("job_id") or "")
+        if job_id:
+            events = [item for item in events if item.get("job_id") == job_id]
+        return {"items": events, "next_cursor": ""}
+
+    def prune_info_events(self, before: str) -> int:
+        self.prune_boundaries.append(before)
+        return 3
+
+
+def _event(identity: str, **overrides: object) -> dict[str, object]:
+    event: dict[str, object] = {
+        "id": identity,
+        "created_at": "2026-07-16T10:00:00.000Z",
+        "severity": "error",
+        "event_type": "pimcore.update_failed",
+        "module": "pimcore",
+        "stage": "update",
+        "username": "alice",
+        "ean": "5900000000001",
+        "product_id": "PRD-1",
+        "slot": "A",
+        "job_id": "job-1",
+        "correlation_id": "corr-1",
+        "incident_id": "",
+        "summary": "Failure",
+        "recommended_action": "Retry",
+        "details": {},
+        "exception_type": "RuntimeError",
+        "traceback_text": "",
+    }
+    event.update(overrides)
+    return event
+
+
+def test_redact_value_handles_nested_secrets_and_caps_scalar_strings() -> None:
+    value = {
+        "Password": "secret",
+        "nested": [
+            {"api-key": "abc", "safe": "x" * 9000},
+            ("plain", {"Authorization": "Bearer token"}),
+        ],
+        "cookieJar": "session",
+    }
+
+    redacted = observability.redact_value(value)
+
+    assert redacted == {
+        "Password": "[REDACTED]",
+        "nested": [
+            {"api-key": "[REDACTED]", "safe": "x" * 8192},
+            ["plain", {"Authorization": "[REDACTED]"}],
+        ],
+        "cookieJar": "[REDACTED]",
+    }
+
+
+def test_emit_event_normalizes_and_redacts_before_storage(monkeypatch) -> None:
+    fake = FakeStore()
+    monkeypatch.setattr(observability, "observability_store", lambda: fake)
+
+    event = observability.emit_event(
+        severity=" ERROR ",
+        event_type=" pimcore.update_failed ",
+        summary=" Failure ",
+        details={
+            "client_secret": "secret",
+            "nested": {"token": "abc", "safe": 2},
+        },
+    )
+
+    assert event["severity"] == "error"
+    assert event["event_type"] == "pimcore.update_failed"
+    assert event["summary"] == "Failure"
+    assert event["details"] == {
+        "client_secret": "[REDACTED]",
+        "nested": {"token": "[REDACTED]", "safe": 2},
+    }
+    assert str(event["id"]).startswith("evt-")
+    assert str(event["created_at"]).endswith("Z")
+    assert fake.events[0] == event
+
+
+def test_emit_event_rejects_unknown_severity(monkeypatch) -> None:
+    fake = FakeStore()
+    monkeypatch.setattr(observability, "observability_store", lambda: fake)
+
+    with pytest.raises(ValueError, match="severity"):
+        observability.emit_event(
+            severity="debug", event_type="job.debug", summary="Debug"
+        )
+
+    assert fake.events == []
+
+
+def test_emit_event_captures_exception_with_bounded_traceback(monkeypatch) -> None:
+    fake = FakeStore()
+    monkeypatch.setattr(observability, "observability_store", lambda: fake)
+    try:
+        raise RuntimeError("x" * 40_000)
+    except RuntimeError as exc:
+        event = observability.emit_event(
+            severity="critical",
+            event_type="backend.unhandled",
+            summary="Unhandled",
+            exception=exc,
+        )
+
+    assert event["exception_type"] == "RuntimeError"
+    assert len(str(event["traceback_text"])) == 32 * 1024
+
+
+def test_incidents_have_stable_fingerprints_and_fifteen_minute_windows(
+    monkeypatch,
+) -> None:
+    fake = FakeStore()
+    monkeypatch.setattr(observability, "observability_store", lambda: fake)
+    times = [
+        datetime(2026, 7, 16, 10, 0, tzinfo=UTC),
+        datetime(2026, 7, 16, 10, 14, tzinfo=UTC),
+        datetime(2026, 7, 16, 10, 16, tzinfo=UTC),
+    ]
+
+    first = observability.coalesce_incident(
+        _event("evt-1", summary="First message", created_at="earlier"), times[0]
+    )
+    second = observability.coalesce_incident(
+        _event("evt-2", summary="Different message", created_at="later"), times[1]
+    )
+    third = observability.coalesce_incident(
+        _event("evt-3", summary="Third message"), times[2]
+    )
+
+    assert first is not None and second is not None and third is not None
+    assert first["fingerprint"] == second["fingerprint"] == third["fingerprint"]
+    assert first["id"] == second["id"] == third["id"]
+    assert first["notification_due"] is True
+    assert second["notification_due"] is False
+    assert third["notification_due"] is True
+    assert [
+        first["occurrence_count"],
+        second["occurrence_count"],
+        third["occurrence_count"],
+    ] == [1, 2, 3]
+    assert second["notification_window_at"] == "2026-07-16T10:00:00.000Z"
+    assert third["notification_window_at"] == "2026-07-16T10:16:00.000Z"
+    assert fake.events[-1]["incident_id"] == first["id"]
+    assert "notification_due" not in fake.events[-1]
+
+
+def test_fingerprint_changes_with_stable_context(monkeypatch) -> None:
+    fake = FakeStore()
+    monkeypatch.setattr(observability, "observability_store", lambda: fake)
+    now = datetime(2026, 7, 16, 10, 0, tzinfo=UTC)
+
+    first = observability.coalesce_incident(_event("evt-1", slot=" A "), now)
+    same = observability.coalesce_incident(_event("evt-2", slot="A"), now)
+    different = observability.coalesce_incident(_event("evt-3", slot="B"), now)
+
+    assert first is not None and same is not None and different is not None
+    assert first["fingerprint"] == same["fingerprint"]
+    assert first["fingerprint"] != different["fingerprint"]
+
+
+def test_info_events_never_create_incidents(monkeypatch) -> None:
+    fake = FakeStore()
+    monkeypatch.setattr(observability, "observability_store", lambda: fake)
+
+    incident = observability.coalesce_incident(
+        _event("evt-info", severity="info"),
+        datetime(2026, 7, 16, 10, 0, tzinfo=UTC),
+    )
+
+    assert incident is None
+    assert fake.incidents == {}
+    assert fake.events == []
+
+
+def test_coalesce_incident_redacts_the_event_rewrite(monkeypatch) -> None:
+    fake = FakeStore()
+    monkeypatch.setattr(observability, "observability_store", lambda: fake)
+    event = _event(
+        "evt-secret",
+        details={"password": "secret", "nested": {"token": "abc"}},
+    )
+
+    observability.coalesce_incident(
+        event, datetime(2026, 7, 16, 10, 0, tzinfo=UTC)
+    )
+
+    assert fake.events[0]["details"] == {
+        "password": "[REDACTED]",
+        "nested": {"token": "[REDACTED]"},
+    }
+
+
+def test_incident_context_uses_correlation_and_excludes_nearby_events(
+    monkeypatch,
+) -> None:
+    fake = FakeStore()
+    fake.events = [
+        _event("evt-before", created_at="2026-07-16T09:59:00.000Z", job_id=""),
+        _event(
+            "evt-unrelated",
+            created_at="2026-07-16T09:59:30.000Z",
+            job_id="",
+            correlation_id="other",
+        ),
+        _event("evt-first", created_at="2026-07-16T10:00:00.000Z", job_id=""),
+        _event("evt-latest", created_at="2026-07-16T10:01:00.000Z", job_id=""),
+        _event("evt-after", created_at="2026-07-16T10:02:00.000Z", job_id=""),
+    ]
+    monkeypatch.setattr(observability, "observability_store", lambda: fake)
+
+    context = observability.incident_context(
+        {
+            "correlation_id": "corr-1",
+            "first_event_id": "evt-first",
+            "latest_event_id": "evt-latest",
+        }
+    )
+
+    assert [item["id"] for item in context["before"]] == ["evt-before"]
+    assert [item["id"] for item in context["problem"]] == [
+        "evt-first",
+        "evt-latest",
+    ]
+    assert [item["id"] for item in context["after"]] == ["evt-after"]
+
+
+def test_incident_context_prefers_job_scope_and_honors_limits(monkeypatch) -> None:
+    fake = FakeStore()
+    fake.events = [
+        _event(f"evt-{index}", created_at=f"2026-07-16T10:0{index}:00.000Z")
+        for index in range(7)
+    ]
+    monkeypatch.setattr(observability, "observability_store", lambda: fake)
+
+    context = observability.incident_context(
+        {
+            "job_id": "job-1",
+            "correlation_id": "other",
+            "first_event_id": "evt-2",
+            "latest_event_id": "evt-3",
+        },
+        before_limit=1,
+        after_limit=2,
+    )
+
+    assert [item["id"] for item in context["before"]] == ["evt-1"]
+    assert [item["id"] for item in context["problem"]] == ["evt-2", "evt-3"]
+    assert [item["id"] for item in context["after"]] == ["evt-4", "evt-5"]
+
+
+def test_record_job_redacts_all_nested_data(monkeypatch) -> None:
+    fake = FakeStore()
+    monkeypatch.setattr(observability, "observability_store", lambda: fake)
+
+    stored = observability.record_job(
+        {
+            "id": "job-1",
+            "status": "failed",
+            "stages": [{"name": "ftp", "password": "secret"}],
+            "details": {"nested": {"access_token": "abc"}},
+        }
+    )
+
+    assert stored["stages"] == [
+        {"name": "ftp", "password": "[REDACTED]"}
+    ]
+    assert stored["details"] == {"nested": {"access_token": "[REDACTED]"}}
+    assert fake.jobs[0] == stored
+
+
+def test_observability_store_resolves_and_initializes_each_database(
+    monkeypatch,
+) -> None:
+    paths = iter(["first.sqlite", "second.sqlite"])
+    initialized: list[str] = []
+
+    class Store:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+        def initialize(self) -> None:
+            initialized.append(self.path)
+
+    monkeypatch.setattr(
+        observability.storage_settings,
+        "resolve_sqlite_path",
+        lambda: next(paths),
+    )
+    monkeypatch.setattr(observability, "SqliteStore", Store)
+
+    first = observability.observability_store()
+    second = observability.observability_store()
+
+    assert (first.path, second.path) == ("first.sqlite", "second.sqlite")
+    assert initialized == ["first.sqlite", "second.sqlite"]
+
+
+def test_emit_event_mirrors_persistence_failure_and_is_strict_only_on_request(
+    monkeypatch,
+) -> None:
+    class FailingStore:
+        def append_operational_event(self, event: dict[str, object]) -> None:
+            raise OSError("database unavailable")
+
+    mirrored: list[dict[str, object]] = []
+    monkeypatch.setattr(observability, "observability_store", FailingStore)
+    observability.register_event_mirror(lambda event: mirrored.append(dict(event)))
+    try:
+        event = observability.emit_event(
+            severity="error",
+            event_type="ftp.failed",
+            summary="Failure",
+            details={"password": "secret"},
+        )
+        with pytest.raises(OSError, match="database unavailable"):
+            observability.emit_event(
+                severity="error",
+                event_type="ftp.failed",
+                summary="Failure",
+                strict=True,
+            )
+    finally:
+        observability.register_event_mirror(None)
+
+    assert event["details"] == {"password": "[REDACTED]"}
+    assert mirrored[0] == event
+    assert len(mirrored) == 2
+
+
+def test_failing_mirror_does_not_recurse_or_replace_storage_failure(
+    monkeypatch,
+) -> None:
+    class FailingStore:
+        def append_operational_event(self, event: dict[str, object]) -> None:
+            raise OSError("database unavailable")
+
+    calls = 0
+
+    def failing_mirror(event: dict[str, object]) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("mirror unavailable")
+
+    monkeypatch.setattr(observability, "observability_store", FailingStore)
+    observability.register_event_mirror(failing_mirror)
+    try:
+        with pytest.raises(OSError, match="database unavailable"):
+            observability.emit_event(
+                severity="critical",
+                event_type="backend.unhandled",
+                summary="Failure",
+                strict=True,
+            )
+    finally:
+        observability.register_event_mirror(None)
+
+    assert calls == 1
+
+
+def test_prune_live_events_uses_utc_twenty_four_hour_boundary(monkeypatch) -> None:
+    fake = FakeStore()
+    monkeypatch.setattr(observability, "observability_store", lambda: fake)
+
+    removed = observability.prune_live_events(
+        datetime(2026, 7, 16, 10, 0, tzinfo=UTC)
+    )
+
+    assert removed == 3
+    assert fake.prune_boundaries == ["2026-07-15T10:00:00.000Z"]
