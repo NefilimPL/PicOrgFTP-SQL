@@ -7,6 +7,7 @@ import io
 from pathlib import Path
 import shutil
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -105,6 +106,44 @@ class WebAppFileTests(unittest.TestCase):
         self.assertEqual(emit_event.call_args.kwargs["severity"], "critical")
         self.assertIsInstance(emit_event.call_args.kwargs["exception"], RuntimeError)
         self.assertEqual(emit_event.call_args.kwargs["job_id"], queued["job_id"])
+
+    def test_failed_process_job_persists_the_active_stage(self) -> None:
+        form = web_app._ProcessFormSnapshot(fields={"ean": "5901234567890"})
+
+        def fail_during_stage(*, progress, **_kwargs):
+            progress(
+                45,
+                "FTP upload",
+                [{"key": "prepare", "elapsed_ms": 10}],
+                {
+                    "key": "ftp",
+                    "label": "FTP upload",
+                    "started_at": time.time() - 0.05,
+                    "elapsed_ms": 0,
+                    "running": True,
+                },
+            )
+            raise RuntimeError("FTP crashed")
+
+        with (
+            patch.object(web_app._PROCESS_EXECUTOR, "submit"),
+            patch.object(web_app, "_process_upload_snapshot", side_effect=fail_during_stage),
+            patch.object(web_app, "record_job") as record_job,
+            patch.object(web_app, "emit_event"),
+        ):
+            queued = web_app._queue_process_job(
+                username="alice", cache_scope="scope", form=form
+            )
+            web_app._run_process_job(queued["job_id"])
+
+        failed = record_job.call_args_list[-1].args[0]
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual([stage["key"] for stage in failed["stages"]], ["prepare", "ftp"])
+        failing_stage = failed["stages"][-1]
+        self.assertGreaterEqual(failing_stage["elapsed_ms"], 40)
+        self.assertIs(failing_stage["running"], False)
+        self.assertIs(failing_stage["failed"], True)
+        self.assertEqual(failing_stage["error"], "FTP crashed")
 
     def test_process_result_severity_distinguishes_blocking_and_skipped_results(self) -> None:
         self.assertEqual(

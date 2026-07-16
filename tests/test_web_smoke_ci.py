@@ -130,6 +130,82 @@ class WebSmokeCiTests(unittest.TestCase):
         self.assertIsInstance(emit_event.call_args.kwargs["exception"], RuntimeError)
         self.assertIn(payload["correlation_id"], log_error.call_args.args[0])
 
+    def test_synchronous_process_endpoint_persists_correlated_success(self) -> None:
+        snapshot = web_app._ProcessFormSnapshot(
+            fields={"ean": "5901234567890", "name": "Created product"}
+        )
+        result = {
+            "timing": {"stages": [{"key": "prepare", "elapsed_ms": 12}]},
+            "ftp": {},
+            "sql": {},
+            "local_delete": {},
+            "skipped_slots": [],
+            "entry": {"product_id": "123"},
+        }
+        client = TestClient(web_app.app)
+
+        with (
+            patch.object(web_app, "_materialize_process_form", return_value=snapshot),
+            patch.object(web_app, "_process_upload_snapshot", return_value=result) as process,
+            patch.object(web_app, "record_job") as record_job,
+            patch.object(web_app, "emit_event") as emit_event,
+        ):
+            response = client.post("/api/process", data={})
+
+        self.assertEqual(response.status_code, 200)
+        job_id = process.call_args.kwargs["job_id"]
+        self.assertTrue(job_id)
+        self.assertEqual(
+            [call.args[0]["status"] for call in record_job.call_args_list],
+            ["running", "completed"],
+        )
+        self.assertTrue(
+            all(call.args[0]["id"] == job_id for call in record_job.call_args_list)
+        )
+        result_event = emit_event.call_args_list[-1]
+        self.assertEqual(result_event.kwargs["event_type"], "process.completed")
+        self.assertEqual(result_event.kwargs["severity"], "info")
+        self.assertEqual(result_event.kwargs["job_id"], job_id)
+
+    def test_synchronous_process_failure_is_job_correlated_and_returns_safe_500(self) -> None:
+        snapshot = web_app._ProcessFormSnapshot(fields={"ean": "5901234567890"})
+        client = TestClient(web_app.app, raise_server_exceptions=False)
+
+        with (
+            patch.object(web_app, "_materialize_process_form", return_value=snapshot),
+            patch.object(
+                web_app,
+                "_process_upload_snapshot",
+                side_effect=RuntimeError("database password=top-secret"),
+            ) as process,
+            patch.object(web_app, "record_job") as record_job,
+            patch.object(web_app, "emit_event") as emit_event,
+            patch.object(web_app, "log_error"),
+        ):
+            response = client.post("/api/process", data={})
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json()["detail"], "Wystapil nieoczekiwany blad aplikacji.")
+        job_id = process.call_args.kwargs["job_id"]
+        self.assertTrue(job_id)
+        self.assertEqual(record_job.call_args_list[-1].args[0]["status"], "failed")
+        self.assertEqual(record_job.call_args_list[-1].args[0]["id"], job_id)
+        process_failure = next(
+            call
+            for call in emit_event.call_args_list
+            if call.kwargs["event_type"] == "process.failed"
+        )
+        self.assertEqual(process_failure.kwargs["severity"], "critical")
+        self.assertEqual(process_failure.kwargs["job_id"], job_id)
+        backend_failure = next(
+            call
+            for call in emit_event.call_args_list
+            if call.kwargs["event_type"] == "backend.unhandled_error"
+        )
+        self.assertEqual(
+            backend_failure.kwargs["correlation_id"], response.json()["correlation_id"]
+        )
+
 
     def test_public_pages_and_static_assets_are_served(self) -> None:
         client = TestClient(web_app.app)

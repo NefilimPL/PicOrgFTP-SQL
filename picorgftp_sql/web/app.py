@@ -3238,6 +3238,23 @@ def _persist_process_job(job: Dict[str, Any]) -> None:
         pass
 
 
+def _update_process_job_progress(
+    job: Dict[str, Any],
+    percent: int,
+    label: str,
+    stages: Optional[List[Dict[str, Any]]] = None,
+    current_stage: Optional[Dict[str, Any]] = None,
+) -> None:
+    job["progress"] = max(0, min(100, int(percent or 0)))
+    job["progress_label"] = str(label or "")
+    if stages is not None:
+        job["timing_stages"] = [
+            dict(stage) for stage in stages if isinstance(stage, dict)
+        ]
+    if current_stage is not None:
+        job["current_stage"] = dict(current_stage)
+
+
 def _set_process_job_progress(
     job_id: str,
     percent: int,
@@ -3245,19 +3262,171 @@ def _set_process_job_progress(
     stages: Optional[List[Dict[str, Any]]] = None,
     current_stage: Optional[Dict[str, Any]] = None,
 ) -> None:
-    value = max(0, min(100, int(percent or 0)))
     with _PROCESS_JOBS_LOCK:
         job = _PROCESS_JOBS.get(job_id)
         if not job:
             return
-        job["progress"] = value
-        job["progress_label"] = str(label or "")
-        if stages is not None:
-            job["timing_stages"] = [dict(stage) for stage in stages if isinstance(stage, dict)]
-        if current_stage is not None:
-            job["current_stage"] = dict(current_stage)
+        _update_process_job_progress(job, percent, label, stages, current_stage)
         durable_job = dict(job)
     _persist_process_job(durable_job)
+
+
+def _new_process_job(
+    *,
+    username: str,
+    cache_scope: str,
+    form: _ProcessFormSnapshot,
+    status: str,
+) -> Dict[str, Any]:
+    job_id = secrets.token_hex(8)
+    entry = _snapshot_entry_payload(form)
+    created_at = time.time()
+    running = status == "running"
+    return {
+        "id": job_id,
+        "status": status,
+        "username": username,
+        "cache_scope": cache_scope,
+        "form": form,
+        "entry": entry,
+        "entry_label": _process_entry_label(entry),
+        "created_at": created_at,
+        "created_time": time.strftime(
+            "%Y-%m-%d %H:%M:%S", time.localtime(created_at)
+        ),
+        "started_at": created_at if running else 0.0,
+        "finished_at": 0.0,
+        "result": None,
+        "progress": 1 if running else 0,
+        "progress_label": "Start zadania" if running else "Oczekuje w kolejce",
+        "timing_stages": [],
+        "current_stage": None,
+        "error": "",
+        "warning_messages": [],
+    }
+
+
+def _finish_process_job_success(
+    job: Dict[str, Any], payload: Dict[str, Any]
+) -> List[str]:
+    warning_messages = _process_warning_messages(payload)
+    job["status"] = "completed"
+    job["finished_at"] = time.time()
+    job["result"] = payload
+    job["progress"] = 100
+    job["progress_label"] = "Zakonczono"
+    job["timing_stages"] = payload.get("timing", {}).get("stages", [])
+    job["current_stage"] = None
+    job["warning_messages"] = warning_messages
+    job.pop("form", None)
+    return warning_messages
+
+
+def _finish_process_job_failure(
+    job: Dict[str, Any], exc: BaseException
+) -> tuple[str, int, str]:
+    message = _exception_message(exc)
+    status_code = int(getattr(exc, "status_code", 500) or 500)
+    severity = (
+        "warning"
+        if isinstance(exc, HTTPException) and status_code < 500
+        else "error"
+        if isinstance(exc, HTTPException)
+        else "critical"
+    )
+    finished_at = time.time()
+    current = job.get("current_stage")
+    if isinstance(current, dict):
+        failing_stage = dict(current)
+        current_started = float(failing_stage.get("started_at") or 0)
+        elapsed_ms = (
+            int(max(0, finished_at - current_started) * 1000)
+            if current_started
+            else int(failing_stage.get("elapsed_ms") or 0)
+        )
+        failing_stage.update(
+            {
+                "elapsed_ms": max(
+                    elapsed_ms, int(failing_stage.get("elapsed_ms") or 0)
+                ),
+                "running": False,
+                "failed": True,
+                "error": message,
+            }
+        )
+        stages = [
+            dict(stage)
+            for stage in (job.get("timing_stages") or [])
+            if isinstance(stage, dict)
+        ]
+        stages.append(failing_stage)
+        job["timing_stages"] = stages
+    job["status"] = "failed"
+    job["finished_at"] = finished_at
+    job["error"] = message
+    job["progress_label"] = "Blad zadania"
+    job["warning_messages"] = [message]
+    job["current_stage"] = None
+    job.pop("form", None)
+    return message, status_code, severity
+
+
+def _emit_process_completed(
+    job: Dict[str, Any], payload: Dict[str, Any], warning_messages: List[str]
+) -> None:
+    entry = dict(job.get("entry") or {})
+    severity = _result_severity(payload)
+    emit_event(
+        severity=severity,
+        event_type="process.completed",
+        module="web.process",
+        stage="completed",
+        username=str(job.get("username") or ""),
+        ean=str(entry.get("ean") or ""),
+        product_id=str(entry.get("product_id") or ""),
+        job_id=str(job.get("id") or ""),
+        summary=(
+            "Process completed successfully."
+            if severity == "info"
+            else "Process completed with integration failures."
+            if severity == "error"
+            else "Process completed with skipped slots."
+        ),
+        details={"warnings": warning_messages, "result": payload},
+    )
+
+
+def _emit_process_failed(
+    job: Dict[str, Any],
+    exc: BaseException,
+    *,
+    message: str,
+    status_code: int,
+    severity: str,
+) -> None:
+    entry = dict(job.get("entry") or {})
+    username = str(job.get("username") or "")
+    job_id = str(job.get("id") or "")
+    _write_web_event(
+        level="warning" if status_code < 500 else "error",
+        event="PROCESS_JOB_FAILED",
+        username=username,
+        message=f"{str(job.get('entry_label') or '')}: {message}",
+        details={"job_id": job_id, "entry": entry},
+    )
+    emit_event(
+        severity=severity,
+        event_type="process.failed",
+        module="web.process",
+        stage="failed",
+        username=username,
+        ean=str(entry.get("ean") or ""),
+        product_id=str(entry.get("product_id") or ""),
+        job_id=job_id,
+        summary=message,
+        details={"entry": entry, "status_code": status_code},
+        exception=exc,
+    )
 
 
 def _queue_process_job(
@@ -3267,29 +3436,10 @@ def _queue_process_job(
     form: _ProcessFormSnapshot,
 ) -> Dict[str, Any]:
     _cleanup_process_jobs()
-    job_id = secrets.token_hex(8)
-    entry = _snapshot_entry_payload(form)
-    created_at = time.time()
-    job = {
-        "id": job_id,
-        "status": "queued",
-        "username": username,
-        "cache_scope": cache_scope,
-        "form": form,
-        "entry": entry,
-        "entry_label": _process_entry_label(entry),
-        "created_at": created_at,
-        "created_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_at)),
-        "started_at": 0.0,
-        "finished_at": 0.0,
-        "result": None,
-        "progress": 0,
-        "progress_label": "Oczekuje w kolejce",
-        "timing_stages": [],
-        "current_stage": None,
-        "error": "",
-        "warning_messages": [],
-    }
+    job = _new_process_job(
+        username=username, cache_scope=cache_scope, form=form, status="queued"
+    )
+    job_id = str(job["id"])
     with _PROCESS_JOBS_LOCK:
         _PROCESS_JOBS[job_id] = job
     _persist_process_job(dict(job))
@@ -3309,8 +3459,6 @@ def _run_process_job(job_id: str) -> None:
         username = str(job.get("username") or "")
         cache_scope = str(job.get("cache_scope") or "")
         form = job.get("form")
-        entry = dict(job.get("entry") or {})
-        entry_label = str(job.get("entry_label") or "")
         durable_job = dict(job)
     _persist_process_job(durable_job)
     try:
@@ -3327,83 +3475,28 @@ def _run_process_job(job_id: str) -> None:
                 current_stage,
             ),
         )
-        warning_messages = _process_warning_messages(payload)
         with _PROCESS_JOBS_LOCK:
             job = _PROCESS_JOBS.get(job_id)
             if not job:
                 return
-            job["status"] = "completed"
-            job["finished_at"] = time.time()
-            job["result"] = payload
-            job["progress"] = 100
-            job["progress_label"] = "Zakonczono"
-            job["timing_stages"] = payload.get("timing", {}).get("stages", [])
-            job["current_stage"] = None
-            job["warning_messages"] = warning_messages
-            job.pop("form", None)
+            warning_messages = _finish_process_job_success(job, payload)
             durable_job = dict(job)
         _persist_process_job(durable_job)
-        severity = _result_severity(payload)
-        emit_event(
-            severity=severity,
-            event_type="process.completed",
-            module="web.process",
-            stage="completed",
-            username=username,
-            ean=str(entry.get("ean") or ""),
-            product_id=str(entry.get("product_id") or ""),
-            job_id=job_id,
-            summary=(
-                "Process completed successfully."
-                if severity == "info"
-                else "Process completed with integration failures."
-                if severity == "error"
-                else "Process completed with skipped slots."
-            ),
-            details={"warnings": warning_messages, "result": payload},
-        )
+        _emit_process_completed(durable_job, payload, warning_messages)
     except Exception as exc:
-        message = _exception_message(exc)
-        status_code = getattr(exc, "status_code", 500)
-        severity = (
-            "warning"
-            if isinstance(exc, HTTPException) and int(status_code or 500) < 500
-            else "error"
-            if isinstance(exc, HTTPException)
-            else "critical"
-        )
-        _write_web_event(
-            level="warning" if int(status_code or 500) < 500 else "error",
-            event="PROCESS_JOB_FAILED",
-            username=username,
-            message=f"{entry_label}: {message}",
-            details={"job_id": job_id, "entry": entry},
-        )
         with _PROCESS_JOBS_LOCK:
             job = _PROCESS_JOBS.get(job_id)
             if not job:
                 return
-            job["status"] = "failed"
-            job["finished_at"] = time.time()
-            job["error"] = message
-            job["progress_label"] = "Blad zadania"
-            job["warning_messages"] = [message]
-            job["current_stage"] = None
-            job.pop("form", None)
+            message, status_code, severity = _finish_process_job_failure(job, exc)
             durable_job = dict(job)
         _persist_process_job(durable_job)
-        emit_event(
+        _emit_process_failed(
+            durable_job,
+            exc,
+            message=message,
+            status_code=status_code,
             severity=severity,
-            event_type="process.failed",
-            module="web.process",
-            stage="failed",
-            username=username,
-            ean=str(entry.get("ean") or ""),
-            product_id=str(entry.get("product_id") or ""),
-            job_id=job_id,
-            summary=message,
-            details={"entry": entry, "status_code": status_code},
-            exception=exc,
         )
 
 
@@ -5131,13 +5224,52 @@ def create_app() -> FastAPI:
         except Exception:
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise
-        payload = await run_in_threadpool(
-            lambda: _process_upload_snapshot(
-                username=username,
-                cache_scope=cache_scope,
-                form=snapshot,
-            )
+        job = _new_process_job(
+            username=username,
+            cache_scope=cache_scope,
+            form=snapshot,
+            status="running",
         )
+        job_id = str(job["id"])
+        _persist_process_job(dict(job))
+
+        def update_progress(
+            percent: int,
+            label: str,
+            stages: List[Dict[str, Any]],
+            current_stage: Optional[Dict[str, Any]],
+        ) -> None:
+            _update_process_job_progress(
+                job, percent, label, stages, current_stage
+            )
+            _persist_process_job(dict(job))
+
+        try:
+            payload = await run_in_threadpool(
+                lambda: _process_upload_snapshot(
+                    username=username,
+                    cache_scope=cache_scope,
+                    form=snapshot,
+                    job_id=job_id,
+                    progress=update_progress,
+                )
+            )
+        except Exception as exc:
+            message, status_code, severity = _finish_process_job_failure(job, exc)
+            durable_job = dict(job)
+            _persist_process_job(durable_job)
+            _emit_process_failed(
+                durable_job,
+                exc,
+                message=message,
+                status_code=status_code,
+                severity=severity,
+            )
+            raise
+        warning_messages = _finish_process_job_success(job, payload)
+        durable_job = dict(job)
+        _persist_process_job(durable_job)
+        _emit_process_completed(durable_job, payload, warning_messages)
         return JSONResponse(payload)
     return app
 
