@@ -202,6 +202,66 @@ class WebAppFileTests(unittest.TestCase):
             )
         )
 
+    def test_existing_photo_snapshot_captures_size_before_local_mutation(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            photo = Path(temp_dir) / "old.jpg"
+            photo.write_bytes(b"old-photo")
+
+            snapshot = web_app._snapshot_existing_photos(
+                [
+                    {
+                        "prefix": "03",
+                        "filename": photo.name,
+                        "path": str(photo),
+                        "ftp_filename": "5901234567890_03.jpg",
+                    },
+                    {
+                        "prefix": "04",
+                        "path": "",
+                        "ftp_filename": "5901234567890_04.jpg",
+                    },
+                ]
+            )
+            photo.unlink()
+
+        self.assertEqual(snapshot[0]["size_bytes"], 9)
+        self.assertEqual(snapshot[0]["filename"], "old.jpg")
+        self.assertEqual(snapshot[1]["ftp_filename"], "5901234567890_04.jpg")
+        self.assertIsNone(snapshot[1]["size_bytes"])
+
+    def test_process_integration_events_reuse_results_and_job_id(self) -> None:
+        with patch.object(web_app, "emit_event") as emit_event:
+            web_app._emit_process_integration_events(
+                username="alice",
+                job_id="job-123",
+                ean="5901234567890",
+                ftp_result={
+                    "enabled": True,
+                    "uploaded": 2,
+                    "deleted": 1,
+                    "elapsed_ms": 14,
+                    "error": "",
+                },
+                sql_result={
+                    "enabled": True,
+                    "updated": 0,
+                    "cleared": 0,
+                    "rows": 0,
+                    "elapsed_ms": 6,
+                    "error": "database unavailable",
+                },
+            )
+
+        self.assertEqual(emit_event.call_count, 2)
+        ftp_event, sql_event = emit_event.call_args_list
+        self.assertEqual(ftp_event.kwargs["severity"], "info")
+        self.assertEqual(ftp_event.kwargs["event_type"], "integration.ftp.completed")
+        self.assertEqual(ftp_event.kwargs["details"]["uploaded"], 2)
+        self.assertEqual(sql_event.kwargs["severity"], "error")
+        self.assertEqual(sql_event.kwargs["event_type"], "integration.sql.completed")
+        self.assertTrue(all(call.kwargs["job_id"] == "job-123" for call in emit_event.call_args_list))
+
     def _image_bytes(self, image_format: str, mode: str = "RGB") -> bytes:
         if Image is None:
             self.skipTest("Pillow unavailable")

@@ -29,12 +29,14 @@ const state = {
   pimcoreLastCheckedEan: "",
   pimcoreMissingEan: "",
   pimcoreCreateSchema: [],
+  pimcoreCreateIntegrations: { sql_profiles: [] },
   pimcoreRuntimeEnabled: false,
   pimcoreExistingObject: null,
   pimcoreEditObjectId: 0,
   pimcoreEditRequestId: 0,
   pimcoreEditMarker: "",
   pimcoreEditSchema: [],
+  pimcoreEditIntegrations: { sql_profiles: [] },
   pimcoreTemplateRow: null,
   pimcoreSetup: {
     step: 1,
@@ -8306,6 +8308,8 @@ async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
     : (schema || []).filter((mapping) => mapping.value_template).map((mapping) => mapping.source);
   if (!selected.length) return { values: {}, warnings: [], calculated_values: {}, changed: {} };
   const values = Object.fromEntries(new FormData(form).entries());
+  if (form === pimcoreCreateForm) state.pimcoreCreateIntegrations = { sql_profiles: [] };
+  if (form === pimcoreEditForm) state.pimcoreEditIntegrations = { sql_profiles: [] };
   const result = await requestJson("/api/pimcore/render-templates", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -8316,6 +8320,9 @@ async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
       mode: form.dataset.pimcoreMode || "create",
     }),
   });
+  const integrationContext = result.integrations || { sql_profiles: [] };
+  if (form === pimcoreCreateForm) state.pimcoreCreateIntegrations = integrationContext;
+  if (form === pimcoreEditForm) state.pimcoreEditIntegrations = integrationContext;
   for (const source of selected) {
     const input = form.elements[source];
     if (input && Object.prototype.hasOwnProperty.call(result.values || {}, source)) {
@@ -8765,6 +8772,7 @@ async function checkPimcoreProductStatus(ean) {
 function openPimcoreCreateModal(ean) {
   if (!pimcoreCreateForm || !pimcoreCreateModal) return;
   pimcoreCreateForm.dataset.pimcoreMode = "create";
+  state.pimcoreCreateIntegrations = { sql_profiles: [] };
   const values = Object.fromEntries(
     (state.pimcoreCreateSchema || []).map((mapping) => [
       mapping.source,
@@ -8815,7 +8823,10 @@ async function submitPimcoreRuntimeCreate(event) {
     const payload = await requestJson("/api/pimcore/products", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ values }),
+      body: JSON.stringify({
+        values,
+        integration_results: state.pimcoreCreateIntegrations,
+      }),
       timeoutMs: 120000,
     });
     const object = payload.object || {};
@@ -8863,6 +8874,7 @@ async function openPimcoreEditModal() {
   if (pimcoreEditButton) pimcoreEditButton.disabled = true;
   state.pimcoreEditObjectId = 0;
   state.pimcoreEditMarker = "";
+  state.pimcoreEditIntegrations = { sql_profiles: [] };
   pimcoreEditForm.textContent = "";
   pimcoreEditObjectInfo.textContent = `ID ${objectId}`;
   pimcoreEditStatus.textContent = "Pobieranie danych Pimcore...";
@@ -8941,6 +8953,7 @@ function closePimcoreEditModal() {
   state.pimcoreEditObjectId = 0;
   state.pimcoreEditMarker = "";
   state.pimcoreEditSchema = [];
+  state.pimcoreEditIntegrations = { sql_profiles: [] };
 }
 
 async function submitPimcoreRuntimeEdit(event) {
@@ -8956,7 +8969,11 @@ async function submitPimcoreRuntimeEdit(event) {
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ marker: state.pimcoreEditMarker, values }),
+        body: JSON.stringify({
+          marker: state.pimcoreEditMarker,
+          values,
+          integration_results: state.pimcoreEditIntegrations,
+        }),
         timeoutMs: 120000,
       }
     );

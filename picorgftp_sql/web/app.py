@@ -55,6 +55,7 @@ from ..common import (
 )
 from ..database import connect_db
 from ..github_status import github_repository_status
+from ..history_changes import history_change_set
 from ..image_utils import fit_image_to_content
 from ..legacy_import import import_legacy_to_sqlite
 from ..logging_utils import log_error
@@ -2604,6 +2605,63 @@ def _process_warning_messages(payload: Dict[str, Any]) -> List[str]:
     return messages
 
 
+def _snapshot_existing_photos(photos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Copy pre-mutation file metadata, including known local file sizes."""
+
+    snapshot: List[Dict[str, Any]] = []
+    for photo in photos:
+        item = dict(photo)
+        size: Optional[int] = None
+        path = str(item.get("path") or "").strip()
+        if path and os.path.isfile(path):
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = None
+        elif isinstance(item.get("size_bytes"), int) and not isinstance(
+            item.get("size_bytes"), bool
+        ):
+            size = max(0, int(item["size_bytes"]))
+        item["size_bytes"] = size
+        snapshot.append(item)
+    return snapshot
+
+
+def _emit_process_integration_events(
+    *,
+    username: str,
+    job_id: str,
+    ean: str,
+    ftp_result: Dict[str, Any],
+    sql_result: Dict[str, Any],
+) -> None:
+    for name, result, count_keys in (
+        ("ftp", ftp_result, ("uploaded", "deleted")),
+        ("sql", sql_result, ("updated", "cleared", "rows")),
+    ):
+        enabled = bool(result.get("enabled"))
+        error = str(result.get("error") or "")
+        status = "disabled" if not enabled else "error" if error else "success"
+        details = {
+            "enabled": enabled,
+            "status": status,
+            "elapsed_ms": int(result.get("elapsed_ms") or 0),
+            "error": error,
+        }
+        details.update({key: int(result.get(key) or 0) for key in count_keys})
+        emit_event(
+            severity="error" if enabled and error else "info",
+            event_type=f"integration.{name}.completed",
+            module="web.process",
+            stage=name,
+            username=username,
+            ean=ean,
+            job_id=job_id,
+            summary=f"Integracja {name.upper()}: {status}.",
+            details=details,
+        )
+
+
 def _process_upload_snapshot(
     *,
     username: str,
@@ -2797,6 +2855,7 @@ def _process_upload_snapshot(
             include_ftp=bool(config.CONFIG.get(ft, True)),
             include_sql=include_sql_in_existing_photo_scan,
         )
+        existing_photos_snapshot = _snapshot_existing_photos(existing_photos)
         existing_file_photos = [photo for photo in existing_photos if _photo_has_file_source(photo)]
         if existing_entry is None:
             conflicts = _existing_photo_conflicts(
@@ -3062,6 +3121,19 @@ def _process_upload_snapshot(
     timings.append(_timing_item("file_index", "Odswiezenie indeksu lokalnego", stage_started))
     payload["timing"] = _timing_payload(timings, process_started)
     payload["show_timing_details"] = _show_timing_details()
+    saved_entry = _entry_payload_from_product(product)
+    if isinstance(entry_result, dict):
+        saved_entry["product_id"] = str(entry_result.get("product_id") or saved_entry["product_id"])
+    integrations = {"ftp": ftp_result, "sql": sql_result}
+    change_set = history_change_set(
+        existing_entry=existing_entry,
+        saved_entry=saved_entry,
+        existing_photos=existing_photos_snapshot,
+        saved_files=payload["saved_files"],
+        delete_requests=delete_requests,
+        migrated_prefixes=migrated_prefixes,
+        integrations=integrations,
+    )
     record_history(
         username=username,
         action="process",
@@ -3087,7 +3159,16 @@ def _process_upload_snapshot(
             "output_dir": payload["output_dir"],
             "timing": payload["timing"],
             "entry": entry_result.get("entry", {}) if isinstance(entry_result, dict) else {},
+            "job_id": job_id,
+            "change_set": change_set,
         },
+    )
+    _emit_process_integration_events(
+        username=username,
+        job_id=job_id,
+        ean=product.ean,
+        ftp_result=ftp_result,
+        sql_result=sql_result,
     )
     event_level = "info"
     event_name = "PROCESS_COMPLETED"
@@ -4913,16 +4994,29 @@ def create_app() -> FastAPI:
         payload = await request.json()
         values = payload.get("values") if isinstance(payload, dict) else None
         marker = payload.get("marker") if isinstance(payload, dict) else None
+        integration_results = (
+            payload.get("integration_results") if isinstance(payload, dict) else None
+        )
         if not isinstance(values, dict) or not str(marker or ""):
             raise HTTPException(status_code=400, detail="Brak danych albo wersji produktu Pimcore.")
         try:
-            result = await run_in_threadpool(
-                update_pimcore_product,
-                object_id,
-                marker,
-                values,
-                username,
-            )
+            if integration_results is None:
+                result = await run_in_threadpool(
+                    update_pimcore_product,
+                    object_id,
+                    marker,
+                    values,
+                    username,
+                )
+            else:
+                result = await run_in_threadpool(
+                    update_pimcore_product,
+                    object_id,
+                    marker,
+                    values,
+                    username,
+                    integration_results,
+                )
         except PimcoreConflictError as exc:
             raise HTTPException(
                 status_code=409,
@@ -4944,10 +5038,21 @@ def create_app() -> FastAPI:
         username = _require_user(request)
         payload = await request.json()
         values = payload.get("values") if isinstance(payload, dict) else None
+        integration_results = (
+            payload.get("integration_results") if isinstance(payload, dict) else None
+        )
         if not isinstance(values, dict):
             raise HTTPException(status_code=400, detail="Brak danych produktu Pimcore.")
         try:
-            result = await run_in_threadpool(create_pimcore_product, values, username)
+            if integration_results is None:
+                result = await run_in_threadpool(create_pimcore_product, values, username)
+            else:
+                result = await run_in_threadpool(
+                    create_pimcore_product,
+                    values,
+                    username,
+                    integration_results,
+                )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except PimcoreApiError as exc:

@@ -72,6 +72,7 @@ from .excel_utils import (
     NO_EAN_PLACEHOLDER,
 )
 from .logging_utils import log_error
+from .observability import emit_event
 from .services.ftp_service import connect_ftp, list_remote_files_for_ean, list_remote_filenames
 from .services.sql_service import (
     extract_presence_context,
@@ -1637,13 +1638,36 @@ def _persist_pimcore_operation(report: dict[str, object]) -> dict[str, object]:
         action = "pimcore_product_create_rejected"
     else:
         action = "pimcore_product_create"
+    pimcore_change_set = (
+        result.get("change_set")
+        if isinstance(result.get("change_set"), dict)
+        else {}
+    )
+    integrations = (
+        report.get("integration_results")
+        if isinstance(report.get("integration_results"), dict)
+        else pimcore_change_set.get("integrations")
+        if isinstance(pimcore_change_set.get("integrations"), dict)
+        else {}
+    )
+    details: dict[str, object] = {
+        "pimcore_operation": redact_pimcore_log_value(report)
+    }
+    if pimcore_change_set:
+        details["change_set"] = {
+            "kind": pimcore_change_set.get("kind", "synchronized"),
+            "fields": [],
+            "files": [],
+            "integrations": integrations,
+            "pimcore": pimcore_change_set,
+        }
     return record_history(
         username=_text(report.get("username")),
         action=action,
         ean=values.get("EAN", ""),
         product_id=result.get("object_id") or result_object.get("id", ""),
         summary=f"Pimcore: {report.get('status', 'unknown')}.",
-        details={"pimcore_operation": redact_pimcore_log_value(report)},
+        details=details,
     )
 
 
@@ -1902,14 +1926,18 @@ def _render_templates(
     }
     extra_sources: list[SourceDefinition] = []
     extra_values: dict[str, object] = {}
+    sql_profile_results: list[dict[str, object]] = []
     for source in sql_template_sources:
         mapping = mappings[source]
         sql_key = _sql_template_source(source)
         extra_sources.append(
             SourceDefinition(sql_key, f"SQL {mapping.get('label') or source}", "sql", (sql_key,))
         )
+        integration_started = time.perf_counter()
+        profile_id = _text(mapping.get("sql_profile_id"))
         try:
             profile = resolve_sql_profile(profiles, mapping.get("sql_profile_id"))
+            profile_id = _text(profile.get("id")) or profile_id
             if not profile.get("enabled", True):
                 label = profile.get("label") or profile.get("id")
                 raise ValueError(f"Profil SQL {label} jest wylaczony.")
@@ -1923,9 +1951,35 @@ def _render_templates(
         except Exception as exc:
             warnings.append({"source": source, "code": "sql_error", "message": str(exc)})
             extra_values[sql_key] = ""
+            safe_error = redact_pimcore_log_value({"error": str(exc)})
+            sql_profile_results.append(
+                {
+                    "profile_id": profile_id,
+                    "source": source,
+                    "status": "error",
+                    "elapsed_ms": int((time.perf_counter() - integration_started) * 1000),
+                    "warning_codes": ["sql_error"],
+                    "error": safe_error.get("error", "") if isinstance(safe_error, dict) else "",
+                }
+            )
         else:
             extra_values[sql_key] = sql_result.value
             warnings.extend({"source": source, **warning} for warning in sql_result.warnings)
+            warning_codes = [
+                _text(warning.get("code"))
+                for warning in sql_result.warnings
+                if isinstance(warning, dict) and _text(warning.get("code"))
+            ]
+            sql_profile_results.append(
+                {
+                    "profile_id": profile_id,
+                    "source": source,
+                    "status": "warning" if warning_codes else "success",
+                    "elapsed_ms": int((time.perf_counter() - integration_started) * 1000),
+                    "warning_codes": warning_codes,
+                    "error": "",
+                }
+            )
     rendered = render_mapping_templates(
         template_mappings,
         product_values=product_context,
@@ -1957,8 +2011,11 @@ def _render_templates(
                 calculated_values[source] = output[source]
                 changed[source] = str(submitted.get(source, "")) != str(output[source])
             continue
+        integration_started = time.perf_counter()
+        profile_id = _text(mapping.get("sql_profile_id"))
         try:
             profile = resolve_sql_profile(profiles, mapping.get("sql_profile_id"))
+            profile_id = _text(profile.get("id")) or profile_id
             if not profile.get("enabled", True):
                 label = profile.get("label") or profile.get("id")
                 raise ValueError(f"Profil SQL {label} jest wylaczony.")
@@ -1972,9 +2029,35 @@ def _render_templates(
         except Exception as exc:
             warnings.append({"source": source, "code": "sql_error", "message": str(exc)})
             calculated = ""
+            safe_error = redact_pimcore_log_value({"error": str(exc)})
+            sql_profile_results.append(
+                {
+                    "profile_id": profile_id,
+                    "source": source,
+                    "status": "error",
+                    "elapsed_ms": int((time.perf_counter() - integration_started) * 1000),
+                    "warning_codes": ["sql_error"],
+                    "error": safe_error.get("error", "") if isinstance(safe_error, dict) else "",
+                }
+            )
         else:
             calculated = sql_result.value
             warnings.extend({"source": source, **warning} for warning in sql_result.warnings)
+            warning_codes = [
+                _text(warning.get("code"))
+                for warning in sql_result.warnings
+                if isinstance(warning, dict) and _text(warning.get("code"))
+            ]
+            sql_profile_results.append(
+                {
+                    "profile_id": profile_id,
+                    "source": source,
+                    "status": "warning" if warning_codes else "success",
+                    "elapsed_ms": int((time.perf_counter() - integration_started) * 1000),
+                    "warning_codes": warning_codes,
+                    "error": "",
+                }
+            )
         calculated_values[source] = calculated
         current = str(submitted.get(source, ""))
         changed[source] = current != str(calculated)
@@ -1986,6 +2069,7 @@ def _render_templates(
         "calculated_values": calculated_values,
         "warnings": warnings,
         "changed": changed,
+        "integrations": {"sql_profiles": sql_profile_results},
     }
 
 
@@ -2076,8 +2160,113 @@ def find_pimcore_product_by_ean(ean: object) -> dict[str, object]:
     }
 
 
-def create_pimcore_product(values: object, username: str) -> dict[str, object]:
+def _safe_pimcore_integration_results(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    raw_profiles = source.get("sql_profiles")
+    profiles: list[dict[str, object]] = []
+    if not isinstance(raw_profiles, list):
+        return {"sql_profiles": profiles}
+    for item in raw_profiles[:100]:
+        if not isinstance(item, dict):
+            continue
+        status = _text(item.get("status")).casefold()
+        if status not in {"success", "warning", "error"}:
+            status = "error"
+        try:
+            elapsed_ms = max(0, min(int(item.get("elapsed_ms") or 0), 86_400_000))
+        except (TypeError, ValueError):
+            elapsed_ms = 0
+        raw_codes = item.get("warning_codes")
+        warning_codes = (
+            [_text(code)[:100] for code in raw_codes if isinstance(code, str) and _text(code)]
+            if isinstance(raw_codes, list)
+            else []
+        )
+        filtered = {
+            "profile_id": _text(item.get("profile_id"))[:200],
+            "source": _text(item.get("source"))[:200],
+            "status": status,
+            "elapsed_ms": elapsed_ms,
+            "warning_codes": warning_codes,
+            "error": _text(item.get("error"))[:2000],
+        }
+        safe = redact_pimcore_log_value(filtered)
+        profiles.append(safe if isinstance(safe, dict) else filtered)
+    return {"sql_profiles": profiles}
+
+
+def _emit_sql_profile_integration_events(
+    integrations: dict[str, object],
+    *,
+    username: str,
+    job_id: str,
+    ean: object,
+) -> None:
+    profiles = integrations.get("sql_profiles")
+    if not isinstance(profiles, list):
+        return
+    for item in profiles:
+        if not isinstance(item, dict):
+            continue
+        status = _text(item.get("status"))
+        warning_codes = item.get("warning_codes")
+        event_details = {
+            **item,
+            "warning_count": len(warning_codes) if isinstance(warning_codes, list) else 0,
+        }
+        emit_event(
+            severity="error" if status == "error" else "info",
+            event_type="integration.sql_profile.completed",
+            module="pimcore.runtime",
+            stage="sql_profile",
+            username=username,
+            ean=_text(ean),
+            job_id=job_id,
+            summary=f"Profil SQL {_text(item.get('profile_id'))}: {status}.",
+            details=event_details,
+        )
+
+
+def _emit_pimcore_integration_event(
+    result: dict[str, object],
+    *,
+    status: str,
+    operation_type: str,
+    username: str,
+    job_id: str,
+    ean: object,
+    elapsed_ms: int,
+) -> None:
+    change_set = result.get("change_set") if isinstance(result.get("change_set"), dict) else {}
+    fields = change_set.get("fields") if isinstance(change_set.get("fields"), list) else []
+    result_object = result.get("object") if isinstance(result.get("object"), dict) else {}
+    emit_event(
+        severity="error" if status == "failed" else "info",
+        event_type="integration.pimcore.completed",
+        module="pimcore.runtime",
+        stage=operation_type,
+        username=username,
+        ean=_text(ean),
+        job_id=job_id,
+        summary=f"Integracja Pimcore: {status}.",
+        details={
+            "status": status,
+            "operation_type": operation_type,
+            "elapsed_ms": max(0, int(elapsed_ms)),
+            "field_count": len(fields),
+            "object_count": 1 if result_object else 0,
+            "object_id": result_object.get("id", ""),
+        },
+    )
+
+
+def create_pimcore_product(
+    values: object,
+    username: str,
+    integration_results: object = None,
+) -> dict[str, object]:
     submitted = dict(values) if isinstance(values, dict) else {}
+    safe_integrations = _safe_pimcore_integration_results(integration_results)
     settings_payload = _active_pimcore_runtime_settings()
     operation_id = secrets.token_hex(12)
     started = time.time()
@@ -2100,6 +2289,9 @@ def create_pimcore_product(values: object, username: str) -> dict[str, object]:
 
     try:
         result = create_product(settings_payload, submitted, emit=emit)
+        change_set = result.get("change_set") if isinstance(result.get("change_set"), dict) else {}
+        if change_set:
+            result["change_set"] = {**change_set, "integrations": safe_integrations}
         status = "duplicate" if result.get("duplicate") else "completed"
         return result
     except Exception as exc:
@@ -2120,10 +2312,26 @@ def create_pimcore_product(values: object, username: str) -> dict[str, object]:
                 "total_ms": int(max(0, finished - started) * 1000),
                 "events": events,
                 "result": result,
+                "integration_results": safe_integrations,
             }
         )
         _persist_pimcore_operation(report)
         _persist_pimcore_submission(report)
+        _emit_sql_profile_integration_events(
+            safe_integrations,
+            username=username,
+            job_id=operation_id,
+            ean=submitted.get("EAN"),
+        )
+        _emit_pimcore_integration_event(
+            result,
+            status=status,
+            operation_type="create",
+            username=username,
+            job_id=operation_id,
+            ean=submitted.get("EAN"),
+            elapsed_ms=int(max(0, finished - started) * 1000),
+        )
 
 
 def get_pimcore_product_for_edit(
@@ -2193,9 +2401,11 @@ def update_pimcore_product(
     marker: object,
     values: object,
     username: str,
+    integration_results: object = None,
 ) -> dict[str, object]:
     settings_payload = _active_pimcore_runtime_settings()
     submitted = dict(values) if isinstance(values, dict) else {}
+    safe_integrations = _safe_pimcore_integration_results(integration_results)
     operation_id = secrets.token_hex(12)
     started = time.time()
     events: list[dict[str, object]] = []
@@ -2223,6 +2433,9 @@ def update_pimcore_product(
             submitted,
             emit=emit,
         )
+        change_set = result.get("change_set") if isinstance(result.get("change_set"), dict) else {}
+        if change_set:
+            result["change_set"] = {**change_set, "integrations": safe_integrations}
         status = "completed"
         return result
     except PimcoreConflictError:
@@ -2244,9 +2457,25 @@ def update_pimcore_product(
             "total_ms": int(max(0, finished - started) * 1000),
             "events": events,
             "result": result,
+            "integration_results": safe_integrations,
         }
         _persist_pimcore_operation(report)
         _persist_pimcore_submission(report)
+        _emit_sql_profile_integration_events(
+            safe_integrations,
+            username=username,
+            job_id=operation_id,
+            ean=submitted.get("EAN"),
+        )
+        _emit_pimcore_integration_event(
+            result,
+            status=status,
+            operation_type="update",
+            username=username,
+            job_id=operation_id,
+            ean=submitted.get("EAN"),
+            elapsed_ms=int(max(0, finished - started) * 1000),
+        )
 
 
 def pimcore_operation_status(

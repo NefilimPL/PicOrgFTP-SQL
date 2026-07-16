@@ -513,6 +513,15 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("body[data-theme=\"dark\"] .pimcore-runtime-conflict input", css)
         self.assertIn("@keyframes pimcore-runtime-pulse", css)
 
+    def test_pimcore_runtime_forwards_latest_render_integration_context(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("pimcoreCreateIntegrations", source)
+        self.assertIn("pimcoreEditIntegrations", source)
+        self.assertIn("result.integrations || { sql_profiles: [] }", source)
+        self.assertIn("integration_results: state.pimcoreCreateIntegrations", source)
+        self.assertIn("integration_results: state.pimcoreEditIntegrations", source)
+
     def test_pimcore_history_has_submission_export_actions(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         html = INDEX_HTML.read_text(encoding="utf-8")
