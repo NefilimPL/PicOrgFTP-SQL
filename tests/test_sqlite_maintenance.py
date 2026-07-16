@@ -3,7 +3,11 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from picorgftp_sql.sqlite_maintenance import repair_sqlite_database
+from picorgftp_sql.sqlite_maintenance import (
+    TIMESTAMP_COLUMNS,
+    normalize_timestamp_columns,
+    repair_sqlite_database,
+)
 from picorgftp_sql.sqlite_store import SqliteStore
 
 
@@ -98,3 +102,52 @@ def test_repair_converts_legacy_numeric_updated_at_and_drops_empty_app_settings(
         assert value.endswith("Z")
         assert "T" in value
     assert app_settings_exists is None
+
+
+def test_normalize_timestamp_columns_covers_observability_tables(tmp_path: Path) -> None:
+    db_path = tmp_path / "data.sqlite"
+    store = SqliteStore(str(db_path))
+    store.initialize()
+    expected = {
+        ("operational_events", "created_at"),
+        ("job_runs", "started_at"),
+        ("job_runs", "finished_at"),
+        ("incidents", "first_seen_at"),
+        ("incidents", "last_seen_at"),
+        ("incidents", "notification_window_at"),
+        ("alert_reads", "created_at"),
+    }
+    assert expected <= set(TIMESTAMP_COLUMNS)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO job_runs (id, status, started_at, finished_at)
+            VALUES ('job-1', 'completed', '1784196000', '1784196060')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO incidents (
+                id, fingerprint, severity, event_type, first_seen_at,
+                last_seen_at, first_event_id, latest_event_id,
+                notification_window_at
+            ) VALUES (
+                'inc-1', 'fingerprint', 'error', 'ftp.failed',
+                '1784196000', '1784196060', 'evt-1', 'evt-2', '1784196060'
+            )
+            """
+        )
+        changed = normalize_timestamp_columns(conn)
+        job = conn.execute(
+            "SELECT started_at, finished_at FROM job_runs WHERE id = 'job-1'"
+        ).fetchone()
+        incident = conn.execute(
+            """
+            SELECT first_seen_at, last_seen_at, notification_window_at
+            FROM incidents WHERE id = 'inc-1'
+            """
+        ).fetchone()
+
+    assert changed == 5
+    assert all(value.endswith("Z") for value in (*job, *incident))

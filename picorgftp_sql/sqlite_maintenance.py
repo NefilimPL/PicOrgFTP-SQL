@@ -21,6 +21,13 @@ TIMESTAMP_COLUMNS = (
     ("web_history", "created_at"),
     ("file_index_cache", "updated_at"),
     ("file_index_segments", "updated_at"),
+    ("operational_events", "created_at"),
+    ("job_runs", "started_at"),
+    ("job_runs", "finished_at"),
+    ("incidents", "first_seen_at"),
+    ("incidents", "last_seen_at"),
+    ("incidents", "notification_window_at"),
+    ("alert_reads", "created_at"),
 )
 
 

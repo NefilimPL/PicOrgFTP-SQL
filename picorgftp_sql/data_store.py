@@ -69,6 +69,73 @@ class SqliteDataStoreAdapter:
     def append_history(self, record: dict[str, object]) -> None:
         self.store.append_history(record)
 
+    def append_operational_event(
+        self, event: dict[str, object]
+    ) -> dict[str, Any]:
+        return self.store.append_operational_event(event)
+
+    def query_operational_events(
+        self,
+        *,
+        severities=(),
+        username: str = "",
+        ean: str = "",
+        job_id: str = "",
+        module: str = "",
+        query: str = "",
+        after_id: str = "",
+        cursor: str = "",
+        limit: int = 20,
+        since: str = "",
+    ) -> dict[str, Any]:
+        return self.store.query_operational_events(
+            severities=severities,
+            username=username,
+            ean=ean,
+            job_id=job_id,
+            module=module,
+            query=query,
+            after_id=after_id,
+            cursor=cursor,
+            limit=limit,
+            since=since,
+        )
+
+    def upsert_job_run(self, job: dict[str, object]) -> dict[str, Any]:
+        return self.store.upsert_job_run(job)
+
+    def query_job_runs(
+        self, *, cursor: str = "", limit: int = 20
+    ) -> dict[str, Any]:
+        return self.store.query_job_runs(cursor=cursor, limit=limit)
+
+    def upsert_incident(self, incident: dict[str, object]) -> dict[str, Any]:
+        return self.store.upsert_incident(incident)
+
+    def find_open_incident(self, fingerprint: str) -> dict[str, Any] | None:
+        return self.store.find_open_incident(fingerprint)
+
+    def query_incidents(
+        self, *, severity: str = "", cursor: str = "", limit: int = 20
+    ) -> dict[str, Any]:
+        return self.store.query_incidents(
+            severity=severity, cursor=cursor, limit=limit
+        )
+
+    def mark_alerts_read(
+        self, username: str, severity: str, event_id: str, created_at: str
+    ) -> None:
+        self.store.mark_alerts_read(username, severity, event_id, created_at)
+
+    def unread_alert_summary(self, username: str) -> dict[str, object]:
+        return self.store.unread_alert_summary(username)
+
+    def prune_info_events(self, before: str) -> int:
+        return self.store.prune_info_events(before)
+
+    def clear_operational_data(self) -> dict[str, int]:
+        return self.store.clear_operational_data()
+
     def append_pimcore_submission(self, record: dict[str, object]) -> dict[str, Any]:
         return self.store.append_pimcore_submission(record)
 

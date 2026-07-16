@@ -1,0 +1,259 @@
+"""Tests for structured operational persistence."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from picorgftp_sql.data_store import SqliteDataStoreAdapter
+from picorgftp_sql.sqlite_store import SqliteStore
+
+
+def _event(
+    identity: str,
+    created_at: str,
+    severity: str = "info",
+    **overrides: object,
+) -> dict[str, object]:
+    event: dict[str, object] = {
+        "id": identity,
+        "created_at": created_at,
+        "severity": severity,
+        "event_type": "job.started",
+        "module": "process",
+        "stage": "prepare",
+        "username": "alice",
+        "ean": "5900000000001",
+        "product_id": "product-1",
+        "slot": "01",
+        "job_id": "job-1",
+        "correlation_id": "correlation-1",
+        "summary": "Start",
+        "recommended_action": "Wait",
+        "details": {"step": 1},
+    }
+    event.update(overrides)
+    return event
+
+
+def test_operational_schema_and_cursor_queries(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.initialize()
+    first = store.append_operational_event(
+        _event("evt-1", "2026-07-16T10:00:00.000Z")
+    )
+    store.append_operational_event(
+        {
+            **first,
+            "id": "evt-2",
+            "created_at": "2026-07-16T10:01:00.000Z",
+            "severity": "error",
+            "summary": "FTP failed",
+        }
+    )
+    store.append_operational_event(
+        _event(
+            "evt-3",
+            "2026-07-16T10:02:00.000Z",
+            "warning",
+            username="bob",
+            ean="5900000000002",
+            job_id="job-2",
+            module="pimcore",
+            summary="Pimcore warning",
+        )
+    )
+
+    error_page = store.query_operational_events(severities=("error",), limit=20)
+    assert [item["id"] for item in error_page["items"]] == ["evt-2"]
+    assert error_page["items"][0]["details"] == {"step": 1}
+    assert "details_json" not in error_page["items"][0]
+    assert error_page["next_cursor"] == ""
+
+    first_page = store.query_operational_events(limit=2)
+    assert [item["id"] for item in first_page["items"]] == ["evt-3", "evt-2"]
+    assert first_page["next_cursor"]
+    second_page = store.query_operational_events(cursor=first_page["next_cursor"], limit=2)
+    assert [item["id"] for item in second_page["items"]] == ["evt-1"]
+    assert second_page["next_cursor"] == ""
+
+    assert [
+        item["id"]
+        for item in store.query_operational_events(
+            username="bob",
+            ean="5900000000002",
+            job_id="job-2",
+            module="pimcore",
+            query="warning",
+            since="2026-07-16T10:01:30.000Z",
+        )["items"]
+    ] == ["evt-3"]
+    assert [
+        item["id"]
+        for item in store.query_operational_events(after_id="evt-1")["items"]
+    ] == ["evt-3", "evt-2"]
+
+
+def test_job_and_incident_roundtrips_use_descending_cursors(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.initialize()
+    first_job = store.upsert_job_run(
+        {
+            "id": "job-1",
+            "username": "alice",
+            "ean": "5900000000001",
+            "status": "running",
+            "summary": "Preparing",
+            "started_at": "2026-07-16T10:00:00.000Z",
+            "stages": [{"name": "prepare", "status": "running"}],
+            "details": {"files": 2},
+        }
+    )
+    store.upsert_job_run(
+        {
+            **first_job,
+            "status": "completed",
+            "finished_at": "2026-07-16T10:03:00.000Z",
+        }
+    )
+    store.upsert_job_run(
+        {
+            "id": "job-2",
+            "status": "failed",
+            "started_at": "2026-07-16T10:02:00.000Z",
+        }
+    )
+    jobs = store.query_job_runs(limit=1)
+    assert [item["id"] for item in jobs["items"]] == ["job-2"]
+    assert jobs["next_cursor"]
+    older_jobs = store.query_job_runs(cursor=jobs["next_cursor"], limit=1)
+    assert older_jobs["items"][0]["id"] == "job-1"
+    assert older_jobs["items"][0]["stages"][0]["name"] == "prepare"
+    assert older_jobs["items"][0]["details"] == {"files": 2}
+
+    first_incident = store.upsert_incident(
+        {
+            "id": "inc-1",
+            "fingerprint": "ftp-failed",
+            "severity": "error",
+            "event_type": "ftp.failed",
+            "first_seen_at": "2026-07-16T10:00:00.000Z",
+            "last_seen_at": "2026-07-16T10:00:00.000Z",
+            "first_event_id": "evt-1",
+            "latest_event_id": "evt-1",
+            "job_id": "job-1",
+            "context": {"host": "ftp.example.com"},
+        }
+    )
+    store.upsert_incident(
+        {
+            **first_incident,
+            "last_seen_at": "2026-07-16T10:01:00.000Z",
+            "latest_event_id": "evt-2",
+            "occurrence_count": 2,
+        }
+    )
+    store.upsert_incident(
+        {
+            "id": "inc-2",
+            "fingerprint": "disk-full",
+            "severity": "critical",
+            "event_type": "disk.full",
+            "first_seen_at": "2026-07-16T10:02:00.000Z",
+            "last_seen_at": "2026-07-16T10:02:00.000Z",
+            "first_event_id": "evt-3",
+            "latest_event_id": "evt-3",
+        }
+    )
+
+    found = store.find_open_incident("ftp-failed")
+    assert found is not None
+    assert found["occurrence_count"] == 2
+    assert found["context"] == {"host": "ftp.example.com"}
+    incidents = store.query_incidents(severity="error", limit=1)
+    assert [item["id"] for item in incidents["items"]] == ["inc-1"]
+    assert incidents["next_cursor"] == ""
+
+
+def test_unread_alert_markers_are_per_user_and_severity(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.initialize()
+    store.append_operational_event(
+        _event("evt-warning", "2026-07-16T10:00:00.000Z", "warning")
+    )
+    store.append_operational_event(
+        _event("evt-error", "2026-07-16T10:01:00.000Z", "error")
+    )
+    store.append_operational_event(
+        _event("evt-critical", "2026-07-16T10:02:00.000Z", "critical")
+    )
+
+    assert store.unread_alert_summary("alice") == {
+        "warning": 1,
+        "error": 1,
+        "critical": 1,
+        "total": 3,
+        "highest": "critical",
+    }
+    store.mark_alerts_read(
+        "alice", "error", "evt-error", "2026-07-16T10:01:00.000Z"
+    )
+    assert store.unread_alert_summary("alice")["error"] == 0
+    assert store.unread_alert_summary("bob")["error"] == 1
+
+
+def test_prune_and_clear_operational_data_preserve_web_history(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.initialize()
+    store.append_history(
+        {"id": "history-1", "created_at": "2026-07-15T09:00:00.000Z"}
+    )
+    store.append_operational_event(
+        _event("evt-old", "2026-07-15T09:59:59.999Z")
+    )
+    store.append_operational_event(
+        _event("evt-boundary", "2026-07-15T10:00:00.000Z")
+    )
+    store.append_operational_event(
+        _event("evt-warning", "2026-07-15T09:00:00.000Z", "warning")
+    )
+    store.upsert_job_run(
+        {"id": "job-1", "status": "running", "started_at": "2026-07-16T10:00:00.000Z"}
+    )
+    store.upsert_incident(
+        {
+            "id": "inc-1",
+            "fingerprint": "failure",
+            "severity": "warning",
+            "event_type": "job.warning",
+            "first_seen_at": "2026-07-16T10:00:00.000Z",
+            "last_seen_at": "2026-07-16T10:00:00.000Z",
+            "first_event_id": "evt-warning",
+            "latest_event_id": "evt-warning",
+        }
+    )
+    store.mark_alerts_read(
+        "alice", "warning", "evt-warning", "2026-07-15T09:00:00.000Z"
+    )
+
+    assert store.prune_info_events("2026-07-15T10:00:00.000Z") == 1
+    assert [
+        item["id"] for item in store.query_operational_events(limit=20)["items"]
+    ] == ["evt-boundary", "evt-warning"]
+
+    assert store.clear_operational_data() == {
+        "operational_events": 2,
+        "job_runs": 1,
+        "incidents": 1,
+        "alert_reads": 1,
+    }
+    assert store.load_history()[0]["id"] == "history-1"
+
+
+def test_sqlite_adapter_delegates_observability_repository(tmp_path: Path) -> None:
+    adapter = SqliteDataStoreAdapter(str(tmp_path / "app.sqlite"))
+    adapter.append_operational_event(
+        _event("evt-1", "2026-07-16T10:00:00.000Z", "error")
+    )
+    assert adapter.query_operational_events(severities=("error",))["items"][0][
+        "id"
+    ] == "evt-1"

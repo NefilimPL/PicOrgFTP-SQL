@@ -35,7 +35,16 @@ def test_schema_creates_expected_tables(tmp_path: Path) -> None:
         "web_history",
         "file_index_cache",
         "pimcore_submissions",
+        "operational_events",
+        "job_runs",
+        "incidents",
+        "alert_reads",
     } <= tables
+
+    with sqlite3.connect(db_path) as conn:
+        version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+
+    assert version == 5
 
 
 def test_pimcore_submissions_roundtrip_and_filter(tmp_path: Path) -> None:
