@@ -1129,10 +1129,11 @@ def create_product(
     if duplicate:
         emit(
             "duplicate_check",
-            "warning",
+            "success",
             "EAN juz istnieje w Pimcore.",
             object_id=duplicate["id"],
             object_path=duplicate["path"],
+            status="existing",
             stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
         )
         return {
@@ -1326,13 +1327,14 @@ def update_product(
         object_path=identity["path"],
         stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
     )
+    changes = field_changes(current_values, verified_values)
     return {
         "object": identity,
         "values": verified_values,
         "marker": _object_marker(verified_data),
         "change_set": {
-            "kind": "updated",
-            "fields": field_changes(current_values, verified_values),
+            "kind": "updated" if changes else "synchronized",
+            "fields": changes,
         },
     }
 

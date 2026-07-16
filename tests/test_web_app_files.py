@@ -910,6 +910,8 @@ class WebAppFileTests(unittest.TestCase):
                             "prefix": "03",
                             "path": str(photo_path),
                             "filename": photo_path.name,
+                            "ftp": True,
+                            "ftp_filename": "5901234567890_03.jpg",
                         }
                     ],
                 ),
@@ -925,6 +927,7 @@ class WebAppFileTests(unittest.TestCase):
             self.assertEqual(migrated, ["03"])
             self.assertEqual(uploaded_slots[0].prefix, "03")
             self.assertEqual(uploaded_slots[0].source_path, str(photo_path))
+            self.assertEqual(uploaded_slots[0].original_filename, photo_path.name)
             self.assertEqual(delete_requests[0]["local_path"], str(photo_path))
 
     def test_ftp_only_photos_are_downloaded_when_local_file_is_missing(self) -> None:

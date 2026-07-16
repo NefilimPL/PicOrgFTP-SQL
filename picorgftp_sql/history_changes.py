@@ -140,7 +140,12 @@ def history_change_set(
 ) -> dict[str, object]:
     """Build the common history payload for a product operation."""
 
-    fields = field_changes(existing_entry, saved_entry)
+    comparable_existing = (
+        {key: existing_entry.get(key) for key in saved_entry}
+        if existing_entry is not None
+        else None
+    )
+    fields = field_changes(comparable_existing, saved_entry)
     files = file_changes(
         existing_photos,
         saved_files,

@@ -2159,7 +2159,11 @@ def _append_existing_photo_sources(
                     label=label,
                     filename_label=filename_label,
                     source_path=source_path,
-                    original_filename=ftp_filename or os.path.basename(source_path),
+                    original_filename=(
+                        os.path.basename(source_path)
+                        if had_local_source
+                        else ftp_filename or os.path.basename(source_path)
+                    ),
                 )
             )
             occupied_prefixes.add(prefix)

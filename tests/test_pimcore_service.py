@@ -628,6 +628,25 @@ def test_update_product_returns_only_verified_field_changes():
     }
 
 
+def test_update_product_classifies_verified_noop_as_synchronized():
+    verified = json.loads(json.dumps(EDIT_OBJECT))
+    verified["modificationDate"] = 101
+    client = Mock()
+    client.object_by_id.side_effect = [{"data": EDIT_OBJECT}, {"data": verified}]
+    client.update_object.return_value = {"success": True}
+
+    result = update_product(
+        PRODUCT_CONFIG,
+        91,
+        "100",
+        {"SKU": "OLD", "EAN": "5904804578169"},
+        client=client,
+        emit=lambda *args, **kwargs: None,
+    )
+
+    assert result["change_set"] == {"kind": "synchronized", "fields": []}
+
+
 def test_find_product_by_ean_returns_normalized_identity():
     client = ProductClient(existing=[{"id": 51, "key": "ABC", "fullPath": "/Produkty/ABC"}])
 
@@ -666,6 +685,22 @@ def test_create_product_rechecks_duplicate_before_post():
     assert result["duplicate"] is True
     assert result["object"]["id"] == 51
     assert client.created == []
+
+
+def test_create_product_reports_existing_duplicate_as_success_data():
+    events = []
+    result = create_product(
+        PRODUCT_CONFIG,
+        {"SKU": "ABC-1", "EAN": "5904804578169"},
+        client=ProductClient(
+            existing=[{"id": 51, "key": "ABC", "fullPath": "/Produkty/ABC"}]
+        ),
+        emit=lambda *args, **kwargs: events.append((args, kwargs)),
+    )
+
+    assert result["duplicate"] is True
+    assert events[0][0][1] == "success"
+    assert events[0][1]["status"] == "existing"
 
 
 def test_create_product_posts_when_ean_is_missing():

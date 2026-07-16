@@ -183,3 +183,32 @@ def test_history_change_set_classifies_created_updated_and_synchronized() -> Non
     assert synchronized["kind"] == "synchronized"
     assert synchronized["fields"] == []
     assert synchronized["files"] == []
+
+
+def test_history_change_set_ignores_derived_fields_absent_from_saved_product_shape() -> None:
+    existing = {
+        "product_id": "PRD-1",
+        "ean": "5901234567890",
+        "name": "Chair",
+        "type_name": "Armchair",
+        "model": "A1",
+        "color1": "Blue",
+        "color2": "",
+        "color3": "",
+        "extra": "",
+        "label": "Chair | Armchair | A1 | Blue - 5901234567890",
+    }
+    saved = {key: value for key, value in existing.items() if key != "label"}
+
+    result = history_change_set(
+        existing_entry=existing,
+        saved_entry=saved,
+        existing_photos=[],
+        saved_files=[],
+        delete_requests=[],
+        migrated_prefixes=[],
+        integrations={},
+    )
+
+    assert result["kind"] == "synchronized"
+    assert result["fields"] == []

@@ -117,6 +117,7 @@ from .services.pimcore_service import (
 from .services.translation_service import translate_text
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
 from .sql_profiles import (
+    DEFAULT_SQL_PROFILE_ID,
     SQL_PROFILES_KEY,
     additional_sql_profiles,
     normalize_sql_profiles,
@@ -129,6 +130,7 @@ from .product_fields import (
     missing_required_fields,
     normalize_product_fields,
 )
+
 from .workflow_utils import (
     build_product_directory,
     parse_slot_filename,
@@ -137,6 +139,18 @@ from .workflow_utils import (
 )
 from .web_workflow import available_convert_formats
 from .version import get_display_version
+
+
+SQL_PROFILE_WARNING_CODES_MAX = 20
+SQL_PROFILE_ERROR_MAX_BYTES = 2000
+_SQL_CREDENTIAL_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(pwd|password|token|api(?:[_ -]?key)|cookie)\b\s*[:=]\s*"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+)
+_SQL_AUTHORIZATION_ASSIGNMENT_RE = re.compile(
+    r"(?i)\bauthorization\b\s*[:=]\s*"
+    r"(?:\"[^\"]*\"|'[^']*'|(?:bearer\s+)?[^\s,;]+)"
+)
 
 
 WEB_FTP_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
@@ -1877,6 +1891,36 @@ def _rewrite_sql_template_source(template: object, source: object) -> str:
     return re.sub(r"\{([^{}]+)\}", replace, str(template or ""))
 
 
+def _redact_sql_integration_error(
+    value: object,
+    profiles: list[dict[str, object]],
+) -> str:
+    text = str(value or "")
+    known_secrets = {
+        str(profile.get("password") or "")
+        for profile in profiles
+        if len(str(profile.get("password") or "")) >= 4
+    }
+    for secret in sorted(known_secrets, key=len, reverse=True):
+        text = text.replace(secret, "[REDACTED]")
+    text = _SQL_AUTHORIZATION_ASSIGNMENT_RE.sub("authorization=[REDACTED]", text)
+    text = _SQL_CREDENTIAL_ASSIGNMENT_RE.sub("credential=[REDACTED]", text)
+    encoded = text.encode("utf-8")
+    if len(encoded) > SQL_PROFILE_ERROR_MAX_BYTES:
+        text = encoded[:SQL_PROFILE_ERROR_MAX_BYTES].decode("utf-8", errors="ignore")
+    return text
+
+
+def _sql_warning_codes(warnings: object) -> list[str]:
+    if not isinstance(warnings, list):
+        return []
+    return [
+        _text(warning.get("code"))
+        for warning in warnings
+        if isinstance(warning, dict) and _text(warning.get("code"))
+    ][:SQL_PROFILE_WARNING_CODES_MAX]
+
+
 def _render_templates(
     settings_payload: dict[str, object],
     product_values: object,
@@ -1929,6 +1973,7 @@ def _render_templates(
     sql_profile_results: list[dict[str, object]] = []
     for source in sql_template_sources:
         mapping = mappings[source]
+        required = bool(mapping.get("required"))
         sql_key = _sql_template_source(source)
         extra_sources.append(
             SourceDefinition(sql_key, f"SQL {mapping.get('label') or source}", "sql", (sql_key,))
@@ -1949,9 +1994,9 @@ def _render_templates(
                 mappings=mappings_list,
             )
         except Exception as exc:
-            warnings.append({"source": source, "code": "sql_error", "message": str(exc)})
+            safe_error = _redact_sql_integration_error(exc, profiles)
+            warnings.append({"source": source, "code": "sql_error", "message": safe_error})
             extra_values[sql_key] = ""
-            safe_error = redact_pimcore_log_value({"error": str(exc)})
             sql_profile_results.append(
                 {
                     "profile_id": profile_id,
@@ -1959,17 +2004,14 @@ def _render_templates(
                     "status": "error",
                     "elapsed_ms": int((time.perf_counter() - integration_started) * 1000),
                     "warning_codes": ["sql_error"],
-                    "error": safe_error.get("error", "") if isinstance(safe_error, dict) else "",
+                    "error": safe_error,
+                    "required": required,
                 }
             )
         else:
             extra_values[sql_key] = sql_result.value
             warnings.extend({"source": source, **warning} for warning in sql_result.warnings)
-            warning_codes = [
-                _text(warning.get("code"))
-                for warning in sql_result.warnings
-                if isinstance(warning, dict) and _text(warning.get("code"))
-            ]
+            warning_codes = _sql_warning_codes(sql_result.warnings)
             sql_profile_results.append(
                 {
                     "profile_id": profile_id,
@@ -1978,6 +2020,7 @@ def _render_templates(
                     "elapsed_ms": int((time.perf_counter() - integration_started) * 1000),
                     "warning_codes": warning_codes,
                     "error": "",
+                    "required": required,
                 }
             )
     rendered = render_mapping_templates(
@@ -2004,6 +2047,7 @@ def _render_templates(
         output[source] = value
     for mapping in mappings_list:
         source = mapping["source"]
+        required = bool(mapping.get("required"))
         if source not in selected_targets:
             continue
         if source not in sql_sources:
@@ -2027,9 +2071,9 @@ def _render_templates(
                 mappings=mappings_list,
             )
         except Exception as exc:
-            warnings.append({"source": source, "code": "sql_error", "message": str(exc)})
+            safe_error = _redact_sql_integration_error(exc, profiles)
+            warnings.append({"source": source, "code": "sql_error", "message": safe_error})
             calculated = ""
-            safe_error = redact_pimcore_log_value({"error": str(exc)})
             sql_profile_results.append(
                 {
                     "profile_id": profile_id,
@@ -2037,17 +2081,14 @@ def _render_templates(
                     "status": "error",
                     "elapsed_ms": int((time.perf_counter() - integration_started) * 1000),
                     "warning_codes": ["sql_error"],
-                    "error": safe_error.get("error", "") if isinstance(safe_error, dict) else "",
+                    "error": safe_error,
+                    "required": required,
                 }
             )
         else:
             calculated = sql_result.value
             warnings.extend({"source": source, **warning} for warning in sql_result.warnings)
-            warning_codes = [
-                _text(warning.get("code"))
-                for warning in sql_result.warnings
-                if isinstance(warning, dict) and _text(warning.get("code"))
-            ]
+            warning_codes = _sql_warning_codes(sql_result.warnings)
             sql_profile_results.append(
                 {
                     "profile_id": profile_id,
@@ -2056,6 +2097,7 @@ def _render_templates(
                     "elapsed_ms": int((time.perf_counter() - integration_started) * 1000),
                     "warning_codes": warning_codes,
                     "error": "",
+                    "required": required,
                 }
             )
         calculated_values[source] = calculated
@@ -2160,14 +2202,37 @@ def find_pimcore_product_by_ean(ean: object) -> dict[str, object]:
     }
 
 
-def _safe_pimcore_integration_results(value: object) -> dict[str, object]:
+def _safe_pimcore_integration_results(
+    value: object,
+    settings_payload: dict[str, object],
+) -> dict[str, object]:
     source = value if isinstance(value, dict) else {}
     raw_profiles = source.get("sql_profiles")
     profiles: list[dict[str, object]] = []
     if not isinstance(raw_profiles, list):
         return {"sql_profiles": profiles}
+    configured_profiles = normalize_sql_profiles(config.CONFIG)
+    trusted_mappings: dict[tuple[str, str], bool] = {}
+    for mapping in settings_payload.get("field_mappings", []):
+        if not isinstance(mapping, dict):
+            continue
+        template = mapping.get("value_template")
+        if not (
+            str(template or "").strip().casefold() == "sql"
+            or _template_uses_sql_source(template)
+        ):
+            continue
+        mapping_source = _text(mapping.get("source"))
+        profile_id = _text(mapping.get("sql_profile_id")) or DEFAULT_SQL_PROFILE_ID
+        if mapping_source:
+            trusted_mappings[(mapping_source, profile_id)] = bool(mapping.get("required"))
     for item in raw_profiles[:100]:
         if not isinstance(item, dict):
+            continue
+        profile_id = _text(item.get("profile_id")) or DEFAULT_SQL_PROFILE_ID
+        item_source = _text(item.get("source"))
+        trusted_key = (item_source, profile_id)
+        if trusted_key not in trusted_mappings:
             continue
         status = _text(item.get("status")).casefold()
         if status not in {"success", "warning", "error"}:
@@ -2178,17 +2243,22 @@ def _safe_pimcore_integration_results(value: object) -> dict[str, object]:
             elapsed_ms = 0
         raw_codes = item.get("warning_codes")
         warning_codes = (
-            [_text(code)[:100] for code in raw_codes if isinstance(code, str) and _text(code)]
+            [
+                _text(code)[:100]
+                for code in raw_codes
+                if isinstance(code, str) and _text(code)
+            ][:SQL_PROFILE_WARNING_CODES_MAX]
             if isinstance(raw_codes, list)
             else []
         )
         filtered = {
-            "profile_id": _text(item.get("profile_id"))[:200],
-            "source": _text(item.get("source"))[:200],
+            "profile_id": profile_id[:200],
+            "source": item_source[:200],
             "status": status,
             "elapsed_ms": elapsed_ms,
             "warning_codes": warning_codes,
-            "error": _text(item.get("error"))[:2000],
+            "error": _redact_sql_integration_error(item.get("error"), configured_profiles),
+            "required": trusted_mappings[trusted_key],
         }
         safe = redact_pimcore_log_value(filtered)
         profiles.append(safe if isinstance(safe, dict) else filtered)
@@ -2215,7 +2285,11 @@ def _emit_sql_profile_integration_events(
             "warning_count": len(warning_codes) if isinstance(warning_codes, list) else 0,
         }
         emit_event(
-            severity="error" if status == "error" else "info",
+            severity=(
+                "error"
+                if status == "error" and bool(item.get("required"))
+                else "info"
+            ),
             event_type="integration.sql_profile.completed",
             module="pimcore.runtime",
             stage="sql_profile",
@@ -2266,8 +2340,11 @@ def create_pimcore_product(
     integration_results: object = None,
 ) -> dict[str, object]:
     submitted = dict(values) if isinstance(values, dict) else {}
-    safe_integrations = _safe_pimcore_integration_results(integration_results)
     settings_payload = _active_pimcore_runtime_settings()
+    safe_integrations = _safe_pimcore_integration_results(
+        integration_results,
+        settings_payload,
+    )
     operation_id = secrets.token_hex(12)
     started = time.time()
     events: list[dict[str, object]] = []
@@ -2405,7 +2482,10 @@ def update_pimcore_product(
 ) -> dict[str, object]:
     settings_payload = _active_pimcore_runtime_settings()
     submitted = dict(values) if isinstance(values, dict) else {}
-    safe_integrations = _safe_pimcore_integration_results(integration_results)
+    safe_integrations = _safe_pimcore_integration_results(
+        integration_results,
+        settings_payload,
+    )
     operation_id = secrets.token_hex(12)
     started = time.time()
     events: list[dict[str, object]] = []
