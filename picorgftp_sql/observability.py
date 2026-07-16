@@ -28,8 +28,15 @@ EventMirror = Callable[[dict[str, object]], object]
 _event_mirror: EventMirror | None = None
 
 
+def _truncate_utf8(value: str, limit: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= limit:
+        return value
+    return encoded[:limit].decode("utf-8", errors="ignore")
+
+
 def _text(value: object) -> str:
-    return str(value or "").strip()[:SCALAR_TEXT_LIMIT]
+    return _truncate_utf8(str(value or "").strip(), SCALAR_TEXT_LIMIT)
 
 
 def _utc_datetime(value: datetime | None = None) -> datetime:
@@ -68,7 +75,7 @@ def redact_value(value: object, key: str = "") -> object:
     if isinstance(value, (list, tuple)):
         return [redact_value(item) for item in value]
     if isinstance(value, str):
-        return value[:SCALAR_TEXT_LIMIT]
+        return _truncate_utf8(value, SCALAR_TEXT_LIMIT)
     return value
 
 
@@ -126,9 +133,14 @@ def emit_event(
     traceback_text = ""
     if exception is not None:
         exception_type = _text(type(exception).__name__)
-        traceback_text = "".join(
-            traceback.format_exception(type(exception), exception, exception.__traceback__)
-        )[:TRACEBACK_TEXT_LIMIT]
+        traceback_text = _truncate_utf8(
+            "".join(
+                traceback.format_exception(
+                    type(exception), exception, exception.__traceback__
+                )
+            ),
+            TRACEBACK_TEXT_LIMIT,
+        )
 
     safe_details = redact_value(details if isinstance(details, dict) else {})
     event: dict[str, object] = {
@@ -230,9 +242,66 @@ def coalesce_incident(
     current_iso = _iso_utc(current)
     fingerprint = _incident_fingerprint(event)
     store = observability_store()
+    latest_context = _incident_context_payload(event)
+    atomic_coalesce = getattr(store, "coalesce_incident", None)
+    if callable(atomic_coalesce):
+        incident_result = dict(
+            atomic_coalesce(
+                {
+                    "id": f"inc-{uuid.uuid4().hex}",
+                    "fingerprint": fingerprint,
+                    "severity": severity,
+                    "event_type": _text(event.get("event_type")),
+                    "status": "open",
+                    "first_seen_at": current_iso,
+                    "last_seen_at": current_iso,
+                    "occurrence_count": 1,
+                    "first_event_id": _text(event.get("id")),
+                    "latest_event_id": _text(event.get("id")),
+                    "job_id": _text(event.get("job_id")),
+                    "correlation_id": _text(event.get("correlation_id")),
+                    "notification_window_at": current_iso,
+                    "context": latest_context,
+                }
+            )
+        )
+        notification_due = bool(incident_result.get("notification_due"))
+    else:
+        incident_result, notification_due = _coalesce_with_legacy_store(
+            store,
+            event,
+            fingerprint=fingerprint,
+            severity=severity,
+            current=current,
+            current_iso=current_iso,
+            latest_context=latest_context,
+        )
+
+    incident_result["notification_due"] = notification_due
+
+    event["incident_id"] = _text(incident_result.get("id"))
+    persisted_event = redact_value(event)
+    if not isinstance(persisted_event, dict):
+        persisted_event = {}
+    persisted_event.pop("notification_due", None)
+    store.append_operational_event(persisted_event)
+    return incident_result
+
+
+def _coalesce_with_legacy_store(
+    store: object,
+    event: dict[str, object],
+    *,
+    fingerprint: str,
+    severity: str,
+    current: datetime,
+    current_iso: str,
+    latest_context: dict[str, object],
+) -> tuple[dict[str, object], bool]:
+    """Keep lightweight test doubles compatible; SQLite uses its atomic method."""
+
     existing = store.find_open_incident(fingerprint)
     notification_due = existing is None
-    latest_context = _incident_context_payload(event)
 
     if existing is None:
         incident: dict[str, object] = {
@@ -268,13 +337,14 @@ def coalesce_incident(
                 "last_seen_at": current_iso,
                 "occurrence_count": occurrence_count,
                 "latest_event_id": _text(event.get("id")),
-                "job_id": _text(incident.get("job_id"))
-                or _text(event.get("job_id")),
-                "correlation_id": _text(incident.get("correlation_id"))
-                or _text(event.get("correlation_id")),
                 "context": merged_context,
             }
         )
+        latest_job_id = _text(event.get("job_id"))
+        latest_correlation_id = _text(event.get("correlation_id"))
+        if latest_job_id or latest_correlation_id:
+            incident["job_id"] = latest_job_id
+            incident["correlation_id"] = latest_correlation_id
         window_started = _parse_datetime(incident.get("notification_window_at"))
         if window_started is None or current - window_started >= INCIDENT_NOTIFICATION_WINDOW:
             notification_due = True
@@ -282,15 +352,7 @@ def coalesce_incident(
 
     persisted = store.upsert_incident(incident)
     incident_result = dict(persisted)
-    incident_result["notification_due"] = notification_due
-
-    event["incident_id"] = _text(incident_result.get("id"))
-    persisted_event = redact_value(event)
-    if not isinstance(persisted_event, dict):
-        persisted_event = {}
-    persisted_event.pop("notification_due", None)
-    store.append_operational_event(persisted_event)
-    return incident_result
+    return incident_result, notification_due
 
 
 def _correlated_events(incident: dict[str, object]) -> list[dict[str, object]]:
@@ -304,9 +366,11 @@ def _correlated_events(incident: dict[str, object]) -> list[dict[str, object]]:
     cursor = ""
     seen_cursors: set[str] = set()
     while True:
-        query: dict[str, object] = {"cursor": cursor, "limit": 100}
+        query: dict[str, object] = {"cursor": cursor, "limit": 20}
         if job_id:
             query["job_id"] = job_id
+        else:
+            query["correlation_id"] = correlation_id
         page = store.query_operational_events(**query)
         page_items = page.get("items", []) if isinstance(page, dict) else []
         for item in page_items if isinstance(page_items, list) else []:
@@ -327,7 +391,7 @@ def _correlated_events(incident: dict[str, object]) -> list[dict[str, object]]:
 
 def _bounded_context_limit(value: object) -> int:
     try:
-        return max(0, min(100, int(value)))
+        return max(0, min(5, int(value)))
     except (TypeError, ValueError):
         return 5
 
@@ -342,10 +406,10 @@ def incident_context(
     first_id = _text(incident.get("first_event_id"))
     latest_id = _text(incident.get("latest_event_id"))
     positions = {_text(item.get("id")): index for index, item in enumerate(events)}
-    if first_id not in positions or latest_id not in positions:
+    if latest_id not in positions:
         return {"before": [], "problem": [], "after": []}
-    first_index = positions[first_id]
     latest_index = positions[latest_id]
+    first_index = positions.get(first_id, latest_index)
     if latest_index < first_index:
         first_index, latest_index = latest_index, first_index
     before_count = _bounded_context_limit(before_limit)

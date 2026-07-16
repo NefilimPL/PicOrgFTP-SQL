@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from threading import Barrier
 
 from picorgftp_sql.data_store import SqliteDataStoreAdapter
 from picorgftp_sql.sqlite_store import SqliteStore
@@ -60,6 +62,7 @@ def test_operational_schema_and_cursor_queries(tmp_path: Path) -> None:
             username="bob",
             ean="5900000000002",
             job_id="job-2",
+            correlation_id="correlation-2",
             module="pimcore",
             summary="Pimcore warning",
         )
@@ -93,6 +96,12 @@ def test_operational_schema_and_cursor_queries(tmp_path: Path) -> None:
         item["id"]
         for item in store.query_operational_events(after_id="evt-1")["items"]
     ] == ["evt-3", "evt-2"]
+    assert [
+        item["id"]
+        for item in store.query_operational_events(correlation_id="correlation-1")[
+            "items"
+        ]
+    ] == ["evt-2", "evt-1"]
 
 
 def test_event_timestamps_are_canonical_and_sort_chronologically(
@@ -230,6 +239,47 @@ def test_job_and_incident_roundtrips_use_descending_cursors(tmp_path: Path) -> N
     assert incidents["next_cursor"] == ""
 
 
+def test_atomic_incident_coalescing_across_store_connections(tmp_path: Path) -> None:
+    db_path = tmp_path / "app.sqlite"
+    stores = [SqliteStore(str(db_path)), SqliteStore(str(db_path))]
+    for store in stores:
+        store.initialize()
+    barrier = Barrier(2)
+
+    def coalesce(index: int) -> dict[str, object]:
+        barrier.wait()
+        return stores[index].coalesce_incident(
+            {
+                "id": f"inc-{index}",
+                "fingerprint": "same-failure",
+                "severity": "error",
+                "event_type": "ftp.failed",
+                "status": "open",
+                "first_seen_at": "2026-07-16T10:00:00.000Z",
+                "last_seen_at": "2026-07-16T10:00:00.000Z",
+                "first_event_id": f"evt-{index}",
+                "latest_event_id": f"evt-{index}",
+                "correlation_id": f"corr-{index}",
+                "notification_window_at": "2026-07-16T10:00:00.000Z",
+                "context": {"attempt": index},
+            }
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(coalesce, range(2)))
+
+    stored = stores[0].find_open_incident("same-failure")
+    assert stored is not None
+    assert stored["occurrence_count"] == 2
+    assert len({item["id"] for item in results}) == 1
+    assert sorted(item["notification_due"] for item in results) == [False, True]
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM incidents WHERE fingerprint = ? AND status = 'open'",
+            ("same-failure",),
+        ).fetchone()[0] == 1
+
+
 def test_unread_alert_markers_are_per_user_and_severity(tmp_path: Path) -> None:
     store = SqliteStore(str(tmp_path / "app.sqlite"))
     store.initialize()
@@ -345,3 +395,27 @@ def test_sqlite_adapter_delegates_observability_repository(tmp_path: Path) -> No
     assert adapter.query_operational_events(severities=("error",))["items"][0][
         "id"
     ] == "evt-1"
+    assert adapter.query_operational_events(correlation_id="correlation-1")[
+        "items"
+    ][0]["id"] == "evt-1"
+
+
+def test_sqlite_adapter_delegates_atomic_incident_coalescing(tmp_path: Path) -> None:
+    adapter = SqliteDataStoreAdapter(str(tmp_path / "app.sqlite"))
+
+    incident = adapter.coalesce_incident(
+        {
+            "id": "inc-1",
+            "fingerprint": "failure",
+            "severity": "error",
+            "event_type": "ftp.failed",
+            "first_seen_at": "2026-07-16T10:00:00.000Z",
+            "last_seen_at": "2026-07-16T10:00:00.000Z",
+            "first_event_id": "evt-1",
+            "latest_event_id": "evt-1",
+            "notification_window_at": "2026-07-16T10:00:00.000Z",
+        }
+    )
+
+    assert incident["id"] == "inc-1"
+    assert incident["notification_due"] is True

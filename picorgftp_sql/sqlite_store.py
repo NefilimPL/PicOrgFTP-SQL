@@ -8,7 +8,7 @@ import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -446,6 +446,8 @@ class SqliteStore:
                     ON operational_events(correlation_id);
                 CREATE INDEX IF NOT EXISTS idx_incidents_fingerprint_last_seen_at
                     ON incidents(fingerprint, last_seen_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_incidents_one_open_fingerprint
+                    ON incidents(fingerprint) WHERE status = 'open';
                 CREATE INDEX IF NOT EXISTS idx_job_runs_started_at_id
                     ON job_runs(started_at, id);
                 """
@@ -553,6 +555,7 @@ class SqliteStore:
         username: str = "",
         ean: str = "",
         job_id: str = "",
+        correlation_id: str = "",
         module: str = "",
         query: str = "",
         after_id: str = "",
@@ -580,6 +583,7 @@ class SqliteStore:
             ("username", username),
             ("ean", ean),
             ("job_id", job_id),
+            ("correlation_id", correlation_id),
             ("module", module),
         ):
             if _text(value):
@@ -792,6 +796,145 @@ class SqliteStore:
                 (_text(fingerprint),),
             ).fetchone()
         return self._incident_from_row(row) if row else None
+
+    def coalesce_incident(
+        self,
+        occurrence: dict[str, object],
+        notification_window_seconds: int = 15 * 60,
+    ) -> dict[str, Any]:
+        """Atomically create or update one open fingerprint occurrence."""
+
+        self.initialize()
+        context = occurrence.get("context")
+        candidate: dict[str, Any] = {
+            "id": _text(occurrence.get("id")) or f"inc-{uuid.uuid4().hex}",
+            "fingerprint": _text(occurrence.get("fingerprint")),
+            "severity": _text(occurrence.get("severity")),
+            "event_type": _text(occurrence.get("event_type")),
+            "status": "open",
+            "first_seen_at": _iso_from_timestamp(
+                occurrence.get("first_seen_at") or _now_iso()
+            ),
+            "last_seen_at": _iso_from_timestamp(
+                occurrence.get("last_seen_at") or _now_iso()
+            ),
+            "occurrence_count": 1,
+            "first_event_id": _text(occurrence.get("first_event_id")),
+            "latest_event_id": _text(occurrence.get("latest_event_id")),
+            "job_id": _text(occurrence.get("job_id")),
+            "correlation_id": _text(occurrence.get("correlation_id")),
+            "notification_window_at": _iso_from_timestamp(
+                occurrence.get("notification_window_at")
+                or occurrence.get("last_seen_at")
+                or _now_iso()
+            ),
+            "context": context if isinstance(context, dict) else {},
+        }
+        try:
+            window_seconds = max(0, int(notification_window_seconds))
+        except (TypeError, ValueError):
+            window_seconds = 15 * 60
+
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT * FROM incidents
+                WHERE fingerprint = ? AND status = 'open'
+                ORDER BY last_seen_at DESC, id DESC
+                LIMIT 1
+                """,
+                (candidate["fingerprint"],),
+            ).fetchone()
+            notification_due = row is None
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO incidents (
+                        id, fingerprint, severity, event_type, status,
+                        first_seen_at, last_seen_at, occurrence_count,
+                        first_event_id, latest_event_id, job_id, correlation_id,
+                        notification_window_at, context_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        candidate["id"], candidate["fingerprint"],
+                        candidate["severity"], candidate["event_type"],
+                        candidate["status"], candidate["first_seen_at"],
+                        candidate["last_seen_at"], 1,
+                        candidate["first_event_id"], candidate["latest_event_id"],
+                        candidate["job_id"], candidate["correlation_id"],
+                        candidate["notification_window_at"],
+                        _json_dumps(candidate["context"]),
+                    ),
+                )
+                incident_id = candidate["id"]
+            else:
+                existing = self._incident_from_row(row)
+                merged_context = dict(existing.get("context") or {})
+                merged_context.update(candidate["context"])
+                severity_order = ("info", "warning", "error", "critical")
+                old_severity = _text(existing.get("severity"))
+                new_severity = candidate["severity"]
+                old_rank = (
+                    severity_order.index(old_severity)
+                    if old_severity in severity_order
+                    else -1
+                )
+                new_rank = (
+                    severity_order.index(new_severity)
+                    if new_severity in severity_order
+                    else -1
+                )
+                severity = old_severity if old_rank >= new_rank else new_severity
+                notification_window_at = _text(
+                    existing.get("notification_window_at")
+                )
+                try:
+                    current = datetime.fromisoformat(
+                        candidate["last_seen_at"].replace("Z", "+00:00")
+                    )
+                    window_started = datetime.fromisoformat(
+                        notification_window_at.replace("Z", "+00:00")
+                    )
+                    notification_due = (
+                        current - window_started
+                        >= timedelta(seconds=window_seconds)
+                    )
+                except (TypeError, ValueError):
+                    notification_due = True
+                if notification_due:
+                    notification_window_at = candidate["last_seen_at"]
+                latest_job_id = candidate["job_id"]
+                latest_correlation_id = candidate["correlation_id"]
+                if not latest_job_id and not latest_correlation_id:
+                    latest_job_id = _text(existing.get("job_id"))
+                    latest_correlation_id = _text(existing.get("correlation_id"))
+                incident_id = _text(existing.get("id"))
+                conn.execute(
+                    """
+                    UPDATE incidents SET
+                        severity = ?, event_type = ?, last_seen_at = ?,
+                        occurrence_count = occurrence_count + 1,
+                        latest_event_id = ?, job_id = ?, correlation_id = ?,
+                        notification_window_at = ?, context_json = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        severity, candidate["event_type"],
+                        candidate["last_seen_at"], candidate["latest_event_id"],
+                        latest_job_id, latest_correlation_id,
+                        notification_window_at, _json_dumps(merged_context),
+                        incident_id,
+                    ),
+                )
+            persisted_row = conn.execute(
+                "SELECT * FROM incidents WHERE id = ?", (incident_id,)
+            ).fetchone()
+
+        result = self._incident_from_row(persisted_row)
+        result["notification_due"] = notification_due
+        return result
 
     def query_incidents(
         self, *, severity: str = "", cursor: str = "", limit: int = 20

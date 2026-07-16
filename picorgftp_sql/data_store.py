@@ -81,6 +81,7 @@ class SqliteDataStoreAdapter:
         username: str = "",
         ean: str = "",
         job_id: str = "",
+        correlation_id: str = "",
         module: str = "",
         query: str = "",
         after_id: str = "",
@@ -93,6 +94,7 @@ class SqliteDataStoreAdapter:
             username=username,
             ean=ean,
             job_id=job_id,
+            correlation_id=correlation_id,
             module=module,
             query=query,
             after_id=after_id,
@@ -114,6 +116,16 @@ class SqliteDataStoreAdapter:
 
     def find_open_incident(self, fingerprint: str) -> dict[str, Any] | None:
         return self.store.find_open_incident(fingerprint)
+
+    def coalesce_incident(
+        self,
+        occurrence: dict[str, object],
+        notification_window_seconds: int = 15 * 60,
+    ) -> dict[str, Any]:
+        return self.store.coalesce_incident(
+            occurrence,
+            notification_window_seconds=notification_window_seconds,
+        )
 
     def query_incidents(
         self, *, severity: str = "", cursor: str = "", limit: int = 20

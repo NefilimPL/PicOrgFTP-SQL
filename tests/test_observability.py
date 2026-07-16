@@ -41,8 +41,15 @@ class FakeStore:
     def query_operational_events(self, **filters: object) -> dict[str, object]:
         events = list(reversed(self.events))
         job_id = str(filters.get("job_id") or "")
+        correlation_id = str(filters.get("correlation_id") or "")
         if job_id:
             events = [item for item in events if item.get("job_id") == job_id]
+        if correlation_id:
+            events = [
+                item
+                for item in events
+                if item.get("correlation_id") == correlation_id
+            ]
         return {"items": events, "next_cursor": ""}
 
     def prune_info_events(self, before: str) -> int:
@@ -95,6 +102,7 @@ def test_redact_value_handles_nested_secrets_and_caps_scalar_strings() -> None:
         ],
         "cookieJar": "[REDACTED]",
     }
+    assert len(str(observability.redact_value("ą" * 8192)).encode("utf-8")) <= 8192
 
 
 def test_emit_event_normalizes_and_redacts_before_storage(monkeypatch) -> None:
@@ -139,7 +147,7 @@ def test_emit_event_captures_exception_with_bounded_traceback(monkeypatch) -> No
     fake = FakeStore()
     monkeypatch.setattr(observability, "observability_store", lambda: fake)
     try:
-        raise RuntimeError("x" * 40_000)
+        raise RuntimeError("ą" * 40_000)
     except RuntimeError as exc:
         event = observability.emit_event(
             severity="critical",
@@ -149,7 +157,7 @@ def test_emit_event_captures_exception_with_bounded_traceback(monkeypatch) -> No
         )
 
     assert event["exception_type"] == "RuntimeError"
-    assert len(str(event["traceback_text"])) == 32 * 1024
+    assert len(str(event["traceback_text"]).encode("utf-8")) <= 32 * 1024
 
 
 def test_incidents_have_stable_fingerprints_and_fifteen_minute_windows(
@@ -236,6 +244,35 @@ def test_coalesce_incident_redacts_the_event_rewrite(monkeypatch) -> None:
     }
 
 
+def test_incident_scope_follows_the_latest_correlation(monkeypatch) -> None:
+    fake = FakeStore()
+    monkeypatch.setattr(observability, "observability_store", lambda: fake)
+    first = observability.coalesce_incident(
+        _event("evt-corr-1", job_id="", correlation_id="corr-1"),
+        datetime(2026, 7, 16, 10, 0, tzinfo=UTC),
+    )
+    second = observability.coalesce_incident(
+        _event(
+            "evt-corr-2",
+            created_at="2026-07-16T10:01:00.000Z",
+            job_id="",
+            correlation_id="corr-2",
+        ),
+        datetime(2026, 7, 16, 10, 1, tzinfo=UTC),
+    )
+
+    assert first is not None and second is not None
+    assert second["id"] == first["id"]
+    assert second["correlation_id"] == "corr-2"
+    context = observability.incident_context(second)
+    assert [item["id"] for item in context["problem"]] == ["evt-corr-2"]
+    assert all(
+        item["correlation_id"] == "corr-2"
+        for section in context.values()
+        for item in section
+    )
+
+
 def test_incident_context_uses_correlation_and_excludes_nearby_events(
     monkeypatch,
 ) -> None:
@@ -292,6 +329,105 @@ def test_incident_context_prefers_job_scope_and_honors_limits(monkeypatch) -> No
     assert [item["id"] for item in context["before"]] == ["evt-1"]
     assert [item["id"] for item in context["problem"]] == ["evt-2", "evt-3"]
     assert [item["id"] for item in context["after"]] == ["evt-4", "evt-5"]
+
+
+def test_incident_context_pages_in_batches_of_twenty(monkeypatch) -> None:
+    class PagedStore(FakeStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.requested_limits: list[int] = []
+
+        def query_operational_events(self, **filters: object) -> dict[str, object]:
+            limit = int(filters.get("limit") or 0)
+            self.requested_limits.append(limit)
+            correlation_id = str(filters.get("correlation_id") or "")
+            events = list(reversed(self.events))
+            if correlation_id:
+                events = [
+                    item
+                    for item in events
+                    if item.get("correlation_id") == correlation_id
+                ]
+            start = int(str(filters.get("cursor") or "0"))
+            end = start + limit
+            return {
+                "items": events[start:end],
+                "next_cursor": str(end) if end < len(events) else "",
+            }
+
+    fake = PagedStore()
+    fake.events = [
+        _event(
+            f"target-{index:02d}",
+            created_at=f"2026-07-16T10:{index:02d}:00.000Z",
+            job_id="",
+            correlation_id="target",
+        )
+        for index in range(25)
+    ] + [
+        _event(
+            f"other-{index:02d}",
+            created_at=f"2026-07-16T11:{index:02d}:00.000Z",
+            job_id="",
+            correlation_id="other",
+        )
+        for index in range(10)
+    ]
+    monkeypatch.setattr(observability, "observability_store", lambda: fake)
+
+    context = observability.incident_context(
+        {
+            "correlation_id": "target",
+            "first_event_id": "target-02",
+            "latest_event_id": "target-04",
+        }
+    )
+
+    assert fake.requested_limits == [20, 20]
+    assert [item["id"] for item in context["problem"]] == [
+        "target-02",
+        "target-03",
+        "target-04",
+    ]
+    assert all(
+        item["correlation_id"] == "target"
+        for section in context.values()
+        for item in section
+    )
+
+
+def test_incident_context_clamps_public_limits_to_five(monkeypatch) -> None:
+    fake = FakeStore()
+    fake.events = [
+        _event(f"evt-{index:02d}", created_at=f"2026-07-16T10:{index:02d}:00.000Z")
+        for index in range(14)
+    ]
+    monkeypatch.setattr(observability, "observability_store", lambda: fake)
+
+    context = observability.incident_context(
+        {
+            "job_id": "job-1",
+            "first_event_id": "evt-06",
+            "latest_event_id": "evt-07",
+        },
+        before_limit=999,
+        after_limit=999,
+    )
+
+    assert [item["id"] for item in context["before"]] == [
+        "evt-01",
+        "evt-02",
+        "evt-03",
+        "evt-04",
+        "evt-05",
+    ]
+    assert [item["id"] for item in context["after"]] == [
+        "evt-08",
+        "evt-09",
+        "evt-10",
+        "evt-11",
+        "evt-12",
+    ]
 
 
 def test_record_job_redacts_all_nested_data(monkeypatch) -> None:
