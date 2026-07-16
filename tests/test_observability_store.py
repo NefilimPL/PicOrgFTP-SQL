@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 from picorgftp_sql.data_store import SqliteDataStoreAdapter
@@ -91,6 +93,60 @@ def test_operational_schema_and_cursor_queries(tmp_path: Path) -> None:
         item["id"]
         for item in store.query_operational_events(after_id="evt-1")["items"]
     ] == ["evt-3", "evt-2"]
+
+
+def test_event_timestamps_are_canonical_and_sort_chronologically(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.initialize()
+    store.append_operational_event(
+        _event("evt-whole", "2026-07-16T10:00:00Z")
+    )
+    store.append_operational_event(
+        _event("evt-fraction", "2026-07-16T10:00:00.999Z")
+    )
+    offset = store.append_operational_event(
+        _event("evt-offset", "2026-07-16T12:00:00+02:00")
+    )
+    malformed = store.append_operational_event(
+        _event("evt-malformed", "not-aTtimestampZ")
+    )
+
+    page = store.query_operational_events(
+        since="2026-07-16T10:00:00.000Z", limit=20
+    )
+    ordered_ids = [item["id"] for item in page["items"]]
+    assert ordered_ids.index("evt-fraction") < ordered_ids.index("evt-whole")
+    by_id = {item["id"]: item for item in page["items"]}
+    assert by_id["evt-whole"]["created_at"] == "2026-07-16T10:00:00.000Z"
+    assert by_id["evt-fraction"]["created_at"] == "2026-07-16T10:00:00.999Z"
+    assert offset["created_at"] == "2026-07-16T10:00:00.000Z"
+    assert malformed["created_at"] != "not-aTtimestampZ"
+    datetime.fromisoformat(malformed["created_at"].replace("Z", "+00:00"))
+
+
+def test_equal_timestamp_cursor_uses_id_tie_breaker_and_handles_bad_cursor(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.initialize()
+    for identity in ("evt-a", "evt-b", "evt-c"):
+        store.append_operational_event(
+            _event(identity, "2026-07-16T10:00:00.000Z")
+        )
+
+    first = store.query_operational_events(limit=2)
+    second = store.query_operational_events(cursor=first["next_cursor"], limit=2)
+    malformed = store.query_operational_events(cursor="not-base64!", limit=200)
+
+    assert [item["id"] for item in first["items"]] == ["evt-c", "evt-b"]
+    assert [item["id"] for item in second["items"]] == ["evt-a"]
+    assert [item["id"] for item in malformed["items"]] == [
+        "evt-c",
+        "evt-b",
+        "evt-a",
+    ]
 
 
 def test_job_and_incident_roundtrips_use_descending_cursors(tmp_path: Path) -> None:
@@ -199,6 +255,38 @@ def test_unread_alert_markers_are_per_user_and_severity(tmp_path: Path) -> None:
     )
     assert store.unread_alert_summary("alice")["error"] == 0
     assert store.unread_alert_summary("bob")["error"] == 1
+
+
+def test_alert_read_marker_does_not_regress_to_an_older_event(tmp_path: Path) -> None:
+    db_path = tmp_path / "app.sqlite"
+    store = SqliteStore(str(db_path))
+    store.initialize()
+    store.append_operational_event(
+        _event("evt-old", "2026-07-16T10:00:00.000Z", "error")
+    )
+    store.append_operational_event(
+        _event("evt-new", "2026-07-16T10:01:00.000Z", "error")
+    )
+
+    store.mark_alerts_read(
+        "alice", "error", "evt-new", "2026-07-16T10:01:00.000Z"
+    )
+    store.mark_alerts_read(
+        "alice", "error", "evt-old", "2026-07-16T10:00:00.000Z"
+    )
+    store.mark_alerts_read(
+        "alice", "error", "evt-aaa", "2026-07-16T10:01:00.000Z"
+    )
+
+    assert store.unread_alert_summary("alice")["error"] == 0
+    with sqlite3.connect(db_path) as conn:
+        marker = conn.execute(
+            """
+            SELECT event_id, created_at FROM alert_reads
+            WHERE username = 'alice' AND severity = 'error'
+            """
+        ).fetchone()
+    assert marker == ("evt-new", "2026-07-16T10:01:00.000Z")
 
 
 def test_prune_and_clear_operational_data_preserve_web_history(tmp_path: Path) -> None:

@@ -151,3 +151,28 @@ def test_normalize_timestamp_columns_covers_observability_tables(tmp_path: Path)
 
     assert changed == 5
     assert all(value.endswith("Z") for value in (*job, *incident))
+
+
+def test_normalize_timestamp_columns_canonicalizes_valid_iso_text(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "data.sqlite"
+    store = SqliteStore(str(db_path))
+    store.initialize()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO operational_events (
+                id, created_at, severity, event_type, summary
+            ) VALUES (
+                'evt-1', '2026-07-16T10:00:00Z', 'info', 'job.started', 'Start'
+            )
+            """
+        )
+        changed = normalize_timestamp_columns(conn)
+        created_at = conn.execute(
+            "SELECT created_at FROM operational_events WHERE id = 'evt-1'"
+        ).fetchone()[0]
+
+    assert changed == 1
+    assert created_at == "2026-07-16T10:00:00.000Z"

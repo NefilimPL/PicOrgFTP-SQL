@@ -94,19 +94,23 @@ def _now_iso() -> str:
 
 
 def _iso_from_timestamp(value: object) -> str:
-    if isinstance(value, str):
+    parsed: datetime | None = None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
         text = value.strip()
-        if text.endswith("Z") and "T" in text:
-            return text
         try:
-            value = float(text)
-        except (TypeError, ValueError):
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            value = text
+    if parsed is None:
+        try:
+            parsed = datetime.fromtimestamp(float(value), timezone.utc)
+        except (TypeError, ValueError, OverflowError, OSError):
             return _now_iso()
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return _now_iso()
-    return datetime.fromtimestamp(number, timezone.utc).isoformat(
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat(
         timespec="milliseconds"
     ).replace("+00:00", "Z")
 
@@ -839,6 +843,11 @@ class SqliteStore:
                 ON CONFLICT(username, severity) DO UPDATE SET
                     event_id = excluded.event_id,
                     created_at = excluded.created_at
+                WHERE excluded.created_at > alert_reads.created_at
+                    OR (
+                        excluded.created_at = alert_reads.created_at
+                        AND excluded.event_id > alert_reads.event_id
+                    )
                 """,
                 (
                     _text(username), _text(severity), _text(event_id),
