@@ -176,6 +176,96 @@ def _migrate_web_history_created_at(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE web_history_legacy_ts")
 
 
+def _severity_rank(value: object) -> int:
+    severities = ("info", "warning", "error", "critical")
+    text = _text(value)
+    return severities.index(text) if text in severities else -1
+
+
+def _incident_context_from_row(row: sqlite3.Row) -> dict[str, object]:
+    context = _json_loads(row["context_json"], {})
+    return dict(context) if isinstance(context, dict) else {}
+
+
+def _reconcile_duplicate_open_incidents(conn: sqlite3.Connection) -> None:
+    """Merge duplicate v5 open incidents before adding the unique index."""
+
+    fingerprints = conn.execute(
+        """
+        SELECT fingerprint FROM incidents
+        WHERE status = 'open'
+        GROUP BY fingerprint
+        HAVING COUNT(*) > 1
+        ORDER BY fingerprint
+        """
+    ).fetchall()
+    for group in fingerprints:
+        rows = conn.execute(
+            """
+            SELECT * FROM incidents
+            WHERE fingerprint = ? AND status = 'open'
+            ORDER BY id
+            """,
+            (group["fingerprint"],),
+        ).fetchall()
+        first = min(
+            rows,
+            key=lambda row: (
+                row["first_seen_at"], row["first_event_id"], row["id"]
+            ),
+        )
+        latest = max(
+            rows,
+            key=lambda row: (
+                row["last_seen_at"], row["latest_event_id"], row["id"]
+            ),
+        )
+        keeper_id = first["id"]
+        contexts: dict[str, object] = {}
+        for row in sorted(
+            rows,
+            key=lambda item: (
+                item["last_seen_at"], item["latest_event_id"], item["id"]
+            ),
+        ):
+            contexts.update(_incident_context_from_row(row))
+        merged_ids = sorted(row["id"] for row in rows if row["id"] != keeper_id)
+        contexts["merged_incident_ids"] = merged_ids
+        severity = max(rows, key=lambda row: _severity_rank(row["severity"]))[
+            "severity"
+        ]
+        occurrence_count = sum(max(0, int(row["occurrence_count"] or 0)) for row in rows)
+        notification_window_at = max(
+            (_text(row["notification_window_at"]) for row in rows), default=""
+        )
+        conn.execute(
+            """
+            UPDATE incidents SET
+                severity = ?, event_type = ?, status = 'open',
+                first_seen_at = ?, last_seen_at = ?, occurrence_count = ?,
+                first_event_id = ?, latest_event_id = ?, job_id = ?,
+                correlation_id = ?, notification_window_at = ?, context_json = ?
+            WHERE id = ?
+            """,
+            (
+                severity, latest["event_type"], first["first_seen_at"],
+                latest["last_seen_at"], occurrence_count,
+                first["first_event_id"], latest["latest_event_id"],
+                latest["job_id"], latest["correlation_id"],
+                notification_window_at, _json_dumps(contexts), keeper_id,
+            ),
+        )
+        for row in rows:
+            if row["id"] == keeper_id:
+                continue
+            merged_context = _incident_context_from_row(row)
+            merged_context["merged_into_incident_id"] = keeper_id
+            conn.execute(
+                "UPDATE incidents SET status = 'merged', context_json = ? WHERE id = ?",
+                (_json_dumps(merged_context), row["id"]),
+            )
+
+
 def _flatten_config(payload: dict[str, object]) -> list[tuple[str, object]]:
     rows: list[tuple[str, object]] = []
 
@@ -416,6 +506,7 @@ class SqliteStore:
                 """
             )
             _migrate_web_history_created_at(conn)
+            _reconcile_duplicate_open_incidents(conn)
             conn.executescript(
                 """
                 CREATE INDEX IF NOT EXISTS idx_web_history_created_at
@@ -871,61 +962,93 @@ class SqliteStore:
                 incident_id = candidate["id"]
             else:
                 existing = self._incident_from_row(row)
-                merged_context = dict(existing.get("context") or {})
-                merged_context.update(candidate["context"])
-                severity_order = ("info", "warning", "error", "critical")
                 old_severity = _text(existing.get("severity"))
                 new_severity = candidate["severity"]
-                old_rank = (
-                    severity_order.index(old_severity)
-                    if old_severity in severity_order
-                    else -1
+                severity = (
+                    old_severity
+                    if _severity_rank(old_severity) >= _severity_rank(new_severity)
+                    else new_severity
                 )
-                new_rank = (
-                    severity_order.index(new_severity)
-                    if new_severity in severity_order
-                    else -1
+                candidate_is_latest = (
+                    candidate["last_seen_at"], candidate["latest_event_id"]
+                ) >= (
+                    _text(existing.get("last_seen_at")),
+                    _text(existing.get("latest_event_id")),
                 )
-                severity = old_severity if old_rank >= new_rank else new_severity
+                candidate_is_first = (
+                    candidate["first_seen_at"],
+                    candidate["first_event_id"],
+                    candidate["id"],
+                ) < (
+                    _text(existing.get("first_seen_at")),
+                    _text(existing.get("first_event_id")),
+                    _text(existing.get("id")),
+                )
+                first_seen_at = (
+                    candidate["first_seen_at"]
+                    if candidate_is_first
+                    else _text(existing.get("first_seen_at"))
+                )
+                first_event_id = (
+                    candidate["first_event_id"]
+                    if candidate_is_first
+                    else _text(existing.get("first_event_id"))
+                )
                 notification_window_at = _text(
                     existing.get("notification_window_at")
                 )
-                try:
-                    current = datetime.fromisoformat(
-                        candidate["last_seen_at"].replace("Z", "+00:00")
-                    )
-                    window_started = datetime.fromisoformat(
-                        notification_window_at.replace("Z", "+00:00")
-                    )
-                    notification_due = (
-                        current - window_started
-                        >= timedelta(seconds=window_seconds)
-                    )
-                except (TypeError, ValueError):
-                    notification_due = True
-                if notification_due:
-                    notification_window_at = candidate["last_seen_at"]
-                latest_job_id = candidate["job_id"]
-                latest_correlation_id = candidate["correlation_id"]
-                if not latest_job_id and not latest_correlation_id:
+                notification_due = False
+                if candidate_is_latest:
+                    try:
+                        current = datetime.fromisoformat(
+                            candidate["last_seen_at"].replace("Z", "+00:00")
+                        )
+                        window_started = datetime.fromisoformat(
+                            notification_window_at.replace("Z", "+00:00")
+                        )
+                        notification_due = (
+                            current - window_started
+                            >= timedelta(seconds=window_seconds)
+                        )
+                    except (TypeError, ValueError):
+                        notification_due = True
+                    if notification_due:
+                        notification_window_at = candidate["last_seen_at"]
+                    latest_job_id = candidate["job_id"]
+                    latest_correlation_id = candidate["correlation_id"]
+                    if not latest_job_id and not latest_correlation_id:
+                        latest_job_id = _text(existing.get("job_id"))
+                        latest_correlation_id = _text(
+                            existing.get("correlation_id")
+                        )
+                    merged_context = dict(existing.get("context") or {})
+                    merged_context.update(candidate["context"])
+                    event_type = candidate["event_type"]
+                    last_seen_at = candidate["last_seen_at"]
+                    latest_event_id = candidate["latest_event_id"]
+                else:
                     latest_job_id = _text(existing.get("job_id"))
                     latest_correlation_id = _text(existing.get("correlation_id"))
+                    merged_context = dict(existing.get("context") or {})
+                    event_type = _text(existing.get("event_type"))
+                    last_seen_at = _text(existing.get("last_seen_at"))
+                    latest_event_id = _text(existing.get("latest_event_id"))
                 incident_id = _text(existing.get("id"))
                 conn.execute(
                     """
                     UPDATE incidents SET
-                        severity = ?, event_type = ?, last_seen_at = ?,
+                        severity = ?, event_type = ?, first_seen_at = ?,
+                        last_seen_at = ?, first_event_id = ?,
                         occurrence_count = occurrence_count + 1,
                         latest_event_id = ?, job_id = ?, correlation_id = ?,
                         notification_window_at = ?, context_json = ?
                     WHERE id = ?
                     """,
                     (
-                        severity, candidate["event_type"],
-                        candidate["last_seen_at"], candidate["latest_event_id"],
-                        latest_job_id, latest_correlation_id,
-                        notification_window_at, _json_dumps(merged_context),
-                        incident_id,
+                        severity, event_type, first_seen_at, last_seen_at,
+                        first_event_id, latest_event_id, latest_job_id,
+                        latest_correlation_id, notification_window_at,
+                        _json_dumps(merged_context), incident_id,
                     ),
                 )
             persisted_row = conn.execute(

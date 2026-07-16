@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from threading import Barrier
+
+import pytest
 
 from picorgftp_sql.data_store import SqliteDataStoreAdapter
 from picorgftp_sql.sqlite_store import SqliteStore
@@ -278,6 +281,206 @@ def test_atomic_incident_coalescing_across_store_connections(tmp_path: Path) -> 
             "SELECT COUNT(*) FROM incidents WHERE fingerprint = ? AND status = 'open'",
             ("same-failure",),
         ).fetchone()[0] == 1
+
+
+def test_initialize_reconciles_duplicate_open_incidents_before_unique_index(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "legacy-v5.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE schema_version (
+                version INTEGER NOT NULL,
+                applied_at TEXT NOT NULL
+            );
+            INSERT INTO schema_version (version, applied_at)
+            VALUES (5, '2026-07-16T08:00:00.000Z');
+            CREATE TABLE incidents (
+                id TEXT PRIMARY KEY,
+                fingerprint TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                occurrence_count INTEGER NOT NULL DEFAULT 1,
+                first_event_id TEXT NOT NULL,
+                latest_event_id TEXT NOT NULL,
+                job_id TEXT NOT NULL DEFAULT '',
+                correlation_id TEXT NOT NULL DEFAULT '',
+                notification_window_at TEXT NOT NULL DEFAULT '',
+                context_json TEXT NOT NULL DEFAULT '{}'
+            );
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO incidents (
+                id, fingerprint, severity, event_type, status,
+                first_seen_at, last_seen_at, occurrence_count,
+                first_event_id, latest_event_id, job_id, correlation_id,
+                notification_window_at, context_json
+            ) VALUES (?, 'duplicate', ?, 'ftp.failed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "inc-old", "warning", "open",
+                    "2026-07-16T09:00:00.000Z", "2026-07-16T09:05:00.000Z", 2,
+                    "evt-first", "evt-old", "job-old", "corr-old",
+                    "2026-07-16T09:00:00.000Z",
+                    '{"old": 1, "shared": "old"}',
+                ),
+                (
+                    "inc-new", "critical", "open",
+                    "2026-07-16T09:01:00.000Z", "2026-07-16T09:10:00.000Z", 3,
+                    "evt-new-first", "evt-latest", "job-new", "corr-new",
+                    "2026-07-16T09:10:00.000Z",
+                    '{"new": 2, "shared": "new"}',
+                ),
+                (
+                    "inc-closed", "error", "closed",
+                    "2026-07-16T08:00:00.000Z", "2026-07-16T08:10:00.000Z", 4,
+                    "evt-closed-first", "evt-closed-last", "", "",
+                    "2026-07-16T08:00:00.000Z", '{"closed": true}',
+                ),
+            ],
+        )
+
+    store = SqliteStore(str(db_path))
+    store.initialize()
+
+    open_incident = store.find_open_incident("duplicate")
+    assert open_incident is not None
+    assert open_incident["id"] == "inc-old"
+    assert open_incident["first_seen_at"] == "2026-07-16T09:00:00.000Z"
+    assert open_incident["first_event_id"] == "evt-first"
+    assert open_incident["last_seen_at"] == "2026-07-16T09:10:00.000Z"
+    assert open_incident["latest_event_id"] == "evt-latest"
+    assert open_incident["job_id"] == "job-new"
+    assert open_incident["correlation_id"] == "corr-new"
+    assert open_incident["occurrence_count"] == 5
+    assert open_incident["severity"] == "critical"
+    assert open_incident["context"]["old"] == 1
+    assert open_incident["context"]["new"] == 2
+    assert open_incident["context"]["shared"] == "new"
+    assert open_incident["context"]["merged_incident_ids"] == ["inc-new"]
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, status, context_json FROM incidents ORDER BY id"
+        ).fetchall()
+        assert len(rows) == 3
+        merged = next(row for row in rows if row[0] == "inc-new")
+        assert merged[1] == "merged"
+        assert json.loads(merged[2])["merged_into_incident_id"] == "inc-old"
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO incidents (
+                    id, fingerprint, severity, event_type, status,
+                    first_seen_at, last_seen_at, first_event_id, latest_event_id
+                ) VALUES (
+                    'inc-conflict', 'duplicate', 'error', 'ftp.failed', 'open',
+                    '2026-07-16T10:00:00.000Z', '2026-07-16T10:00:00.000Z',
+                    'evt-conflict', 'evt-conflict'
+                )
+                """
+            )
+
+
+def test_delayed_older_incident_does_not_regress_latest_state(tmp_path: Path) -> None:
+    db_path = tmp_path / "app.sqlite"
+    newer_store = SqliteStore(str(db_path))
+    older_store = SqliteStore(str(db_path))
+    newer_store.initialize()
+    older_store.initialize()
+
+    newer_store.coalesce_incident(
+        {
+            "id": "inc-newer",
+            "fingerprint": "delayed-failure",
+            "severity": "error",
+            "event_type": "ftp.failed",
+            "first_seen_at": "2026-07-16T10:05:00.000Z",
+            "last_seen_at": "2026-07-16T10:05:00.000Z",
+            "first_event_id": "evt-newer",
+            "latest_event_id": "evt-newer",
+            "job_id": "job-newer",
+            "correlation_id": "corr-newer",
+            "notification_window_at": "2026-07-16T10:05:00.000Z",
+            "context": {"state": "newer", "newer": True},
+        }
+    )
+    older_store.coalesce_incident(
+        {
+            "id": "inc-older",
+            "fingerprint": "delayed-failure",
+            "severity": "warning",
+            "event_type": "ftp.failed",
+            "first_seen_at": "2026-07-16T10:00:00.000Z",
+            "last_seen_at": "2026-07-16T10:00:00.000Z",
+            "first_event_id": "evt-older",
+            "latest_event_id": "evt-older",
+            "job_id": "job-older",
+            "correlation_id": "corr-older",
+            "notification_window_at": "2026-07-16T10:00:00.000Z",
+            "context": {"state": "older", "older": True},
+        }
+    )
+
+    stored = newer_store.find_open_incident("delayed-failure")
+    assert stored is not None
+    assert stored["occurrence_count"] == 2
+    assert stored["first_seen_at"] == "2026-07-16T10:00:00.000Z"
+    assert stored["first_event_id"] == "evt-older"
+    assert stored["last_seen_at"] == "2026-07-16T10:05:00.000Z"
+    assert stored["latest_event_id"] == "evt-newer"
+    assert stored["job_id"] == "job-newer"
+    assert stored["correlation_id"] == "corr-newer"
+    assert stored["context"] == {"state": "newer", "newer": True}
+
+
+def test_closed_incident_allows_a_new_open_lifecycle(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    first = store.coalesce_incident(
+        {
+            "id": "inc-first",
+            "fingerprint": "reopened-failure",
+            "severity": "error",
+            "event_type": "ftp.failed",
+            "first_seen_at": "2026-07-16T10:00:00.000Z",
+            "last_seen_at": "2026-07-16T10:00:00.000Z",
+            "first_event_id": "evt-first",
+            "latest_event_id": "evt-first",
+            "notification_window_at": "2026-07-16T10:00:00.000Z",
+        }
+    )
+    store.upsert_incident({**first, "status": "closed"})
+
+    reopened = store.coalesce_incident(
+        {
+            "id": "inc-reopened",
+            "fingerprint": "reopened-failure",
+            "severity": "error",
+            "event_type": "ftp.failed",
+            "first_seen_at": "2026-07-16T11:00:00.000Z",
+            "last_seen_at": "2026-07-16T11:00:00.000Z",
+            "first_event_id": "evt-reopened",
+            "latest_event_id": "evt-reopened",
+            "notification_window_at": "2026-07-16T11:00:00.000Z",
+        }
+    )
+
+    assert reopened["id"] == "inc-reopened"
+    assert reopened["occurrence_count"] == 1
+    assert reopened["notification_due"] is True
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute(
+            "SELECT id, status FROM incidents ORDER BY id"
+        ).fetchall() == [
+            ("inc-first", "closed"),
+            ("inc-reopened", "open"),
+        ]
 
 
 def test_unread_alert_markers_are_per_user_and_severity(tmp_path: Path) -> None:
