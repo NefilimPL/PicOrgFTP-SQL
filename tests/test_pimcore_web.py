@@ -934,7 +934,7 @@ def test_integration_results_use_trusted_requiredness_redact_errors_and_bound_wa
         }
     )
     cfg["sql_profiles"] = [
-        {"id": "required-profile", "password": "server-required-secret", "enabled": True},
+        {"id": "required-profile", "password": "q7", "enabled": True},
         {"id": "optional-profile", "password": "server-optional-secret", "enabled": True},
     ]
     browser_results = {
@@ -947,8 +947,8 @@ def test_integration_results_use_trusted_requiredness_redact_errors_and_bound_wa
                 "elapsed_ms": 8,
                 "warning_codes": [f"warning-{index}" for index in range(40)],
                 "error": (
-                    "server-required-secret password=browser-password "
-                    "token=browser-token " + ("x" * 5000)
+                    "unlabeled q7; secret=browser secret with spaces; "
+                    "password=browser-password; token=browser-token; " + ("x" * 5000)
                 ),
             },
             {
@@ -994,8 +994,9 @@ def test_integration_results_use_trusted_requiredness_redact_errors_and_bound_wa
     serialized_history = json.dumps(history_details)
     serialized_events = json.dumps([call.kwargs["details"] for call in emit_event.call_args_list])
     for secret in (
-        "server-required-secret",
+        "q7",
         "server-optional-secret",
+        "browser secret with spaces",
         "browser-password",
         "browser-token",
         "browser-auth",
@@ -1583,13 +1584,14 @@ def test_render_sql_profile_error_redacts_assignments_and_known_profile_secret()
             ],
         }
     )
-    cfg["sql_profiles"] = [
-        {"id": "stock", "password": "server-profile-secret", "enabled": True}
-    ]
+    cfg["sql_profiles"] = [{"id": "stock", "password": "q7", "enabled": True}]
     raw_error = (
-        "server-profile-secret PWD=driver-secret password=inline-secret "
-        "token=token-secret authorization=Bearer auth-secret api_key=api-secret "
-        "cookie=session=cookie-secret"
+        "unlabeled q7; PWD=driver secret with spaces; "
+        "password='inline secret with spaces'; pass=pass secret with spaces; "
+        "secret=plain secret with spaces; token=token secret with spaces; "
+        "authorization=Bearer auth secret with spaces; "
+        "api_key=underscore api secret; api-key=hyphen api secret; "
+        "cookie=session cookie secret\nsafe diagnostic"
     )
     with (
         patch.object(web_data.config, "CONFIG", cfg),
@@ -1601,18 +1603,70 @@ def test_render_sql_profile_error_redacts_assignments_and_known_profile_secret()
 
     serialized = json.dumps(result)
     for secret in (
-        "server-profile-secret",
-        "driver-secret",
-        "inline-secret",
-        "token-secret",
-        "auth-secret",
-        "api-secret",
-        "cookie-secret",
+        "q7",
+        "driver secret with spaces",
+        "inline secret with spaces",
+        "pass secret with spaces",
+        "plain secret with spaces",
+        "token secret with spaces",
+        "auth secret with spaces",
+        "underscore api secret",
+        "hyphen api secret",
+        "session cookie secret",
     ):
         assert secret not in serialized
     assert "[REDACTED]" in serialized
     integration = result["integrations"]["sql_profiles"][0]
     assert integration["required"] is True
+
+
+def test_sql_warning_codes_caps_before_iterating_warning_collection():
+    class SliceOnlyWarnings(list):
+        def __iter__(self):
+            raise AssertionError("warning collection was traversed before capping")
+
+    warnings = SliceOnlyWarnings(
+        [{"code": f"warning-{index}"} for index in range(1000)]
+    )
+
+    assert web_data._sql_warning_codes(warnings) == [
+        f"warning-{index}" for index in range(web_data.SQL_PROFILE_WARNING_CODES_MAX)
+    ]
+
+
+def test_safe_integration_results_caps_browser_warning_codes_before_iterating():
+    class SliceOnlyCodes(list):
+        def __iter__(self):
+            raise AssertionError("warning codes were traversed before capping")
+
+    settings = {
+        "field_mappings": [
+            {
+                "source": "STOCK",
+                "required": False,
+                "value_template": "SQL",
+                "sql_profile_id": "stock",
+            }
+        ]
+    }
+    submitted = {
+        "sql_profiles": [
+            {
+                "profile_id": "stock",
+                "source": "STOCK",
+                "status": "warning",
+                "warning_codes": SliceOnlyCodes(
+                    [f"warning-{index}" for index in range(1000)]
+                ),
+            }
+        ]
+    }
+
+    result = web_data._safe_pimcore_integration_results(submitted, settings)
+
+    assert result["sql_profiles"][0]["warning_codes"] == [
+        f"warning-{index}" for index in range(web_data.SQL_PROFILE_WARNING_CODES_MAX)
+    ]
 
 
 def test_render_saved_pimcore_templates_uses_sql_as_template_source():

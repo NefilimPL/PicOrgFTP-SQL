@@ -144,12 +144,9 @@ from .version import get_display_version
 SQL_PROFILE_WARNING_CODES_MAX = 20
 SQL_PROFILE_ERROR_MAX_BYTES = 2000
 _SQL_CREDENTIAL_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(pwd|password|token|api(?:[_ -]?key)|cookie)\b\s*[:=]\s*"
-    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
-)
-_SQL_AUTHORIZATION_ASSIGNMENT_RE = re.compile(
-    r"(?i)\bauthorization\b\s*[:=]\s*"
-    r"(?:\"[^\"]*\"|'[^']*'|(?:bearer\s+)?[^\s,;]+)"
+    r"(?ix)\b(?:password|pass|pwd|secret|token|authorization|api[_-]?key|cookie)\b"
+    r"\s*[:=]\s*"
+    r'(?:"(?:\\.|[^"\r\n])*"|\'(?:\\.|[^\'\r\n])*\'|[^\r\n;,]*)'
 )
 
 
@@ -1899,11 +1896,10 @@ def _redact_sql_integration_error(
     known_secrets = {
         str(profile.get("password") or "")
         for profile in profiles
-        if len(str(profile.get("password") or "")) >= 4
+        if str(profile.get("password") or "")
     }
     for secret in sorted(known_secrets, key=len, reverse=True):
         text = text.replace(secret, "[REDACTED]")
-    text = _SQL_AUTHORIZATION_ASSIGNMENT_RE.sub("authorization=[REDACTED]", text)
     text = _SQL_CREDENTIAL_ASSIGNMENT_RE.sub("credential=[REDACTED]", text)
     encoded = text.encode("utf-8")
     if len(encoded) > SQL_PROFILE_ERROR_MAX_BYTES:
@@ -1916,9 +1912,9 @@ def _sql_warning_codes(warnings: object) -> list[str]:
         return []
     return [
         _text(warning.get("code"))
-        for warning in warnings
+        for warning in warnings[:SQL_PROFILE_WARNING_CODES_MAX]
         if isinstance(warning, dict) and _text(warning.get("code"))
-    ][:SQL_PROFILE_WARNING_CODES_MAX]
+    ]
 
 
 def _render_templates(
@@ -2245,9 +2241,9 @@ def _safe_pimcore_integration_results(
         warning_codes = (
             [
                 _text(code)[:100]
-                for code in raw_codes
+                for code in raw_codes[:SQL_PROFILE_WARNING_CODES_MAX]
                 if isinstance(code, str) and _text(code)
-            ][:SQL_PROFILE_WARNING_CODES_MAX]
+            ]
             if isinstance(raw_codes, list)
             else []
         )
