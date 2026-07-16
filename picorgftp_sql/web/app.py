@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import binascii
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import hmac
 import io
@@ -27,7 +29,7 @@ from urllib.parse import urlsplit
 import zipfile
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
@@ -59,7 +61,14 @@ from ..history_changes import history_change_set
 from ..image_utils import fit_image_to_content
 from ..legacy_import import import_legacy_to_sqlite
 from ..logging_utils import log_error
-from ..observability import emit_event, record_job
+from ..observability import (
+    SEVERITIES,
+    emit_event,
+    incident_context,
+    observability_store,
+    prune_live_events,
+    record_job,
+)
 from ..product_fields import PRODUCT_FIELDS_KEY, normalize_product_fields
 from ..pimcore_templates import TemplateError
 from ..services.ftp_service import sync_remote_files
@@ -178,6 +187,13 @@ _UPLOAD_SCAN_RESULTS: Dict[str, Dict[str, Any]] = {}
 _UPLOAD_SCAN_RESULTS_LOCK = threading.Lock()
 _BACKUP_SCHEDULER_STOP = threading.Event()
 _BACKUP_SCHEDULER_THREAD: threading.Thread | None = None
+_LIVE_EVENT_PRUNE_INTERVAL_SECONDS = 60 * 60
+_LIVE_EVENT_LAST_PRUNED = 0.0
+_HEALTH_INTEGRATION_CACHE_SECONDS = 1.0
+_HEALTH_INTEGRATION_CACHE_LOCK = threading.Lock()
+_HEALTH_INTEGRATION_CACHE_PATH = ""
+_HEALTH_INTEGRATION_CACHE_AT = 0.0
+_HEALTH_INTEGRATION_CACHE: Dict[str, Any] | None = None
 RATE_LIMIT_LOGIN_ATTEMPTS = 20
 RATE_LIMIT_LOGIN_WINDOW_SECONDS = 10 * 60
 RATE_LIMIT_UPLOAD_ATTEMPTS = 80
@@ -3910,12 +3926,29 @@ def _run_due_sqlite_backups_once() -> Dict[str, Any]:
     return {"created": 1, "slots": slots, "backup": result}
 
 
+def _prune_live_events_if_due(*, force: bool = False) -> int:
+    global _LIVE_EVENT_LAST_PRUNED
+    now = time.monotonic()
+    if (
+        not force
+        and _LIVE_EVENT_LAST_PRUNED
+        and now - _LIVE_EVENT_LAST_PRUNED < _LIVE_EVENT_PRUNE_INTERVAL_SECONDS
+    ):
+        return 0
+    _LIVE_EVENT_LAST_PRUNED = now
+    return max(0, int(prune_live_events() or 0))
+
+
 def _backup_scheduler_loop() -> None:
     while not _BACKUP_SCHEDULER_STOP.wait(60):
         try:
             _run_due_sqlite_backups_once()
         except Exception as exc:
             log_error(f"WEB scheduled SQLite backup failed: {exc}\n{traceback.format_exc()}")
+        try:
+            _prune_live_events_if_due()
+        except Exception as exc:
+            log_error(f"WEB observability pruning failed: {exc}\n{traceback.format_exc()}")
 
 
 def _start_backup_scheduler() -> None:
@@ -3938,6 +3971,210 @@ def _stop_backup_scheduler() -> None:
     if thread is not None and thread.is_alive():
         thread.join(timeout=2)
     _BACKUP_SCHEDULER_THREAD = None
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _observability_limit(value: object) -> int:
+    try:
+        parsed = int(value or 20)
+    except (TypeError, ValueError):
+        parsed = 20
+    return max(1, min(100, parsed))
+
+
+def _validate_observability_cursor(value: object) -> str:
+    cursor = str(value or "").strip()
+    if not cursor:
+        return ""
+    padded = cursor + "=" * (-len(cursor) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(padded).decode("utf-8")
+        payload = json.loads(decoded)
+    except (binascii.Error, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Niepoprawny kursor.") from exc
+    if (
+        not isinstance(payload, list)
+        or len(payload) != 2
+        or not all(isinstance(item, str) and item.strip() for item in payload)
+    ):
+        raise HTTPException(status_code=400, detail="Niepoprawny kursor.")
+    return cursor
+
+
+def _validated_severities(value: object, *, multiple: bool = True) -> list[str]:
+    raw_values = str(value or "").split(",") if multiple else [str(value or "")]
+    severities = [item.strip().lower() for item in raw_values if item.strip()]
+    if any(item not in SEVERITIES for item in severities):
+        raise HTTPException(status_code=400, detail="Niepoprawny poziom zdarzenia.")
+    return list(dict.fromkeys(severities))
+
+
+def _observability_api_payload(
+    username: str, page: Dict[str, Any]
+) -> Dict[str, Any]:
+    store = observability_store()
+    return {
+        "items": list(page.get("items") or []),
+        "next_cursor": str(page.get("next_cursor") or ""),
+        "unread": store.unread_alert_summary(username),
+        "server_time": _utc_now_iso(),
+    }
+
+
+_INTEGRATION_EVENT_NAMES = {
+    "integration.ftp.completed": "ftp",
+    "integration.sql.completed": "sql",
+    "integration.pimcore.completed": "pimcore",
+}
+_SAFE_INTEGRATION_STATUSES = {
+    "completed",
+    "disabled",
+    "error",
+    "failed",
+    "ok",
+    "online",
+    "success",
+    "unknown",
+    "warning",
+}
+
+
+def _safe_integration_status(event: Dict[str, Any]) -> str:
+    details = event.get("details") if isinstance(event.get("details"), dict) else {}
+    status = str(details.get("status") or "").strip().lower()
+    if status in _SAFE_INTEGRATION_STATUSES:
+        return status
+    if str(event.get("severity") or "") in {"error", "critical"}:
+        return "error"
+    return "unknown"
+
+
+def _last_known_integrations(store: Any) -> Dict[str, Any]:
+    unknown = {"status": "unknown", "observed_at": ""}
+    result: Dict[str, Any] = {
+        "ftp": dict(unknown),
+        "sql": dict(unknown),
+        "sql_profiles": [],
+        "pimcore": dict(unknown),
+    }
+    seen_profiles: set[str] = set()
+    page = store.query_operational_events(limit=100)
+    for event in page.get("items") or []:
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("event_type") or "")
+        observed_at = str(event.get("created_at") or "")
+        status = _safe_integration_status(event)
+        component = _INTEGRATION_EVENT_NAMES.get(event_type)
+        if component and result[component]["status"] == "unknown":
+            result[component] = {"status": status, "observed_at": observed_at}
+            continue
+        if event_type != "integration.sql_profile.completed":
+            continue
+        details = event.get("details") if isinstance(event.get("details"), dict) else {}
+        profile_id = str(details.get("profile_id") or "").strip()[:200]
+        if not profile_id or profile_id in seen_profiles:
+            continue
+        seen_profiles.add(profile_id)
+        result["sql_profiles"].append(
+            {
+                "profile_id": profile_id,
+                "status": status,
+                "observed_at": observed_at,
+            }
+        )
+    return result
+
+
+def _cached_last_known_integrations(store: Any) -> Dict[str, Any]:
+    global _HEALTH_INTEGRATION_CACHE
+    global _HEALTH_INTEGRATION_CACHE_AT
+    global _HEALTH_INTEGRATION_CACHE_PATH
+    store_path = str(getattr(store, "path", "") or "")
+    now = time.monotonic()
+    with _HEALTH_INTEGRATION_CACHE_LOCK:
+        if (
+            _HEALTH_INTEGRATION_CACHE is not None
+            and _HEALTH_INTEGRATION_CACHE_PATH == store_path
+            and now - _HEALTH_INTEGRATION_CACHE_AT < _HEALTH_INTEGRATION_CACHE_SECONDS
+        ):
+            return _HEALTH_INTEGRATION_CACHE
+        snapshot = _last_known_integrations(store)
+        _HEALTH_INTEGRATION_CACHE = snapshot
+        _HEALTH_INTEGRATION_CACHE_PATH = store_path
+        _HEALTH_INTEGRATION_CACHE_AT = now
+        return snapshot
+
+
+def _integration_component_status(status: object) -> str:
+    value = str(status or "unknown")
+    if value in {"success", "ok", "online", "completed"}:
+        return "online"
+    if value in {"error", "failed", "warning"}:
+        return "degraded"
+    return value if value == "disabled" else "unknown"
+
+
+def _health_payload() -> Dict[str, Any]:
+    components: Dict[str, Dict[str, Any]] = {
+        "backend": {"status": "online"},
+        "sqlite": {"status": "critical"},
+        "job_processor": {
+            "status": "critical"
+            if bool(getattr(_PROCESS_EXECUTOR, "_shutdown", False))
+            else "online"
+        },
+    }
+    integrations: Dict[str, Any] = {
+        "ftp": {"status": "unknown", "observed_at": ""},
+        "sql": {"status": "unknown", "observed_at": ""},
+        "sql_profiles": [],
+        "pimcore": {"status": "unknown", "observed_at": ""},
+    }
+    try:
+        store = observability_store()
+        with store.connection() as conn:
+            conn.execute("SELECT 1").fetchone()
+        components["sqlite"] = {"status": "online"}
+        integrations = _cached_last_known_integrations(store)
+    except Exception:
+        pass
+    for name in ("ftp", "sql", "pimcore"):
+        item = integrations[name]
+        components[name] = {
+            "status": _integration_component_status(item.get("status")),
+            "observed_at": item.get("observed_at", ""),
+        }
+    profile_items = integrations["sql_profiles"]
+    profile_statuses = {
+        _integration_component_status(item.get("status")) for item in profile_items
+    }
+    components["sql_profiles"] = {
+        "status": (
+            "degraded"
+            if "degraded" in profile_statuses
+            else "online"
+            if profile_items and profile_statuses == {"online"}
+            else "unknown"
+        ),
+        "count": len(profile_items),
+    }
+    local_ready = all(
+        components[name]["status"] == "online"
+        for name in ("backend", "sqlite", "job_processor")
+    )
+    return {
+        "ok": local_ready,
+        "version": get_display_version(),
+        "time": datetime.now().isoformat(timespec="seconds"),
+        "components": components,
+        "integrations": integrations,
+    }
 
 
 def create_app() -> FastAPI:
@@ -4034,6 +4271,10 @@ def create_app() -> FastAPI:
         app.state.runtime_info = runtime_info
         cleanup_web_ftp_cache(force=True)
         cleanup_web_upload_cache(force=True)
+        try:
+            _prune_live_events_if_due(force=True)
+        except Exception as exc:
+            log_error(f"WEB observability pruning failed: {exc}\n{traceback.format_exc()}")
         _start_backup_scheduler()
 
     @app.on_event("shutdown")
@@ -4044,11 +4285,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health() -> Dict[str, Any]:
-        return {
-            "ok": True,
-            "version": get_display_version(),
-            "time": datetime.now().isoformat(timespec="seconds"),
-        }
+        return _health_payload()
 
     @app.get("/")
     def index(request: Request) -> Response:
@@ -4199,6 +4436,122 @@ def create_app() -> FastAPI:
         _require_admin(request)
         return _logs_response(limit)
 
+    @app.get("/api/observability/events")
+    def observability_events_api(
+        request: Request,
+        severity: str = "",
+        cursor: str = "",
+        limit: int = 20,
+        username: str = "",
+        ean: str = "",
+        job_id: str = "",
+        correlation_id: str = "",
+        module: str = "",
+        query: str = "",
+        since: str = "",
+    ) -> Dict[str, Any]:
+        current_user = _require_admin(request)
+        severities = _validated_severities(severity)
+        page = observability_store().query_operational_events(
+            severities=severities,
+            username=username,
+            ean=ean,
+            job_id=job_id,
+            correlation_id=correlation_id,
+            module=module,
+            query=query,
+            cursor=_validate_observability_cursor(cursor),
+            limit=_observability_limit(limit),
+            since=since,
+        )
+        return _observability_api_payload(str(current_user.get("username") or ""), page)
+
+    @app.get("/api/observability/incidents")
+    def observability_incidents_api(
+        request: Request,
+        severity: str = "",
+        cursor: str = "",
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        current_user = _require_admin(request)
+        severities = _validated_severities(severity, multiple=False)
+        page = observability_store().query_incidents(
+            severity=severities[0] if severities else "",
+            cursor=_validate_observability_cursor(cursor),
+            limit=_observability_limit(limit),
+        )
+        page["items"] = [
+            {**item, **incident_context(item)}
+            for item in page.get("items") or []
+            if isinstance(item, dict)
+        ]
+        return _observability_api_payload(str(current_user.get("username") or ""), page)
+
+    @app.get("/api/observability/jobs")
+    def observability_jobs_api(
+        request: Request, cursor: str = "", limit: int = 20
+    ) -> Dict[str, Any]:
+        current_user = _require_admin(request)
+        page = observability_store().query_job_runs(
+            cursor=_validate_observability_cursor(cursor),
+            limit=_observability_limit(limit),
+        )
+        return _observability_api_payload(str(current_user.get("username") or ""), page)
+
+    @app.get("/api/observability/stream")
+    async def observability_stream_api(
+        request: Request, after_id: str = ""
+    ) -> StreamingResponse:
+        _require_admin(request)
+
+        async def generate():
+            cursor = str(after_id or "").strip()
+            next_heartbeat = time.monotonic()
+            while not await request.is_disconnected():
+                page = observability_store().query_operational_events(
+                    after_id=cursor, limit=100
+                )
+                for item in reversed(page.get("items") or []):
+                    cursor = str(item.get("id") or "")
+                    yield (
+                        f"id: {cursor}\n"
+                        f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+                    )
+                now = time.monotonic()
+                if now >= next_heartbeat:
+                    yield ": heartbeat\n\n"
+                    next_heartbeat = now + 15
+                await asyncio.sleep(1)
+
+        return StreamingResponse(generate(), media_type="text/event-stream")
+
+    @app.post("/api/observability/read")
+    async def observability_read_api(request: Request) -> Dict[str, Any]:
+        current_user = _require_admin(request)
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Niepoprawne dane odczytu.") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Niepoprawne dane odczytu.")
+        severities = _validated_severities(payload.get("severity"), multiple=False)
+        event_id = str(payload.get("event_id") or "").strip()
+        created_at = str(payload.get("created_at") or "").strip()
+        if not severities or not event_id or not created_at:
+            raise HTTPException(status_code=400, detail="Niepoprawne dane odczytu.")
+        try:
+            datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Niepoprawne dane odczytu.") from exc
+        username = str(current_user.get("username") or "")
+        store = observability_store()
+        store.mark_alerts_read(username, severities[0], event_id, created_at)
+        return {
+            "ok": True,
+            "unread": store.unread_alert_summary(username),
+            "server_time": _utc_now_iso(),
+        }
+
     @app.get("/api/server/active-users")
     def active_users_api(request: Request) -> Dict[str, Any]:
         _require_admin(request)
@@ -4224,10 +4577,12 @@ def create_app() -> FastAPI:
         verified = authenticate_user(username, password)
         if not verified or verified.get("role") != "admin":
             raise HTTPException(status_code=403, detail="Niepoprawne haslo administratora.")
+        structured_result = observability_store().clear_operational_data()
         clear_result = _clear_log_files()
         response = _logs_response(400)
         response["cleared"] = clear_result["cleared"]
         response["clear_errors"] = clear_result["errors"]
+        response["structured_cleared"] = structured_result
         return JSONResponse(response)
 
     @app.post("/api/file-index/refresh")

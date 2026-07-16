@@ -43,6 +43,12 @@ class WebSmokeCiTests(unittest.TestCase):
         self.assertIs(payload["ok"], True)
         self.assertTrue(str(payload["version"]).strip())
         self.assertTrue(str(payload["time"]).strip())
+        self.assertEqual(payload["components"]["backend"]["status"], "online")
+        self.assertIn(payload["components"]["sqlite"]["status"], {"online", "critical"})
+        self.assertIn(
+            payload["components"]["job_processor"]["status"],
+            {"online", "critical"},
+        )
 
     def test_client_error_route_requires_auth_and_csrf_and_emits_redacted_critical(self) -> None:
         class EventStore:
@@ -373,6 +379,18 @@ class WebSmokeCiTests(unittest.TestCase):
 
         self.assertEqual(result["created"], 1)
         save_backup_settings.assert_called_once()
+
+    def test_live_event_pruning_runs_no_more_than_hourly(self) -> None:
+        with (
+            patch.object(web_app, "prune_live_events", return_value=3) as prune,
+            patch.object(web_app.time, "monotonic", side_effect=[100.0, 200.0, 3701.0]),
+        ):
+            web_app._LIVE_EVENT_LAST_PRUNED = 0.0
+            self.assertEqual(web_app._prune_live_events_if_due(force=True), 3)
+            self.assertEqual(web_app._prune_live_events_if_due(), 0)
+            self.assertEqual(web_app._prune_live_events_if_due(), 3)
+
+        self.assertEqual(prune.call_count, 2)
 
     def test_sql_column_detection_endpoint_updates_settings(self) -> None:
         client = TestClient(web_app.app)
