@@ -9,6 +9,23 @@ import unittest
 
 
 class SourceIntegrityTests(unittest.TestCase):
+    def test_web_client_reports_deduplicated_global_failures(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        self.assertIn("function reportClientFailure", source)
+        self.assertIn('requestJson("/api/observability/client-errors"', source)
+        self.assertIn('window.addEventListener("error"', source)
+        self.assertIn('window.addEventListener("unhandledrejection"', source)
+        self.assertIn("CLIENT_FAILURE_DEDUPE_MS", source)
+        self.assertIn("clientFailureFingerprints", source)
+
     def test_desktop_uses_generic_product_field_settings(self) -> None:
         app_path = Path(__file__).resolve().parents[1] / "picorgftp_sql" / "app.py"
         source = app_path.read_text(encoding="utf-8")

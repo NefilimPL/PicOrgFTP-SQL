@@ -21,6 +21,7 @@ else:
     TEST_CLIENT_IMPORT_ERROR = None
 
 from picorgftp_sql import web_data
+from picorgftp_sql import observability
 from picorgftp_sql.web import app as web_app
 
 
@@ -42,6 +43,93 @@ class WebSmokeCiTests(unittest.TestCase):
         self.assertIs(payload["ok"], True)
         self.assertTrue(str(payload["version"]).strip())
         self.assertTrue(str(payload["time"]).strip())
+
+    def test_client_error_route_requires_auth_and_csrf_and_emits_redacted_critical(self) -> None:
+        class EventStore:
+            def __init__(self) -> None:
+                self.events = []
+
+            def append_operational_event(self, event):
+                self.events.append(dict(event))
+                return dict(event)
+
+        previous = os.environ.get("PICORG_WEB_AUTH")
+        os.environ["PICORG_WEB_AUTH"] = "1"
+        store = EventStore()
+        try:
+            client = TestClient(web_app.app)
+            payload = {
+                "kind": "error",
+                "message": "Frontend exploded",
+                "source": "app.js",
+                "line": 42,
+                "column": 7,
+                "stack": "Error: Frontend exploded",
+                "token": "browser-secret",
+            }
+
+            anonymous = client.post("/api/observability/client-errors", json=payload)
+            self.assertEqual(anonymous.status_code, 401)
+
+            login = client.post(
+                "/api/login",
+                data={"username": "admin", "password": "admin"},
+                headers={"X-Requested-With": "XMLHttpRequest"},
+            )
+            self.assertEqual(login.status_code, 200)
+            csrf = login.json()["csrf_token"]
+            forged = client.post(
+                "/api/observability/client-errors",
+                json=payload,
+                headers={"X-PicOrg-CSRF": "bad"},
+            )
+            self.assertEqual(forged.status_code, 403)
+
+            with patch.object(observability, "observability_store", return_value=store):
+                response = client.post(
+                    "/api/observability/client-errors",
+                    json=payload,
+                    headers={"X-PicOrg-CSRF": csrf},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), {"ok": True})
+            event = store.events[-1]
+            self.assertEqual(event["severity"], "critical")
+            self.assertEqual(event["event_type"], "frontend.unhandled_error")
+            self.assertEqual(event["details"]["token"], "[REDACTED]")
+        finally:
+            if previous is None:
+                os.environ.pop("PICORG_WEB_AUTH", None)
+            else:
+                os.environ["PICORG_WEB_AUTH"] = previous
+
+    def test_unhandled_backend_error_returns_only_safe_correlation_payload(self) -> None:
+        test_app = web_app.create_app()
+
+        @test_app.get("/api/test-unhandled-error")
+        def fail_for_test():
+            raise RuntimeError("database password=top-secret")
+
+        client = TestClient(test_app, raise_server_exceptions=False)
+        with (
+            patch.object(web_app, "emit_event") as emit_event,
+            patch.object(web_app, "log_error") as log_error,
+        ):
+            response = client.get("/api/test-unhandled-error")
+
+        self.assertEqual(response.status_code, 500)
+        payload = response.json()
+        self.assertEqual(payload["detail"], "Wystapil nieoczekiwany blad aplikacji.")
+        self.assertTrue(payload["correlation_id"])
+        self.assertNotIn("password", response.text)
+        self.assertEqual(emit_event.call_args.kwargs["severity"], "critical")
+        self.assertEqual(
+            emit_event.call_args.kwargs["correlation_id"], payload["correlation_id"]
+        )
+        self.assertIsInstance(emit_event.call_args.kwargs["exception"], RuntimeError)
+        self.assertIn(payload["correlation_id"], log_error.call_args.args[0])
+
 
     def test_public_pages_and_static_assets_are_served(self) -> None:
         client = TestClient(web_app.app)

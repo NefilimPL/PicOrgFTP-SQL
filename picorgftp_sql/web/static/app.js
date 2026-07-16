@@ -109,6 +109,8 @@ const CLIENT_ID_HEADER = "X-PicOrg-Client-Id";
 const CSRF_SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const SECRET_REVEAL_MS = 60000;
 const POLL_HIDDEN_DELAY_MS = 30000;
+const CLIENT_FAILURE_DEDUPE_MS = 60000;
+const clientFailureFingerprints = new Map();
 const SQLITE_BACKUP_DAYS = [
   ["mon", "Pon"],
   ["tue", "Wt"],
@@ -421,6 +423,58 @@ async function requestJson(path, options = {}) {
   }
   return payload;
 }
+
+function clientFailureFingerprint(payload) {
+  return JSON.stringify([
+    payload.kind || "",
+    payload.message || "",
+    payload.source || "",
+    Number(payload.line || 0),
+    Number(payload.column || 0),
+    payload.stack || "",
+  ]);
+}
+
+async function reportClientFailure(payload) {
+  const now = Date.now();
+  const fingerprint = clientFailureFingerprint(payload);
+  const lastReportedAt = Number(clientFailureFingerprints.get(fingerprint) || 0);
+  if (now - lastReportedAt < CLIENT_FAILURE_DEDUPE_MS) return;
+  clientFailureFingerprints.set(fingerprint, now);
+  for (const [key, reportedAt] of clientFailureFingerprints.entries()) {
+    if (now - reportedAt >= CLIENT_FAILURE_DEDUPE_MS) {
+      clientFailureFingerprints.delete(key);
+    }
+  }
+  await requestJson("/api/observability/client-errors", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+window.addEventListener("error", (event) => {
+  reportClientFailure({
+    kind: "error",
+    message: event.message || "Frontend error",
+    source: event.filename || "",
+    line: Number(event.lineno || 0),
+    column: Number(event.colno || 0),
+    stack: event.error?.stack || "",
+  }).catch(() => {});
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  const reason = event.reason;
+  reportClientFailure({
+    kind: "unhandledrejection",
+    message: reason?.message || String(reason || "Unhandled promise rejection"),
+    source: "",
+    line: 0,
+    column: 0,
+    stack: reason?.stack || "",
+  }).catch(() => {});
+});
 
 function updateAdminUi() {
   state.isAdmin = state.currentUser?.role === "admin";

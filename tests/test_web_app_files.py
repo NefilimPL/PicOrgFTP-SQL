@@ -46,6 +46,123 @@ class _MemoryUpload:
 
 
 class WebAppFileTests(unittest.TestCase):
+    def test_process_job_persists_correlated_result(self) -> None:
+        form = web_app._ProcessFormSnapshot(
+            fields={"ean": "5901234567890", "name": "Test product"}
+        )
+        result = {
+            "timing": {"stages": [{"key": "prepare", "elapsed_ms": 12}]},
+            "ftp": {},
+            "sql": {},
+            "local_delete": {},
+            "skipped_slots": [],
+        }
+
+        with (
+            patch.object(web_app._PROCESS_EXECUTOR, "submit"),
+            patch.object(web_app, "_process_upload_snapshot", return_value=result) as process,
+            patch.object(web_app, "record_job") as record_job,
+            patch.object(web_app, "emit_event") as emit_event,
+        ):
+            queued = web_app._queue_process_job(
+                username="alice", cache_scope="scope", form=form
+            )
+            web_app._run_process_job(queued["job_id"])
+
+        process.assert_called_once()
+        self.assertEqual(process.call_args.kwargs["job_id"], queued["job_id"])
+        states = [call.args[0]["status"] for call in record_job.call_args_list]
+        self.assertEqual(states, ["queued", "running", "completed"])
+        self.assertTrue(
+            all(call.args[0]["id"] == queued["job_id"] for call in record_job.call_args_list)
+        )
+        completed = record_job.call_args_list[-1].args[0]
+        self.assertEqual(completed["stages"], result["timing"]["stages"])
+        self.assertEqual(emit_event.call_args.kwargs["severity"], "info")
+        self.assertEqual(emit_event.call_args.kwargs["job_id"], queued["job_id"])
+
+    def test_process_job_persists_critical_unexpected_failure(self) -> None:
+        form = web_app._ProcessFormSnapshot(fields={"ean": "5901234567890"})
+
+        with (
+            patch.object(web_app._PROCESS_EXECUTOR, "submit"),
+            patch.object(
+                web_app,
+                "_process_upload_snapshot",
+                side_effect=RuntimeError("database password=secret"),
+            ),
+            patch.object(web_app, "record_job") as record_job,
+            patch.object(web_app, "emit_event") as emit_event,
+        ):
+            queued = web_app._queue_process_job(
+                username="alice", cache_scope="scope", form=form
+            )
+            web_app._run_process_job(queued["job_id"])
+
+        failed = record_job.call_args_list[-1].args[0]
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["id"], queued["job_id"])
+        self.assertEqual(emit_event.call_args.kwargs["severity"], "critical")
+        self.assertIsInstance(emit_event.call_args.kwargs["exception"], RuntimeError)
+        self.assertEqual(emit_event.call_args.kwargs["job_id"], queued["job_id"])
+
+    def test_process_result_severity_distinguishes_blocking_and_skipped_results(self) -> None:
+        self.assertEqual(
+            web_app._result_severity(
+                {"ftp": {"error": "offline"}, "sql": {}, "local_delete": {}}
+            ),
+            "error",
+        )
+        self.assertEqual(
+            web_app._result_severity(
+                {"ftp": {}, "sql": {}, "local_delete": {}, "skipped_slots": ["01"]}
+            ),
+            "warning",
+        )
+        self.assertEqual(
+            web_app._result_severity(
+                {"ftp": {}, "sql": {}, "local_delete": {}, "skipped_slots": []}
+            ),
+            "info",
+        )
+
+    def test_process_snapshot_emits_correlated_stage_and_validation_events(self) -> None:
+        form = web_app._ProcessFormSnapshot()
+        with (
+            patch.object(web_app, "slot_definitions_from_config", return_value=[]),
+            patch.object(web_app, "_active_product_field_settings", return_value={}),
+            patch.object(
+                web_app,
+                "effective_product_form",
+                side_effect=lambda product, _settings: product,
+            ),
+            patch.object(web_app, "validate_product_form", return_value=["Missing EAN"]),
+            patch.object(web_app, "emit_event") as emit_event,
+        ):
+            with self.assertRaises(HTTPException) as caught:
+                web_app._process_upload_snapshot(
+                    username="alice",
+                    cache_scope="scope",
+                    form=form,
+                    job_id="job-correlated",
+                )
+
+        self.assertEqual(caught.exception.status_code, 400)
+        self.assertEqual(
+            [call.kwargs["severity"] for call in emit_event.call_args_list],
+            ["info", "warning"],
+        )
+        self.assertEqual(
+            [call.kwargs["event_type"] for call in emit_event.call_args_list],
+            ["process.stage_started", "process.validation_rejected"],
+        )
+        self.assertTrue(
+            all(
+                call.kwargs["job_id"] == "job-correlated"
+                for call in emit_event.call_args_list
+            )
+        )
+
     def _image_bytes(self, image_format: str, mode: str = "RGB") -> bytes:
         if Image is None:
             self.skipTest("Pillow unavailable")

@@ -58,6 +58,7 @@ from ..github_status import github_repository_status
 from ..image_utils import fit_image_to_content
 from ..legacy_import import import_legacy_to_sqlite
 from ..logging_utils import log_error
+from ..observability import emit_event, record_job
 from ..product_fields import PRODUCT_FIELDS_KEY, normalize_product_fields
 from ..pimcore_templates import TemplateError
 from ..services.ftp_service import sync_remote_files
@@ -2608,6 +2609,7 @@ def _process_upload_snapshot(
     username: str,
     cache_scope: str,
     form: _ProcessFormSnapshot,
+    job_id: str = "",
     progress: Optional[
         Callable[[int, str, List[Dict[str, Any]], Optional[Dict[str, Any]]], None]
     ] = None,
@@ -2619,6 +2621,17 @@ def _process_upload_snapshot(
         current_key: str = "",
         current_label: str = "",
     ) -> None:
+        if current_key:
+            emit_event(
+                severity="info",
+                event_type="process.stage_started",
+                module="web.process",
+                stage=current_key,
+                username=username,
+                job_id=job_id,
+                summary=current_label or label,
+                details={"percent": percent, "label": label},
+            )
         if progress:
             current_stage = None
             if current_key:
@@ -2996,6 +3009,16 @@ def _process_upload_snapshot(
             message=detail,
             details=details,
         )
+        emit_event(
+            severity="warning" if exc.status_code < 500 else "error",
+            event_type="process.validation_rejected",
+            module="web.process",
+            username=username,
+            job_id=job_id,
+            summary=detail,
+            details=details,
+            exception=exc,
+        )
         raise
     except ValueError as exc:
         details = {}
@@ -3007,6 +3030,16 @@ def _process_upload_snapshot(
             username=username,
             message=str(exc),
             details=details,
+        )
+        emit_event(
+            severity="warning",
+            event_type="process.validation_rejected",
+            module="web.process",
+            username=username,
+            job_id=job_id,
+            summary=str(exc),
+            details=details,
+            exception=exc,
         )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
@@ -3099,6 +3132,26 @@ def _exception_message(exc: BaseException) -> str:
     return str(exc) or exc.__class__.__name__
 
 
+def _result_severity(payload: Dict[str, Any]) -> str:
+    ftp = payload.get("ftp") if isinstance(payload.get("ftp"), dict) else {}
+    sql = payload.get("sql") if isinstance(payload.get("sql"), dict) else {}
+    local_delete = (
+        payload.get("local_delete")
+        if isinstance(payload.get("local_delete"), dict)
+        else {}
+    )
+    blocking = [
+        ftp.get("error"),
+        sql.get("error"),
+        *(local_delete.get("errors") or []),
+    ]
+    if any(blocking):
+        return "error"
+    if payload.get("skipped_slots"):
+        return "warning"
+    return "info"
+
+
 def _cleanup_process_jobs(now: Optional[float] = None) -> None:
     cutoff = (time.time() if now is None else now) - _PROCESS_JOB_RETENTION_SECONDS
     with _PROCESS_JOBS_LOCK:
@@ -3150,6 +3203,41 @@ def _process_job_timing(job: Dict[str, Any], now: Optional[float] = None) -> Dic
     return {"total_ms": total_ms, "stages": stages}
 
 
+def _process_job_record(job: Dict[str, Any]) -> Dict[str, Any]:
+    entry = dict(job.get("entry") or {})
+    timing = _process_job_timing(job)
+    details: Dict[str, Any] = {
+        "entry": entry,
+        "entry_label": str(job.get("entry_label") or ""),
+        "progress": int(job.get("progress") or 0),
+        "progress_label": str(job.get("progress_label") or ""),
+        "warning_messages": list(job.get("warning_messages") or []),
+        "error": str(job.get("error") or ""),
+        "timing_total_ms": timing["total_ms"],
+    }
+    if job.get("result") is not None:
+        details["result"] = job.get("result")
+    return {
+        "id": str(job.get("id") or ""),
+        "username": str(job.get("username") or ""),
+        "ean": str(entry.get("ean") or ""),
+        "status": str(job.get("status") or "queued"),
+        "summary": str(job.get("progress_label") or job.get("error") or ""),
+        "started_at": job.get("started_at") or job.get("created_at") or time.time(),
+        "finished_at": job.get("finished_at") or "",
+        "stages": timing["stages"],
+        "details": details,
+    }
+
+
+def _persist_process_job(job: Dict[str, Any]) -> None:
+    try:
+        record_job(_process_job_record(job))
+    except Exception:
+        # Observability must not change the processing job's business outcome.
+        pass
+
+
 def _set_process_job_progress(
     job_id: str,
     percent: int,
@@ -3168,6 +3256,8 @@ def _set_process_job_progress(
             job["timing_stages"] = [dict(stage) for stage in stages if isinstance(stage, dict)]
         if current_stage is not None:
             job["current_stage"] = dict(current_stage)
+        durable_job = dict(job)
+    _persist_process_job(durable_job)
 
 
 def _queue_process_job(
@@ -3202,6 +3292,7 @@ def _queue_process_job(
     }
     with _PROCESS_JOBS_LOCK:
         _PROCESS_JOBS[job_id] = job
+    _persist_process_job(dict(job))
     _PROCESS_EXECUTOR.submit(_run_process_job, job_id)
     return _process_job_payload(job, include_result=False)
 
@@ -3220,11 +3311,14 @@ def _run_process_job(job_id: str) -> None:
         form = job.get("form")
         entry = dict(job.get("entry") or {})
         entry_label = str(job.get("entry_label") or "")
+        durable_job = dict(job)
+    _persist_process_job(durable_job)
     try:
         payload = _process_upload_snapshot(
             username=username,
             cache_scope=cache_scope,
             form=form,
+            job_id=job_id,
             progress=lambda percent, label, stages, current_stage: _set_process_job_progress(
                 job_id,
                 percent,
@@ -3247,9 +3341,37 @@ def _run_process_job(job_id: str) -> None:
             job["current_stage"] = None
             job["warning_messages"] = warning_messages
             job.pop("form", None)
+            durable_job = dict(job)
+        _persist_process_job(durable_job)
+        severity = _result_severity(payload)
+        emit_event(
+            severity=severity,
+            event_type="process.completed",
+            module="web.process",
+            stage="completed",
+            username=username,
+            ean=str(entry.get("ean") or ""),
+            product_id=str(entry.get("product_id") or ""),
+            job_id=job_id,
+            summary=(
+                "Process completed successfully."
+                if severity == "info"
+                else "Process completed with integration failures."
+                if severity == "error"
+                else "Process completed with skipped slots."
+            ),
+            details={"warnings": warning_messages, "result": payload},
+        )
     except Exception as exc:
         message = _exception_message(exc)
         status_code = getattr(exc, "status_code", 500)
+        severity = (
+            "warning"
+            if isinstance(exc, HTTPException) and int(status_code or 500) < 500
+            else "error"
+            if isinstance(exc, HTTPException)
+            else "critical"
+        )
         _write_web_event(
             level="warning" if int(status_code or 500) < 500 else "error",
             event="PROCESS_JOB_FAILED",
@@ -3268,6 +3390,21 @@ def _run_process_job(job_id: str) -> None:
             job["warning_messages"] = [message]
             job["current_stage"] = None
             job.pop("form", None)
+            durable_job = dict(job)
+        _persist_process_job(durable_job)
+        emit_event(
+            severity=severity,
+            event_type="process.failed",
+            module="web.process",
+            stage="failed",
+            username=username,
+            ean=str(entry.get("ean") or ""),
+            product_id=str(entry.get("product_id") or ""),
+            job_id=job_id,
+            summary=message,
+            details={"entry": entry, "status_code": status_code},
+            exception=exc,
+        )
 
 
 def _process_job_for_user(job_id: str, username: str) -> Optional[Dict[str, Any]]:
@@ -3631,6 +3768,33 @@ def create_app() -> FastAPI:
     app = FastAPI(title="PicOrgFTP-SQL Web", version=get_app_version())
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+    @app.exception_handler(Exception)
+    async def _unhandled_application_error(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        correlation_id = f"corr-{secrets.token_hex(12)}"
+        emit_event(
+            severity="critical",
+            event_type="backend.unhandled_error",
+            module="web",
+            stage="request",
+            correlation_id=correlation_id,
+            summary="Unhandled application error.",
+            details={"method": request.method, "path": request.url.path},
+            exception=exc,
+        )
+        log_error(
+            f"[{correlation_id}] WEB {request.method} {request.url.path}: "
+            f"{exc}\n{traceback.format_exc()}"
+        )
+        return JSONResponse(
+            {
+                "detail": "Wystapil nieoczekiwany blad aplikacji.",
+                "correlation_id": correlation_id,
+            },
+            status_code=500,
+        )
+
     def _runtime_info() -> Dict[str, Any]:
         return {
             "base_dir": settings.AC,
@@ -3638,16 +3802,6 @@ def create_app() -> FastAPI:
             "config_path": config.CONFIG_PATH,
             "warning": settings.BASE_DIR_OVERRIDE_WARNING,
         }
-
-    @app.middleware("http")
-    async def _log_unhandled_web_errors(request: Request, call_next):
-        try:
-            return await call_next(request)
-        except Exception as exc:
-            log_error(
-                f"WEB {request.method} {request.url.path}: {exc}\n{traceback.format_exc()}"
-            )
-            raise
 
     @app.middleware("http")
     async def _guard_mutating_requests(request: Request, call_next):
@@ -4908,6 +5062,27 @@ def create_app() -> FastAPI:
         if target == "sql":
             return JSONResponse(test_sql_connection())
         raise HTTPException(status_code=404, detail="Nieznany test diagnostyczny.")
+
+    @app.post("/api/observability/client-errors")
+    async def client_errors_api(request: Request) -> Dict[str, bool]:
+        username = _require_user(request)
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Niepoprawne dane bledu klienta.") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Niepoprawne dane bledu klienta.")
+        emit_event(
+            severity="critical",
+            event_type="frontend.unhandled_error",
+            module="web.frontend",
+            stage=str(payload.get("kind") or "client"),
+            username=username,
+            summary=str(payload.get("message") or "Frontend error"),
+            details=payload,
+            recommended_action="Review the browser stack and correlated backend events.",
+        )
+        return {"ok": True}
 
     @app.get("/api/process-jobs")
     def process_jobs_api(request: Request, limit: int = 20) -> Dict[str, Any]:
