@@ -72,7 +72,7 @@ from .excel_utils import (
     NO_EAN_PLACEHOLDER,
 )
 from .logging_utils import log_error
-from .observability import emit_event
+from .observability import SECRET_KEY_RE, emit_event
 from .services.ftp_service import connect_ftp, list_remote_files_for_ean, list_remote_filenames
 from .services.sql_service import (
     extract_presence_context,
@@ -143,9 +143,8 @@ from .version import get_display_version
 
 SQL_PROFILE_WARNING_CODES_MAX = 20
 SQL_PROFILE_ERROR_MAX_BYTES = 2000
-_SQL_CREDENTIAL_ASSIGNMENT_RE = re.compile(
-    r"(?ix)\b(?:password|pass|pwd|secret|token|authorization|api[_-]?key|cookie)\b"
-    r"\s*[:=]\s*"
+_SQL_ASSIGNMENT_RE = re.compile(
+    r"(?ix)(?<![a-z0-9_.-])(?P<key>[a-z0-9_.-]+)\s*[:=]\s*"
     r'(?:"(?:\\.|[^"\r\n])*"|\'(?:\\.|[^\'\r\n])*\'|[^\r\n;,]*)'
 )
 
@@ -1893,6 +1892,13 @@ def _redact_sql_integration_error(
     profiles: list[dict[str, object]],
 ) -> str:
     text = str(value or "")
+
+    def redact_assignment(match: re.Match[str]) -> str:
+        if not SECRET_KEY_RE.search(match.group("key")):
+            return match.group(0)
+        return "credential=[REDACTED]"
+
+    text = _SQL_ASSIGNMENT_RE.sub(redact_assignment, text)
     known_secrets = {
         str(profile.get("password") or "")
         for profile in profiles
@@ -1900,7 +1906,6 @@ def _redact_sql_integration_error(
     }
     for secret in sorted(known_secrets, key=len, reverse=True):
         text = text.replace(secret, "[REDACTED]")
-    text = _SQL_CREDENTIAL_ASSIGNMENT_RE.sub("credential=[REDACTED]", text)
     encoded = text.encode("utf-8")
     if len(encoded) > SQL_PROFILE_ERROR_MAX_BYTES:
         text = encoded[:SQL_PROFILE_ERROR_MAX_BYTES].decode("utf-8", errors="ignore")

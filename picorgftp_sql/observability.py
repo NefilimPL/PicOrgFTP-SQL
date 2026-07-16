@@ -16,7 +16,7 @@ from .sqlite_store import SqliteStore
 
 SEVERITIES = ("info", "warning", "error", "critical")
 SECRET_KEY_RE = re.compile(
-    r"password|pass|secret|token|authorization|api[_-]?key|cookie",
+    r"password|pass|pwd|secret|token|authorization|api[_-]?key|cookie",
     re.IGNORECASE,
 )
 SCALAR_TEXT_LIMIT = 8 * 1024

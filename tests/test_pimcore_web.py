@@ -948,7 +948,13 @@ def test_integration_results_use_trusted_requiredness_redact_errors_and_bound_wa
                 "warning_codes": [f"warning-{index}" for index in range(40)],
                 "error": (
                     "unlabeled q7; secret=browser secret with spaces; "
-                    "password=browser-password; token=browser-token; " + ("x" * 5000)
+                    "password=browser-password; token=browser-token; "
+                    "access_token=browser access token; "
+                    "refresh_token='browser refresh token'; "
+                    "client_secret=browser client secret; "
+                    "db_password=browser database password; "
+                    "x_api_key=browser compound api key; query_id=trace-42; "
+                    + ("x" * 5000)
                 ),
             },
             {
@@ -999,12 +1005,18 @@ def test_integration_results_use_trusted_requiredness_redact_errors_and_bound_wa
         "browser secret with spaces",
         "browser-password",
         "browser-token",
+        "browser access token",
+        "browser refresh token",
+        "browser client secret",
+        "browser database password",
+        "browser compound api key",
         "browser-auth",
         "browser-cookie",
     ):
         assert secret not in serialized_result
         assert secret not in serialized_history
         assert secret not in serialized_events
+    assert "query_id=trace-42" in profiles[0]["error"]
     assert [call.kwargs["severity"] for call in emit_event.call_args_list[:2]] == [
         "error",
         "info",
@@ -1591,7 +1603,10 @@ def test_render_sql_profile_error_redacts_assignments_and_known_profile_secret()
         "secret=plain secret with spaces; token=token secret with spaces; "
         "authorization=Bearer auth secret with spaces; "
         "api_key=underscore api secret; api-key=hyphen api secret; "
-        "cookie=session cookie secret\nsafe diagnostic"
+        "cookie=session cookie secret; access_token=render access token; "
+        "refresh_token='render refresh token'; "
+        "client_secret=render client secret; db_password=render database password; "
+        "x_api_key=render compound api key; query_id=trace-42\nsafe diagnostic"
     )
     with (
         patch.object(web_data.config, "CONFIG", cfg),
@@ -1613,11 +1628,17 @@ def test_render_sql_profile_error_redacts_assignments_and_known_profile_secret()
         "underscore api secret",
         "hyphen api secret",
         "session cookie secret",
+        "render access token",
+        "render refresh token",
+        "render client secret",
+        "render database password",
+        "render compound api key",
     ):
         assert secret not in serialized
     assert "[REDACTED]" in serialized
     integration = result["integrations"]["sql_profiles"][0]
     assert integration["required"] is True
+    assert "query_id=trace-42" in integration["error"]
 
 
 def test_sql_warning_codes_caps_before_iterating_warning_collection():
