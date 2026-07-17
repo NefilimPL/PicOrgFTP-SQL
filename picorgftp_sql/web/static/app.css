@@ -2764,6 +2764,71 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
   margin: 0;
 }
 
+.log-delivery-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.log-delivery-badge {
+  display: inline-flex;
+  width: fit-content;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  padding: 3px 9px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.log-delivery-sent,
+.log-delivery-fallback {
+  border-color: var(--local);
+  color: var(--local);
+}
+
+.log-delivery-error {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.log-delivery-details {
+  flex: 1 1 280px;
+  min-width: min(280px, 100%);
+  border-top: 0;
+}
+
+.log-delivery-details > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.log-delivery-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.log-delivery-item {
+  display: grid;
+  gap: 4px;
+  border-left: 2px solid var(--line);
+  padding-left: 8px;
+}
+
+.log-delivery-item > span,
+.log-delivery-attempts {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.log-delivery-attempts {
+  margin: 0;
+  padding-left: 20px;
+}
+
 .log-card-highlight {
   outline: 3px solid var(--accent);
   outline-offset: 2px;

@@ -4265,6 +4265,35 @@ def _redacted_email_test_attempt(raw: object) -> Dict[str, Any]:
     return attempt
 
 
+_INCIDENT_DELIVERY_STATUSES = frozenset(
+    {"pending", "sending", "sent", "fallback", "skipped", "error"}
+)
+
+
+def _public_incident_delivery(raw: object) -> Dict[str, Any]:
+    """Return the closed, recipient-free delivery projection used by log cards."""
+
+    item = raw if isinstance(raw, dict) else {}
+    status = str(item.get("status") or "").strip().lower()
+    if status not in _INCIDENT_DELIVERY_STATUSES:
+        status = "error"
+    channel = str(item.get("used_channel") or "").strip().lower()
+    if channel not in {"entra", "smtp"}:
+        channel = ""
+    recipients = item.get("recipients")
+    raw_attempts = item.get("attempts")
+    attempts = raw_attempts if isinstance(raw_attempts, list) else []
+    return {
+        "id": str(item.get("id") or ""),
+        "status": status,
+        "used_channel": channel,
+        "recipient_count": len(recipients) if isinstance(recipients, list) else 0,
+        "created_at": str(item.get("created_at") or ""),
+        "updated_at": str(item.get("updated_at") or ""),
+        "attempts": [_redacted_email_test_attempt(attempt) for attempt in attempts[:2]],
+    }
+
+
 def create_app() -> FastAPI:
     """Create the LAN web backend."""
 
@@ -4580,15 +4609,32 @@ def create_app() -> FastAPI:
     ) -> Dict[str, Any]:
         current_user = _require_admin(request)
         severities = _validated_severities(severity, multiple=False)
-        page = observability_store().query_incidents(
+        store = observability_store()
+        page = store.query_incidents(
             severity=severities[0] if severities else "",
             cursor=_validate_observability_cursor(cursor),
             limit=_observability_limit(limit),
         )
+        incident_items = [
+            item for item in page.get("items") or [] if isinstance(item, dict)
+        ]
+        incident_ids = [str(item.get("id") or "") for item in incident_items]
+        deliveries_by_incident: Dict[str, List[Dict[str, Any]]] = {}
+        for delivery in store.notification_deliveries_for_incidents(
+            incident_ids, per_incident_limit=5
+        ):
+            incident_id = str(delivery.get("incident_id") or "")
+            if incident_id in incident_ids:
+                deliveries_by_incident.setdefault(incident_id, []).append(
+                    _public_incident_delivery(delivery)
+                )
         page["items"] = [
-            {**item, **incident_context(item)}
-            for item in page.get("items") or []
-            if isinstance(item, dict)
+            {
+                **item,
+                **incident_context(item),
+                "deliveries": deliveries_by_incident.get(str(item.get("id") or ""), []),
+            }
+            for item in incident_items
         ]
         return _observability_api_payload(str(current_user.get("username") or ""), page)
 

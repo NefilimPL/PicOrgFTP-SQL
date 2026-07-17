@@ -4830,6 +4830,80 @@ function incidentValue(incident, key) {
   return incident[key] || incident.context?.[key] || "";
 }
 
+const DELIVERY_STATUS_LABELS = {
+  pending: "Oczekuje",
+  sending: "Oczekuje",
+  sent: "Wysłano",
+  fallback: "Fallback",
+  skipped: "Pominięto",
+  error: "Błąd",
+};
+
+function deliveryStatusLabel(status) {
+  return DELIVERY_STATUS_LABELS[status] || "Błąd";
+}
+
+function deliveryChannelLabel(channel) {
+  if (channel === "smtp") return "SMTP";
+  if (channel === "entra") return "Microsoft Entra";
+  return "brak kanału";
+}
+
+function renderIncidentDeliveries(incident) {
+  const deliveries = Array.isArray(incident.deliveries) ? incident.deliveries : [];
+  if (!deliveries.length) return null;
+  const wrapper = document.createElement("div");
+  const latest = deliveries[0];
+  const badge = document.createElement("span");
+  const details = document.createElement("details");
+  const heading = document.createElement("summary");
+  const list = document.createElement("div");
+  wrapper.className = "log-delivery-summary";
+  badge.className = `log-delivery-badge log-delivery-${latest.status || "error"}`;
+  badge.textContent = `${deliveryStatusLabel(latest.status)} · ${deliveryChannelLabel(
+    latest.used_channel
+  )}`;
+  details.className = "log-delivery-details";
+  heading.textContent = `Powiadomienia e-mail (${deliveries.length})`;
+  list.className = "log-delivery-list";
+  for (const delivery of deliveries) {
+    const item = document.createElement("section");
+    const meta = document.createElement("strong");
+    const recipients = document.createElement("span");
+    const attempts = document.createElement("ul");
+    item.className = "log-delivery-item";
+    meta.textContent = [
+      deliveryStatusLabel(delivery.status),
+      deliveryChannelLabel(delivery.used_channel),
+      delivery.updated_at || delivery.created_at || "",
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    recipients.textContent = `Liczba odbiorców: ${Number(delivery.recipient_count || 0)}`;
+    attempts.className = "log-delivery-attempts";
+    for (const attempt of delivery.attempts || []) {
+      const row = document.createElement("li");
+      row.textContent = [
+        deliveryChannelLabel(attempt.channel),
+        attempt.status === "sent" ? "Wysłano" : "Błąd",
+        Number.isInteger(attempt.status_code) ? `kod ${attempt.status_code}` : "",
+        Number.isInteger(attempt.elapsed_ms) ? `${attempt.elapsed_ms} ms` : "",
+        attempt.code || "",
+        attempt.message || "",
+      ]
+        .filter(Boolean)
+        .join(" | ");
+      attempts.appendChild(row);
+    }
+    item.append(meta, recipients);
+    if (attempts.childElementCount) item.appendChild(attempts);
+    list.appendChild(item);
+  }
+  details.append(heading, list);
+  wrapper.append(badge, details);
+  return wrapper;
+}
+
 function renderIncidentContext(incident, key, label) {
   const details = document.createElement("details");
   const heading = document.createElement("summary");
@@ -4914,6 +4988,8 @@ function renderIncidentCard(incident) {
   card.append(meta, title, action);
   if (context.textContent) card.appendChild(context);
   if (links.childElementCount) card.appendChild(links);
+  const deliveryStatus = renderIncidentDeliveries(incident);
+  if (deliveryStatus) card.appendChild(deliveryStatus);
   card.append(
     renderIncidentContext(incident, "before", "Przed"),
     renderIncidentContext(incident, "problem", "Problem"),

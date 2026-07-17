@@ -273,6 +273,128 @@ def test_incidents_include_only_their_correlated_context(api_environment) -> Non
     assert "evt-unrelated" not in response.text
 
 
+def test_incidents_include_matching_delivery_status_with_strict_safe_projection(
+    api_environment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, store = api_environment
+    _login(client)
+    store.append_operational_event(
+        _event("evt-problem", "2026-07-16T10:01:00.000Z", "error")
+    )
+    store.upsert_incident(
+        {
+            "id": "inc-visible",
+            "fingerprint": "visible-failure",
+            "severity": "error",
+            "event_type": "test.failure",
+            "first_seen_at": "2026-07-16T10:01:00.000Z",
+            "last_seen_at": "2026-07-16T10:01:00.000Z",
+            "first_event_id": "evt-problem",
+            "latest_event_id": "evt-problem",
+        }
+    )
+    store.enqueue_notification_delivery(
+        {
+            "id": "delivery-visible",
+            "incident_id": "inc-visible",
+            "event_id": "evt-problem",
+            "severity": "error",
+            "status": "error",
+            "primary_channel": "entra",
+            "used_channel": "smtp",
+            "recipients": ["admin@example.com", "operator@example.com"],
+            "message": {
+                "message_id": "incident-visible",
+                "subject": "private subject",
+                "text_body": "private body",
+            },
+            "attempts": [
+                {
+                    "channel": "smtp",
+                    "status": "error",
+                    "status_code": 503,
+                    "elapsed_ms": 47,
+                    "code": "delivery_failed",
+                    "category": "delivery",
+                    "message": "smtp_password=must-not-leak",
+                    "recipients": ["intruder@example.com"],
+                    "access_token": "must-not-leak",
+                    "unexpected": "must-not-leak",
+                }
+            ],
+            "created_at": "2026-07-16T10:02:00.000Z",
+            "updated_at": "2026-07-16T10:03:00.000Z",
+            "next_attempt_at": "",
+        }
+    )
+    # More than one global delivery page must not starve the matching older row.
+    for index in range(101):
+        store.enqueue_notification_delivery(
+            {
+                "id": f"delivery-decoy-{index:03d}",
+                "incident_id": "inc-not-visible",
+                "event_id": "evt-decoy",
+                "severity": "warning",
+                "status": "pending",
+                "primary_channel": "entra",
+                "used_channel": "",
+                "recipients": ["decoy@example.com"],
+                "message": {"message_id": f"decoy-{index}"},
+                "attempts": [],
+                "created_at": f"2026-07-17T10:{index // 60:02d}:{index % 60:02d}.000Z",
+                "updated_at": f"2026-07-17T10:{index // 60:02d}:{index % 60:02d}.000Z",
+                "next_attempt_at": "",
+            }
+        )
+    monkeypatch.setattr(web_app, "observability_store", lambda: store)
+
+    response = client.get("/api/observability/incidents", params={"severity": "error"})
+
+    assert response.status_code == 200
+    delivery = response.json()["items"][0]["deliveries"][0]
+    assert delivery == {
+        "id": "delivery-visible",
+        "status": "error",
+        "used_channel": "smtp",
+        "recipient_count": 2,
+        "created_at": "2026-07-16T10:02:00.000Z",
+        "updated_at": "2026-07-16T10:03:00.000Z",
+        "attempts": [
+            {
+                "channel": "smtp",
+                "status": "error",
+                "status_code": 503,
+                "elapsed_ms": 47,
+                "code": "delivery_failed",
+                "category": "delivery",
+                "message": "Kanal nie wyslal wiadomosci.",
+            }
+        ],
+    }
+    serialized = json.dumps(response.json(), ensure_ascii=False)
+    for private_value in (
+        "admin@example.com",
+        "operator@example.com",
+        "intruder@example.com",
+        "private subject",
+        "private body",
+        "must-not-leak",
+    ):
+        assert private_value not in serialized
+
+
+def test_non_admin_cannot_inspect_incident_delivery_status(api_environment) -> None:
+    client, _store = api_environment
+    web_data.add_user("operator", "secret", "user")
+    _login(client, "operator", "secret")
+
+    response = client.get("/api/observability/incidents")
+
+    assert response.status_code == 403
+    assert "recipients" not in response.text.lower()
+    assert "attempts" not in response.text.lower()
+
+
 def test_jobs_endpoint_returns_durable_runs_for_admin(api_environment) -> None:
     client, store = api_environment
     _login(client)

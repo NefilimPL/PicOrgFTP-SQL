@@ -188,6 +188,13 @@ class SqliteDataStoreAdapter:
             limit=limit,
         )
 
+    def notification_deliveries_for_incidents(
+        self, incident_ids: list[str], *, per_incident_limit: int = 5
+    ) -> list[dict[str, Any]]:
+        return self.store.notification_deliveries_for_incidents(
+            incident_ids, per_incident_limit=per_incident_limit
+        )
+
     def mark_alerts_read(
         self, username: str, severity: str, event_id: str, created_at: str
     ) -> None:

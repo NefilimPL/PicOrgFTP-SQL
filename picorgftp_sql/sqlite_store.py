@@ -1612,6 +1612,41 @@ class SqliteStore:
         )
         return {"items": items, "next_cursor": next_cursor}
 
+    def notification_deliveries_for_incidents(
+        self, incident_ids: list[str], *, per_incident_limit: int = 5
+    ) -> list[dict[str, Any]]:
+        """Return a bounded recent delivery set for a bounded incident page."""
+
+        self.initialize()
+        normalized_ids = list(
+            dict.fromkeys(_text(value) for value in incident_ids if _text(value))
+        )[:100]
+        if not normalized_ids:
+            return []
+        bounded_limit = max(1, min(10, int(per_incident_limit or 5)))
+        placeholders = ", ".join("?" for _value in normalized_ids)
+        with self.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM (
+                    SELECT notification_deliveries.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY incident_id
+                               ORDER BY created_at DESC, id DESC
+                           ) AS delivery_rank
+                    FROM notification_deliveries
+                    WHERE incident_id IN ({placeholders})
+                )
+                WHERE delivery_rank <= ?
+                ORDER BY created_at DESC, id DESC
+                """,
+                (*normalized_ids, bounded_limit),
+            ).fetchall()
+        deliveries = [self._delivery_from_row(row) for row in rows]
+        for delivery in deliveries:
+            delivery.pop("delivery_rank", None)
+        return deliveries
+
     def mark_alerts_read(
         self, username: str, severity: str, event_id: str, created_at: str
     ) -> None:

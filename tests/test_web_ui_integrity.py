@@ -211,6 +211,38 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertNotIn("innerHTML", logs_renderer)
         self.assertIn("textContent", logs_renderer)
 
+    def test_incident_cards_render_safe_delivery_status_details(self) -> None:
+        js_source = APP_JS.read_text(encoding="utf-8")
+        css_source = (
+            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+
+        for status, label in (
+            ("pending", "Oczekuje"),
+            ("sending", "Oczekuje"),
+            ("sent", "Wysłano"),
+            ("fallback", "Fallback"),
+            ("skipped", "Pominięto"),
+            ("error", "Błąd"),
+        ):
+            self.assertIn(f'{status}: "{label}"', js_source)
+        incident_renderer = js_source[
+            js_source.index("function renderIncidentCard") : js_source.index(
+                "function renderJobCard"
+            )
+        ]
+        self.assertIn("renderIncidentDeliveries", incident_renderer)
+        self.assertNotIn("innerHTML", incident_renderer)
+        self.assertIn(".log-delivery-badge", css_source)
+        self.assertIn(".log-delivery-details", css_source)
+        delivery_styles = css_source[
+            css_source.index(".log-delivery-summary") : css_source.index(
+                ".log-card-highlight"
+            )
+        ]
+        self.assertIn("var(--local)", delivery_styles)
+        self.assertNotIn("var(--success)", delivery_styles)
+
     def test_app_js_static_id_selectors_exist_in_index_html(self) -> None:
         html = _parse(INDEX_HTML)
         source = APP_JS.read_text(encoding="utf-8")
