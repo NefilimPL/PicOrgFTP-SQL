@@ -47,6 +47,9 @@ def test_free_text_redaction_covers_credentials_without_harming_identifiers() ->
         "ADJACENT_EAN_SENTINEL_F1",
         "ADJACENT_OBJECT_SENTINEL_F1",
         "ADJACENT_PATH_SENTINEL_F1",
+        "MULTILINE_JSON_SENTINEL_F1",
+        "MULTILINE_KEY_SENTINEL_F1",
+        "MULTILINE_SCHEME_SENTINEL_F1",
         "§",
         "¤",
     ]
@@ -96,6 +99,17 @@ def test_free_text_redaction_covers_credentials_without_harming_identifiers() ->
         "empty_header": (
             "Authorization:\nX-Diagnostic: EAN 5901234567890"
         ),
+        "multiline_json": (
+            '"access_token":\n  "MULTILINE_JSON_SENTINEL_F1"'
+        ),
+        "multiline_key": "password:\n  MULTILINE_KEY_SENTINEL_F1",
+        "multiline_scheme": "Bearer\n  MULTILINE_SCHEME_SENTINEL_F1",
+        "unindented_key": (
+            "password:\nX-Diagnostic: EAN 5901234567890"
+        ),
+        "unindented_scheme": (
+            "Bearer\nX-Diagnostic: object_id=12842"
+        ),
         "diagnostic": (
             "Nie udało się zaktualizować produktu EAN 5901234567890, "
             "object ID 12842, plik C:\\obrazy\\5901234567890_01.jpg"
@@ -129,6 +143,17 @@ def test_free_text_redaction_covers_credentials_without_harming_identifiers() ->
     )
     assert redacted["empty_header"] == (
         "Authorization:[REDACTED]\nX-Diagnostic: EAN 5901234567890"
+    )
+    assert redacted["multiline_json"] == (
+        '"access_token":\n  "[REDACTED]"'
+    )
+    assert redacted["multiline_key"] == "password:\n  [REDACTED]"
+    assert redacted["multiline_scheme"] == "Bearer\n  [REDACTED]"
+    assert redacted["unindented_key"] == (
+        "password:\nX-Diagnostic: EAN 5901234567890"
+    )
+    assert redacted["unindented_scheme"] == (
+        "Bearer\nX-Diagnostic: object_id=12842"
     )
 
 

@@ -19,6 +19,8 @@ _SECRET_NAME = (
     r"token|access[_ -]?token|refresh[_ -]?token|api[_ -]?key|"
     r"authorization|cookie"
 )
+_VALUE_GAP = r"[ \t]*(?:\r?\n[ \t]+)?"
+_SCHEME_GAP = r"[ \t]*(?:\r?\n[ \t]+|[ \t])"
 _HEADER_RE = re.compile(
     r"(?im)(?P<prefix>\b(?:authorization|proxy-authorization|cookie|set-cookie)"
     r"[ \t]*:[ \t]*)[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*"
@@ -28,15 +30,15 @@ _URI_USERINFO_RE = re.compile(
 )
 _DOUBLE_QUOTED_VALUE_RE = re.compile(
     rf"(?i)(?P<prefix>(?<![\w-])[\"']?(?:{_SECRET_NAME})[\"']?"
-    r"[ \t]*[:=][ \t]*)\"(?:\\[^\r\n]|[^\"\\\r\n])*\""
+    rf"[ \t]*[:=]{_VALUE_GAP})\"(?:\\[^\r\n]|[^\"\\\r\n])*\""
 )
 _SINGLE_QUOTED_VALUE_RE = re.compile(
     rf"(?i)(?P<prefix>(?<![\w-])[\"']?(?:{_SECRET_NAME})[\"']?"
-    r"[ \t]*[:=][ \t]*)'(?:\\[^\r\n]|[^'\\\r\n])*'"
+    rf"[ \t]*[:=]{_VALUE_GAP})'(?:\\[^\r\n]|[^'\\\r\n])*'"
 )
 _BRACED_VALUE_RE = re.compile(
     rf"(?i)(?P<prefix>(?<![\w-])[\"']?(?:{_SECRET_NAME})[\"']?"
-    r"[ \t]*[:=][ \t]*)\{(?:\}\}|[^}\r\n])*\}"
+    rf"[ \t]*[:=]{_VALUE_GAP})\{{(?:\}}\}}|[^}}\r\n])*\}}"
 )
 _CONNECTION_PREFIX_RE = re.compile(
     rf"(?i)(?P<prefix>(?:^|;)[ \t]*(?:{_SECRET_NAME})[ \t]*=[ \t]*)"
@@ -44,10 +46,11 @@ _CONNECTION_PREFIX_RE = re.compile(
 )
 _PLAIN_PREFIX_RE = re.compile(
     rf"(?i)(?P<prefix>(?<![\w-])[\"']?(?:{_SECRET_NAME})[\"']?"
-    r"[ \t]*[:=][ \t]*)"
+    rf"[ \t]*[:=]{_VALUE_GAP})"
 )
 _AUTH_SCHEME_RE = re.compile(
-    r"(?i)(?P<prefix>\b(?:Bearer|Basic)[ \t]+)(?!\[REDACTED\])\S+"
+    rf"(?i)(?P<prefix>\b(?:Bearer|Basic){_SCHEME_GAP})"
+    r"(?!\[REDACTED\])\S+"
 )
 _STRUCTURED_FIELD_RE = re.compile(
     r"[A-Za-z_][A-Za-z0-9_.-]*[ \t]*[:=]"
