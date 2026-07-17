@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier
 
@@ -347,6 +347,81 @@ def test_empty_stream_marker_returns_bounded_latest_snapshot(tmp_path: Path) -> 
         f"evt-{index:03d}" for index in range(5, 105)
     ]
     assert store.poll_operational_event_stream(position=start["position"])["items"] == []
+
+
+def test_live_snapshot_returns_empty_marker_for_empty_stream(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+
+    snapshot = store.snapshot_operational_event_stream(
+        since="2026-07-16T00:00:00.000Z"
+    )
+
+    assert snapshot == {"items": [], "stream_after_id": ""}
+
+
+def test_live_snapshot_uses_tombstone_checkpoint_and_drains_every_later_event(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.append_operational_event(_event("evt-old", "2026-07-15T09:00:00.000Z"))
+    store.append_operational_event(_event("evt-visible", "2026-07-16T10:00:00.000Z"))
+    store.append_operational_event(_event("evt-tombstone", "2026-07-16T10:01:00.000Z"))
+    with sqlite3.connect(tmp_path / "app.sqlite") as conn:
+        conn.execute("DELETE FROM operational_events WHERE id = ?", ("evt-tombstone",))
+
+    snapshot = store.snapshot_operational_event_stream(
+        since="2026-07-16T00:00:00.000Z"
+    )
+    expected = []
+    for index in range(205):
+        identity = f"evt-later-{index:03d}"
+        expected.append(identity)
+        store.append_operational_event(
+            _event(identity, "2026-07-16T10:02:00.000Z")
+        )
+
+    assert [item["id"] for item in snapshot["items"]] == ["evt-visible"]
+    assert snapshot["stream_after_id"] == "evt-tombstone"
+    assert all("sequence" not in item for item in snapshot["items"])
+    start = store.start_operational_event_stream(
+        after_id=snapshot["stream_after_id"]
+    )
+    position = start["position"]
+    streamed = []
+    while True:
+        page = store.poll_operational_event_stream(position=position, limit=100)
+        streamed.extend(item["id"] for item in page["items"])
+        position = page["position"]
+        if not page["items"]:
+            break
+    assert streamed == expected
+
+
+def test_live_snapshot_returns_newest_two_thousand_in_chronological_order(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    started_at = datetime(2026, 7, 16, 10, tzinfo=timezone.utc)
+    for index in range(2005):
+        store.append_operational_event(
+            _event(
+                f"evt-{index:04d}",
+                (started_at + timedelta(seconds=index))
+                .isoformat(timespec="milliseconds")
+                .replace("+00:00", "Z"),
+            )
+        )
+
+    snapshot = store.snapshot_operational_event_stream(
+        since="2026-07-16T00:00:00.000Z",
+        limit=9999,
+    )
+
+    assert len(snapshot["items"]) == 2000
+    assert snapshot["items"][0]["id"] == "evt-0005"
+    assert snapshot["items"][-1]["id"] == "evt-2004"
+    assert snapshot["stream_after_id"] == "evt-2004"
+    assert all("sequence" not in item for item in snapshot["items"])
 
 
 def test_job_and_incident_roundtrips_use_descending_cursors(tmp_path: Path) -> None:

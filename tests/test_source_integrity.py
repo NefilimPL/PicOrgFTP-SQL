@@ -42,19 +42,40 @@ class SourceIntegrityTests(unittest.TestCase):
         seed_end = source.index("function appendLiveEvent", seed_start)
         seed_source = source[seed_start:seed_end]
         self.assertIn("seedGeneration", seed_source)
-        self.assertIn("seedBuffer", seed_source)
+        self.assertIn("live_seed", seed_source)
+        self.assertIn("stream_after_id", seed_source)
         self.assertIn("mergeLiveItems", seed_source)
         self.assertLess(
-            seed_source.index("startObservabilityStream();"),
-            seed_source.index('requestObservabilityPayload("/api/observability/events?"'),
+            seed_source.index('"/api/observability/events?"'),
+            seed_source.index("startObservabilityStream(streamAfterId);"),
         )
+        self.assertNotIn("seedBuffer", seed_source)
+        paused_seed = seed_source[
+            seed_source.index("if (state.observability.paused)") : seed_source.index(
+                "} else", seed_source.index("if (state.observability.paused)")
+            )
+        ]
+        self.assertIn("appendPausedObservabilityEvents(seedItems)", paused_seed)
+        self.assertNotIn("live.items =", paused_seed)
+        self.assertNotIn("renderLogs()", paused_seed)
         seed_catch = seed_source[seed_source.index("} catch (error)") :]
         self.assertIn(
             "if (state.observability.seedGeneration !== seedGeneration) return;",
             seed_catch,
         )
-        self.assertGreaterEqual(seed_source.count("bufferedFrames.filter"), 2)
+        self.assertIn("if (state.observability.streamAfterId)", seed_catch)
         self.assertNotIn("observability-live-high-water", source)
+        paused_buffer = source[
+            source.index("function appendPausedObservabilityEvents") : seed_start
+        ]
+        self.assertIn("live.items", paused_buffer)
+        stream_source = source[
+            source.index("function startObservabilityStream") : source.index(
+                "function stopObservabilityStream"
+            )
+        ]
+        self.assertIn("encodeURIComponent(afterId)", stream_source)
+        self.assertIn('state.observability.paused ? "Wstrzymano" : "Polaczono"', stream_source)
         self.assertIn("if (tab.loading) return;", source)
         self.assertIn("logsLoadMoreButton.disabled = Boolean(tab.loading)", source)
         self.assertIn("state.observability.activeTab === tabName", source)
@@ -92,7 +113,13 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("visitedCursors.has(nextCursor)", source)
         self.assertIn("unreadRequestId", source)
         self.assertIn("applyObservabilityUnread", source)
-        self.assertIn("authoritativeUnread", source)
+        request_source = source[
+            source.index("async function requestObservabilityPayload") : source.index(
+                "function showLogsError"
+            )
+        ]
+        self.assertNotIn("authoritativeUnread", request_source)
+        self.assertEqual(request_source.count("unreadRequestId ="), 1)
         self.assertIn("committedFilters", source)
         self.assertIn('logsFilters?.addEventListener("reset"', source)
         job_renderer = source[
@@ -101,6 +128,32 @@ class SourceIntegrityTests(unittest.TestCase):
             )
         ]
         self.assertNotIn(': "error"', job_renderer)
+        walk_source = source[
+            source.index("async function walkObservabilityPages") : source.index(
+                "function focusObservabilityRecord"
+            )
+        ]
+        self.assertIn("findIncidentRecord", walk_source)
+        self.assertIn("loadIncidentThroughRecord", walk_source)
+        discovery_source = source[
+            source.index("async function findIncidentRecord") : source.index(
+                "async function loadIncidentThroughRecord"
+            )
+        ]
+        self.assertNotIn("appendUniqueObservabilityItems", discovery_source)
+        severity_walk = source[
+            source.index("async function loadIncidentThroughRecord") : source.index(
+                "async function walkObservabilityPages"
+            )
+        ]
+        self.assertIn("observabilityEndpoint(severity, cursor)", severity_walk)
+        self.assertIn("tab.nextCursor = payload.next_cursor", severity_walk)
+        jobs_walk = source[
+            source.index("async function loadJobThroughRecord") : source.index(
+                "async function walkObservabilityPages"
+            )
+        ]
+        self.assertIn("jobs.nextCursor = payload.next_cursor", jobs_walk)
 
     def test_web_client_reports_deduplicated_global_failures(self) -> None:
         app_path = (

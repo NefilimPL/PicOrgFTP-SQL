@@ -90,6 +90,8 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn(".nav-button.log-alert-error", css_source)
         self.assertIn(".log-card-highlight", css_source)
         self.assertIn("data-observability-id", js_source)
+        self.assertIn("live_seed", js_source)
+        self.assertIn("stream_after_id", js_source)
         logs_renderer = js_source[
             js_source.index("function renderLogEvent") : js_source.index("function createPoller")
         ]

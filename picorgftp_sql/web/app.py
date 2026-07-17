@@ -7,7 +7,7 @@ import base64
 import binascii
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import io
@@ -4477,6 +4477,7 @@ def create_app() -> FastAPI:
     @app.get("/api/observability/events")
     def observability_events_api(
         request: Request,
+        live_seed: bool = False,
         severity: str = "",
         cursor: str = "",
         limit: int = 20,
@@ -4489,8 +4490,22 @@ def create_app() -> FastAPI:
         since: str = "",
     ) -> Dict[str, Any]:
         current_user = _require_admin(request)
+        store = observability_store()
+        if live_seed:
+            seed_since = (
+                datetime.now(timezone.utc) - timedelta(hours=24)
+            ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            page = store.snapshot_operational_event_stream(
+                since=seed_since,
+                limit=2000,
+            )
+            response = _observability_api_payload(
+                str(current_user.get("username") or ""), page
+            )
+            response["stream_after_id"] = str(page.get("stream_after_id") or "")
+            return response
         severities = _validated_severities(severity)
-        page = observability_store().query_operational_events(
+        page = store.query_operational_events(
             severities=severities,
             username=username,
             ean=ean,

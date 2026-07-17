@@ -6,6 +6,8 @@ import asyncio
 import base64
 import json
 import os
+import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -138,6 +140,45 @@ def test_events_are_admin_only_paginated_filtered_and_validate_cursor(
         assert client.get(
             "/api/observability/events", params={"cursor": noncanonical}
         ).status_code == 400
+
+
+def test_live_seed_is_admin_only_atomic_and_exposes_only_opaque_marker(
+    api_environment,
+) -> None:
+    client, store = api_environment
+    now = datetime.now(timezone.utc)
+    recent = (now - timedelta(minutes=5)).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+    old = (now - timedelta(hours=25)).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+    store.append_operational_event(_event("evt-old", old))
+    store.append_operational_event(_event("evt-recent", recent))
+    store.append_operational_event(_event("evt-tombstone", recent))
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("DELETE FROM operational_events WHERE id = ?", ("evt-tombstone",))
+    web_data.add_user("operator", "secret", "user")
+
+    assert client.get(
+        "/api/observability/events", params={"live_seed": 1}
+    ).status_code == 401
+    _login(client, "operator", "secret")
+    assert client.get(
+        "/api/observability/events", params={"live_seed": 1}
+    ).status_code == 403
+
+    admin = TestClient(web_app.app)
+    _login(admin)
+    response = admin.get("/api/observability/events", params={"live_seed": 1})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["id"] for item in payload["items"]] == ["evt-recent"]
+    assert payload["stream_after_id"] == "evt-tombstone"
+    assert payload["next_cursor"] == ""
+    assert "sequence" not in json.dumps(payload)
+    admin.close()
 
 
 def test_incidents_include_only_their_correlated_context(api_environment) -> None:

@@ -726,6 +726,44 @@ class SqliteStore:
             "position": high_water,
         }
 
+    def snapshot_operational_event_stream(
+        self, *, since: str, limit: int = 2000
+    ) -> dict[str, Any]:
+        """Return a bounded live snapshot and its atomic durable checkpoint."""
+
+        self.initialize()
+        try:
+            snapshot_limit = max(1, min(2000, int(limit or 2000)))
+        except (TypeError, ValueError):
+            snapshot_limit = 2000
+        with self.connection() as conn:
+            conn.execute("BEGIN")
+            marker = conn.execute(
+                """
+                SELECT sequence, event_id
+                FROM operational_event_stream
+                ORDER BY sequence DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if marker is None:
+                return {"items": [], "stream_after_id": ""}
+            rows = conn.execute(
+                """
+                SELECT s.sequence AS _stream_sequence, e.*
+                FROM operational_event_stream AS s
+                JOIN operational_events AS e ON e.id = s.event_id
+                WHERE s.sequence <= ? AND e.created_at >= ?
+                ORDER BY s.sequence DESC
+                LIMIT ?
+                """,
+                (int(marker["sequence"]), _text(since), snapshot_limit),
+            ).fetchall()
+        return {
+            "items": [self._stream_event_from_row(row) for row in reversed(rows)],
+            "stream_after_id": _text(marker["event_id"]),
+        }
+
     def poll_operational_event_stream(
         self, *, position: int, limit: int = 100
     ) -> dict[str, Any]:

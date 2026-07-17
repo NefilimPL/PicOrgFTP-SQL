@@ -55,11 +55,9 @@ const state = {
     unread: { critical: 0, error: 0, warning: 0, total: 0, highest: "" },
     stream: null,
     streamSeeded: false,
-    latestEventId: "",
+    streamAfterId: "",
     seedGeneration: 0,
     seedLoading: false,
-    seedBuffer: [],
-    seedSince: "",
     unreadRequestId: 0,
     paused: false,
     buffer: [],
@@ -5036,19 +5034,10 @@ function applyObservabilityUnread(unread = {}, requestId = 0) {
 }
 
 async function requestObservabilityPayload(path, options = {}) {
-  const requestOptions = { ...options };
-  const authoritativeUnread = requestOptions.authoritativeUnread === true;
-  delete requestOptions.authoritativeUnread;
   const requestId = Number(state.observability.unreadRequestId || 0) + 1;
   state.observability.unreadRequestId = requestId;
-  const payload = await requestJson(path, requestOptions);
-  if (authoritativeUnread) {
-    const authoritativeRequestId = Number(state.observability.unreadRequestId || 0) + 1;
-    state.observability.unreadRequestId = authoritativeRequestId;
-    applyObservabilityUnread(payload.unread || {}, authoritativeRequestId);
-  } else {
-    applyObservabilityUnread(payload.unread || {}, requestId);
-  }
+  const payload = await requestJson(path, options);
+  applyObservabilityUnread(payload.unread || {}, requestId);
   return payload;
 }
 
@@ -5089,7 +5078,6 @@ async function markSeverityRead(severity, requestId) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ severity, event_id: eventId, created_at: createdAt }),
-      authoritativeUnread: true,
     });
   } finally {
     tab.readInFlight = false;
@@ -5112,7 +5100,10 @@ function mergeLiveItems(items = [], since = "") {
 }
 
 function appendPausedObservabilityEvents(items = []) {
-  const knownIds = new Set(state.observability.buffer.map((item) => item.id));
+  const live = observabilityTab("live");
+  const knownIds = new Set(
+    [...live.items, ...state.observability.buffer].map((item) => item.id)
+  );
   for (const item of items) {
     if (item?.id && !knownIds.has(item.id)) {
       knownIds.add(item.id);
@@ -5134,50 +5125,35 @@ async function seedLiveLogs({ force = false } = {}) {
     return;
   }
   if (state.observability.seedLoading && !force) return;
-  const preserveBufferedFrames = state.observability.seedLoading;
   const seedGeneration = Number(state.observability.seedGeneration || 0) + 1;
   state.observability.seedGeneration = seedGeneration;
   state.observability.seedLoading = true;
-  state.observability.seedSince = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  if (!preserveBufferedFrames) state.observability.seedBuffer = [];
-  startObservabilityStream();
-  const since = state.observability.seedSince;
-  let cursor = "";
-  const newestFirst = [];
+  stopObservabilityStream();
+  if (state.observability.paused && logsStreamStatus) {
+    logsStreamStatus.textContent = "Wstrzymano";
+  }
   try {
-    do {
-      const params = new URLSearchParams({ since, limit: "100" });
-      if (cursor) params.set("cursor", cursor);
-      const payload = await requestObservabilityPayload("/api/observability/events?" + params.toString());
-      if (state.observability.seedGeneration !== seedGeneration) return;
-      newestFirst.push(...(Array.isArray(payload.items) ? payload.items : []));
-      cursor = payload.next_cursor || "";
-    } while (cursor && newestFirst.length < MAX_LIVE_LOG_EVENTS);
+    const params = new URLSearchParams({ live_seed: "1" });
+    const payload = await requestObservabilityPayload(
+      "/api/observability/events?" + params.toString()
+    );
     if (state.observability.seedGeneration !== seedGeneration) return;
-    const seedItems = newestFirst.slice(0, MAX_LIVE_LOG_EVENTS).reverse();
-    const bufferedFrames = state.observability.seedBuffer.splice(0);
-    const merged = mergeLiveItems([...live.items, ...seedItems, ...bufferedFrames], since);
+    const seedItems = mergeLiveItems(Array.isArray(payload.items) ? payload.items : []);
+    const streamAfterId = String(payload.stream_after_id || "");
     if (state.observability.paused) {
-      live.items = mergeLiveItems([...live.items, ...seedItems], since);
-      appendPausedObservabilityEvents(
-        bufferedFrames.filter((item) => String(item.created_at || "") >= since)
-      );
+      appendPausedObservabilityEvents(seedItems);
     } else {
-      live.items = merged;
+      live.items = seedItems;
+      if (state.observability.activeTab === "live") renderLogs();
     }
-    state.observability.latestEventId =
-      merged[merged.length - 1]?.id || state.observability.latestEventId;
+    state.observability.streamAfterId = streamAfterId;
     state.observability.streamSeeded = true;
-    if (state.observability.activeTab === "live") renderLogs();
+    startObservabilityStream(streamAfterId);
   } catch (error) {
     if (state.observability.seedGeneration !== seedGeneration) return;
-    const bufferedFrames = state.observability.seedBuffer.splice(0);
-    const currentFrames = bufferedFrames.filter(
-      (item) => String(item.created_at || "") >= since
-    );
-    if (state.observability.paused) appendPausedObservabilityEvents(currentFrames);
-    else live.items = mergeLiveItems([...live.items, ...currentFrames], since);
-    if (state.observability.activeTab === "live") renderLogs();
+    if (state.observability.streamAfterId) {
+      startObservabilityStream(state.observability.streamAfterId);
+    }
     throw error;
   } finally {
     if (state.observability.seedGeneration === seedGeneration) {
@@ -5231,19 +5207,8 @@ function handleObservabilityEvent(event) {
     return;
   }
   if (!item || typeof item !== "object") return;
-  if (state.observability.seedLoading) {
-    if (
-      item.id &&
-      !state.observability.seedBuffer.some((buffered) => buffered.id === item.id)
-    ) {
-      state.observability.seedBuffer.push(item);
-      if (state.observability.seedBuffer.length > MAX_LIVE_LOG_EVENTS) {
-        state.observability.seedBuffer.shift();
-      }
-    }
-    return;
-  }
-  state.observability.latestEventId = item.id || event.lastEventId || state.observability.latestEventId;
+  state.observability.streamAfterId =
+    item.id || event.lastEventId || state.observability.streamAfterId;
   if (state.observability.paused) {
     appendPausedObservabilityEvents([item]);
     if (logsStreamStatus) {
@@ -5254,7 +5219,7 @@ function handleObservabilityEvent(event) {
   appendLiveEvent(item);
 }
 
-function startObservabilityStream() {
+function startObservabilityStream(afterId = state.observability.streamAfterId || "") {
   if (
     state.observability.stream ||
     !state.isAdmin ||
@@ -5262,17 +5227,22 @@ function startObservabilityStream() {
   ) {
     return;
   }
-  const latestId = state.observability.latestEventId || "";
-  const stream = latestId
-    ? new EventSource("/api/observability/stream?after_id=" + encodeURIComponent(latestId))
+  const stream = afterId
+    ? new EventSource("/api/observability/stream?after_id=" + encodeURIComponent(afterId))
     : new EventSource("/api/observability/stream");
   state.observability.stream = stream;
   stream.onopen = () => {
-    if (logsStreamStatus) logsStreamStatus.textContent = "Polaczono";
+    if (logsStreamStatus) {
+      logsStreamStatus.textContent = state.observability.paused ? "Wstrzymano" : "Polaczono";
+    }
   };
   stream.onmessage = handleObservabilityEvent;
   stream.onerror = () => {
-    if (logsStreamStatus) logsStreamStatus.textContent = "Ponowne laczenie...";
+    if (logsStreamStatus) {
+      logsStreamStatus.textContent = state.observability.paused
+        ? "Wstrzymano"
+        : "Ponowne laczenie...";
+    }
   };
 }
 
@@ -5301,39 +5271,94 @@ function appendUniqueObservabilityItems(tab, items = []) {
   );
 }
 
-async function walkObservabilityPages(kind, recordId) {
-  if (!recordId || !["incidents", "jobs"].includes(kind)) return null;
+async function findIncidentRecord(recordId) {
   let cursor = "";
   const visitedCursors = new Set();
   while (true) {
     const params = new URLSearchParams({ limit: String(OBSERVABILITY_PAGE_SIZE) });
     if (cursor) params.set("cursor", cursor);
     const payload = await requestObservabilityPayload(
-      `/api/observability/${kind}?${params.toString()}`
+      `/api/observability/incidents?${params.toString()}`
     );
     const items = Array.isArray(payload.items) ? payload.items : [];
-    if (kind === "jobs") {
-      const jobs = observabilityTab("jobs");
-      appendUniqueObservabilityItems(jobs, items);
-      jobs.nextCursor = payload.next_cursor || "";
-    } else {
-      for (const severity of ["critical", "error", "warning"]) {
-        appendUniqueObservabilityItems(
-          observabilityTab(severity),
-          items.filter((item) => item.severity === severity)
-        );
-      }
-    }
     const found = items.find((item) => item.id === recordId);
-    if (found) {
-      return { item: found, tabName: kind === "jobs" ? "jobs" : found.severity };
-    }
+    if (found) return found;
     const nextCursor = payload.next_cursor || "";
     if (!nextCursor || visitedCursors.has(nextCursor)) return null;
     visitedCursors.add(nextCursor);
     cursor = nextCursor;
   }
   return null;
+}
+
+async function loadIncidentThroughRecord(severity, recordId) {
+  if (!["critical", "error", "warning"].includes(severity)) return null;
+  const tab = observabilityTab(severity);
+  const requestId = Number(tab.requestId || 0) + 1;
+  tab.requestId = requestId;
+  tab.loading = true;
+  tab.items = [];
+  tab.nextCursor = "";
+  let cursor = "";
+  const visitedCursors = new Set();
+  try {
+    while (true) {
+      const payload = await requestObservabilityPayload(observabilityEndpoint(severity, cursor));
+      if (tab.requestId !== requestId) return null;
+      appendUniqueObservabilityItems(
+        tab,
+        (Array.isArray(payload.items) ? payload.items : []).filter(
+          (item) => item.severity === severity
+        )
+      );
+      tab.nextCursor = payload.next_cursor || "";
+      const found = tab.items.find((item) => item.id === recordId);
+      if (found) return found;
+      if (!tab.nextCursor || visitedCursors.has(tab.nextCursor)) return null;
+      visitedCursors.add(tab.nextCursor);
+      cursor = tab.nextCursor;
+    }
+  } finally {
+    if (tab.requestId === requestId) tab.loading = false;
+  }
+}
+
+async function loadJobThroughRecord(recordId) {
+  const jobs = observabilityTab("jobs");
+  const requestId = Number(jobs.requestId || 0) + 1;
+  jobs.requestId = requestId;
+  jobs.loading = true;
+  jobs.items = [];
+  jobs.nextCursor = "";
+  let cursor = "";
+  const visitedCursors = new Set();
+  try {
+    while (true) {
+      const payload = await requestObservabilityPayload(observabilityEndpoint("jobs", cursor));
+      if (jobs.requestId !== requestId) return null;
+      appendUniqueObservabilityItems(jobs, Array.isArray(payload.items) ? payload.items : []);
+      jobs.nextCursor = payload.next_cursor || "";
+      const found = jobs.items.find((item) => item.id === recordId);
+      if (found) return found;
+      if (!jobs.nextCursor || visitedCursors.has(jobs.nextCursor)) return null;
+      visitedCursors.add(jobs.nextCursor);
+      cursor = jobs.nextCursor;
+    }
+  } finally {
+    if (jobs.requestId === requestId) jobs.loading = false;
+  }
+}
+
+async function walkObservabilityPages(kind, recordId) {
+  if (!recordId || !["incidents", "jobs"].includes(kind)) return null;
+  if (kind === "jobs") {
+    const item = await loadJobThroughRecord(recordId);
+    return item ? { item, tabName: "jobs" } : null;
+  }
+  const discovered = await findIncidentRecord(recordId);
+  if (!discovered) return null;
+  const item = await loadIncidentThroughRecord(discovered.severity, recordId);
+  return item ? { item, tabName: discovered.severity } : null;
 }
 
 function focusObservabilityRecord(recordId) {
@@ -5533,11 +5558,9 @@ function closeLogsClearModal() {
 function resetObservabilityLists() {
   stopObservabilityStream();
   state.observability.streamSeeded = false;
-  state.observability.latestEventId = "";
+  state.observability.streamAfterId = "";
   state.observability.seedGeneration = Number(state.observability.seedGeneration || 0) + 1;
   state.observability.seedLoading = false;
-  state.observability.seedBuffer = [];
-  state.observability.seedSince = "";
   state.observability.unreadRequestId = Number(state.observability.unreadRequestId || 0) + 1;
   state.observability.buffer = [];
   for (const tab of Object.values(state.observability.tabs)) {
@@ -10693,8 +10716,6 @@ logsPauseButton?.addEventListener("click", () => {
   const buffered = state.observability.buffer.splice(0);
   const live = observabilityTab("live");
   live.items = mergeLiveItems([...live.items, ...buffered]);
-  state.observability.latestEventId =
-    live.items[live.items.length - 1]?.id || state.observability.latestEventId;
   if (logsStreamStatus) logsStreamStatus.textContent = "Polaczono";
   renderLogs();
 });
