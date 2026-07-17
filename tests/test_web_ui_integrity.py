@@ -243,6 +243,39 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("var(--local)", delivery_styles)
         self.assertNotIn("var(--success)", delivery_styles)
 
+    def test_incident_context_is_loaded_lazily_and_problem_is_cursor_paginated(self) -> None:
+        js_source = APP_JS.read_text(encoding="utf-8")
+        incident_renderer = js_source[
+            js_source.index("function renderIncidentCard") : js_source.index(
+                "function renderJobCard"
+            )
+        ]
+
+        self.assertNotIn('renderIncidentContext(incident, "before"', incident_renderer)
+        self.assertIn("renderLazyIncidentContext", incident_renderer)
+        self.assertIn("/context?", js_source)
+        self.assertIn("problem_next_cursor", js_source)
+        self.assertIn("Wczytaj wiecej", js_source)
+        self.assertIn('addEventListener("toggle"', js_source)
+
+    def test_live_archive_load_more_keeps_fixed_seed_boundary_and_deduplicates(self) -> None:
+        js_source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("archiveSince", js_source)
+        self.assertIn("payload.archive_since", js_source)
+        self.assertIn("liveArchiveEndpoint", js_source)
+        self.assertIn('params.set("since", live.archiveSince)', js_source)
+        self.assertIn("mergeLiveItems", js_source)
+        self.assertIn("live.nextCursor", js_source)
+        self.assertNotIn('tabName === "live" || !tab.nextCursor', js_source)
+        append_live = js_source[
+            js_source.index("function appendLiveEvent") : js_source.index(
+                "function handleObservabilityEvent"
+            )
+        ]
+        self.assertIn("live.archiveSince", append_live)
+        self.assertIn("live.items.sort", append_live)
+
     def test_app_js_static_id_selectors_exist_in_index_html(self) -> None:
         html = _parse(INDEX_HTML)
         source = APP_JS.read_text(encoding="utf-8")

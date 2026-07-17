@@ -137,6 +137,23 @@ class SqliteDataStoreAdapter:
             severity=severity, cursor=cursor, limit=limit
         )
 
+    def query_incident_context(
+        self,
+        incident_id: str,
+        *,
+        problem_cursor: str = "",
+        problem_limit: int = 20,
+        before_limit: int = 5,
+        after_limit: int = 5,
+    ) -> dict[str, Any] | None:
+        return self.store.query_incident_context(
+            incident_id,
+            problem_cursor=problem_cursor,
+            problem_limit=problem_limit,
+            before_limit=before_limit,
+            after_limit=after_limit,
+        )
+
     def release_incident_notification(
         self,
         incident_id: str,

@@ -431,40 +431,6 @@ def _coalesce_with_legacy_store(
     return incident_result, notification_due
 
 
-def _correlated_events(incident: dict[str, object]) -> list[dict[str, object]]:
-    store = observability_store()
-    job_id = _text(incident.get("job_id"))
-    correlation_id = _text(incident.get("correlation_id"))
-    if not job_id and not correlation_id:
-        return []
-
-    items: list[dict[str, object]] = []
-    cursor = ""
-    seen_cursors: set[str] = set()
-    while True:
-        query: dict[str, object] = {"cursor": cursor, "limit": 20}
-        if job_id:
-            query["job_id"] = job_id
-        else:
-            query["correlation_id"] = correlation_id
-        page = store.query_operational_events(**query)
-        page_items = page.get("items", []) if isinstance(page, dict) else []
-        for item in page_items if isinstance(page_items, list) else []:
-            if not isinstance(item, dict):
-                continue
-            if job_id and _text(item.get("job_id")) != job_id:
-                continue
-            if not job_id and _text(item.get("correlation_id")) != correlation_id:
-                continue
-            items.append(dict(item))
-        next_cursor = _text(page.get("next_cursor")) if isinstance(page, dict) else ""
-        if not next_cursor or next_cursor in seen_cursors:
-            break
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
-    return items
-
-
 def _bounded_context_limit(value: object) -> int:
     try:
         return max(0, min(5, int(value)))
@@ -474,27 +440,24 @@ def _bounded_context_limit(value: object) -> int:
 
 def incident_context(
     incident: dict[str, object], *, before_limit: int = 5, after_limit: int = 5
-) -> dict[str, list[dict[str, object]]]:
-    """Return chronological before/problem/after events from one correlation."""
+) -> dict[str, object]:
+    """Delegate bounded incident context retrieval to the indexed repository."""
 
-    events = _correlated_events(incident)
-    events.sort(key=lambda item: (_text(item.get("created_at")), _text(item.get("id"))))
-    first_id = _text(incident.get("first_event_id"))
-    latest_id = _text(incident.get("latest_event_id"))
-    positions = {_text(item.get("id")): index for index, item in enumerate(events)}
-    if latest_id not in positions:
-        return {"before": [], "problem": [], "after": []}
-    latest_index = positions[latest_id]
-    first_index = positions.get(first_id, latest_index)
-    if latest_index < first_index:
-        first_index, latest_index = latest_index, first_index
-    before_count = _bounded_context_limit(before_limit)
-    after_count = _bounded_context_limit(after_limit)
-    return {
-        "before": events[max(0, first_index - before_count) : first_index],
-        "problem": events[first_index : latest_index + 1],
-        "after": events[latest_index + 1 : latest_index + 1 + after_count],
+    empty: dict[str, object] = {
+        "before": [],
+        "problem": [],
+        "after": [],
+        "problem_next_cursor": "",
     }
+    incident_id = _text(incident.get("id"))
+    if not incident_id:
+        return empty
+    context = observability_store().query_incident_context(
+        incident_id,
+        before_limit=_bounded_context_limit(before_limit),
+        after_limit=_bounded_context_limit(after_limit),
+    )
+    return context if isinstance(context, dict) else empty
 
 
 def prune_live_events(now: datetime | None = None) -> int:

@@ -440,6 +440,228 @@ def test_operational_schema_and_cursor_queries(tmp_path: Path) -> None:
     ] == ["evt-2", "evt-1"]
 
 
+def test_incident_context_is_indexed_bounded_and_cursor_paginated(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "app.sqlite"
+    store = SqliteStore(str(db_path))
+    for index in range(7):
+        store.append_operational_event(
+            _event(
+                f"before-{index:03d}",
+                f"2026-07-16T09:{index:02d}:00.000Z",
+                job_id="job-context",
+            )
+        )
+    for index in range(125):
+        store.append_operational_event(
+            _event(
+                f"problem-{index:03d}",
+                f"2026-07-16T10:{index // 60:02d}:{index % 60:02d}.000Z",
+                "error",
+                job_id="job-context",
+            )
+        )
+    for index in range(7):
+        store.append_operational_event(
+            _event(
+                f"after-{index:03d}",
+                f"2026-07-16T13:{index:02d}:00.000Z",
+                job_id="job-context",
+            )
+        )
+    store.append_operational_event(
+        _event(
+            "unrelated",
+            "2026-07-16T10:30:30.000Z",
+            "critical",
+            job_id="job-other",
+        )
+    )
+    store.upsert_incident(
+        {
+            "id": "inc-context",
+            "fingerprint": "context",
+            "severity": "error",
+            "event_type": "test.failure",
+            "first_seen_at": "2026-07-16T10:00:00.000Z",
+            "last_seen_at": "2026-07-16T10:02:04.000Z",
+            "first_event_id": "problem-000",
+            "latest_event_id": "problem-124",
+            "job_id": "job-context",
+        }
+    )
+
+    first = store.query_incident_context("inc-context", problem_limit=20)
+    second = store.query_incident_context(
+        "inc-context",
+        problem_cursor=first["problem_next_cursor"],
+        problem_limit=1000,
+    )
+
+    assert [item["id"] for item in first["before"]] == [
+        "before-002",
+        "before-003",
+        "before-004",
+        "before-005",
+        "before-006",
+    ]
+    assert [item["id"] for item in first["problem"]] == [
+        f"problem-{index:03d}" for index in range(20)
+    ]
+    assert first["problem_next_cursor"]
+    assert [item["id"] for item in second["problem"]] == [
+        f"problem-{index:03d}" for index in range(20, 120)
+    ]
+    assert second["problem_next_cursor"]
+    assert [item["id"] for item in first["after"]] == [
+        f"after-{index:03d}" for index in range(5)
+    ]
+    assert "unrelated" not in json.dumps(first)
+
+    with sqlite3.connect(db_path) as conn:
+        indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(operational_events)")
+        }
+        job_plan = " ".join(
+            str(row[3])
+            for row in conn.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT * FROM operational_events
+                WHERE job_id = ? AND created_at < ?
+                ORDER BY created_at DESC, id DESC LIMIT 5
+                """,
+                ("job-context", "2026-07-16T10:00:00.000Z"),
+            )
+        )
+        correlation_plan = " ".join(
+            str(row[3])
+            for row in conn.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT * FROM operational_events
+                WHERE correlation_id = ? AND created_at > ?
+                ORDER BY created_at ASC, id ASC LIMIT 5
+                """,
+                ("correlation-1", "2026-07-16T10:00:00.000Z"),
+            )
+        )
+    assert "idx_operational_events_job_created_at_id" in indexes
+    assert "idx_operational_events_correlation_created_at_id" in indexes
+    assert "idx_operational_events_job_created_at_id" in job_plan
+    assert "idx_operational_events_correlation_created_at_id" in correlation_plan
+
+
+def test_incident_context_uses_correlation_ties_and_rejects_bad_cursor(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    for identity in ("evt-a", "evt-b", "evt-c", "evt-d"):
+        store.append_operational_event(
+            _event(
+                identity,
+                "2026-07-16T10:00:00.000Z",
+                "error",
+                job_id="",
+                correlation_id="corr-context",
+            )
+        )
+    store.upsert_incident(
+        {
+            "id": "inc-ties",
+            "fingerprint": "ties",
+            "severity": "error",
+            "event_type": "test.failure",
+            "first_seen_at": "2026-07-16T10:00:00.000Z",
+            "last_seen_at": "2026-07-16T10:00:00.000Z",
+            "first_event_id": "evt-a",
+            "latest_event_id": "evt-d",
+            "correlation_id": "corr-context",
+        }
+    )
+
+    first = store.query_incident_context("inc-ties", problem_limit=2)
+    second = store.query_incident_context(
+        "inc-ties", problem_cursor=first["problem_next_cursor"], problem_limit=2
+    )
+
+    assert [item["id"] for item in first["problem"]] == ["evt-a", "evt-b"]
+    assert [item["id"] for item in second["problem"]] == ["evt-c", "evt-d"]
+    assert second["problem_next_cursor"] == ""
+    assert store.query_incident_context("missing") is None
+    with pytest.raises(ValueError):
+        store.query_incident_context("inc-ties", problem_cursor="not-base64!")
+
+
+def test_incident_context_rejects_boundaries_outside_its_scope(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.append_operational_event(
+        _event("wrong-first", "2026-07-16T10:00:00.000Z", job_id="other")
+    )
+    store.append_operational_event(
+        _event("right-latest", "2026-07-16T10:01:00.000Z", job_id="target")
+    )
+    store.upsert_incident(
+        {
+            "id": "inc-wrong-boundary",
+            "fingerprint": "wrong-boundary",
+            "severity": "error",
+            "event_type": "test.failure",
+            "first_event_id": "wrong-first",
+            "latest_event_id": "right-latest",
+            "job_id": "target",
+        }
+    )
+
+    context = store.query_incident_context("inc-wrong-boundary")
+
+    assert context == {
+        "before": [],
+        "problem": [],
+        "after": [],
+        "problem_next_cursor": "",
+    }
+
+
+def test_live_snapshot_pages_entire_24h_archive_without_eager_loading(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    since = "2026-07-16T00:00:00.000Z"
+    store.initialize()
+    with store.connection() as conn:
+        for index in range(4000):
+            payload = store._normalize_operational_event(
+                _event(
+                f"evt-{index:04d}",
+                (datetime(2026, 7, 16, tzinfo=timezone.utc) + timedelta(seconds=index))
+                .isoformat(timespec="milliseconds")
+                .replace("+00:00", "Z"),
+                )
+            )
+            store._insert_operational_event(conn, payload)
+
+    seed = store.snapshot_operational_event_stream(since=since, limit=200)
+    assert len(seed["items"]) == 200
+    assert seed["archive_since"] == since
+    assert seed["next_cursor"]
+    reached = {item["id"] for item in seed["items"]}
+    cursor = seed["next_cursor"]
+    page_count = 0
+    while cursor:
+        page = store.query_operational_events(
+            cursor=cursor, since=seed["archive_since"], limit=100
+        )
+        reached.update(item["id"] for item in page["items"])
+        cursor = page["next_cursor"]
+        page_count += 1
+
+    assert page_count == 38
+    assert len(reached) == 4000
+    assert "evt-0000" in reached
+
+
 def test_event_timestamps_are_canonical_and_sort_chronologically(
     tmp_path: Path,
 ) -> None:
@@ -809,30 +1031,34 @@ def test_live_snapshot_uses_tombstone_checkpoint_and_drains_every_later_event(
     assert streamed == expected
 
 
-def test_live_snapshot_returns_newest_two_thousand_in_chronological_order(
+def test_live_snapshot_returns_bounded_newest_window_with_older_cursor(
     tmp_path: Path,
 ) -> None:
     store = SqliteStore(str(tmp_path / "app.sqlite"))
     started_at = datetime(2026, 7, 16, 10, tzinfo=timezone.utc)
-    for index in range(2005):
-        store.append_operational_event(
-            _event(
-                f"evt-{index:04d}",
-                (started_at + timedelta(seconds=index))
-                .isoformat(timespec="milliseconds")
-                .replace("+00:00", "Z"),
+    store.initialize()
+    with store.connection() as conn:
+        for index in range(2005):
+            payload = store._normalize_operational_event(
+                _event(
+                    f"evt-{index:04d}",
+                    (started_at + timedelta(seconds=index))
+                    .isoformat(timespec="milliseconds")
+                    .replace("+00:00", "Z"),
+                )
             )
-        )
+            store._insert_operational_event(conn, payload)
 
     snapshot = store.snapshot_operational_event_stream(
         since="2026-07-16T00:00:00.000Z",
         limit=9999,
     )
 
-    assert len(snapshot["items"]) == 2000
-    assert snapshot["items"][0]["id"] == "evt-0005"
+    assert len(snapshot["items"]) == 500
+    assert snapshot["items"][0]["id"] == "evt-1505"
     assert snapshot["items"][-1]["id"] == "evt-2004"
     assert snapshot["stream_after_id"] == "evt-2004"
+    assert snapshot["next_cursor"]
     assert all("sequence" not in item for item in snapshot["items"])
 
 

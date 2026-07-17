@@ -267,10 +267,121 @@ def test_incidents_include_only_their_correlated_context(api_environment) -> Non
 
     assert response.status_code == 200
     incident = response.json()["items"][0]
-    assert [item["id"] for item in incident["before"]] == ["evt-before"]
-    assert [item["id"] for item in incident["problem"]] == ["evt-problem"]
-    assert [item["id"] for item in incident["after"]] == ["evt-after"]
+    assert "before" not in incident
+    assert "problem" not in incident
+    assert "after" not in incident
     assert "evt-unrelated" not in response.text
+
+    context = client.get("/api/observability/incidents/inc-1/context")
+    assert context.status_code == 200
+    assert [item["id"] for item in context.json()["before"]] == ["evt-before"]
+    assert [item["id"] for item in context.json()["problem"]] == ["evt-problem"]
+    assert [item["id"] for item in context.json()["after"]] == ["evt-after"]
+    assert context.json()["problem_next_cursor"] == ""
+
+
+def test_incident_context_endpoint_is_admin_only_lazy_and_pages_problem(
+    api_environment,
+) -> None:
+    client, store = api_environment
+    for index in range(25):
+        store.append_operational_event(
+            _event(
+                f"evt-problem-{index:02d}",
+                f"2026-07-16T10:{index:02d}:00.000Z",
+                "error",
+                job_id="job-context",
+                details={"password": "must-not-leak", "safe": index},
+            )
+        )
+    store.upsert_incident(
+        {
+            "id": "inc-lazy",
+            "fingerprint": "lazy",
+            "severity": "error",
+            "event_type": "test.failure",
+            "first_seen_at": "2026-07-16T10:00:00.000Z",
+            "last_seen_at": "2026-07-16T10:24:00.000Z",
+            "first_event_id": "evt-problem-00",
+            "latest_event_id": "evt-problem-24",
+            "job_id": "job-context",
+        }
+    )
+    web_data.add_user("operator-context", "secret", "user")
+
+    assert client.get("/api/observability/incidents/inc-lazy/context").status_code == 401
+    _login(client, "operator-context", "secret")
+    assert client.get("/api/observability/incidents/inc-lazy/context").status_code == 403
+
+    admin = TestClient(web_app.app)
+    _login(admin)
+    listing = admin.get("/api/observability/incidents", params={"severity": "error"})
+    assert listing.status_code == 200
+    assert "problem" not in listing.json()["items"][0]
+    first = admin.get(
+        "/api/observability/incidents/inc-lazy/context", params={"limit": 20}
+    )
+    assert first.status_code == 200
+    assert len(first.json()["problem"]) == 20
+    assert first.json()["problem_next_cursor"]
+    second = admin.get(
+        "/api/observability/incidents/inc-lazy/context",
+        params={"cursor": first.json()["problem_next_cursor"], "limit": 20},
+    )
+    assert [item["id"] for item in second.json()["problem"]] == [
+        f"evt-problem-{index:02d}" for index in range(20, 25)
+    ]
+    serialized = json.dumps([first.json(), second.json()])
+    assert "must-not-leak" not in serialized
+    assert admin.get("/api/observability/incidents/missing/context").status_code == 404
+    assert admin.get(
+        "/api/observability/incidents/inc-lazy/context",
+        params={"cursor": "not-base64!"},
+    ).status_code == 400
+    admin.close()
+
+
+def test_live_api_cursor_reaches_oldest_of_4000_retained_events(
+    api_environment,
+) -> None:
+    client, store = api_environment
+    _login(client)
+    start = datetime.now(timezone.utc) - timedelta(hours=2)
+    with store.connection() as conn:
+        for index in range(4000):
+            payload = store._normalize_operational_event(
+                _event(
+                    f"evt-live-{index:04d}",
+                    (start + timedelta(seconds=index))
+                    .isoformat(timespec="milliseconds")
+                    .replace("+00:00", "Z"),
+                )
+            )
+            store._insert_operational_event(conn, payload)
+
+    seed = client.get("/api/observability/events", params={"live_seed": 1})
+    assert seed.status_code == 200
+    payload = seed.json()
+    assert len(payload["items"]) == 200
+    assert payload["archive_since"]
+    assert payload["next_cursor"]
+    reached = {item["id"] for item in payload["items"]}
+    cursor = payload["next_cursor"]
+    while cursor:
+        page = client.get(
+            "/api/observability/events",
+            params={
+                "cursor": cursor,
+                "since": payload["archive_since"],
+                "limit": 100,
+            },
+        )
+        assert page.status_code == 200
+        reached.update(item["id"] for item in page.json()["items"])
+        cursor = page.json()["next_cursor"]
+
+    assert len(reached) == 4000
+    assert "evt-live-0000" in reached
 
 
 def test_incidents_include_matching_delivery_status_with_strict_safe_projection(

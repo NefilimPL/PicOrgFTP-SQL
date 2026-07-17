@@ -208,6 +208,87 @@ def _message_payload(
     }
 
 
+def _runtime_context_lines(
+    context: Mapping[str, object],
+) -> list[tuple[str, list[str]]]:
+    from .observability import redact_value
+
+    sections: list[tuple[str, list[str]]] = []
+    for key, label, cap in (
+        ("before", "Przed", 3),
+        ("problem", "Problem", 5),
+        ("after", "Po", 3),
+    ):
+        raw_items = context.get(key)
+        items = raw_items if isinstance(raw_items, list) else []
+        lines: list[str] = []
+        for raw in items[:cap]:
+            safe = redact_value(raw)
+            if not isinstance(safe, Mapping):
+                continue
+            parts = [
+                _text(safe.get("created_at"), 40),
+                _text(safe.get("severity"), 20).upper(),
+                _text(safe.get("summary"), 500),
+            ]
+            details = safe.get("details")
+            if isinstance(details, Mapping):
+                projected = _project_mail_context(dict(details))
+                if projected:
+                    parts.append(
+                        json.dumps(
+                            projected,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(", ", ": "),
+                        )[:1_000]
+                    )
+            line = " | ".join(part for part in parts if part)
+            if line:
+                lines.append(line)
+        sections.append((label, lines))
+    return sections
+
+
+def _append_runtime_context(
+    message: Mapping[str, object], context: Mapping[str, object]
+) -> dict[str, str]:
+    enriched = {
+        "message_id": _text(message.get("message_id")),
+        "subject": _text(message.get("subject"), 300),
+        "text_body": _text(message.get("text_body"), 10_000),
+        "html_body": _text(message.get("html_body"), 20_000),
+    }
+    sections = _runtime_context_lines(context)
+    text_sections = []
+    html_sections = []
+    for label, lines in sections:
+        text_sections.append(
+            f"{label}:\n" + "\n".join(f"- {line}" for line in lines)
+            if lines
+            else f"{label}: Brak zdarzeń."
+        )
+        html_items = (
+            "<ul>"
+            + "".join(f"<li>{html.escape(line)}</li>" for line in lines)
+            + "</ul>"
+            if lines
+            else "<p>Brak zdarzeń.</p>"
+        )
+        html_sections.append(f"<h3>{html.escape(label)}</h3>{html_items}")
+    text_context = "\n\nKontekst zdarzeń\n" + "\n\n".join(text_sections)
+    html_context = "<h2>Kontekst zdarzeń</h2>" + "".join(html_sections)
+    enriched["text_body"] = (
+        enriched["text_body"][: max(0, 10_000 - len(text_context))]
+        + text_context[:10_000]
+    )[:10_000]
+    enriched["html_body"] = (
+        enriched["html_body"][: max(0, 20_000 - len(html_context))]
+        + html_context[:20_000]
+    )[:20_000]
+    return enriched
+
+
 def _channel_sender(
     channel: str, settings: Mapping[str, object]
 ) -> tuple[str, str]:
@@ -319,6 +400,25 @@ class NotificationService:
             recipients=list(recipients) if isinstance(recipients, list) else [],
         )
 
+    def _with_delivery_context(
+        self, delivery: Mapping[str, object]
+    ) -> Mapping[str, object]:
+        try:
+            context = self.store.query_incident_context(
+                _text(delivery.get("incident_id")),
+                problem_limit=5,
+                before_limit=3,
+                after_limit=3,
+            )
+        except Exception:
+            return delivery
+        safe_context = context if isinstance(context, Mapping) else {}
+        payload = delivery.get("message")
+        message = payload if isinstance(payload, Mapping) else {}
+        enriched = dict(delivery)
+        enriched["message"] = _append_runtime_context(message, safe_context)
+        return enriched
+
     def _send_channel(
         self,
         delivery: Mapping[str, object],
@@ -403,8 +503,9 @@ class NotificationService:
             ]
         else:
             try:
+                delivery_for_send = self._with_delivery_context(claimed)
                 status, used_channel, attempts = self._deliver_claimed(
-                    claimed,
+                    delivery_for_send,
                     settings,
                     allow_fallback=bool(settings.get("fallback_enabled")),
                 )

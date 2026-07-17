@@ -80,6 +80,7 @@ def _incident(**overrides: object) -> dict[str, object]:
 class FakeStore:
     def __init__(self) -> None:
         self.deliveries: dict[str, dict[str, object]] = {}
+        self.incident_context: dict[str, object] | None = None
 
     def enqueue_notification_delivery(
         self, record: dict[str, object]
@@ -137,6 +138,12 @@ class FakeStore:
         if incident_id:
             items = [item for item in items if item["incident_id"] == incident_id]
         return {"items": [dict(item) for item in items[:limit]], "next_cursor": ""}
+
+    def query_incident_context(
+        self, incident_id: str, **_kwargs: object
+    ) -> dict[str, object] | None:
+        del incident_id
+        return self.incident_context
 
 
 class FakeTransport:
@@ -327,6 +334,87 @@ def test_process_delivery_primary_success_does_not_call_fallback() -> None:
     assert result["status"] == "sent"
     assert len(primary.messages) == 1
     assert fallback.messages == []
+
+
+def test_process_delivery_enriches_mail_with_bounded_redacted_runtime_context() -> None:
+    store = FakeStore()
+    store.incident_context = {
+        "before": [
+            _event(
+                id="evt-before",
+                summary="Przygotowanie <start>",
+                details={"safe": "before", "client_secret": "never-leak"},
+            )
+        ],
+        "problem": [
+            _event(
+                id="evt-problem",
+                summary="Problem FTP",
+                details={"safe": "problem", "password": "never-leak"},
+            )
+        ],
+        "after": [],
+        "problem_next_cursor": "ignored",
+    }
+    transport = FakeTransport()
+    service = _service(store, {"entra": transport, "smtp": FakeTransport()})
+    queued = service.queue_incident_notification(_event(), _incident())
+    assert "Przygotowanie" not in queued["message"]["text_body"]
+
+    result = service.process_delivery(str(queued["id"]))
+
+    assert result["status"] == "sent"
+    message = transport.messages[0]
+    assert "Przed:" in message.text_body
+    assert "Przygotowanie <start>" in message.text_body
+    assert "Problem:" in message.text_body
+    assert "Problem FTP" in message.text_body
+    assert "Po: Brak zdarzeń." in message.text_body
+    assert "Przygotowanie &lt;start&gt;" in message.html_body
+    assert "never-leak" not in message.text_body
+    assert "never-leak" not in message.html_body
+    assert "Przygotowanie" not in store.deliveries[str(queued["id"])]["message"][
+        "text_body"
+    ]
+
+
+def test_process_delivery_context_lookup_failure_uses_safe_queued_message() -> None:
+    class BrokenContextStore(FakeStore):
+        def query_incident_context(self, *_args: object, **_kwargs: object):
+            raise RuntimeError("password=context-secret")
+
+    store = BrokenContextStore()
+    transport = FakeTransport()
+    service = _service(store, {"entra": transport, "smtp": FakeTransport()})
+    queued = service.queue_incident_notification(_event(), _incident())
+
+    result = service.process_delivery(str(queued["id"]))
+
+    assert result["status"] == "sent"
+    assert len(transport.messages) == 1
+    assert "context-secret" not in transport.messages[0].text_body
+
+
+def test_delivery_context_is_preserved_when_queued_body_is_near_size_cap() -> None:
+    store = FakeStore()
+    store.incident_context = {
+        "before": [],
+        "problem": [_event(summary="Runtime context marker")],
+        "after": [],
+    }
+    transport = FakeTransport()
+    service = _service(store, {"entra": transport, "smtp": FakeTransport()})
+    queued = service.queue_incident_notification(_event(), _incident())
+    store.deliveries[str(queued["id"])]["message"]["text_body"] = "x" * 9_999
+    store.deliveries[str(queued["id"])]["message"]["html_body"] = "x" * 19_999
+
+    result = service.process_delivery(str(queued["id"]))
+
+    assert result["status"] == "sent"
+    assert "Runtime context marker" in transport.messages[0].text_body
+    assert "Runtime context marker" in transport.messages[0].html_body
+    assert len(transport.messages[0].text_body) <= 10_000
+    assert len(transport.messages[0].html_body) <= 20_000
 
 
 def test_process_delivery_records_both_failures_and_suppresses_recursion() -> None:

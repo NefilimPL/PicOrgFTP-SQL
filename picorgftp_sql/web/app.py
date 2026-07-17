@@ -65,7 +65,6 @@ from ..email_settings import EMAIL_SETTINGS_KEY
 from ..observability import (
     SEVERITIES,
     emit_event,
-    incident_context,
     observability_store,
     prune_live_events,
     record_job,
@@ -4593,12 +4592,13 @@ def create_app() -> FastAPI:
             ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
             page = store.snapshot_operational_event_stream(
                 since=seed_since,
-                limit=2000,
+                limit=200,
             )
             response = _observability_api_payload(
                 str(current_user.get("username") or ""), page
             )
             response["stream_after_id"] = str(page.get("stream_after_id") or "")
+            response["archive_since"] = str(page.get("archive_since") or seed_since)
             return response
         severities = _validated_severities(severity)
         page = store.query_operational_events(
@@ -4646,12 +4646,34 @@ def create_app() -> FastAPI:
         page["items"] = [
             {
                 **item,
-                **incident_context(item),
                 "deliveries": deliveries_by_incident.get(str(item.get("id") or ""), []),
             }
             for item in incident_items
         ]
         return _observability_api_payload(str(current_user.get("username") or ""), page)
+
+    @app.get("/api/observability/incidents/{incident_id}/context")
+    def observability_incident_context_api(
+        incident_id: str,
+        request: Request,
+        cursor: str = "",
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        current_user = _require_admin(request)
+        context = observability_store().query_incident_context(
+            incident_id,
+            problem_cursor=_validate_observability_cursor(cursor),
+            problem_limit=_observability_limit(limit),
+        )
+        if context is None:
+            raise HTTPException(status_code=404, detail="Nie znaleziono incydentu.")
+        safe_context = redact_sensitive_value(context, text_limit=32 * 1024)
+        response = safe_context if isinstance(safe_context, dict) else {}
+        response["unread"] = observability_store().unread_alert_summary(
+            str(current_user.get("username") or "")
+        )
+        response["server_time"] = _utc_now_iso()
+        return response
 
     @app.get("/api/observability/jobs")
     def observability_jobs_api(

@@ -17,6 +17,8 @@ class FakeStore:
         self.jobs: list[dict[str, object]] = []
         self.incidents: dict[str, dict[str, object]] = {}
         self.prune_boundaries: list[str] = []
+        self.context_response: dict[str, object] | None = None
+        self.context_requests: list[tuple[str, dict[str, object]]] = []
 
     def append_operational_event(
         self, event: dict[str, object]
@@ -52,6 +54,12 @@ class FakeStore:
                 if item.get("correlation_id") == correlation_id
             ]
         return {"items": events, "next_cursor": ""}
+
+    def query_incident_context(
+        self, incident_id: str, **options: object
+    ) -> dict[str, object] | None:
+        self.context_requests.append((incident_id, dict(options)))
+        return self.context_response
 
     def prune_info_events(self, before: str) -> int:
         self.prune_boundaries.append(before)
@@ -390,11 +398,17 @@ def test_incident_scope_follows_the_latest_correlation(monkeypatch) -> None:
     assert first is not None and second is not None
     assert second["id"] == first["id"]
     assert second["correlation_id"] == "corr-2"
+    fake.context_response = {
+        "before": [],
+        "problem": [_event("evt-corr-2", job_id="", correlation_id="corr-2")],
+        "after": [],
+        "problem_next_cursor": "",
+    }
     context = observability.incident_context(second)
     assert [item["id"] for item in context["problem"]] == ["evt-corr-2"]
     assert all(
         item["correlation_id"] == "corr-2"
-        for section in context.values()
+        for section in (context["before"], context["problem"], context["after"])
         for item in section
     )
 
@@ -416,9 +430,16 @@ def test_incident_context_uses_correlation_and_excludes_nearby_events(
         _event("evt-after", created_at="2026-07-16T10:02:00.000Z", job_id=""),
     ]
     monkeypatch.setattr(observability, "observability_store", lambda: fake)
+    fake.context_response = {
+        "before": [fake.events[0]],
+        "problem": [fake.events[2], fake.events[3]],
+        "after": [fake.events[4]],
+        "problem_next_cursor": "",
+    }
 
     context = observability.incident_context(
         {
+            "id": "inc-correlation",
             "correlation_id": "corr-1",
             "first_event_id": "evt-first",
             "latest_event_id": "evt-latest",
@@ -440,9 +461,16 @@ def test_incident_context_prefers_job_scope_and_honors_limits(monkeypatch) -> No
         for index in range(7)
     ]
     monkeypatch.setattr(observability, "observability_store", lambda: fake)
+    fake.context_response = {
+        "before": [fake.events[1]],
+        "problem": [fake.events[2], fake.events[3]],
+        "after": [fake.events[4], fake.events[5]],
+        "problem_next_cursor": "",
+    }
 
     context = observability.incident_context(
         {
+            "id": "inc-job",
             "job_id": "job-1",
             "correlation_id": "other",
             "first_event_id": "evt-2",
@@ -457,7 +485,9 @@ def test_incident_context_prefers_job_scope_and_honors_limits(monkeypatch) -> No
     assert [item["id"] for item in context["after"]] == ["evt-4", "evt-5"]
 
 
-def test_incident_context_pages_in_batches_of_twenty(monkeypatch) -> None:
+def test_incident_context_delegates_once_without_operational_event_page_scan(
+    monkeypatch,
+) -> None:
     class PagedStore(FakeStore):
         def __init__(self) -> None:
             super().__init__()
@@ -500,16 +530,26 @@ def test_incident_context_pages_in_batches_of_twenty(monkeypatch) -> None:
         for index in range(10)
     ]
     monkeypatch.setattr(observability, "observability_store", lambda: fake)
+    fake.context_response = {
+        "before": [],
+        "problem": fake.events[2:5],
+        "after": [],
+        "problem_next_cursor": "next-problem-page",
+    }
 
     context = observability.incident_context(
         {
+            "id": "inc-target",
             "correlation_id": "target",
             "first_event_id": "target-02",
             "latest_event_id": "target-04",
         }
     )
 
-    assert fake.requested_limits == [20, 20]
+    assert fake.requested_limits == []
+    assert fake.context_requests == [
+        ("inc-target", {"before_limit": 5, "after_limit": 5})
+    ]
     assert [item["id"] for item in context["problem"]] == [
         "target-02",
         "target-03",
@@ -517,7 +557,7 @@ def test_incident_context_pages_in_batches_of_twenty(monkeypatch) -> None:
     ]
     assert all(
         item["correlation_id"] == "target"
-        for section in context.values()
+        for section in (context["before"], context["problem"], context["after"])
         for item in section
     )
 
@@ -529,9 +569,16 @@ def test_incident_context_clamps_public_limits_to_five(monkeypatch) -> None:
         for index in range(14)
     ]
     monkeypatch.setattr(observability, "observability_store", lambda: fake)
+    fake.context_response = {
+        "before": fake.events[1:6],
+        "problem": fake.events[6:8],
+        "after": fake.events[8:13],
+        "problem_next_cursor": "",
+    }
 
     context = observability.incident_context(
         {
+            "id": "inc-limits",
             "job_id": "job-1",
             "first_event_id": "evt-06",
             "latest_event_id": "evt-07",
@@ -553,6 +600,9 @@ def test_incident_context_clamps_public_limits_to_five(monkeypatch) -> None:
         "evt-10",
         "evt-11",
         "evt-12",
+    ]
+    assert fake.context_requests == [
+        ("inc-limits", {"before_limit": 5, "after_limit": 5})
     ]
 
 

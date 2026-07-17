@@ -653,6 +653,10 @@ class SqliteStore:
                     ON operational_events(job_id);
                 CREATE INDEX IF NOT EXISTS idx_operational_events_correlation_id
                     ON operational_events(correlation_id);
+                CREATE INDEX IF NOT EXISTS idx_operational_events_job_created_at_id
+                    ON operational_events(job_id, created_at, id);
+                CREATE INDEX IF NOT EXISTS idx_operational_events_correlation_created_at_id
+                    ON operational_events(correlation_id, created_at, id);
                 CREATE INDEX IF NOT EXISTS idx_incidents_fingerprint_last_seen_at
                     ON incidents(fingerprint, last_seen_at);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_incidents_one_open_fingerprint
@@ -854,15 +858,16 @@ class SqliteStore:
         }
 
     def snapshot_operational_event_stream(
-        self, *, since: str, limit: int = 2000
+        self, *, since: str, limit: int = 200
     ) -> dict[str, Any]:
-        """Return a bounded live snapshot and its atomic durable checkpoint."""
+        """Return a bounded live snapshot, archive cursor and atomic checkpoint."""
 
         self.initialize()
         try:
-            snapshot_limit = max(1, min(2000, int(limit or 2000)))
+            snapshot_limit = max(1, min(500, int(limit or 200)))
         except (TypeError, ValueError):
-            snapshot_limit = 2000
+            snapshot_limit = 200
+        archive_since = _text(since)
         with self.connection() as conn:
             conn.execute("BEGIN")
             marker = conn.execute(
@@ -874,21 +879,35 @@ class SqliteStore:
                 """
             ).fetchone()
             if marker is None:
-                return {"items": [], "stream_after_id": ""}
+                return {
+                    "items": [],
+                    "stream_after_id": "",
+                    "next_cursor": "",
+                    "archive_since": archive_since,
+                }
             rows = conn.execute(
                 """
                 SELECT s.sequence AS _stream_sequence, e.*
                 FROM operational_event_stream AS s
                 JOIN operational_events AS e ON e.id = s.event_id
                 WHERE s.sequence <= ? AND e.created_at >= ?
-                ORDER BY s.sequence DESC
+                ORDER BY e.created_at DESC, e.id DESC
                 LIMIT ?
                 """,
-                (int(marker["sequence"]), _text(since), snapshot_limit),
+                (int(marker["sequence"]), archive_since, snapshot_limit + 1),
             ).fetchall()
+        has_more = len(rows) > snapshot_limit
+        selected = rows[:snapshot_limit]
+        items = [self._stream_event_from_row(row) for row in reversed(selected)]
         return {
-            "items": [self._stream_event_from_row(row) for row in reversed(rows)],
+            "items": items,
             "stream_after_id": _text(marker["event_id"]),
+            "next_cursor": (
+                _page_cursor(items[0]["created_at"], items[0]["id"])
+                if has_more and items
+                else ""
+            ),
+            "archive_since": archive_since,
         }
 
     def poll_operational_event_stream(
@@ -1430,6 +1449,150 @@ class SqliteStore:
             else ""
         )
         return {"items": items, "next_cursor": next_cursor}
+
+    def query_incident_context(
+        self,
+        incident_id: str,
+        *,
+        problem_cursor: str = "",
+        problem_limit: int = 20,
+        before_limit: int = 5,
+        after_limit: int = 5,
+    ) -> dict[str, Any] | None:
+        """Return one bounded chronological incident context without scanning."""
+
+        self.initialize()
+        normalized_id = _text(incident_id)
+        if not normalized_id:
+            return None
+        page_limit = _bounded_page_limit(problem_limit)
+        try:
+            bounded_before = max(0, min(5, int(before_limit)))
+        except (TypeError, ValueError):
+            bounded_before = 5
+        try:
+            bounded_after = max(0, min(5, int(after_limit)))
+        except (TypeError, ValueError):
+            bounded_after = 5
+
+        with self.connection() as conn:
+            incident_row = conn.execute(
+                "SELECT * FROM incidents WHERE id = ?", (normalized_id,)
+            ).fetchone()
+            if incident_row is None:
+                return None
+            incident = self._incident_from_row(incident_row)
+            job_id = _text(incident.get("job_id"))
+            correlation_id = _text(incident.get("correlation_id"))
+            if job_id:
+                scope_column, scope_value = "job_id", job_id
+            elif correlation_id:
+                scope_column, scope_value = "correlation_id", correlation_id
+            else:
+                return {
+                    "before": [],
+                    "problem": [],
+                    "after": [],
+                    "problem_next_cursor": "",
+                }
+            boundary_rows = conn.execute(
+                """
+                SELECT id, created_at, job_id, correlation_id
+                FROM operational_events
+                WHERE id IN (?, ?)
+                """,
+                (
+                    _text(incident.get("first_event_id")),
+                    _text(incident.get("latest_event_id")),
+                ),
+            ).fetchall()
+            boundaries = {_text(row["id"]): row for row in boundary_rows}
+            first_row = boundaries.get(_text(incident.get("first_event_id")))
+            latest_row = boundaries.get(_text(incident.get("latest_event_id")))
+            if (
+                first_row is None
+                or latest_row is None
+                or _text(first_row[scope_column]) != scope_value
+                or _text(latest_row[scope_column]) != scope_value
+            ):
+                return {
+                    "before": [],
+                    "problem": [],
+                    "after": [],
+                    "problem_next_cursor": "",
+                }
+            first = (_text(first_row["created_at"]), _text(first_row["id"]))
+            latest = (_text(latest_row["created_at"]), _text(latest_row["id"]))
+            if latest < first:
+                first, latest = latest, first
+
+            before_rows = conn.execute(
+                f"""
+                SELECT * FROM operational_events
+                WHERE {scope_column} = ?
+                  AND (created_at < ? OR (created_at = ? AND id < ?))
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (scope_value, first[0], first[0], first[1], bounded_before),
+            ).fetchall()
+
+            problem_clauses = [
+                f"{scope_column} = ?",
+                "(created_at > ? OR (created_at = ? AND id >= ?))",
+                "(created_at < ? OR (created_at = ? AND id <= ?))",
+            ]
+            problem_params: list[object] = [
+                scope_value,
+                first[0],
+                first[0],
+                first[1],
+                latest[0],
+                latest[0],
+                latest[1],
+            ]
+            cursor_at, cursor_id = _decode_page_cursor(problem_cursor)
+            if _text(problem_cursor) and not (cursor_at and cursor_id):
+                raise ValueError("invalid incident context cursor")
+            if cursor_at and cursor_id:
+                problem_clauses.append(
+                    "(created_at > ? OR (created_at = ? AND id > ?))"
+                )
+                problem_params.extend([cursor_at, cursor_at, cursor_id])
+            problem_rows = conn.execute(
+                f"""
+                SELECT * FROM operational_events
+                WHERE {' AND '.join(problem_clauses)}
+                ORDER BY created_at ASC, id ASC
+                LIMIT ?
+                """,
+                (*problem_params, page_limit + 1),
+            ).fetchall()
+            after_rows = conn.execute(
+                f"""
+                SELECT * FROM operational_events
+                WHERE {scope_column} = ?
+                  AND (created_at > ? OR (created_at = ? AND id > ?))
+                ORDER BY created_at ASC, id ASC
+                LIMIT ?
+                """,
+                (scope_value, latest[0], latest[0], latest[1], bounded_after),
+            ).fetchall()
+
+        has_more = len(problem_rows) > page_limit
+        problem = [self._event_from_row(row) for row in problem_rows[:page_limit]]
+        return {
+            "before": [
+                self._event_from_row(row) for row in reversed(before_rows)
+            ],
+            "problem": problem,
+            "after": [self._event_from_row(row) for row in after_rows],
+            "problem_next_cursor": (
+                _page_cursor(problem[-1]["created_at"], problem[-1]["id"])
+                if has_more and problem
+                else ""
+            ),
+        }
 
     def enqueue_notification_delivery(
         self, record: dict[str, object]
