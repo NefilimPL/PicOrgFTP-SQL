@@ -40,7 +40,17 @@ class WebSmokeCiTests(unittest.TestCase):
     def test_health_endpoint_returns_versioned_ok_payload(self) -> None:
         client = TestClient(web_app.app)
 
-        response = client.get("/api/health")
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.object(
+                web_app.storage_settings,
+                "resolve_sqlite_path",
+                return_value=os.path.join(temp_dir, "health.sqlite"),
+            ),
+        ):
+            web_app._invalidate_health_integration_cache()
+            response = client.get("/api/health")
+        web_app._invalidate_health_integration_cache()
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()

@@ -164,12 +164,29 @@ def emit_event(
         "traceback_text": traceback_text,
     }
     try:
-        return observability_store().append_operational_event(event)
+        persisted = observability_store().append_operational_event(event)
     except Exception:
         _mirror_event(event)
         if strict:
             raise
         return event
+    if normalized_severity == "info":
+        return persisted
+    try:
+        incident = coalesce_incident(persisted)
+        if incident is not None:
+            safe_details = persisted.get("details")
+            suppress = isinstance(safe_details, dict) and bool(
+                safe_details.get("suppress_notifications")
+            )
+            if not suppress:
+                from .notification_service import queue_incident_notification
+
+                queue_incident_notification(persisted, incident)
+    except Exception:
+        # Incident and notification persistence must never mask the product result.
+        pass
+    return persisted
 
 
 def record_job(job: dict[str, object]) -> dict[str, object]:

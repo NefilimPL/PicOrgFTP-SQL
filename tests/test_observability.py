@@ -160,6 +160,48 @@ def test_emit_event_captures_exception_with_bounded_traceback(monkeypatch) -> No
     assert len(str(event["traceback_text"]).encode("utf-8")) <= 32 * 1024
 
 
+def test_emit_event_coalesces_and_queues_due_incident_best_effort(monkeypatch) -> None:
+    fake = FakeStore()
+    queued: list[tuple[dict[str, object], dict[str, object]]] = []
+    monkeypatch.setattr(observability, "observability_store", lambda: fake)
+    monkeypatch.setattr(
+        "picorgftp_sql.notification_service.queue_incident_notification",
+        lambda event, incident: queued.append((dict(event), dict(incident))),
+    )
+
+    event = observability.emit_event(
+        severity="error",
+        event_type="ftp.upload_failed",
+        summary="FTP failed",
+        username="alice",
+    )
+
+    assert event["incident_id"].startswith("inc-")
+    assert len(queued) == 1
+    assert queued[0][0]["id"] == event["id"]
+    assert queued[0][1]["notification_due"] is True
+
+
+def test_emit_event_suppress_notifications_prevents_recursive_queue(monkeypatch) -> None:
+    fake = FakeStore()
+    queued: list[object] = []
+    monkeypatch.setattr(observability, "observability_store", lambda: fake)
+    monkeypatch.setattr(
+        "picorgftp_sql.notification_service.queue_incident_notification",
+        lambda *_args: queued.append(object()),
+    )
+
+    event = observability.emit_event(
+        severity="error",
+        event_type="notification.failed",
+        summary="Delivery failed",
+        details={"suppress_notifications": True},
+    )
+
+    assert event["incident_id"].startswith("inc-")
+    assert queued == []
+
+
 def test_incidents_have_stable_fingerprints_and_fifteen_minute_windows(
     monkeypatch,
 ) -> None:

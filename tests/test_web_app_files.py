@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import io
 from pathlib import Path
 import shutil
@@ -47,6 +48,14 @@ class _MemoryUpload:
 
 
 class WebAppFileTests(unittest.TestCase):
+    def test_application_lifecycle_starts_and_stops_notification_worker(self) -> None:
+        source = inspect.getsource(web_app.create_app)
+
+        self.assertIn("start_notification_worker()", source)
+        self.assertIn("stop_notification_worker()", source)
+        self.assertIn("_start_backup_scheduler()", source)
+        self.assertIn("_stop_backup_scheduler()", source)
+
     def test_process_job_persists_correlated_result(self) -> None:
         form = web_app._ProcessFormSnapshot(
             fields={"ean": "5901234567890", "name": "Test product"}

@@ -69,6 +69,10 @@ from ..observability import (
     prune_live_events,
     record_job,
 )
+from ..notification_service import (
+    start_notification_worker,
+    stop_notification_worker,
+)
 from ..product_fields import PRODUCT_FIELDS_KEY, normalize_product_fields
 from ..pimcore_templates import TemplateError
 from ..services.ftp_service import sync_remote_files
@@ -4314,9 +4318,11 @@ def create_app() -> FastAPI:
         except Exception as exc:
             log_error(f"WEB observability pruning failed: {exc}\n{traceback.format_exc()}")
         _start_backup_scheduler()
+        start_notification_worker()
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
+        stop_notification_worker()
         _stop_backup_scheduler()
         with _ACTIVE_CLIENTS_LOCK:
             _flush_active_clients_locked(time.time(), force=True)
