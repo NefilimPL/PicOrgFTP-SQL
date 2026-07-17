@@ -1940,6 +1940,7 @@ def _sync_result_to_sql(
         return payload
     conn = None
     cur = None
+    attempted_slots: set[str] = set()
     try:
         conn = connect_db()
         cur = conn.cursor()
@@ -1966,6 +1967,7 @@ def _sync_result_to_sql(
                 continue
             short_name = f"{ean}_{prefix}{parsed.extension}"
             query = template.format(col=column, column=column, filename=short_name, ean=ean)
+            attempted_slots.add(str(prefix))
             cur.execute(query)
             rowcount = _cursor_rowcount(cur)
             if rowcount != 0:
@@ -1977,6 +1979,7 @@ def _sync_result_to_sql(
             column = _safe_sql_identifier(sql_map.get(prefix, ""))
             if not column:
                 continue
+            attempted_slots.add(str(prefix))
             cur.execute(f"UPDATE {table} SET {column} = ''{where_clause}")
             rowcount = _cursor_rowcount(cur)
             if rowcount != 0:
@@ -1988,14 +1991,24 @@ def _sync_result_to_sql(
             conn.commit()
     except Exception as exc:
         payload["error"] = str(exc)
-        for item in slot_results.values():
-            if item["status"] == "skipped":
-                item["status"] = "error"
+        payload["updated"] = 0
+        payload["cleared"] = 0
+        payload["rows"] = 0
+        rollback_succeeded = False
         if conn is not None:
             try:
                 conn.rollback()
+                rollback_succeeded = True
             except Exception:
                 pass
+        payload["rolled_back"] = rollback_succeeded
+        for slot in attempted_slots:
+            item = slot_results[slot]
+            item["status"] = (
+                "rolled_back"
+                if rollback_succeeded and item["status"] in {"updated", "cleared"}
+                else "error"
+            )
     finally:
         payload["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
         for item in slot_results.values():
@@ -2108,6 +2121,28 @@ def _delete_local_files(delete_requests: List[Dict[str, Any]], saved_paths: Set[
                 }
             )
     return payload
+
+
+def _local_slot_results(
+    saved_files: List[Dict[str, Any]], local_delete_result: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Keep save and delete evidence as distinct operations for each slot."""
+
+    evidence = [
+        {
+            "slot": str(item.get("prefix") or ""),
+            "operation": "save",
+            "status": "saved",
+            "elapsed_ms": max(0, int(item.get("elapsed_ms") or 0)),
+        }
+        for item in saved_files
+        if str(item.get("prefix") or "")
+    ]
+    for item in local_delete_result.get("slot_results", []):
+        if not isinstance(item, dict) or not str(item.get("slot") or ""):
+            continue
+        evidence.append({**item, "operation": "delete"})
+    return evidence
 
 
 def _entry_payload_from_product(product: WebProductForm) -> Dict[str, Any]:
@@ -3332,21 +3367,9 @@ def _process_upload_snapshot(
     saved_entry = _entry_payload_from_product(product)
     if isinstance(entry_result, dict):
         saved_entry["product_id"] = str(entry_result.get("product_id") or saved_entry["product_id"])
-    saved_slot_results = [
-        {
-            "slot": str(item.get("prefix") or ""),
-            "status": "saved",
-            "elapsed_ms": max(0, int(item.get("elapsed_ms") or 0)),
-        }
-        for item in payload["saved_files"]
-        if str(item.get("prefix") or "")
-    ]
-    saved_slot_names = {str(item["slot"]) for item in saved_slot_results}
-    local_slot_results = saved_slot_results + [
-        item
-        for item in local_delete_result.get("slot_results", [])
-        if isinstance(item, dict) and str(item.get("slot") or "") not in saved_slot_names
-    ]
+    local_slot_results = _local_slot_results(
+        payload["saved_files"], local_delete_result
+    )
     integrations = {
         "local": {"slot_results": local_slot_results},
         "ftp": ftp_result,
@@ -4368,6 +4391,23 @@ def _integration_component_status(status: object) -> str:
     return value if value == "disabled" else "unknown"
 
 
+def _canonical_health_observed_at(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        observed_at = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if observed_at.tzinfo is None:
+        return ""
+    return (
+        observed_at.astimezone(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
 def _health_payload() -> Dict[str, Any]:
     server_time = _utc_now_iso()
     components: Dict[str, Dict[str, Any]] = {
@@ -4405,6 +4445,13 @@ def _health_payload() -> Dict[str, Any]:
     profile_statuses = {
         _integration_component_status(item.get("status")) for item in profile_items
     }
+    profile_observed_at = max(
+        (
+            _canonical_health_observed_at(item.get("observed_at"))
+            for item in profile_items
+        ),
+        default="",
+    )
     components["sql_profiles"] = {
         "status": (
             "degraded"
@@ -4414,6 +4461,7 @@ def _health_payload() -> Dict[str, Any]:
             else "unknown"
         ),
         "count": len(profile_items),
+        "observed_at": profile_observed_at,
     }
     local_ready = all(
         components[name]["status"] == "online"

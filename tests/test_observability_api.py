@@ -993,6 +993,9 @@ def test_health_reports_local_components_and_last_known_integrations(
             "observed_at": "2026-07-16T10:01:00.000Z",
         }
     ]
+    assert payload["components"]["sql_profiles"]["observed_at"] == (
+        "2026-07-16T10:01:00.000Z"
+    )
     assert "password" not in response.text.lower()
     assert "private" not in response.text.lower()
 

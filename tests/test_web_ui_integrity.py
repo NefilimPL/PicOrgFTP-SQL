@@ -157,6 +157,8 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertNotIn("backendHealthDetailsList.innerHTML", js_source)
         self.assertIn("backendHealthDetailsList.replaceChildren", js_source)
         self.assertIn("observed_at", js_source)
+        self.assertIn("components[key]?.observed_at", js_source)
+        self.assertIn("status.textContent = observedAt", js_source)
         self.assertIn("serverTime", js_source)
         self.assertIn("currentLatencyMs", js_source)
         self.assertIn("medianLatencyMs", js_source)

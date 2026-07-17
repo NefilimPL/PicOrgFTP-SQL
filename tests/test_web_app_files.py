@@ -1401,6 +1401,89 @@ class WebAppFileTests(unittest.TestCase):
         self.assertEqual(len(conn.cursor_obj.queries), 2)
         self.assertFalse(conn.committed)
 
+    def test_sql_sync_rolls_back_success_evidence_when_later_slot_fails(self) -> None:
+        result = SimpleNamespace(
+            ean="5901234567890",
+            saved_files=[
+                SimpleNamespace(prefix="03", filename="5901234567890_03_NEW.jpg"),
+                SimpleNamespace(prefix="04", filename="5901234567890_04_NEW.jpg"),
+            ],
+        )
+
+        class Cursor:
+            rowcount = -1
+
+            def execute(self, query):
+                if "img_04" in str(query):
+                    raise RuntimeError("second slot failed")
+                self.rowcount = 1 if str(query).lstrip().upper().startswith("UPDATE") else -1
+
+            def fetchone(self):
+                return (1,)
+
+            def close(self):
+                return None
+
+        class Connection:
+            def __init__(self):
+                self.cursor_obj = Cursor()
+                self.committed = False
+                self.rolled_back = False
+
+            def cursor(self):
+                return self.cursor_obj
+
+            def commit(self):
+                self.committed = True
+
+            def rollback(self):
+                self.rolled_back = True
+
+            def close(self):
+                return None
+
+        conn = Connection()
+        with (
+            patch.dict(
+                web_app.config.CONFIG,
+                {
+                    web_app.u: True,
+                    web_app.p: web_app.K,
+                    web_app.w: "UPDATE object_query_1 SET {col} = '{filename}' WHERE EAN = '{ean}'",
+                    web_app.SQL_COLUMN_MAP_KEY: {"03": "img_03", "04": "img_04"},
+                },
+                clear=False,
+            ),
+            patch.object(web_app, "connect_db", return_value=conn),
+        ):
+            payload = web_app._sync_result_to_sql(result)
+
+        assert payload["error"] == "second slot failed"
+        assert payload["updated"] == 0
+        assert payload["rows"] == 0
+        assert payload["rolled_back"] is True
+        assert conn.rolled_back is True
+        assert conn.committed is False
+        assert [(item["slot"], item["status"]) for item in payload["slot_results"]] == [
+            ("03", "rolled_back"),
+            ("04", "error"),
+        ]
+
+    def test_local_slot_results_preserve_save_and_delete_evidence_for_same_slot(self) -> None:
+        result = web_app._local_slot_results(
+            [{"prefix": "03", "elapsed_ms": 12}],
+            {
+                "slot_results": [
+                    {"slot": "03", "status": "error", "elapsed_ms": 4}
+                ]
+            },
+        )
+
+        assert result == [
+            {"slot": "03", "operation": "save", "status": "saved", "elapsed_ms": 12},
+            {"slot": "03", "operation": "delete", "status": "error", "elapsed_ms": 4},
+        ]
+
     def test_complete_existing_photo_is_not_appended_without_missing_sources(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:

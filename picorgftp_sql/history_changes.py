@@ -166,7 +166,15 @@ def history_change_set(
                 continue
             slot = _slot(item)
             if slot:
-                evidence_by_slot.setdefault(slot, {})[integration_name] = dict(item)
+                slot_evidence = evidence_by_slot.setdefault(slot, {})
+                current = slot_evidence.get(integration_name)
+                candidate = dict(item)
+                if current is None:
+                    slot_evidence[integration_name] = candidate
+                elif isinstance(current, list):
+                    current.append(candidate)
+                else:
+                    slot_evidence[integration_name] = [current, candidate]
     for file_change in files:
         slot_evidence = evidence_by_slot.get(str(file_change.get("slot") or ""))
         if slot_evidence:

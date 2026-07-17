@@ -194,6 +194,30 @@ def test_history_change_set_attaches_server_slot_evidence_to_each_changed_file()
     }
 
 
+def test_history_change_set_preserves_multiple_local_operations_for_replacement() -> None:
+    result = history_change_set(
+        existing_entry={"name": "Chair"},
+        saved_entry={"name": "Chair"},
+        existing_photos=[{"prefix": "03", "filename": "old.jpg"}],
+        saved_files=[{"prefix": "03", "filename": "new.jpg", "elapsed_ms": 12}],
+        delete_requests=[{"prefix": "03", "local_path": "old.jpg"}],
+        migrated_prefixes=[],
+        integrations={
+            "local": {
+                "slot_results": [
+                    {"slot": "03", "operation": "save", "status": "saved", "elapsed_ms": 12},
+                    {"slot": "03", "operation": "delete", "status": "error", "elapsed_ms": 4},
+                ]
+            }
+        },
+    )
+
+    assert result["files"][0]["evidence"]["local"] == [
+        {"slot": "03", "operation": "save", "status": "saved", "elapsed_ms": 12},
+        {"slot": "03", "operation": "delete", "status": "error", "elapsed_ms": 4},
+    ]
+
+
 def test_history_change_set_classifies_created_updated_and_synchronized() -> None:
     created = history_change_set(
         existing_entry=None,
