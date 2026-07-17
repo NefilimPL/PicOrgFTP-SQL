@@ -4239,6 +4239,7 @@ _EMAIL_TEST_ATTEMPT_CODES = frozenset(
     {
         "delivery_failed",
         "message_invalid",
+        "partial_routing_unknown",
         "processing_failed",
         "settings_unavailable",
         "test_failed",

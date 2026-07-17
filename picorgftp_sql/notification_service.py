@@ -415,6 +415,58 @@ def _failure_attempt(
     }
 
 
+def _verified_refused_recipients(
+    message: MailMessage,
+    result: Mapping[str, object],
+) -> list[str] | None:
+    """Return a verified refused subset or None when routing is ambiguous."""
+
+    if result.get("routing_known") is not True:
+        return None
+    original = [_text(address) for address in message.recipients]
+    identities = [address.casefold() for address in original]
+    if not original or any(not identity for identity in identities):
+        return None
+    if len(set(identities)) != len(identities):
+        return None
+    allowed = dict(zip(identities, original))
+    raw_refused = result.get("refused_recipients")
+    if not isinstance(raw_refused, list) or not raw_refused:
+        return None
+    refused: list[str] = []
+    seen: set[str] = set()
+    for raw_address in raw_refused:
+        if not isinstance(raw_address, str):
+            return None
+        identity = _text(raw_address).casefold()
+        address = allowed.get(identity)
+        if not address or identity in seen:
+            return None
+        seen.add(identity)
+        refused.append(address)
+    accepted_count = result.get("accepted_count")
+    refused_count = result.get("refused_count")
+    if (
+        not isinstance(accepted_count, int)
+        or isinstance(accepted_count, bool)
+        or not isinstance(refused_count, int)
+        or isinstance(refused_count, bool)
+    ):
+        return None
+    if refused_count != len(refused):
+        return None
+    if accepted_count != len(original) - refused_count:
+        return None
+    status = _text(result.get("status")).lower()
+    if status == "partial" and not (0 < refused_count < len(original)):
+        return None
+    if status == "refused" and not (
+        refused_count == len(original) and accepted_count == 0
+    ):
+        return None
+    return refused if status in {"partial", "refused"} else None
+
+
 class NotificationService:
     """Coordinate durable queue state without exposing transport secrets."""
 
@@ -582,7 +634,7 @@ class NotificationService:
         delivery: Mapping[str, object],
         channel: str,
         settings: Mapping[str, object],
-    ) -> tuple[dict[str, object], bool, list[str]]:
+    ) -> tuple[dict[str, object], bool, list[str], bool]:
         try:
             channel_settings = settings.get(channel)
             transport = self.transport_factory(
@@ -595,7 +647,7 @@ class NotificationService:
                 code="transport_unavailable",
                 category="transport",
                 message="Nie można przygotować kanału wysyłki.",
-            ), False, []
+            ), False, [], True
         try:
             message = self._mail_message(delivery, channel, settings)
         except Exception:
@@ -604,39 +656,32 @@ class NotificationService:
                 code="message_invalid",
                 category="message",
                 message="Nie można przygotować wiadomości.",
-            ), False, []
+            ), False, [], True
         try:
             result = transport.send(message)
             safe_result = result if isinstance(result, Mapping) else {}
             attempt = _safe_attempt(channel, safe_result)
             status = _text(safe_result.get("status")).lower()
             if status in {"partial", "refused"}:
-                allowed = {
-                    address.casefold(): address for address in message.recipients
-                }
-                raw_refused = safe_result.get("refused_recipients")
-                refused: list[str] = []
-                if isinstance(raw_refused, (list, tuple, set)):
-                    for raw_address in raw_refused:
-                        address = allowed.get(_text(raw_address).casefold())
-                        if address and address not in refused:
-                            refused.append(address)
-                if refused:
-                    return attempt, False, refused
+                refused = _verified_refused_recipients(message, safe_result)
+                if refused is not None:
+                    return attempt, False, refused, True
                 return _failure_attempt(
                     channel,
-                    code="delivery_failed",
+                    code="partial_routing_unknown",
                     category="delivery",
-                    message="Kanał nie wysłał wiadomości.",
-                ), False, []
-            return attempt, True, []
+                    message=(
+                        "Nie można bezpiecznie ustalić odrzuconych odbiorców."
+                    ),
+                ), False, [], False
+            return attempt, True, [], False
         except Exception:
             return _failure_attempt(
                 channel,
                 code="delivery_failed",
                 category="delivery",
                 message="Kanał nie wysłał wiadomości.",
-            ), False, []
+            ), False, [], True
 
     def _deliver_claimed(
         self,
@@ -647,17 +692,19 @@ class NotificationService:
     ) -> tuple[str, str, list[dict[str, object]]]:
         primary = _text(claimed.get("primary_channel")).lower()
         attempts: list[dict[str, object]] = []
-        attempt, success, refused = self._send_channel(claimed, primary, settings)
+        attempt, success, refused, fallback_safe = self._send_channel(
+            claimed, primary, settings
+        )
         attempts.append(attempt)
         if success:
             return "sent", primary, attempts
-        if allow_fallback:
+        if allow_fallback and fallback_safe:
             fallback = "smtp" if primary == "entra" else "entra"
             fallback_delivery = claimed
             if refused:
                 fallback_delivery = dict(claimed)
                 fallback_delivery["recipients"] = refused
-            attempt, success, _fallback_refused = self._send_channel(
+            attempt, success, _fallback_refused, _fallback_safe = self._send_channel(
                 fallback_delivery, fallback, settings
             )
             attempts.append(attempt)

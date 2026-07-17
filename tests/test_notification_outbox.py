@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -114,6 +115,101 @@ def test_same_v6_database_adds_notification_outbox_idempotently(tmp_path: Path) 
             row[1] for row in conn.execute("PRAGMA index_list(notification_outbox)")
         }
     assert "idx_notification_outbox_pending" in indexes
+
+
+def test_info_intent_foreign_primary_key_collision_rolls_back_event(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.initialize()
+    with store.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO notification_outbox (
+                id, event_id, incident_id, severity, status,
+                created_at, updated_at, completed_at
+            ) VALUES (?, ?, '', 'info', 'pending', ?, ?, '')
+            """,
+            (
+                "intent-evt-info-collision",
+                "evt-foreign",
+                "2026-07-17T11:00:00.000Z",
+                "2026-07-17T11:00:00.000Z",
+            ),
+        )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.append_operational_event(
+            _event("evt-info-collision", "info"),
+            create_notification_intent=True,
+        )
+
+    assert store.query_operational_events()["items"] == []
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT event_id FROM notification_outbox WHERE id = ?",
+            ("intent-evt-info-collision",),
+        ).fetchone()
+    assert row["event_id"] == "evt-foreign"
+
+
+def test_incident_intent_foreign_primary_key_collision_rolls_back_everything(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.initialize()
+    with store.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO notification_outbox (
+                id, event_id, incident_id, severity, status,
+                created_at, updated_at, completed_at
+            ) VALUES (?, ?, '', 'error', 'pending', ?, ?, '')
+            """,
+            (
+                "intent-evt-incident-collision",
+                "evt-foreign",
+                "2026-07-17T11:00:00.000Z",
+                "2026-07-17T11:00:00.000Z",
+            ),
+        )
+    event = _event("evt-incident-collision")
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.coalesce_incident(
+            _occurrence(event),
+            source_event=event,
+            create_notification_intent=True,
+        )
+
+    assert store.query_operational_events()["items"] == []
+    assert store.query_incidents()["items"] == []
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT event_id FROM notification_outbox WHERE id = ?",
+            ("intent-evt-incident-collision",),
+        ).fetchone()
+    assert row["event_id"] == "evt-foreign"
+
+
+def test_replayed_event_id_must_match_deterministic_intent_identity(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.initialize()
+    with store.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO notification_outbox (
+                id, event_id, incident_id, severity, status,
+                created_at, updated_at, completed_at
+            ) VALUES ('intent-wrong', 'evt-replay', '', 'info', 'pending', ?, ?, '')
+            """,
+            ("2026-07-17T11:00:00.000Z", "2026-07-17T11:00:00.000Z"),
+        )
+
+    with pytest.raises(RuntimeError, match="identity conflict"):
+        store.append_operational_event(
+            _event("evt-replay", "info"), create_notification_intent=True
+        )
+
+    assert store.query_operational_events()["items"] == []
 
 
 def test_incident_event_window_claim_and_outbox_intent_commit_atomically(

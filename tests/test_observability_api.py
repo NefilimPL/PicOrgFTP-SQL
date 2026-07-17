@@ -620,6 +620,23 @@ def test_partial_delivery_projection_exposes_only_safe_counts_status_and_codes(
     assert "private@example.com" not in str(projected)
     assert "sensitive" not in str(projected)
 
+    failed = _public_incident_delivery(
+        {
+            "id": "delivery-2",
+            "status": "error",
+            "attempts": [
+                {
+                    "channel": "smtp",
+                    "status": "error",
+                    "code": "partial_routing_unknown",
+                    "category": "delivery",
+                    "message": "private",
+                }
+            ],
+        }
+    )
+    assert failed["attempts"][0]["code"] == "partial_routing_unknown"
+
 
 def test_jobs_endpoint_returns_durable_runs_for_admin(api_environment) -> None:
     client, store = api_environment

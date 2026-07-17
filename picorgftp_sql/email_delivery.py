@@ -180,6 +180,7 @@ class SmtpMailTransport:
         outbound.add_alternative(message.html_body, subtype="html")
 
         client = None
+        refused_recipients: object = None
         try:
             if self._security == "tls":
                 client = smtplib.SMTP_SSL(
@@ -204,6 +205,8 @@ class SmtpMailTransport:
             if self._username:
                 client.login(self._username, self._password)
             refused_recipients = client.send_message(outbound)
+        except smtplib.SMTPRecipientsRefused as exc:
+            refused_recipients = getattr(exc, "recipients", None)
         except Exception:
             raise RuntimeError("SMTP delivery failed.") from None
         finally:
@@ -216,55 +219,73 @@ class SmtpMailTransport:
                     except Exception:
                         pass
 
-        refused = refused_recipients if isinstance(refused_recipients, Mapping) else {}
-        requested = {
-            _text(address).casefold(): _text(address)
-            for address in message.recipients
-        }
-        refused_addresses: list[str] = []
-        refusal_codes: list[int] = []
-        for raw_address, raw_diagnostic in refused.items():
-            address = requested.get(_text(raw_address).casefold())
-            if not address or address in refused_addresses:
-                continue
-            refused_addresses.append(address)
-            diagnostic = (
-                raw_diagnostic
-                if isinstance(raw_diagnostic, (tuple, list))
-                else ()
-            )
-            if (
-                diagnostic
-                and isinstance(diagnostic[0], int)
-                and not isinstance(diagnostic[0], bool)
-            ):
-                refusal_codes.append(max(0, diagnostic[0]))
-        refused_count = len(refused_addresses)
-        accepted_count = max(0, len(message.recipients) - refused_count)
-        status = (
-            "sent"
-            if refused_count == 0
-            else "partial"
-            if accepted_count
-            else "refused"
-        )
-        result: dict[str, object] = {
+        return _smtp_result(message, refused_recipients, started)
+
+
+def _smtp_result(
+    message: MailMessage,
+    refused_recipients: object,
+    started: float,
+) -> dict[str, object]:
+    if not refused_recipients:
+        return {
             "channel": "smtp",
-            "status": status,
+            "status": "sent",
             "elapsed_ms": _elapsed_ms(started),
         }
-        if refused_count:
-            result.update(
-                {
-                    "accepted_count": accepted_count,
-                    "refused_count": refused_count,
-                    "refusal_codes": sorted(set(refusal_codes)),
-                    # Internal-only routing data; NotificationService strips it
-                    # before persistence and public projection.
-                    "refused_recipients": refused_addresses,
-                }
-            )
-        return result
+
+    refused = (
+        refused_recipients
+        if isinstance(refused_recipients, Mapping)
+        else {}
+    )
+    original = [_text(address) for address in message.recipients]
+    requested = {
+        address.casefold(): address for address in original if address
+    }
+    routing_known = (
+        isinstance(refused_recipients, Mapping)
+        and len(requested) == len(original)
+    )
+    refused_addresses: list[str] = []
+    seen: set[str] = set()
+    refusal_codes: list[int] = []
+    for raw_address, raw_diagnostic in refused.items():
+        identity = _text(raw_address).casefold()
+        address = requested.get(identity)
+        if not identity or identity in seen or not address:
+            routing_known = False
+            continue
+        seen.add(identity)
+        refused_addresses.append(address)
+        diagnostic = (
+            raw_diagnostic
+            if isinstance(raw_diagnostic, (tuple, list))
+            else ()
+        )
+        if (
+            diagnostic
+            and isinstance(diagnostic[0], int)
+            and not isinstance(diagnostic[0], bool)
+        ):
+            refusal_codes.append(max(0, diagnostic[0]))
+    if len(seen) != len(refused):
+        routing_known = False
+    refused_count = len(refused_addresses)
+    accepted_count = max(0, len(original) - refused_count)
+    status = "refused" if refused_count == len(original) else "partial"
+    return {
+        "channel": "smtp",
+        "status": status,
+        "routing_known": bool(routing_known and refused_count),
+        "accepted_count": accepted_count,
+        "refused_count": refused_count,
+        "refusal_codes": sorted(set(refusal_codes)),
+        # Internal-only routing data; NotificationService strips it before
+        # persistence and public projection.
+        "refused_recipients": refused_addresses,
+        "elapsed_ms": _elapsed_ms(started),
+    }
 
 
 def build_transport(

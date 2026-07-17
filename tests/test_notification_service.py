@@ -344,6 +344,7 @@ def test_smtp_partial_refusal_falls_back_only_refused_recipients_without_persist
             self.messages.append(message)
             return {
                 "status": "partial",
+                "routing_known": True,
                 "elapsed_ms": 4,
                 "accepted_count": 1,
                 "refused_count": 1,
@@ -384,6 +385,7 @@ def test_partial_refusal_without_fallback_finishes_error_without_resending_accep
             self.messages.append(message)
             return {
                 "status": "partial",
+                "routing_known": True,
                 "accepted_count": 1,
                 "refused_count": 1,
                 "refusal_codes": [452],
@@ -410,6 +412,7 @@ def test_all_refused_fallback_receives_all_recipients_and_failure_stays_safe() -
             self.messages.append(message)
             return {
                 "status": "refused",
+                "routing_known": True,
                 "accepted_count": 0,
                 "refused_count": 2,
                 "refusal_codes": [550, 551],
@@ -439,6 +442,75 @@ def test_all_refused_fallback_receives_all_recipients_and_failure_stays_safe() -
     }
     assert result["attempts"][1]["status"] == "error"
     assert "private" not in str(result["attempts"])
+
+
+@pytest.mark.parametrize(
+    "unsafe_result",
+    [
+        {
+            "status": "partial",
+            "routing_known": True,
+            "accepted_count": 1,
+            "refused_count": 1,
+        },
+        {
+            "status": "partial",
+            "routing_known": True,
+            "accepted_count": 0,
+            "refused_count": 2,
+            "refused_recipients": ["ops@example.com"],
+        },
+        {
+            "status": "partial",
+            "routing_known": True,
+            "accepted_count": 1,
+            "refused_count": 1,
+            "refused_recipients": ["unknown@example.com"],
+        },
+        {
+            "status": "partial",
+            "routing_known": True,
+            "accepted_count": 0,
+            "refused_count": 2,
+            "refused_recipients": ["ops@example.com", "OPS@example.com"],
+        },
+        {
+            "status": "partial",
+            "routing_known": False,
+            "accepted_count": 1,
+            "refused_count": 1,
+            "refused_recipients": ["ops@example.com"],
+        },
+    ],
+    ids=["missing", "count-mismatch", "unknown", "duplicate", "unverified"],
+)
+def test_partial_unknown_routing_fails_closed_without_fallback(
+    unsafe_result: dict[str, object],
+) -> None:
+    class UnsafePartialTransport(FakeTransport):
+        def send(self, message: object) -> dict[str, object]:
+            self.messages.append(message)
+            return dict(unsafe_result)
+
+    store = FakeStore()
+    primary = UnsafePartialTransport()
+    fallback = FakeTransport()
+    service = _service(store, {"entra": primary, "smtp": fallback})
+    queued = service.queue_incident_notification(_event(), _incident())
+
+    result = service.process_delivery(str(queued["id"]))
+
+    assert result["status"] == "error"
+    assert result["attempts"] == [
+        {
+            "channel": "entra",
+            "status": "error",
+            "code": "partial_routing_unknown",
+            "category": "delivery",
+            "message": "Nie można bezpiecznie ustalić odrzuconych odbiorców.",
+        }
+    ]
+    assert fallback.messages == []
 
 
 def test_process_delivery_enriches_mail_with_bounded_redacted_runtime_context() -> None:

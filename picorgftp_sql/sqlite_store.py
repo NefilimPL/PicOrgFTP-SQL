@@ -882,15 +882,17 @@ class SqliteStore:
         if normalized_severity not in _NOTIFICATION_DELIVERY_SEVERITIES:
             raise ValueError("invalid notification intent severity")
         timestamp = _canonical_timestamp(created_at, field="created_at")
+        expected_id = f"intent-{normalized_event_id}"
         conn.execute(
             """
-            INSERT OR IGNORE INTO notification_outbox (
+            INSERT INTO notification_outbox (
                 id, event_id, incident_id, severity, status,
                 created_at, updated_at, completed_at
             ) VALUES (?, ?, ?, ?, 'pending', ?, ?, '')
+            ON CONFLICT(event_id) DO NOTHING
             """,
             (
-                f"intent-{normalized_event_id}",
+                expected_id,
                 normalized_event_id,
                 _text(incident_id),
                 normalized_severity,
@@ -898,6 +900,12 @@ class SqliteStore:
                 timestamp,
             ),
         )
+        row = conn.execute(
+            "SELECT id FROM notification_outbox WHERE event_id = ?",
+            (normalized_event_id,),
+        ).fetchone()
+        if row is None or _text(row["id"]) != expected_id:
+            raise RuntimeError("notification intent identity conflict")
 
     @staticmethod
     def _normalize_operational_event(

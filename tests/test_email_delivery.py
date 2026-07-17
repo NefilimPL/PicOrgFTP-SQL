@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import smtplib
 import ssl
 from types import SimpleNamespace
 
@@ -427,6 +428,7 @@ def test_smtp_transport_returns_internal_partial_refusal_without_sensitive_respo
     assert result == {
         "channel": "smtp",
         "status": "partial",
+        "routing_known": True,
         "accepted_count": 1,
         "refused_count": 1,
         "refusal_codes": [452],
@@ -456,6 +458,40 @@ def test_smtp_transport_reports_all_refused_for_service_fallback(monkeypatch) ->
     assert result["accepted_count"] == 0
     assert result["refused_count"] == 2
     assert result["refusal_codes"] == [550, 551]
+
+
+def test_smtp_all_recipients_refused_exception_uses_safe_internal_routing(
+    monkeypatch,
+) -> None:
+    refusal = smtplib.SMTPRecipientsRefused(
+        {
+            "first@example.com": (550, b"private first response"),
+            "second@example.com": (551, b"private second response"),
+        }
+    )
+    smtp = FakeSmtp(send_error=refusal)
+    monkeypatch.setattr(
+        email_delivery.smtplib,
+        "SMTP",
+        lambda host, port, timeout: smtp,
+    )
+
+    result = SmtpMailTransport(
+        {"host": "smtp.example", "port": 25, "security": "none"}
+    ).send(sample_message())
+
+    assert result == {
+        "channel": "smtp",
+        "status": "refused",
+        "routing_known": True,
+        "accepted_count": 0,
+        "refused_count": 2,
+        "refusal_codes": [550, 551],
+        "refused_recipients": ["first@example.com", "second@example.com"],
+        "elapsed_ms": result["elapsed_ms"],
+    }
+    assert "private" not in repr(result)
+    assert smtp.calls[-1] == "quit"
 
 
 def test_build_transport_selects_supported_channel() -> None:
