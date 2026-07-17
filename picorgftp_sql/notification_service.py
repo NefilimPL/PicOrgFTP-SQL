@@ -493,24 +493,54 @@ class NotificationService:
         address = normalize_email_address(recipient)
         if not address:
             raise ValueError("Niepoprawny adres e-mail.")
-        settings = self._settings()
-        now = _iso_utc(self.now())
-        message_id = f"test-{uuid.uuid4().hex}"
-        delivery = {
-            "id": f"test-{uuid.uuid4().hex}",
-            "incident_id": "",
-            "primary_channel": selected,
-            "recipients": [address],
-            "message": {
-                "message_id": message_id,
-                "subject": "[TEST] PicOrgFTP-SQL — wiadomość testowa",
-                "text_body": f"To jest wiadomość testowa. Czas: {now}",
-                "html_body": (
-                    "<h2>Wiadomość testowa PicOrgFTP-SQL</h2>"
-                    f"<p>Czas: {html.escape(now)}</p>"
-                ),
-            },
-        }
+        try:
+            settings = self._settings()
+        except Exception:
+            return {
+                "status": "error",
+                "used_channel": selected,
+                "attempts": [
+                    _failure_attempt(
+                        selected,
+                        code="settings_unavailable",
+                        category="configuration",
+                        message="Nie można wczytać konfiguracji poczty.",
+                    )
+                ],
+                "message_id": "",
+            }
+        try:
+            now = _iso_utc(self.now())
+            message_id = f"test-{uuid.uuid4().hex}"
+            delivery = {
+                "id": f"test-{uuid.uuid4().hex}",
+                "incident_id": "",
+                "primary_channel": selected,
+                "recipients": [address],
+                "message": {
+                    "message_id": message_id,
+                    "subject": "[TEST] PicOrgFTP-SQL — wiadomość testowa",
+                    "text_body": f"To jest wiadomość testowa. Czas: {now}",
+                    "html_body": (
+                        "<h2>Wiadomość testowa PicOrgFTP-SQL</h2>"
+                        f"<p>Czas: {html.escape(now)}</p>"
+                    ),
+                },
+            }
+        except Exception:
+            return {
+                "status": "error",
+                "used_channel": selected,
+                "attempts": [
+                    _failure_attempt(
+                        selected,
+                        code="message_invalid",
+                        category="message",
+                        message="Nie można przygotować wiadomości testowej.",
+                    )
+                ],
+                "message_id": "",
+            }
         status, used_channel, attempts = self._deliver_claimed(
             delivery,
             settings,

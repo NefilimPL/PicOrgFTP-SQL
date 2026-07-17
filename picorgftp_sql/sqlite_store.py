@@ -376,6 +376,8 @@ def _entry_payload(payload: dict[str, object]) -> dict[str, str]:
 class SqliteStore:
     """Small SQLite persistence wrapper used by the active data store layer."""
 
+    supports_atomic_incident_event = True
+
     def __init__(self, path: str):
         self.path = str(Path(path))
 
@@ -710,8 +712,17 @@ class SqliteStore:
         """Persist one structured operational event."""
 
         self.initialize()
+        payload = self._normalize_operational_event(event)
+        with self.connection() as conn:
+            self._insert_operational_event(conn, payload)
+        return payload
+
+    @staticmethod
+    def _normalize_operational_event(
+        event: dict[str, object],
+    ) -> dict[str, Any]:
         details = event.get("details")
-        payload: dict[str, Any] = {
+        return {
             "id": _text(event.get("id")) or f"evt-{uuid.uuid4().hex}",
             "created_at": _iso_from_timestamp(event.get("created_at") or _now_iso()),
             "severity": _text(event.get("severity")),
@@ -731,52 +742,55 @@ class SqliteStore:
             "exception_type": _text(event.get("exception_type")),
             "traceback_text": _text(event.get("traceback_text")),
         }
-        with self.connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO operational_events (
-                    id, created_at, severity, event_type, module, stage,
-                    username, ean, product_id, slot, job_id, correlation_id,
-                    incident_id, summary, recommended_action, details_json,
-                    exception_type, traceback_text
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    created_at = excluded.created_at,
-                    severity = excluded.severity,
-                    event_type = excluded.event_type,
-                    module = excluded.module,
-                    stage = excluded.stage,
-                    username = excluded.username,
-                    ean = excluded.ean,
-                    product_id = excluded.product_id,
-                    slot = excluded.slot,
-                    job_id = excluded.job_id,
-                    correlation_id = excluded.correlation_id,
-                    incident_id = excluded.incident_id,
-                    summary = excluded.summary,
-                    recommended_action = excluded.recommended_action,
-                    details_json = excluded.details_json,
-                    exception_type = excluded.exception_type,
-                    traceback_text = excluded.traceback_text
-                """,
-                (
-                    payload["id"], payload["created_at"], payload["severity"],
-                    payload["event_type"], payload["module"], payload["stage"],
-                    payload["username"], payload["ean"], payload["product_id"],
-                    payload["slot"], payload["job_id"], payload["correlation_id"],
-                    payload["incident_id"], payload["summary"],
-                    payload["recommended_action"], _json_dumps(payload["details"]),
-                    payload["exception_type"], payload["traceback_text"],
-                ),
-            )
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO operational_event_stream (event_id)
-                VALUES (?)
-                """,
-                (payload["id"],),
-            )
-        return payload
+
+    @staticmethod
+    def _insert_operational_event(
+        conn: sqlite3.Connection, payload: dict[str, Any]
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO operational_events (
+                id, created_at, severity, event_type, module, stage,
+                username, ean, product_id, slot, job_id, correlation_id,
+                incident_id, summary, recommended_action, details_json,
+                exception_type, traceback_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                created_at = excluded.created_at,
+                severity = excluded.severity,
+                event_type = excluded.event_type,
+                module = excluded.module,
+                stage = excluded.stage,
+                username = excluded.username,
+                ean = excluded.ean,
+                product_id = excluded.product_id,
+                slot = excluded.slot,
+                job_id = excluded.job_id,
+                correlation_id = excluded.correlation_id,
+                incident_id = excluded.incident_id,
+                summary = excluded.summary,
+                recommended_action = excluded.recommended_action,
+                details_json = excluded.details_json,
+                exception_type = excluded.exception_type,
+                traceback_text = excluded.traceback_text
+            """,
+            (
+                payload["id"], payload["created_at"], payload["severity"],
+                payload["event_type"], payload["module"], payload["stage"],
+                payload["username"], payload["ean"], payload["product_id"],
+                payload["slot"], payload["job_id"], payload["correlation_id"],
+                payload["incident_id"], payload["summary"],
+                payload["recommended_action"], _json_dumps(payload["details"]),
+                payload["exception_type"], payload["traceback_text"],
+            ),
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO operational_event_stream (event_id)
+            VALUES (?)
+            """,
+            (payload["id"],),
+        )
 
     @staticmethod
     def _stream_event_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -1154,8 +1168,9 @@ class SqliteStore:
         self,
         occurrence: dict[str, object],
         notification_window_seconds: int = 15 * 60,
+        source_event: dict[str, object] | None = None,
     ) -> dict[str, Any]:
-        """Atomically create or update one open fingerprint occurrence."""
+        """Atomically coalesce an incident and optionally publish its event."""
 
         self.initialize()
         context = occurrence.get("context")
@@ -1321,6 +1336,10 @@ class SqliteStore:
             persisted_row = conn.execute(
                 "SELECT * FROM incidents WHERE id = ?", (incident_id,)
             ).fetchone()
+            if source_event is not None:
+                event_payload = self._normalize_operational_event(source_event)
+                event_payload["incident_id"] = incident_id
+                self._insert_operational_event(conn, event_payload)
 
         result = self._incident_from_row(persisted_row)
         result["notification_due"] = notification_due

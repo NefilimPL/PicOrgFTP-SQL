@@ -502,6 +502,43 @@ def test_send_test_message_rejects_invalid_recipient_without_network() -> None:
     assert transport.messages == []
 
 
+def test_send_test_message_redacts_settings_loader_exception() -> None:
+    store = FakeStore()
+    transport = FakeTransport()
+    service = notification_service.NotificationService(
+        store=store,
+        transport_factory=lambda _channel, _settings: transport,
+        settings_loader=lambda: (_ for _ in ()).throw(
+            RuntimeError("client_secret=LEAK")
+        ),
+        user_lookup=lambda _username: None,
+        event_emitter=lambda **_kwargs: None,
+        now=lambda: NOW,
+    )
+
+    result = service.send_test_message(
+        channel="entra", recipient="test@example.com"
+    )
+
+    assert result == {
+        "status": "error",
+        "used_channel": "entra",
+        "attempts": [
+            {
+                "channel": "entra",
+                "status": "error",
+                "code": "settings_unavailable",
+                "category": "configuration",
+                "message": "Nie można wczytać konfiguracji poczty.",
+            }
+        ],
+        "message_id": "",
+    }
+    assert "LEAK" not in str(result)
+    assert store.deliveries == {}
+    assert transport.messages == []
+
+
 def test_worker_start_is_best_effort_when_store_is_unavailable(monkeypatch) -> None:
     notification_service.stop_notification_worker()
     monkeypatch.setattr(

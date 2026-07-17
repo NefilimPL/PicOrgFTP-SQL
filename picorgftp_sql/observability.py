@@ -313,27 +313,35 @@ def coalesce_incident(
     store = observability_store()
     latest_context = _incident_context_payload(event)
     atomic_coalesce = getattr(store, "coalesce_incident", None)
+    occurrence = {
+        "id": f"inc-{uuid.uuid4().hex}",
+        "fingerprint": fingerprint,
+        "severity": severity,
+        "event_type": _text(event.get("event_type")),
+        "status": "open",
+        "first_seen_at": current_iso,
+        "last_seen_at": current_iso,
+        "occurrence_count": 1,
+        "first_event_id": _text(event.get("id")),
+        "latest_event_id": _text(event.get("id")),
+        "job_id": _text(event.get("job_id")),
+        "correlation_id": _text(event.get("correlation_id")),
+        "notification_window_at": current_iso,
+        "context": latest_context,
+    }
+    atomic_incident_event = bool(
+        getattr(store, "supports_atomic_incident_event", False)
+    )
     if callable(atomic_coalesce):
-        incident_result = dict(
-            atomic_coalesce(
-                {
-                    "id": f"inc-{uuid.uuid4().hex}",
-                    "fingerprint": fingerprint,
-                    "severity": severity,
-                    "event_type": _text(event.get("event_type")),
-                    "status": "open",
-                    "first_seen_at": current_iso,
-                    "last_seen_at": current_iso,
-                    "occurrence_count": 1,
-                    "first_event_id": _text(event.get("id")),
-                    "latest_event_id": _text(event.get("id")),
-                    "job_id": _text(event.get("job_id")),
-                    "correlation_id": _text(event.get("correlation_id")),
-                    "notification_window_at": current_iso,
-                    "context": latest_context,
-                }
+        if atomic_incident_event:
+            source_event = redact_value(event)
+            if not isinstance(source_event, dict):
+                source_event = {}
+            incident_result = dict(
+                atomic_coalesce(occurrence, source_event=source_event)
             )
-        )
+        else:
+            incident_result = dict(atomic_coalesce(occurrence))
         notification_due = bool(incident_result.get("notification_due"))
     else:
         incident_result, notification_due = _coalesce_with_legacy_store(
@@ -353,7 +361,10 @@ def coalesce_incident(
     if not isinstance(persisted_event, dict):
         persisted_event = {}
     persisted_event.pop("notification_due", None)
-    store.append_operational_event(persisted_event)
+    if not atomic_incident_event:
+        # Test/lightweight stores have no shared transaction capability.
+        # Production observability_store() always returns atomic SqliteStore.
+        store.append_operational_event(persisted_event)
     return incident_result
 
 

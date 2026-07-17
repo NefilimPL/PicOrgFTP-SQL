@@ -27,6 +27,7 @@ class SqliteDataStoreAdapter:
     """Adapter exposing SQLite persistence through the active store API."""
 
     mode = storage_settings.DATA_MODE_SQLITE
+    supports_atomic_incident_event = True
 
     def __init__(self, database_path: str):
         self.database_path = database_path
@@ -121,10 +122,12 @@ class SqliteDataStoreAdapter:
         self,
         occurrence: dict[str, object],
         notification_window_seconds: int = 15 * 60,
+        source_event: dict[str, object] | None = None,
     ) -> dict[str, Any]:
         return self.store.coalesce_incident(
             occurrence,
             notification_window_seconds=notification_window_seconds,
+            source_event=source_event,
         )
 
     def query_incidents(

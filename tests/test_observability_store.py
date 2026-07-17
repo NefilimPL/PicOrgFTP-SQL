@@ -989,6 +989,143 @@ def test_release_incident_notification_is_compare_and_swap_safe(tmp_path: Path) 
     assert store.find_open_incident("ftp-failed")["notification_window_at"] == ""
 
 
+def test_atomic_incident_event_insert_rolls_back_new_incident_on_event_failure(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.initialize()
+    with store.connection() as conn:
+        conn.execute(
+            """
+            CREATE TRIGGER force_event_failure
+            BEFORE INSERT ON operational_events
+            BEGIN
+                SELECT RAISE(ABORT, 'forced event failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced event failure"):
+        store.coalesce_incident(
+            {
+                "id": "inc-new",
+                "fingerprint": "atomic-new",
+                "severity": "error",
+                "event_type": "ftp.failed",
+                "first_seen_at": "2026-07-17T10:00:00.000Z",
+                "last_seen_at": "2026-07-17T10:00:00.000Z",
+                "first_event_id": "evt-new",
+                "latest_event_id": "evt-new",
+                "notification_window_at": "2026-07-17T10:00:00.000Z",
+            },
+            source_event=_event(
+                "evt-new", "2026-07-17T10:00:00.000Z", "error"
+            ),
+        )
+
+    assert store.find_open_incident("atomic-new") is None
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM operational_events").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM operational_event_stream").fetchone()[0] == 1
+
+
+def test_atomic_incident_event_insert_rolls_back_existing_incident_update(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    first = store.coalesce_incident(
+        {
+            "id": "inc-existing",
+            "fingerprint": "atomic-existing",
+            "severity": "warning",
+            "event_type": "ftp.failed",
+            "first_seen_at": "2026-07-17T10:00:00.000Z",
+            "last_seen_at": "2026-07-17T10:00:00.000Z",
+            "first_event_id": "evt-first",
+            "latest_event_id": "evt-first",
+            "notification_window_at": "2026-07-17T10:00:00.000Z",
+        },
+        source_event=_event(
+            "evt-first", "2026-07-17T10:00:00.000Z", "warning"
+        ),
+    )
+    with store.connection() as conn:
+        conn.execute(
+            """
+            CREATE TRIGGER force_event_failure
+            BEFORE INSERT ON operational_events
+            WHEN NEW.id = 'evt-second'
+            BEGIN
+                SELECT RAISE(ABORT, 'forced event failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced event failure"):
+        store.coalesce_incident(
+            {
+                "id": "inc-unused",
+                "fingerprint": "atomic-existing",
+                "severity": "critical",
+                "event_type": "ftp.failed",
+                "first_seen_at": "2026-07-17T10:16:00.000Z",
+                "last_seen_at": "2026-07-17T10:16:00.000Z",
+                "first_event_id": "evt-second",
+                "latest_event_id": "evt-second",
+                "notification_window_at": "2026-07-17T10:16:00.000Z",
+            },
+            source_event=_event(
+                "evt-second", "2026-07-17T10:16:00.000Z", "critical"
+            ),
+        )
+
+    stored = store.find_open_incident("atomic-existing")
+    assert stored is not None
+    assert stored["id"] == first["id"]
+    assert stored["severity"] == "warning"
+    assert stored["occurrence_count"] == 1
+    assert stored["latest_event_id"] == "evt-first"
+    assert stored["last_seen_at"] == "2026-07-17T10:00:00.000Z"
+    assert stored["notification_window_at"] == "2026-07-17T10:00:00.000Z"
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM operational_events WHERE id = 'evt-second'"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM operational_event_stream WHERE event_id = 'evt-second'"
+        ).fetchone()[0] == 0
+
+
+def test_atomic_incident_event_insert_publishes_exactly_once_with_incident_id(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    event = _event("evt-atomic", "2026-07-17T10:00:00.000Z", "error")
+
+    incident = store.coalesce_incident(
+        {
+            "id": "inc-atomic",
+            "fingerprint": "atomic-success",
+            "severity": "error",
+            "event_type": "ftp.failed",
+            "first_seen_at": "2026-07-17T10:00:00.000Z",
+            "last_seen_at": "2026-07-17T10:00:00.000Z",
+            "first_event_id": "evt-atomic",
+            "latest_event_id": "evt-atomic",
+            "notification_window_at": "2026-07-17T10:00:00.000Z",
+        },
+        source_event=event,
+    )
+
+    stream = store.start_operational_event_stream(initial_limit=20)
+    assert [item["id"] for item in stream["items"]] == ["evt-atomic"]
+    assert stream["items"][0]["incident_id"] == incident["id"]
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM operational_event_stream WHERE event_id = 'evt-atomic'"
+        ).fetchone()[0] == 1
+
+
 def test_initialize_reconciles_duplicate_open_incidents_before_unique_index(
     tmp_path: Path,
 ) -> None:

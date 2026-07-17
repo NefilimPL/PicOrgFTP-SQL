@@ -193,9 +193,9 @@ def test_non_info_event_enters_stream_once_with_incident_id(
             super().__init__(path)
             self.published: list[dict[str, object]] = []
 
-        def append_operational_event(self, event):
-            self.published.append(dict(event))
-            return super().append_operational_event(event)
+        def _insert_operational_event(self, conn, payload):
+            self.published.append(dict(payload))
+            return super()._insert_operational_event(conn, payload)
 
     store = PublishingStore(str(tmp_path / "events.sqlite"))
     monkeypatch.setattr(observability, "observability_store", lambda: store)
