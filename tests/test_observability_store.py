@@ -42,6 +42,127 @@ def _event(
     return event
 
 
+def _delivery(identity: str, created_at: str, **overrides: object) -> dict[str, object]:
+    delivery: dict[str, object] = {
+        "id": identity,
+        "incident_id": "inc-1",
+        "event_id": "evt-1",
+        "severity": "error",
+        "status": "pending",
+        "primary_channel": "entra",
+        "used_channel": "",
+        "recipients": ["admin@example.com"],
+        "message": {"subject": "FTP failed", "message_id": "incident-1"},
+        "attempts": [],
+        "created_at": created_at,
+        "updated_at": created_at,
+        "next_attempt_at": "",
+    }
+    delivery.update(overrides)
+    return delivery
+
+
+def test_v6_schema_adds_notification_deliveries_to_fresh_and_existing_databases(
+    tmp_path: Path,
+) -> None:
+    fresh_path = tmp_path / "fresh.sqlite"
+    SqliteStore(str(fresh_path)).initialize()
+    with sqlite3.connect(fresh_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notification_deliveries'"
+        ).fetchone()
+        indexes = {
+            row[1]
+            for row in conn.execute("PRAGMA index_list(notification_deliveries)")
+        }
+    assert "idx_notification_deliveries_pending" in indexes
+    assert "idx_notification_deliveries_incident" in indexes
+
+    existing_path = tmp_path / "existing-v6.sqlite"
+    existing = SqliteStore(str(existing_path))
+    existing.initialize()
+    with sqlite3.connect(existing_path) as conn:
+        conn.execute("DROP TABLE notification_deliveries")
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+    existing.initialize()
+    with sqlite3.connect(existing_path) as conn:
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notification_deliveries'"
+        ).fetchone()
+
+
+def test_notification_delivery_repository_decodes_updates_filters_and_pages(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    first = store.enqueue_notification_delivery(
+        _delivery("delivery-1", "2026-07-16T10:00:00.000Z")
+    )
+    store.enqueue_notification_delivery(
+        _delivery(
+            "delivery-2",
+            "2026-07-16T10:01:00.000Z",
+            incident_id="inc-2",
+            next_attempt_at="2999-01-01T00:00:00.000Z",
+        )
+    )
+    store.enqueue_notification_delivery(
+        _delivery("delivery-3", "2026-07-16T10:02:00.000Z")
+    )
+
+    assert first["recipients"] == ["admin@example.com"]
+    assert first["message"] == {"message_id": "incident-1", "subject": "FTP failed"}
+    assert first["attempts"] == []
+    assert "recipients_json" not in first
+
+    pending = store.pending_notification_deliveries(limit=20)
+    assert [item["id"] for item in pending] == ["delivery-1", "delivery-3"]
+
+    updated = store.update_notification_delivery(
+        "delivery-1",
+        status="sent",
+        used_channel="smtp",
+        attempts=[{"channel": "entra", "status": "error"}],
+        updated_at="2026-07-16T10:03:00.000Z",
+    )
+    assert updated["status"] == "sent"
+    assert updated["used_channel"] == "smtp"
+    assert updated["attempts"] == [{"channel": "entra", "status": "error"}]
+
+    first_page = store.query_notification_deliveries(limit=2)
+    assert [item["id"] for item in first_page["items"]] == [
+        "delivery-3",
+        "delivery-2",
+    ]
+    second_page = store.query_notification_deliveries(
+        cursor=first_page["next_cursor"], limit=2
+    )
+    assert [item["id"] for item in second_page["items"]] == ["delivery-1"]
+    assert [
+        item["id"]
+        for item in store.query_notification_deliveries(incident_id="inc-1")["items"]
+    ] == ["delivery-3", "delivery-1"]
+
+
+def test_sqlite_adapter_delegates_notification_delivery_repository(tmp_path: Path) -> None:
+    adapter = SqliteDataStoreAdapter(str(tmp_path / "app.sqlite"))
+    queued = adapter.enqueue_notification_delivery(
+        _delivery("delivery-1", "2026-07-16T10:00:00.000Z")
+    )
+
+    assert queued["id"] == "delivery-1"
+    assert adapter.pending_notification_deliveries()[0]["id"] == "delivery-1"
+    assert adapter.update_notification_delivery(
+        "delivery-1",
+        status="sent",
+        updated_at="2026-07-16T10:01:00.000Z",
+    )["status"] == "sent"
+    assert adapter.query_notification_deliveries(incident_id="inc-1")["items"][0][
+        "id"
+    ] == "delivery-1"
+
+
 def test_operational_schema_and_cursor_queries(tmp_path: Path) -> None:
     store = SqliteStore(str(tmp_path / "app.sqlite"))
     store.initialize()
@@ -917,6 +1038,17 @@ def test_prune_and_clear_operational_data_preserve_web_history(tmp_path: Path) -
     store.mark_alerts_read(
         "alice", "warning", "evt-warning", "2026-07-15T09:00:00.000Z"
     )
+    store.enqueue_notification_delivery(
+        _delivery("delivery-1", "2026-07-16T10:00:00.000Z")
+    )
+    store.append_pimcore_submission(
+        {
+            "id": "submission-1",
+            "operation_type": "create",
+            "status": "success",
+            "created_at": "2026-07-16T10:00:00.000Z",
+        }
+    )
 
     assert store.prune_info_events("2026-07-15T10:00:00.000Z") == 1
     assert [
@@ -928,8 +1060,10 @@ def test_prune_and_clear_operational_data_preserve_web_history(tmp_path: Path) -
         "job_runs": 1,
         "incidents": 1,
         "alert_reads": 1,
+        "notification_deliveries": 1,
     }
     assert store.load_history()[0]["id"] == "history-1"
+    assert store.query_pimcore_submissions()[0]["id"] == "submission-1"
     with sqlite3.connect(tmp_path / "app.sqlite") as conn:
         stream_ids = conn.execute(
             "SELECT event_id FROM operational_event_stream ORDER BY sequence"

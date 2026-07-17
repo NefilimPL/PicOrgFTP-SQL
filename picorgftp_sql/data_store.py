@@ -134,6 +134,44 @@ class SqliteDataStoreAdapter:
             severity=severity, cursor=cursor, limit=limit
         )
 
+    def enqueue_notification_delivery(
+        self, record: dict[str, object]
+    ) -> dict[str, Any]:
+        return self.store.enqueue_notification_delivery(record)
+
+    def pending_notification_deliveries(
+        self, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        return self.store.pending_notification_deliveries(limit=limit)
+
+    def update_notification_delivery(
+        self,
+        delivery_id: str,
+        *,
+        status: str,
+        used_channel: str = "",
+        attempts=None,
+        updated_at: str,
+        next_attempt_at: str = "",
+    ) -> dict[str, Any]:
+        return self.store.update_notification_delivery(
+            delivery_id,
+            status=status,
+            used_channel=used_channel,
+            attempts=attempts,
+            updated_at=updated_at,
+            next_attempt_at=next_attempt_at,
+        )
+
+    def query_notification_deliveries(
+        self, *, incident_id: str = "", cursor: str = "", limit: int = 20
+    ) -> dict[str, Any]:
+        return self.store.query_notification_deliveries(
+            incident_id=incident_id,
+            cursor=cursor,
+            limit=limit,
+        )
+
     def mark_alerts_read(
         self, username: str, severity: str, event_id: str, created_at: str
     ) -> None:

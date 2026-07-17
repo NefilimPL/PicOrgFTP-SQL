@@ -52,6 +52,13 @@ from .common import (
     w,
 )
 from .config import save_config
+from .email_settings import (
+    EMAIL_CLIENT_SECRET,
+    EMAIL_SETTINGS_KEY,
+    EMAIL_SMTP_PASSWORD,
+    normalize_email_settings,
+    public_email_settings,
+)
 from .database import connect_db
 from .excel_utils import (
     COLOR1_HEADER,
@@ -192,6 +199,7 @@ _CONFIG_SECRET_FIELDS = {
     K: {N, M},
     TRANSLATION_SETTINGS_KEY: {TRANSLATION_API_KEY},
     PIMCORE_SETTINGS_KEY: {PIMCORE_API_KEY},
+    EMAIL_SETTINGS_KEY: {"entra.client_secret", "smtp.password"},
 }
 _PIMCORE_OPERATIONS = PimcoreOperationRegistry()
 
@@ -2756,6 +2764,18 @@ def _preserve_unsubmitted_config_secrets(payload: dict[str, object]) -> dict[str
     pimcore_payload = payload.get(PIMCORE_SETTINGS_KEY)
     if isinstance(pimcore_payload, dict) and _text(pimcore_payload.get(PIMCORE_API_KEY)):
         preserve[PIMCORE_SETTINGS_KEY].discard(PIMCORE_API_KEY)
+    email_payload = payload.get(EMAIL_SETTINGS_KEY)
+    if isinstance(email_payload, dict):
+        entra_payload = email_payload.get("entra")
+        if isinstance(entra_payload, dict) and _text(
+            entra_payload.get(EMAIL_CLIENT_SECRET)
+        ):
+            preserve[EMAIL_SETTINGS_KEY].discard("entra.client_secret")
+        smtp_payload = email_payload.get("smtp")
+        if isinstance(smtp_payload, dict) and _text(
+            smtp_payload.get(EMAIL_SMTP_PASSWORD)
+        ):
+            preserve[EMAIL_SETTINGS_KEY].discard("smtp.password")
     return {section: keys for section, keys in preserve.items() if keys}
 
 
@@ -2795,6 +2815,7 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
     processing_payload = payload.get("processing") if isinstance(payload.get("processing"), dict) else {}
     security_payload = payload.get("security") if isinstance(payload.get("security"), dict) else {}
     pimcore_payload = payload.get(PIMCORE_SETTINGS_KEY)
+    email_payload = payload.get(EMAIL_SETTINGS_KEY)
     backup_payload = payload.get("sqlite_backup") if isinstance(payload.get("sqlite_backup"), dict) else None
     slots_payload = payload.get("slots") if isinstance(payload.get("slots"), list) else None
     runtime_reloaded = False
@@ -2872,6 +2893,24 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
         if not _text(pimcore_payload.get(PIMCORE_API_KEY)):
             merged[PIMCORE_API_KEY] = current[PIMCORE_API_KEY]
         cfg[PIMCORE_SETTINGS_KEY] = normalize_pimcore_settings(merged)
+
+    if isinstance(email_payload, dict):
+        current_email = normalize_email_settings(cfg.get(EMAIL_SETTINGS_KEY))
+        merged_email = dict(current_email)
+        merged_email.update(email_payload)
+        for channel, secret_key in (
+            ("entra", EMAIL_CLIENT_SECRET),
+            ("smtp", EMAIL_SMTP_PASSWORD),
+        ):
+            current_channel = current_email[channel]
+            submitted_channel = email_payload.get(channel)
+            if isinstance(submitted_channel, dict):
+                merged_channel = dict(current_channel)
+                merged_channel.update(submitted_channel)
+                if not _text(submitted_channel.get(secret_key)):
+                    merged_channel[secret_key] = current_channel[secret_key]
+                merged_email[channel] = merged_channel
+        cfg[EMAIL_SETTINGS_KEY] = normalize_email_settings(merged_email)
 
     if ftp_payload:
         ftp = cfg.setdefault(H, {})
@@ -3019,6 +3058,7 @@ def settings_snapshot() -> dict[str, object]:
             legacy_color_labels=cfg.get(COLOR_FIELD_LABELS_KEY),
         ),
         "pimcore": pimcore_public,
+        EMAIL_SETTINGS_KEY: public_email_settings(cfg.get(EMAIL_SETTINGS_KEY)),
         "slots": [
             {
                 "prefix": slot.get("prefix", ""),

@@ -526,6 +526,22 @@ class SqliteStore:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (username, severity)
                 );
+
+                CREATE TABLE IF NOT EXISTS notification_deliveries (
+                    id TEXT PRIMARY KEY,
+                    incident_id TEXT NOT NULL DEFAULT '',
+                    event_id TEXT NOT NULL DEFAULT '',
+                    severity TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    primary_channel TEXT NOT NULL,
+                    used_channel TEXT NOT NULL DEFAULT '',
+                    recipients_json TEXT NOT NULL DEFAULT '[]',
+                    message_json TEXT NOT NULL,
+                    attempts_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    next_attempt_at TEXT NOT NULL DEFAULT ''
+                );
                 """
             )
             _migrate_web_history_created_at(conn)
@@ -592,6 +608,10 @@ class SqliteStore:
                     ON incidents(fingerprint) WHERE status = 'open';
                 CREATE INDEX IF NOT EXISTS idx_job_runs_started_at_id
                     ON job_runs(started_at, id);
+                CREATE INDEX IF NOT EXISTS idx_notification_deliveries_pending
+                    ON notification_deliveries(status, next_attempt_at, created_at);
+                CREATE INDEX IF NOT EXISTS idx_notification_deliveries_incident
+                    ON notification_deliveries(incident_id, created_at);
                 """
             )
             version_row = conn.execute(
@@ -622,6 +642,18 @@ class SqliteStore:
     def _incident_from_row(row: sqlite3.Row) -> dict[str, Any]:
         payload = dict(row)
         payload["context"] = _json_loads(payload.pop("context_json", "{}"), {})
+        return payload
+
+    @staticmethod
+    def _delivery_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        payload = dict(row)
+        payload["recipients"] = _json_loads(
+            payload.pop("recipients_json", "[]"), []
+        )
+        payload["message"] = _json_loads(payload.pop("message_json", "{}"), {})
+        payload["attempts"] = _json_loads(
+            payload.pop("attempts_json", "[]"), []
+        )
         return payload
 
     def append_operational_event(
@@ -1277,6 +1309,173 @@ class SqliteStore:
         )
         return {"items": items, "next_cursor": next_cursor}
 
+    def enqueue_notification_delivery(
+        self, record: dict[str, object]
+    ) -> dict[str, Any]:
+        """Insert one durable notification delivery and return its stored form."""
+
+        self.initialize()
+        created_at = _iso_from_timestamp(record.get("created_at") or _now_iso())
+        updated_at = _iso_from_timestamp(record.get("updated_at") or created_at)
+        next_attempt_text = _text(record.get("next_attempt_at"))
+        next_attempt_at = (
+            _iso_from_timestamp(next_attempt_text) if next_attempt_text else ""
+        )
+        recipients = record.get("recipients", [])
+        if not isinstance(recipients, (list, tuple)):
+            recipients = []
+        message = record.get("message", {})
+        if not isinstance(message, dict):
+            message = {}
+        attempts = record.get("attempts", [])
+        if not isinstance(attempts, list):
+            attempts = []
+        delivery_id = _text(record.get("id")) or f"delivery-{uuid.uuid4().hex}"
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO notification_deliveries (
+                    id, incident_id, event_id, severity, status,
+                    primary_channel, used_channel, recipients_json,
+                    message_json, attempts_json, created_at, updated_at,
+                    next_attempt_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    delivery_id,
+                    _text(record.get("incident_id")),
+                    _text(record.get("event_id")),
+                    _text(record.get("severity")),
+                    _text(record.get("status")) or "pending",
+                    _text(record.get("primary_channel")),
+                    _text(record.get("used_channel")),
+                    _json_dumps(list(recipients)),
+                    _json_dumps(message),
+                    _json_dumps(attempts),
+                    created_at,
+                    updated_at,
+                    next_attempt_at,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM notification_deliveries WHERE id = ?",
+                (delivery_id,),
+            ).fetchone()
+        return self._delivery_from_row(row)
+
+    def pending_notification_deliveries(
+        self, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Return due pending deliveries in deterministic queue order."""
+
+        self.initialize()
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM notification_deliveries
+                WHERE status = 'pending'
+                  AND (next_attempt_at = '' OR next_attempt_at <= ?)
+                ORDER BY next_attempt_at ASC, created_at ASC, id ASC
+                LIMIT ?
+                """,
+                (_now_iso(), _bounded_page_limit(limit)),
+            ).fetchall()
+        return [self._delivery_from_row(row) for row in rows]
+
+    def update_notification_delivery(
+        self,
+        delivery_id: str,
+        *,
+        status: str,
+        used_channel: str = "",
+        attempts: object = None,
+        updated_at: str,
+        next_attempt_at: str = "",
+    ) -> dict[str, Any]:
+        """Update mutable delivery state and return the decoded row."""
+
+        self.initialize()
+        next_attempt_text = _text(next_attempt_at)
+        normalized_next_attempt = (
+            _iso_from_timestamp(next_attempt_text) if next_attempt_text else ""
+        )
+        with self.connection() as conn:
+            if attempts is None:
+                conn.execute(
+                    """
+                    UPDATE notification_deliveries
+                    SET status = ?, used_channel = ?, updated_at = ?,
+                        next_attempt_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        _text(status),
+                        _text(used_channel),
+                        _iso_from_timestamp(updated_at),
+                        normalized_next_attempt,
+                        _text(delivery_id),
+                    ),
+                )
+            else:
+                normalized_attempts = attempts if isinstance(attempts, list) else []
+                conn.execute(
+                    """
+                    UPDATE notification_deliveries
+                    SET status = ?, used_channel = ?, attempts_json = ?,
+                        updated_at = ?, next_attempt_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        _text(status),
+                        _text(used_channel),
+                        _json_dumps(normalized_attempts),
+                        _iso_from_timestamp(updated_at),
+                        normalized_next_attempt,
+                        _text(delivery_id),
+                    ),
+                )
+            row = conn.execute(
+                "SELECT * FROM notification_deliveries WHERE id = ?",
+                (_text(delivery_id),),
+            ).fetchone()
+        return self._delivery_from_row(row) if row else {}
+
+    def query_notification_deliveries(
+        self, *, incident_id: str = "", cursor: str = "", limit: int = 20
+    ) -> dict[str, Any]:
+        """Return a descending cursor page of notification deliveries."""
+
+        self.initialize()
+        clauses: list[str] = []
+        params: list[object] = []
+        if _text(incident_id):
+            clauses.append("incident_id = ?")
+            params.append(_text(incident_id))
+        cursor_at, cursor_id = _decode_page_cursor(cursor)
+        if cursor_at and cursor_id:
+            clauses.append("(created_at < ? OR (created_at = ? AND id < ?))")
+            params.extend([cursor_at, cursor_at, cursor_id])
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        page_limit = _bounded_page_limit(limit)
+        with self.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM notification_deliveries
+                {where}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (*params, page_limit + 1),
+            ).fetchall()
+        has_more = len(rows) > page_limit
+        items = [self._delivery_from_row(row) for row in rows[:page_limit]]
+        next_cursor = (
+            _page_cursor(items[-1]["created_at"], items[-1]["id"])
+            if has_more and items
+            else ""
+        )
+        return {"items": items, "next_cursor": next_cursor}
+
     def mark_alerts_read(
         self, username: str, severity: str, event_id: str, created_at: str
     ) -> None:
@@ -1365,7 +1564,8 @@ class SqliteStore:
         deleted: dict[str, int] = {}
         with self.connection() as conn:
             for table in (
-                "operational_events", "job_runs", "incidents", "alert_reads"
+                "operational_events", "job_runs", "incidents", "alert_reads",
+                "notification_deliveries",
             ):
                 cursor = conn.execute(f"DELETE FROM {table}")
                 deleted[table] = max(0, cursor.rowcount)

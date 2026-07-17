@@ -116,6 +116,9 @@ def test_normalize_timestamp_columns_covers_observability_tables(tmp_path: Path)
         ("incidents", "last_seen_at"),
         ("incidents", "notification_window_at"),
         ("alert_reads", "created_at"),
+        ("notification_deliveries", "created_at"),
+        ("notification_deliveries", "updated_at"),
+        ("notification_deliveries", "next_attempt_at"),
     }
     assert expected <= set(TIMESTAMP_COLUMNS)
 
@@ -138,6 +141,17 @@ def test_normalize_timestamp_columns_covers_observability_tables(tmp_path: Path)
             )
             """
         )
+        conn.execute(
+            """
+            INSERT INTO notification_deliveries (
+                id, severity, status, primary_channel, message_json,
+                created_at, updated_at, next_attempt_at
+            ) VALUES (
+                'delivery-1', 'error', 'pending', 'entra', '{}',
+                '1784196000', '1784196060', '1784196120'
+            )
+            """
+        )
         changed = normalize_timestamp_columns(conn)
         job = conn.execute(
             "SELECT started_at, finished_at FROM job_runs WHERE id = 'job-1'"
@@ -148,9 +162,15 @@ def test_normalize_timestamp_columns_covers_observability_tables(tmp_path: Path)
             FROM incidents WHERE id = 'inc-1'
             """
         ).fetchone()
+        delivery = conn.execute(
+            """
+            SELECT created_at, updated_at, next_attempt_at
+            FROM notification_deliveries WHERE id = 'delivery-1'
+            """
+        ).fetchone()
 
-    assert changed == 5
-    assert all(value.endswith("Z") for value in (*job, *incident))
+    assert changed == 8
+    assert all(value.endswith("Z") for value in (*job, *incident, *delivery))
 
 
 def test_normalize_timestamp_columns_canonicalizes_valid_iso_text(

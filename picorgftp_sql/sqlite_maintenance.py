@@ -28,6 +28,9 @@ TIMESTAMP_COLUMNS = (
     ("incidents", "last_seen_at"),
     ("incidents", "notification_window_at"),
     ("alert_reads", "created_at"),
+    ("notification_deliveries", "created_at"),
+    ("notification_deliveries", "updated_at"),
+    ("notification_deliveries", "next_attempt_at"),
 )
 
 

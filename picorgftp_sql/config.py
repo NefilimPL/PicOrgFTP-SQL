@@ -1,5 +1,6 @@
 """Configuration file loading and persistence."""
 
+import copy
 import tempfile
 
 from .common import (
@@ -52,6 +53,12 @@ from .common import (
     require_runtime_modules,
 )
 from .encryption import decrypt, encrypt
+from .email_settings import (
+    EMAIL_CLIENT_SECRET,
+    EMAIL_SETTINGS_KEY,
+    EMAIL_SMTP_PASSWORD,
+    normalize_email_settings,
+)
 from .pimcore_config import (
     PIMCORE_API_KEY,
     PIMCORE_SETTINGS_KEY,
@@ -390,6 +397,22 @@ def _merge_raw_config(raw_config, config_copy):
         else encrypt(B)
     )
     config_copy[PIMCORE_SETTINGS_KEY] = pimcore_settings
+    raw_email = raw_config.get(EMAIL_SETTINGS_KEY, {})
+    email_settings = normalize_email_settings(raw_email)
+    if Aq(raw_email, dict):
+        raw_entra = raw_email.get("entra", {})
+        raw_smtp = raw_email.get("smtp", {})
+        email_settings["entra"][EMAIL_CLIENT_SECRET] = decrypt(
+            raw_entra.get(EMAIL_CLIENT_SECRET, encrypt(B))
+            if Aq(raw_entra, dict)
+            else encrypt(B)
+        )
+        email_settings["smtp"][EMAIL_SMTP_PASSWORD] = decrypt(
+            raw_smtp.get(EMAIL_SMTP_PASSWORD, encrypt(B))
+            if Aq(raw_smtp, dict)
+            else encrypt(B)
+        )
+    config_copy[EMAIL_SETTINGS_KEY] = email_settings
     return config_copy
 
 
@@ -426,6 +449,15 @@ def load_config(interactive=I):
             )
             pimcore_initial[PIMCORE_API_KEY] = encrypt(
                 pimcore_initial[PIMCORE_API_KEY]
+            )
+            email_initial = normalize_email_settings(
+                config_copy.get(EMAIL_SETTINGS_KEY)
+            )
+            email_initial["entra"][EMAIL_CLIENT_SECRET] = encrypt(
+                email_initial["entra"][EMAIL_CLIENT_SECRET]
+            )
+            email_initial["smtp"][EMAIL_SMTP_PASSWORD] = encrypt(
+                email_initial["smtp"][EMAIL_SMTP_PASSWORD]
             )
             initial = {
                 H: {
@@ -481,6 +513,7 @@ def load_config(interactive=I):
                     ),
                 },
                 PIMCORE_SETTINGS_KEY: pimcore_initial,
+                EMAIL_SETTINGS_KEY: email_initial,
             }
             try:
                 # Ensure the configuration directory exists before writing.
@@ -589,6 +622,22 @@ def load_config(interactive=I):
             else encrypt(B)
         )
         config_copy[PIMCORE_SETTINGS_KEY] = pimcore_settings
+        raw_email = raw_config.get(EMAIL_SETTINGS_KEY, {})
+        email_settings = normalize_email_settings(raw_email)
+        if Aq(raw_email, dict):
+            raw_entra = raw_email.get("entra", {})
+            raw_smtp = raw_email.get("smtp", {})
+            email_settings["entra"][EMAIL_CLIENT_SECRET] = decrypt(
+                raw_entra.get(EMAIL_CLIENT_SECRET, encrypt(B))
+                if Aq(raw_entra, dict)
+                else encrypt(B)
+            )
+            email_settings["smtp"][EMAIL_SMTP_PASSWORD] = decrypt(
+                raw_smtp.get(EMAIL_SMTP_PASSWORD, encrypt(B))
+                if Aq(raw_smtp, dict)
+                else encrypt(B)
+            )
+        config_copy[EMAIL_SETTINGS_KEY] = email_settings
         try:
             # Saving back the normalised structure keeps missing keys aligned
             # with future versions of the configuration schema.
@@ -598,6 +647,10 @@ def load_config(interactive=I):
                 K: {N, M},
                 TRANSLATION_SETTINGS_KEY: {TRANSLATION_API_KEY},
                 PIMCORE_SETTINGS_KEY: {PIMCORE_API_KEY},
+                EMAIL_SETTINGS_KEY: {
+                    "entra.client_secret",
+                    "smtp.password",
+                },
             }
             save_config(
                 config_copy,
@@ -654,11 +707,15 @@ def save_config(config, raw_config=None, preserve_secrets=None):
     def _pick_secret(section_key, item_key, value):
         preserve_keys = preserve_secrets.get(section_key, set())
         if preserve_keys and item_key in preserve_keys:
-            raw_section = raw_config.get(section_key, {})
-            if Aq(raw_section, dict) and item_key in raw_section:
-                raw_value = raw_section.get(item_key)
-                if raw_value is not None:
-                    return raw_value
+            raw_value = raw_config.get(section_key, {})
+            found = Aq(raw_value, dict)
+            for path_part in item_key.split("."):
+                if not Aq(raw_value, dict) or path_part not in raw_value:
+                    found = False
+                    break
+                raw_value = raw_value[path_part]
+            if found and raw_value is not None:
+                return raw_value
         return encrypt(value)
 
     pimcore_settings = normalize_pimcore_settings(config.get(PIMCORE_SETTINGS_KEY))
@@ -667,6 +724,18 @@ def save_config(config, raw_config=None, preserve_secrets=None):
         PIMCORE_SETTINGS_KEY,
         PIMCORE_API_KEY,
         pimcore_settings[PIMCORE_API_KEY],
+    )
+    email_settings = normalize_email_settings(config.get(EMAIL_SETTINGS_KEY))
+    email_payload = copy.deepcopy(email_settings)
+    email_payload["entra"][EMAIL_CLIENT_SECRET] = _pick_secret(
+        EMAIL_SETTINGS_KEY,
+        "entra.client_secret",
+        email_settings["entra"][EMAIL_CLIENT_SECRET],
+    )
+    email_payload["smtp"][EMAIL_SMTP_PASSWORD] = _pick_secret(
+        EMAIL_SETTINGS_KEY,
+        "smtp.password",
+        email_settings["smtp"][EMAIL_SMTP_PASSWORD],
     )
     payload = {
         H: {
@@ -725,6 +794,7 @@ def save_config(config, raw_config=None, preserve_secrets=None):
             TRANSLATION_API_URL: translation_settings.get(TRANSLATION_API_URL, B),
         },
         PIMCORE_SETTINGS_KEY: pimcore_payload,
+        EMAIL_SETTINGS_KEY: email_payload,
     }
     sqlite_store = _active_sqlite_store()
     if sqlite_store is not None:
