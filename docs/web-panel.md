@@ -49,6 +49,23 @@ http://IP_SERWERA:8000
 
 Ustawienia są widoczne tylko dla użytkowników webowych z rolą `admin`.
 
+## Historia i obserwowalność administratora
+
+Widok **Historia** pokazuje przebieg operacji produktu. Przycisk **Zmiany** otwiera bezpieczny podgląd wartości przed i po operacji, zmian plików, czasu wykonania oraz identyfikatora powiązanego zadania.
+
+Administrator ma także widok **Logi** z kartami **Na żywo**, **Krytyczne**, **Błędy**, **Ostrzeżenia** i **Zadania**. Strumień na żywo obejmuje zdarzenia z ostatnich 24 godzin. Powiązane zdarzenia są grupowane w incydenty i zadania, a nieprzeczytane wpisy są sygnalizowane według najwyższego priorytetu: krytyczne, błędy, a następnie ostrzeżenia.
+
+## Stan backendu w nagłówku
+
+Obok nazwy aplikacji widoczny jest tekstowy stan backendu z kropką i medianą czasu odpowiedzi z pięciu ostatnich udanych pomiarów. Szczegóły po najechaniu, ustawieniu fokusu lub kliknięciu pokazują stan backendu, SQLite, procesora zadań oraz ostatni znany stan FTP, SQL, profili SQL i Pimcore. Panel pokazuje wyłącznie znormalizowane stany, bez ścieżek, sekretów i treści wyjątków.
+
+- **Online**: lokalne komponenty odpowiadają prawidłowo, mediana jest poniżej 300 ms i brak stanu ograniczonego.
+- **Wolno**: mediana wynosi co najmniej 300 ms albo któryś komponent ma stan ograniczony.
+- **Krytyczny**: backend lub SQLite zgłasza problem albo mediana przekracza 1000 ms.
+- **Offline**: trzy kolejne próby pobrania stanu zakończyły się błędem.
+
+Pomiar jest wykonywany co pięć sekund. Przeglądarka wstrzymuje go w ukrytej karcie i odświeża stan natychmiast po powrocie.
+
 ## Bezpieczeństwo LAN
 
 Panel jest przeznaczony do zaufanej sieci LAN albo VPN. Nie wystawiaj tego panelu bezpośrednio do publicznego internetu bez dodatkowej warstwy zabezpieczeń, aktualizacji haseł, kontroli dostępu i przeglądu konfiguracji serwera.

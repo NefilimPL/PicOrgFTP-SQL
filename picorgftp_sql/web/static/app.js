@@ -143,8 +143,16 @@ const CLIENT_FAILURE_DEDUPE_MS = 60000;
 const LOG_AUTOSCROLL_KEY = "picorg-log-autoscroll";
 const MAX_LIVE_LOG_EVENTS = 2000;
 const OBSERVABILITY_PAGE_SIZE = 20;
+const HEALTH_POLL_INTERVAL_MS = 5000;
+const HEALTH_SLOW_MS = 300;
+const HEALTH_CRITICAL_MS = 1000;
+const HEALTH_OFFLINE_FAILURES = 3;
 state.observability.autoscroll = localStorage.getItem(LOG_AUTOSCROLL_KEY) !== "false";
 const clientFailureFingerprints = new Map();
+const healthSamples = [];
+let healthFailures = 0;
+let healthPollTimer = 0;
+let healthPollRunning = false;
 const SQLITE_BACKUP_DAYS = [
   ["mon", "Pon"],
   ["tue", "Wt"],
@@ -207,6 +215,10 @@ const fileIndexInfo = document.querySelector("#fileIndexInfo");
 const latencyInfo = document.querySelector("#latencyInfo");
 const serverInfo = document.querySelector("#serverInfo");
 const versionInfo = document.querySelector("#versionInfo");
+const backendHealthIndicator = document.querySelector(".backend-health-indicator");
+const backendHealthStatus = document.querySelector("#backendHealthStatus");
+const backendHealthText = document.querySelector("#backendHealthText");
+const backendHealthDetailsList = document.querySelector("#backendHealthDetailsList");
 const githubStatusButton = document.querySelector("#githubStatusButton");
 const githubStatusModal = document.querySelector("#githubStatusModal");
 const githubStatusOutput = document.querySelector("#githubStatusOutput");
@@ -5042,6 +5054,135 @@ async function requestObservabilityPayload(path, options = {}) {
   return payload;
 }
 
+const HEALTH_COMPONENT_LABELS = [
+  ["backend", "Backend"],
+  ["sqlite", "SQLite"],
+  ["job_processor", "Proces zadan"],
+  ["ftp", "FTP"],
+  ["sql", "SQL"],
+  ["sql_profiles", "Profile SQL"],
+  ["pimcore", "Pimcore"],
+];
+
+const HEALTH_STATUS_LABELS = {
+  online: "Online",
+  degraded: "Ograniczony",
+  critical: "Krytyczny",
+  disabled: "Wylaczony",
+  unknown: "Brak danych",
+};
+
+function normalizedHealthStatus(value) {
+  const status = String(value || "unknown").toLowerCase();
+  return Object.hasOwn(HEALTH_STATUS_LABELS, status) ? status : "unknown";
+}
+
+function renderBackendHealthDetails(components = {}) {
+  if (!backendHealthDetailsList) return;
+  const rows = HEALTH_COMPONENT_LABELS.map(([key, label]) => {
+    const item = document.createElement("li");
+    const name = document.createElement("span");
+    const status = document.createElement("strong");
+    const normalized = normalizedHealthStatus(components[key]?.status);
+    name.textContent = label;
+    status.textContent = HEALTH_STATUS_LABELS[normalized];
+    item.dataset.level = normalized;
+    item.append(name, status);
+    return item;
+  });
+  backendHealthDetailsList.replaceChildren(...rows);
+}
+
+function medianHealthLatency() {
+  const recentSamples = healthSamples.slice(-5).sort((left, right) => left - right);
+  if (!recentSamples.length) return 0;
+  const middle = Math.floor(recentSamples.length / 2);
+  if (recentSamples.length % 2) return recentSamples[middle];
+  return (recentSamples[middle - 1] + recentSamples[middle]) / 2;
+}
+
+function updateBackendHealthStatus(level, latencyMs = 0, components = {}) {
+  if (!backendHealthStatus || !backendHealthText) return;
+  const labels = {
+    online: "Online",
+    slow: "Wolno",
+    critical: "Krytyczny",
+    offline: "Offline",
+  };
+  const safeLevel = Object.hasOwn(labels, level) ? level : "critical";
+  backendHealthStatus.dataset.level = safeLevel;
+  backendHealthText.textContent =
+    safeLevel === "offline" ? labels[safeLevel] : `${labels[safeLevel]} · ${Math.round(latencyMs)} ms`;
+  renderBackendHealthDetails(components);
+}
+
+function healthLevel(ms, components = {}) {
+  if (components.backend?.status !== "online" || components.sqlite?.status === "critical") {
+    return "critical";
+  }
+  if (ms > HEALTH_CRITICAL_MS) return "critical";
+  if (ms >= HEALTH_SLOW_MS || Object.values(components).some((item) => item.status === "degraded")) {
+    return "slow";
+  }
+  return "online";
+}
+
+function scheduleBackendHealthPoll(delayMs = HEALTH_POLL_INTERVAL_MS) {
+  if (healthPollTimer) window.clearTimeout(healthPollTimer);
+  healthPollTimer = 0;
+  if (document.hidden) return;
+  healthPollTimer = window.setTimeout(() => {
+    healthPollTimer = 0;
+    pollBackendHealth().catch(() => {});
+  }, Math.max(0, delayMs));
+}
+
+async function pollBackendHealth() {
+  if (document.hidden) return;
+  if (healthPollRunning) {
+    scheduleBackendHealthPoll();
+    return;
+  }
+  healthPollRunning = true;
+  const startedAt = performance.now();
+  try {
+    const payload = await requestJson("/api/health");
+    const elapsedMs = Math.max(0, performance.now() - startedAt);
+    const components = payload.components || {};
+    healthFailures = 0;
+    healthSamples.push(elapsedMs);
+    if (healthSamples.length > 5) healthSamples.shift();
+    const medianMs = medianHealthLatency();
+    updateBackendHealthStatus(healthLevel(medianMs, components), medianMs, components);
+  } catch (_error) {
+    healthFailures += 1;
+    if (healthFailures >= HEALTH_OFFLINE_FAILURES) {
+      updateBackendHealthStatus("offline");
+    }
+  } finally {
+    healthPollRunning = false;
+    scheduleBackendHealthPoll();
+  }
+}
+
+function setBackendHealthDetailsExpanded(expanded) {
+  backendHealthIndicator?.classList.toggle("details-open", expanded);
+  backendHealthStatus?.setAttribute("aria-expanded", expanded ? "true" : "false");
+}
+
+backendHealthStatus?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  setBackendHealthDetailsExpanded(backendHealthStatus.getAttribute("aria-expanded") !== "true");
+});
+
+backendHealthStatus?.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  setBackendHealthDetailsExpanded(false);
+  backendHealthStatus.focus();
+});
+
+document.addEventListener("click", () => setBackendHealthDetailsExpanded(false));
+
 function showLogsError(error) {
   if (!logsOutput) return;
   logsOutput.className = "logs-output empty-state";
@@ -5548,8 +5689,11 @@ function startBackgroundPollers() {
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
+    if (healthPollTimer) window.clearTimeout(healthPollTimer);
+    healthPollTimer = 0;
     return;
   }
+  scheduleBackendHealthPoll(0);
   state.pollers.forEach((poller) => poller.kick());
   if ([...state.processJobs.values()].some(processJobIsActive)) {
     scheduleProcessJobPoll(0);
@@ -11077,3 +11221,4 @@ setupPageExitGuards();
 applyTheme();
 loadBootstrap().catch(showError);
 startBackgroundPollers();
+scheduleBackendHealthPoll(0);

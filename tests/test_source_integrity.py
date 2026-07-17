@@ -9,6 +9,21 @@ import unittest
 
 
 class SourceIntegrityTests(unittest.TestCase):
+    def test_header_contains_smoothed_backend_health_indicator(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        html_source = (
+            root / "picorgftp_sql" / "web" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+        js_source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('id="backendHealthStatus"', html_source)
+        self.assertIn("HEALTH_SLOW_MS = 300", js_source)
+        self.assertIn("HEALTH_CRITICAL_MS = 1000", js_source)
+        self.assertIn("HEALTH_OFFLINE_FAILURES = 3", js_source)
+        self.assertIn("healthSamples.slice(-5)", js_source)
+
     def test_web_logs_use_durable_observability_apis(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]

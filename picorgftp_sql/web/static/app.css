@@ -171,6 +171,138 @@ h2 {
   min-width: 0;
 }
 
+.topbar-brand-info {
+  min-width: 0;
+}
+
+.topbar-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.backend-health-indicator {
+  position: relative;
+}
+
+.backend-health-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  border-color: var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 2px 9px;
+}
+
+.backend-health-status:hover,
+.backend-health-status:focus-visible {
+  border-color: var(--accent);
+  background: var(--surface-2);
+}
+
+.backend-health-status span {
+  display: inline;
+  margin-top: 0;
+  color: inherit;
+  font-size: 12px;
+}
+
+.backend-health-dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.backend-health-status[data-level="online"] {
+  color: var(--local);
+}
+
+.backend-health-status[data-level="slow"] {
+  color: var(--warn);
+}
+
+.backend-health-status[data-level="critical"],
+.backend-health-status[data-level="offline"] {
+  color: var(--error);
+}
+
+.backend-health-status[data-level="online"] .backend-health-dot {
+  background: var(--local);
+}
+
+.backend-health-status[data-level="slow"] .backend-health-dot {
+  background: var(--warn);
+}
+
+.backend-health-status[data-level="critical"] .backend-health-dot,
+.backend-health-status[data-level="offline"] .backend-health-dot {
+  background: var(--error);
+}
+
+.backend-health-details {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 8px);
+  left: 0;
+  width: min(300px, calc(100vw - 28px));
+  visibility: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  opacity: 0;
+  padding: 12px;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition: opacity 120ms ease, transform 120ms ease, visibility 120ms ease;
+}
+
+.backend-health-indicator:hover .backend-health-details,
+.backend-health-indicator:focus-within .backend-health-details,
+.backend-health-indicator.details-open .backend-health-details {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.backend-health-details > strong {
+  font-size: 12px;
+}
+
+.backend-health-details ul {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.backend-health-details li {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.backend-health-details li span,
+.backend-health-details li strong {
+  display: inline;
+  margin-top: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.backend-health-details li strong {
+  color: var(--text);
+  text-align: right;
+}
+
 .github-status-button {
   display: inline-grid;
   width: 42px;
@@ -2882,6 +3014,12 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
     align-items: flex-start;
     flex-direction: column;
     padding: 12px 14px;
+  }
+
+  .topbar-title-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
   }
 
   .topnav {

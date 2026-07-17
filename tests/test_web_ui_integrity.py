@@ -58,6 +58,46 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
+    def test_backend_health_indicator_is_accessible_safe_and_visibility_aware(self) -> None:
+        html_source = INDEX_HTML.read_text(encoding="utf-8")
+        js_source = APP_JS.read_text(encoding="utf-8")
+        css_source = (
+            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+
+        brand_start = html_source.index('<div class="topbar-brand">')
+        brand_end = html_source.index("</header>", brand_start)
+        brand_source = html_source[brand_start:brand_end]
+        self.assertIn('id="backendHealthStatus"', brand_source)
+        self.assertIn('aria-live="polite"', brand_source)
+        self.assertIn('aria-controls="backendHealthDetails"', brand_source)
+        self.assertIn('aria-expanded="false"', brand_source)
+        self.assertIn('class="backend-health-dot"', brand_source)
+        self.assertIn('id="backendHealthText"', brand_source)
+        self.assertIn('id="backendHealthDetails"', brand_source)
+        for label in ("Backend", "SQLite", "Proces zadan", "FTP", "SQL", "Profile SQL", "Pimcore"):
+            self.assertIn(label, brand_source)
+
+        health_start = js_source.index("function healthLevel")
+        health_end = js_source.index("function scheduleBackendHealthPoll", health_start)
+        health_source = js_source[health_start:health_end]
+        self.assertIn('components.backend?.status !== "online"', health_source)
+        self.assertIn('components.sqlite?.status === "critical"', health_source)
+        self.assertIn("ms > HEALTH_CRITICAL_MS", health_source)
+        self.assertIn("ms >= HEALTH_SLOW_MS", health_source)
+        self.assertIn('item.status === "degraded"', health_source)
+        self.assertIn("performance.now()", js_source)
+        self.assertIn('requestJson("/api/health")', js_source)
+        self.assertIn("healthFailures = 0", js_source)
+        self.assertIn("healthFailures >= HEALTH_OFFLINE_FAILURES", js_source)
+        self.assertIn("document.hidden", js_source)
+        self.assertIn("scheduleBackendHealthPoll(0)", js_source)
+        self.assertNotIn("backendHealthDetailsList.innerHTML", js_source)
+        self.assertIn("backendHealthDetailsList.replaceChildren", js_source)
+
+        self.assertIn(".backend-health-dot", css_source)
+        self.assertIn('[data-level="offline"]', css_source)
+
     def test_logs_use_tabs_live_stream_and_cursor_loading(self) -> None:
         html_source = INDEX_HTML.read_text(encoding="utf-8")
         js_source = APP_JS.read_text(encoding="utf-8")
