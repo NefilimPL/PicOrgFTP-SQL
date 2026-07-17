@@ -261,6 +261,30 @@ def _smtp_result(
         isinstance(refused_recipients, Mapping)
         and len(requested) == len(original)
     )
+    if refusal_exception:
+        refused_identities = [
+            _text(address).casefold() for address in refused.keys()
+        ]
+        complete_exception_mapping = (
+            len(refused_identities) == len(original)
+            and len(set(refused_identities)) == len(original)
+            and set(refused_identities) == set(requested)
+        )
+        if not complete_exception_mapping:
+            safe_codes = []
+            for diagnostic in refused.values():
+                values = (
+                    diagnostic
+                    if isinstance(diagnostic, (tuple, list))
+                    else ()
+                )
+                if (
+                    values
+                    and isinstance(values[0], int)
+                    and not isinstance(values[0], bool)
+                ):
+                    safe_codes.append(max(0, values[0]))
+            return _smtp_unknown_routing(started, safe_codes)
     refused_addresses: list[str] = []
     seen: set[str] = set()
     refusal_codes: list[int] = []

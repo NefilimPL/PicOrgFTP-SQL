@@ -522,6 +522,64 @@ def test_smtp_recipients_refused_with_unknown_payload_never_becomes_success(
     assert smtp.calls[-1] == "quit"
 
 
+def test_smtp_recipients_refused_incomplete_mapping_is_routing_unknown(
+    monkeypatch,
+) -> None:
+    smtp = FakeSmtp(
+        send_error=smtplib.SMTPRecipientsRefused(
+            {"second@example.com": (550, b"private incomplete response")}
+        )
+    )
+    monkeypatch.setattr(
+        email_delivery.smtplib,
+        "SMTP",
+        lambda host, port, timeout: smtp,
+    )
+
+    result = SmtpMailTransport(
+        {"host": "smtp.example", "port": 25, "security": "none"}
+    ).send(sample_message())
+
+    assert result["status"] == "routing_unknown"
+    assert result["routing_known"] is False
+    assert result["refusal_codes"] == [550]
+    assert result["refused_recipients"] == []
+    assert "second@example.com" not in repr(result)
+    assert "private" not in repr(result)
+
+
+def test_smtp_recipients_refused_complete_case_variant_mapping_is_verified(
+    monkeypatch,
+) -> None:
+    smtp = FakeSmtp(
+        send_error=smtplib.SMTPRecipientsRefused(
+            {
+                "FIRST@EXAMPLE.COM": (550, b"private first"),
+                "Second@Example.Com": (551, b"private second"),
+            }
+        )
+    )
+    monkeypatch.setattr(
+        email_delivery.smtplib,
+        "SMTP",
+        lambda host, port, timeout: smtp,
+    )
+
+    result = SmtpMailTransport(
+        {"host": "smtp.example", "port": 25, "security": "none"}
+    ).send(sample_message())
+
+    assert result["status"] == "refused"
+    assert result["routing_known"] is True
+    assert result["accepted_count"] == 0
+    assert result["refused_count"] == 2
+    assert result["refusal_codes"] == [550, 551]
+    assert result["refused_recipients"] == [
+        "first@example.com",
+        "second@example.com",
+    ]
+
+
 def test_build_transport_selects_supported_channel() -> None:
     assert isinstance(build_transport("entra", {}), GraphMailTransport)
     assert isinstance(build_transport("smtp", {}), SmtpMailTransport)
