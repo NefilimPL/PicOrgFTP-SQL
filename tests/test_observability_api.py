@@ -438,11 +438,22 @@ def test_live_seed_and_older_page_apply_same_literal_substring_filters(
         "/api/observability/events",
         params={"live_seed": 1, "module": "pim%"},
     )
+    date_seed = client.get(
+        "/api/observability/events",
+        params={"live_seed": 1, "query": start.strftime("%Y-%m")},
+    )
+    property_name = client.get(
+        "/api/observability/events",
+        params={"live_seed": 1, "query": "created_at"},
+    )
 
     assert len(payload["items"]) == 200
     assert {item["module"] for item in payload["items"]} == {"Pimcore"}
     assert len(older.json()["items"]) == 5
     assert [item["id"] for item in literal.json()["items"]] == ["evt-filter-000"]
+    assert len(date_seed.json()["items"]) == 200
+    assert date_seed.json()["next_cursor"]
+    assert property_name.json()["items"] == []
 
 
 def test_incidents_include_matching_delivery_status_with_strict_safe_projection(

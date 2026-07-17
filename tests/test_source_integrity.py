@@ -253,6 +253,48 @@ class SourceIntegrityTests(unittest.TestCase):
             2,
         )
 
+    def test_live_query_uses_explicit_server_aligned_search_projection(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+        search_source = source[
+            source.index("function logEventSearchText") : source.index(
+                "function logItemMatchesFilters"
+            )
+        ]
+        for field in (
+            "created_at",
+            "id",
+            "severity",
+            "event_type",
+            "module",
+            "stage",
+            "username",
+            "ean",
+            "product_id",
+            "slot",
+            "job_id",
+            "correlation_id",
+            "incident_id",
+            "summary",
+            "recommended_action",
+            "exception_type",
+            "traceback_text",
+        ):
+            self.assertIn(f"item.{field}", search_source)
+        self.assertIn("JSON.stringify(item.details || {})", search_source)
+        self.assertNotIn("JSON.stringify(item)", search_source)
+        filter_source = source[
+            source.index("function logItemMatchesFilters") : source.index(
+                "function renderLogs"
+            )
+        ]
+        self.assertIn("logEventSearchText(item)", filter_source)
+
     def test_web_logs_gate_reads_navigation_unread_and_filters(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]

@@ -289,6 +289,33 @@ def _html_context_section(label: str, lines: list[str], budget: int) -> str:
     return opening + list_open + "".join(items) + list_close + closing
 
 
+def _text_context_section(label: str, lines: list[str], budget: int) -> str:
+    heading = f"{label}:"
+    if not lines:
+        return f"{heading} Brak zdarzeń."
+    remaining = max(0, budget - len(heading) - 1)
+    items: list[str] = []
+    for index, line in enumerate(lines):
+        prefix = "- "
+        separator_size = 1 if items else 0
+        if remaining <= len(prefix) + separator_size:
+            break
+        remaining_items = max(1, len(lines) - index)
+        line_budget = max(
+            0,
+            (remaining - separator_size) // remaining_items - len(prefix),
+        )
+        item = prefix + str(line or "")[:line_budget]
+        consumed = separator_size + len(item)
+        if consumed > remaining:
+            break
+        items.append(item)
+        remaining -= consumed
+    if not items:
+        return f"{heading} Brak zdarzeń."
+    return heading + "\n" + "\n".join(items)
+
+
 def _append_runtime_context(
     message: Mapping[str, object], context: Mapping[str, object]
 ) -> dict[str, str]:
@@ -301,12 +328,11 @@ def _append_runtime_context(
     sections = _runtime_context_lines(context)
     text_sections = []
     html_sections = []
+    text_section_budgets = {"Przed": 1_200, "Problem": 2_400, "Po": 1_200}
     section_budgets = {"Przed": 1_800, "Problem": 3_200, "Po": 1_800}
     for label, lines in sections:
         text_sections.append(
-            f"{label}:\n" + "\n".join(f"- {line}" for line in lines)
-            if lines
-            else f"{label}: Brak zdarzeń."
+            _text_context_section(label, lines, text_section_budgets[label])
         )
         html_sections.append(
             _html_context_section(label, lines, section_budgets[label])
@@ -317,10 +343,8 @@ def _append_runtime_context(
         + "".join(html_sections)
         + "</div>"
     )
-    enriched["text_body"] = (
-        enriched["text_body"][: max(0, 10_000 - len(text_context))]
-        + text_context[:10_000]
-    )[:10_000]
+    text_base_budget = max(0, 10_000 - len(text_context))
+    enriched["text_body"] = enriched["text_body"][:text_base_budget] + text_context
     html_base_budget = max(0, 20_000 - len(html_context))
     html_base = enriched["html_body"]
     if len(html_base) > html_base_budget:

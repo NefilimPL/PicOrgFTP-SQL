@@ -444,6 +444,38 @@ def test_delivery_context_html_keeps_complete_sections_under_worst_case_budget()
     assert not re.search(r"&(?:[A-Za-z]*|#[0-9]*)$", body)
 
 
+def test_delivery_context_text_keeps_all_headings_under_worst_case_budget() -> None:
+    store = FakeStore()
+    huge = "problem-context-" * 2_000
+    store.incident_context = {
+        "before": [
+            _event(id=f"before-{index}", summary=huge, details={"blob": huge})
+            for index in range(3)
+        ],
+        "problem": [
+            _event(id=f"problem-{index}", summary=huge, details={"blob": huge})
+            for index in range(5)
+        ],
+        "after": [
+            _event(id=f"after-{index}", summary=huge, details={"blob": huge})
+            for index in range(3)
+        ],
+    }
+    transport = FakeTransport()
+    service = _service(store, {"entra": transport, "smtp": FakeTransport()})
+    queued = service.queue_incident_notification(_event(), _incident())
+    store.deliveries[str(queued["id"])]["message"]["text_body"] = "x" * 9_999
+
+    result = service.process_delivery(str(queued["id"]))
+
+    assert result["status"] == "sent"
+    body = transport.messages[0].text_body
+    assert len(body) <= 10_000
+    assert "Kontekst zdarzeń" in body
+    assert body.index("Przed:") < body.index("Problem:") < body.index("Po:")
+    assert "problem-context" in body
+
+
 def test_process_delivery_records_both_failures_and_suppresses_recursion() -> None:
     store = FakeStore()
     emitted: list[dict[str, object]] = []

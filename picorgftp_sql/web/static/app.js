@@ -5193,13 +5193,41 @@ function resetCommittedLogFilters() {
   });
 }
 
+function logEventSearchText(item) {
+  return [
+    item.created_at,
+    item.id,
+    item.severity,
+    item.event_type,
+    item.module,
+    item.stage,
+    item.username,
+    item.ean,
+    item.product_id,
+    item.slot,
+    item.job_id,
+    item.correlation_id,
+    item.incident_id,
+    item.summary,
+    item.recommended_action,
+    JSON.stringify(item.details || {}),
+    item.exception_type,
+    item.traceback_text,
+  ]
+    .map((value) => String(value || ""))
+    .join("\n")
+    .toLowerCase();
+}
+
 function logItemMatchesFilters(item) {
   const filters = state.observability.committedFilters;
   const { query, severity, username, ean, jobId } = filters;
   const moduleName = filters.module;
   const context = item.context || {};
-  const serialized = JSON.stringify(item).toLowerCase();
-  if (query && !serialized.includes(query)) return false;
+  const searchText = item.created_at
+    ? logEventSearchText(item)
+    : JSON.stringify(item).toLowerCase();
+  if (query && !searchText.includes(query)) return false;
   if (severity && (item.severity || "") !== severity) return false;
   if (moduleName && !String(item.module || context.module || "").toLowerCase().includes(moduleName)) return false;
   if (username && !String(item.username || context.username || "").toLowerCase().includes(username)) return false;

@@ -72,6 +72,7 @@ _INCIDENT_CONTEXT_AFTER_SQL = """
     LIMIT ?
 """
 _OPERATIONAL_EVENT_QUERY_COLUMNS = (
+    "created_at",
     "id",
     "severity",
     "event_type",

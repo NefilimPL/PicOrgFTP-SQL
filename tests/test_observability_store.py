@@ -817,6 +817,16 @@ def test_archive_filters_are_case_insensitive_literal_substrings(
         item["id"]
         for item in store.query_operational_events(query="pim")["items"]
     } == {"evt-pim-literal", "evt-pim-decoy"}
+    assert {
+        item["id"]
+        for item in store.query_operational_events(query="2026-07")["items"]
+    } == {
+        "evt-pim-literal",
+        "evt-pim-decoy",
+        "evt-id-only-needle",
+        "evt-fallback-needle",
+    }
+    assert store.query_operational_events(query="created_at")["items"] == []
     assert [
         item["id"]
         for item in store.query_operational_events(job_id="needle")["items"]
