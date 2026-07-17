@@ -111,6 +111,34 @@ def _recipients(value: object) -> list[str]:
     return recipients
 
 
+def validate_email_rule_recipients(raw: object) -> None:
+    """Reject crafted non-empty recipient values before settings are mutated."""
+
+    source = raw if isinstance(raw, dict) else {}
+    rules = source.get("rules") if isinstance(source.get("rules"), dict) else {}
+    for severity in EMAIL_SEVERITIES:
+        rule = rules.get(severity)
+        if not isinstance(rule, dict) or "recipients" not in rule:
+            continue
+        raw_recipients = rule.get("recipients")
+        values = raw_recipients.split(",") if isinstance(raw_recipients, str) else raw_recipients
+        if not isinstance(values, (list, tuple)):
+            if _text(values):
+                raise ValueError(
+                    f"Niepoprawna lista adresow e-mail dla reguly {severity}."
+                )
+            continue
+        for value in values:
+            if not _text(value):
+                continue
+            try:
+                normalize_email_address(value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Niepoprawny adres e-mail odbiorcy dla reguly {severity}."
+                ) from exc
+
+
 def _bool_value(value: object, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value

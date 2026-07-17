@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from picorgftp_sql.excel_utils import ENTRY_RECORDS_KEY
@@ -40,6 +42,7 @@ def test_schema_creates_expected_tables(tmp_path: Path) -> None:
         "job_runs",
         "incidents",
         "alert_reads",
+        "pimcore_integration_contexts",
     } <= tables
 
     with sqlite3.connect(db_path) as conn:
@@ -54,6 +57,89 @@ def test_schema_creates_expected_tables(tmp_path: Path) -> None:
     assert version == 6
     assert stream_columns == ["sequence", "event_id"]
     assert stream_foreign_keys == []
+
+
+def test_pimcore_integration_context_is_bound_redacted_and_one_time(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    now = datetime(2026, 7, 17, 10, 0, tzinfo=timezone.utc)
+    context_id = store.create_pimcore_integration_context(
+        username="alice",
+        mode="edit",
+        object_id=91,
+        results={
+            "sql_profiles": [
+                {"profile_id": "stock", "status": "error", "error": "password=secret"}
+            ]
+        },
+        ttl_seconds=600,
+        now=now,
+    )
+
+    assert len(context_id) >= 32
+    assert store.consume_pimcore_integration_context(
+        context_id, username="mallory", mode="edit", object_id=91, now=now
+    ) is None
+    assert store.consume_pimcore_integration_context(
+        context_id, username="alice", mode="create", object_id=None, now=now
+    ) is None
+    assert store.consume_pimcore_integration_context(
+        context_id, username="alice", mode="edit", object_id=92, now=now
+    ) is None
+    result = store.consume_pimcore_integration_context(
+        context_id, username="alice", mode="edit", object_id=91, now=now
+    )
+    assert result["sql_profiles"][0]["profile_id"] == "stock"
+    assert "secret" not in json.dumps(result)
+    assert store.consume_pimcore_integration_context(
+        context_id, username="alice", mode="edit", object_id=91, now=now
+    ) is None
+
+
+def test_pimcore_integration_context_expiry_prune_and_clear(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    now = datetime(2026, 7, 17, 10, 0, tzinfo=timezone.utc)
+    context_id = store.create_pimcore_integration_context(
+        username="alice", mode="create", object_id=None, results={}, ttl_seconds=1, now=now
+    )
+
+    assert store.consume_pimcore_integration_context(
+        context_id,
+        username="alice",
+        mode="create",
+        object_id=None,
+        now=now + timedelta(seconds=31),
+    ) is None
+    assert store.prune_pimcore_integration_contexts(now=now + timedelta(seconds=31)) == 0
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM pimcore_integration_contexts").fetchone()[0] == 0
+
+    store.create_pimcore_integration_context(
+        username="alice", mode="create", object_id=None, results={}, now=now
+    )
+    deleted = store.clear_operational_data()
+    assert deleted["pimcore_integration_contexts"] == 1
+
+
+def test_pimcore_integration_context_concurrent_consume_has_one_winner(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    now = datetime(2026, 7, 17, 10, 0, tzinfo=timezone.utc)
+    context_id = store.create_pimcore_integration_context(
+        username="alice",
+        mode="edit",
+        object_id=91,
+        results={"sql_profiles": [{"profile_id": "stock", "status": "success"}]},
+        now=now,
+    )
+
+    def consume() -> object:
+        return store.consume_pimcore_integration_context(
+            context_id, username="alice", mode="edit", object_id=91, now=now
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _item: consume(), range(2)))
+
+    assert sum(result is not None for result in results) == 1
 
 
 def test_pimcore_submissions_roundtrip_and_filter(tmp_path: Path) -> None:

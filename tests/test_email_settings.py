@@ -188,7 +188,7 @@ def test_web_settings_update_and_snapshot_canonicalize_crafted_recipient_list() 
         "recipients": [
             " Admin@Example.COM ",
             "admin@example.com",
-            "invalid",
+            "",
             "Ops@example.com",
         ],
         "include_actor": True,
@@ -218,6 +218,28 @@ def test_web_settings_update_and_snapshot_canonicalize_crafted_recipient_list() 
         "recipients": expected,
         "include_actor": True,
     }
+
+
+def test_web_settings_update_rejects_non_empty_invalid_rule_recipient() -> None:
+    current = deepcopy(common.DEFAULT_CONFIG)
+    current[EMAIL_SETTINGS_KEY] = default_email_settings()
+    submitted = default_email_settings()
+    submitted["rules"]["warning"] = {
+        "enabled": True,
+        "recipients": "valid@example.com, bad address",
+        "include_actor": False,
+    }
+
+    with (
+        patch.object(config, "CONFIG", current),
+        patch.object(web_data.config, "CONFIG", current),
+        patch.object(web_data, "save_config") as save,
+    ):
+        with pytest.raises(ValueError, match="warning"):
+            web_data.update_settings({EMAIL_SETTINGS_KEY: submitted})
+
+    save.assert_not_called()
+    assert current[EMAIL_SETTINGS_KEY]["rules"]["warning"]["recipients"] == []
 
 
 def test_public_email_settings_masks_both_secrets() -> None:

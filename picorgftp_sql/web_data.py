@@ -59,6 +59,7 @@ from .email_settings import (
     normalize_email_address,
     normalize_email_settings,
     public_email_settings,
+    validate_email_rule_recipients,
 )
 from .database import connect_db
 from .excel_utils import (
@@ -1690,6 +1691,48 @@ def _persist_pimcore_operation(report: dict[str, object]) -> dict[str, object]:
         if isinstance(result.get("change_set"), dict)
         else {}
     )
+    if pimcore_change_set:
+        pimcore_change_set = dict(pimcore_change_set)
+        object_id = _text(
+            result.get("object_id")
+            or result.get("id")
+            or result_object.get("id")
+        )
+        object_path = _text(
+            result.get("object_path")
+            or result.get("path")
+            or result_object.get("path")
+            or result_object.get("fullPath")
+        )
+        if object_id:
+            pimcore_change_set["object_id"] = object_id
+        if object_path:
+            pimcore_change_set["object_path"] = object_path
+
+        def safe_elapsed(value: object) -> int | None:
+            if isinstance(value, bool):
+                return None
+            try:
+                return max(0, min(int(value), 86_400_000))
+            except (TypeError, ValueError):
+                return None
+
+        total_ms = safe_elapsed(report.get("total_ms"))
+        if total_ms is not None:
+            pimcore_change_set["total_ms"] = total_ms
+        events = report.get("events") if isinstance(report.get("events"), list) else []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            elapsed = safe_elapsed(event.get("stage_elapsed_ms"))
+            if elapsed is None:
+                continue
+            stage = _text(event.get("stage")).lower()
+            if stage in {"create", "update"}:
+                pimcore_change_set["send_ms"] = elapsed
+            elif stage == "verify":
+                pimcore_change_set["verification_ms"] = elapsed
+        pimcore_change_set = redact_pimcore_log_value(pimcore_change_set)
     integrations = (
         report.get("integration_results")
         if isinstance(report.get("integration_results"), dict)
@@ -2842,6 +2885,8 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
     security_payload = payload.get("security") if isinstance(payload.get("security"), dict) else {}
     pimcore_payload = payload.get(PIMCORE_SETTINGS_KEY)
     email_payload = payload.get(EMAIL_SETTINGS_KEY)
+    if isinstance(email_payload, dict):
+        validate_email_rule_recipients(email_payload)
     backup_payload = payload.get("sqlite_backup") if isinstance(payload.get("sqlite_backup"), dict) else None
     slots_payload = payload.get("slots") if isinstance(payload.get("slots"), list) else None
     runtime_reloaded = False

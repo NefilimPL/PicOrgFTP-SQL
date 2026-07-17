@@ -945,3 +945,26 @@ def test_worker_stop_retains_live_handles_and_start_cannot_overlap(monkeypatch) 
 
 def test_worker_default_stop_timeout_covers_transport_and_poll_margin() -> None:
     assert notification_service.WORKER_STOP_TIMEOUT_SECONDS >= 22
+
+
+def test_notification_worker_health_reads_existing_thread_without_starting_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class AliveThread:
+        def is_alive(self) -> bool:
+            return True
+
+    monkeypatch.setattr(notification_service, "_WORKER_THREAD", AliveThread())
+    monkeypatch.setattr(
+        notification_service, "_WORKER_OBSERVED_AT", "2026-07-17T08:01:02.003Z"
+    )
+    monkeypatch.setattr(
+        notification_service,
+        "_default_service",
+        lambda: (_ for _ in ()).throw(AssertionError("health must not start worker")),
+    )
+
+    assert notification_service.notification_worker_health() == {
+        "status": "online",
+        "observed_at": "2026-07-17T08:01:02.003Z",
+    }

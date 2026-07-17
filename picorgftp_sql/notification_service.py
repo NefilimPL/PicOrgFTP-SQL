@@ -924,6 +924,7 @@ _WORKER_LOCK = threading.Lock()
 _WORKER_STOP: threading.Event | None = None
 _WORKER_THREAD: threading.Thread | None = None
 _WORKER_SERVICE: NotificationService | None = None
+_WORKER_OBSERVED_AT = ""
 
 
 def _worker_loop(service: NotificationService, stop_event: threading.Event) -> None:
@@ -940,7 +941,7 @@ def _worker_loop(service: NotificationService, stop_event: threading.Event) -> N
 def start_notification_worker() -> None:
     """Recover stale claims and start one bounded daemon queue worker."""
 
-    global _WORKER_SERVICE, _WORKER_STOP, _WORKER_THREAD
+    global _WORKER_OBSERVED_AT, _WORKER_SERVICE, _WORKER_STOP, _WORKER_THREAD
     with _WORKER_LOCK:
         if _WORKER_THREAD is not None and _WORKER_THREAD.is_alive():
             return
@@ -965,12 +966,13 @@ def start_notification_worker() -> None:
             daemon=True,
         )
         _WORKER_THREAD.start()
+        _WORKER_OBSERVED_AT = _iso_utc(_utc_now())
 
 
 def stop_notification_worker() -> None:
     """Stop and join the current notification worker."""
 
-    global _WORKER_SERVICE, _WORKER_STOP, _WORKER_THREAD
+    global _WORKER_OBSERVED_AT, _WORKER_SERVICE, _WORKER_STOP, _WORKER_THREAD
     with _WORKER_LOCK:
         thread = _WORKER_THREAD
         stop_event = _WORKER_STOP
@@ -986,3 +988,15 @@ def stop_notification_worker() -> None:
         _WORKER_THREAD = None
         _WORKER_SERVICE = None
         _WORKER_STOP = None
+        _WORKER_OBSERVED_AT = _iso_utc(_utc_now())
+
+
+def notification_worker_health() -> dict[str, str]:
+    """Return current worker state without constructing or starting a worker."""
+
+    with _WORKER_LOCK:
+        thread = _WORKER_THREAD
+        return {
+            "status": "online" if thread is not None and thread.is_alive() else "critical",
+            "observed_at": _WORKER_OBSERVED_AT,
+        }

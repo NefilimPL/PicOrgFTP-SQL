@@ -30,6 +30,7 @@ const state = {
   pimcoreMissingEan: "",
   pimcoreCreateSchema: [],
   pimcoreCreateIntegrations: { sql_profiles: [] },
+  pimcoreCreateIntegrationContextId: "",
   pimcoreRuntimeEnabled: false,
   pimcoreExistingObject: null,
   pimcoreEditObjectId: 0,
@@ -37,6 +38,7 @@ const state = {
   pimcoreEditMarker: "",
   pimcoreEditSchema: [],
   pimcoreEditIntegrations: { sql_profiles: [] },
+  pimcoreEditIntegrationContextId: "",
   pimcoreTemplateRow: null,
   pimcoreSetup: {
     step: 1,
@@ -4542,6 +4544,21 @@ function renderHistoryChanges(item = {}) {
     if (pimcore.kind) {
       section.appendChild(historyChangeRow("Rodzaj", pimcore.kind));
     }
+    if (pimcore.object_id !== undefined) {
+      section.appendChild(historyChangeRow("ID obiektu", pimcore.object_id));
+    }
+    if (pimcore.object_path !== undefined) {
+      section.appendChild(historyChangeRow("Sciezka obiektu", pimcore.object_path));
+    }
+    if (pimcore.total_ms !== undefined) {
+      section.appendChild(historyChangeRow("Czas calkowity", formatHistoryDuration(pimcore.total_ms)));
+    }
+    if (pimcore.send_ms !== undefined) {
+      section.appendChild(historyChangeRow("Wysylka", formatHistoryDuration(pimcore.send_ms)));
+    }
+    if (pimcore.verification_ms !== undefined) {
+      section.appendChild(historyChangeRow("Weryfikacja", formatHistoryDuration(pimcore.verification_ms)));
+    }
     for (const field of pimcoreFields) {
       section.appendChild(
         historyChangeComparison(field.label || field.key, field.before, field.after)
@@ -4590,6 +4607,10 @@ function renderHistoryChanges(item = {}) {
       if (file.preprocessed !== undefined) {
         card.appendChild(historyChangeRow("Wstepnie przetworzony", file.preprocessed ? "Tak" : "Nie"));
       }
+      const evidence = file.evidence && typeof file.evidence === "object" ? file.evidence : {};
+      if (evidence.local) card.appendChild(historyChangeRow("Lokalnie", evidence.local));
+      if (evidence.ftp) card.appendChild(historyChangeRow("FTP", evidence.ftp));
+      if (evidence.sql) card.appendChild(historyChangeRow("SQL", evidence.sql));
       section.appendChild(card);
     }
     historyChangesOutput.appendChild(section);
@@ -5282,6 +5303,7 @@ const HEALTH_COMPONENT_LABELS = [
   ["backend", "Backend"],
   ["sqlite", "SQLite"],
   ["job_processor", "Proces zadan"],
+  ["notification_worker", "Powiadomienia"],
   ["ftp", "FTP"],
   ["sql", "SQL"],
   ["sql_profiles", "Profile SQL"],
@@ -5305,12 +5327,23 @@ function normalizedHealthComponents(components = {}) {
   return Object.fromEntries(
     HEALTH_COMPONENT_LABELS.map(([key]) => [
       key,
-      { status: normalizedHealthStatus(components[key]?.status) },
+      {
+        status: normalizedHealthStatus(components[key]?.status),
+        observed_at: String(components[key]?.observed_at || ""),
+      },
     ])
   );
 }
 
-function renderBackendHealthDetails(components = {}) {
+function canonicalHealthTimestamp(value) {
+  const text = String(value || "");
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/.test(text) ? text : "";
+}
+
+function renderBackendHealthDetails(
+  components = {},
+  { serverTime = "", currentLatencyMs = 0, medianLatencyMs = 0 } = {}
+) {
   if (!backendHealthDetailsList) return;
   const rows = HEALTH_COMPONENT_LABELS.map(([key, label]) => {
     const item = document.createElement("li");
@@ -5318,12 +5351,28 @@ function renderBackendHealthDetails(components = {}) {
     const status = document.createElement("strong");
     const normalized = normalizedHealthStatus(components[key]?.status);
     name.textContent = label;
-    status.textContent = HEALTH_STATUS_LABELS[normalized];
+    const observedAt = canonicalHealthTimestamp(components[key]?.observed_at);
+    status.textContent = observedAt
+      ? `${HEALTH_STATUS_LABELS[normalized]} · ${observedAt}`
+      : HEALTH_STATUS_LABELS[normalized];
     item.dataset.level = normalized;
     item.append(name, status);
     return item;
   });
-  backendHealthDetailsList.replaceChildren(...rows);
+  const metrics = [
+    ["Biezace opoznienie", `${Math.round(currentLatencyMs)} ms`],
+    ["Mediana opoznienia", `${Math.round(medianLatencyMs)} ms`],
+    ["Czas serwera UTC", canonicalHealthTimestamp(serverTime) || "Brak danych"],
+  ].map(([label, value]) => {
+    const item = document.createElement("li");
+    const name = document.createElement("span");
+    const status = document.createElement("strong");
+    name.textContent = label;
+    status.textContent = value;
+    item.append(name, status);
+    return item;
+  });
+  backendHealthDetailsList.replaceChildren(...rows, ...metrics);
 }
 
 function medianHealthLatency() {
@@ -5334,7 +5383,12 @@ function medianHealthLatency() {
   return (recentSamples[middle - 1] + recentSamples[middle]) / 2;
 }
 
-function updateBackendHealthStatus(level, latencyMs = 0, components = {}) {
+function updateBackendHealthStatus(
+  level,
+  currentLatencyMs = 0,
+  components = {},
+  { medianLatencyMs = currentLatencyMs, serverTime = "" } = {}
+) {
   if (!backendHealthStatus || !backendHealthText) return;
   const labels = {
     online: "Online",
@@ -5345,12 +5399,20 @@ function updateBackendHealthStatus(level, latencyMs = 0, components = {}) {
   const safeLevel = Object.hasOwn(labels, level) ? level : "critical";
   backendHealthStatus.dataset.level = safeLevel;
   backendHealthText.textContent =
-    safeLevel === "offline" ? labels[safeLevel] : `${labels[safeLevel]} · ${Math.round(latencyMs)} ms`;
-  renderBackendHealthDetails(components);
+    safeLevel === "offline"
+      ? labels[safeLevel]
+      : `${labels[safeLevel]} · ${Math.round(currentLatencyMs)} ms`;
+  renderBackendHealthDetails(components, { serverTime, currentLatencyMs, medianLatencyMs });
 }
 
-function healthLevel(ms, components = {}) {
-  if (components.backend?.status !== "online" || components.sqlite?.status === "critical") {
+function healthLevel(ms, components = {}, payloadOk = true) {
+  if (
+    payloadOk === false ||
+    components.backend?.status !== "online" ||
+    components.sqlite?.status === "critical" ||
+    components.job_processor?.status === "critical" ||
+    components.notification_worker?.status === "critical"
+  ) {
     return "critical";
   }
   if (ms > HEALTH_CRITICAL_MS) return "critical";
@@ -5396,7 +5458,12 @@ async function pollBackendHealth() {
     healthSamples.push(elapsedMs);
     if (healthSamples.length > 5) healthSamples.shift();
     const medianMs = medianHealthLatency();
-    updateBackendHealthStatus(healthLevel(medianMs, components), medianMs, components);
+    updateBackendHealthStatus(
+      healthLevel(medianMs, components, payload.ok),
+      elapsedMs,
+      components,
+      { medianLatencyMs: medianMs, serverTime: payload.time }
+    );
   } catch (error) {
     if (
       error?.name === "AbortError" ||
@@ -9860,6 +9927,8 @@ async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
   const selected = Array.isArray(targets)
     ? targets
     : (schema || []).filter((mapping) => mapping.value_template).map((mapping) => mapping.source);
+  if (form === pimcoreCreateForm) state.pimcoreCreateIntegrationContextId = "";
+  if (form === pimcoreEditForm) state.pimcoreEditIntegrationContextId = "";
   if (!selected.length) return { values: {}, warnings: [], calculated_values: {}, changed: {} };
   const values = Object.fromEntries(new FormData(form).entries());
   if (form === pimcoreCreateForm) state.pimcoreCreateIntegrations = { sql_profiles: [] };
@@ -9872,11 +9941,19 @@ async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
       values,
       targets: selected,
       mode: form.dataset.pimcoreMode || "create",
+      object_id:
+        form === pimcoreEditForm ? Number(state.pimcoreEditObjectId || 0) : null,
     }),
   });
   const integrationContext = result.integrations || { sql_profiles: [] };
   if (form === pimcoreCreateForm) state.pimcoreCreateIntegrations = integrationContext;
   if (form === pimcoreEditForm) state.pimcoreEditIntegrations = integrationContext;
+  if (form === pimcoreCreateForm) {
+    state.pimcoreCreateIntegrationContextId = String(result.integration_context_id || "");
+  }
+  if (form === pimcoreEditForm) {
+    state.pimcoreEditIntegrationContextId = String(result.integration_context_id || "");
+  }
   for (const source of selected) {
     const input = form.elements[source];
     if (input && Object.prototype.hasOwnProperty.call(result.values || {}, source)) {
@@ -10327,6 +10404,7 @@ function openPimcoreCreateModal(ean) {
   if (!pimcoreCreateForm || !pimcoreCreateModal) return;
   pimcoreCreateForm.dataset.pimcoreMode = "create";
   state.pimcoreCreateIntegrations = { sql_profiles: [] };
+  state.pimcoreCreateIntegrationContextId = "";
   const values = Object.fromEntries(
     (state.pimcoreCreateSchema || []).map((mapping) => [
       mapping.source,
@@ -10379,7 +10457,7 @@ async function submitPimcoreRuntimeCreate(event) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         values,
-        integration_results: state.pimcoreCreateIntegrations,
+        integration_context_id: state.pimcoreCreateIntegrationContextId,
       }),
       timeoutMs: 120000,
     });
@@ -10429,6 +10507,7 @@ async function openPimcoreEditModal() {
   state.pimcoreEditObjectId = 0;
   state.pimcoreEditMarker = "";
   state.pimcoreEditIntegrations = { sql_profiles: [] };
+  state.pimcoreEditIntegrationContextId = "";
   pimcoreEditForm.textContent = "";
   pimcoreEditObjectInfo.textContent = `ID ${objectId}`;
   pimcoreEditStatus.textContent = "Pobieranie danych Pimcore...";
@@ -10508,6 +10587,7 @@ function closePimcoreEditModal() {
   state.pimcoreEditMarker = "";
   state.pimcoreEditSchema = [];
   state.pimcoreEditIntegrations = { sql_profiles: [] };
+  state.pimcoreEditIntegrationContextId = "";
 }
 
 async function submitPimcoreRuntimeEdit(event) {
@@ -10526,7 +10606,7 @@ async function submitPimcoreRuntimeEdit(event) {
         body: JSON.stringify({
           marker: state.pimcoreEditMarker,
           values,
-          integration_results: state.pimcoreEditIntegrations,
+          integration_context_id: state.pimcoreEditIntegrationContextId,
         }),
         timeoutMs: 120000,
       }

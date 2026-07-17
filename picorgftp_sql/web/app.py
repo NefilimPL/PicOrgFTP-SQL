@@ -71,6 +71,7 @@ from ..observability import (
 )
 from ..redaction import redact_sensitive_value, sanitize_free_text
 from ..notification_service import (
+    notification_worker_health,
     send_test_message,
     start_notification_worker,
     stop_notification_worker,
@@ -1693,19 +1694,27 @@ def _remote_name_for_output(filename: str) -> str:
     return f"{parsed.ean}_{parsed.normalized_label}{parsed.extension}"
 
 
+def _transfer_slot(filename: object) -> str:
+    parts = os.path.basename(str(filename or "")).split("_")
+    return parts[1].strip()[:40] if len(parts) > 1 else ""
+
+
 def _sync_result_to_ftp(
     result: Any,
     delete_candidates: Optional[List[str]] = None,
     *,
     skip_upload_prefixes: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
-    if not bool(config.CONFIG.get(ft, True)):
-        return {"enabled": False, "uploaded": 0, "deleted": 0, "elapsed_ms": 0, "error": ""}
     skip_upload_prefixes = {str(prefix) for prefix in (skip_upload_prefixes or set())}
-    filenames = [
+    all_filenames = [
         item.filename
         for item in result.saved_files
-        if getattr(item, "filename", "") and str(getattr(item, "prefix", "")) not in skip_upload_prefixes
+        if getattr(item, "filename", "")
+    ]
+    filenames = [
+        filename
+        for filename in all_filenames
+        if _transfer_slot(filename) not in skip_upload_prefixes
     ]
     uploaded_remote_names = {_remote_name_for_output(filename) for filename in filenames}
     delete_set = {
@@ -1714,8 +1723,56 @@ def _sync_result_to_ftp(
         if os.path.basename(str(item or ""))
     }
     delete_set.difference_update({item for item in uploaded_remote_names if item})
+    slot_results: dict[str, dict[str, object]] = {}
+    for filename in all_filenames:
+        slot = _transfer_slot(filename)
+        if not slot:
+            continue
+        slot_results.setdefault(
+            slot,
+            {
+                "slot": slot,
+                "upload_status": "not_requested",
+                "delete_status": "not_requested",
+                "elapsed_ms": 0,
+            },
+        )["upload_status"] = "skipped" if slot in skip_upload_prefixes else "pending"
+    for filename in sorted(delete_set):
+        slot = _transfer_slot(filename)
+        if not slot:
+            continue
+        slot_results.setdefault(
+            slot,
+            {
+                "slot": slot,
+                "upload_status": "not_requested",
+                "delete_status": "not_requested",
+                "elapsed_ms": 0,
+            },
+        )["delete_status"] = "pending"
+    if not bool(config.CONFIG.get(ft, True)):
+        for item in slot_results.values():
+            if item["upload_status"] == "pending":
+                item["upload_status"] = "skipped"
+            if item["delete_status"] == "pending":
+                item["delete_status"] = "skipped"
+        return {
+            "enabled": False,
+            "uploaded": 0,
+            "deleted": 0,
+            "elapsed_ms": 0,
+            "error": "",
+            "slot_results": [slot_results[key] for key in sorted(slot_results)],
+        }
     if not filenames and not delete_set:
-        return {"enabled": True, "uploaded": 0, "deleted": 0, "elapsed_ms": 0, "error": ""}
+        return {
+            "enabled": True,
+            "uploaded": 0,
+            "deleted": 0,
+            "elapsed_ms": 0,
+            "error": "",
+            "slot_results": [slot_results[key] for key in sorted(slot_results)],
+        }
     try:
         payload = sync_remote_files(
             config.CONFIG.get(H, {}),
@@ -1727,6 +1784,57 @@ def _sync_result_to_ftp(
     except Exception as exc:
         payload = {"uploaded": 0, "deleted": 0, "elapsed_ms": 0, "error": str(exc)}
     payload["enabled"] = True
+    elapsed_ms = max(0, int(payload.get("elapsed_ms") or 0))
+    error = bool(payload.get("error"))
+    uploaded_count = max(0, int(payload.get("uploaded") or 0))
+    deleted_count = max(0, int(payload.get("deleted") or 0))
+    upload_status = (
+        "uploaded"
+        if uploaded_count == len(filenames)
+        else "partial"
+        if 0 < uploaded_count < len(filenames)
+        else "error"
+        if error
+        else "skipped"
+    )
+    delete_status = (
+        "deleted"
+        if deleted_count == len(delete_set)
+        else "partial"
+        if 0 < deleted_count < len(delete_set)
+        else "error"
+        if error
+        else "skipped"
+    )
+    for filename in filenames:
+        slot = _transfer_slot(filename)
+        if slot not in slot_results:
+            continue
+        slot_results[slot]["upload_status"] = upload_status
+        if upload_status == "partial":
+            slot_results[slot].update(
+                {
+                    "upload_count": uploaded_count,
+                    "upload_requested": len(filenames),
+                    "provider_error": error,
+                }
+            )
+    for filename in sorted(delete_set):
+        slot = _transfer_slot(filename)
+        if slot not in slot_results:
+            continue
+        slot_results[slot]["delete_status"] = delete_status
+        if delete_status == "partial":
+            slot_results[slot].update(
+                {
+                    "delete_count": deleted_count,
+                    "delete_requested": len(delete_set),
+                    "provider_error": error,
+                }
+            )
+    for item in slot_results.values():
+        item["elapsed_ms"] = elapsed_ms
+    payload["slot_results"] = [slot_results[key] for key in sorted(slot_results)]
     return payload
 
 
@@ -1758,6 +1866,34 @@ def _sync_result_to_sql(
     *,
     clear_prefixes: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
+    saved_by_prefix = {
+        str(item.prefix): item.filename
+        for item in result.saved_files
+        if getattr(item, "filename", "")
+    }
+    requested_clears = {
+        str(prefix) for prefix in (clear_prefixes or set())
+    } - set(saved_by_prefix)
+    slot_results: dict[str, dict[str, object]] = {
+        prefix: {
+            "slot": prefix,
+            "operation": "update",
+            "status": "skipped",
+            "elapsed_ms": 0,
+        }
+        for prefix in saved_by_prefix
+    }
+    slot_results.update(
+        {
+            prefix: {
+                "slot": prefix,
+                "operation": "clear",
+                "status": "skipped",
+                "elapsed_ms": 0,
+            }
+            for prefix in requested_clears
+        }
+    )
     if not bool(config.CONFIG.get(u, True)):
         return {
             "enabled": False,
@@ -1768,6 +1904,7 @@ def _sync_result_to_sql(
             "error": "",
             "skipped": False,
             "reason": "",
+            "slot_results": [slot_results[key] for key in sorted(slot_results)],
         }
     started = time.perf_counter()
     ean = str(getattr(result, "ean", "") or "").strip()
@@ -1780,19 +1917,26 @@ def _sync_result_to_sql(
         "error": "",
         "skipped": False,
         "reason": "",
+        "slot_results": [],
     }
     if not (ean and len(ean) == 13 and ean.isdigit()):
         payload["error"] = "SQL pominiety: brak poprawnego EAN-13."
+        for item in slot_results.values():
+            item["status"] = "error"
+        payload["slot_results"] = [slot_results[key] for key in sorted(slot_results)]
         return payload
     sql_map = config.CONFIG.get(SQL_COLUMN_MAP_KEY, {}) or {}
     context = extract_presence_context(config.CONFIG, ean)
     if not context:
         payload["error"] = "SQL pominiety: nie mozna ustalic tabeli/warunku z zapytania."
+        for item in slot_results.values():
+            item["status"] = "error"
+        payload["slot_results"] = [slot_results[key] for key in sorted(slot_results)]
         return payload
     table, where_clause = context
-    saved_by_prefix = {item.prefix: item.filename for item in result.saved_files if getattr(item, "filename", "")}
-    clear_prefixes = set(clear_prefixes or set()) - set(saved_by_prefix)
+    clear_prefixes = requested_clears
     if not saved_by_prefix and not clear_prefixes:
+        payload["slot_results"] = []
         return payload
     conn = None
     cur = None
@@ -1805,11 +1949,13 @@ def _sync_result_to_sql(
             if not cur.fetchone():
                 payload["skipped"] = True
                 payload["reason"] = "nie znaleziono wiersza produktu dla tego EAN"
+                payload["slot_results"] = [slot_results[key] for key in sorted(slot_results)]
                 return payload
         template = str(config.CONFIG.get(w, "") or "").strip()
         if not template:
             payload["skipped"] = True
             payload["reason"] = "nie skonfigurowano zapytania SQL"
+            payload["slot_results"] = [slot_results[key] for key in sorted(slot_results)]
             return payload
         for prefix, filename in saved_by_prefix.items():
             column = _safe_sql_identifier(sql_map.get(prefix, ""))
@@ -1824,6 +1970,7 @@ def _sync_result_to_sql(
             rowcount = _cursor_rowcount(cur)
             if rowcount != 0:
                 payload["updated"] += 1
+                slot_results[str(prefix)]["status"] = "updated"
             if rowcount > 0:
                 payload["rows"] += rowcount
         for prefix in clear_prefixes:
@@ -1834,12 +1981,16 @@ def _sync_result_to_sql(
             rowcount = _cursor_rowcount(cur)
             if rowcount != 0:
                 payload["cleared"] += 1
+                slot_results[str(prefix)]["status"] = "cleared"
             if rowcount > 0:
                 payload["rows"] += rowcount
         if payload["updated"] or payload["cleared"]:
             conn.commit()
     except Exception as exc:
         payload["error"] = str(exc)
+        for item in slot_results.values():
+            if item["status"] == "skipped":
+                item["status"] = "error"
         if conn is not None:
             try:
                 conn.rollback()
@@ -1847,6 +1998,9 @@ def _sync_result_to_sql(
                 pass
     finally:
         payload["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        for item in slot_results.values():
+            item["elapsed_ms"] = payload["elapsed_ms"]
+        payload["slot_results"] = [slot_results[key] for key in sorted(slot_results)]
         if cur is not None:
             try:
                 cur.close()
@@ -1918,24 +2072,41 @@ def _ftp_replacement_delete_candidates(
 
 
 def _delete_local_files(delete_requests: List[Dict[str, Any]], saved_paths: Set[str]) -> Dict[str, Any]:
-    payload = {"deleted": 0, "skipped": 0, "errors": []}
+    payload = {"deleted": 0, "skipped": 0, "errors": [], "slot_results": []}
     normalized_saved_paths = {os.path.normcase(os.path.abspath(path)) for path in saved_paths}
     for item in delete_requests:
+        slot_started = time.perf_counter()
+        slot = str(item.get("prefix") or "").strip()
         path = str(item.get("local_path") or "")
         if not path:
+            if slot:
+                payload["slot_results"].append(
+                    {"slot": slot, "status": "skipped", "elapsed_ms": 0}
+                )
             continue
         abs_path = os.path.abspath(path)
+        status = "skipped"
         if os.path.normcase(abs_path) in normalized_saved_paths:
             payload["skipped"] += 1
-            continue
-        try:
-            if os.path.isfile(abs_path):
-                os.remove(abs_path)
-                payload["deleted"] += 1
-            else:
-                payload["skipped"] += 1
-        except Exception as exc:
-            payload["errors"].append(f"{os.path.basename(abs_path)}: {exc}")
+        else:
+            try:
+                if os.path.isfile(abs_path):
+                    os.remove(abs_path)
+                    payload["deleted"] += 1
+                    status = "deleted"
+                else:
+                    payload["skipped"] += 1
+            except Exception as exc:
+                status = "error"
+                payload["errors"].append(f"{os.path.basename(abs_path)}: {exc}")
+        if slot:
+            payload["slot_results"].append(
+                {
+                    "slot": slot,
+                    "status": status,
+                    "elapsed_ms": int((time.perf_counter() - slot_started) * 1000),
+                }
+            )
     return payload
 
 
@@ -3161,7 +3332,26 @@ def _process_upload_snapshot(
     saved_entry = _entry_payload_from_product(product)
     if isinstance(entry_result, dict):
         saved_entry["product_id"] = str(entry_result.get("product_id") or saved_entry["product_id"])
-    integrations = {"ftp": ftp_result, "sql": sql_result}
+    saved_slot_results = [
+        {
+            "slot": str(item.get("prefix") or ""),
+            "status": "saved",
+            "elapsed_ms": max(0, int(item.get("elapsed_ms") or 0)),
+        }
+        for item in payload["saved_files"]
+        if str(item.get("prefix") or "")
+    ]
+    saved_slot_names = {str(item["slot"]) for item in saved_slot_results}
+    local_slot_results = saved_slot_results + [
+        item
+        for item in local_delete_result.get("slot_results", [])
+        if isinstance(item, dict) and str(item.get("slot") or "") not in saved_slot_names
+    ]
+    integrations = {
+        "local": {"slot_results": local_slot_results},
+        "ftp": ftp_result,
+        "sql": sql_result,
+    }
     change_set = history_change_set(
         existing_entry=existing_entry,
         saved_entry=saved_entry,
@@ -4179,14 +4369,17 @@ def _integration_component_status(status: object) -> str:
 
 
 def _health_payload() -> Dict[str, Any]:
+    server_time = _utc_now_iso()
     components: Dict[str, Dict[str, Any]] = {
-        "backend": {"status": "online"},
-        "sqlite": {"status": "critical"},
+        "backend": {"status": "online", "observed_at": server_time},
+        "sqlite": {"status": "critical", "observed_at": server_time},
         "job_processor": {
             "status": "critical"
             if bool(getattr(_PROCESS_EXECUTOR, "_shutdown", False))
-            else "online"
+            else "online",
+            "observed_at": server_time,
         },
+        "notification_worker": notification_worker_health(),
     }
     integrations: Dict[str, Any] = {
         "ftp": {"status": "unknown", "observed_at": ""},
@@ -4198,7 +4391,7 @@ def _health_payload() -> Dict[str, Any]:
         store = observability_store()
         with store.connection() as conn:
             conn.execute("SELECT 1").fetchone()
-        components["sqlite"] = {"status": "online"}
+        components["sqlite"] = {"status": "online", "observed_at": server_time}
         integrations = _cached_last_known_integrations(store)
     except Exception:
         pass
@@ -4224,12 +4417,12 @@ def _health_payload() -> Dict[str, Any]:
     }
     local_ready = all(
         components[name]["status"] == "online"
-        for name in ("backend", "sqlite", "job_processor")
+        for name in ("backend", "sqlite", "job_processor", "notification_worker")
     )
     return {
         "ok": local_ready,
         "version": get_display_version(),
-        "time": datetime.now().isoformat(timespec="seconds"),
+        "time": server_time,
         "components": components,
         "integrations": integrations,
     }
@@ -5651,19 +5844,51 @@ def create_app() -> FastAPI:
 
     @app.post("/api/pimcore/render-templates")
     async def pimcore_render_templates_api(request: Request) -> JSONResponse:
-        _require_user(request)
+        username = _require_user(request)
         payload = await request.json()
         source = payload if isinstance(payload, dict) else {}
+        mode = str(source.get("mode") or "create").strip().lower()
+        object_id = source.get("object_id")
+        if mode not in {"create", "edit"}:
+            raise HTTPException(status_code=400, detail="Niepoprawny tryb Pimcore.")
+        if mode == "edit":
+            try:
+                object_id = int(object_id)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Brak ID obiektu Pimcore.")
+            if object_id <= 0:
+                raise HTTPException(status_code=400, detail="Brak ID obiektu Pimcore.")
+        else:
+            object_id = None
         try:
             result = await run_in_threadpool(
                 render_saved_pimcore_templates,
                 source.get("product_values"),
                 source.get("values"),
                 source.get("targets"),
-                source.get("mode", "create"),
+                mode,
             )
         except (TemplateError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        integrations = result.get("integrations") if isinstance(result, dict) else None
+        profiles = (
+            integrations.get("sql_profiles")
+            if isinstance(integrations, dict)
+            else None
+        )
+        if isinstance(profiles, list) and profiles:
+            try:
+                result["integration_context_id"] = await run_in_threadpool(
+                    observability_store().create_pimcore_integration_context,
+                    username=username,
+                    mode=mode,
+                    object_id=object_id,
+                    results=integrations,
+                )
+            except Exception:
+                # Calculated values remain usable; unavailable audit evidence must
+                # never be replaced by browser-supplied claims.
+                pass
         return JSONResponse(result)
 
     @app.get("/api/pimcore/products/{object_id}")
@@ -5687,11 +5912,21 @@ def create_app() -> FastAPI:
         payload = await request.json()
         values = payload.get("values") if isinstance(payload, dict) else None
         marker = payload.get("marker") if isinstance(payload, dict) else None
-        integration_results = (
-            payload.get("integration_results") if isinstance(payload, dict) else None
-        )
+        context_id = payload.get("integration_context_id") if isinstance(payload, dict) else None
         if not isinstance(values, dict) or not str(marker or ""):
             raise HTTPException(status_code=400, detail="Brak danych albo wersji produktu Pimcore.")
+        integration_results = None
+        if isinstance(context_id, str) and 20 <= len(context_id) <= 200:
+            try:
+                integration_results = await run_in_threadpool(
+                    observability_store().consume_pimcore_integration_context,
+                    context_id,
+                    username=username,
+                    mode="edit",
+                    object_id=object_id,
+                )
+            except Exception:
+                integration_results = None
         try:
             if integration_results is None:
                 result = await run_in_threadpool(
@@ -5731,11 +5966,21 @@ def create_app() -> FastAPI:
         username = _require_user(request)
         payload = await request.json()
         values = payload.get("values") if isinstance(payload, dict) else None
-        integration_results = (
-            payload.get("integration_results") if isinstance(payload, dict) else None
-        )
+        context_id = payload.get("integration_context_id") if isinstance(payload, dict) else None
         if not isinstance(values, dict):
             raise HTTPException(status_code=400, detail="Brak danych produktu Pimcore.")
+        integration_results = None
+        if isinstance(context_id, str) and 20 <= len(context_id) <= 200:
+            try:
+                integration_results = await run_in_threadpool(
+                    observability_store().consume_pimcore_integration_context,
+                    context_id,
+                    username=username,
+                    mode="create",
+                    object_id=None,
+                )
+            except Exception:
+                integration_results = None
         try:
             if integration_results is None:
                 result = await run_in_threadpool(create_pimcore_product, values, username)

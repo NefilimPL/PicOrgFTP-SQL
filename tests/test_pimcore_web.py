@@ -722,7 +722,7 @@ def test_runtime_create_route_allows_logged_in_user_and_returns_created_object()
     create.assert_called_once_with({"SKU": "ABC", "EAN": "5904804578169"}, "operator")
 
 
-def test_runtime_create_route_forwards_rendered_integration_results():
+def test_runtime_create_route_ignores_browser_supplied_integration_results():
     client = TestClient(web_app.app)
     integrations = {
         "sql_profiles": [
@@ -750,11 +750,7 @@ def test_runtime_create_route_forwards_rendered_integration_results():
         )
 
     assert response.status_code == 200
-    create.assert_called_once_with(
-        {"EAN": "5904804578169"},
-        "operator",
-        integrations,
-    )
+    create.assert_called_once_with({"EAN": "5904804578169"}, "operator")
 
 
 def test_edit_adapter_requires_enabled_complete_setup():
@@ -901,6 +897,48 @@ def test_create_adapter_filters_and_attaches_integration_results_to_audit_and_ch
     assert all(call.kwargs["severity"] == "info" for call in emit_event.call_args_list)
 
 
+def test_pimcore_history_change_set_includes_object_identity_and_stage_timings(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        web_data,
+        "record_history",
+        lambda **kwargs: captured.update(kwargs) or kwargs,
+    )
+    report = {
+        "operation_type": "manual_update",
+        "username": "alice",
+        "status": "completed",
+        "total_ms": 91,
+        "values": {"EAN": "5904804578169"},
+        "events": [
+            {"stage": "update", "stage_elapsed_ms": 31},
+            {"stage": "verify", "stage_elapsed_ms": 17},
+        ],
+        "result": {
+            "object": {"id": 91, "path": "/Produkty/ABC"},
+            "change_set": {
+                "kind": "updated",
+                "fields": [
+                    {"key": "SKU", "label": "SKU", "before": "OLD", "after": "NEW"}
+                ],
+            },
+        },
+    }
+
+    web_data._persist_pimcore_operation(report)
+
+    pimcore = captured["details"]["change_set"]["pimcore"]
+    assert pimcore == {
+        "kind": "updated",
+        "fields": [
+            {"key": "SKU", "label": "SKU", "before": "OLD", "after": "NEW"}
+        ],
+        "object_id": "91",
+        "object_path": "/Produkty/ABC",
+        "total_ms": 91,
+        "send_ms": 31,
+        "verification_ms": 17,
+    }
 def test_integration_results_use_trusted_requiredness_redact_errors_and_bound_warnings():
     cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
     cfg["pimcore"].update(
@@ -1052,7 +1090,11 @@ def test_pimcore_history_persists_common_change_set_with_nested_pimcore_diff():
         "fields": [],
         "files": [],
         "integrations": integrations,
-        "pimcore": {**pimcore_change, "integrations": integrations},
+        "pimcore": {
+            **pimcore_change,
+            "integrations": integrations,
+            "object_id": "91",
+        },
     }
 
 
@@ -1224,7 +1266,7 @@ def test_runtime_edit_routes_allow_logged_in_user():
     assert put_response.json() == updated
 
 
-def test_runtime_edit_route_forwards_rendered_integration_results():
+def test_runtime_edit_route_ignores_browser_supplied_integration_results():
     client = TestClient(web_app.app)
     integrations = {
         "sql_profiles": [
@@ -1261,7 +1303,83 @@ def test_runtime_edit_route_forwards_rendered_integration_results():
         "100",
         {"EAN": "5904804578169"},
         "operator",
+    )
+
+
+def test_rendered_integration_context_is_bound_consumed_once_and_forwarded(tmp_path):
+    client = TestClient(web_app.app)
+    store = SqliteStore(str(tmp_path / "context.sqlite"))
+    integrations = {
+        "sql_profiles": [
+            {
+                "profile_id": "stock",
+                "source": "STOCK",
+                "status": "success",
+                "elapsed_ms": 8,
+                "warning_codes": [],
+                "error": "",
+            }
+        ]
+    }
+    rendered = {
+        "values": {"STOCK": "12"},
+        "warnings": [],
+        "integrations": integrations,
+    }
+    with (
+        patch.object(web_app, "_require_user", return_value="operator"),
+        patch.object(web_app, "observability_store", return_value=store),
+        patch.object(web_app, "render_saved_pimcore_templates", return_value=rendered),
+        patch.object(
+            web_app,
+            "update_pimcore_product",
+            return_value={"object": {"id": 91}},
+        ) as update,
+    ):
+        render_response = client.post(
+            "/api/pimcore/render-templates",
+            json={
+                "product_values": {"ean": "5904804578169"},
+                "values": {"EAN": "5904804578169"},
+                "targets": ["STOCK"],
+                "mode": "edit",
+                "object_id": 91,
+            },
+        )
+        context_id = render_response.json()["integration_context_id"]
+        first = client.put(
+            "/api/pimcore/products/91",
+            json={
+                "marker": "100",
+                "values": {"EAN": "5904804578169"},
+                "integration_context_id": context_id,
+                "integration_results": {"sql_profiles": [{"status": "fake-critical"}]},
+            },
+        )
+        replay = client.put(
+            "/api/pimcore/products/91",
+            json={
+                "marker": "100",
+                "values": {"EAN": "5904804578169"},
+                "integration_context_id": context_id,
+            },
+        )
+
+    assert render_response.status_code == 200
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert update.call_args_list[0].args == (
+        91,
+        "100",
+        {"EAN": "5904804578169"},
+        "operator",
         integrations,
+    )
+    assert update.call_args_list[1].args == (
+        91,
+        "100",
+        {"EAN": "5904804578169"},
+        "operator",
     )
 
 

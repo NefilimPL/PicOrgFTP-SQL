@@ -134,7 +134,7 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn('id="backendHealthText"', brand_source)
         self.assertIn('id="backendHealthDetails"', brand_source)
         self.assertIn('id="backendHealthDetails" class="backend-health-details" role="tooltip" hidden', brand_source)
-        for label in ("Backend", "SQLite", "Proces zadan", "FTP", "SQL", "Profile SQL", "Pimcore"):
+        for label in ("Backend", "SQLite", "Proces zadan", "Powiadomienia", "FTP", "SQL", "Profile SQL", "Pimcore"):
             self.assertIn(label, brand_source)
 
         health_start = js_source.index("function healthLevel")
@@ -142,6 +142,9 @@ class WebUiIntegrityTests(unittest.TestCase):
         health_source = js_source[health_start:health_end]
         self.assertIn('components.backend?.status !== "online"', health_source)
         self.assertIn('components.sqlite?.status === "critical"', health_source)
+        self.assertIn('components.job_processor?.status === "critical"', health_source)
+        self.assertIn('components.notification_worker?.status === "critical"', health_source)
+        self.assertIn("payloadOk === false", health_source)
         self.assertIn("ms > HEALTH_CRITICAL_MS", health_source)
         self.assertIn("ms >= HEALTH_SLOW_MS", health_source)
         self.assertIn('item.status === "degraded"', health_source)
@@ -153,6 +156,10 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("pollBackendHealth().catch(() => {})", js_source)
         self.assertNotIn("backendHealthDetailsList.innerHTML", js_source)
         self.assertIn("backendHealthDetailsList.replaceChildren", js_source)
+        self.assertIn("observed_at", js_source)
+        self.assertIn("serverTime", js_source)
+        self.assertIn("currentLatencyMs", js_source)
+        self.assertIn("medianLatencyMs", js_source)
 
         disclosure_start = js_source.index("function setBackendHealthDetailsExpanded")
         disclosure_end = js_source.index("function showLogsError", disclosure_start)
@@ -737,8 +744,18 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("pimcoreCreateIntegrations", source)
         self.assertIn("pimcoreEditIntegrations", source)
         self.assertIn("result.integrations || { sql_profiles: [] }", source)
-        self.assertIn("integration_results: state.pimcoreCreateIntegrations", source)
-        self.assertIn("integration_results: state.pimcoreEditIntegrations", source)
+        self.assertNotIn("integration_results: state.pimcoreCreateIntegrations", source)
+        self.assertNotIn("integration_results: state.pimcoreEditIntegrations", source)
+        self.assertIn(
+            "integration_context_id: state.pimcoreCreateIntegrationContextId",
+            source,
+        )
+        self.assertIn(
+            "integration_context_id: state.pimcoreEditIntegrationContextId",
+            source,
+        )
+        self.assertIn("result.integration_context_id", source)
+        self.assertIn("object_id:", source)
 
     def test_pimcore_history_has_submission_export_actions(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -1002,10 +1019,22 @@ class WebUiIntegrityTests(unittest.TestCase):
             "file.before_size_bytes",
             "file.after_size_bytes",
             "file.elapsed_ms",
+            "file.evidence",
             "historyChangeJobId(details, changeSet)",
         ):
             self.assertIn(value, renderer)
         self.assertIn("textContent", renderer)
+        for evidence_row in (
+            'historyChangeRow("Lokalnie"',
+            'historyChangeRow("FTP"',
+            'historyChangeRow("SQL"',
+            'historyChangeRow("ID obiektu"',
+            'historyChangeRow("Sciezka obiektu"',
+            'historyChangeRow("Czas calkowity"',
+            'historyChangeRow("Wysylka"',
+            'historyChangeRow("Weryfikacja"',
+        ):
+            self.assertIn(evidence_row, renderer)
         self.assertIn("historyChangesCloseButton?.focus()", js_source)
         self.assertIn(
             "changesButton.disabled = !hasChangeSet && !hasLegacyDetails",

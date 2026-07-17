@@ -997,6 +997,48 @@ def test_health_reports_local_components_and_last_known_integrations(
     assert "private" not in response.text.lower()
 
 
+def test_health_is_critical_when_job_processor_is_shutdown_even_if_storage_is_online(
+    api_environment,
+) -> None:
+    client, _store = api_environment
+
+    with (
+        patch.object(web_app._PROCESS_EXECUTOR, "_shutdown", True),
+        patch.object(
+            web_app,
+            "notification_worker_health",
+            return_value={"status": "online", "observed_at": "2026-07-17T08:00:00.000Z"},
+        ),
+    ):
+        payload = client.get("/api/health").json()
+
+    assert payload["ok"] is False
+    assert payload["components"]["backend"]["status"] == "online"
+    assert payload["components"]["sqlite"]["status"] == "online"
+    assert payload["components"]["job_processor"]["status"] == "critical"
+
+
+def test_health_reports_existing_notification_worker_and_canonical_utc_time(
+    api_environment,
+) -> None:
+    client, _store = api_environment
+
+    with patch.object(
+        web_app,
+        "notification_worker_health",
+        return_value={"status": "critical", "observed_at": "2026-07-17T08:01:02.003Z"},
+    ):
+        payload = client.get("/api/health").json()
+
+    assert payload["ok"] is False
+    assert payload["components"]["notification_worker"] == {
+        "status": "critical",
+        "observed_at": "2026-07-17T08:01:02.003Z",
+    }
+    assert payload["time"].endswith("Z")
+    datetime.fromisoformat(payload["time"].replace("Z", "+00:00"))
+
+
 def test_last_known_integration_stops_at_newest_unknown_status(tmp_path: Path) -> None:
     store = SqliteStore(str(tmp_path / "app.sqlite"))
     store.append_operational_event(

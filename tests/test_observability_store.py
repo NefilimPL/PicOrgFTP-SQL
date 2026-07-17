@@ -187,6 +187,65 @@ def test_pending_deliveries_order_by_effective_due_time_without_starvation(
     assert "retry-future" not in {item["id"] for item in first_batch}
 
 
+def test_notification_deliveries_for_incidents_caps_ids_dedupes_and_orders_ties(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    same_time = "2026-07-16T10:00:00.000Z"
+    for index in range(102):
+        store.enqueue_notification_delivery(
+            _delivery(
+                f"delivery-{index:03d}",
+                same_time,
+                incident_id=f"inc-{index:03d}",
+            )
+        )
+    for suffix in range(12):
+        store.enqueue_notification_delivery(
+            _delivery(
+                f"inc-zero-extra-{suffix:02d}",
+                same_time,
+                incident_id="inc-000",
+            )
+        )
+
+    rows = store.notification_deliveries_for_incidents(
+        ["inc-000", "inc-000", *[f"inc-{index:03d}" for index in range(1, 103)]],
+        per_incident_limit=99,
+    )
+
+    assert {row["incident_id"] for row in rows} == {
+        f"inc-{index:03d}" for index in range(100)
+    }
+    zero_rows = [row for row in rows if row["incident_id"] == "inc-000"]
+    assert len(zero_rows) == 10
+    assert [row["id"] for row in zero_rows] == sorted(
+        [row["id"] for row in zero_rows], reverse=True
+    )
+    assert [row["id"] for row in rows] == sorted(
+        [row["id"] for row in rows], reverse=True
+    )
+
+
+def test_sqlite_adapter_forwards_incident_delivery_batch_arguments(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = SqliteDataStoreAdapter(str(tmp_path / "app.sqlite"))
+    captured = {}
+
+    def load(ids, *, per_incident_limit):
+        captured["ids"] = ids
+        captured["limit"] = per_incident_limit
+        return [{"id": "delivery-1"}]
+
+    monkeypatch.setattr(adapter.store, "notification_deliveries_for_incidents", load)
+
+    assert adapter.notification_deliveries_for_incidents(
+        ["inc-1", "inc-1"], per_incident_limit=7
+    ) == [{"id": "delivery-1"}]
+    assert captured == {"ids": ["inc-1", "inc-1"], "limit": 7}
+
+
 def test_notification_delivery_claim_is_atomic_across_connections(tmp_path: Path) -> None:
     db_path = tmp_path / "app.sqlite"
     SqliteStore(str(db_path)).enqueue_notification_delivery(
@@ -1865,6 +1924,7 @@ def test_prune_and_clear_operational_data_preserve_web_history(tmp_path: Path) -
         "alert_reads": 1,
         "notification_deliveries": 1,
         "notification_outbox": 0,
+        "pimcore_integration_contexts": 0,
     }
     assert store.load_history()[0]["id"] == "history-1"
     assert store.query_pimcore_submissions()[0]["id"] == "submission-1"
@@ -1873,7 +1933,35 @@ def test_prune_and_clear_operational_data_preserve_web_history(tmp_path: Path) -
             "SELECT event_id FROM operational_event_stream ORDER BY sequence"
         ).fetchall()
         assert stream_ids[0][0]
-        assert stream_ids[1:] == [("evt-old",), ("evt-boundary",), ("evt-warning",)]
+        assert stream_ids[1:] == [("evt-boundary",), ("evt-warning",)]
+
+
+def test_prune_info_events_compacts_old_tombstones_but_keeps_origin_and_checkpoint(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    for index in range(150):
+        store.append_operational_event(
+            _event(f"evt-old-{index:03d}", "2026-07-15T09:00:00.000Z", "info")
+        )
+    store.append_operational_event(
+        _event("evt-current", "2026-07-16T10:00:00.000Z", "info")
+    )
+
+    assert store.prune_info_events("2026-07-16T00:00:00.000Z") == 150
+
+    with store.connection() as conn:
+        rows = conn.execute(
+            "SELECT sequence, event_id FROM operational_event_stream ORDER BY sequence"
+        ).fetchall()
+    assert len(rows) == 2
+    assert rows[0][0] == 0
+    assert rows[1][1] == "evt-current"
+    # Reconnect markers older than retention resume at the current high-water;
+    # the archive snapshot is the source for retained history.
+    reconnect = store.start_operational_event_stream(after_id="evt-old-000")
+    assert reconnect["items"] == []
+    assert reconnect["position"] == rows[1][0]
 
 
 def test_sqlite_adapter_delegates_observability_repository(tmp_path: Path) -> None:

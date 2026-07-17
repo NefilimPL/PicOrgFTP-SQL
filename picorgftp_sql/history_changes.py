@@ -152,6 +152,25 @@ def history_change_set(
         delete_requests,
         migrated_prefixes,
     )
+    integration_payload = integrations if isinstance(integrations, Mapping) else {}
+    evidence_by_slot: dict[str, dict[str, object]] = {}
+    for integration_name in ("local", "ftp", "sql"):
+        integration = integration_payload.get(integration_name)
+        if not isinstance(integration, Mapping):
+            continue
+        slot_results = integration.get("slot_results")
+        if not isinstance(slot_results, list):
+            continue
+        for item in slot_results:
+            if not isinstance(item, Mapping):
+                continue
+            slot = _slot(item)
+            if slot:
+                evidence_by_slot.setdefault(slot, {})[integration_name] = dict(item)
+    for file_change in files:
+        slot_evidence = evidence_by_slot.get(str(file_change.get("slot") or ""))
+        if slot_evidence:
+            file_change["evidence"] = slot_evidence
     kind = "created" if existing_entry is None else "updated" if fields or files else "synchronized"
     return {
         "kind": kind,

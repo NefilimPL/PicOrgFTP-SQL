@@ -834,9 +834,9 @@ class WebAppFileTests(unittest.TestCase):
 
             result = web_app._delete_local_files(
                 [
-                    {"local_path": str(delete_file)},
-                    {"local_path": str(saved_file)},
-                    {"local_path": str(missing_file)},
+                    {"prefix": "03", "local_path": str(delete_file)},
+                    {"prefix": "04", "local_path": str(saved_file)},
+                    {"prefix": "05", "local_path": str(missing_file)},
                 ],
                 {str(saved_file)},
             )
@@ -844,6 +844,11 @@ class WebAppFileTests(unittest.TestCase):
             self.assertEqual(result["deleted"], 1)
             self.assertEqual(result["skipped"], 2)
             self.assertEqual(result["errors"], [])
+            self.assertEqual(
+                [(item["slot"], item["status"]) for item in result["slot_results"]],
+                [("03", "deleted"), ("04", "skipped"), ("05", "skipped")],
+            )
+            self.assertTrue(all(item["elapsed_ms"] >= 0 for item in result["slot_results"]))
             self.assertFalse(delete_file.exists())
             self.assertTrue(saved_file.exists())
 
@@ -874,7 +879,61 @@ class WebAppFileTests(unittest.TestCase):
 
         self.assertTrue(payload["enabled"])
         self.assertEqual(payload["uploaded"], 0)
+        self.assertEqual(
+            payload["slot_results"],
+            [
+                {
+                    "slot": "03",
+                    "upload_status": "skipped",
+                    "delete_status": "not_requested",
+                    "elapsed_ms": 0,
+                }
+            ],
+        )
         sync_remote.assert_not_called()
+
+    def test_ftp_sync_derives_slot_specific_statuses_from_requested_and_provider_result(self) -> None:
+        result = SimpleNamespace(
+            output_dir="processed",
+            saved_files=[
+                SimpleNamespace(prefix="03", filename="5901234567890_03_NEW.jpg"),
+                SimpleNamespace(prefix="04", filename="5901234567890_04_NEW.jpg"),
+            ],
+        )
+        with (
+            patch.dict(web_app.config.CONFIG, {web_app.ft: True, web_app.H: {}}, clear=False),
+            patch.object(
+                web_app,
+                "sync_remote_files",
+                return_value={"uploaded": 1, "deleted": 1, "elapsed_ms": 25, "error": "network"},
+            ),
+        ):
+            payload = web_app._sync_result_to_ftp(
+                result,
+                ["5901234567890_05_OLD.jpg"],
+            )
+
+        assert payload["slot_results"] == [
+            {
+                "slot": "03",
+                "upload_status": "partial",
+                "delete_status": "not_requested",
+                "elapsed_ms": 25,
+                "upload_count": 1,
+                "upload_requested": 2,
+                "provider_error": True,
+            },
+            {
+                "slot": "04",
+                "upload_status": "partial",
+                "delete_status": "not_requested",
+                "elapsed_ms": 25,
+                "upload_count": 1,
+                "upload_requested": 2,
+                "provider_error": True,
+            },
+            {"slot": "05", "upload_status": "not_requested", "delete_status": "deleted", "elapsed_ms": 25},
+        ]
 
     def test_existing_local_photos_are_migrated_when_product_path_changes(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]
@@ -1271,6 +1330,10 @@ class WebAppFileTests(unittest.TestCase):
         self.assertEqual(len(conn.cursor_obj.queries), 1)
         self.assertIn("SELECT 1", conn.cursor_obj.queries[0])
         self.assertFalse(conn.committed)
+        self.assertEqual(
+            payload["slot_results"],
+            [{"slot": "03", "operation": "update", "status": "skipped", "elapsed_ms": payload["elapsed_ms"]}],
+        )
 
     def test_sql_sync_does_not_count_zero_row_updates(self) -> None:
         result = SimpleNamespace(

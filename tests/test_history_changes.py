@@ -138,6 +138,62 @@ def test_file_changes_preserve_deleted_ftp_name_for_replacement_without_scan_met
     assert result[0]["before_size_bytes"] is None
 
 
+def test_history_change_set_attaches_server_slot_evidence_to_each_changed_file() -> None:
+    result = history_change_set(
+        existing_entry={"name": "Chair"},
+        saved_entry={"name": "Chair"},
+        existing_photos=[{"prefix": "03", "filename": "old.jpg"}],
+        saved_files=[
+            {"prefix": "03", "filename": "new.jpg", "elapsed_ms": 12}
+        ],
+        delete_requests=[{"prefix": "03", "ftp_filename": "590_03.jpg"}],
+        migrated_prefixes=[],
+        integrations={
+            "local": {
+                "slot_results": [
+                    {"slot": "03", "status": "saved", "elapsed_ms": 12}
+                ]
+            },
+            "ftp": {
+                "slot_results": [
+                    {
+                        "slot": "03",
+                        "upload_status": "uploaded",
+                        "delete_status": "deleted",
+                        "elapsed_ms": 44,
+                    }
+                ]
+            },
+            "sql": {
+                "slot_results": [
+                    {
+                        "slot": "03",
+                        "operation": "update",
+                        "status": "updated",
+                        "elapsed_ms": 7,
+                    }
+                ]
+            },
+        },
+    )
+
+    assert result["files"][0]["evidence"] == {
+        "local": {"slot": "03", "status": "saved", "elapsed_ms": 12},
+        "ftp": {
+            "slot": "03",
+            "upload_status": "uploaded",
+            "delete_status": "deleted",
+            "elapsed_ms": 44,
+        },
+        "sql": {
+            "slot": "03",
+            "operation": "update",
+            "status": "updated",
+            "elapsed_ms": 7,
+        },
+    }
+
+
 def test_history_change_set_classifies_created_updated_and_synchronized() -> None:
     created = history_change_set(
         existing_entry=None,

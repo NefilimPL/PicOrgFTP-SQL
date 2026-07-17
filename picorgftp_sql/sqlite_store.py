@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import secrets
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -632,6 +633,17 @@ class SqliteStore:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS pimcore_integration_contexts (
+                    id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    mode TEXT NOT NULL CHECK (mode IN ('create', 'edit')),
+                    object_id TEXT NOT NULL DEFAULT '',
+                    results_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    consumed_at TEXT NOT NULL DEFAULT ''
+                );
+
                 CREATE TABLE IF NOT EXISTS operational_events (
                     id TEXT PRIMARY KEY,
                     created_at TEXT NOT NULL,
@@ -773,6 +785,8 @@ class SqliteStore:
                     ON pimcore_submissions(ean);
                 CREATE INDEX IF NOT EXISTS idx_pimcore_submissions_user
                     ON pimcore_submissions(username);
+                CREATE INDEX IF NOT EXISTS idx_pimcore_integration_contexts_expiry
+                    ON pimcore_integration_contexts(expires_at, consumed_at);
                 CREATE INDEX IF NOT EXISTS idx_operational_events_created_at_id
                     ON operational_events(created_at, id);
                 CREATE INDEX IF NOT EXISTS idx_operational_events_severity_created_at
@@ -2223,7 +2237,12 @@ class SqliteStore:
         }
 
     def prune_info_events(self, before: str) -> int:
-        """Delete informational events older than the supplied boundary."""
+        """Delete old info events and compact obsolete pre-checkpoint markers.
+
+        A marker older than retention is intentionally no longer resolvable and
+        reconnects at the current high-water; retained history comes from the
+        bounded archive snapshot. Sequence zero and the newest checkpoint stay.
+        """
 
         self.initialize()
         with self.connection() as conn:
@@ -2238,6 +2257,166 @@ class SqliteStore:
                 """,
                 (_text(before),),
             )
+            removed = max(0, cursor.rowcount)
+            conn.execute(
+                """
+                DELETE FROM operational_event_stream
+                WHERE sequence <> 0
+                  AND sequence < (
+                      SELECT COALESCE(MAX(sequence), 0)
+                      FROM operational_event_stream
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM operational_events AS e
+                      WHERE e.id = operational_event_stream.event_id
+                  )
+                """
+            )
+            now = _now_iso()
+            conn.execute(
+                "DELETE FROM pimcore_integration_contexts WHERE expires_at <= ?",
+                (now,),
+            )
+            return removed
+
+    def create_pimcore_integration_context(
+        self,
+        *,
+        username: str,
+        mode: str,
+        object_id: object,
+        results: object,
+        ttl_seconds: int = 10 * 60,
+        now: datetime | None = None,
+    ) -> str:
+        """Persist redacted SQL-profile evidence behind an opaque short-lived ID."""
+
+        self.initialize()
+        bound_user = _text(username)
+        bound_mode = _text(mode).lower()
+        bound_object_id = _text(object_id)
+        if not bound_user:
+            raise ValueError("Pimcore integration context requires a user")
+        if bound_mode not in {"create", "edit"}:
+            raise ValueError("Pimcore integration context mode is invalid")
+        if bound_mode == "create":
+            bound_object_id = ""
+        elif not bound_object_id:
+            raise ValueError("Pimcore edit integration context requires an object")
+        try:
+            bounded_ttl = max(30, min(int(ttl_seconds), 30 * 60))
+        except (TypeError, ValueError):
+            bounded_ttl = 10 * 60
+        created = now or datetime.now(timezone.utc)
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        created = created.astimezone(timezone.utc)
+        created_at = _iso_from_timestamp(created)
+        expires_at = _iso_from_timestamp(created + timedelta(seconds=bounded_ttl))
+        safe_results = redact_sensitive_value(
+            results if isinstance(results, dict) else {}, text_limit=32 * 1024
+        )
+        if not isinstance(safe_results, dict):
+            safe_results = {}
+        context_id = secrets.token_urlsafe(32)
+        with self.connection() as conn:
+            conn.execute(
+                "DELETE FROM pimcore_integration_contexts WHERE expires_at <= ?",
+                (created_at,),
+            )
+            conn.execute(
+                """
+                INSERT INTO pimcore_integration_contexts (
+                    id, username, mode, object_id, results_json,
+                    created_at, expires_at, consumed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, '')
+                """,
+                (
+                    context_id,
+                    bound_user,
+                    bound_mode,
+                    bound_object_id,
+                    _json_dumps(safe_results),
+                    created_at,
+                    expires_at,
+                ),
+            )
+        return context_id
+
+    def consume_pimcore_integration_context(
+        self,
+        context_id: object,
+        *,
+        username: str,
+        mode: str,
+        object_id: object,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically consume evidence only when every server binding matches."""
+
+        self.initialize()
+        identity = _text(context_id)
+        bound_user = _text(username)
+        bound_mode = _text(mode).lower()
+        bound_object_id = "" if bound_mode == "create" else _text(object_id)
+        if not identity or not bound_user or bound_mode not in {"create", "edit"}:
+            return None
+        consumed_at = _iso_from_timestamp(now or datetime.now(timezone.utc))
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "DELETE FROM pimcore_integration_contexts WHERE expires_at <= ?",
+                (consumed_at,),
+            )
+            row = conn.execute(
+                """
+                SELECT results_json FROM pimcore_integration_contexts
+                WHERE id = ? AND username = ? AND mode = ? AND object_id = ?
+                  AND consumed_at = '' AND expires_at > ?
+                """,
+                (
+                    identity,
+                    bound_user,
+                    bound_mode,
+                    bound_object_id,
+                    consumed_at,
+                ),
+            ).fetchone()
+            if row is None:
+                return None
+            cursor = conn.execute(
+                """
+                UPDATE pimcore_integration_contexts SET consumed_at = ?
+                WHERE id = ? AND consumed_at = ''
+                """,
+                (consumed_at, identity),
+            )
+            if cursor.rowcount != 1:
+                return None
+            payload = _json_loads(row["results_json"], {})
+            return dict(payload) if isinstance(payload, dict) else {}
+
+    def prune_pimcore_integration_contexts(
+        self, *, now: datetime | None = None
+    ) -> int:
+        """Bound retained integration contexts during regular maintenance."""
+
+        self.initialize()
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        current = current.astimezone(timezone.utc)
+        current_at = _iso_from_timestamp(current)
+        consumed_before = _iso_from_timestamp(current - timedelta(days=1))
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM pimcore_integration_contexts
+                WHERE expires_at <= ?
+                   OR (consumed_at <> '' AND consumed_at <= ?)
+                """,
+                (current_at, consumed_before),
+            )
             return max(0, cursor.rowcount)
 
     def clear_operational_data(self) -> dict[str, int]:
@@ -2249,6 +2428,7 @@ class SqliteStore:
             for table in (
                 "operational_events", "job_runs", "incidents", "alert_reads",
                 "notification_deliveries", "notification_outbox",
+                "pimcore_integration_contexts",
             ):
                 cursor = conn.execute(f"DELETE FROM {table}")
                 deleted[table] = max(0, cursor.rowcount)
