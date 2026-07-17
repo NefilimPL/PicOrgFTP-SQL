@@ -56,9 +56,22 @@ const state = {
     stream: null,
     streamSeeded: false,
     latestEventId: "",
+    seedGeneration: 0,
+    seedLoading: false,
+    seedBuffer: [],
+    seedSince: "",
+    unreadRequestId: 0,
     paused: false,
     buffer: [],
     autoscroll: true,
+    committedFilters: {
+      query: "",
+      severity: "",
+      module: "",
+      username: "",
+      ean: "",
+      jobId: "",
+    },
     tabs: {
       live: { items: [], nextCursor: "", unread: 0, loading: false, requestId: 0 },
       critical: { items: [], nextCursor: "", unread: 0, loading: false, requestId: 0 },
@@ -4834,6 +4847,8 @@ function renderIncidentCard(incident) {
   const ean = incidentValue(incident, "ean");
   const jobId = incident.job_id || incidentValue(incident, "job_id");
   card.id = incident.id || "";
+  card.dataset.observabilityId = incident.id || "";
+  card.tabIndex = -1;
   card.className = `log-incident log-event-${severity}`;
   meta.className = "log-event-meta";
   meta.textContent = [
@@ -4871,8 +4886,7 @@ function renderIncidentCard(incident) {
     jobLink.className = "ghost-button";
     jobLink.textContent = "Pokaz zadanie";
     jobLink.addEventListener("click", () => {
-      if (logsJobFilter) logsJobFilter.value = jobId;
-      switchLogTab("jobs").catch(showLogsError);
+      openObservabilityRecord("jobs", jobId).catch(showLogsError);
     });
     links.appendChild(jobLink);
   }
@@ -4898,6 +4912,8 @@ function renderJobCard(job) {
   const ean = job.ean || job.entry?.ean || job.details?.ean || "";
   const incidentId = job.incident_id || job.details?.incident_id || "";
   card.className = `log-job log-job-${job.status || "unknown"}`;
+  card.dataset.observabilityId = jobId;
+  card.tabIndex = -1;
   meta.className = "log-event-meta";
   meta.textContent = [job.started_at || "", job.finished_at || "", job.status || ""]
     .filter(Boolean)
@@ -4925,11 +4941,7 @@ function renderJobCard(job) {
     incidentLink.className = "ghost-button";
     incidentLink.textContent = "Pokaz incydent";
     incidentLink.addEventListener("click", () => {
-      if (logsTextFilter) logsTextFilter.value = incidentId;
-      const severity = ["critical", "error", "warning"].includes(job.severity)
-        ? job.severity
-        : "error";
-      switchLogTab(severity).catch(showLogsError);
+      openObservabilityRecord("incidents", incidentId).catch(showLogsError);
     });
     links.appendChild(incidentLink);
   }
@@ -4948,13 +4960,39 @@ function renderJobCard(job) {
   return card;
 }
 
+function logFilterInputValues() {
+  return {
+    query: (logsTextFilter?.value || "").trim().toLowerCase(),
+    severity: logsSeverityFilter?.value || "",
+    module: (logsModuleFilter?.value || "").trim().toLowerCase(),
+    username: (logsUserFilter?.value || "").trim().toLowerCase(),
+    ean: (logsEanFilter?.value || "").trim().toLowerCase(),
+    jobId: (logsJobFilter?.value || "").trim().toLowerCase(),
+  };
+}
+
+function commitLogFilters(filters = logFilterInputValues()) {
+  state.observability.committedFilters = { ...filters };
+}
+
+function resetCommittedLogFilters() {
+  for (const control of [
+    logsTextFilter,
+    logsSeverityFilter,
+    logsModuleFilter,
+    logsUserFilter,
+    logsEanFilter,
+    logsJobFilter,
+  ]) {
+    if (control) control.value = "";
+  }
+  commitLogFilters({ query: "", severity: "", module: "", username: "", ean: "", jobId: "" });
+}
+
 function logItemMatchesFilters(item) {
-  const query = (logsTextFilter?.value || "").trim().toLowerCase();
-  const severity = logsSeverityFilter?.value || "";
-  const moduleName = (logsModuleFilter?.value || "").trim().toLowerCase();
-  const username = (logsUserFilter?.value || "").trim().toLowerCase();
-  const ean = (logsEanFilter?.value || "").trim().toLowerCase();
-  const jobId = (logsJobFilter?.value || "").trim().toLowerCase();
+  const filters = state.observability.committedFilters;
+  const { query, severity, username, ean, jobId } = filters;
+  const moduleName = filters.module;
   const context = item.context || {};
   const serialized = JSON.stringify(item).toLowerCase();
   if (query && !serialized.includes(query)) return false;
@@ -4991,29 +5029,101 @@ function renderLogs() {
   }
 }
 
+function applyObservabilityUnread(unread = {}, requestId = 0) {
+  if (requestId !== state.observability.unreadRequestId) return false;
+  updateLogAlert(unread);
+  return true;
+}
+
+async function requestObservabilityPayload(path, options = {}) {
+  const requestOptions = { ...options };
+  const authoritativeUnread = requestOptions.authoritativeUnread === true;
+  delete requestOptions.authoritativeUnread;
+  const requestId = Number(state.observability.unreadRequestId || 0) + 1;
+  state.observability.unreadRequestId = requestId;
+  const payload = await requestJson(path, requestOptions);
+  if (authoritativeUnread) {
+    const authoritativeRequestId = Number(state.observability.unreadRequestId || 0) + 1;
+    state.observability.unreadRequestId = authoritativeRequestId;
+    applyObservabilityUnread(payload.unread || {}, authoritativeRequestId);
+  } else {
+    applyObservabilityUnread(payload.unread || {}, requestId);
+  }
+  return payload;
+}
+
 function showLogsError(error) {
   if (!logsOutput) return;
   logsOutput.className = "logs-output empty-state";
   logsOutput.textContent = error.message || String(error);
 }
 
-async function markSeverityRead(severity) {
+function waitForLogsPaint() {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(resolve);
+    });
+  });
+}
+
+async function markSeverityRead(severity, requestId) {
   const tab = observabilityTab(severity);
   if (!tab.items.length || !tab.unread || tab.readInFlight) return;
-  const incident = tab.items[0];
-  const eventId = incident.latest_event_id || incident.first_event_id || "";
-  const createdAt = incident.last_seen_at || incident.first_seen_at || "";
-  if (!eventId || !createdAt) return;
   tab.readInFlight = true;
   try {
-    const payload = await requestJson("/api/observability/read", {
+    await waitForLogsPaint();
+    if (
+      !logsView?.classList.contains("active") ||
+      state.observability.activeTab !== severity ||
+      tab.requestId !== requestId
+    ) {
+      return;
+    }
+    const card = logsOutput.querySelector(".log-incident[data-observability-id]");
+    if (!card || card.hidden || !card.isConnected || !card.getClientRects().length) return;
+    const incident = tab.items.find((item) => item.id === card.dataset.observabilityId);
+    const eventId = incident?.latest_event_id || incident?.first_event_id || "";
+    const createdAt = incident?.last_seen_at || incident?.first_seen_at || "";
+    if (!eventId || !createdAt) return;
+    await requestObservabilityPayload("/api/observability/read", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ severity, event_id: eventId, created_at: createdAt }),
+      authoritativeUnread: true,
     });
-    updateLogAlert(payload.unread || {});
   } finally {
     tab.readInFlight = false;
+  }
+}
+
+function mergeLiveItems(items = [], since = "") {
+  const byId = new Map();
+  for (const item of items) {
+    if (!item?.id || (since && String(item.created_at || "") < since)) continue;
+    byId.set(item.id, item);
+  }
+  return [...byId.values()]
+    .sort((left, right) =>
+      `${left.created_at || ""}\u0000${left.id}`.localeCompare(
+        `${right.created_at || ""}\u0000${right.id}`
+      )
+    )
+    .slice(-MAX_LIVE_LOG_EVENTS);
+}
+
+function appendPausedObservabilityEvents(items = []) {
+  const knownIds = new Set(state.observability.buffer.map((item) => item.id));
+  for (const item of items) {
+    if (item?.id && !knownIds.has(item.id)) {
+      knownIds.add(item.id);
+      state.observability.buffer.push(item);
+    }
+  }
+  if (state.observability.buffer.length > MAX_LIVE_LOG_EVENTS) {
+    state.observability.buffer.splice(
+      0,
+      state.observability.buffer.length - MAX_LIVE_LOG_EVENTS
+    );
   }
 }
 
@@ -5023,29 +5133,57 @@ async function seedLiveLogs({ force = false } = {}) {
     renderLogs();
     return;
   }
-  if (force) stopObservabilityStream();
-  live.items = [];
-  live.nextCursor = "";
-  state.observability.buffer = [];
-  state.observability.latestEventId = "";
-  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  if (state.observability.seedLoading && !force) return;
+  const preserveBufferedFrames = state.observability.seedLoading;
+  const seedGeneration = Number(state.observability.seedGeneration || 0) + 1;
+  state.observability.seedGeneration = seedGeneration;
+  state.observability.seedLoading = true;
+  state.observability.seedSince = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  if (!preserveBufferedFrames) state.observability.seedBuffer = [];
+  startObservabilityStream();
+  const since = state.observability.seedSince;
   let cursor = "";
   const newestFirst = [];
-  do {
-    const params = new URLSearchParams({ since, limit: "100" });
-    if (cursor) params.set("cursor", cursor);
-    const payload = await requestJson("/api/observability/events?" + params.toString());
-    const items = Array.isArray(payload.items) ? payload.items : [];
-    if (!state.observability.latestEventId && items[0]?.id) {
-      state.observability.latestEventId = items[0].id;
+  try {
+    do {
+      const params = new URLSearchParams({ since, limit: "100" });
+      if (cursor) params.set("cursor", cursor);
+      const payload = await requestObservabilityPayload("/api/observability/events?" + params.toString());
+      if (state.observability.seedGeneration !== seedGeneration) return;
+      newestFirst.push(...(Array.isArray(payload.items) ? payload.items : []));
+      cursor = payload.next_cursor || "";
+    } while (cursor && newestFirst.length < MAX_LIVE_LOG_EVENTS);
+    if (state.observability.seedGeneration !== seedGeneration) return;
+    const seedItems = newestFirst.slice(0, MAX_LIVE_LOG_EVENTS).reverse();
+    const bufferedFrames = state.observability.seedBuffer.splice(0);
+    const merged = mergeLiveItems([...live.items, ...seedItems, ...bufferedFrames], since);
+    if (state.observability.paused) {
+      live.items = mergeLiveItems([...live.items, ...seedItems], since);
+      appendPausedObservabilityEvents(
+        bufferedFrames.filter((item) => String(item.created_at || "") >= since)
+      );
+    } else {
+      live.items = merged;
     }
-    newestFirst.push(...items);
-    cursor = payload.next_cursor || "";
-    updateLogAlert(payload.unread || {});
-  } while (cursor && newestFirst.length < MAX_LIVE_LOG_EVENTS);
-  live.items = newestFirst.slice(0, MAX_LIVE_LOG_EVENTS).reverse();
-  state.observability.streamSeeded = true;
-  renderLogs();
+    state.observability.latestEventId =
+      merged[merged.length - 1]?.id || state.observability.latestEventId;
+    state.observability.streamSeeded = true;
+    if (state.observability.activeTab === "live") renderLogs();
+  } catch (error) {
+    if (state.observability.seedGeneration !== seedGeneration) return;
+    const bufferedFrames = state.observability.seedBuffer.splice(0);
+    const currentFrames = bufferedFrames.filter(
+      (item) => String(item.created_at || "") >= since
+    );
+    if (state.observability.paused) appendPausedObservabilityEvents(currentFrames);
+    else live.items = mergeLiveItems([...live.items, ...currentFrames], since);
+    if (state.observability.activeTab === "live") renderLogs();
+    throw error;
+  } finally {
+    if (state.observability.seedGeneration === seedGeneration) {
+      state.observability.seedLoading = false;
+    }
+  }
 }
 
 function appendLiveEvent(event) {
@@ -5093,12 +5231,21 @@ function handleObservabilityEvent(event) {
     return;
   }
   if (!item || typeof item !== "object") return;
+  if (state.observability.seedLoading) {
+    if (
+      item.id &&
+      !state.observability.seedBuffer.some((buffered) => buffered.id === item.id)
+    ) {
+      state.observability.seedBuffer.push(item);
+      if (state.observability.seedBuffer.length > MAX_LIVE_LOG_EVENTS) {
+        state.observability.seedBuffer.shift();
+      }
+    }
+    return;
+  }
   state.observability.latestEventId = item.id || event.lastEventId || state.observability.latestEventId;
   if (state.observability.paused) {
-    state.observability.buffer.push(item);
-    if (state.observability.buffer.length > MAX_LIVE_LOG_EVENTS) {
-      state.observability.buffer.shift();
-    }
+    appendPausedObservabilityEvents([item]);
     if (logsStreamStatus) {
       logsStreamStatus.textContent = `Wstrzymano (${state.observability.buffer.length} oczekuje)`;
     }
@@ -5115,8 +5262,10 @@ function startObservabilityStream() {
   ) {
     return;
   }
-  const latestId = state.observability.latestEventId || "observability-live-high-water";
-  const stream = new EventSource("/api/observability/stream?after_id=" + encodeURIComponent(latestId));
+  const latestId = state.observability.latestEventId || "";
+  const stream = latestId
+    ? new EventSource("/api/observability/stream?after_id=" + encodeURIComponent(latestId))
+    : new EventSource("/api/observability/stream");
   state.observability.stream = stream;
   stream.onopen = () => {
     if (logsStreamStatus) logsStreamStatus.textContent = "Polaczono";
@@ -5141,6 +5290,77 @@ function observabilityEndpoint(tabName, cursor = "") {
   return "/api/observability/incidents?" + params.toString();
 }
 
+function appendUniqueObservabilityItems(tab, items = []) {
+  const knownIds = new Set(tab.items.map((item) => item.id).filter(Boolean));
+  tab.items = tab.items.concat(
+    items.filter((item) => {
+      if (!item?.id || knownIds.has(item.id)) return false;
+      knownIds.add(item.id);
+      return true;
+    })
+  );
+}
+
+async function walkObservabilityPages(kind, recordId) {
+  if (!recordId || !["incidents", "jobs"].includes(kind)) return null;
+  let cursor = "";
+  const visitedCursors = new Set();
+  while (true) {
+    const params = new URLSearchParams({ limit: String(OBSERVABILITY_PAGE_SIZE) });
+    if (cursor) params.set("cursor", cursor);
+    const payload = await requestObservabilityPayload(
+      `/api/observability/${kind}?${params.toString()}`
+    );
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    if (kind === "jobs") {
+      const jobs = observabilityTab("jobs");
+      appendUniqueObservabilityItems(jobs, items);
+      jobs.nextCursor = payload.next_cursor || "";
+    } else {
+      for (const severity of ["critical", "error", "warning"]) {
+        appendUniqueObservabilityItems(
+          observabilityTab(severity),
+          items.filter((item) => item.severity === severity)
+        );
+      }
+    }
+    const found = items.find((item) => item.id === recordId);
+    if (found) {
+      return { item: found, tabName: kind === "jobs" ? "jobs" : found.severity };
+    }
+    const nextCursor = payload.next_cursor || "";
+    if (!nextCursor || visitedCursors.has(nextCursor)) return null;
+    visitedCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+  return null;
+}
+
+function focusObservabilityRecord(recordId) {
+  const card = [...logsOutput.querySelectorAll("[data-observability-id]")].find(
+    (item) => item.dataset.observabilityId === recordId
+  );
+  if (!card) return false;
+  card.classList.add("log-card-highlight");
+  card.focus({ preventScroll: true });
+  card.scrollIntoView({ block: "center", behavior: "smooth" });
+  window.setTimeout(() => card.classList.remove("log-card-highlight"), 2400);
+  return true;
+}
+
+async function openObservabilityRecord(kind, recordId) {
+  const located = await walkObservabilityPages(kind, recordId);
+  if (!located || !state.observability.tabs[located.tabName]) {
+    throw new Error("Nie znaleziono wskazanego rekordu obserwowalnosci.");
+  }
+  resetCommittedLogFilters();
+  await switchLogTab(located.tabName);
+  await waitForLogsPaint();
+  if (!focusObservabilityRecord(recordId)) {
+    throw new Error("Nie mozna pokazac wskazanego rekordu obserwowalnosci.");
+  }
+}
+
 async function loadObservabilityTab(tabName, { append = false, force = false } = {}) {
   if (tabName === "live") {
     await seedLiveLogs({ force });
@@ -5155,7 +5375,9 @@ async function loadObservabilityTab(tabName, { append = false, force = false } =
   }
   if (!append && tab.items.length) {
     renderLogs();
-    if (["critical", "error", "warning"].includes(tabName)) await markSeverityRead(tabName);
+    if (["critical", "error", "warning"].includes(tabName)) {
+      await markSeverityRead(tabName, tab.requestId);
+    }
     return;
   }
   const cursor = append ? tab.nextCursor : "";
@@ -5166,25 +5388,21 @@ async function loadObservabilityTab(tabName, { append = false, force = false } =
   if (state.observability.activeTab === tabName) renderLogs();
   let rendered = false;
   try {
-    const payload = await requestJson(endpoint);
+    const payload = await requestObservabilityPayload(endpoint);
     if (tab.requestId !== requestId) return;
     const items = Array.isArray(payload.items) ? payload.items : [];
     if (append) {
-      const knownIds = new Set(tab.items.map((item) => item.id).filter(Boolean));
-      tab.items = tab.items.concat(
-        items.filter((item) => !item.id || !knownIds.has(item.id))
-      );
+      appendUniqueObservabilityItems(tab, items);
     } else {
       tab.items = items;
     }
     tab.nextCursor = payload.next_cursor || "";
-    updateLogAlert(payload.unread || {});
     if (state.observability.activeTab === tabName) {
       tab.loading = false;
       renderLogs();
       rendered = true;
       if (!append && ["critical", "error", "warning"].includes(tabName)) {
-        await markSeverityRead(tabName);
+        await markSeverityRead(tabName, requestId);
       }
     }
   } finally {
@@ -5219,8 +5437,7 @@ async function pollLogStatus() {
     updateLogAlert({});
     return;
   }
-  const payload = await requestJson("/api/observability/events?limit=1");
-  updateLogAlert(payload.unread || {});
+  await requestObservabilityPayload("/api/observability/events?limit=1");
 }
 
 function createPoller(name, intervalMs, callback, options = {}) {
@@ -5317,6 +5534,11 @@ function resetObservabilityLists() {
   stopObservabilityStream();
   state.observability.streamSeeded = false;
   state.observability.latestEventId = "";
+  state.observability.seedGeneration = Number(state.observability.seedGeneration || 0) + 1;
+  state.observability.seedLoading = false;
+  state.observability.seedBuffer = [];
+  state.observability.seedSince = "";
+  state.observability.unreadRequestId = Number(state.observability.unreadRequestId || 0) + 1;
   state.observability.buffer = [];
   for (const tab of Object.values(state.observability.tabs)) {
     tab.requestId = Number(tab.requestId || 0) + 1;
@@ -10444,7 +10666,21 @@ document.querySelectorAll("[data-log-tab]").forEach((button) => {
 
 logsFilters?.addEventListener("submit", (event) => {
   event.preventDefault();
+  commitLogFilters();
   renderLogs();
+  const tabName = state.observability.activeTab;
+  if (["critical", "error", "warning"].includes(tabName)) {
+    markSeverityRead(tabName, observabilityTab(tabName).requestId).catch(showLogsError);
+  }
+});
+
+logsFilters?.addEventListener("reset", () => {
+  resetCommittedLogFilters();
+  renderLogs();
+  const tabName = state.observability.activeTab;
+  if (["critical", "error", "warning"].includes(tabName)) {
+    markSeverityRead(tabName, observabilityTab(tabName).requestId).catch(showLogsError);
+  }
 });
 
 logsPauseButton?.addEventListener("click", () => {
@@ -10456,16 +10692,9 @@ logsPauseButton?.addEventListener("click", () => {
   }
   const buffered = state.observability.buffer.splice(0);
   const live = observabilityTab("live");
-  const known = new Set(live.items.map((item) => item.id));
-  for (const item of buffered) {
-    if (item?.id && !known.has(item.id)) {
-      known.add(item.id);
-      live.items.push(item);
-    }
-  }
-  if (live.items.length > MAX_LIVE_LOG_EVENTS) {
-    live.items.splice(0, live.items.length - MAX_LIVE_LOG_EVENTS);
-  }
+  live.items = mergeLiveItems([...live.items, ...buffered]);
+  state.observability.latestEventId =
+    live.items[live.items.length - 1]?.id || state.observability.latestEventId;
   if (logsStreamStatus) logsStreamStatus.textContent = "Polaczono";
   renderLogs();
 });

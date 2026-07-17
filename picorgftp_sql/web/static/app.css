@@ -2549,6 +2549,12 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
   margin: 0;
 }
 
+.log-card-highlight {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
 .log-incident-context {
   border-top: 1px solid var(--line);
   padding-top: 8px;

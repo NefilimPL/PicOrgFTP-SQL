@@ -78,6 +78,7 @@ class WebUiIntegrityTests(unittest.TestCase):
             "logsPauseButton",
             "logsAutoscrollToggle",
             "logsLoadMoreButton",
+            "logsResetFiltersButton",
         ):
             self.assertIn(f'id="{control_id}"', html_source)
         self.assertIn("observability:", js_source)
@@ -87,6 +88,8 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("localStorage.getItem(LOG_AUTOSCROLL_KEY)", js_source)
         self.assertIn('classList.toggle("log-alert-error"', js_source)
         self.assertIn(".nav-button.log-alert-error", css_source)
+        self.assertIn(".log-card-highlight", css_source)
+        self.assertIn("data-observability-id", js_source)
         logs_renderer = js_source[
             js_source.index("function renderLogEvent") : js_source.index("function createPoller")
         ]

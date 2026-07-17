@@ -38,10 +38,23 @@ class SourceIntegrityTests(unittest.TestCase):
         )
         source = app_path.read_text(encoding="utf-8")
 
-        self.assertIn(
-            'state.observability.latestEventId || "observability-live-high-water"',
-            source,
+        seed_start = source.index("async function seedLiveLogs")
+        seed_end = source.index("function appendLiveEvent", seed_start)
+        seed_source = source[seed_start:seed_end]
+        self.assertIn("seedGeneration", seed_source)
+        self.assertIn("seedBuffer", seed_source)
+        self.assertIn("mergeLiveItems", seed_source)
+        self.assertLess(
+            seed_source.index("startObservabilityStream();"),
+            seed_source.index('requestObservabilityPayload("/api/observability/events?"'),
         )
+        seed_catch = seed_source[seed_source.index("} catch (error)") :]
+        self.assertIn(
+            "if (state.observability.seedGeneration !== seedGeneration) return;",
+            seed_catch,
+        )
+        self.assertGreaterEqual(seed_source.count("bufferedFrames.filter"), 2)
+        self.assertNotIn("observability-live-high-water", source)
         self.assertIn("if (tab.loading) return;", source)
         self.assertIn("logsLoadMoreButton.disabled = Boolean(tab.loading)", source)
         self.assertIn("state.observability.activeTab === tabName", source)
@@ -52,6 +65,42 @@ class SourceIntegrityTests(unittest.TestCase):
         ]
         self.assertIn("logsOutput.appendChild(renderLogEvent(event))", append_live)
         self.assertNotIn("renderLogs()", append_live)
+
+    def test_web_logs_gate_reads_navigation_unread_and_filters(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        self.assertIn("function waitForLogsPaint", source)
+        self.assertIn("window.requestAnimationFrame", source)
+        self.assertIn('logsView?.classList.contains("active")', source)
+        self.assertIn("tab.requestId !== requestId", source)
+        self.assertIn(
+            'logsOutput.querySelector(".log-incident[data-observability-id]")',
+            source,
+        )
+        self.assertIn("card.getClientRects().length", source)
+        self.assertIn("async function walkObservabilityPages", source)
+        self.assertIn("async function openObservabilityRecord", source)
+        self.assertIn("focusObservabilityRecord", source)
+        self.assertNotIn("OBSERVABILITY_RECORD_PAGE_LIMIT", source)
+        self.assertIn("visitedCursors.has(nextCursor)", source)
+        self.assertIn("unreadRequestId", source)
+        self.assertIn("applyObservabilityUnread", source)
+        self.assertIn("authoritativeUnread", source)
+        self.assertIn("committedFilters", source)
+        self.assertIn('logsFilters?.addEventListener("reset"', source)
+        job_renderer = source[
+            source.index("function renderJobCard") : source.index(
+                "function logItemMatchesFilters"
+            )
+        ]
+        self.assertNotIn(': "error"', job_renderer)
 
     def test_web_client_reports_deduplicated_global_failures(self) -> None:
         app_path = (
