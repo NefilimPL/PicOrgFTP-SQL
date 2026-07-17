@@ -4254,12 +4254,32 @@ def _redacted_email_test_attempt(raw: object) -> Dict[str, Any]:
     channel = str(item.get("channel") or "").strip().lower()
     if channel not in {"entra", "smtp"}:
         channel = ""
-    status = "sent" if item.get("status") == "sent" else "error"
+    raw_status = str(item.get("status") or "").strip().lower()
+    status = (
+        raw_status
+        if raw_status in {"sent", "partial", "refused"}
+        else "error"
+    )
     attempt: Dict[str, Any] = {"channel": channel, "status": status}
     for key in ("status_code", "elapsed_ms"):
         value = item.get(key)
         if isinstance(value, int) and not isinstance(value, bool):
             attempt[key] = max(0, value)
+    if status in {"partial", "refused"}:
+        for key in ("accepted_count", "refused_count"):
+            value = item.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                attempt[key] = max(0, value)
+        raw_codes = item.get("refusal_codes")
+        if isinstance(raw_codes, (list, tuple, set)):
+            attempt["refusal_codes"] = sorted(
+                {
+                    max(0, value)
+                    for value in raw_codes
+                    if isinstance(value, int) and not isinstance(value, bool)
+                }
+            )[:20]
+        return attempt
     if status == "sent":
         return attempt
     category = str(item.get("category") or "delivery").strip().lower()

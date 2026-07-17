@@ -151,7 +151,15 @@ def emit_event(
     }
     if normalized_severity == "info":
         try:
-            return observability_store().append_operational_event(event)
+            store = observability_store()
+            suppress = isinstance(safe_details, dict) and bool(
+                safe_details.get("suppress_notifications")
+            )
+            if bool(getattr(store, "supports_notification_outbox", False)):
+                return store.append_operational_event(
+                    event, create_notification_intent=not suppress
+                )
+            return store.append_operational_event(event)
         except Exception:
             _mirror_event(event)
             if strict:
@@ -171,6 +179,8 @@ def emit_event(
         safe_details.get("suppress_notifications")
     )
     if suppress or not bool(incident.get("notification_due")):
+        return event
+    if bool(incident.get("notification_intent_persisted")):
         return event
     try:
         from .notification_service import queue_incident_notification
@@ -318,14 +328,22 @@ def coalesce_incident(
     atomic_incident_event = bool(
         getattr(store, "supports_atomic_incident_event", False)
     )
+    supports_outbox = bool(
+        getattr(store, "supports_notification_outbox", False)
+    )
+    event_details = event.get("details")
+    suppress_notifications = isinstance(event_details, dict) and bool(
+        event_details.get("suppress_notifications")
+    )
     if callable(atomic_coalesce):
         if atomic_incident_event:
             source_event = redact_value(event)
             if not isinstance(source_event, dict):
                 source_event = {}
-            incident_result = dict(
-                atomic_coalesce(occurrence, source_event=source_event)
-            )
+            kwargs: dict[str, object] = {"source_event": source_event}
+            if supports_outbox:
+                kwargs["create_notification_intent"] = not suppress_notifications
+            incident_result = dict(atomic_coalesce(occurrence, **kwargs))
         else:
             incident_result = dict(atomic_coalesce(occurrence))
         notification_due = bool(incident_result.get("notification_due"))
@@ -341,6 +359,9 @@ def coalesce_incident(
         )
 
     incident_result["notification_due"] = notification_due
+    incident_result["notification_intent_persisted"] = bool(
+        supports_outbox and notification_due and not suppress_notifications
+    )
 
     event["incident_id"] = _text(incident_result.get("id"))
     persisted_event = redact_value(event)

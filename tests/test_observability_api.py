@@ -582,6 +582,45 @@ def test_non_admin_cannot_inspect_incident_delivery_status(api_environment) -> N
     assert "attempts" not in response.text.lower()
 
 
+def test_partial_delivery_projection_exposes_only_safe_counts_status_and_codes(
+) -> None:
+    from picorgftp_sql.web.app import _public_incident_delivery
+
+    projected = _public_incident_delivery(
+        {
+            "id": "delivery-1",
+            "status": "error",
+            "used_channel": "smtp",
+            "recipients": ["private@example.com", "other@example.com"],
+            "created_at": "2026-07-17T12:00:00.000Z",
+            "updated_at": "2026-07-17T12:00:01.000Z",
+            "attempts": [
+                {
+                    "channel": "smtp",
+                    "status": "partial",
+                    "accepted_count": 1,
+                    "refused_count": 1,
+                    "refusal_codes": [452],
+                    "refused_recipients": ["private@example.com"],
+                    "server_response": "sensitive",
+                }
+            ],
+        }
+    )
+
+    assert projected["attempts"] == [
+        {
+            "channel": "smtp",
+            "status": "partial",
+            "accepted_count": 1,
+            "refused_count": 1,
+            "refusal_codes": [452],
+        }
+    ]
+    assert "private@example.com" not in str(projected)
+    assert "sensitive" not in str(projected)
+
+
 def test_jobs_endpoint_returns_durable_runs_for_admin(api_environment) -> None:
     client, store = api_environment
     _login(client)
@@ -884,6 +923,7 @@ def test_clear_logs_clears_operational_tables_but_preserves_audits(
         "incidents": 1,
         "alert_reads": 1,
         "notification_deliveries": 0,
+        "notification_outbox": 0,
     }
     assert store.query_operational_events()["items"] == []
     assert store.query_job_runs()["items"] == []

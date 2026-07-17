@@ -28,6 +28,7 @@ class SqliteDataStoreAdapter:
 
     mode = storage_settings.DATA_MODE_SQLITE
     supports_atomic_incident_event = True
+    supports_notification_outbox = True
 
     def __init__(self, database_path: str):
         self.database_path = database_path
@@ -71,9 +72,14 @@ class SqliteDataStoreAdapter:
         self.store.append_history(record)
 
     def append_operational_event(
-        self, event: dict[str, object]
+        self,
+        event: dict[str, object],
+        *,
+        create_notification_intent: bool = False,
     ) -> dict[str, Any]:
-        return self.store.append_operational_event(event)
+        return self.store.append_operational_event(
+            event, create_notification_intent=create_notification_intent
+        )
 
     def query_operational_events(
         self,
@@ -123,11 +129,13 @@ class SqliteDataStoreAdapter:
         occurrence: dict[str, object],
         notification_window_seconds: int = 15 * 60,
         source_event: dict[str, object] | None = None,
+        create_notification_intent: bool = False,
     ) -> dict[str, Any]:
         return self.store.coalesce_incident(
             occurrence,
             notification_window_seconds=notification_window_seconds,
             source_event=source_event,
+            create_notification_intent=create_notification_intent,
         )
 
     def query_incidents(
@@ -171,6 +179,28 @@ class SqliteDataStoreAdapter:
         self, record: dict[str, object]
     ) -> dict[str, Any]:
         return self.store.enqueue_notification_delivery(record)
+
+    def pending_notification_intents(self, limit: int = 20) -> list[dict[str, Any]]:
+        return self.store.pending_notification_intents(limit=limit)
+
+    def notification_intent_context(
+        self, intent_id: str
+    ) -> dict[str, Any] | None:
+        return self.store.notification_intent_context(intent_id)
+
+    def materialize_notification_intent(
+        self,
+        intent_id: str,
+        *,
+        delivery: dict[str, object] | None,
+        completed_at: str,
+    ) -> dict[str, Any]:
+        return self.store.materialize_notification_intent(
+            intent_id, delivery=delivery, completed_at=completed_at
+        )
+
+    def prune_done_notification_intents(self, before: str) -> int:
+        return self.store.prune_done_notification_intents(before)
 
     def pending_notification_deliveries(
         self, limit: int = 20

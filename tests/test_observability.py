@@ -227,23 +227,20 @@ def test_non_info_event_enters_stream_once_with_incident_id(
     assert event["incident_id"].startswith("inc-")
 
 
-def test_queue_failure_restores_notification_window_and_next_event_is_due(
+def test_durable_outbox_keeps_notification_window_claim_after_event_commit(
     monkeypatch, tmp_path
 ) -> None:
     store = SqliteStore(str(tmp_path / "events.sqlite"))
     monkeypatch.setattr(observability, "observability_store", lambda: store)
     queued: list[dict[str, object]] = []
 
-    def fail_then_queue(event, incident):
-        if not queued:
-            queued.append({"failed": True})
-            raise RuntimeError("sqlite queue unavailable token=secret")
+    def forbidden_post_commit_queue(event, incident):
         queued.append(dict(incident))
-        return {"status": "pending"}
+        raise AssertionError("production outbox must not queue after commit")
 
     monkeypatch.setattr(
         "picorgftp_sql.notification_service.queue_incident_notification",
-        fail_then_queue,
+        forbidden_post_commit_queue,
     )
     first_now = datetime(2026, 7, 17, 10, 0, tzinfo=UTC)
     second_now = datetime(2026, 7, 17, 10, 1, tzinfo=UTC)
@@ -259,10 +256,13 @@ def test_queue_failure_restores_notification_window_and_next_event_is_due(
     )
 
     assert first_incident["id"] == first["incident_id"]
-    assert first_incident["notification_window_at"] == ""
-    diagnostics = store.query_operational_events(query="notification.queue_failed")
-    assert diagnostics["items"][0]["details"]["suppress_notifications"] is True
-    assert "secret" not in str(diagnostics["items"][0])
+    assert (
+        first_incident["notification_window_at"]
+        == "2026-07-17T10:00:00.000Z"
+    )
+    assert [item["event_id"] for item in store.pending_notification_intents(10)] == [
+        first["id"]
+    ]
 
     monkeypatch.setattr(observability, "_utc_datetime", lambda _now=None: second_now)
     second = observability.emit_event(
@@ -270,8 +270,8 @@ def test_queue_failure_restores_notification_window_and_next_event_is_due(
     )
 
     assert second["incident_id"] == first["incident_id"]
-    assert len(queued) == 2
-    assert queued[-1]["notification_due"] is True
+    assert queued == []
+    assert len(store.pending_notification_intents(10)) == 1
 
 
 def test_emit_event_suppress_notifications_prevents_recursive_queue(monkeypatch) -> None:

@@ -369,7 +369,7 @@ def test_smtp_transport_redacts_errors_and_always_cleans_up(monkeypatch) -> None
     assert smtp.calls[-1] == "quit"
 
 
-def test_smtp_transport_rejects_redacted_recipient_refusals_and_cleans_up(
+def test_smtp_transport_redacts_recipient_refusals_and_cleans_up(
     monkeypatch,
 ) -> None:
     sensitive_response = (
@@ -377,7 +377,7 @@ def test_smtp_transport_rejects_redacted_recipient_refusals_and_cleans_up(
     )
     smtp = FakeSmtp(
         send_result={
-            "recipient@example.com": (550, sensitive_response.encode("utf-8"))
+            "second@example.com": (550, sensitive_response.encode("utf-8"))
         }
     )
     monkeypatch.setattr(
@@ -386,26 +386,76 @@ def test_smtp_transport_rejects_redacted_recipient_refusals_and_cleans_up(
         lambda host, port, timeout: smtp,
     )
 
-    with pytest.raises(RuntimeError) as exc_info:
-        SmtpMailTransport(
-            {
-                "host": "smtp.example",
-                "port": 25,
-                "security": "none",
-                "username": "sender",
-                "password": "password-sensitive",
-            }
-        ).send(sample_message())
+    result = SmtpMailTransport(
+        {
+            "host": "smtp.example",
+            "port": 25,
+            "security": "none",
+            "username": "sender",
+            "password": "password-sensitive",
+        }
+    ).send(sample_message())
 
-    assert str(exc_info.value) == "SMTP delivery failed."
+    assert result["status"] == "partial"
     for sensitive in (
         sensitive_response,
         "password-sensitive",
-        "recipient@example.com",
         "Plain incident body",
     ):
-        assert sensitive not in str(exc_info.value)
+        assert sensitive not in str(result)
     assert smtp.calls[-1] == "quit"
+
+
+def test_smtp_transport_returns_internal_partial_refusal_without_sensitive_response(
+    monkeypatch,
+) -> None:
+    smtp = FakeSmtp(
+        send_result={
+            "second@example.com": (452, b"temporary mailbox failure with private data")
+        }
+    )
+    monkeypatch.setattr(
+        email_delivery.smtplib,
+        "SMTP",
+        lambda host, port, timeout: smtp,
+    )
+
+    result = SmtpMailTransport(
+        {"host": "smtp.example", "port": 25, "security": "none"}
+    ).send(sample_message())
+
+    assert result == {
+        "channel": "smtp",
+        "status": "partial",
+        "accepted_count": 1,
+        "refused_count": 1,
+        "refusal_codes": [452],
+        "refused_recipients": ["second@example.com"],
+        "elapsed_ms": result["elapsed_ms"],
+    }
+    assert "private data" not in repr(result)
+    assert smtp.calls[-1] == "quit"
+
+
+def test_smtp_transport_reports_all_refused_for_service_fallback(monkeypatch) -> None:
+    smtp = FakeSmtp(
+        send_result={
+            "first@example.com": (550, b"no"),
+            "second@example.com": (551, b"no"),
+        }
+    )
+    monkeypatch.setattr(
+        email_delivery.smtplib, "SMTP", lambda *_args, **_kwargs: smtp
+    )
+
+    result = SmtpMailTransport(
+        {"host": "smtp.example", "port": 25, "security": "none"}
+    ).send(sample_message())
+
+    assert result["status"] == "refused"
+    assert result["accepted_count"] == 0
+    assert result["refused_count"] == 2
+    assert result["refusal_codes"] == [550, 551]
 
 
 def test_build_transport_selects_supported_channel() -> None:

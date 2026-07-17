@@ -21,7 +21,9 @@ from .email_settings import (
 
 WORKER_POLL_SECONDS = 2.0
 WORKER_BATCH_LIMIT = 20
+WORKER_STOP_TIMEOUT_SECONDS = 23.0
 STALE_SENDING_AFTER = timedelta(minutes=5)
+OUTBOX_DONE_RETENTION = timedelta(days=7)
 
 
 def _utc_now() -> datetime:
@@ -81,6 +83,8 @@ def resolve_recipients(
     event: Mapping[str, object],
     settings: Mapping[str, object],
     user_lookup: Callable[[str], Mapping[str, object] | None],
+    *,
+    tolerate_lookup_errors: bool = True,
 ) -> list[str]:
     """Resolve, validate and case-insensitively deduplicate one severity rule."""
 
@@ -103,6 +107,8 @@ def resolve_recipients(
         try:
             user = user_lookup(username) if username else None
         except Exception:
+            if not tolerate_lookup_errors:
+                raise
             user = None
         if isinstance(user, Mapping):
             candidates.append(user.get("email", ""))
@@ -372,11 +378,28 @@ def _channel_sender(
 
 
 def _safe_attempt(channel: str, result: Mapping[str, object]) -> dict[str, object]:
-    attempt: dict[str, object] = {"channel": channel, "status": "sent"}
+    status = _text(result.get("status")).lower()
+    if status not in {"sent", "partial", "refused"}:
+        status = "sent"
+    attempt: dict[str, object] = {"channel": channel, "status": status}
     for key in ("status_code", "elapsed_ms"):
         value = result.get(key)
         if isinstance(value, int) and not isinstance(value, bool):
             attempt[key] = max(0, value)
+    if status in {"partial", "refused"}:
+        for key in ("accepted_count", "refused_count"):
+            value = result.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                attempt[key] = max(0, value)
+        raw_codes = result.get("refusal_codes")
+        if isinstance(raw_codes, (list, tuple, set)):
+            attempt["refusal_codes"] = sorted(
+                {
+                    max(0, value)
+                    for value in raw_codes
+                    if isinstance(value, int) and not isinstance(value, bool)
+                }
+            )[:20]
     return attempt
 
 
@@ -450,6 +473,71 @@ class NotificationService:
         }
         return self.store.enqueue_notification_delivery(record)
 
+    def process_notification_intent(self, intent_id: str) -> bool:
+        """Materialize one durable outbox intent, leaving transient failures pending."""
+
+        try:
+            context = self.store.notification_intent_context(_text(intent_id))
+            if not isinstance(context, Mapping):
+                return False
+            event = context.get("event")
+            incident = context.get("incident")
+            if not isinstance(event, Mapping):
+                return False
+            incident_values = incident if isinstance(incident, Mapping) else {}
+            settings = self._settings()
+            recipients = resolve_recipients(
+                event,
+                settings,
+                self.user_lookup,
+                tolerate_lookup_errors=False,
+            )
+            severity = _text(event.get("severity")).lower()
+            completed_at = _iso_utc(self.now())
+            if severity == "info" and not recipients:
+                self.store.materialize_notification_intent(
+                    _text(intent_id), delivery=None, completed_at=completed_at
+                )
+                return True
+            event_id = _text(event.get("id"))
+            message_id = f"notify-{event_id}"
+            delivery_id = f"delivery-{event_id}"
+            delivery: dict[str, object] = {
+                "id": delivery_id,
+                "incident_id": _text(incident_values.get("id")),
+                "event_id": event_id,
+                "severity": severity,
+                "status": "pending" if recipients else "skipped",
+                "primary_channel": _text(settings.get("primary_channel")).lower(),
+                "used_channel": "",
+                "recipients": recipients,
+                "message": _message_payload(event, incident_values, message_id),
+                "attempts": [],
+                "created_at": completed_at,
+                "updated_at": completed_at,
+                "next_attempt_at": "",
+            }
+            self.store.materialize_notification_intent(
+                _text(intent_id), delivery=delivery, completed_at=completed_at
+            )
+            return True
+        except Exception:
+            # The source intent remains pending; diagnostics here would recurse.
+            return False
+
+    def process_notification_intents(self, limit: int = WORKER_BATCH_LIMIT) -> int:
+        processed = 0
+        try:
+            intents = self.store.pending_notification_intents(limit=limit)
+        except Exception:
+            return 0
+        for intent in intents:
+            if isinstance(intent, Mapping) and self.process_notification_intent(
+                _text(intent.get("id"))
+            ):
+                processed += 1
+        return processed
+
     def _mail_message(
         self,
         delivery: Mapping[str, object],
@@ -494,7 +582,7 @@ class NotificationService:
         delivery: Mapping[str, object],
         channel: str,
         settings: Mapping[str, object],
-    ) -> tuple[dict[str, object], bool]:
+    ) -> tuple[dict[str, object], bool, list[str]]:
         try:
             channel_settings = settings.get(channel)
             transport = self.transport_factory(
@@ -507,7 +595,7 @@ class NotificationService:
                 code="transport_unavailable",
                 category="transport",
                 message="Nie można przygotować kanału wysyłki.",
-            ), False
+            ), False, []
         try:
             message = self._mail_message(delivery, channel, settings)
         except Exception:
@@ -516,18 +604,39 @@ class NotificationService:
                 code="message_invalid",
                 category="message",
                 message="Nie można przygotować wiadomości.",
-            ), False
+            ), False, []
         try:
             result = transport.send(message)
             safe_result = result if isinstance(result, Mapping) else {}
-            return _safe_attempt(channel, safe_result), True
+            attempt = _safe_attempt(channel, safe_result)
+            status = _text(safe_result.get("status")).lower()
+            if status in {"partial", "refused"}:
+                allowed = {
+                    address.casefold(): address for address in message.recipients
+                }
+                raw_refused = safe_result.get("refused_recipients")
+                refused: list[str] = []
+                if isinstance(raw_refused, (list, tuple, set)):
+                    for raw_address in raw_refused:
+                        address = allowed.get(_text(raw_address).casefold())
+                        if address and address not in refused:
+                            refused.append(address)
+                if refused:
+                    return attempt, False, refused
+                return _failure_attempt(
+                    channel,
+                    code="delivery_failed",
+                    category="delivery",
+                    message="Kanał nie wysłał wiadomości.",
+                ), False, []
+            return attempt, True, []
         except Exception:
             return _failure_attempt(
                 channel,
                 code="delivery_failed",
                 category="delivery",
                 message="Kanał nie wysłał wiadomości.",
-            ), False
+            ), False, []
 
     def _deliver_claimed(
         self,
@@ -538,13 +647,19 @@ class NotificationService:
     ) -> tuple[str, str, list[dict[str, object]]]:
         primary = _text(claimed.get("primary_channel")).lower()
         attempts: list[dict[str, object]] = []
-        attempt, success = self._send_channel(claimed, primary, settings)
+        attempt, success, refused = self._send_channel(claimed, primary, settings)
         attempts.append(attempt)
         if success:
             return "sent", primary, attempts
         if allow_fallback:
             fallback = "smtp" if primary == "entra" else "entra"
-            attempt, success = self._send_channel(claimed, fallback, settings)
+            fallback_delivery = claimed
+            if refused:
+                fallback_delivery = dict(claimed)
+                fallback_delivery["recipients"] = refused
+            attempt, success, _fallback_refused = self._send_channel(
+                fallback_delivery, fallback, settings
+            )
             attempts.append(attempt)
             if success:
                 return "fallback", fallback, attempts
@@ -649,10 +764,17 @@ class NotificationService:
         return recovered
 
     def process_pending_batch(self, limit: int = WORKER_BATCH_LIMIT) -> int:
+        self.process_notification_intents(limit=limit)
         processed = 0
         for delivery in self.store.pending_notification_deliveries(limit=limit):
             if self.process_delivery(_text(delivery.get("id"))):
                 processed += 1
+        try:
+            self.store.prune_done_notification_intents(
+                _iso_utc(self.now() - OUTBOX_DONE_RETENTION)
+            )
+        except Exception:
+            pass
         return processed
 
     def send_test_message(
@@ -752,29 +874,32 @@ def send_test_message(
 
 
 _WORKER_LOCK = threading.Lock()
-_WORKER_STOP = threading.Event()
+_WORKER_STOP: threading.Event | None = None
 _WORKER_THREAD: threading.Thread | None = None
 _WORKER_SERVICE: NotificationService | None = None
 
 
-def _worker_loop(service: NotificationService) -> None:
-    while not _WORKER_STOP.is_set():
+def _worker_loop(service: NotificationService, stop_event: threading.Event) -> None:
+    while not stop_event.is_set():
         try:
             service.process_pending_batch(limit=WORKER_BATCH_LIMIT)
         except Exception:
             # Queue processing is isolated from the web/product request paths.
             pass
-        if _WORKER_STOP.wait(WORKER_POLL_SECONDS):
+        if stop_event.wait(WORKER_POLL_SECONDS):
             break
 
 
 def start_notification_worker() -> None:
     """Recover stale claims and start one bounded daemon queue worker."""
 
-    global _WORKER_SERVICE, _WORKER_THREAD
+    global _WORKER_SERVICE, _WORKER_STOP, _WORKER_THREAD
     with _WORKER_LOCK:
         if _WORKER_THREAD is not None and _WORKER_THREAD.is_alive():
             return
+        _WORKER_THREAD = None
+        _WORKER_SERVICE = None
+        _WORKER_STOP = None
         try:
             service = _default_service()
         except Exception:
@@ -783,11 +908,12 @@ def start_notification_worker() -> None:
             service.recover_stale_deliveries()
         except Exception:
             pass
+        stop_event = threading.Event()
         _WORKER_SERVICE = service
-        _WORKER_STOP.clear()
+        _WORKER_STOP = stop_event
         _WORKER_THREAD = threading.Thread(
             target=_worker_loop,
-            args=(service,),
+            args=(service, stop_event),
             name="picorg-notification-worker",
             daemon=True,
         )
@@ -797,11 +923,19 @@ def start_notification_worker() -> None:
 def stop_notification_worker() -> None:
     """Stop and join the current notification worker."""
 
-    global _WORKER_SERVICE, _WORKER_THREAD
+    global _WORKER_SERVICE, _WORKER_STOP, _WORKER_THREAD
     with _WORKER_LOCK:
-        _WORKER_STOP.set()
         thread = _WORKER_THREAD
+        stop_event = _WORKER_STOP
+        if stop_event is not None:
+            stop_event.set()
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=WORKER_STOP_TIMEOUT_SECONDS)
+    with _WORKER_LOCK:
+        if _WORKER_THREAD is not thread:
+            return
         if thread is not None and thread.is_alive():
-            thread.join(timeout=WORKER_POLL_SECONDS + 1)
+            return
         _WORKER_THREAD = None
         _WORKER_SERVICE = None
+        _WORKER_STOP = None

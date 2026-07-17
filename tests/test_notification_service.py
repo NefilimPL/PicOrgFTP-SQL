@@ -337,6 +337,110 @@ def test_process_delivery_primary_success_does_not_call_fallback() -> None:
     assert fallback.messages == []
 
 
+def test_smtp_partial_refusal_falls_back_only_refused_recipients_without_persisting_addresses(
+) -> None:
+    class PartialTransport(FakeTransport):
+        def send(self, message: object) -> dict[str, object]:
+            self.messages.append(message)
+            return {
+                "status": "partial",
+                "elapsed_ms": 4,
+                "accepted_count": 1,
+                "refused_count": 1,
+                "refusal_codes": [452],
+                "refused_recipients": ["ops@example.com"],
+            }
+
+    store = FakeStore()
+    primary = PartialTransport()
+    fallback = FakeTransport()
+    service = _service(store, {"entra": primary, "smtp": fallback})
+    queued = service.queue_incident_notification(_event(), _incident())
+
+    result = service.process_delivery(str(queued["id"]))
+
+    assert result["status"] == "fallback"
+    assert primary.messages[0].recipients == [
+        "Admin@example.com",
+        "ops@example.com",
+    ]
+    assert fallback.messages[0].recipients == ["ops@example.com"]
+    assert primary.messages[0].message_id == fallback.messages[0].message_id
+    assert result["attempts"][0] == {
+        "channel": "entra",
+        "status": "partial",
+        "elapsed_ms": 4,
+        "accepted_count": 1,
+        "refused_count": 1,
+        "refusal_codes": [452],
+    }
+    assert "ops@example.com" not in str(result["attempts"])
+
+
+def test_partial_refusal_without_fallback_finishes_error_without_resending_accepted(
+) -> None:
+    class PartialTransport(FakeTransport):
+        def send(self, message: object) -> dict[str, object]:
+            self.messages.append(message)
+            return {
+                "status": "partial",
+                "accepted_count": 1,
+                "refused_count": 1,
+                "refusal_codes": [452],
+                "refused_recipients": ["ops@example.com"],
+            }
+
+    store = FakeStore()
+    settings = _settings(fallback_enabled=False)
+    primary = PartialTransport()
+    fallback = FakeTransport()
+    service = _service(store, {"entra": primary, "smtp": fallback}, settings=settings)
+    queued = service.queue_incident_notification(_event(), _incident())
+
+    result = service.process_delivery(str(queued["id"]))
+
+    assert result["status"] == "error"
+    assert result["attempts"][0]["status"] == "partial"
+    assert fallback.messages == []
+
+
+def test_all_refused_fallback_receives_all_recipients_and_failure_stays_safe() -> None:
+    class RefusedTransport(FakeTransport):
+        def send(self, message: object) -> dict[str, object]:
+            self.messages.append(message)
+            return {
+                "status": "refused",
+                "accepted_count": 0,
+                "refused_count": 2,
+                "refusal_codes": [550, 551],
+                "refused_recipients": list(message.recipients),
+                "server_response": "private server text",
+            }
+
+    store = FakeStore()
+    primary = RefusedTransport()
+    fallback = FakeTransport(error=RuntimeError("private fallback failure"))
+    service = _service(store, {"entra": primary, "smtp": fallback})
+    queued = service.queue_incident_notification(_event(), _incident())
+
+    result = service.process_delivery(str(queued["id"]))
+
+    assert result["status"] == "error"
+    assert fallback.messages[0].recipients == [
+        "Admin@example.com",
+        "ops@example.com",
+    ]
+    assert result["attempts"][0] == {
+        "channel": "entra",
+        "status": "refused",
+        "accepted_count": 0,
+        "refused_count": 2,
+        "refusal_codes": [550, 551],
+    }
+    assert result["attempts"][1]["status"] == "error"
+    assert "private" not in str(result["attempts"])
+
+
 def test_process_delivery_enriches_mail_with_bounded_redacted_runtime_context() -> None:
     store = FakeStore()
     store.incident_context = {
@@ -697,3 +801,51 @@ def test_worker_start_is_best_effort_when_store_is_unavailable(monkeypatch) -> N
     notification_service.start_notification_worker()
 
     assert notification_service._WORKER_THREAD is None
+
+
+def test_worker_stop_retains_live_handles_and_start_cannot_overlap(monkeypatch) -> None:
+    import threading
+
+    notification_service.stop_notification_worker()
+    entered = threading.Event()
+    release = threading.Event()
+    services: list[object] = []
+
+    class BlockingService:
+        def recover_stale_deliveries(self) -> int:
+            return 0
+
+        def process_pending_batch(self, limit: int) -> int:
+            del limit
+            entered.set()
+            release.wait()
+            return 0
+
+    def factory() -> object:
+        service = BlockingService()
+        services.append(service)
+        return service
+
+    monkeypatch.setattr(notification_service, "_default_service", factory)
+    monkeypatch.setattr(notification_service, "WORKER_STOP_TIMEOUT_SECONDS", 0.01)
+    notification_service.start_notification_worker()
+    assert entered.wait(1)
+    first_thread = notification_service._WORKER_THREAD
+    first_stop = notification_service._WORKER_STOP
+
+    notification_service.stop_notification_worker()
+    assert notification_service._WORKER_THREAD is first_thread
+    assert notification_service._WORKER_STOP is first_stop
+    assert notification_service._WORKER_SERVICE is services[0]
+    notification_service.start_notification_worker()
+    assert len(services) == 1
+
+    release.set()
+    first_thread.join(timeout=1)
+    notification_service.stop_notification_worker()
+    assert notification_service._WORKER_THREAD is None
+    assert notification_service._WORKER_STOP is None
+
+
+def test_worker_default_stop_timeout_covers_transport_and_poll_margin() -> None:
+    assert notification_service.WORKER_STOP_TIMEOUT_SECONDS >= 22

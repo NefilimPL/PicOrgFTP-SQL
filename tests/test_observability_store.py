@@ -1864,6 +1864,7 @@ def test_prune_and_clear_operational_data_preserve_web_history(tmp_path: Path) -
         "incidents": 1,
         "alert_reads": 1,
         "notification_deliveries": 1,
+        "notification_outbox": 0,
     }
     assert store.load_history()[0]["id"] == "history-1"
     assert store.query_pimcore_submissions()[0]["id"] == "submission-1"

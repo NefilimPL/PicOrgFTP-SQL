@@ -488,6 +488,7 @@ class SqliteStore:
     """Small SQLite persistence wrapper used by the active data store layer."""
 
     supports_atomic_incident_event = True
+    supports_notification_outbox = True
 
     def __init__(self, path: str):
         self.path = str(Path(path))
@@ -709,6 +710,17 @@ class SqliteStore:
                     updated_at TEXT NOT NULL,
                     next_attempt_at TEXT NOT NULL DEFAULT ''
                 );
+
+                CREATE TABLE IF NOT EXISTS notification_outbox (
+                    id TEXT PRIMARY KEY,
+                    event_id TEXT NOT NULL UNIQUE,
+                    incident_id TEXT NOT NULL DEFAULT '',
+                    severity TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT NOT NULL DEFAULT ''
+                );
                 """
             )
             _migrate_web_history_created_at(conn)
@@ -783,6 +795,8 @@ class SqliteStore:
                     ON notification_deliveries(status, next_attempt_at, created_at);
                 CREATE INDEX IF NOT EXISTS idx_notification_deliveries_incident
                     ON notification_deliveries(incident_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_notification_outbox_pending
+                    ON notification_outbox(status, created_at, id);
                 """
             )
             version_row = conn.execute(
@@ -831,7 +845,10 @@ class SqliteStore:
         return payload
 
     def append_operational_event(
-        self, event: dict[str, object]
+        self,
+        event: dict[str, object],
+        *,
+        create_notification_intent: bool = False,
     ) -> dict[str, Any]:
         """Persist one structured operational event."""
 
@@ -839,7 +856,48 @@ class SqliteStore:
         payload = self._normalize_operational_event(event)
         with self.connection() as conn:
             self._insert_operational_event(conn, payload)
+            if create_notification_intent:
+                self._insert_notification_intent(
+                    conn,
+                    event_id=payload["id"],
+                    incident_id=payload["incident_id"],
+                    severity=payload["severity"],
+                    created_at=payload["created_at"],
+                )
         return payload
+
+    @staticmethod
+    def _insert_notification_intent(
+        conn: sqlite3.Connection,
+        *,
+        event_id: object,
+        incident_id: object,
+        severity: object,
+        created_at: object,
+    ) -> None:
+        normalized_event_id = _text(event_id)
+        if not normalized_event_id:
+            raise ValueError("notification intent event id is required")
+        normalized_severity = _text(severity).lower()
+        if normalized_severity not in _NOTIFICATION_DELIVERY_SEVERITIES:
+            raise ValueError("invalid notification intent severity")
+        timestamp = _canonical_timestamp(created_at, field="created_at")
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO notification_outbox (
+                id, event_id, incident_id, severity, status,
+                created_at, updated_at, completed_at
+            ) VALUES (?, ?, ?, ?, 'pending', ?, ?, '')
+            """,
+            (
+                f"intent-{normalized_event_id}",
+                normalized_event_id,
+                _text(incident_id),
+                normalized_severity,
+                timestamp,
+                timestamp,
+            ),
+        )
 
     @staticmethod
     def _normalize_operational_event(
@@ -1319,6 +1377,7 @@ class SqliteStore:
         occurrence: dict[str, object],
         notification_window_seconds: int = 15 * 60,
         source_event: dict[str, object] | None = None,
+        create_notification_intent: bool = False,
     ) -> dict[str, Any]:
         """Atomically coalesce an incident and optionally publish its event."""
 
@@ -1496,6 +1555,14 @@ class SqliteStore:
                 event_payload = self._normalize_operational_event(source_event)
                 event_payload["incident_id"] = incident_id
                 self._insert_operational_event(conn, event_payload)
+                if create_notification_intent and notification_due:
+                    self._insert_notification_intent(
+                        conn,
+                        event_id=event_payload["id"],
+                        incident_id=incident_id,
+                        severity=event_payload["severity"],
+                        created_at=event_payload["created_at"],
+                    )
 
         result = self._incident_from_row(persisted_row)
         result["notification_due"] = notification_due
@@ -1697,12 +1764,10 @@ class SqliteStore:
             ),
         }
 
-    def enqueue_notification_delivery(
-        self, record: dict[str, object]
+    @staticmethod
+    def _notification_delivery_payload(
+        record: dict[str, object],
     ) -> dict[str, Any]:
-        """Insert one durable notification delivery and return its stored form."""
-
-        self.initialize()
         delivery_id = _text(record.get("id"))
         if not delivery_id:
             raise ValueError("notification delivery id is required")
@@ -1736,37 +1801,188 @@ class SqliteStore:
         attempts = record.get("attempts", [])
         if not isinstance(attempts, list):
             raise ValueError("notification delivery attempts must be a list")
+        return {
+            "id": delivery_id,
+            "incident_id": _text(record.get("incident_id")),
+            "event_id": _text(record.get("event_id")),
+            "severity": severity,
+            "status": status,
+            "primary_channel": primary_channel,
+            "used_channel": used_channel,
+            "recipients": recipients,
+            "message": message,
+            "attempts": attempts,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "next_attempt_at": next_attempt_at,
+        }
+
+    @staticmethod
+    def _insert_notification_delivery(
+        conn: sqlite3.Connection, payload: dict[str, Any]
+    ) -> None:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO notification_deliveries (
+                id, incident_id, event_id, severity, status,
+                primary_channel, used_channel, recipients_json,
+                message_json, attempts_json, created_at, updated_at,
+                next_attempt_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload["id"], payload["incident_id"], payload["event_id"],
+                payload["severity"], payload["status"],
+                payload["primary_channel"], payload["used_channel"],
+                _json_dumps(payload["recipients"]),
+                _json_dumps(payload["message"]),
+                _json_dumps(payload["attempts"]), payload["created_at"],
+                payload["updated_at"], payload["next_attempt_at"],
+            ),
+        )
+
+    def enqueue_notification_delivery(
+        self, record: dict[str, object]
+    ) -> dict[str, Any]:
+        """Insert one durable notification delivery and return its stored form."""
+
+        self.initialize()
+        payload = self._notification_delivery_payload(record)
         with self.connection() as conn:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO notification_deliveries (
-                    id, incident_id, event_id, severity, status,
-                    primary_channel, used_channel, recipients_json,
-                    message_json, attempts_json, created_at, updated_at,
-                    next_attempt_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    delivery_id,
-                    _text(record.get("incident_id")),
-                    _text(record.get("event_id")),
-                    severity,
-                    status,
-                    primary_channel,
-                    used_channel,
-                    _json_dumps(recipients),
-                    _json_dumps(message),
-                    _json_dumps(attempts),
-                    created_at,
-                    updated_at,
-                    next_attempt_at,
-                ),
-            )
+            self._insert_notification_delivery(conn, payload)
             row = conn.execute(
                 "SELECT * FROM notification_deliveries WHERE id = ?",
-                (delivery_id,),
+                (payload["id"],),
             ).fetchone()
         return self._delivery_from_row(row)
+
+    def pending_notification_intents(
+        self, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Return a bounded deterministic batch of pending outbox intents."""
+
+        self.initialize()
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, event_id, incident_id, severity, status,
+                       created_at, updated_at, completed_at
+                FROM notification_outbox
+                WHERE status = 'pending'
+                ORDER BY created_at ASC, id ASC
+                LIMIT ?
+                """,
+                (_bounded_page_limit(limit),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def notification_intent_context(
+        self, intent_id: str
+    ) -> dict[str, Any] | None:
+        """Load the durable event and optional incident needed to materialize an intent."""
+
+        self.initialize()
+        with self.connection() as conn:
+            intent = conn.execute(
+                "SELECT * FROM notification_outbox WHERE id = ? AND status = 'pending'",
+                (_text(intent_id),),
+            ).fetchone()
+            if intent is None:
+                return None
+            event_row = conn.execute(
+                "SELECT * FROM operational_events WHERE id = ?",
+                (intent["event_id"],),
+            ).fetchone()
+            incident_row = None
+            if _text(intent["incident_id"]):
+                incident_row = conn.execute(
+                    "SELECT * FROM incidents WHERE id = ?",
+                    (intent["incident_id"],),
+                ).fetchone()
+        if event_row is None:
+            raise RuntimeError("notification intent source event is unavailable")
+        return {
+            "intent": dict(intent),
+            "event": self._event_from_row(event_row),
+            "incident": self._incident_from_row(incident_row) if incident_row else {},
+        }
+
+    def materialize_notification_intent(
+        self,
+        intent_id: str,
+        *,
+        delivery: dict[str, object] | None,
+        completed_at: str,
+    ) -> dict[str, Any]:
+        """Atomically create at most one delivery and complete an outbox intent."""
+
+        self.initialize()
+        normalized_id = _text(intent_id)
+        completed = _canonical_timestamp(completed_at, field="completed_at")
+        payload = (
+            self._notification_delivery_payload(delivery)
+            if isinstance(delivery, dict)
+            else None
+        )
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            intent = conn.execute(
+                "SELECT * FROM notification_outbox WHERE id = ?",
+                (normalized_id,),
+            ).fetchone()
+            if intent is None:
+                return {}
+            if payload is not None:
+                if payload["event_id"] != _text(intent["event_id"]):
+                    raise ValueError("delivery event does not match notification intent")
+                existing = conn.execute(
+                    """
+                    SELECT * FROM notification_deliveries
+                    WHERE event_id = ?
+                    ORDER BY created_at, id LIMIT 1
+                    """,
+                    (payload["event_id"],),
+                ).fetchone()
+                if existing is None and intent["status"] == "pending":
+                    self._insert_notification_delivery(conn, payload)
+                    existing = conn.execute(
+                        "SELECT * FROM notification_deliveries WHERE id = ?",
+                        (payload["id"],),
+                    ).fetchone()
+                    if (
+                        existing is None
+                        or _text(existing["event_id"]) != payload["event_id"]
+                    ):
+                        raise RuntimeError(
+                            "notification delivery identity conflict"
+                        )
+            else:
+                existing = None
+            if intent["status"] == "pending":
+                conn.execute(
+                    """
+                    UPDATE notification_outbox
+                    SET status = 'done', updated_at = ?, completed_at = ?
+                    WHERE id = ? AND status = 'pending'
+                    """,
+                    (completed, completed, normalized_id),
+                )
+        return self._delivery_from_row(existing) if existing is not None else {}
+
+    def prune_done_notification_intents(self, before: str) -> int:
+        """Delete completed intents older than the idempotency retention boundary."""
+
+        self.initialize()
+        boundary = _canonical_timestamp(before, field="before")
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM notification_outbox
+                WHERE status = 'done' AND completed_at < ?
+                """,
+                (boundary,),
+            )
+        return max(0, cursor.rowcount)
 
     def pending_notification_deliveries(
         self, limit: int = 20
@@ -2004,7 +2220,14 @@ class SqliteStore:
         self.initialize()
         with self.connection() as conn:
             cursor = conn.execute(
-                "DELETE FROM operational_events WHERE severity = 'info' AND created_at < ?",
+                """
+                DELETE FROM operational_events
+                WHERE severity = 'info' AND created_at < ?
+                  AND id NOT IN (
+                      SELECT event_id FROM notification_outbox
+                      WHERE status = 'pending'
+                  )
+                """,
                 (_text(before),),
             )
             return max(0, cursor.rowcount)
@@ -2017,7 +2240,7 @@ class SqliteStore:
         with self.connection() as conn:
             for table in (
                 "operational_events", "job_runs", "incidents", "alert_reads",
-                "notification_deliveries",
+                "notification_deliveries", "notification_outbox",
             ):
                 cursor = conn.execute(f"DELETE FROM {table}")
                 deleted[table] = max(0, cursor.rowcount)

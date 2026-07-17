@@ -204,8 +204,6 @@ class SmtpMailTransport:
             if self._username:
                 client.login(self._username, self._password)
             refused_recipients = client.send_message(outbound)
-            if refused_recipients:
-                raise RuntimeError("SMTP delivery failed.")
         except Exception:
             raise RuntimeError("SMTP delivery failed.") from None
         finally:
@@ -218,11 +216,55 @@ class SmtpMailTransport:
                     except Exception:
                         pass
 
-        return {
+        refused = refused_recipients if isinstance(refused_recipients, Mapping) else {}
+        requested = {
+            _text(address).casefold(): _text(address)
+            for address in message.recipients
+        }
+        refused_addresses: list[str] = []
+        refusal_codes: list[int] = []
+        for raw_address, raw_diagnostic in refused.items():
+            address = requested.get(_text(raw_address).casefold())
+            if not address or address in refused_addresses:
+                continue
+            refused_addresses.append(address)
+            diagnostic = (
+                raw_diagnostic
+                if isinstance(raw_diagnostic, (tuple, list))
+                else ()
+            )
+            if (
+                diagnostic
+                and isinstance(diagnostic[0], int)
+                and not isinstance(diagnostic[0], bool)
+            ):
+                refusal_codes.append(max(0, diagnostic[0]))
+        refused_count = len(refused_addresses)
+        accepted_count = max(0, len(message.recipients) - refused_count)
+        status = (
+            "sent"
+            if refused_count == 0
+            else "partial"
+            if accepted_count
+            else "refused"
+        )
+        result: dict[str, object] = {
             "channel": "smtp",
-            "status": "sent",
+            "status": status,
             "elapsed_ms": _elapsed_ms(started),
         }
+        if refused_count:
+            result.update(
+                {
+                    "accepted_count": accepted_count,
+                    "refused_count": refused_count,
+                    "refusal_codes": sorted(set(refusal_codes)),
+                    # Internal-only routing data; NotificationService strips it
+                    # before persistence and public projection.
+                    "refused_recipients": refused_addresses,
+                }
+            )
+        return result
 
 
 def build_transport(
