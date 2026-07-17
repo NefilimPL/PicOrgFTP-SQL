@@ -3,6 +3,8 @@
 import copy
 import tempfile
 
+from .redaction import sanitize_free_text
+
 from .common import (
     A,
     A6,
@@ -113,12 +115,13 @@ def _write_json_atomic(path, payload):
 def _write_error_log_direct(message):
     """Write a fallback error log entry without importing logging_utils."""
 
+    safe_message = sanitize_free_text(message, limit=32 * 1024)
     try:
         settings.ensure_log_dir()
         with open(settings.AM, "a", encoding=k) as log_file:
             log_file.write(
                 f"[{A9.now().strftime(A6)}] [USER: {AO}] [PC: {AF}] "
-                f"ERROR: {message}\n"
+                f"ERROR: {safe_message}\n"
             )
     except Exception:
         pass

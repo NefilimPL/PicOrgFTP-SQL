@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from numbers import Number
 
 
 DEFAULT_TEXT_LIMIT = 8 * 1024
@@ -20,29 +21,33 @@ _SECRET_NAME = (
 )
 _HEADER_RE = re.compile(
     r"(?im)(?P<prefix>\b(?:authorization|proxy-authorization|cookie|set-cookie)"
-    r"\s*:\s*)[^\r\n]*"
+    r"\s*:\s*)[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*"
 )
 _URI_USERINFO_RE = re.compile(
     r"(?i)(?P<prefix>\b[a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@/\s]+@"
 )
 _DOUBLE_QUOTED_VALUE_RE = re.compile(
     rf"(?i)(?P<prefix>(?<![\w-])[\"']?(?:{_SECRET_NAME})[\"']?"
-    r"\s*[:=]\s*)\"(?:\\.|[^\"\r\n])*\""
+    r"\s*[:=]\s*)\"(?:\\[^\r\n]|[^\"\\\r\n])*\""
 )
 _SINGLE_QUOTED_VALUE_RE = re.compile(
     rf"(?i)(?P<prefix>(?<![\w-])[\"']?(?:{_SECRET_NAME})[\"']?"
-    r"\s*[:=]\s*)'(?:\\.|[^'\r\n])*'"
+    r"\s*[:=]\s*)'(?:\\[^\r\n]|[^'\\\r\n])*'"
+)
+_BRACED_VALUE_RE = re.compile(
+    rf"(?i)(?P<prefix>(?<![\w-])[\"']?(?:{_SECRET_NAME})[\"']?"
+    r"\s*[:=]\s*)\{(?:\}\}|[^}\r\n])*\}"
 )
 _CONNECTION_VALUE_RE = re.compile(
     rf"(?i)(?P<prefix>(?:^|;)\s*(?:{_SECRET_NAME})\s*=\s*)"
-    r"[^;\r\n]*(?=;)"
+    r"(?!\{)[^;\r\n]*(?=;)"
 )
 _PLAIN_VALUE_RE = re.compile(
     rf"(?i)(?P<prefix>(?<![\w-])[\"']?(?:{_SECRET_NAME})[\"']?"
-    r"\s*[:=]\s*)(?!\[REDACTED\])[^\s,;\}\]\)\r\n]+"
+    r"\s*[:=]\s*)(?!\[REDACTED\])[^\s;\r\n]+"
 )
 _AUTH_SCHEME_RE = re.compile(
-    r"(?i)(?P<prefix>\b(?:Bearer|Basic)\s+)[A-Za-z0-9._~+/=:-]{4,}"
+    r"(?i)(?P<prefix>\b(?:Bearer|Basic)\s+)(?!\[REDACTED\])\S+"
 )
 
 
@@ -66,6 +71,10 @@ def _replace_single_quoted_value(match: re.Match[str]) -> str:
     return f"{match.group('prefix')}'{REDACTED}'"
 
 
+def _replace_braced_value(match: re.Match[str]) -> str:
+    return f"{match.group('prefix')}{{{REDACTED}}}"
+
+
 def _replace_uri_password(match: re.Match[str]) -> str:
     return f"{match.group('prefix')}{REDACTED}@"
 
@@ -73,11 +82,20 @@ def _replace_uri_password(match: re.Match[str]) -> str:
 def sanitize_free_text(value: object, *, limit: int = DEFAULT_TEXT_LIMIT) -> str:
     """Redact credential-shaped fragments, then cap the result by UTF-8 bytes."""
 
-    text = str(value or "")
+    if value is None:
+        text = ""
+    elif isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = str(value)
+        except Exception:
+            text = f"<{type(value).__name__}>"
     text = _URI_USERINFO_RE.sub(_replace_uri_password, text)
     text = _HEADER_RE.sub(_replace_value, text)
     text = _DOUBLE_QUOTED_VALUE_RE.sub(_replace_double_quoted_value, text)
     text = _SINGLE_QUOTED_VALUE_RE.sub(_replace_single_quoted_value, text)
+    text = _BRACED_VALUE_RE.sub(_replace_braced_value, text)
     text = _CONNECTION_VALUE_RE.sub(_replace_value, text)
     text = _PLAIN_VALUE_RE.sub(_replace_value, text)
     text = _AUTH_SCHEME_RE.sub(_replace_value, text)
@@ -95,14 +113,16 @@ def redact_sensitive_value(
     if key and SECRET_KEY_RE.search(key):
         return REDACTED
     if isinstance(value, dict):
-        return {
-            str(item_key): redact_sensitive_value(
+        redacted: dict[str, object] = {}
+        for item_key, item in value.items():
+            raw_key = str(item_key)
+            safe_key = sanitize_free_text(raw_key, limit=text_limit)
+            redacted[safe_key] = redact_sensitive_value(
                 item,
-                str(item_key),
+                raw_key,
                 text_limit=text_limit,
             )
-            for item_key, item in value.items()
-        }
+        return redacted
     if isinstance(value, (list, tuple)):
         return [
             redact_sensitive_value(item, text_limit=text_limit)
@@ -110,4 +130,6 @@ def redact_sensitive_value(
         ]
     if isinstance(value, str):
         return sanitize_free_text(value, limit=text_limit)
-    return value
+    if value is None or isinstance(value, (bool, Number)):
+        return value
+    return sanitize_free_text(value, limit=text_limit)

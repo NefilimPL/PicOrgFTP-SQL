@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from picorgftp_sql import logging_utils, observability, web_data
+from picorgftp_sql import config, logging_utils, observability, web_data
+from picorgftp_sql.redaction import redact_sensitive_value
 from picorgftp_sql.sqlite_store import SqliteStore
 from picorgftp_sql.web import app as web_app
 
@@ -37,9 +40,15 @@ def test_free_text_redaction_covers_credentials_without_harming_identifiers() ->
         "COOKIE_SENTINEL_F1",
         "URI_SENTINEL_F1",
         "CONNECTION_SENTINEL_F1",
+        "FOLDED_AUTH_SENTINEL_F1",
+        "FOLDED_COOKIE_SENTINEL_F1",
+        "PUNCTUATION_SUFFIX_SENTINEL_F1",
+        "BRACED_SUFFIX_SENTINEL_F1",
+        "§",
+        "¤",
     ]
     payload = {
-        "authorization_header": "Authorization: Custom AUTH_SENTINEL_F1",
+        "custom_header": "Authorization: Custom AUTH_SENTINEL_F1",
         "bearer": "upstream replied Bearer BEARER_SENTINEL_F1",
         "basic": "proxy used Basic BASIC_SENTINEL_F1",
         "quoted": 'password="PASSWORD_SENTINEL_F1"',
@@ -48,11 +57,29 @@ def test_free_text_redaction_covers_credentials_without_harming_identifiers() ->
         ),
         "json_text": '{"access_token": "TOKEN_SENTINEL_F1"}',
         "api": "api key: APIKEY_SENTINEL_F1",
-        "cookie_header": "Cookie: session=COOKIE_SENTINEL_F1; Path=/",
+        "session_header": "Cookie: session=COOKIE_SENTINEL_F1; Path=/",
         "uri": "mssql://operator:URI_SENTINEL_F1@sql.local/catalog",
         "connection": (
             "Server=sql.local;User Id=operator;Password="
             "CONNECTION_SENTINEL_F1;Database=products"
+        ),
+        "folded_http": (
+            "Authorization: Bearer first-part\r\n"
+            "\tFOLDED_AUTH_SENTINEL_F1\r\n"
+            "X-Diagnostic: EAN 5901234567890"
+        ),
+        "folded_session": (
+            "Cookie: session=first-part\n FOLDED_COOKIE_SENTINEL_F1\n"
+            "Następna linia diagnostyczna"
+        ),
+        "short_bearer": "Bearer §",
+        "short_basic": "Basic ¤",
+        "punctuation": (
+            "token=prefix,PUNCTUATION_SUFFIX_SENTINEL_F1) zakończono"
+        ),
+        "braced_connection": (
+            "Server=sql.local;Password={prefix;BRACED_SUFFIX_SENTINEL_F1};"
+            "Database=products"
         ),
         "diagnostic": (
             "Nie udało się zaktualizować produktu EAN 5901234567890, "
@@ -72,6 +99,54 @@ def test_free_text_redaction_covers_credentials_without_harming_identifiers() ->
         redacted["plain_with_context"]
     )
     assert observability.redact_value(redacted) == redacted
+    assert "X-Diagnostic: EAN 5901234567890" in str(
+        redacted["folded_http"]
+    )
+    assert "Następna linia diagnostyczna" in str(redacted["folded_session"])
+
+
+def test_recursive_redaction_stringifies_and_sanitizes_unknown_objects() -> None:
+    sentinels = ["EXCEPTION_OBJECT_SENTINEL_F1", "CUSTOM_OBJECT_SENTINEL_F1"]
+
+    class ProviderDiagnostic:
+        def __str__(self) -> str:
+            return "client_secret=CUSTOM_OBJECT_SENTINEL_F1"
+
+    redacted = redact_sensitive_value(
+        {
+            "exception": RuntimeError("token=EXCEPTION_OBJECT_SENTINEL_F1"),
+            "provider_diagnostic": ProviderDiagnostic(),
+            "boolean": True,
+            "integer": 12842,
+            "float": 12.5,
+            "nothing": None,
+        }
+    )
+
+    _assert_all_secrets_absent(redacted, sentinels)
+    assert isinstance(redacted["exception"], str)
+    assert isinstance(redacted["provider_diagnostic"], str)
+    assert redacted["boolean"] is True
+    assert redacted["integer"] == 12842
+    assert redacted["float"] == 12.5
+    assert redacted["nothing"] is None
+
+
+def test_unterminated_quoted_backslashes_are_processed_within_fixed_timeout() -> None:
+    script = (
+        "from picorgftp_sql.redaction import sanitize_free_text\n"
+        "sanitize_free_text('password=\"' + chr(92) * 4000)\n"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+
+    assert completed.returncode == 0
 
 
 def test_sqlite_persistence_sanitizes_events_incidents_and_history(tmp_path: Path) -> None:
@@ -80,6 +155,7 @@ def test_sqlite_persistence_sanitizes_events_incidents_and_history(tmp_path: Pat
         "ACTION_SENTINEL_F1",
         "TRACE_SENTINEL_F1",
         "DETAIL_SENTINEL_F1",
+        "SQLITE_EXCEPTION_OBJECT_SENTINEL_F1",
         "CONTEXT_SENTINEL_F1",
         "HISTORY_SENTINEL_F1",
     ]
@@ -97,6 +173,9 @@ def test_sqlite_persistence_sanitizes_events_incidents_and_history(tmp_path: Pat
             ),
             "details": {
                 "provider_error": "access_token: DETAIL_SENTINEL_F1",
+                "provider_exception": RuntimeError(
+                    "token=SQLITE_EXCEPTION_OBJECT_SENTINEL_F1"
+                ),
                 "ean": "5901234567890",
             },
         }
@@ -219,8 +298,10 @@ def test_event_mirror_and_legacy_text_files_receive_only_sanitized_values(
         "MIRROR_SENTINEL_F1",
         "MIRROR_DETAIL_SENTINEL_F1",
         "DIRECT_MIRROR_SENTINEL_F1",
+        "MIRROR_EXCEPTION_OBJECT_SENTINEL_F1",
         "HISTORY_JSON_SENTINEL_F1",
         "WEB_LOG_SENTINEL_F1",
+        "WEB_LOG_EXCEPTION_OBJECT_SENTINEL_F1",
     ]
 
     class BrokenStore:
@@ -238,7 +319,14 @@ def test_event_mirror_and_legacy_text_files_receive_only_sanitized_values(
             details={"provider": "client_secret: MIRROR_DETAIL_SENTINEL_F1"},
         )
         observability._mirror_event(
-            {"summary": "password=DIRECT_MIRROR_SENTINEL_F1"}
+            {
+                "summary": "password=DIRECT_MIRROR_SENTINEL_F1",
+                "details": {
+                    "exception": RuntimeError(
+                        "token=MIRROR_EXCEPTION_OBJECT_SENTINEL_F1"
+                    )
+                },
+            }
         )
     finally:
         observability.register_event_mirror(None)
@@ -260,7 +348,12 @@ def test_event_mirror_and_legacy_text_files_receive_only_sanitized_values(
         event="PROCESS_FAILED",
         username="admin",
         message="Authorization: Basic WEB_LOG_SENTINEL_F1",
-        details={"error": "api_key=WEB_LOG_SENTINEL_F1"},
+        details={
+            "error": "api_key=WEB_LOG_SENTINEL_F1",
+            "exception": RuntimeError(
+                "token=WEB_LOG_EXCEPTION_OBJECT_SENTINEL_F1"
+            ),
+        },
     )
     web_log = (Path(web_app.settings.LOG_DIR) / "picorg_web_events.log").read_text(
         encoding="utf-8"
@@ -300,7 +393,7 @@ def test_rotating_log_writers_sanitize_exception_derived_free_text(
 def test_observability_public_projection_sanitizes_untrusted_exception_strings(
     monkeypatch,
 ) -> None:
-    sentinel = "PUBLIC_SENTINEL_F1"
+    sentinels = ["PUBLIC_SENTINEL_F1", "PUBLIC_EXCEPTION_OBJECT_SENTINEL_F1"]
 
     class Store:
         @staticmethod
@@ -316,12 +409,67 @@ def test_observability_public_projection_sanitizes_untrusted_exception_strings(
                     "id": "evt-public-boundary",
                     "summary": "password=PUBLIC_SENTINEL_F1",
                     "traceback_text": "Bearer PUBLIC_SENTINEL_F1",
-                    "details": {"exception": "api key: PUBLIC_SENTINEL_F1"},
+                    "details": {
+                        "exception_text": "api key: PUBLIC_SENTINEL_F1",
+                        "exception_object": RuntimeError(
+                            "token=PUBLIC_EXCEPTION_OBJECT_SENTINEL_F1"
+                        ),
+                    },
                 }
             ],
             "next_cursor": "",
         },
     )
 
-    _assert_secret_absent(payload, sentinel)
-    assert json.dumps(payload).count("[REDACTED]") >= 3
+    _assert_all_secrets_absent(payload, sentinels)
+    assert json.dumps(payload).count("[REDACTED]") >= 4
+
+
+def test_legacy_stream_decoder_sanitizes_existing_rows(tmp_path: Path) -> None:
+    sentinel = "LEGACY_STREAM_SENTINEL_F1"
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.initialize()
+    with store.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO operational_events (
+                id, created_at, severity, event_type, summary,
+                details_json, traceback_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "evt-legacy-secret",
+                "2026-07-17T10:00:00.000Z",
+                "error",
+                "legacy.failed",
+                f"password={sentinel}",
+                json.dumps({"exception": f"Bearer {sentinel}"}),
+                f"mssql://worker:{sentinel}@sql.local/products",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO operational_event_stream (event_id) VALUES (?)",
+            ("evt-legacy-secret",),
+        )
+
+    page = store.start_operational_event_stream(initial_limit=20)
+
+    _assert_secret_absent(page, sentinel)
+    assert json.dumps(page).count("[REDACTED]") >= 3
+
+
+def test_direct_config_error_log_sanitizes_exception_objects(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sentinel = "CONFIG_LOG_SENTINEL_F1"
+    path = tmp_path / "config-error.log"
+    monkeypatch.setattr(config.settings, "AM", str(path))
+    monkeypatch.setattr(config.settings, "ensure_log_dir", lambda: None)
+
+    config._write_error_log_direct(
+        RuntimeError(f"Authorization: Bearer {sentinel}")
+    )
+
+    content = path.read_text(encoding="utf-8")
+    _assert_secret_absent(content, sentinel)
+    assert "[REDACTED]" in content

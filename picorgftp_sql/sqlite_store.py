@@ -805,7 +805,8 @@ class SqliteStore:
         payload = dict(row)
         payload.pop("_stream_sequence", None)
         payload["details"] = _json_loads(payload.pop("details_json", "{}"), {})
-        return payload
+        redacted = redact_sensitive_value(payload, text_limit=32 * 1024)
+        return redacted if isinstance(redacted, dict) else {}
 
     @staticmethod
     def _stream_high_water(conn: sqlite3.Connection) -> int:
