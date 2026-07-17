@@ -8,6 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from picorgftp_sql.excel_utils import ENTRY_RECORDS_KEY
 from picorgftp_sql.sqlite_store import SqliteStore
 
@@ -43,6 +45,8 @@ def test_schema_creates_expected_tables(tmp_path: Path) -> None:
         "incidents",
         "alert_reads",
         "pimcore_integration_contexts",
+        "entra_secret_status",
+        "entra_secret_reminders",
     } <= tables
 
     with sqlite3.connect(db_path) as conn:
@@ -54,9 +58,220 @@ def test_schema_creates_expected_tables(tmp_path: Path) -> None:
             "PRAGMA foreign_key_list(operational_event_stream)"
         ).fetchall()
 
-    assert version == 6
+    assert version == 7
     assert stream_columns == ["sequence", "event_id"]
     assert stream_foreign_keys == []
+
+
+def test_entra_expiry_status_round_trip_returns_only_safe_metadata(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+
+    result = store.upsert_entra_secret_status(
+        {
+            "tenant_id": "tenant",
+            "client_id": "client",
+            "status": "ok",
+            "expires_at": "2026-08-01T10:00:00.000Z",
+            "credential_name": "Primary",
+            "credential_key_id": "internal-key",
+            "application_name": "PicOrg Mailer",
+            "source": "graph",
+            "last_checked_at": "2026-07-17T10:00:00.000Z",
+            "last_success_at": "2026-07-17T10:00:00.000Z",
+            "error_code": "",
+            "error_message": "",
+            "secret": "must-not-persist",
+            "access_token": "must-not-persist",
+            "authorization": "must-not-persist",
+        }
+    )
+
+    assert result == store.get_entra_secret_status("tenant", "client")
+    assert result == {
+        "tenant_id": "tenant",
+        "client_id": "client",
+        "status": "ok",
+        "expires_at": "2026-08-01T10:00:00.000Z",
+        "credential_name": "Primary",
+        "application_name": "PicOrg Mailer",
+        "source": "graph",
+        "last_checked_at": "2026-07-17T10:00:00.000Z",
+        "last_success_at": "2026-07-17T10:00:00.000Z",
+        "error_code": "",
+        "error_message": "",
+    }
+    assert store.get_entra_secret_status("missing", "client") == {}
+    with store.connection() as conn:
+        persisted = conn.execute("SELECT * FROM entra_secret_status").fetchone()
+    assert "must-not-persist" not in " ".join(str(value) for value in persisted)
+
+
+def test_entra_expiry_status_requires_canonical_timestamps(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+
+    with pytest.raises(ValueError, match="expires_at must be a canonical timestamp"):
+        store.upsert_entra_secret_status(
+            {
+                "tenant_id": "tenant",
+                "client_id": "client",
+                "status": "ok",
+                "expires_at": "2026-08-01T10:00:00Z",
+            }
+        )
+
+
+def test_entra_expiry_status_rejects_or_redacts_malformed_public_fields(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.upsert_entra_secret_status(
+        {
+            "tenant_id": "tenant",
+            "client_id": "client",
+            "status": "ok",
+        }
+    )
+
+    with pytest.raises(ValueError, match="tenant_id must be text"):
+        store.upsert_entra_secret_status(
+            {
+                "tenant_id": {"access_token": "tenant-secret"},
+                "client_id": ["client_secret=client-secret"],
+                "status": "ok",
+            }
+        )
+
+    result = store.upsert_entra_secret_status(
+        {
+            "tenant_id": "tenant",
+            "client_id": "client",
+            "status": {"Authorization": "Bearer status-secret"},
+            "error_message": (
+                "access_token=error-secret; client_secret=client-secret; "
+                "Authorization: Bearer authorization-secret"
+            ),
+        }
+    )
+
+    assert result["status"] == "unknown"
+    public_payload = json.dumps(store.get_entra_secret_status("tenant", "client"))
+    with store.connection() as conn:
+        persisted = conn.execute("SELECT * FROM entra_secret_status").fetchone()
+    persisted_values = " ".join(str(value) for value in persisted)
+    for secret in (
+        "tenant-secret",
+        "client-secret",
+        "status-secret",
+        "error-secret",
+        "authorization-secret",
+    ):
+        assert secret not in public_payload
+        assert secret not in persisted_values
+
+
+def test_entra_expiry_reminder_claim_is_idempotent_and_identity_sensitive(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    first_claim = (
+        "tenant",
+        "client",
+        "key-a",
+        "2026-08-01T00:00:00.000Z",
+        7,
+        "2026-07-25T00:00:00.000Z",
+    )
+
+    assert store.claim_entra_secret_reminder(*first_claim)
+    assert not store.claim_entra_secret_reminder(
+        *first_claim[:-1], "2026-07-25T00:00:01.000Z"
+    )
+    assert store.claim_entra_secret_reminder(
+        "tenant",
+        "client",
+        "key-b",
+        "2026-08-01T00:00:00.000Z",
+        7,
+        "2026-07-25T00:00:00.000Z",
+    )
+    assert store.claim_entra_secret_reminder(
+        "tenant",
+        "client",
+        "key-a",
+        "2026-09-01T00:00:00.000Z",
+        7,
+        "2026-08-25T00:00:00.000Z",
+    )
+
+
+def test_operational_clear_preserves_entra_expiry_status_and_reminder_claims(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.upsert_entra_secret_status(
+        {
+            "tenant_id": "tenant",
+            "client_id": "client",
+            "status": "ok",
+            "expires_at": "2026-08-01T00:00:00.000Z",
+            "last_checked_at": "2026-07-17T00:00:00.000Z",
+        }
+    )
+    assert store.claim_entra_secret_reminder(
+        "tenant",
+        "client",
+        "key-a",
+        "2026-08-01T00:00:00.000Z",
+        7,
+        "2026-07-25T00:00:00.000Z",
+    )
+
+    store.clear_operational_data()
+
+    assert store.get_entra_secret_status("tenant", "client")["status"] == "ok"
+    assert not store.claim_entra_secret_reminder(
+        "tenant",
+        "client",
+        "key-a",
+        "2026-08-01T00:00:00.000Z",
+        7,
+        "2026-07-25T00:00:01.000Z",
+    )
+
+
+def test_clear_entra_expiry_status_also_removes_matching_reminder_claims(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.upsert_entra_secret_status(
+        {
+            "tenant_id": "tenant",
+            "client_id": "client",
+            "status": "ok",
+            "expires_at": "2026-08-01T00:00:00.000Z",
+        }
+    )
+    assert store.claim_entra_secret_reminder(
+        "tenant",
+        "client",
+        "key-a",
+        "2026-08-01T00:00:00.000Z",
+        7,
+        "2026-07-25T00:00:00.000Z",
+    )
+
+    assert store.clear_entra_secret_status("tenant", "client") == 1
+    assert store.get_entra_secret_status("tenant", "client") == {}
+    assert store.claim_entra_secret_reminder(
+        "tenant",
+        "client",
+        "key-a",
+        "2026-08-01T00:00:00.000Z",
+        7,
+        "2026-07-25T00:00:01.000Z",
+    )
 
 
 def test_pimcore_integration_context_is_bound_redacted_and_one_time(tmp_path: Path) -> None:

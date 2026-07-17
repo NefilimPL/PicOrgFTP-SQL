@@ -100,14 +100,14 @@ def _service(
     )
 
 
-def test_same_v6_database_adds_notification_outbox_idempotently(tmp_path: Path) -> None:
+def test_same_v7_database_adds_notification_outbox_idempotently(tmp_path: Path) -> None:
     path = tmp_path / "app.sqlite"
     store = SqliteStore(str(path))
     store.initialize()
     store.initialize()
 
     with store.connection() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='notification_outbox'"
         ).fetchone()

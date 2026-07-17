@@ -27,13 +27,27 @@ from .excel_utils import (
 )
 from .redaction import redact_sensitive_value, sanitize_free_text
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 _NOTIFICATION_DELIVERY_STATUSES = frozenset(
     {"pending", "sending", "sent", "fallback", "skipped", "error"}
 )
 _NOTIFICATION_DELIVERY_CHANNELS = frozenset({"entra", "smtp"})
 _NOTIFICATION_DELIVERY_SEVERITIES = frozenset(
     {"info", "warning", "error", "critical"}
+)
+_ENTRA_SECRET_STATUS_VALUES = frozenset({"ok", "unavailable", "unknown"})
+_ENTRA_SECRET_STATUS_PUBLIC_COLUMNS = (
+    "tenant_id",
+    "client_id",
+    "status",
+    "expires_at",
+    "credential_name",
+    "application_name",
+    "source",
+    "last_checked_at",
+    "last_success_at",
+    "error_code",
+    "error_message",
 )
 _OPERATIONAL_EVENT_STREAM_ORIGIN_ID = (
     "sys-4e680c0b1c744a0e82e385cad10b47d1"
@@ -96,6 +110,35 @@ _OPERATIONAL_EVENT_QUERY_COLUMNS = (
 
 def _text(value: object) -> str:
     return str(value or "").strip()
+
+
+def _bounded_scalar_text(
+    value: object,
+    *,
+    field: str,
+    limit: int,
+    required: bool = False,
+) -> str:
+    """Accept only bounded, redacted text without coercing structured values."""
+
+    if value is None:
+        text = ""
+    elif not isinstance(value, str):
+        raise ValueError(f"{field} must be text")
+    else:
+        text = sanitize_free_text(value, limit=limit).strip()
+    if required and not text:
+        raise ValueError(f"{field} is required")
+    return text
+
+
+def _entra_secret_status_value(value: object) -> str:
+    """Return a safe, stable Entra status rather than stringifying input."""
+
+    if not isinstance(value, str):
+        return "unknown"
+    normalized = value.strip().lower()
+    return normalized if normalized in _ENTRA_SECRET_STATUS_VALUES else "unknown"
 
 
 def _unicode_lower(value: object) -> str:
@@ -733,6 +776,35 @@ class SqliteStore:
                     updated_at TEXT NOT NULL,
                     completed_at TEXT NOT NULL DEFAULT ''
                 );
+
+                CREATE TABLE IF NOT EXISTS entra_secret_status (
+                    tenant_id TEXT NOT NULL,
+                    client_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    expires_at TEXT NOT NULL DEFAULT '',
+                    credential_name TEXT NOT NULL DEFAULT '',
+                    credential_key_id TEXT NOT NULL DEFAULT '',
+                    application_name TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT '',
+                    last_checked_at TEXT NOT NULL DEFAULT '',
+                    last_success_at TEXT NOT NULL DEFAULT '',
+                    error_code TEXT NOT NULL DEFAULT '',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (tenant_id, client_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS entra_secret_reminders (
+                    tenant_id TEXT NOT NULL,
+                    client_id TEXT NOT NULL,
+                    credential_key_id TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    threshold_days INTEGER NOT NULL,
+                    claimed_at TEXT NOT NULL,
+                    PRIMARY KEY (
+                        tenant_id, client_id, credential_key_id, expires_at,
+                        threshold_days
+                    )
+                );
                 """
             )
             _migrate_web_history_created_at(conn)
@@ -811,6 +883,8 @@ class SqliteStore:
                     ON notification_deliveries(incident_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_notification_outbox_pending
                     ON notification_outbox(status, created_at, id);
+                CREATE INDEX IF NOT EXISTS idx_entra_secret_status_last_checked_at
+                    ON entra_secret_status(last_checked_at);
                 """
             )
             version_row = conn.execute(
@@ -857,6 +931,207 @@ class SqliteStore:
             payload.pop("attempts_json", "[]"), []
         )
         return payload
+
+    @staticmethod
+    def _public_entra_secret_status(row: sqlite3.Row) -> dict[str, str]:
+        """Project persisted Entra status to fields that are safe to expose."""
+
+        limits = {
+            "tenant_id": 256,
+            "client_id": 256,
+            "expires_at": 64,
+            "credential_name": 512,
+            "application_name": 512,
+            "source": 128,
+            "last_checked_at": 64,
+            "last_success_at": 64,
+            "error_code": 128,
+            "error_message": 8 * 1024,
+        }
+        return {
+            column: (
+                _entra_secret_status_value(row[column])
+                if column == "status"
+                else sanitize_free_text(row[column], limit=limits[column]).strip()
+            )
+            for column in _ENTRA_SECRET_STATUS_PUBLIC_COLUMNS
+        }
+
+    def get_entra_secret_status(self, tenant_id: str, client_id: str) -> dict[str, str]:
+        """Return the safe Entra expiry status for one tenant and application."""
+
+        self.initialize()
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT tenant_id, client_id, status, expires_at, credential_name,
+                       application_name, source, last_checked_at, last_success_at,
+                       error_code, error_message
+                FROM entra_secret_status
+                WHERE tenant_id = ? AND client_id = ?
+                """,
+                (
+                    _bounded_scalar_text(
+                        tenant_id, field="tenant_id", limit=256, required=True
+                    ),
+                    _bounded_scalar_text(
+                        client_id, field="client_id", limit=256, required=True
+                    ),
+                ),
+            ).fetchone()
+        return self._public_entra_secret_status(row) if row else {}
+
+    def clear_entra_secret_status(self, tenant_id: str, client_id: str) -> int:
+        """Remove an Entra status record and all reminder claims for its identity."""
+
+        self.initialize()
+        identity = (
+            _bounded_scalar_text(
+                tenant_id, field="tenant_id", limit=256, required=True
+            ),
+            _bounded_scalar_text(
+                client_id, field="client_id", limit=256, required=True
+            ),
+        )
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM entra_secret_status WHERE tenant_id = ? AND client_id = ?",
+                identity,
+            )
+            conn.execute(
+                "DELETE FROM entra_secret_reminders "
+                "WHERE tenant_id = ? AND client_id = ?",
+                identity,
+            )
+        return max(0, cursor.rowcount)
+
+    def upsert_entra_secret_status(
+        self, status: dict[str, object]
+    ) -> dict[str, str]:
+        """Persist an Entra expiry status without accepting secret-bearing fields."""
+
+        if not isinstance(status, dict):
+            raise ValueError("status must be a mapping")
+        tenant_id = _bounded_scalar_text(
+            status.get("tenant_id"), field="tenant_id", limit=256, required=True
+        )
+        client_id = _bounded_scalar_text(
+            status.get("client_id"), field="client_id", limit=256, required=True
+        )
+        normalized_status = _entra_secret_status_value(status.get("status"))
+        payload = {
+            "tenant_id": tenant_id,
+            "client_id": client_id,
+            "status": normalized_status,
+            "expires_at": _canonical_timestamp(
+                status.get("expires_at"), field="expires_at", required=False
+            ),
+            "credential_name": _bounded_scalar_text(
+                status.get("credential_name"), field="credential_name", limit=512
+            ),
+            "credential_key_id": _bounded_scalar_text(
+                status.get("credential_key_id"), field="credential_key_id", limit=256
+            ),
+            "application_name": _bounded_scalar_text(
+                status.get("application_name"), field="application_name", limit=512
+            ),
+            "source": _bounded_scalar_text(
+                status.get("source"), field="source", limit=128
+            ),
+            "last_checked_at": _canonical_timestamp(
+                status.get("last_checked_at"), field="last_checked_at", required=False
+            ),
+            "last_success_at": _canonical_timestamp(
+                status.get("last_success_at"), field="last_success_at", required=False
+            ),
+            "error_code": _bounded_scalar_text(
+                status.get("error_code"), field="error_code", limit=128
+            ),
+            "error_message": _bounded_scalar_text(
+                status.get("error_message"), field="error_message", limit=8 * 1024
+            ),
+        }
+        self.initialize()
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO entra_secret_status (
+                    tenant_id, client_id, status, expires_at, credential_name,
+                    credential_key_id, application_name, source, last_checked_at,
+                    last_success_at, error_code, error_message
+                ) VALUES (
+                    :tenant_id, :client_id, :status, :expires_at, :credential_name,
+                    :credential_key_id, :application_name, :source, :last_checked_at,
+                    :last_success_at, :error_code, :error_message
+                )
+                ON CONFLICT(tenant_id, client_id) DO UPDATE SET
+                    status = excluded.status,
+                    expires_at = excluded.expires_at,
+                    credential_name = excluded.credential_name,
+                    credential_key_id = excluded.credential_key_id,
+                    application_name = excluded.application_name,
+                    source = excluded.source,
+                    last_checked_at = excluded.last_checked_at,
+                    last_success_at = excluded.last_success_at,
+                    error_code = excluded.error_code,
+                    error_message = excluded.error_message
+                """,
+                payload,
+            )
+            row = conn.execute(
+                """
+                SELECT tenant_id, client_id, status, expires_at, credential_name,
+                       application_name, source, last_checked_at, last_success_at,
+                       error_code, error_message
+                FROM entra_secret_status
+                WHERE tenant_id = ? AND client_id = ?
+                """,
+                (tenant_id, client_id),
+            ).fetchone()
+        return self._public_entra_secret_status(row)
+
+    def claim_entra_secret_reminder(
+        self,
+        tenant_id: str,
+        client_id: str,
+        credential_key_id: str,
+        expires_at: str,
+        threshold_days: int,
+        claimed_at: str,
+    ) -> bool:
+        """Atomically claim one Entra secret-expiry reminder threshold."""
+
+        tenant = _bounded_scalar_text(
+            tenant_id, field="tenant_id", limit=256, required=True
+        )
+        client = _bounded_scalar_text(
+            client_id, field="client_id", limit=256, required=True
+        )
+        credential = _bounded_scalar_text(
+            credential_key_id, field="credential_key_id", limit=256, required=True
+        )
+        try:
+            threshold = int(threshold_days)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("threshold_days must be an integer") from exc
+        if threshold < 0:
+            raise ValueError("threshold_days must be non-negative")
+        expiry = _canonical_timestamp(expires_at, field="expires_at")
+        claimed = _canonical_timestamp(claimed_at, field="claimed_at")
+        self.initialize()
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                INSERT INTO entra_secret_reminders (
+                    tenant_id, client_id, credential_key_id, expires_at,
+                    threshold_days, claimed_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
+                """,
+                (tenant, client, credential, expiry, threshold, claimed),
+            )
+        return cursor.rowcount == 1
 
     def append_operational_event(
         self,
