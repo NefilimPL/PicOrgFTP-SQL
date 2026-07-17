@@ -574,6 +574,7 @@ def test_clear_logs_clears_operational_tables_but_preserves_audits(
         "job_runs": 1,
         "incidents": 1,
         "alert_reads": 1,
+        "notification_deliveries": 0,
     }
     assert store.query_operational_events()["items"] == []
     assert store.query_job_runs()["items"] == []
