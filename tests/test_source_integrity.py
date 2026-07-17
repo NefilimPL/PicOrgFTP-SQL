@@ -24,6 +24,48 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("HEALTH_OFFLINE_FAILURES = 3", js_source)
         self.assertIn("healthSamples.slice(-5)", js_source)
 
+    def test_backend_health_poll_ignores_hidden_aborted_and_stale_requests(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        js_source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+
+        poll_start = js_source.index("async function pollBackendHealth")
+        poll_end = js_source.index("function setBackendHealthDetailsExpanded", poll_start)
+        poll_source = js_source[poll_start:poll_end]
+        visibility_start = js_source.index('document.addEventListener("visibilitychange"')
+        visibility_end = js_source.index("});", visibility_start) + 3
+        visibility_source = js_source[visibility_start:visibility_end]
+
+        self.assertIn("new AbortController()", poll_source)
+        self.assertIn("requestGeneration !== healthPollGeneration", poll_source)
+        self.assertIn("controller.signal.aborted", poll_source)
+        self.assertIn('error?.name === "AbortError"', poll_source)
+        self.assertLess(
+            poll_source.index("requestGeneration !== healthPollGeneration"),
+            poll_source.index("healthSamples.push"),
+        )
+        self.assertIn("scheduleBackendHealthPoll(requestGeneration)", poll_source)
+        self.assertIn("healthPollGeneration += 1", visibility_source)
+        self.assertIn("healthPollController?.abort()", visibility_source)
+        self.assertIn("pollBackendHealth().catch(() => {})", visibility_source)
+        self.assertNotIn("scheduleBackendHealthPoll(0)", visibility_source)
+
+    def test_backend_health_offline_reuses_normalized_last_successful_components(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        js_source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+        docs_source = (root / "docs" / "web-panel.md").read_text(encoding="utf-8")
+
+        self.assertIn("lastSuccessfulHealthComponents", js_source)
+        self.assertIn("function normalizedHealthComponents", js_source)
+        self.assertIn(
+            'updateBackendHealthStatus("offline", 0, lastSuccessfulHealthComponents)',
+            js_source,
+        )
+        self.assertIn("ostatni znany stan komponentów", docs_source.lower())
+
     def test_web_logs_use_durable_observability_apis(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]

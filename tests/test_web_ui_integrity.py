@@ -75,6 +75,7 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn('class="backend-health-dot"', brand_source)
         self.assertIn('id="backendHealthText"', brand_source)
         self.assertIn('id="backendHealthDetails"', brand_source)
+        self.assertIn('id="backendHealthDetails" class="backend-health-details" role="tooltip" hidden', brand_source)
         for label in ("Backend", "SQLite", "Proces zadan", "FTP", "SQL", "Profile SQL", "Pimcore"):
             self.assertIn(label, brand_source)
 
@@ -87,16 +88,30 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("ms >= HEALTH_SLOW_MS", health_source)
         self.assertIn('item.status === "degraded"', health_source)
         self.assertIn("performance.now()", js_source)
-        self.assertIn('requestJson("/api/health")', js_source)
+        self.assertIn('requestJson("/api/health", { signal: controller.signal })', js_source)
         self.assertIn("healthFailures = 0", js_source)
         self.assertIn("healthFailures >= HEALTH_OFFLINE_FAILURES", js_source)
         self.assertIn("document.hidden", js_source)
-        self.assertIn("scheduleBackendHealthPoll(0)", js_source)
+        self.assertIn("pollBackendHealth().catch(() => {})", js_source)
         self.assertNotIn("backendHealthDetailsList.innerHTML", js_source)
         self.assertIn("backendHealthDetailsList.replaceChildren", js_source)
 
+        disclosure_start = js_source.index("function setBackendHealthDetailsExpanded")
+        disclosure_end = js_source.index("function showLogsError", disclosure_start)
+        disclosure_source = js_source[disclosure_start:disclosure_end]
+        self.assertIn("backendHealthDetails.hidden = !expanded", disclosure_source)
+        self.assertIn('setAttribute("aria-expanded", expanded ? "true" : "false")', disclosure_source)
+        self.assertIn("healthDetailsPinned", disclosure_source)
+        self.assertIn("healthDetailsPointerInside = true", disclosure_source)
+        self.assertIn("healthDetailsPointerInside = false", disclosure_source)
+        self.assertNotIn('matches(":hover")', disclosure_source)
+        for event_name in ("pointerenter", "pointerleave", "focusin", "focusout", "click"):
+            self.assertIn(f'addEventListener("{event_name}"', disclosure_source)
+
         self.assertIn(".backend-health-dot", css_source)
         self.assertIn('[data-level="offline"]', css_source)
+        self.assertNotIn(".backend-health-indicator:hover .backend-health-details", css_source)
+        self.assertNotIn(".backend-health-indicator:focus-within .backend-health-details", css_source)
 
     def test_logs_use_tabs_live_stream_and_cursor_loading(self) -> None:
         html_source = INDEX_HTML.read_text(encoding="utf-8")

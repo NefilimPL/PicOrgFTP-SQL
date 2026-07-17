@@ -263,8 +263,6 @@ h2 {
   transition: opacity 120ms ease, transform 120ms ease, visibility 120ms ease;
 }
 
-.backend-health-indicator:hover .backend-health-details,
-.backend-health-indicator:focus-within .backend-health-details,
 .backend-health-indicator.details-open .backend-health-details {
   visibility: visible;
   opacity: 1;

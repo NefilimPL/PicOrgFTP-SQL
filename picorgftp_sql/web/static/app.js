@@ -152,7 +152,11 @@ const clientFailureFingerprints = new Map();
 const healthSamples = [];
 let healthFailures = 0;
 let healthPollTimer = 0;
-let healthPollRunning = false;
+let healthPollGeneration = 0;
+let healthPollController = null;
+let lastSuccessfulHealthComponents = {};
+let healthDetailsPinned = false;
+let healthDetailsPointerInside = false;
 const SQLITE_BACKUP_DAYS = [
   ["mon", "Pon"],
   ["tue", "Wt"],
@@ -218,6 +222,7 @@ const versionInfo = document.querySelector("#versionInfo");
 const backendHealthIndicator = document.querySelector(".backend-health-indicator");
 const backendHealthStatus = document.querySelector("#backendHealthStatus");
 const backendHealthText = document.querySelector("#backendHealthText");
+const backendHealthDetails = document.querySelector("#backendHealthDetails");
 const backendHealthDetailsList = document.querySelector("#backendHealthDetailsList");
 const githubStatusButton = document.querySelector("#githubStatusButton");
 const githubStatusModal = document.querySelector("#githubStatusModal");
@@ -439,6 +444,7 @@ async function requestJson(path, options = {}) {
   const timeoutMs = Number(options.timeoutMs || 0);
   const fetchOptions = { ...options };
   delete fetchOptions.timeoutMs;
+  const hasExternalSignal = Boolean(fetchOptions.signal);
   applyClientIdentityHeader(path, fetchOptions);
   applyPanelRequestHeaders(path, fetchOptions);
   let timeoutId = 0;
@@ -451,6 +457,9 @@ async function requestJson(path, options = {}) {
   try {
     response = await fetch(path, fetchOptions);
   } catch (error) {
+    if (error?.name === "AbortError" && hasExternalSignal) {
+      throw error;
+    }
     if (error?.name === "AbortError") {
       throw new Error(
         `Backend nie odpowiedzial w ciagu ${Math.round(timeoutMs / 1000)} s (${path}). ` +
@@ -5077,6 +5086,15 @@ function normalizedHealthStatus(value) {
   return Object.hasOwn(HEALTH_STATUS_LABELS, status) ? status : "unknown";
 }
 
+function normalizedHealthComponents(components = {}) {
+  return Object.fromEntries(
+    HEALTH_COMPONENT_LABELS.map(([key]) => [
+      key,
+      { status: normalizedHealthStatus(components[key]?.status) },
+    ])
+  );
+}
+
 function renderBackendHealthDetails(components = {}) {
   if (!backendHealthDetailsList) return;
   const rows = HEALTH_COMPONENT_LABELS.map(([key, label]) => {
@@ -5127,61 +5145,121 @@ function healthLevel(ms, components = {}) {
   return "online";
 }
 
-function scheduleBackendHealthPoll(delayMs = HEALTH_POLL_INTERVAL_MS) {
+function scheduleBackendHealthPoll(requestGeneration = healthPollGeneration) {
   if (healthPollTimer) window.clearTimeout(healthPollTimer);
   healthPollTimer = 0;
   if (document.hidden) return;
   healthPollTimer = window.setTimeout(() => {
     healthPollTimer = 0;
+    if (document.hidden || requestGeneration !== healthPollGeneration) return;
     pollBackendHealth().catch(() => {});
-  }, Math.max(0, delayMs));
+  }, HEALTH_POLL_INTERVAL_MS);
 }
 
 async function pollBackendHealth() {
   if (document.hidden) return;
-  if (healthPollRunning) {
-    scheduleBackendHealthPoll();
-    return;
-  }
-  healthPollRunning = true;
+  if (healthPollTimer) window.clearTimeout(healthPollTimer);
+  healthPollTimer = 0;
+  const requestGeneration = ++healthPollGeneration;
+  healthPollController?.abort();
+  const controller = new AbortController();
+  healthPollController = controller;
   const startedAt = performance.now();
   try {
-    const payload = await requestJson("/api/health");
+    const payload = await requestJson("/api/health", { signal: controller.signal });
     const elapsedMs = Math.max(0, performance.now() - startedAt);
-    const components = payload.components || {};
+    if (
+      requestGeneration !== healthPollGeneration ||
+      controller.signal.aborted ||
+      document.hidden
+    ) {
+      return;
+    }
+    const components = normalizedHealthComponents(payload.components || {});
+    lastSuccessfulHealthComponents = components;
     healthFailures = 0;
     healthSamples.push(elapsedMs);
     if (healthSamples.length > 5) healthSamples.shift();
     const medianMs = medianHealthLatency();
     updateBackendHealthStatus(healthLevel(medianMs, components), medianMs, components);
-  } catch (_error) {
+  } catch (error) {
+    if (
+      error?.name === "AbortError" ||
+      controller.signal.aborted ||
+      requestGeneration !== healthPollGeneration ||
+      document.hidden
+    ) {
+      return;
+    }
     healthFailures += 1;
     if (healthFailures >= HEALTH_OFFLINE_FAILURES) {
-      updateBackendHealthStatus("offline");
+      updateBackendHealthStatus("offline", 0, lastSuccessfulHealthComponents);
     }
   } finally {
-    healthPollRunning = false;
-    scheduleBackendHealthPoll();
+    if (requestGeneration === healthPollGeneration) {
+      if (healthPollController === controller) healthPollController = null;
+      if (!document.hidden) scheduleBackendHealthPoll(requestGeneration);
+    }
   }
 }
 
-function setBackendHealthDetailsExpanded(expanded) {
+function setBackendHealthDetailsExpanded(expanded, { pinned = healthDetailsPinned } = {}) {
+  healthDetailsPinned = pinned;
   backendHealthIndicator?.classList.toggle("details-open", expanded);
+  if (backendHealthDetails) backendHealthDetails.hidden = !expanded;
   backendHealthStatus?.setAttribute("aria-expanded", expanded ? "true" : "false");
 }
 
+function refreshBackendHealthDetailsExpanded() {
+  const expanded = Boolean(
+    healthDetailsPinned ||
+      healthDetailsPointerInside ||
+      backendHealthIndicator?.contains(document.activeElement)
+  );
+  setBackendHealthDetailsExpanded(expanded);
+}
+
+backendHealthIndicator?.addEventListener("pointerenter", () => {
+  healthDetailsPointerInside = true;
+  setBackendHealthDetailsExpanded(true);
+});
+
+backendHealthIndicator?.addEventListener("pointerleave", () => {
+  healthDetailsPointerInside = false;
+  refreshBackendHealthDetailsExpanded();
+});
+
+backendHealthIndicator?.addEventListener("focusin", () => {
+  setBackendHealthDetailsExpanded(true);
+});
+
+backendHealthIndicator?.addEventListener("focusout", () => {
+  window.setTimeout(refreshBackendHealthDetailsExpanded, 0);
+});
+
 backendHealthStatus?.addEventListener("click", (event) => {
   event.stopPropagation();
-  setBackendHealthDetailsExpanded(backendHealthStatus.getAttribute("aria-expanded") !== "true");
+  const pinned = !healthDetailsPinned;
+  setBackendHealthDetailsExpanded(
+    Boolean(
+      pinned ||
+        healthDetailsPointerInside ||
+        backendHealthIndicator?.contains(document.activeElement)
+    ),
+    { pinned }
+  );
 });
 
 backendHealthStatus?.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
-  setBackendHealthDetailsExpanded(false);
+  setBackendHealthDetailsExpanded(false, { pinned: false });
   backendHealthStatus.focus();
 });
 
-document.addEventListener("click", () => setBackendHealthDetailsExpanded(false));
+document.addEventListener("click", (event) => {
+  if (backendHealthIndicator?.contains(event.target)) return;
+  setBackendHealthDetailsExpanded(false, { pinned: false });
+});
 
 function showLogsError(error) {
   if (!logsOutput) return;
@@ -5691,9 +5769,12 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     if (healthPollTimer) window.clearTimeout(healthPollTimer);
     healthPollTimer = 0;
+    healthPollGeneration += 1;
+    healthPollController?.abort();
+    healthPollController = null;
     return;
   }
-  scheduleBackendHealthPoll(0);
+  pollBackendHealth().catch(() => {});
   state.pollers.forEach((poller) => poller.kick());
   if ([...state.processJobs.values()].some(processJobIsActive)) {
     scheduleProcessJobPoll(0);
@@ -11221,4 +11302,4 @@ setupPageExitGuards();
 applyTheme();
 loadBootstrap().catch(showError);
 startBackgroundPollers();
-scheduleBackendHealthPoll(0);
+pollBackendHealth().catch(() => {});

@@ -62,7 +62,7 @@ Obok nazwy aplikacji widoczny jest tekstowy stan backendu z kropką i medianą c
 - **Online**: lokalne komponenty odpowiadają prawidłowo, mediana jest poniżej 300 ms i brak stanu ograniczonego.
 - **Wolno**: mediana wynosi co najmniej 300 ms albo któryś komponent ma stan ograniczony.
 - **Krytyczny**: backend lub SQLite zgłasza problem albo mediana przekracza 1000 ms.
-- **Offline**: trzy kolejne próby pobrania stanu zakończyły się błędem.
+- **Offline**: trzy kolejne próby pobrania stanu zakończyły się błędem; szczegóły zachowują ostatni znany stan komponentów z poprzedniego udanego pomiaru.
 
 Pomiar jest wykonywany co pięć sekund. Przeglądarka wstrzymuje go w ukrytej karcie i odświeża stan natychmiast po powrocie.
 
