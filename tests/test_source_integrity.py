@@ -9,6 +9,50 @@ import unittest
 
 
 class SourceIntegrityTests(unittest.TestCase):
+    def test_web_logs_use_durable_observability_apis(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        self.assertIn('new EventSource("/api/observability/stream', source)
+        self.assertIn('"/api/observability/events', source)
+        self.assertIn('"/api/observability/incidents', source)
+        self.assertIn('"/api/observability/jobs', source)
+        self.assertIn('"/api/observability/read"', source)
+        self.assertIn('logsLoadMoreButton.textContent = "Wczytaj wiecej"', source)
+        self.assertNotIn("for (const log of logs)", source)
+        self.assertNotIn("function logReadStorageKey", source)
+
+    def test_web_logs_guard_stream_and_cursor_races(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'state.observability.latestEventId || "observability-live-high-water"',
+            source,
+        )
+        self.assertIn("if (tab.loading) return;", source)
+        self.assertIn("logsLoadMoreButton.disabled = Boolean(tab.loading)", source)
+        self.assertIn("state.observability.activeTab === tabName", source)
+        append_live = source[
+            source.index("function appendLiveEvent") : source.index(
+                "function handleObservabilityEvent"
+            )
+        ]
+        self.assertIn("logsOutput.appendChild(renderLogEvent(event))", append_live)
+        self.assertNotIn("renderLogs()", append_live)
+
     def test_web_client_reports_deduplicated_global_failures(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]

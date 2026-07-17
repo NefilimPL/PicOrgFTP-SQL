@@ -58,6 +58,41 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
+    def test_logs_use_tabs_live_stream_and_cursor_loading(self) -> None:
+        html_source = INDEX_HTML.read_text(encoding="utf-8")
+        js_source = APP_JS.read_text(encoding="utf-8")
+        css_source = (
+            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+
+        for tab in ("live", "critical", "error", "warning", "jobs"):
+            self.assertIn(f'data-log-tab="{tab}"', html_source)
+            self.assertIn(f'data-log-badge="{tab}"', html_source)
+        for control_id in (
+            "logsTextFilter",
+            "logsSeverityFilter",
+            "logsModuleFilter",
+            "logsUserFilter",
+            "logsEanFilter",
+            "logsJobFilter",
+            "logsPauseButton",
+            "logsAutoscrollToggle",
+            "logsLoadMoreButton",
+        ):
+            self.assertIn(f'id="{control_id}"', html_source)
+        self.assertIn("observability:", js_source)
+        self.assertIn("nextCursor", js_source)
+        self.assertIn("unread", js_source)
+        self.assertIn("MAX_LIVE_LOG_EVENTS = 2000", js_source)
+        self.assertIn("localStorage.getItem(LOG_AUTOSCROLL_KEY)", js_source)
+        self.assertIn('classList.toggle("log-alert-error"', js_source)
+        self.assertIn(".nav-button.log-alert-error", css_source)
+        logs_renderer = js_source[
+            js_source.index("function renderLogEvent") : js_source.index("function createPoller")
+        ]
+        self.assertNotIn("innerHTML", logs_renderer)
+        self.assertIn("textContent", logs_renderer)
+
     def test_app_js_static_id_selectors_exist_in_index_html(self) -> None:
         html = _parse(INDEX_HTML)
         source = APP_JS.read_text(encoding="utf-8")

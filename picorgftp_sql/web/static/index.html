@@ -333,7 +333,37 @@
             <button type="button" class="ghost-button modal-close" data-close-modal>Zamknij</button>
           </div>
         </div>
+        <div class="logs-tabs" role="tablist" aria-label="Kategorie logow">
+          <button type="button" class="logs-tab active" data-log-tab="live" role="tab" aria-selected="true">Na zywo <span data-log-badge="live">0</span></button>
+          <button type="button" class="logs-tab" data-log-tab="critical" role="tab" aria-selected="false">Krytyczne <span data-log-badge="critical">0</span></button>
+          <button type="button" class="logs-tab" data-log-tab="error" role="tab" aria-selected="false">Bledy <span data-log-badge="error">0</span></button>
+          <button type="button" class="logs-tab" data-log-tab="warning" role="tab" aria-selected="false">Ostrzezenia <span data-log-badge="warning">0</span></button>
+          <button type="button" class="logs-tab" data-log-tab="jobs" role="tab" aria-selected="false">Zadania <span data-log-badge="jobs">0</span></button>
+        </div>
+        <form id="logsFilters" class="logs-filters">
+          <input id="logsTextFilter" type="search" placeholder="Szukaj w logach" aria-label="Szukaj w logach" autocomplete="off" />
+          <select id="logsSeverityFilter" aria-label="Poziom zdarzenia">
+            <option value="">Wszystkie poziomy</option>
+            <option value="critical">Krytyczne</option>
+            <option value="error">Bledy</option>
+            <option value="warning">Ostrzezenia</option>
+            <option value="info">Informacje</option>
+          </select>
+          <input id="logsModuleFilter" placeholder="Modul" aria-label="Modul" autocomplete="off" />
+          <input id="logsUserFilter" placeholder="Uzytkownik" aria-label="Uzytkownik" autocomplete="off" />
+          <input id="logsEanFilter" placeholder="EAN" aria-label="EAN" autocomplete="off" />
+          <input id="logsJobFilter" placeholder="ID zadania" aria-label="ID zadania" autocomplete="off" />
+          <button type="submit" class="secondary-button">Filtruj</button>
+        </form>
+        <div class="logs-live-controls">
+          <button id="logsPauseButton" type="button" class="secondary-button">Wstrzymaj</button>
+          <label><input id="logsAutoscrollToggle" type="checkbox" /> Przewijaj automatycznie</label>
+          <span id="logsStreamStatus" role="status"></span>
+        </div>
         <div id="logsOutput" class="logs-output empty-state">Logi sa dostepne tylko dla administratora.</div>
+        <div class="logs-pagination">
+          <button id="logsLoadMoreButton" type="button" class="secondary-button" hidden>Wczytaj wiecej</button>
+        </div>
       </section>
     </div>
 

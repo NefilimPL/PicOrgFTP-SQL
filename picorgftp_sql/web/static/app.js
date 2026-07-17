@@ -50,7 +50,23 @@ const state = {
     report: null,
   },
   pimcoreSetupPrompted: false,
-  logs: null,
+  observability: {
+    activeTab: "live",
+    unread: { critical: 0, error: 0, warning: 0, total: 0, highest: "" },
+    stream: null,
+    streamSeeded: false,
+    latestEventId: "",
+    paused: false,
+    buffer: [],
+    autoscroll: true,
+    tabs: {
+      live: { items: [], nextCursor: "", unread: 0, loading: false, requestId: 0 },
+      critical: { items: [], nextCursor: "", unread: 0, loading: false, requestId: 0 },
+      error: { items: [], nextCursor: "", unread: 0, loading: false, requestId: 0 },
+      warning: { items: [], nextCursor: "", unread: 0, loading: false, requestId: 0 },
+      jobs: { items: [], nextCursor: "", unread: 0, loading: false, requestId: 0 },
+    },
+  },
   settingsSecrets: null,
   theme: localStorage.getItem("picorg-theme") || "light",
   suppressAutoSearch: false,
@@ -112,6 +128,10 @@ const CSRF_SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const SECRET_REVEAL_MS = 60000;
 const POLL_HIDDEN_DELAY_MS = 30000;
 const CLIENT_FAILURE_DEDUPE_MS = 60000;
+const LOG_AUTOSCROLL_KEY = "picorg-log-autoscroll";
+const MAX_LIVE_LOG_EVENTS = 2000;
+const OBSERVABILITY_PAGE_SIZE = 20;
+state.observability.autoscroll = localStorage.getItem(LOG_AUTOSCROLL_KEY) !== "false";
 const clientFailureFingerprints = new Map();
 const SQLITE_BACKUP_DAYS = [
   ["mon", "Pon"],
@@ -305,6 +325,18 @@ const logsClearPassword = document.querySelector("#logsClearPassword");
 const logsClearStatus = document.querySelector("#logsClearStatus");
 const logsOutput = document.querySelector("#logsOutput");
 const logsButton = document.querySelector('[data-modal="logs"]');
+const logsView = document.querySelector("#logsView");
+const logsFilters = document.querySelector("#logsFilters");
+const logsTextFilter = document.querySelector("#logsTextFilter");
+const logsSeverityFilter = document.querySelector("#logsSeverityFilter");
+const logsModuleFilter = document.querySelector("#logsModuleFilter");
+const logsUserFilter = document.querySelector("#logsUserFilter");
+const logsEanFilter = document.querySelector("#logsEanFilter");
+const logsJobFilter = document.querySelector("#logsJobFilter");
+const logsPauseButton = document.querySelector("#logsPauseButton");
+const logsAutoscrollToggle = document.querySelector("#logsAutoscrollToggle");
+const logsStreamStatus = document.querySelector("#logsStreamStatus");
+const logsLoadMoreButton = document.querySelector("#logsLoadMoreButton");
 const secretRevealModal = document.querySelector("#secretRevealModal");
 const secretRevealForm = document.querySelector("#secretRevealForm");
 const secretRevealPassword = document.querySelector("#secretRevealPassword");
@@ -488,6 +520,7 @@ function updateAdminUi() {
     node.hidden = !state.isAdmin;
   });
   if (!state.isAdmin) {
+    stopObservabilityStream();
     updateLogAlert({});
   }
 }
@@ -631,6 +664,7 @@ function openGithubStatusModal() {
 }
 
 function closeModals() {
+  stopObservabilityStream();
   closeHistoryChangesModal({ restoreFocus: false });
   document.querySelectorAll(".modal-view").forEach((modal) => modal.classList.remove("active"));
   if (logsClearPassword) logsClearPassword.value = "";
@@ -4665,52 +4699,46 @@ function showHistoryLoadError(error) {
   }
 }
 
-function logReadStorageKey() {
-  const username = state.currentUser?.username || "anonymous";
-  return `picorg-log-read-${username}`;
+function observabilityTab(tab = state.observability.activeTab) {
+  return state.observability.tabs[tab] || state.observability.tabs.live;
 }
 
-function readLogMarker() {
-  try {
-    return JSON.parse(localStorage.getItem(logReadStorageKey()) || "{}");
-  } catch (_error) {
-    return {};
-  }
+function updateLogBadges() {
+  const tabs = state.observability.tabs;
+  document.querySelectorAll("[data-log-badge]").forEach((badge) => {
+    const tab = badge.dataset.logBadge || "";
+    const value = ["critical", "error", "warning"].includes(tab)
+      ? Number(tabs[tab]?.unread || 0)
+      : Number(tabs[tab]?.items?.length || 0);
+    badge.textContent = String(value);
+    badge.hidden = value === 0;
+  });
 }
 
-function writeLogMarker(summary = {}) {
-  const marker = {
-    critical: summary.latest_critical_id || "",
-    warning: summary.latest_warning_id || "",
+function updateLogAlert(unread = {}) {
+  state.observability.unread = {
+    critical: Number(unread.critical || 0),
+    error: Number(unread.error || 0),
+    warning: Number(unread.warning || 0),
+    total: Number(unread.total || 0),
+    highest: String(unread.highest || ""),
   };
-  localStorage.setItem(logReadStorageKey(), JSON.stringify(marker));
-  return marker;
-}
-
-function unreadLogSeverity(summary = {}) {
-  const marker = readLogMarker();
-  if (summary.latest_critical_id && summary.latest_critical_id !== marker.critical) {
-    return "critical";
+  for (const severity of ["critical", "error", "warning"]) {
+    state.observability.tabs[severity].unread = state.observability.unread[severity];
   }
-  if (summary.latest_warning_id && summary.latest_warning_id !== marker.warning) {
-    return "warning";
-  }
-  return "";
-}
-
-function updateLogAlert(summary = {}, { initialize = false } = {}) {
+  updateLogBadges();
   if (!logsButton || !state.isAdmin) {
-    logsButton?.classList.remove("log-alert-critical", "log-alert-warning");
+    logsButton?.classList.remove("log-alert-critical", "log-alert-error", "log-alert-warning");
     return;
   }
-  if (initialize && !localStorage.getItem(logReadStorageKey())) {
-    writeLogMarker(summary);
-  }
-  const severity = unreadLogSeverity(summary);
+  const severity = state.observability.unread.highest;
   logsButton.classList.toggle("log-alert-critical", severity === "critical");
+  logsButton.classList.toggle("log-alert-error", severity === "error");
   logsButton.classList.toggle("log-alert-warning", severity === "warning");
   if (severity === "critical") {
     logsButton.title = "Nowy krytyczny blad w logach.";
+  } else if (severity === "error") {
+    logsButton.title = "Nowy blad w logach.";
   } else if (severity === "warning") {
     logsButton.title = "Nowe ostrzezenie w logach.";
   } else {
@@ -4718,13 +4746,9 @@ function updateLogAlert(summary = {}, { initialize = false } = {}) {
   }
 }
 
-function markLogsRead(payload = {}) {
-  writeLogMarker(payload.summary || {});
-  updateLogAlert(payload.summary || {});
-}
-
 function logSeverityLabel(severity = "info") {
   if (severity === "critical") return "Krytyczny";
+  if (severity === "error") return "Blad";
   if (severity === "warning") return "Ostrzezenie";
   return "Info";
 }
@@ -4733,77 +4757,470 @@ function renderLogEvent(event) {
   const block = document.createElement("article");
   const meta = document.createElement("div");
   const title = document.createElement("strong");
-  const source = document.createElement("span");
+  const context = document.createElement("span");
   const details = document.createElement("details");
   const summary = document.createElement("summary");
   const lines = document.createElement("pre");
   const severity = event.severity || "info";
   block.className = `log-event log-event-${severity}`;
   meta.className = "log-event-meta";
-  meta.textContent = [event.time || "", logSeverityLabel(severity)].filter(Boolean).join(" | ");
+  meta.textContent = [event.created_at || "", logSeverityLabel(severity), event.module || "", event.stage || ""]
+    .filter(Boolean)
+    .join(" | ");
   title.textContent = event.summary || "Zdarzenie";
-  source.textContent = event.path || "";
+  context.textContent = [
+    event.username ? `uzytkownik: ${event.username}` : "",
+    event.ean ? `EAN: ${event.ean}` : "",
+    event.job_id ? `zadanie: ${event.job_id}` : "",
+  ]
+    .filter(Boolean)
+    .join(" | ");
   summary.textContent = "Szczegoly";
   lines.className = "log-lines";
-  lines.textContent = (event.lines || []).join("\n");
+  lines.textContent = [
+    event.recommended_action ? `Zalecane dzialanie: ${event.recommended_action}` : "",
+    event.exception_type ? `Wyjatek: ${event.exception_type}` : "",
+    event.traceback_text || "",
+    Object.keys(event.details || {}).length ? JSON.stringify(event.details, null, 2) : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
   details.append(summary, lines);
-  block.append(meta, title, source, details);
+  block.append(meta, title);
+  if (context.textContent) block.appendChild(context);
+  if (lines.textContent) block.appendChild(details);
   return block;
 }
 
-function renderLogs(payload) {
-  state.logs = payload;
+function incidentValue(incident, key) {
+  return incident[key] || incident.context?.[key] || "";
+}
+
+function renderIncidentContext(incident, key, label) {
+  const details = document.createElement("details");
+  const heading = document.createElement("summary");
+  const output = document.createElement("div");
+  const items = Array.isArray(incident[key]) ? incident[key] : [];
+  details.className = `log-incident-context log-incident-context-${key}`;
+  heading.textContent = `${label} (${items.length})`;
+  output.className = "log-context-events";
+  if (!items.length) {
+    const empty = document.createElement("span");
+    empty.textContent = "Brak zdarzen.";
+    output.appendChild(empty);
+  } else {
+    for (const item of items) output.appendChild(renderLogEvent(item));
+  }
+  details.append(heading, output);
+  return details;
+}
+
+function openHistoryForEan(ean) {
+  if (!ean || !historySearchInput) return;
+  closeModals();
+  historySearchInput.value = ean;
+  state.historyPage = 1;
+  openModal("history");
+}
+
+function renderIncidentCard(incident) {
+  const card = document.createElement("article");
+  const meta = document.createElement("div");
+  const title = document.createElement("strong");
+  const action = document.createElement("p");
+  const context = document.createElement("span");
+  const links = document.createElement("div");
+  const severity = incident.severity || "warning";
+  const ean = incidentValue(incident, "ean");
+  const jobId = incident.job_id || incidentValue(incident, "job_id");
+  card.id = incident.id || "";
+  card.className = `log-incident log-event-${severity}`;
+  meta.className = "log-event-meta";
+  meta.textContent = [
+    incident.last_seen_at || incident.first_seen_at || "",
+    logSeverityLabel(severity),
+    `wystapienia: ${Number(incident.occurrence_count || 1)}`,
+  ]
+    .filter(Boolean)
+    .join(" | ");
+  title.textContent = incidentValue(incident, "summary") || incident.event_type || "Incydent";
+  action.className = "log-recommended-action";
+  action.textContent = incidentValue(incident, "recommended_action")
+    ? `Zalecane dzialanie: ${incidentValue(incident, "recommended_action")}`
+    : "Brak zalecanego dzialania.";
+  context.textContent = [
+    incidentValue(incident, "username") ? `uzytkownik: ${incidentValue(incident, "username")}` : "",
+    ean ? `EAN: ${ean}` : "",
+    jobId ? `zadanie: ${jobId}` : "",
+    incidentValue(incident, "module") ? `modul: ${incidentValue(incident, "module")}` : "",
+  ]
+    .filter(Boolean)
+    .join(" | ");
+  links.className = "log-card-links";
+  if (ean) {
+    const historyLink = document.createElement("button");
+    historyLink.type = "button";
+    historyLink.className = "ghost-button";
+    historyLink.textContent = "Historia EAN";
+    historyLink.addEventListener("click", () => openHistoryForEan(ean));
+    links.appendChild(historyLink);
+  }
+  if (jobId) {
+    const jobLink = document.createElement("button");
+    jobLink.type = "button";
+    jobLink.className = "ghost-button";
+    jobLink.textContent = "Pokaz zadanie";
+    jobLink.addEventListener("click", () => {
+      if (logsJobFilter) logsJobFilter.value = jobId;
+      switchLogTab("jobs").catch(showLogsError);
+    });
+    links.appendChild(jobLink);
+  }
+  card.append(meta, title, action);
+  if (context.textContent) card.appendChild(context);
+  if (links.childElementCount) card.appendChild(links);
+  card.append(
+    renderIncidentContext(incident, "before", "Przed"),
+    renderIncidentContext(incident, "problem", "Problem"),
+    renderIncidentContext(incident, "after", "Po")
+  );
+  return card;
+}
+
+function renderJobCard(job) {
+  const card = document.createElement("article");
+  const meta = document.createElement("div");
+  const title = document.createElement("strong");
+  const context = document.createElement("span");
+  const stages = document.createElement("ol");
+  const links = document.createElement("div");
+  const jobId = job.id || job.job_id || "";
+  const ean = job.ean || job.entry?.ean || job.details?.ean || "";
+  const incidentId = job.incident_id || job.details?.incident_id || "";
+  card.className = `log-job log-job-${job.status || "unknown"}`;
+  meta.className = "log-event-meta";
+  meta.textContent = [job.started_at || "", job.finished_at || "", job.status || ""]
+    .filter(Boolean)
+    .join(" | ");
+  title.textContent = job.summary || jobId || "Zadanie";
+  context.textContent = [
+    job.username ? `uzytkownik: ${job.username}` : "",
+    ean ? `EAN: ${ean}` : "",
+    jobId ? `ID: ${jobId}` : "",
+  ]
+    .filter(Boolean)
+    .join(" | ");
+  stages.className = "log-job-stages";
+  for (const stage of job.stages || []) {
+    const item = document.createElement("li");
+    item.textContent = [stage.name || stage.key || "Etap", stage.status || "", stage.error || ""]
+      .filter(Boolean)
+      .join(" | ");
+    stages.appendChild(item);
+  }
+  links.className = "log-card-links";
+  if (incidentId) {
+    const incidentLink = document.createElement("button");
+    incidentLink.type = "button";
+    incidentLink.className = "ghost-button";
+    incidentLink.textContent = "Pokaz incydent";
+    incidentLink.addEventListener("click", () => {
+      if (logsTextFilter) logsTextFilter.value = incidentId;
+      const severity = ["critical", "error", "warning"].includes(job.severity)
+        ? job.severity
+        : "error";
+      switchLogTab(severity).catch(showLogsError);
+    });
+    links.appendChild(incidentLink);
+  }
+  if (ean) {
+    const historyLink = document.createElement("button");
+    historyLink.type = "button";
+    historyLink.className = "ghost-button";
+    historyLink.textContent = "Historia EAN";
+    historyLink.addEventListener("click", () => openHistoryForEan(ean));
+    links.appendChild(historyLink);
+  }
+  card.append(meta, title);
+  if (context.textContent) card.appendChild(context);
+  if (stages.childElementCount) card.appendChild(stages);
+  if (links.childElementCount) card.appendChild(links);
+  return card;
+}
+
+function logItemMatchesFilters(item) {
+  const query = (logsTextFilter?.value || "").trim().toLowerCase();
+  const severity = logsSeverityFilter?.value || "";
+  const moduleName = (logsModuleFilter?.value || "").trim().toLowerCase();
+  const username = (logsUserFilter?.value || "").trim().toLowerCase();
+  const ean = (logsEanFilter?.value || "").trim().toLowerCase();
+  const jobId = (logsJobFilter?.value || "").trim().toLowerCase();
+  const context = item.context || {};
+  const serialized = JSON.stringify(item).toLowerCase();
+  if (query && !serialized.includes(query)) return false;
+  if (severity && (item.severity || "") !== severity) return false;
+  if (moduleName && !String(item.module || context.module || "").toLowerCase().includes(moduleName)) return false;
+  if (username && !String(item.username || context.username || "").toLowerCase().includes(username)) return false;
+  if (ean && !String(item.ean || context.ean || item.entry?.ean || "").toLowerCase().includes(ean)) return false;
+  if (jobId && !String(item.job_id || item.id || context.job_id || "").toLowerCase().includes(jobId)) return false;
+  return true;
+}
+
+function renderLogs() {
   logsOutput.textContent = "";
-  const logs = payload.logs || [];
-  const hasEvents = logs.some((log) => (log.events || []).length);
-  if (!hasEvents) {
+  const tabName = state.observability.activeTab;
+  const items = observabilityTab(tabName).items.filter(logItemMatchesFilters);
+  if (!items.length) {
     logsOutput.className = "logs-output empty-state";
-    logsOutput.textContent = "Brak zdarzen w logach systemowych.";
+    logsOutput.textContent = "Brak zdarzen dla wybranych filtrow.";
+  } else {
+    logsOutput.className = `logs-output logs-output-${tabName}`;
+    for (const item of items) {
+      if (tabName === "live") logsOutput.appendChild(renderLogEvent(item));
+      else if (tabName === "jobs") logsOutput.appendChild(renderJobCard(item));
+      else logsOutput.appendChild(renderIncidentCard(item));
+    }
+  }
+  const tab = observabilityTab(tabName);
+  logsLoadMoreButton.textContent = "Wczytaj wiecej";
+  logsLoadMoreButton.hidden = tabName === "live" || !tab.nextCursor;
+  logsLoadMoreButton.disabled = Boolean(tab.loading);
+  updateLogBadges();
+  if (tabName === "live" && state.observability.autoscroll) {
+    logsOutput.scrollTop = logsOutput.scrollHeight;
+  }
+}
+
+function showLogsError(error) {
+  if (!logsOutput) return;
+  logsOutput.className = "logs-output empty-state";
+  logsOutput.textContent = error.message || String(error);
+}
+
+async function markSeverityRead(severity) {
+  const tab = observabilityTab(severity);
+  if (!tab.items.length || !tab.unread || tab.readInFlight) return;
+  const incident = tab.items[0];
+  const eventId = incident.latest_event_id || incident.first_event_id || "";
+  const createdAt = incident.last_seen_at || incident.first_seen_at || "";
+  if (!eventId || !createdAt) return;
+  tab.readInFlight = true;
+  try {
+    const payload = await requestJson("/api/observability/read", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ severity, event_id: eventId, created_at: createdAt }),
+    });
+    updateLogAlert(payload.unread || {});
+  } finally {
+    tab.readInFlight = false;
+  }
+}
+
+async function seedLiveLogs({ force = false } = {}) {
+  const live = observabilityTab("live");
+  if (state.observability.streamSeeded && !force) {
+    renderLogs();
     return;
   }
-  logsOutput.className = "logs-output";
-  for (const log of logs) {
-    const category = document.createElement("section");
-    const heading = document.createElement("div");
-    const title = document.createElement("strong");
-    const path = document.createElement("span");
-    const events = log.events || [];
-    category.className = "log-category";
-    heading.className = "log-category-heading";
-    title.textContent = `${log.label || log.key || "Log"} (${events.length})`;
-    path.textContent = log.path || "";
-    heading.append(title, path);
-    category.appendChild(heading);
-    if (!events.length) {
-      const empty = document.createElement("p");
-      empty.className = "empty-state";
-      empty.textContent = "Brak zdarzen w tej kategorii.";
-      category.appendChild(empty);
+  if (force) stopObservabilityStream();
+  live.items = [];
+  live.nextCursor = "";
+  state.observability.buffer = [];
+  state.observability.latestEventId = "";
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  let cursor = "";
+  const newestFirst = [];
+  do {
+    const params = new URLSearchParams({ since, limit: "100" });
+    if (cursor) params.set("cursor", cursor);
+    const payload = await requestJson("/api/observability/events?" + params.toString());
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    if (!state.observability.latestEventId && items[0]?.id) {
+      state.observability.latestEventId = items[0].id;
+    }
+    newestFirst.push(...items);
+    cursor = payload.next_cursor || "";
+    updateLogAlert(payload.unread || {});
+  } while (cursor && newestFirst.length < MAX_LIVE_LOG_EVENTS);
+  live.items = newestFirst.slice(0, MAX_LIVE_LOG_EVENTS).reverse();
+  state.observability.streamSeeded = true;
+  renderLogs();
+}
+
+function appendLiveEvent(event) {
+  const live = observabilityTab("live");
+  if (!event?.id || live.items.some((item) => item.id === event.id)) return;
+  live.items.push(event);
+  let removed = [];
+  if (live.items.length > MAX_LIVE_LOG_EVENTS) {
+    removed = live.items.splice(0, live.items.length - MAX_LIVE_LOG_EVENTS);
+  }
+  if (state.observability.activeTab !== "live") {
+    updateLogBadges();
+    return;
+  }
+  for (const item of removed) {
+    if (logItemMatchesFilters(item)) logsOutput.firstElementChild?.remove();
+  }
+  if (!logItemMatchesFilters(event)) {
+    updateLogBadges();
+    if (!logsOutput.childElementCount) {
+      logsOutput.className = "logs-output empty-state";
+      logsOutput.textContent = "Brak zdarzen dla wybranych filtrow.";
+    }
+    return;
+  }
+  if (logsOutput.classList.contains("empty-state")) {
+    logsOutput.textContent = "";
+    logsOutput.className = "logs-output logs-output-live";
+  }
+  logsOutput.appendChild(renderLogEvent(event));
+  while (logsOutput.childElementCount > MAX_LIVE_LOG_EVENTS) {
+    logsOutput.firstElementChild?.remove();
+  }
+  updateLogBadges();
+  if (state.observability.autoscroll) {
+    logsOutput.scrollTop = logsOutput.scrollHeight;
+  }
+}
+
+function handleObservabilityEvent(event) {
+  let item;
+  try {
+    item = JSON.parse(event.data);
+  } catch (_error) {
+    return;
+  }
+  if (!item || typeof item !== "object") return;
+  state.observability.latestEventId = item.id || event.lastEventId || state.observability.latestEventId;
+  if (state.observability.paused) {
+    state.observability.buffer.push(item);
+    if (state.observability.buffer.length > MAX_LIVE_LOG_EVENTS) {
+      state.observability.buffer.shift();
+    }
+    if (logsStreamStatus) {
+      logsStreamStatus.textContent = `Wstrzymano (${state.observability.buffer.length} oczekuje)`;
+    }
+    return;
+  }
+  appendLiveEvent(item);
+}
+
+function startObservabilityStream() {
+  if (
+    state.observability.stream ||
+    !state.isAdmin ||
+    !logsView?.classList.contains("active")
+  ) {
+    return;
+  }
+  const latestId = state.observability.latestEventId || "observability-live-high-water";
+  const stream = new EventSource("/api/observability/stream?after_id=" + encodeURIComponent(latestId));
+  state.observability.stream = stream;
+  stream.onopen = () => {
+    if (logsStreamStatus) logsStreamStatus.textContent = "Polaczono";
+  };
+  stream.onmessage = handleObservabilityEvent;
+  stream.onerror = () => {
+    if (logsStreamStatus) logsStreamStatus.textContent = "Ponowne laczenie...";
+  };
+}
+
+function stopObservabilityStream() {
+  state.observability.stream?.close();
+  state.observability.stream = null;
+  if (logsStreamStatus) logsStreamStatus.textContent = "";
+}
+
+function observabilityEndpoint(tabName, cursor = "") {
+  const params = new URLSearchParams({ limit: String(OBSERVABILITY_PAGE_SIZE) });
+  if (cursor) params.set("cursor", cursor);
+  if (tabName === "jobs") return "/api/observability/jobs?" + params.toString();
+  params.set("severity", tabName);
+  return "/api/observability/incidents?" + params.toString();
+}
+
+async function loadObservabilityTab(tabName, { append = false, force = false } = {}) {
+  if (tabName === "live") {
+    await seedLiveLogs({ force });
+    startObservabilityStream();
+    return;
+  }
+  const tab = observabilityTab(tabName);
+  if (tab.loading) return;
+  if (force) {
+    tab.items = [];
+    tab.nextCursor = "";
+  }
+  if (!append && tab.items.length) {
+    renderLogs();
+    if (["critical", "error", "warning"].includes(tabName)) await markSeverityRead(tabName);
+    return;
+  }
+  const cursor = append ? tab.nextCursor : "";
+  const endpoint = observabilityEndpoint(tabName, cursor);
+  const requestId = Number(tab.requestId || 0) + 1;
+  tab.requestId = requestId;
+  tab.loading = true;
+  if (state.observability.activeTab === tabName) renderLogs();
+  let rendered = false;
+  try {
+    const payload = await requestJson(endpoint);
+    if (tab.requestId !== requestId) return;
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    if (append) {
+      const knownIds = new Set(tab.items.map((item) => item.id).filter(Boolean));
+      tab.items = tab.items.concat(
+        items.filter((item) => !item.id || !knownIds.has(item.id))
+      );
     } else {
-      for (const event of events) {
-        category.appendChild(renderLogEvent(event));
+      tab.items = items;
+    }
+    tab.nextCursor = payload.next_cursor || "";
+    updateLogAlert(payload.unread || {});
+    if (state.observability.activeTab === tabName) {
+      tab.loading = false;
+      renderLogs();
+      rendered = true;
+      if (!append && ["critical", "error", "warning"].includes(tabName)) {
+        await markSeverityRead(tabName);
       }
     }
-    logsOutput.appendChild(category);
+  } finally {
+    if (tab.requestId === requestId) {
+      tab.loading = false;
+      if (!rendered && state.observability.activeTab === tabName) renderLogs();
+    }
   }
 }
 
-async function loadLogs({ markRead = true } = {}) {
-  const payload = await requestJson("/api/logs?limit=400");
-  updateLogAlert(payload.summary || {});
-  renderLogs(payload);
-  if (markRead) {
-    markLogsRead(payload);
-  }
+async function switchLogTab(tabName) {
+  if (!state.observability.tabs[tabName]) return;
+  state.observability.activeTab = tabName;
+  document.querySelectorAll("[data-log-tab]").forEach((button) => {
+    const active = button.dataset.logTab === tabName;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  document.querySelector(".logs-live-controls")?.toggleAttribute("hidden", tabName !== "live");
+  renderLogs();
+  await loadObservabilityTab(tabName);
 }
 
-async function pollLogStatus({ initialize = false } = {}) {
+async function loadLogs({ refresh = false } = {}) {
+  const tabName = state.observability.activeTab;
+  await loadObservabilityTab(tabName, { force: refresh });
+  startObservabilityStream();
+}
+
+async function pollLogStatus() {
   if (!state.isAdmin) {
     updateLogAlert({});
     return;
   }
-  const payload = await requestJson("/api/logs?limit=120");
-  updateLogAlert(payload.summary || {}, { initialize });
+  const payload = await requestJson("/api/observability/events?limit=1");
+  updateLogAlert(payload.unread || {});
 }
 
 function createPoller(name, intervalMs, callback, options = {}) {
@@ -4896,6 +5313,21 @@ function closeLogsClearModal() {
   document.querySelector("#logsClearModal")?.classList.remove("active");
 }
 
+function resetObservabilityLists() {
+  stopObservabilityStream();
+  state.observability.streamSeeded = false;
+  state.observability.latestEventId = "";
+  state.observability.buffer = [];
+  for (const tab of Object.values(state.observability.tabs)) {
+    tab.requestId = Number(tab.requestId || 0) + 1;
+    tab.loading = false;
+    tab.items = [];
+    tab.nextCursor = "";
+    tab.unread = 0;
+  }
+  updateLogAlert({});
+}
+
 async function clearLogs(password) {
   if (!password) {
     return;
@@ -4908,8 +5340,8 @@ async function clearLogs(password) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ password }),
   });
-  renderLogs(payload);
-  markLogsRead(payload);
+  resetObservabilityLists();
+  await loadLogs({ refresh: true });
   if ((payload.clear_errors || []).length) {
     if (logsClearStatus) {
       logsClearStatus.textContent = `Nie wyczyszczono wszystkich logow: ${(payload.clear_errors || []).join(
@@ -5528,7 +5960,7 @@ async function loadBootstrap(options = {}) {
     renderActiveUsersPresence({ enabled: false, users: [] });
   });
   applyTimingDetailsVisibility();
-  pollLogStatus({ initialize: true }).catch(() => {});
+  pollLogStatus().catch(() => {});
   loadRecentProcessJobs().catch(() => {});
   refreshProcessQueue().catch(() => {});
   refreshGithubStatus().catch(() => {});
@@ -10004,10 +10436,57 @@ historyNextButton?.addEventListener("click", () => {
   loadHistory({ page }).catch(showHistoryLoadError);
 });
 
-logsRefreshButton?.addEventListener("click", () => {
-  loadLogs().catch((error) => {
-    logsOutput.textContent = error.message;
+document.querySelectorAll("[data-log-tab]").forEach((button) => {
+  button.addEventListener("click", () => {
+    switchLogTab(button.dataset.logTab || "live").catch(showLogsError);
   });
+});
+
+logsFilters?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  renderLogs();
+});
+
+logsPauseButton?.addEventListener("click", () => {
+  state.observability.paused = !state.observability.paused;
+  logsPauseButton.textContent = state.observability.paused ? "Wznow" : "Wstrzymaj";
+  if (state.observability.paused) {
+    if (logsStreamStatus) logsStreamStatus.textContent = "Wstrzymano";
+    return;
+  }
+  const buffered = state.observability.buffer.splice(0);
+  const live = observabilityTab("live");
+  const known = new Set(live.items.map((item) => item.id));
+  for (const item of buffered) {
+    if (item?.id && !known.has(item.id)) {
+      known.add(item.id);
+      live.items.push(item);
+    }
+  }
+  if (live.items.length > MAX_LIVE_LOG_EVENTS) {
+    live.items.splice(0, live.items.length - MAX_LIVE_LOG_EVENTS);
+  }
+  if (logsStreamStatus) logsStreamStatus.textContent = "Polaczono";
+  renderLogs();
+});
+
+if (logsAutoscrollToggle) {
+  logsAutoscrollToggle.checked = state.observability.autoscroll;
+  logsAutoscrollToggle.addEventListener("change", () => {
+    state.observability.autoscroll = logsAutoscrollToggle.checked;
+    localStorage.setItem(LOG_AUTOSCROLL_KEY, String(state.observability.autoscroll));
+    if (state.observability.autoscroll && state.observability.activeTab === "live") {
+      logsOutput.scrollTop = logsOutput.scrollHeight;
+    }
+  });
+}
+
+logsLoadMoreButton?.addEventListener("click", () => {
+  loadObservabilityTab(state.observability.activeTab, { append: true }).catch(showLogsError);
+});
+
+logsRefreshButton?.addEventListener("click", () => {
+  loadLogs({ refresh: true }).catch(showLogsError);
 });
 
 logsClearButton?.addEventListener("click", () => {

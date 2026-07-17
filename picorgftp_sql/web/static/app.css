@@ -371,6 +371,12 @@ h2 {
   animation: log-alert-critical 1s ease-in-out infinite;
 }
 
+.nav-button.log-alert-error {
+  border-color: var(--error);
+  color: var(--error);
+  animation: log-alert-error 1.2s ease-in-out infinite;
+}
+
 .nav-button.log-alert-warning {
   border-color: var(--warn);
   color: var(--warn);
@@ -1910,6 +1916,71 @@ button.slot-badge.on:hover {
   min-height: 32px;
 }
 
+.logs-tabs,
+.logs-filters,
+.logs-live-controls,
+.logs-pagination,
+.log-card-links {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.logs-tabs,
+.logs-filters,
+.logs-live-controls {
+  margin-bottom: 12px;
+}
+
+.logs-tab {
+  min-height: 34px;
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.logs-tab.active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.logs-tab span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  min-height: 20px;
+  margin-left: 4px;
+  border-radius: 10px;
+  background: color-mix(in srgb, currentColor 18%, transparent);
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+.logs-filters input,
+.logs-filters select {
+  width: auto;
+  min-width: 130px;
+  flex: 1 1 150px;
+}
+
+.logs-live-controls span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.logs-output-live {
+  max-height: min(65vh, 760px);
+  overflow: auto;
+}
+
+.logs-pagination {
+  justify-content: center;
+  margin-top: 12px;
+}
+
 .history-changes-panel {
   width: min(980px, calc(100vw - 32px));
 }
@@ -2416,9 +2487,10 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
   color: var(--text);
 }
 
-.log-category,
 .log-block,
-.log-event {
+.log-event,
+.log-incident,
+.log-job {
   display: grid;
   gap: 8px;
   border: 1px solid var(--line);
@@ -2427,32 +2499,12 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
   padding: 12px;
 }
 
-.log-category {
-  background: var(--surface-2);
-}
-
-.log-category .empty-state {
-  border: 0;
-  padding: 6px 0 0;
-}
-
-.log-category-heading {
-  display: grid;
-  gap: 4px;
-}
-
-.log-category-heading span {
-  color: var(--muted);
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-
-.log-category .log-event {
-  background: var(--surface);
-}
-
 .log-event-critical {
   border-color: var(--danger);
+}
+
+.log-event-error {
+  border-color: var(--error);
 }
 
 .log-event-warning {
@@ -2475,6 +2527,8 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
 }
 
 .log-event > span,
+.log-incident > span,
+.log-job > span,
 .log-event-meta {
   color: var(--muted);
   font-size: 12px;
@@ -2483,6 +2537,34 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
 
 .log-event strong {
   overflow-wrap: anywhere;
+}
+
+.log-incident strong,
+.log-job strong,
+.log-recommended-action {
+  overflow-wrap: anywhere;
+}
+
+.log-recommended-action {
+  margin: 0;
+}
+
+.log-incident-context {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.log-context-events {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.log-job-stages {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 24px;
 }
 
 .log-event details {
@@ -2517,6 +2599,17 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
   50% {
     background: color-mix(in srgb, var(--danger) 18%, var(--surface));
     box-shadow: 0 0 0 3px rgba(239, 119, 119, 0.22);
+  }
+}
+
+@keyframes log-alert-error {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--error) 0%, transparent);
+  }
+  50% {
+    background: color-mix(in srgb, var(--error) 18%, var(--surface));
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--error) 22%, transparent);
   }
 }
 
