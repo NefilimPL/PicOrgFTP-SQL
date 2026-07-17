@@ -58,6 +58,37 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
+    def test_mail_settings_tab_has_safe_secrets_and_responsive_channel_cards(self) -> None:
+        html = _parse(INDEX_HTML)
+        source = APP_JS.read_text(encoding="utf-8")
+        css = (
+            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+
+        self.assertTrue(html.has_tag("button", **{"data-settings-tab": "mail"}))
+        mail_start = source.index("function renderSettingsMail()")
+        mail_end = source.index("function renderSettingsSlots", mail_start)
+        mail_source = source[mail_start:mail_end]
+        self.assertIn('type: "password"', mail_source)
+        self.assertIn("email.entra?.client_secret_set", mail_source)
+        self.assertIn("email.smtp?.password_set", mail_source)
+        self.assertNotIn("email.entra?.client_secret ||", mail_source)
+        self.assertNotIn("email.smtp?.password ||", mail_source)
+        self.assertIn("client_secret: data.get(\"email_entra_client_secret\")", mail_source)
+        self.assertIn("password: data.get(\"email_smtp_password\")", mail_source)
+        self.assertIn('security !== "none"', mail_source)
+        self.assertIn("Nie szyfruje polaczenia", mail_source)
+        self.assertIn("testButton.disabled = true", mail_source)
+        self.assertIn("testButton.disabled = false", mail_source)
+        self.assertIn("result.used_channel", source)
+        self.assertIn("result.attempts", source)
+        self.assertIn("error.payload = payload", source)
+        self.assertIn(".mail-channel-grid", css)
+        self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr))", css)
+        responsive_start = css.index("@media (max-width: 920px)")
+        self.assertIn("grid-template-columns: 1fr", css[responsive_start:])
+        self.assertNotIn("animation", css[css.index(".mail-test-status"):responsive_start])
+
     def test_user_settings_forms_send_optional_email_fields(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         css = (

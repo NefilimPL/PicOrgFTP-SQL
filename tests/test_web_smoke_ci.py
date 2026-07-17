@@ -141,12 +141,23 @@ class WebSmokeCiTests(unittest.TestCase):
 
     def test_client_error_route_requires_auth_and_csrf_and_emits_redacted_critical(self) -> None:
         class EventStore:
+            supports_atomic_incident_event = True
+
             def __init__(self) -> None:
                 self.events = []
 
             def append_operational_event(self, event):
                 self.events.append(dict(event))
                 return dict(event)
+
+            def coalesce_incident(self, incident, *, source_event=None):
+                if source_event is not None:
+                    self.events.append(dict(source_event))
+                return {
+                    **dict(incident),
+                    "notification_due": False,
+                    "notification_claim_at": "",
+                }
 
         previous = os.environ.get("PICORG_WEB_AUTH")
         os.environ["PICORG_WEB_AUTH"] = "1"
@@ -349,6 +360,7 @@ class WebSmokeCiTests(unittest.TestCase):
             "/api/file",
             "/api/thumbnail",
             "/api/settings",
+            "/api/settings/email/test",
             "/api/settings/import-legacy",
             "/api/settings/sqlite/repair",
             "/api/settings/sqlite/backup",
@@ -361,6 +373,191 @@ class WebSmokeCiTests(unittest.TestCase):
             "/api/users",
         }
         self.assertEqual(expected_paths - route_paths, set())
+
+    def test_email_test_route_returns_only_redacted_delivery_summary(self) -> None:
+        client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
+        result = {
+            "status": "fallback",
+            "used_channel": "smtp",
+            "message_id": "must-not-be-returned",
+            "attempts": [
+                {
+                    "channel": "entra",
+                    "status": "error",
+                    "code": "delivery_failed",
+                    "category": "delivery",
+                    "message": "token=TOP-SECRET server=mail.internal",
+                    "raw_response": "client_secret=LEAK",
+                },
+                {
+                    "channel": "smtp",
+                    "status": "sent",
+                    "code": "sent",
+                    "category": "delivery",
+                    "message": "smtp password=LEAK",
+                },
+            ],
+        }
+        with (
+            patch.object(web_app, "_require_admin", return_value=admin),
+            patch.object(web_app, "send_test_message", return_value=result) as sender,
+        ):
+            response = client.post(
+                "/api/settings/email/test",
+                json={
+                    "recipient": "admin@example.com",
+                    "channel": "entra",
+                    "use_fallback": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(
+            set(payload),
+            {"ok", "status", "used_channel", "attempts", "elapsed_ms"},
+        )
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "fallback")
+        self.assertEqual(payload["used_channel"], "smtp")
+        self.assertGreaterEqual(payload["elapsed_ms"], 0)
+        self.assertNotIn("TOP-SECRET", response.text)
+        self.assertNotIn("mail.internal", response.text)
+        self.assertNotIn("LEAK", response.text)
+        self.assertNotIn("message_id", response.text)
+        sender.assert_called_once_with(
+            channel="entra",
+            recipient="admin@example.com",
+            use_fallback=True,
+        )
+
+    def test_email_test_route_resolves_primary_and_maps_delivery_error_to_502(self) -> None:
+        client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
+        with (
+            patch.object(web_app, "_require_admin", return_value=admin),
+            patch.object(
+                web_app,
+                "settings_snapshot",
+                return_value={
+                    "email_notifications": {"primary_channel": "smtp"}
+                },
+            ),
+            patch.object(
+                web_app,
+                "send_test_message",
+                return_value={
+                    "status": "error",
+                    "used_channel": "smtp",
+                    "attempts": [
+                        {
+                            "channel": "smtp",
+                            "status": "error",
+                            "code": "transport_unavailable",
+                            "category": "transport",
+                            "message": "host=smtp.secret.example password=hunter2",
+                        }
+                    ],
+                },
+            ) as sender,
+        ):
+            response = client.post(
+                "/api/settings/email/test",
+                json={
+                    "recipient": "admin@example.com",
+                    "channel": "primary",
+                    "use_fallback": False,
+                },
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertFalse(response.json()["ok"])
+        self.assertNotIn("smtp.secret.example", response.text)
+        self.assertNotIn("hunter2", response.text)
+        sender.assert_called_once_with(
+            channel="smtp",
+            recipient="admin@example.com",
+            use_fallback=False,
+        )
+
+    def test_email_test_route_rejects_invalid_payload_without_sending(self) -> None:
+        client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
+        with (
+            patch.object(web_app, "_require_admin", return_value=admin),
+            patch.object(web_app, "send_test_message") as sender,
+        ):
+            bad_channel = client.post(
+                "/api/settings/email/test",
+                json={
+                    "recipient": "admin@example.com",
+                    "channel": "exchange",
+                    "use_fallback": False,
+                },
+            )
+            bad_flag = client.post(
+                "/api/settings/email/test",
+                json={
+                    "recipient": "admin@example.com",
+                    "channel": "smtp",
+                    "use_fallback": "yes",
+                },
+            )
+
+        self.assertEqual(bad_channel.status_code, 400)
+        self.assertEqual(bad_flag.status_code, 400)
+        sender.assert_not_called()
+
+    def test_email_test_route_requires_admin_session_and_csrf(self) -> None:
+        previous = os.environ.get("PICORG_WEB_AUTH")
+        os.environ["PICORG_WEB_AUTH"] = "1"
+        try:
+            client = TestClient(web_app.app)
+            request_payload = {
+                "recipient": "admin@example.com",
+                "channel": "smtp",
+                "use_fallback": False,
+            }
+            anonymous = client.post(
+                "/api/settings/email/test", json=request_payload
+            )
+            self.assertEqual(anonymous.status_code, 401)
+
+            login = client.post(
+                "/api/login",
+                data={"username": "admin", "password": "admin"},
+                headers={"X-Requested-With": "XMLHttpRequest"},
+            )
+            self.assertEqual(login.status_code, 200)
+            forged = client.post(
+                "/api/settings/email/test",
+                json=request_payload,
+                headers={"X-PicOrg-CSRF": "bad"},
+            )
+            self.assertEqual(forged.status_code, 403)
+
+            with patch.object(
+                web_app,
+                "send_test_message",
+                return_value={
+                    "status": "sent",
+                    "used_channel": "smtp",
+                    "attempts": [{"channel": "smtp", "status": "sent"}],
+                },
+            ):
+                accepted = client.post(
+                    "/api/settings/email/test",
+                    json=request_payload,
+                    headers={"X-PicOrg-CSRF": login.json()["csrf_token"]},
+                )
+            self.assertEqual(accepted.status_code, 200)
+            self.assertTrue(accepted.json()["ok"])
+        finally:
+            if previous is None:
+                os.environ.pop("PICORG_WEB_AUTH", None)
+            else:
+                os.environ["PICORG_WEB_AUTH"] = previous
 
     def test_github_repository_endpoint_returns_status_payload(self) -> None:
         client = TestClient(web_app.app)

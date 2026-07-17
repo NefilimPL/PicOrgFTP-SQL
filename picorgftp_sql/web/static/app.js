@@ -487,6 +487,7 @@ async function requestJson(path, options = {}) {
     const error = new Error(message);
     error.status = response.status;
     error.detail = detail;
+    error.payload = payload;
     throw error;
   }
   if (payload.csrf_token) {
@@ -10364,6 +10365,303 @@ function renderSettingsPimcore() {
   settingsOutput.appendChild(form);
 }
 
+function splitEmailRecipients(value) {
+  return String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+const MAIL_SEVERITY_RULES = [
+  {
+    severity: "info",
+    label: "Informacje",
+    enabledName: "email_rule_info_enabled",
+    recipientsName: "email_rule_info_recipients",
+    includeActorName: "email_rule_info_include_actor",
+  },
+  {
+    severity: "warning",
+    label: "Ostrzezenia",
+    enabledName: "email_rule_warning_enabled",
+    recipientsName: "email_rule_warning_recipients",
+    includeActorName: "email_rule_warning_include_actor",
+  },
+  {
+    severity: "error",
+    label: "Bledy",
+    enabledName: "email_rule_error_enabled",
+    recipientsName: "email_rule_error_recipients",
+    includeActorName: "email_rule_error_include_actor",
+  },
+  {
+    severity: "critical",
+    label: "Bledy krytyczne",
+    enabledName: "email_rule_critical_enabled",
+    recipientsName: "email_rule_critical_recipients",
+    includeActorName: "email_rule_critical_include_actor",
+  },
+];
+
+function mailRuleCard(definition, rule = {}) {
+  const card = document.createElement("div");
+  card.className = `mail-rule-card mail-rule-${definition.severity}`;
+  card.append(
+    settingsNote(definition.label),
+    checkField(
+      definition.enabledName,
+      "Wysylaj powiadomienia",
+      Boolean(rule.enabled)
+    ),
+    inputField(
+      definition.recipientsName,
+      "Adresy odbiorcow (oddzielone przecinkami)",
+      Array.isArray(rule.recipients) ? rule.recipients.join(", ") : "",
+      { placeholder: "np. admin@example.com, serwis@example.com" }
+    ),
+    checkField(
+      definition.includeActorName,
+      "Wyslij takze do powiazanego uzytkownika",
+      Boolean(rule.include_actor),
+      "Adres jest pobierany z konta osoby powiazanej ze zdarzeniem."
+    )
+  );
+  return card;
+}
+
+function renderMailTestResult(container, result) {
+  container.textContent = "";
+  container.className = `mail-test-status ${result.ok ? "success-text" : "error-text"}`;
+  const summary = document.createElement("strong");
+  const channel = result.used_channel === "smtp" ? "SMTP" : "Microsoft Entra";
+  summary.textContent = result.ok
+    ? `Wiadomosc wyslana przez ${channel} (${Number(result.elapsed_ms || 0)} ms).`
+    : `Test wysylki nie powiodl sie (${Number(result.elapsed_ms || 0)} ms).`;
+  container.appendChild(summary);
+  const attempts = Array.isArray(result.attempts) ? result.attempts : [];
+  if (attempts.length) {
+    const list = document.createElement("div");
+    list.className = "mail-test-attempts";
+    for (const attempt of attempts) {
+      const row = document.createElement("div");
+      const attemptChannel = attempt.channel === "smtp" ? "SMTP" : "Entra";
+      row.className = `mail-test-attempt mail-test-attempt-${attempt.status === "sent" ? "sent" : "error"}`;
+      row.textContent = attempt.status === "sent"
+        ? `${attemptChannel}: wyslano${Number.isFinite(attempt.elapsed_ms) ? ` (${attempt.elapsed_ms} ms)` : ""}.`
+        : `${attemptChannel}: ${attempt.message || "kanal nie wyslal wiadomosci"}`;
+      list.appendChild(row);
+    }
+    container.appendChild(list);
+  }
+}
+
+function renderSettingsMail() {
+  const email = state.settings.email_notifications || {};
+  const form = document.createElement("form");
+  const channelGrid = document.createElement("div");
+  const entraCard = document.createElement("section");
+  const smtpCard = document.createElement("section");
+  const entraTitle = document.createElement("h3");
+  const smtpTitle = document.createElement("h3");
+  const smtpWarning = document.createElement("p");
+  const smtpSecurity = selectField(
+    "email_smtp_security",
+    "Szyfrowanie polaczenia",
+    email.smtp?.security || "starttls",
+    [
+      ["starttls", "STARTTLS"],
+      ["tls", "TLS od poczatku polaczenia"],
+      ["none", "Brak szyfrowania"],
+    ]
+  );
+  const smtpSecuritySelect = smtpSecurity.querySelector("select");
+  const updateSmtpWarning = () => {
+    const security = smtpSecuritySelect.value;
+    smtpWarning.hidden = security !== "none";
+  };
+  form.className = "settings-form mail-settings-form";
+  channelGrid.className = "mail-channel-grid wide-field";
+  entraCard.className = "mail-channel-card";
+  smtpCard.className = "mail-channel-card";
+  entraTitle.textContent = "Microsoft Entra / Graph";
+  smtpTitle.textContent = "SMTP (dowolny dostawca)";
+  smtpWarning.className = "mail-security-warning";
+  smtpWarning.setAttribute("role", "alert");
+  smtpWarning.textContent =
+    "Uwaga: tryb bez TLS. Nie szyfruje polaczenia ani danych logowania. Uzywaj go tylko w zaufanej sieci.";
+  smtpSecuritySelect.addEventListener("change", updateSmtpWarning);
+  updateSmtpWarning();
+  entraCard.append(
+    entraTitle,
+    inputField("email_entra_tenant_id", "Tenant ID", email.entra?.tenant_id || ""),
+    inputField("email_entra_client_id", "Client ID", email.entra?.client_id || ""),
+    credentialField(
+      "email_entra_client_secret",
+      "Client Secret",
+      Boolean(email.entra?.client_secret_set),
+      { type: "password" }
+    ),
+    inputField("email_entra_from_address", "Adres Od", email.entra?.from_address || "", {
+      type: "email",
+      placeholder: "powiadomienia@example.com",
+    })
+  );
+  smtpCard.append(
+    smtpTitle,
+    inputField("email_smtp_host", "Host SMTP", email.smtp?.host || ""),
+    inputField("email_smtp_port", "Port", email.smtp?.port || 587, {
+      type: "number",
+      min: 1,
+      max: 65535,
+    }),
+    smtpSecurity,
+    smtpWarning,
+    inputField("email_smtp_username", "Login", email.smtp?.username || ""),
+    credentialField(
+      "email_smtp_password",
+      "Haslo",
+      Boolean(email.smtp?.password_set),
+      { type: "password" }
+    ),
+    inputField("email_smtp_from_address", "Adres Od", email.smtp?.from_address || "", {
+      type: "email",
+      placeholder: "powiadomienia@example.com",
+    }),
+    inputField("email_smtp_from_name", "Nazwa Od", email.smtp?.from_name || "PicOrgFTP-SQL")
+  );
+  channelGrid.append(entraCard, smtpCard);
+
+  const rules = email.rules || {};
+  const rulesGrid = document.createElement("div");
+  rulesGrid.className = "mail-rule-grid wide-field";
+  rulesGrid.append(
+    ...MAIL_SEVERITY_RULES.map((definition) =>
+      mailRuleCard(definition, rules[definition.severity])
+    )
+  );
+
+  const testRecipient = inputField(
+    "email_test_recipient",
+    "Adres odbiorcy testu",
+    "",
+    { type: "email", placeholder: "admin@example.com" }
+  );
+  const testChannel = selectField("email_test_channel", "Kanal testu", "primary", [
+    ["primary", "Kanal podstawowy"],
+    ["entra", "Microsoft Entra"],
+    ["smtp", "SMTP"],
+  ]);
+  const testFallback = checkField(
+    "email_test_use_fallback",
+    "Uzyj fallbacku, gdy kanal testowy zawiedzie",
+    Boolean(email.fallback_enabled)
+  );
+  const testButton = document.createElement("button");
+  const testStatus = document.createElement("div");
+  testButton.type = "button";
+  testButton.textContent = "Wyslij wiadomosc testowa";
+  testStatus.className = "mail-test-status";
+  testStatus.setAttribute("role", "status");
+  testStatus.setAttribute("aria-live", "polite");
+  testButton.addEventListener("click", async () => {
+    const recipient = testRecipient.querySelector("input").value.trim();
+    if (!recipient) {
+      testStatus.className = "mail-test-status error-text";
+      testStatus.textContent = "Podaj adres odbiorcy testu.";
+      return;
+    }
+    testButton.disabled = true;
+    testStatus.className = "mail-test-status";
+    testStatus.textContent = "Wysylanie testu...";
+    try {
+      const result = await requestJson("/api/settings/email/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recipient,
+          channel: testChannel.querySelector("select").value,
+          use_fallback: testFallback.querySelector("input").checked,
+        }),
+        timeoutMs: 60000,
+      });
+      renderMailTestResult(testStatus, result);
+    } catch (error) {
+      const result = error.payload || error.detail;
+      if (result && typeof result === "object" && Array.isArray(result.attempts)) {
+        renderMailTestResult(testStatus, result);
+      } else {
+        testStatus.className = "mail-test-status error-text";
+        testStatus.textContent = "Test wysylki nie powiodl sie. Sprawdz konfiguracje kanalu.";
+      }
+    } finally {
+      testButton.disabled = false;
+    }
+  });
+
+  form.append(
+    settingsFieldGroup(
+      "Sposob wysylki",
+      selectField(
+        "email_primary_channel",
+        "Kanal podstawowy",
+        email.primary_channel || "entra",
+        [
+          ["entra", "Microsoft Entra"],
+          ["smtp", "SMTP"],
+        ]
+      ),
+      checkField(
+        "email_fallback_enabled",
+        "Wlacz kanal zapasowy",
+        Boolean(email.fallback_enabled),
+        "Gdy kanal podstawowy zawiedzie, aplikacja wykona jedna probe drugim kanalem."
+      ),
+      channelGrid
+    ),
+    settingsFieldGroup("Reguly powiadomien", rulesGrid),
+    settingsFieldGroup(
+      "Wiadomosc testowa",
+      testRecipient,
+      testChannel,
+      testFallback,
+      actionRow(testButton),
+      testStatus
+    )
+  );
+  settingsSaveButton(form, (data) => ({
+    email_notifications: {
+      primary_channel: data.get("email_primary_channel"),
+      fallback_enabled: data.has("email_fallback_enabled"),
+      entra: {
+        tenant_id: data.get("email_entra_tenant_id"),
+        client_id: data.get("email_entra_client_id"),
+        client_secret: data.get("email_entra_client_secret"),
+        from_address: data.get("email_entra_from_address"),
+      },
+      smtp: {
+        host: data.get("email_smtp_host"),
+        port: data.get("email_smtp_port"),
+        security: data.get("email_smtp_security"),
+        username: data.get("email_smtp_username"),
+        password: data.get("email_smtp_password"),
+        from_address: data.get("email_smtp_from_address"),
+        from_name: data.get("email_smtp_from_name"),
+      },
+      rules: Object.fromEntries(
+        MAIL_SEVERITY_RULES.map((definition) => [
+          definition.severity,
+          {
+            enabled: data.has(definition.enabledName),
+            recipients: splitEmailRecipients(data.get(definition.recipientsName)),
+            include_actor: data.has(definition.includeActorName),
+          },
+        ])
+      ),
+    },
+  }));
+  settingsOutput.appendChild(form);
+}
+
 function renderSettingsSlots() {
   ensureSqlColumnsDatalist();
   const form = document.createElement("form");
@@ -10663,6 +10961,7 @@ function renderSettings() {
   if (state.activeSettingsTab === "ftp") renderSettingsFtp();
   if (state.activeSettingsTab === "sql") renderSettingsSql();
   if (state.activeSettingsTab === "pimcore") renderSettingsPimcore();
+  if (state.activeSettingsTab === "mail") renderSettingsMail();
   if (state.activeSettingsTab === "slots") renderSettingsSlots();
   if (state.activeSettingsTab === "users") renderSettingsUsers();
 }

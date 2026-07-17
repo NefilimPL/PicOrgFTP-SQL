@@ -61,6 +61,7 @@ from ..history_changes import history_change_set
 from ..image_utils import fit_image_to_content
 from ..legacy_import import import_legacy_to_sqlite
 from ..logging_utils import log_error
+from ..email_settings import EMAIL_SETTINGS_KEY
 from ..observability import (
     SEVERITIES,
     emit_event,
@@ -70,6 +71,7 @@ from ..observability import (
     record_job,
 )
 from ..notification_service import (
+    send_test_message,
     start_notification_worker,
     stop_notification_worker,
 )
@@ -4219,6 +4221,38 @@ def _health_payload() -> Dict[str, Any]:
     }
 
 
+def _redacted_email_test_attempt(raw: object) -> Dict[str, Any]:
+    """Project one transport attempt without returning provider diagnostics."""
+
+    item = raw if isinstance(raw, dict) else {}
+    channel = str(item.get("channel") or "").strip().lower()
+    if channel not in {"entra", "smtp"}:
+        channel = ""
+    status = "sent" if item.get("status") == "sent" else "error"
+    attempt: Dict[str, Any] = {"channel": channel, "status": status}
+    for key in ("status_code", "elapsed_ms"):
+        value = item.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            attempt[key] = max(0, value)
+    if status == "sent":
+        return attempt
+    category = str(item.get("category") or "delivery").strip().lower()
+    if category not in {"configuration", "transport", "message", "delivery", "internal"}:
+        category = "delivery"
+    code = str(item.get("code") or "delivery_failed").strip().lower()
+    if not re.fullmatch(r"[a-z0-9_.-]{1,80}", code):
+        code = "delivery_failed"
+    messages = {
+        "configuration": "Niepoprawna lub niedostepna konfiguracja kanalu.",
+        "transport": "Kanal wysylki jest niedostepny.",
+        "message": "Nie mozna przygotowac wiadomosci.",
+        "internal": "Nie mozna zakonczyc testu wysylki.",
+        "delivery": "Kanal nie wyslal wiadomosci.",
+    }
+    attempt.update({"code": code, "category": category, "message": messages[category]})
+    return attempt
+
+
 def create_app() -> FastAPI:
     """Create the LAN web backend."""
 
@@ -5141,6 +5175,99 @@ def create_app() -> FastAPI:
             return response
         snapshot["current_user"] = _current_user_payload(request)
         return JSONResponse(snapshot)
+
+    @app.post("/api/settings/email/test")
+    async def settings_email_test(request: Request) -> JSONResponse:
+        _require_admin(request)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            return JSONResponse(
+                {"ok": False, "status": "invalid", "used_channel": "", "attempts": [], "elapsed_ms": 0},
+                status_code=400,
+            )
+        recipient_value = payload.get("recipient")
+        channel_value = payload.get("channel")
+        use_fallback = payload.get("use_fallback", False)
+        if not isinstance(recipient_value, str) or not recipient_value.strip():
+            return JSONResponse(
+                {"ok": False, "status": "invalid", "used_channel": "", "attempts": [], "elapsed_ms": 0},
+                status_code=400,
+            )
+        if not isinstance(channel_value, str):
+            channel_value = ""
+        selected = channel_value.strip().lower()
+        if selected not in {"entra", "smtp", "primary"} or not isinstance(use_fallback, bool):
+            return JSONResponse(
+                {"ok": False, "status": "invalid", "used_channel": "", "attempts": [], "elapsed_ms": 0},
+                status_code=400,
+            )
+        if selected == "primary":
+            try:
+                email_settings = settings_snapshot().get(EMAIL_SETTINGS_KEY, {})
+                selected = str(
+                    email_settings.get("primary_channel")
+                    if isinstance(email_settings, dict)
+                    else ""
+                ).strip().lower()
+            except Exception:
+                selected = ""
+            if selected not in {"entra", "smtp"}:
+                selected = "entra"
+
+        started = time.perf_counter()
+        try:
+            result = await run_in_threadpool(
+                send_test_message,
+                channel=selected,
+                recipient=recipient_value.strip(),
+                use_fallback=use_fallback,
+            )
+        except ValueError:
+            elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+            return JSONResponse(
+                {"ok": False, "status": "invalid", "used_channel": selected, "attempts": [], "elapsed_ms": elapsed_ms},
+                status_code=400,
+            )
+        except Exception:
+            result = {
+                "status": "error",
+                "used_channel": selected,
+                "attempts": [
+                    {
+                        "channel": selected,
+                        "status": "error",
+                        "code": "test_failed",
+                        "category": "internal",
+                    }
+                ],
+            }
+        elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+        result = result if isinstance(result, dict) else {}
+        status = str(result.get("status") or "error").strip().lower()
+        if status not in {"sent", "fallback", "error"}:
+            status = "error"
+        used_channel = str(result.get("used_channel") or selected).strip().lower()
+        if used_channel not in {"entra", "smtp"}:
+            used_channel = selected
+        raw_attempts = result.get("attempts")
+        attempts = [
+            _redacted_email_test_attempt(item)
+            for item in (raw_attempts if isinstance(raw_attempts, list) else [])[:2]
+        ]
+        response_payload = {
+            "ok": status in {"sent", "fallback"},
+            "status": status,
+            "used_channel": used_channel,
+            "attempts": attempts,
+            "elapsed_ms": elapsed_ms,
+        }
+        return JSONResponse(
+            response_payload,
+            status_code=200 if response_payload["ok"] else 502,
+        )
 
     @app.post("/api/settings/sql-profiles/{profile_id}/test")
     async def settings_sql_profile_test(

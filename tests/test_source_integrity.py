@@ -9,6 +9,52 @@ import unittest
 
 
 class SourceIntegrityTests(unittest.TestCase):
+    def test_mail_settings_ui_wires_both_channels_rules_and_redacted_test(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        html_source = (
+            root / "picorgftp_sql" / "web" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+        js_source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+        css_source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+
+        pimcore_tab = html_source.index('data-settings-tab="pimcore"')
+        mail_tab = html_source.index('data-settings-tab="mail"')
+        slots_tab = html_source.index('data-settings-tab="slots"')
+        self.assertLess(pimcore_tab, mail_tab)
+        self.assertLess(mail_tab, slots_tab)
+        self.assertIn("function renderSettingsMail()", js_source)
+        self.assertIn('requestJson("/api/settings/email/test"', js_source)
+        for name in (
+            "email_primary_channel",
+            "email_fallback_enabled",
+            "email_entra_tenant_id",
+            "email_entra_client_id",
+            "email_entra_client_secret",
+            "email_entra_from_address",
+            "email_smtp_host",
+            "email_smtp_port",
+            "email_smtp_security",
+            "email_smtp_username",
+            "email_smtp_password",
+            "email_smtp_from_address",
+            "email_smtp_from_name",
+            "email_test_recipient",
+            "email_test_channel",
+            "email_test_use_fallback",
+        ):
+            self.assertIn(name, js_source)
+        for severity in ("info", "warning", "error", "critical"):
+            self.assertIn(f"email_rule_{severity}_enabled", js_source)
+            self.assertIn(f"email_rule_{severity}_recipients", js_source)
+            self.assertIn(f"email_rule_{severity}_include_actor", js_source)
+        self.assertIn("splitEmailRecipients", js_source)
+        self.assertIn("mail-test-attempt", css_source)
+        self.assertIn("@media (max-width: 920px)", css_source)
+
     def test_header_contains_smoothed_backend_health_indicator(self) -> None:
         root = Path(__file__).resolve().parents[1]
         html_source = (

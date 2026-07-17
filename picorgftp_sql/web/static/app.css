@@ -1230,6 +1230,91 @@ h2 {
   gap: 10px;
 }
 
+.mail-channel-grid,
+.mail-rule-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.mail-channel-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.mail-rule-grid {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.mail-channel-card,
+.mail-rule-card {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 12px;
+}
+
+.mail-channel-card h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.mail-security-warning {
+  margin: 0;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  color: var(--danger);
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.mail-test-status {
+  grid-column: 1 / -1;
+  min-height: 22px;
+  overflow-wrap: anywhere;
+}
+
+.mail-test-status > strong {
+  display: block;
+}
+
+.mail-test-status.success-text {
+  color: var(--local);
+}
+
+.mail-test-attempts {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.mail-test-attempt {
+  border-left: 3px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-2);
+  padding: 6px 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.mail-test-attempt-sent {
+  border-color: var(--local);
+}
+
+.mail-test-attempt-error {
+  border-color: var(--danger);
+}
+
+@media (max-width: 920px) {
+  .mail-channel-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .pimcore-setup-panel {
   width: min(1080px, calc(100vw - 32px));
 }
