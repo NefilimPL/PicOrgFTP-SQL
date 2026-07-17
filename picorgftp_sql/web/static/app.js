@@ -4371,6 +4371,129 @@ function historyFileOperationLabel(operation) {
   }[operation] || historyChangeValue(operation);
 }
 
+function historyTechnicalDetails(title) {
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  const content = document.createElement("div");
+  details.className = "history-technical-details";
+  summary.textContent = title;
+  content.className = "history-technical-content";
+  details.append(summary, content);
+  return { details, content };
+}
+
+function historyEvidenceEntries(value) {
+  if (Array.isArray(value)) return value.filter((entry) => entry && typeof entry === "object");
+  return value && typeof value === "object" ? [value] : [];
+}
+
+function historyEvidenceStatuses(entry = {}) {
+  const statuses = [];
+  if (entry.status !== undefined) statuses.push(String(entry.status));
+  if (entry.upload_status !== undefined) statuses.push(`wysylka: ${entry.upload_status}`);
+  if (entry.delete_status !== undefined) statuses.push(`usuniecie: ${entry.delete_status}`);
+  return statuses.length ? statuses : ["brak danych"];
+}
+
+function historyEvidenceBadges(evidence = {}) {
+  const badges = document.createElement("div");
+  badges.className = "history-evidence-badges";
+  for (const [key, label] of Object.entries({ local: "Lokalnie", ftp: "FTP", sql: "SQL" })) {
+    const entries = historyEvidenceEntries(evidence[key]);
+    if (!entries.length) continue;
+    const badge = document.createElement("span");
+    badge.className = `history-evidence-badge history-evidence-${key}`;
+    badge.textContent = `${label}: ${entries.map((entry) => {
+      const operation = entry.operation ? `${entry.operation} ` : "";
+      const duration = entry.elapsed_ms === undefined ? "" : ` · ${formatHistoryDuration(entry.elapsed_ms)}`;
+      return `${operation}${historyEvidenceStatuses(entry).join(", ")}${duration}`;
+    }).join(" / ")}`;
+    badges.appendChild(badge);
+  }
+  return badges;
+}
+
+function historyEvidenceDetails(evidence = {}) {
+  const wrapper = document.createElement("section");
+  wrapper.className = "history-evidence-details";
+  for (const [key, label] of Object.entries({ local: "Lokalnie", ftp: "FTP", sql: "SQL" })) {
+    const entries = historyEvidenceEntries(evidence[key]);
+    for (const entry of entries) {
+      const operation = document.createElement("article");
+      const heading = document.createElement("h4");
+      operation.className = `history-evidence-operation history-evidence-${key}`;
+      heading.textContent = `${label}: ${entry.operation || "operacja"}`;
+      operation.append(
+        heading,
+        historyChangeRow("Status", historyEvidenceStatuses(entry).join(", "))
+      );
+      if (entry.elapsed_ms !== undefined) {
+        operation.appendChild(historyChangeRow("Czas", formatHistoryDuration(entry.elapsed_ms)));
+      }
+      for (const [field, fieldLabel] of Object.entries({
+        filename: "Plik",
+        path: "Sciezka",
+        local_path: "Sciezka lokalna",
+        remote_path: "Sciezka FTP",
+        sql_value: "Wartosc SQL",
+      })) {
+        if (entry[field] !== undefined) operation.appendChild(historyChangeRow(fieldLabel, entry[field]));
+      }
+      wrapper.appendChild(operation);
+    }
+  }
+  return wrapper;
+}
+
+function historyCompactFileRow(file = {}) {
+  const operation = String(file.operation || "unknown").toLowerCase();
+  const operationClass = ["added", "deleted", "replaced", "migrated"].includes(operation)
+    ? operation
+    : "unknown";
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  const slot = document.createElement("strong");
+  const action = document.createElement("span");
+  const filename = document.createElement("span");
+  const size = document.createElement("span");
+  const content = document.createElement("div");
+  const evidence = file.evidence && typeof file.evidence === "object" ? file.evidence : {};
+  details.className = `history-file-change history-file-change-${operationClass}`;
+  summary.className = "history-file-summary-row";
+  slot.textContent = `Slot ${historyChangeValue(file.slot)}`;
+  action.textContent = historyFileOperationLabel(operation);
+  filename.textContent = `${historyChangeValue(file.before_name)} → ${historyChangeValue(file.after_name)}`;
+  size.textContent = `${formatBytes(file.before_size_bytes)} → ${formatBytes(file.after_size_bytes)}`;
+  content.className = "history-file-details";
+  summary.append(slot, action, filename, size, historyEvidenceBadges(evidence));
+  content.append(
+    historyChangeComparison("Nazwa", file.before_name, file.after_name),
+    historyChangeComparison("Rozmiar", file.before_size_bytes, file.after_size_bytes, formatBytes)
+  );
+  if (file.source_name !== undefined || file.source_size_bytes !== undefined) {
+    content.append(
+      historyChangeRow("Plik zrodlowy", file.source_name),
+      historyChangeRow("Rozmiar zrodlowy", formatBytes(file.source_size_bytes))
+    );
+  }
+  if (file.processing_operation !== undefined) {
+    content.appendChild(historyChangeRow("Przetwarzanie", file.processing_operation));
+  }
+  if (file.elapsed_ms !== undefined) {
+    content.appendChild(historyChangeRow("Czas", formatHistoryDuration(file.elapsed_ms)));
+  }
+  if (file.content_fit !== undefined) {
+    content.appendChild(historyChangeRow("Dopasowanie zawartosci", file.content_fit ? "Tak" : "Nie"));
+  }
+  if (file.preprocessed !== undefined) {
+    content.appendChild(historyChangeRow("Wstepnie przetworzony", file.preprocessed ? "Tak" : "Nie"));
+  }
+  const evidenceDetails = historyEvidenceDetails(evidence);
+  if (evidenceDetails.childElementCount) content.appendChild(evidenceDetails);
+  details.append(summary, content);
+  return details;
+}
+
 let historyChangesReturnFocus = null;
 let historyChangesBackgroundState = [];
 
@@ -4505,11 +4628,11 @@ function renderHistoryChanges(item = {}) {
     compatibility.textContent = "Szczegolowy zapis zmian nie byl jeszcze dostepny dla tej operacji.";
     historyChangesOutput.appendChild(compatibility);
     if (Object.keys(details).length) {
-      const legacy = historyChangeSection("Dane historyczne");
+      const legacy = historyTechnicalDetails("Dane techniczne");
       for (const [key, value] of Object.entries(details)) {
-        legacy.appendChild(historyChangeRow(key, value));
+        legacy.content.appendChild(historyChangeRow(key, value));
       }
-      historyChangesOutput.appendChild(legacy);
+      historyChangesOutput.appendChild(legacy.details);
     }
     openHistoryChangesModal();
     return;
@@ -4571,47 +4694,7 @@ function renderHistoryChanges(item = {}) {
   if (files.length) {
     const section = historyChangeSection("Pliki");
     for (const file of files) {
-      const operation = String(file.operation || "unknown").toLowerCase();
-      const operationClass = ["added", "deleted", "replaced", "migrated"].includes(operation)
-        ? operation
-        : "unknown";
-      const card = document.createElement("article");
-      const heading = document.createElement("h3");
-      card.className = `history-file-change history-file-change-${operationClass}`;
-      heading.textContent = `Slot ${historyChangeValue(file.slot)}: ${historyFileOperationLabel(operation)}`;
-      card.appendChild(heading);
-      card.appendChild(
-        historyChangeComparison("Nazwa", file.before_name, file.after_name)
-      );
-      card.appendChild(
-        historyChangeComparison(
-          "Rozmiar",
-          file.before_size_bytes,
-          file.after_size_bytes,
-          formatBytes
-        )
-      );
-      if (file.source_name !== undefined || file.source_size_bytes !== undefined) {
-        card.appendChild(historyChangeRow("Plik zrodlowy", file.source_name));
-        card.appendChild(historyChangeRow("Rozmiar zrodlowy", formatBytes(file.source_size_bytes)));
-      }
-      if (file.processing_operation !== undefined) {
-        card.appendChild(historyChangeRow("Przetwarzanie", file.processing_operation));
-      }
-      if (file.elapsed_ms !== undefined) {
-        card.appendChild(historyChangeRow("Czas", formatHistoryDuration(file.elapsed_ms)));
-      }
-      if (file.content_fit !== undefined) {
-        card.appendChild(historyChangeRow("Dopasowanie zawartosci", file.content_fit ? "Tak" : "Nie"));
-      }
-      if (file.preprocessed !== undefined) {
-        card.appendChild(historyChangeRow("Wstepnie przetworzony", file.preprocessed ? "Tak" : "Nie"));
-      }
-      const evidence = file.evidence && typeof file.evidence === "object" ? file.evidence : {};
-      if (evidence.local) card.appendChild(historyChangeRow("Lokalnie", evidence.local));
-      if (evidence.ftp) card.appendChild(historyChangeRow("FTP", evidence.ftp));
-      if (evidence.sql) card.appendChild(historyChangeRow("SQL", evidence.sql));
-      section.appendChild(card);
+      section.appendChild(historyCompactFileRow(file));
     }
     historyChangesOutput.appendChild(section);
   }
@@ -4620,11 +4703,11 @@ function renderHistoryChanges(item = {}) {
     ? changeSet.integrations
     : null;
   if (integrations && Object.keys(integrations).length) {
-    const section = historyChangeSection("Integracje");
+    const section = historyTechnicalDetails("Dane techniczne");
     for (const [key, value] of Object.entries(integrations)) {
-      section.appendChild(historyChangeRow(key, value));
+      section.content.appendChild(historyChangeRow(key, value));
     }
-    historyChangesOutput.appendChild(section);
+    historyChangesOutput.appendChild(section.details);
   }
 
   openHistoryChangesModal();
@@ -4817,28 +4900,33 @@ function logSeverityLabel(severity = "info") {
 
 function renderLogEvent(event) {
   const block = document.createElement("article");
-  const meta = document.createElement("div");
+  const meta = document.createElement("span");
+  const severityBadge = document.createElement("span");
   const title = document.createElement("strong");
   const context = document.createElement("span");
   const details = document.createElement("details");
   const summary = document.createElement("summary");
+  const disclosure = document.createElement("small");
   const lines = document.createElement("pre");
   const severity = event.severity || "info";
-  block.className = `log-event log-event-${severity}`;
+  block.className = `log-event log-event-compact log-event-${severity}`;
   block.dataset.observabilityId = event.id || "";
-  meta.className = "log-event-meta";
-  meta.textContent = [event.created_at || "", logSeverityLabel(severity), event.module || "", event.stage || ""]
-    .filter(Boolean)
-    .join(" | ");
+  meta.className = "log-event-meta log-event-time";
+  meta.textContent = event.created_at || "";
+  severityBadge.className = `log-event-severity log-event-severity-${severity}`;
+  severityBadge.textContent = logSeverityLabel(severity);
   title.textContent = event.summary || "Zdarzenie";
+  summary.className = "log-event-summary-row";
   context.textContent = [
     event.username ? `uzytkownik: ${event.username}` : "",
     event.ean ? `EAN: ${event.ean}` : "",
     event.job_id ? `zadanie: ${event.job_id}` : "",
+    event.module || "",
+    event.stage || "",
   ]
     .filter(Boolean)
     .join(" | ");
-  summary.textContent = "Szczegoly";
+  disclosure.textContent = "Szczegoly";
   lines.className = "log-lines";
   lines.textContent = [
     event.recommended_action ? `Zalecane dzialanie: ${event.recommended_action}` : "",
@@ -4848,10 +4936,10 @@ function renderLogEvent(event) {
   ]
     .filter(Boolean)
     .join("\n");
+  if (!lines.textContent) lines.textContent = "Brak dodatkowych szczegolow.";
+  summary.append(meta, severityBadge, title, context, disclosure);
   details.append(summary, lines);
-  block.append(meta, title);
-  if (context.textContent) block.appendChild(context);
-  if (lines.textContent) block.appendChild(details);
+  block.appendChild(details);
   return block;
 }
 

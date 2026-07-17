@@ -218,6 +218,42 @@ def test_history_change_set_preserves_multiple_local_operations_for_replacement(
     ]
 
 
+def test_history_change_set_keeps_each_slot_operation_for_all_integrations() -> None:
+    result = history_change_set(
+        existing_entry={"name": "Chair"},
+        saved_entry={"name": "Chair"},
+        existing_photos=[{"prefix": "03", "filename": "old.jpg"}],
+        saved_files=[{"prefix": "03", "filename": "new.jpg"}],
+        delete_requests=[{"prefix": "03", "ftp_filename": "old.jpg"}],
+        migrated_prefixes=[],
+        integrations={
+            "local": {"slot_results": [
+                {"slot": "03", "operation": "save", "status": "saved", "elapsed_ms": 12},
+                {"slot": "03", "operation": "delete", "status": "deleted", "elapsed_ms": 4},
+            ]},
+            "ftp": {"slot_results": [
+                {"slot": "03", "operation": "upload", "status": "uploaded", "elapsed_ms": 16},
+                {"slot": "03", "operation": "delete", "status": "deleted", "elapsed_ms": 8},
+            ]},
+            "sql": {"slot_results": [
+                {"slot": "03", "operation": "update", "status": "updated", "elapsed_ms": 3},
+            ]},
+        },
+    )
+
+    assert result["files"][0]["evidence"] == {
+        "local": [
+            {"slot": "03", "operation": "save", "status": "saved", "elapsed_ms": 12},
+            {"slot": "03", "operation": "delete", "status": "deleted", "elapsed_ms": 4},
+        ],
+        "ftp": [
+            {"slot": "03", "operation": "upload", "status": "uploaded", "elapsed_ms": 16},
+            {"slot": "03", "operation": "delete", "status": "deleted", "elapsed_ms": 8},
+        ],
+        "sql": {"slot": "03", "operation": "update", "status": "updated", "elapsed_ms": 3},
+    }
+
+
 def test_history_change_set_classifies_created_updated_and_synchronized() -> None:
     created = history_change_set(
         existing_entry=None,

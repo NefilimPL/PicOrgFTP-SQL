@@ -1016,27 +1016,23 @@ class WebUiIntegrityTests(unittest.TestCase):
         for value in (
             "field.before",
             "field.after",
-            "file.before_name",
-            "file.after_name",
-            "file.before_size_bytes",
-            "file.after_size_bytes",
-            "file.elapsed_ms",
-            "file.evidence",
             "historyChangeJobId(details, changeSet)",
         ):
             self.assertIn(value, renderer)
         self.assertIn("textContent", renderer)
-        for evidence_row in (
+        self.assertIn("historyCompactFileRow(file)", renderer)
+        self.assertIn('historyTechnicalDetails("Dane techniczne"', renderer)
+        compact_start = js_source.index("function historyCompactFileRow")
+        compact_end = js_source.index("let historyChangesReturnFocus", compact_start)
+        compact_helper = js_source[compact_start:compact_end]
+        self.assertIn("historyEvidenceBadges(evidence)", compact_helper)
+        self.assertIn("historyEvidenceDetails(evidence)", compact_helper)
+        for raw_evidence_row in (
             'historyChangeRow("Lokalnie"',
             'historyChangeRow("FTP"',
             'historyChangeRow("SQL"',
-            'historyChangeRow("ID obiektu"',
-            'historyChangeRow("Sciezka obiektu"',
-            'historyChangeRow("Czas calkowity"',
-            'historyChangeRow("Wysylka"',
-            'historyChangeRow("Weryfikacja"',
         ):
-            self.assertIn(evidence_row, renderer)
+            self.assertNotIn(raw_evidence_row, renderer)
         self.assertIn("historyChangesCloseButton?.focus()", js_source)
         self.assertIn(
             "changesButton.disabled = !hasChangeSet && !hasLegacyDetails",
@@ -1047,7 +1043,28 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("history-file-change-added", css_source)
         self.assertIn("history-file-change-deleted", css_source)
         self.assertIn("history-file-change-replaced", css_source)
+        self.assertIn("history-file-summary-row", css_source)
+        self.assertIn("history-evidence-badges", css_source)
         self.assertIn("@media (max-width: 700px)", css_source)
+
+    def test_live_log_renderer_uses_compact_summary_and_expandable_details(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        renderer_start = source.index("function renderLogEvent")
+        renderer_end = source.index("function incidentValue", renderer_start)
+        renderer = source[renderer_start:renderer_end]
+        css_source = (
+            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("log-event-compact", renderer)
+        self.assertIn("log-event-summary-row", renderer)
+        self.assertIn('document.createElement("details")', renderer)
+        self.assertIn('document.createElement("summary")', renderer)
+        self.assertIn("event.recommended_action", renderer)
+        self.assertIn("event.traceback_text", renderer)
+        self.assertIn("JSON.stringify(event.details, null, 2)", renderer)
+        self.assertIn(".log-event-compact", css_source)
+        self.assertIn(".log-event-summary-row", css_source)
 
     def test_history_changes_formats_structured_values_and_unknown_durations(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
