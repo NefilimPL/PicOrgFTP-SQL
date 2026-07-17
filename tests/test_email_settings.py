@@ -148,10 +148,76 @@ def test_normalize_email_settings_bounds_enums_port_and_recipient_lists() -> Non
     assert result["smtp"]["username"] == "123"
     assert result["rules"]["warning"]["recipients"] == [
         "first@example.com",
-        "12",
     ]
     assert normalize_email_settings({"smtp": {"port": 0}})["smtp"]["port"] == 1
     assert normalize_email_settings({"smtp": {"port": "bad"}})["smtp"]["port"] == 587
+
+
+def test_normalize_email_settings_validates_and_casefold_deduplicates_recipients() -> None:
+    result = normalize_email_settings(
+        {
+            "rules": {
+                "critical": {
+                    "enabled": True,
+                    "recipients": [
+                        " First.User@Example.COM ",
+                        "first.user@example.com",
+                        "SECOND@example.com",
+                        " second@EXAMPLE.COM ",
+                        "bad address",
+                    ],
+                    "include_actor": True,
+                }
+            }
+        }
+    )
+
+    assert result["rules"]["critical"] == {
+        "enabled": True,
+        "recipients": ["First.User@example.com", "SECOND@example.com"],
+        "include_actor": True,
+    }
+
+
+def test_web_settings_update_and_snapshot_canonicalize_crafted_recipient_list() -> None:
+    current = deepcopy(common.DEFAULT_CONFIG)
+    current[EMAIL_SETTINGS_KEY] = default_email_settings()
+    submitted = default_email_settings()
+    submitted["rules"]["error"] = {
+        "enabled": True,
+        "recipients": [
+            " Admin@Example.COM ",
+            "admin@example.com",
+            "invalid",
+            "Ops@example.com",
+        ],
+        "include_actor": True,
+    }
+
+    with (
+        patch.object(config, "CONFIG", current),
+        patch.object(web_data.config, "CONFIG", current),
+        patch.object(web_data, "save_config"),
+        patch.object(web_data.config, "initialize_config"),
+        patch.object(
+            web_data,
+            "settings_snapshot",
+            side_effect=lambda: {
+                EMAIL_SETTINGS_KEY: public_email_settings(
+                    current[EMAIL_SETTINGS_KEY]
+                )
+            },
+        ),
+    ):
+        snapshot = web_data.update_settings({EMAIL_SETTINGS_KEY: submitted})
+
+    expected = ["Admin@example.com", "Ops@example.com"]
+    assert current[EMAIL_SETTINGS_KEY]["rules"]["error"]["recipients"] == expected
+    assert snapshot[EMAIL_SETTINGS_KEY]["rules"]["error"] == {
+        "enabled": True,
+        "recipients": expected,
+        "include_actor": True,
+    }
 
 
 def test_public_email_settings_masks_both_secrets() -> None:

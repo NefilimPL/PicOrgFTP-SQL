@@ -10366,10 +10366,16 @@ function renderSettingsPimcore() {
 }
 
 function splitEmailRecipients(value) {
-  return String(value || "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
+  const recipients = [];
+  const seen = new Set();
+  for (const rawItem of String(value || "").split(",")) {
+    const item = rawItem.trim();
+    const identity = item.toLowerCase();
+    if (!item || seen.has(identity)) continue;
+    seen.add(identity);
+    recipients.push(item);
+  }
+  return recipients;
 }
 
 const MAIL_SEVERITY_RULES = [

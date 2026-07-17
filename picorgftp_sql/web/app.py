@@ -4221,6 +4221,18 @@ def _health_payload() -> Dict[str, Any]:
     }
 
 
+_EMAIL_TEST_ATTEMPT_CODES = frozenset(
+    {
+        "delivery_failed",
+        "message_invalid",
+        "processing_failed",
+        "settings_unavailable",
+        "test_failed",
+        "transport_unavailable",
+    }
+)
+
+
 def _redacted_email_test_attempt(raw: object) -> Dict[str, Any]:
     """Project one transport attempt without returning provider diagnostics."""
 
@@ -4240,7 +4252,7 @@ def _redacted_email_test_attempt(raw: object) -> Dict[str, Any]:
     if category not in {"configuration", "transport", "message", "delivery", "internal"}:
         category = "delivery"
     code = str(item.get("code") or "delivery_failed").strip().lower()
-    if not re.fullmatch(r"[a-z0-9_.-]{1,80}", code):
+    if code not in _EMAIL_TEST_ATTEMPT_CODES:
         code = "delivery_failed"
     messages = {
         "configuration": "Niepoprawna lub niedostepna konfiguracja kanalu.",

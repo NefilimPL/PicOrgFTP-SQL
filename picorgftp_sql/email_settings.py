@@ -94,9 +94,21 @@ def _text(value: object) -> str:
 
 def _recipients(value: object) -> list[str]:
     values = value.split(",") if isinstance(value, str) else value
-    if not isinstance(values, (list, tuple, set)):
+    if not isinstance(values, (list, tuple)):
         return []
-    return [text for item in values if (text := _text(item))]
+    recipients: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        try:
+            address = normalize_email_address(item)
+        except ValueError:
+            continue
+        identity = address.casefold()
+        if not address or identity in seen:
+            continue
+        seen.add(identity)
+        recipients.append(address)
+    return recipients
 
 
 def _bool_value(value: object, default: bool = False) -> bool:

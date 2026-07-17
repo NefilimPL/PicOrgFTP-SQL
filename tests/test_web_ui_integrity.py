@@ -83,6 +83,12 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("result.used_channel", source)
         self.assertIn("result.attempts", source)
         self.assertIn("error.payload = payload", source)
+        recipients_start = source.index("function splitEmailRecipients")
+        recipients_end = source.index("const MAIL_SEVERITY_RULES", recipients_start)
+        recipients_source = source[recipients_start:recipients_end]
+        self.assertIn("new Set()", recipients_source)
+        self.assertIn("toLowerCase()", recipients_source)
+        self.assertIn("seen.has", recipients_source)
         self.assertIn(".mail-channel-grid", css)
         self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr))", css)
         responsive_start = css.index("@media (max-width: 920px)")

@@ -481,6 +481,68 @@ class WebSmokeCiTests(unittest.TestCase):
             use_fallback=False,
         )
 
+    def test_email_test_route_replaces_untrusted_attempt_codes_from_api(self) -> None:
+        client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
+        untrusted_codes = [
+            "ToPSeCrEt123",
+            {"nested": {"token": "LEAK"}},
+            "server_password_token_" + ("X" * 200),
+        ]
+
+        for raw_code in untrusted_codes:
+            with self.subTest(raw_code=raw_code):
+                with (
+                    patch.object(web_app, "_require_admin", return_value=admin),
+                    patch.object(
+                        web_app,
+                        "send_test_message",
+                        return_value={
+                            "status": "error",
+                            "used_channel": "entra",
+                            "attempts": [
+                                {
+                                    "channel": "entra",
+                                    "status": "error",
+                                    "code": raw_code,
+                                    "category": "delivery",
+                                    "message": "token=TOPSECRET123",
+                                }
+                            ],
+                        },
+                    ),
+                ):
+                    response = client.post(
+                        "/api/settings/email/test",
+                        json={
+                            "recipient": "admin@example.com",
+                            "channel": "entra",
+                            "use_fallback": False,
+                        },
+                    )
+
+                self.assertEqual(response.status_code, 502)
+                self.assertEqual(
+                    response.json(),
+                    {
+                        "ok": False,
+                        "status": "error",
+                        "used_channel": "entra",
+                        "attempts": [
+                            {
+                                "channel": "entra",
+                                "status": "error",
+                                "code": "delivery_failed",
+                                "category": "delivery",
+                                "message": "Kanal nie wyslal wiadomosci.",
+                            }
+                        ],
+                        "elapsed_ms": response.json()["elapsed_ms"],
+                    },
+                )
+                self.assertNotIn("TOPSECRET", response.text.upper())
+                self.assertNotIn("SERVER_PASSWORD", response.text.upper())
+
     def test_email_test_route_rejects_invalid_payload_without_sending(self) -> None:
         client = TestClient(web_app.app)
         admin = {"username": "admin", "role": "admin"}
