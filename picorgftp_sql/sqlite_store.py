@@ -24,6 +24,7 @@ from .excel_utils import (
     PRODUCT_ID_HEADER,
     TYPE_HEADER,
 )
+from .redaction import redact_sensitive_value, sanitize_free_text
 
 SCHEMA_VERSION = 6
 _NOTIFICATION_DELIVERY_STATUSES = frozenset(
@@ -679,20 +680,23 @@ class SqliteStore:
     def _event_from_row(row: sqlite3.Row) -> dict[str, Any]:
         payload = dict(row)
         payload["details"] = _json_loads(payload.pop("details_json", "{}"), {})
-        return payload
+        redacted = redact_sensitive_value(payload, text_limit=32 * 1024)
+        return redacted if isinstance(redacted, dict) else {}
 
     @staticmethod
     def _job_from_row(row: sqlite3.Row) -> dict[str, Any]:
         payload = dict(row)
         payload["stages"] = _json_loads(payload.pop("stages_json", "[]"), [])
         payload["details"] = _json_loads(payload.pop("details_json", "{}"), {})
-        return payload
+        redacted = redact_sensitive_value(payload)
+        return redacted if isinstance(redacted, dict) else {}
 
     @staticmethod
     def _incident_from_row(row: sqlite3.Row) -> dict[str, Any]:
         payload = dict(row)
         payload["context"] = _json_loads(payload.pop("context_json", "{}"), {})
-        return payload
+        redacted = redact_sensitive_value(payload)
+        return redacted if isinstance(redacted, dict) else {}
 
     @staticmethod
     def _delivery_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -721,7 +725,7 @@ class SqliteStore:
     def _normalize_operational_event(
         event: dict[str, object],
     ) -> dict[str, Any]:
-        details = event.get("details")
+        details = redact_sensitive_value(event.get("details"))
         return {
             "id": _text(event.get("id")) or f"evt-{uuid.uuid4().hex}",
             "created_at": _iso_from_timestamp(event.get("created_at") or _now_iso()),
@@ -736,11 +740,15 @@ class SqliteStore:
             "job_id": _text(event.get("job_id")),
             "correlation_id": _text(event.get("correlation_id")),
             "incident_id": _text(event.get("incident_id")),
-            "summary": _text(event.get("summary")),
-            "recommended_action": _text(event.get("recommended_action")),
+            "summary": sanitize_free_text(event.get("summary")).strip(),
+            "recommended_action": sanitize_free_text(
+                event.get("recommended_action")
+            ).strip(),
             "details": details if isinstance(details, dict) else {},
-            "exception_type": _text(event.get("exception_type")),
-            "traceback_text": _text(event.get("traceback_text")),
+            "exception_type": sanitize_free_text(event.get("exception_type")).strip(),
+            "traceback_text": sanitize_free_text(
+                event.get("traceback_text"), limit=32 * 1024
+            ).strip(),
         }
 
     @staticmethod
@@ -1007,14 +1015,14 @@ class SqliteStore:
         """Insert or update a durable job summary."""
 
         self.initialize()
-        stages = job.get("stages")
-        details = job.get("details")
+        stages = redact_sensitive_value(job.get("stages"))
+        details = redact_sensitive_value(job.get("details"))
         payload: dict[str, Any] = {
             "id": _text(job.get("id")) or f"job-{uuid.uuid4().hex}",
             "username": _text(job.get("username")),
             "ean": _text(job.get("ean")),
             "status": _text(job.get("status")),
-            "summary": _text(job.get("summary")),
+            "summary": sanitize_free_text(job.get("summary")).strip(),
             "started_at": _iso_from_timestamp(job.get("started_at") or _now_iso()),
             "finished_at": _text(job.get("finished_at")),
             "stages": stages if isinstance(stages, list) else [],
@@ -1083,7 +1091,7 @@ class SqliteStore:
         """Insert or update an incident aggregate."""
 
         self.initialize()
-        context = incident.get("context")
+        context = redact_sensitive_value(incident.get("context"))
         try:
             occurrence_count = int(incident.get("occurrence_count") or 1)
         except (TypeError, ValueError):
@@ -1173,7 +1181,7 @@ class SqliteStore:
         """Atomically coalesce an incident and optionally publish its event."""
 
         self.initialize()
-        context = occurrence.get("context")
+        context = redact_sensitive_value(occurrence.get("context"))
         candidate: dict[str, Any] = {
             "id": _text(occurrence.get("id")) or f"inc-{uuid.uuid4().hex}",
             "fingerprint": _text(occurrence.get("fingerprint")),
@@ -1305,6 +1313,12 @@ class SqliteStore:
                         )
                     merged_context = dict(existing.get("context") or {})
                     merged_context.update(candidate["context"])
+                    sanitized_context = redact_sensitive_value(merged_context)
+                    merged_context = (
+                        sanitized_context
+                        if isinstance(sanitized_context, dict)
+                        else {}
+                    )
                     event_type = candidate["event_type"]
                     last_seen_at = candidate["last_seen_at"]
                     latest_event_id = candidate["latest_event_id"]
@@ -1792,6 +1806,8 @@ class SqliteStore:
         """Persist one Pimcore submission audit record."""
 
         self.initialize()
+        safe_record = redact_sensitive_value(record)
+        record = safe_record if isinstance(safe_record, dict) else {}
         record_id = _text(record.get("id")) or f"pim-{uuid.uuid4().hex}"
         created_at = _iso_from_timestamp(record.get("created_at") or _now_iso())
         payload = {
@@ -1906,7 +1922,7 @@ class SqliteStore:
             ).fetchall()
         result = []
         for row in rows:
-            result.append(
+            item = redact_sensitive_value(
                 {
                     "id": row["id"],
                     "operation_id": row["operation_id"],
@@ -1923,6 +1939,8 @@ class SqliteStore:
                     "created_at": row["created_at"],
                 }
             )
+            if isinstance(item, dict):
+                result.append(item)
         return result
 
     def load_slots(self) -> tuple[list[dict[str, str]], dict[str, str]]:
@@ -2245,7 +2263,9 @@ class SqliteStore:
         for row in rows:
             payload = _json_loads(row["payload_json"], {})
             if isinstance(payload, dict):
-                records.append(payload)
+                redacted = redact_sensitive_value(payload)
+                if isinstance(redacted, dict):
+                    records.append(redacted)
         return records
 
     def save_history(self, records: list[dict[str, object]]) -> None:
@@ -2258,7 +2278,8 @@ class SqliteStore:
                 if not isinstance(item, dict):
                     continue
                 record_id = _text(item.get("id")) or f"hist-{uuid.uuid4().hex}"
-                payload = dict(item)
+                safe_item = redact_sensitive_value(item)
+                payload = dict(safe_item) if isinstance(safe_item, dict) else {}
                 payload["id"] = record_id
                 created_at = _history_created_at(payload)
                 payload["created_at"] = created_at
@@ -2281,7 +2302,8 @@ class SqliteStore:
         if not isinstance(record, dict):
             return
         record_id = _text(record.get("id")) or f"hist-{uuid.uuid4().hex}"
-        payload = dict(record)
+        safe_record = redact_sensitive_value(record)
+        payload = dict(safe_record) if isinstance(safe_record, dict) else {}
         payload["id"] = record_id
         created_at = _history_created_at(payload)
         payload["created_at"] = created_at

@@ -4,21 +4,21 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import traceback
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 from . import storage_settings
+from .redaction import (
+    SECRET_KEY_RE,
+    redact_sensitive_value,
+    sanitize_free_text,
+)
 from .sqlite_store import SqliteStore
 
 
 SEVERITIES = ("info", "warning", "error", "critical")
-SECRET_KEY_RE = re.compile(
-    r"password|pass|pwd|secret|token|authorization|api[_-]?key|cookie",
-    re.IGNORECASE,
-)
 SCALAR_TEXT_LIMIT = 8 * 1024
 TRACEBACK_TEXT_LIMIT = 32 * 1024
 INCIDENT_NOTIFICATION_WINDOW = timedelta(minutes=15)
@@ -28,15 +28,8 @@ EventMirror = Callable[[dict[str, object]], object]
 _event_mirror: EventMirror | None = None
 
 
-def _truncate_utf8(value: str, limit: int) -> str:
-    encoded = value.encode("utf-8")
-    if len(encoded) <= limit:
-        return value
-    return encoded[:limit].decode("utf-8", errors="ignore")
-
-
 def _text(value: object) -> str:
-    return _truncate_utf8(str(value or "").strip(), SCALAR_TEXT_LIMIT)
+    return sanitize_free_text(value, limit=SCALAR_TEXT_LIMIT).strip()
 
 
 def _utc_datetime(value: datetime | None = None) -> datetime:
@@ -68,15 +61,7 @@ def _parse_datetime(value: object) -> datetime | None:
 def redact_value(value: object, key: str = "") -> object:
     """Recursively redact secret-bearing keys and bound scalar strings."""
 
-    if key and SECRET_KEY_RE.search(key):
-        return "[REDACTED]"
-    if isinstance(value, dict):
-        return {str(k): redact_value(v, str(k)) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [redact_value(item) for item in value]
-    if isinstance(value, str):
-        return _truncate_utf8(value, SCALAR_TEXT_LIMIT)
-    return value
+    return redact_sensitive_value(value, key, text_limit=SCALAR_TEXT_LIMIT)
 
 
 def register_event_mirror(callback: EventMirror | None) -> None:
@@ -91,7 +76,8 @@ def _mirror_event(event: dict[str, object]) -> None:
     if callback is None:
         return
     try:
-        callback(dict(event))
+        safe_event = redact_value(event)
+        callback(dict(safe_event) if isinstance(safe_event, dict) else {})
     except Exception:
         # The mirror is a last-resort sink and must never recurse or mask SQLite.
         pass
@@ -133,13 +119,13 @@ def emit_event(
     traceback_text = ""
     if exception is not None:
         exception_type = _text(type(exception).__name__)
-        traceback_text = _truncate_utf8(
+        traceback_text = sanitize_free_text(
             "".join(
                 traceback.format_exception(
                     type(exception), exception, exception.__traceback__
                 )
             ),
-            TRACEBACK_TEXT_LIMIT,
+            limit=TRACEBACK_TEXT_LIMIT,
         )
 
     safe_details = redact_value(details if isinstance(details, dict) else {})

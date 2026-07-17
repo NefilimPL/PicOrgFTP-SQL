@@ -70,6 +70,7 @@ from ..observability import (
     prune_live_events,
     record_job,
 )
+from ..redaction import redact_sensitive_value, sanitize_free_text
 from ..notification_service import (
     send_test_message,
     start_notification_worker,
@@ -2302,7 +2303,7 @@ TIMESTAMP_LOG_START_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2}")
 
 def _clean_log_line(line: str) -> str:
     text = ANSI_ESCAPE_RE.sub("", str(line))
-    return CONTROL_LOG_RE.sub("", text)
+    return sanitize_free_text(CONTROL_LOG_RE.sub("", text))
 
 
 def _http_statuses(lines: List[str]) -> List[int]:
@@ -2321,7 +2322,12 @@ def _web_events_log_path() -> Path:
 
 
 def _safe_event_detail(value: Any) -> str:
-    text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    text = (
+        sanitize_free_text(value)
+        .replace("\r", " ")
+        .replace("\n", " ")
+        .strip()
+    )
     return re.sub(r"\s+", " ", text)
 
 
@@ -2343,10 +2349,16 @@ def _write_web_event(
         message_text = _safe_event_detail(message)
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(f"[{timestamp}] [USER: {user_text}] {level_text}: {event_text} - {message_text}\n")
-            if details:
+            safe_details = redact_sensitive_value(details or {})
+            if isinstance(safe_details, dict) and safe_details:
                 handle.write(
                     "details: "
-                    + json.dumps(details, ensure_ascii=False, sort_keys=True, default=str)
+                    + json.dumps(
+                        safe_details,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    )
                     + "\n"
                 )
     except OSError:
@@ -4050,8 +4062,11 @@ def _observability_api_payload(
     username: str, page: Dict[str, Any]
 ) -> Dict[str, Any]:
     store = observability_store()
+    safe_items = redact_sensitive_value(
+        list(page.get("items") or []), text_limit=32 * 1024
+    )
     return {
-        "items": list(page.get("items") or []),
+        "items": safe_items if isinstance(safe_items, list) else [],
         "next_cursor": str(page.get("next_cursor") or ""),
         "unread": store.unread_alert_summary(username),
         "server_time": _utc_now_iso(),
@@ -4667,10 +4682,13 @@ def create_app() -> FastAPI:
             for item in start.get("items") or []:
                 if await request.is_disconnected():
                     return
-                event_id = str(item.get("id") or "")
+                safe_item = redact_sensitive_value(item, text_limit=32 * 1024)
+                if not isinstance(safe_item, dict):
+                    continue
+                event_id = str(safe_item.get("id") or "")
                 yield (
                     f"id: {event_id}\n"
-                    f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+                    f"data: {json.dumps(safe_item, ensure_ascii=False)}\n\n"
                 )
             while not await request.is_disconnected():
                 page = store.poll_operational_event_stream(
@@ -4680,10 +4698,13 @@ def create_app() -> FastAPI:
                 for item in page.get("items") or []:
                     if await request.is_disconnected():
                         return
-                    event_id = str(item.get("id") or "")
+                    safe_item = redact_sensitive_value(item, text_limit=32 * 1024)
+                    if not isinstance(safe_item, dict):
+                        continue
+                    event_id = str(safe_item.get("id") or "")
                     yield (
                         f"id: {event_id}\n"
-                        f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+                        f"data: {json.dumps(safe_item, ensure_ascii=False)}\n\n"
                     )
                 now = time.monotonic()
                 if now >= next_heartbeat:

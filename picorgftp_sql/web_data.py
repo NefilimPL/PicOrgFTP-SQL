@@ -109,6 +109,7 @@ from .pimcore_templates import (
     render_mapping_templates,
 )
 from .sqlite_store import SqliteStore
+from .redaction import redact_sensitive_value, sanitize_free_text
 from .services.pimcore_service import (
     PimcoreClient,
     PimcoreConflictError,
@@ -484,17 +485,29 @@ def _load_history_records() -> list[dict[str, object]]:
         return []
     if not isinstance(payload, list):
         return []
-    return [item for item in payload if isinstance(item, dict)]
+    records: list[dict[str, object]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        redacted = redact_sensitive_value(item)
+        if isinstance(redacted, dict):
+            records.append(redacted)
+    return records
 
 
 def _save_history_records(records: list[dict[str, object]]) -> None:
+    safe_records = redact_sensitive_value(records[-2000:])
+    bounded_records = safe_records if isinstance(safe_records, list) else []
     sqlite_store = _active_sqlite_store()
     if sqlite_store is not None:
-        sqlite_store.save_history(records)
+        sqlite_store.save_history(bounded_records)
         return
     path = _history_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(records[-2000:], indent=2, ensure_ascii=False), encoding="utf-8")
+    path.write_text(
+        json.dumps(bounded_records, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def record_history(
@@ -520,6 +533,8 @@ def record_history(
         "summary": _text(summary),
         "details": details or {},
     }
+    safe_record = redact_sensitive_value(record)
+    record = safe_record if isinstance(safe_record, dict) else {}
     records = _load_history_records()
     records.append(record)
     _save_history_records(records)
@@ -1928,10 +1943,7 @@ def _redact_sql_integration_error(
     }
     for secret in sorted(known_secrets, key=len, reverse=True):
         text = text.replace(secret, "[REDACTED]")
-    encoded = text.encode("utf-8")
-    if len(encoded) > SQL_PROFILE_ERROR_MAX_BYTES:
-        text = encoded[:SQL_PROFILE_ERROR_MAX_BYTES].decode("utf-8", errors="ignore")
-    return text
+    return sanitize_free_text(text, limit=SQL_PROFILE_ERROR_MAX_BYTES)
 
 
 def _sql_warning_codes(warnings: object) -> list[str]:
