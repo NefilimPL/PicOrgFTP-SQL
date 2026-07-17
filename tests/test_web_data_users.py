@@ -10,7 +10,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from picorgftp_sql import data_store, storage_settings, web_data
+from picorgftp_sql import data_store, email_settings, storage_settings, web_data
 from picorgftp_sql.sqlite_store import SqliteStore
 
 
@@ -39,6 +39,94 @@ class WebDataUserTests(unittest.TestCase):
 
         self.assertIsNotNone(user)
         self.assertEqual(user["role"], "admin")
+
+    def test_existing_user_without_email_normalizes_to_empty_string(self) -> None:
+        record = web_data._normalized_user_record(
+            {"username": "operator", "password_hash": "hash"}
+        )
+
+        self.assertEqual(record["email"], "")
+        self.assertEqual(web_data._public_user(record)["email"], "")
+
+    def test_add_user_persists_normalized_email(self) -> None:
+        saved_records = []
+
+        def fake_save(users):
+            saved_records.extend(users)
+            return [web_data._public_user(item) for item in users]
+
+        with (
+            patch.object(web_data, "load_user_records", return_value=[web_data._default_admin()]),
+            patch.object(web_data, "save_users", side_effect=fake_save),
+        ):
+            users = web_data.add_user(
+                "operator",
+                "secret",
+                email=" Operator@Example.COM ",
+            )
+
+        operator = next(user for user in users if user["username"] == "operator")
+        saved_operator = next(
+            user for user in saved_records if user["username"] == "operator"
+        )
+        self.assertEqual(saved_operator["email"], "Operator@example.com")
+        self.assertEqual(operator["email"], "Operator@example.com")
+
+    def test_update_user_persists_normalized_email(self) -> None:
+        with (
+            patch.object(
+                web_data,
+                "load_user_records",
+                return_value=[web_data._default_admin()],
+            ),
+            patch.object(
+                web_data,
+                "save_users",
+                side_effect=lambda users: [
+                    web_data._public_user(item) for item in users
+                ],
+            ),
+        ):
+            users = web_data.update_user("admin", email=" Admin@Example.COM ")
+
+        self.assertEqual(users[0]["email"], "Admin@example.com")
+
+    def test_update_user_empty_email_clears_address(self) -> None:
+        admin = web_data._default_admin()
+        admin["email"] = "admin@example.com"
+        with (
+            patch.object(web_data, "load_user_records", return_value=[admin]),
+            patch.object(
+                web_data,
+                "save_users",
+                side_effect=lambda users: [
+                    web_data._public_user(item) for item in users
+                ],
+            ),
+        ):
+            users = web_data.update_user("admin", email="")
+
+        self.assertEqual(users[0]["email"], "")
+
+    def test_update_user_rejects_invalid_email_address(self) -> None:
+        with (
+            patch.object(
+                web_data,
+                "load_user_records",
+                return_value=[web_data._default_admin()],
+            ),
+            patch.object(web_data, "save_users") as save_users,
+        ):
+            with self.assertRaisesRegex(ValueError, "Niepoprawny adres e-mail"):
+                web_data.update_user("admin", email="Admin <admin@example.com>")
+
+        save_users.assert_not_called()
+
+    def test_normalize_email_address_rejects_multiple_addresses(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Niepoprawny adres e-mail"):
+            email_settings.normalize_email_address(
+                "admin@example.com, operator@example.com"
+            )
 
     def test_update_user_blocks_disabling_current_account(self) -> None:
         temp_dir = _workspace_temp("web_data_users_update")

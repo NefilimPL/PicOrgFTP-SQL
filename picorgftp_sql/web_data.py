@@ -56,6 +56,7 @@ from .email_settings import (
     EMAIL_CLIENT_SECRET,
     EMAIL_SETTINGS_KEY,
     EMAIL_SMTP_PASSWORD,
+    normalize_email_address,
     normalize_email_settings,
     public_email_settings,
 )
@@ -897,6 +898,7 @@ def _public_user(user: dict[str, object]) -> dict[str, object]:
     token_last_used_at = _float_user_value(user.get("extension_token_last_used_at"))
     return {
         "username": _text(user.get("username")),
+        "email": normalize_email_address(user.get("email")),
         "role": "admin" if _text(user.get("role")) == "admin" else "user",
         "enabled": bool(user.get("enabled", True)),
         "has_password": bool(_text(user.get("password_hash"))),
@@ -922,6 +924,7 @@ def _public_user(user: dict[str, object]) -> dict[str, object]:
 def _default_admin() -> dict[str, object]:
     return {
         "username": "admin",
+        "email": "",
         "role": "admin",
         "enabled": True,
         "password_hash": _hash_password("admin"),
@@ -966,6 +969,7 @@ def _normalized_user_record(item: dict[str, object]) -> dict[str, object] | None
     role = _text(item.get("role")) or "user"
     return {
         "username": username,
+        "email": normalize_email_address(item.get("email")),
         "role": "admin" if role == "admin" else "user",
         "enabled": bool(item.get("enabled", True)),
         "password_hash": _text(item.get("password_hash"))
@@ -1184,7 +1188,12 @@ def find_user(username: str) -> dict[str, object] | None:
     return None
 
 
-def add_user(username: str, password: str, role: str = "user") -> list[dict[str, object]]:
+def add_user(
+    username: str,
+    password: str,
+    role: str = "user",
+    email: str = "",
+) -> list[dict[str, object]]:
     """Add a web user account."""
 
     username = _text(username)
@@ -1192,12 +1201,14 @@ def add_user(username: str, password: str, role: str = "user") -> list[dict[str,
         raise ValueError("Nazwa uzytkownika nie moze byc pusta.")
     if not _text(password):
         raise ValueError("Haslo uzytkownika nie moze byc puste.")
+    email = normalize_email_address(email)
     users = load_user_records()
     if any(user["username"].lower() == username.lower() for user in users):
         raise ValueError("Taki uzytkownik juz istnieje.")
     users.append(
         {
             "username": username,
+            "email": email,
             "role": "admin" if _text(role) == "admin" else "user",
             "enabled": True,
             "password_hash": _hash_password(password),
@@ -1223,6 +1234,7 @@ def update_user(
     enabled: bool | None = None,
     role: str | None = None,
     password: str | None = None,
+    email: str | None = None,
     unlock: bool | None = None,
     revoke_sessions: bool | None = None,
     revoke_extension_token: bool | None = None,
@@ -1240,6 +1252,8 @@ def update_user(
             user["enabled"] = bool(enabled)
         if role is not None:
             user["role"] = "admin" if _text(role) == "admin" else "user"
+        if email is not None:
+            user["email"] = normalize_email_address(email)
         if password is not None and _text(password):
             user["password_hash"] = _hash_password(password)
             _bump_user_counter(user, "session_version")

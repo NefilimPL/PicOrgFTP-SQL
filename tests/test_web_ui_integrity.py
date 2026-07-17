@@ -58,6 +58,27 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
+    def test_user_settings_forms_send_optional_email_fields(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        css = (
+            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+        users_source = source[
+            source.index("function renderSettingsUsers") : source.index(
+                "function renderSettings()", source.index("function renderSettingsUsers")
+            )
+        ]
+
+        self.assertIn('emailInput.name = "email"', users_source)
+        self.assertIn('emailInput.type = "email"', users_source)
+        self.assertIn('emailInput.autocomplete = "email"', users_source)
+        self.assertIn('userEmailInput.type = "email"', users_source)
+        self.assertIn('userEmailInput.autocomplete = "email"', users_source)
+        self.assertIn("email: emailInput.value", users_source)
+        self.assertIn("email: userEmailInput.value", users_source)
+        self.assertIn(".user-add-form", css)
+        self.assertIn(".user-row", css)
+
     def test_backend_health_indicator_is_accessible_safe_and_visibility_aware(self) -> None:
         html_source = INDEX_HTML.read_text(encoding="utf-8")
         js_source = APP_JS.read_text(encoding="utf-8")

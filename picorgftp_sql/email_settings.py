@@ -3,12 +3,28 @@
 from __future__ import annotations
 
 import copy
+from email.utils import parseaddr
 
 
 EMAIL_SETTINGS_KEY = "email_notifications"
 EMAIL_CLIENT_SECRET = "client_secret"
 EMAIL_SMTP_PASSWORD = "password"
 EMAIL_SEVERITIES = ("info", "warning", "error", "critical")
+
+
+def normalize_email_address(value: object) -> str:
+    """Return one normalized mailbox address or an empty optional value."""
+
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    display, address = parseaddr(text)
+    if display or address != text or address.count("@") != 1:
+        raise ValueError("Niepoprawny adres e-mail.")
+    local, domain = address.rsplit("@", 1)
+    if not local or "." not in domain or any(ch.isspace() for ch in address):
+        raise ValueError("Niepoprawny adres e-mail.")
+    return f"{local}@{domain.lower()}"
 
 
 def default_email_settings() -> dict[str, object]:

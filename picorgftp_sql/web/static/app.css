@@ -872,7 +872,7 @@ h2 {
 
 .user-add-form {
   display: grid;
-  grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr) minmax(120px, 150px) auto;
+  grid-template-columns: minmax(150px, 1fr) minmax(180px, 1fr) minmax(150px, 1fr) minmax(120px, 150px) auto;
   gap: 10px;
   margin-bottom: 14px;
 }
@@ -1520,7 +1520,7 @@ h2 {
 }
 
 .user-row {
-  grid-template-columns: 140px minmax(120px, 160px) minmax(180px, 1fr) minmax(120px, 160px) auto;
+  grid-template-columns: 140px minmax(120px, 160px) minmax(190px, 1fr) minmax(180px, 1fr) minmax(120px, 160px) auto;
 }
 
 .user-row-locked {

@@ -10448,11 +10448,16 @@ function renderSettingsUsers() {
   const addForm = document.createElement("form");
   addForm.className = "user-add-form wide-field";
   const input = document.createElement("input");
+  const emailInput = document.createElement("input");
   const password = document.createElement("input");
   const role = document.createElement("select");
   const button = document.createElement("button");
   input.name = "username";
   input.placeholder = "Nowy uzytkownik";
+  emailInput.name = "email";
+  emailInput.type = "email";
+  emailInput.autocomplete = "email";
+  emailInput.placeholder = "E-mail opcjonalnie";
   password.name = "password";
   password.type = "password";
   password.placeholder = "Haslo";
@@ -10463,18 +10468,24 @@ function renderSettingsUsers() {
     role.appendChild(option);
   }
   button.textContent = "Dodaj";
-  addForm.append(input, password, role, button);
+  addForm.append(input, emailInput, password, role, button);
   addForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const payload = await requestJson("/api/users", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: input.value, password: password.value, role: role.value }),
+      body: JSON.stringify({
+        username: input.value,
+        email: emailInput.value,
+        password: password.value,
+        role: role.value,
+      }),
     });
     state.settings.users = payload.users;
     state.currentUser = payload.current_user || state.currentUser;
     updateAdminUi();
     input.value = "";
+    emailInput.value = "";
     password.value = "";
     renderSettings();
   });
@@ -10493,6 +10504,7 @@ function renderSettingsUsers() {
     const enabledText = document.createElement("div");
     const enabledTitle = document.createElement("strong");
     const enabledDescription = document.createElement("small");
+    const userEmailInput = document.createElement("input");
     const passwordInput = document.createElement("input");
     const actions = document.createElement("div");
     const save = document.createElement("button");
@@ -10546,6 +10558,11 @@ function renderSettingsUsers() {
     enabledText.append(enabledTitle, enabledDescription);
     enabledWrap.className = "check-row compact-check";
     enabledWrap.append(enabled, enabledText);
+    userEmailInput.name = "email";
+    userEmailInput.type = "email";
+    userEmailInput.autocomplete = "email";
+    userEmailInput.placeholder = "E-mail opcjonalnie";
+    userEmailInput.value = String(user.email || "");
     passwordInput.type = "password";
     passwordInput.placeholder = user.has_password ? "Nowe haslo opcjonalnie" : "Ustaw haslo";
     save.type = "button";
@@ -10559,7 +10576,11 @@ function renderSettingsUsers() {
     revokeExtension.textContent = "Uniewaznij token";
     actions.className = "user-actions";
     save.addEventListener("click", async () => {
-      const payload = { enabled: enabled.checked, role: role.value };
+      const payload = {
+        enabled: enabled.checked,
+        role: role.value,
+        email: userEmailInput.value,
+      };
       if (passwordInput.value) {
         payload.password = passwordInput.value;
       }
@@ -10615,7 +10636,7 @@ function renderSettingsUsers() {
       renderSettings();
     });
     actions.append(save, unlock, revokeSessions, revokeExtension);
-    row.append(name, role, passwordInput, enabledWrap, actions);
+    row.append(name, role, userEmailInput, passwordInput, enabledWrap, actions);
     list.appendChild(row);
   }
   wrapper.append(

@@ -5627,6 +5627,7 @@ def create_app() -> FastAPI:
                 str(payload.get("username") if isinstance(payload, dict) else ""),
                 str(payload.get("password") if isinstance(payload, dict) else ""),
                 str(payload.get("role") if isinstance(payload, dict) else "user"),
+                str(payload.get("email") if isinstance(payload, dict) else ""),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -5644,6 +5645,7 @@ def create_app() -> FastAPI:
                 enabled=payload.get("enabled") if "enabled" in payload else None,
                 role=payload.get("role") if "role" in payload else None,
                 password=payload.get("password") if "password" in payload else None,
+                email=payload.get("email") if "email" in payload else None,
                 unlock=bool(payload.get("unlock")) if "unlock" in payload else None,
                 revoke_sessions=bool(payload.get("revoke_sessions")) if "revoke_sessions" in payload else None,
                 revoke_extension_token=bool(payload.get("revoke_extension_token"))

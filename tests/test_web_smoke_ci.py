@@ -54,6 +54,48 @@ class WebSmokeCiTests(unittest.TestCase):
             {"online", "critical"},
         )
 
+    def test_add_user_route_forwards_email(self) -> None:
+        client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
+        with (
+            patch.object(web_app, "_require_admin", return_value=admin),
+            patch.object(web_app, "_current_user_payload", return_value=admin),
+            patch.object(web_app, "add_user", return_value=[]) as add_user,
+        ):
+            response = client.post(
+                "/api/users",
+                json={
+                    "username": "operator",
+                    "password": "secret",
+                    "role": "user",
+                    "email": "operator@example.com",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        add_user.assert_called_once_with(
+            "operator",
+            "secret",
+            "user",
+            "operator@example.com",
+        )
+
+    def test_update_user_route_forwards_email(self) -> None:
+        client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
+        with (
+            patch.object(web_app, "_require_admin", return_value=admin),
+            patch.object(web_app, "_current_user_payload", return_value=admin),
+            patch.object(web_app, "update_user", return_value=[]) as update_user,
+        ):
+            response = client.patch(
+                "/api/users/operator",
+                json={"email": ""},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(update_user.call_args.kwargs["email"], "")
+
     def test_client_error_route_requires_auth_and_csrf_and_emits_redacted_critical(self) -> None:
         class EventStore:
             def __init__(self) -> None:
