@@ -5136,14 +5136,18 @@ function renderJobCard(job) {
   return card;
 }
 
+function normalizeLogSearchText(value) {
+  return String(value || "").toLowerCase();
+}
+
 function logFilterInputValues() {
   return {
-    query: (logsTextFilter?.value || "").trim().toLowerCase(),
+    query: normalizeLogSearchText(logsTextFilter?.value).trim(),
     severity: logsSeverityFilter?.value || "",
-    module: (logsModuleFilter?.value || "").trim().toLowerCase(),
-    username: (logsUserFilter?.value || "").trim().toLowerCase(),
-    ean: (logsEanFilter?.value || "").trim().toLowerCase(),
-    jobId: (logsJobFilter?.value || "").trim().toLowerCase(),
+    module: normalizeLogSearchText(logsModuleFilter?.value).trim(),
+    username: normalizeLogSearchText(logsUserFilter?.value).trim(),
+    ean: normalizeLogSearchText(logsEanFilter?.value).trim(),
+    jobId: normalizeLogSearchText(logsJobFilter?.value).trim(),
   };
 }
 
@@ -5194,7 +5198,7 @@ function resetCommittedLogFilters() {
 }
 
 function logEventSearchText(item) {
-  return [
+  return normalizeLogSearchText([
     item.created_at,
     item.id,
     item.severity,
@@ -5215,8 +5219,7 @@ function logEventSearchText(item) {
     item.traceback_text,
   ]
     .map((value) => String(value || ""))
-    .join("\n")
-    .toLowerCase();
+    .join("\n"));
 }
 
 function logItemMatchesFilters(item) {
@@ -5226,13 +5229,13 @@ function logItemMatchesFilters(item) {
   const context = item.context || {};
   const searchText = item.created_at
     ? logEventSearchText(item)
-    : JSON.stringify(item).toLowerCase();
+    : normalizeLogSearchText(JSON.stringify(item));
   if (query && !searchText.includes(query)) return false;
   if (severity && (item.severity || "") !== severity) return false;
-  if (moduleName && !String(item.module || context.module || "").toLowerCase().includes(moduleName)) return false;
-  if (username && !String(item.username || context.username || "").toLowerCase().includes(username)) return false;
-  if (ean && !String(item.ean || context.ean || item.entry?.ean || "").toLowerCase().includes(ean)) return false;
-  if (jobId && !String(item.job_id || item.id || context.job_id || "").toLowerCase().includes(jobId)) return false;
+  if (moduleName && !normalizeLogSearchText(item.module || context.module).includes(moduleName)) return false;
+  if (username && !normalizeLogSearchText(item.username || context.username).includes(username)) return false;
+  if (ean && !normalizeLogSearchText(item.ean || context.ean || item.entry?.ean).includes(ean)) return false;
+  if (jobId && !normalizeLogSearchText(item.job_id || item.id || context.job_id).includes(jobId)) return false;
   return true;
 }
 

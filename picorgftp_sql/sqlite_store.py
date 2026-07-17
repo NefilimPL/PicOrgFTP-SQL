@@ -97,6 +97,12 @@ def _text(value: object) -> str:
     return str(value or "").strip()
 
 
+def _unicode_lower(value: object) -> str:
+    """Normalize SQLite text with Python's Unicode-aware case mapping."""
+
+    return str(value or "").lower()
+
+
 def _upper(value: object) -> str:
     return _text(value).upper()
 
@@ -141,7 +147,7 @@ def _bounded_page_limit(value: object) -> int:
 
 
 def _literal_like_pattern(value: object) -> str:
-    needle = _text(value).lower()
+    needle = _text(value)
     escaped = (
         needle.replace("\\", "\\\\")
         .replace("%", "\\%")
@@ -176,19 +182,23 @@ def _append_operational_event_filters(
         params.extend(severity_values)
     for column, value in (("username", username), ("ean", ean), ("module", module)):
         if _text(value):
-            clauses.append(f"LOWER({prefix}{column}) LIKE ? ESCAPE '\\'")
+            clauses.append(
+                f"picorg_lower({prefix}{column}) "
+                "LIKE picorg_lower(?) ESCAPE '\\'"
+            )
             params.append(_literal_like_pattern(value))
     if _text(job_id):
         clauses.append(
-            f"LOWER(CASE WHEN {prefix}job_id <> '' THEN {prefix}job_id "
-            f"ELSE {prefix}id END) LIKE ? ESCAPE '\\'"
+            f"picorg_lower(CASE WHEN {prefix}job_id <> '' THEN {prefix}job_id "
+            f"ELSE {prefix}id END) LIKE picorg_lower(?) ESCAPE '\\'"
         )
         pattern = _literal_like_pattern(job_id)
         params.append(pattern)
     if _text(query):
         pattern = _literal_like_pattern(query)
         query_clauses = " OR ".join(
-                f"LOWER({prefix}{column}) LIKE ? ESCAPE '\\'"
+                f"picorg_lower({prefix}{column}) "
+                "LIKE picorg_lower(?) ESCAPE '\\'"
                 for column in _OPERATIONAL_EVENT_QUERY_COLUMNS
         )
         clauses.append(f"({query_clauses})")
@@ -487,6 +497,12 @@ class SqliteStore:
         directory.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
+        conn.create_function(
+            "picorg_lower",
+            1,
+            _unicode_lower,
+            deterministic=True,
+        )
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 

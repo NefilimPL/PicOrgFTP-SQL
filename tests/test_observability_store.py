@@ -758,22 +758,22 @@ def test_archive_filters_are_case_insensitive_literal_substrings(
         _event(
             "evt-pim-literal",
             "2026-07-16T10:00:00.000Z",
-            module="Pim%core_Service",
+            module="Pim%core_BŁĄD_ŻÓŁĆ\\Service",
             username="Alice.Admin",
             ean="EAN_590",
             job_id="JOB%_42",
-            summary="Literal 100% marker",
+            summary="Literal 100% marker ŻÓŁĆ_\\plik",
         )
     )
     store.append_operational_event(
         _event(
             "evt-pim-decoy",
             "2026-07-16T10:01:00.000Z",
-            module="PimXcore-Service",
+            module="PimXcore-BŁĄDXŻÓŁĆ/Service",
             username="Bob",
             ean="EANX590",
             job_id="JOBXX42",
-            summary="Literal 100X marker",
+            summary="Literal 100X marker ŻÓŁĆX/plik",
         )
     )
     store.append_operational_event(
@@ -799,6 +799,10 @@ def test_archive_filters_are_case_insensitive_literal_substrings(
     ] == ["evt-pim-literal"]
     assert [
         item["id"]
+        for item in store.query_operational_events(module="błąd_żółć\\ser")["items"]
+    ] == ["evt-pim-literal"]
+    assert [
+        item["id"]
         for item in store.query_operational_events(username="alice.ad")["items"]
     ] == ["evt-pim-literal"]
     assert [
@@ -812,6 +816,10 @@ def test_archive_filters_are_case_insensitive_literal_substrings(
     assert [
         item["id"]
         for item in store.query_operational_events(query="100%")["items"]
+    ] == ["evt-pim-literal"]
+    assert [
+        item["id"]
+        for item in store.query_operational_events(query="żółć_\\p")["items"]
     ] == ["evt-pim-literal"]
     assert {
         item["id"]
@@ -847,7 +855,11 @@ def test_filtered_live_snapshot_and_older_page_share_literal_filter_semantics(
                     (datetime(2026, 7, 16, tzinfo=timezone.utc) + timedelta(seconds=index))
                     .isoformat(timespec="milliseconds")
                     .replace("+00:00", "Z"),
-                    module="Pimcore" if index != 0 else "Pim%core",
+                    module=(
+                        "ŻÓŁĆ Pimcore"
+                        if index != 0
+                        else "ŻÓŁĆ%_\\Pimcore"
+                    ),
                 )
             )
             store._insert_operational_event(conn, payload)
@@ -863,23 +875,42 @@ def test_filtered_live_snapshot_and_older_page_share_literal_filter_semantics(
         )
 
     seed = store.snapshot_operational_event_stream(
-        since=since, limit=200, module="pim"
+        since=since, limit=200, module="żółć"
     )
     older = store.query_operational_events(
         since=seed["archive_since"],
         cursor=seed["next_cursor"],
-        module="pim",
+        module="żółć",
         limit=20,
     )
     literal = store.snapshot_operational_event_stream(
-        since=since, limit=20, module="pim%"
+        since=since, limit=20, module="żółć%_\\p"
     )
 
     assert len(seed["items"]) == 200
     assert len(older["items"]) == 5
-    assert {item["module"] for item in seed["items"]} == {"Pimcore"}
+    assert {item["module"] for item in seed["items"]} == {"ŻÓŁĆ Pimcore"}
     assert "evt-pim-000" in {item["id"] for item in older["items"]}
     assert [item["id"] for item in literal["items"]] == ["evt-pim-000"]
+
+
+def test_every_store_connection_registers_deterministic_unicode_lower(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+
+    for _ in range(2):
+        with store.connection() as conn:
+            assert conn.execute(
+                "SELECT picorg_lower(?)",
+                ("BŁĄD ŻÓŁĆ",),
+            ).fetchone()[0] == "błąd żółć"
+            function = next(
+                row
+                for row in conn.execute("PRAGMA function_list")
+                if row[0] == "picorg_lower" and row[4] == 1
+            )
+            assert int(function[5]) & 0x800
 
 
 def test_stream_position_pages_every_later_insert_without_timestamp_ordering(

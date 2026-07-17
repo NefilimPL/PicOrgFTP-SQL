@@ -400,7 +400,11 @@ def test_live_seed_and_older_page_apply_same_literal_substring_filters(
                         .isoformat(timespec="milliseconds")
                         .replace("+00:00", "Z"),
                     ),
-                    "module": "Pimcore" if index else "Pim%core",
+                    "module": (
+                        "ŻÓŁĆ Pimcore"
+                        if index
+                        else "ŻÓŁĆ%_\\Pimcore"
+                    ),
                 }
             )
             store._insert_operational_event(conn, payload)
@@ -421,7 +425,7 @@ def test_live_seed_and_older_page_apply_same_literal_substring_filters(
 
     seed = client.get(
         "/api/observability/events",
-        params={"live_seed": 1, "module": "pim"},
+        params={"live_seed": 1, "module": "żółć"},
     )
     assert seed.status_code == 200
     payload = seed.json()
@@ -430,13 +434,13 @@ def test_live_seed_and_older_page_apply_same_literal_substring_filters(
         params={
             "cursor": payload["next_cursor"],
             "since": payload["archive_since"],
-            "module": "pim",
+            "module": "żółć",
             "limit": 20,
         },
     )
     literal = client.get(
         "/api/observability/events",
-        params={"live_seed": 1, "module": "pim%"},
+        params={"live_seed": 1, "module": "żółć%_\\p"},
     )
     date_seed = client.get(
         "/api/observability/events",
@@ -448,7 +452,7 @@ def test_live_seed_and_older_page_apply_same_literal_substring_filters(
     )
 
     assert len(payload["items"]) == 200
-    assert {item["module"] for item in payload["items"]} == {"Pimcore"}
+    assert {item["module"] for item in payload["items"]} == {"ŻÓŁĆ Pimcore"}
     assert len(older.json()["items"]) == 5
     assert [item["id"] for item in literal.json()["items"]] == ["evt-filter-000"]
     assert len(date_seed.json()["items"]) == 200

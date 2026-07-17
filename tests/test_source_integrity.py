@@ -261,6 +261,12 @@ class SourceIntegrityTests(unittest.TestCase):
             / "static"
             / "app.js"
         ).read_text(encoding="utf-8")
+        normalization_source = source[
+            source.index("function normalizeLogSearchText") : source.index(
+                "function logEventSearchText"
+            )
+        ]
+        self.assertIn('String(value || "").toLowerCase()', normalization_source)
         search_source = source[
             source.index("function logEventSearchText") : source.index(
                 "function logItemMatchesFilters"
@@ -288,12 +294,14 @@ class SourceIntegrityTests(unittest.TestCase):
             self.assertIn(f"item.{field}", search_source)
         self.assertIn("JSON.stringify(item.details || {})", search_source)
         self.assertNotIn("JSON.stringify(item)", search_source)
+        self.assertIn("normalizeLogSearchText", search_source)
         filter_source = source[
             source.index("function logItemMatchesFilters") : source.index(
                 "function renderLogs"
             )
         ]
         self.assertIn("logEventSearchText(item)", filter_source)
+        self.assertGreaterEqual(filter_source.count("normalizeLogSearchText"), 5)
 
     def test_web_logs_gate_reads_navigation_unread_and_filters(self) -> None:
         app_path = (
