@@ -26,6 +26,13 @@ from .excel_utils import (
 )
 
 SCHEMA_VERSION = 6
+_NOTIFICATION_DELIVERY_STATUSES = frozenset(
+    {"pending", "sending", "sent", "fallback", "skipped", "error"}
+)
+_NOTIFICATION_DELIVERY_CHANNELS = frozenset({"entra", "smtp"})
+_NOTIFICATION_DELIVERY_SEVERITIES = frozenset(
+    {"info", "warning", "error", "critical"}
+)
 _OPERATIONAL_EVENT_STREAM_ORIGIN_ID = (
     "sys-4e680c0b1c744a0e82e385cad10b47d1"
 )
@@ -116,6 +123,47 @@ def _iso_from_timestamp(value: object) -> str:
     return parsed.astimezone(timezone.utc).isoformat(
         timespec="milliseconds"
     ).replace("+00:00", "Z")
+
+
+def _canonical_timestamp(
+    value: object, *, field: str, required: bool = True
+) -> str:
+    if value is None:
+        text = ""
+    elif isinstance(value, str):
+        text = value
+    else:
+        raise ValueError(f"{field} must be a canonical timestamp")
+    if not text:
+        if required:
+            raise ValueError(f"{field} is required")
+        return ""
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{field} must be a canonical timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field} must be a canonical timestamp")
+    canonical = parsed.astimezone(timezone.utc).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+    if text != canonical:
+        raise ValueError(f"{field} must be a canonical timestamp")
+    return canonical
+
+
+def _delivery_status(value: object) -> str:
+    status = _text(value)
+    if status not in _NOTIFICATION_DELIVERY_STATUSES:
+        raise ValueError("invalid notification delivery status")
+    return status
+
+
+def _delivery_channel(value: object, *, allow_empty: bool) -> str:
+    channel = _text(value)
+    if (not channel and allow_empty) or channel in _NOTIFICATION_DELIVERY_CHANNELS:
+        return channel
+    raise ValueError("invalid notification delivery channel")
 
 
 def _history_created_at(payload: dict[str, object]) -> str:
@@ -1315,22 +1363,39 @@ class SqliteStore:
         """Insert one durable notification delivery and return its stored form."""
 
         self.initialize()
-        created_at = _iso_from_timestamp(record.get("created_at") or _now_iso())
-        updated_at = _iso_from_timestamp(record.get("updated_at") or created_at)
-        next_attempt_text = _text(record.get("next_attempt_at"))
-        next_attempt_at = (
-            _iso_from_timestamp(next_attempt_text) if next_attempt_text else ""
+        delivery_id = _text(record.get("id"))
+        if not delivery_id:
+            raise ValueError("notification delivery id is required")
+        status = _delivery_status(record.get("status"))
+        primary_channel = _delivery_channel(
+            record.get("primary_channel"), allow_empty=False
+        )
+        used_channel = _delivery_channel(
+            record.get("used_channel"), allow_empty=True
+        )
+        severity = _text(record.get("severity"))
+        if severity not in _NOTIFICATION_DELIVERY_SEVERITIES:
+            raise ValueError("invalid notification delivery severity")
+        created_at = _canonical_timestamp(
+            record.get("created_at"), field="created_at"
+        )
+        updated_at = _canonical_timestamp(
+            record.get("updated_at"), field="updated_at"
+        )
+        next_attempt_at = _canonical_timestamp(
+            record.get("next_attempt_at"),
+            field="next_attempt_at",
+            required=False,
         )
         recipients = record.get("recipients", [])
-        if not isinstance(recipients, (list, tuple)):
-            recipients = []
+        if not isinstance(recipients, list):
+            raise ValueError("notification delivery recipients must be a list")
         message = record.get("message", {})
         if not isinstance(message, dict):
-            message = {}
+            raise ValueError("notification delivery message must be an object")
         attempts = record.get("attempts", [])
         if not isinstance(attempts, list):
-            attempts = []
-        delivery_id = _text(record.get("id")) or f"delivery-{uuid.uuid4().hex}"
+            raise ValueError("notification delivery attempts must be a list")
         with self.connection() as conn:
             conn.execute(
                 """
@@ -1345,11 +1410,11 @@ class SqliteStore:
                     delivery_id,
                     _text(record.get("incident_id")),
                     _text(record.get("event_id")),
-                    _text(record.get("severity")),
-                    _text(record.get("status")) or "pending",
-                    _text(record.get("primary_channel")),
-                    _text(record.get("used_channel")),
-                    _json_dumps(list(recipients)),
+                    severity,
+                    status,
+                    primary_channel,
+                    used_channel,
+                    _json_dumps(recipients),
                     _json_dumps(message),
                     _json_dumps(attempts),
                     created_at,
@@ -1375,7 +1440,8 @@ class SqliteStore:
                 SELECT * FROM notification_deliveries
                 WHERE status = 'pending'
                   AND (next_attempt_at = '' OR next_attempt_at <= ?)
-                ORDER BY next_attempt_at ASC, created_at ASC, id ASC
+                ORDER BY COALESCE(NULLIF(next_attempt_at, ''), created_at) ASC,
+                         created_at ASC, id ASC
                 LIMIT ?
                 """,
                 (_now_iso(), _bounded_page_limit(limit)),
@@ -1395,48 +1461,59 @@ class SqliteStore:
         """Update mutable delivery state and return the decoded row."""
 
         self.initialize()
-        next_attempt_text = _text(next_attempt_at)
-        normalized_next_attempt = (
-            _iso_from_timestamp(next_attempt_text) if next_attempt_text else ""
+        normalized_id = _text(delivery_id)
+        if not normalized_id:
+            raise ValueError("notification delivery id is required")
+        normalized_status = _delivery_status(status)
+        normalized_channel = _delivery_channel(used_channel, allow_empty=True)
+        normalized_updated_at = _canonical_timestamp(
+            updated_at, field="updated_at"
         )
+        normalized_next_attempt = _canonical_timestamp(
+            next_attempt_at, field="next_attempt_at", required=False
+        )
+        if attempts is not None and not isinstance(attempts, list):
+            raise ValueError("notification delivery attempts must be a list")
+        expected_status = "pending" if normalized_status == "sending" else "sending"
         with self.connection() as conn:
-            if attempts is None:
-                conn.execute(
-                    """
-                    UPDATE notification_deliveries
-                    SET status = ?, used_channel = ?, updated_at = ?,
-                        next_attempt_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        _text(status),
-                        _text(used_channel),
-                        _iso_from_timestamp(updated_at),
-                        normalized_next_attempt,
-                        _text(delivery_id),
-                    ),
-                )
-            else:
-                normalized_attempts = attempts if isinstance(attempts, list) else []
-                conn.execute(
-                    """
-                    UPDATE notification_deliveries
-                    SET status = ?, used_channel = ?, attempts_json = ?,
-                        updated_at = ?, next_attempt_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        _text(status),
-                        _text(used_channel),
-                        _json_dumps(normalized_attempts),
-                        _iso_from_timestamp(updated_at),
-                        normalized_next_attempt,
-                        _text(delivery_id),
-                    ),
+            assignments = [
+                "status = ?",
+                "used_channel = ?",
+                "updated_at = ?",
+                "next_attempt_at = ?",
+            ]
+            params: list[object] = [
+                normalized_status,
+                normalized_channel,
+                normalized_updated_at,
+                normalized_next_attempt,
+            ]
+            if attempts is not None:
+                assignments.append("attempts_json = ?")
+                params.append(_json_dumps(attempts))
+            params.extend([normalized_id, expected_status])
+            cursor = conn.execute(
+                f"""
+                UPDATE notification_deliveries
+                SET {", ".join(assignments)}
+                WHERE id = ? AND status = ?
+                """,
+                params,
+            )
+            if cursor.rowcount == 0:
+                row = conn.execute(
+                    "SELECT status FROM notification_deliveries WHERE id = ?",
+                    (normalized_id,),
+                ).fetchone()
+                if normalized_status == "sending" or row is None:
+                    return {}
+                raise ValueError(
+                    f"invalid notification delivery transition: "
+                    f"{row['status']} -> {normalized_status}"
                 )
             row = conn.execute(
                 "SELECT * FROM notification_deliveries WHERE id = ?",
-                (_text(delivery_id),),
+                (normalized_id,),
             ).fetchone()
         return self._delivery_from_row(row) if row else {}
 

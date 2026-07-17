@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from unittest.mock import patch
 
+import pytest
+
 from picorgftp_sql import common, config, web_data
 from picorgftp_sql.email_settings import (
     EMAIL_CLIENT_SECRET,
@@ -12,6 +14,44 @@ from picorgftp_sql.email_settings import (
     normalize_email_settings,
     public_email_settings,
 )
+
+
+@pytest.mark.parametrize("value", [False, "false", "0", "off", "no", ""])
+def test_normalize_email_settings_parses_false_like_boolean_values(value: object) -> None:
+    result = normalize_email_settings(
+        {
+            "fallback_enabled": value,
+            "rules": {
+                "error": {
+                    "enabled": value,
+                    "include_actor": value,
+                }
+            },
+        }
+    )
+
+    assert result["fallback_enabled"] is False
+    assert result["rules"]["error"]["enabled"] is False
+    assert result["rules"]["error"]["include_actor"] is False
+
+
+@pytest.mark.parametrize("value", [True, "true", "1", "on", "yes"])
+def test_normalize_email_settings_parses_true_like_boolean_values(value: object) -> None:
+    result = normalize_email_settings(
+        {
+            "fallback_enabled": value,
+            "rules": {
+                "warning": {
+                    "enabled": value,
+                    "include_actor": value,
+                }
+            },
+        }
+    )
+
+    assert result["fallback_enabled"] is True
+    assert result["rules"]["warning"]["enabled"] is True
+    assert result["rules"]["warning"]["include_actor"] is True
 
 
 def test_normalize_email_settings_builds_both_channels_and_rules() -> None:

@@ -119,6 +119,12 @@ def test_notification_delivery_repository_decodes_updates_filters_and_pages(
     pending = store.pending_notification_deliveries(limit=20)
     assert [item["id"] for item in pending] == ["delivery-1", "delivery-3"]
 
+    claimed = store.update_notification_delivery(
+        "delivery-1",
+        status="sending",
+        updated_at="2026-07-16T10:02:30.000Z",
+    )
+    assert claimed["status"] == "sending"
     updated = store.update_notification_delivery(
         "delivery-1",
         status="sent",
@@ -145,6 +151,188 @@ def test_notification_delivery_repository_decodes_updates_filters_and_pages(
     ] == ["delivery-3", "delivery-1"]
 
 
+def test_pending_deliveries_order_by_effective_due_time_without_starvation(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.enqueue_notification_delivery(
+        _delivery(
+            "retry-overdue",
+            "2026-07-16T10:30:00.000Z",
+            next_attempt_at="2026-07-16T09:00:00.000Z",
+        )
+    )
+    for index in range(5):
+        store.enqueue_notification_delivery(
+            _delivery(
+                f"immediate-{index}",
+                f"2026-07-16T10:0{index}:00.000Z",
+            )
+        )
+    store.enqueue_notification_delivery(
+        _delivery(
+            "retry-future",
+            "2026-07-16T08:00:00.000Z",
+            next_attempt_at="2999-01-01T00:00:00.000Z",
+        )
+    )
+
+    first_batch = store.pending_notification_deliveries(limit=2)
+
+    assert [item["id"] for item in first_batch] == [
+        "retry-overdue",
+        "immediate-0",
+    ]
+    assert "retry-future" not in {item["id"] for item in first_batch}
+
+
+def test_notification_delivery_claim_is_atomic_across_connections(tmp_path: Path) -> None:
+    db_path = tmp_path / "app.sqlite"
+    SqliteStore(str(db_path)).enqueue_notification_delivery(
+        _delivery("delivery-1", "2026-07-16T10:00:00.000Z")
+    )
+    stores = [SqliteStore(str(db_path)), SqliteStore(str(db_path))]
+    barrier = Barrier(2)
+
+    def claim(index: int) -> dict[str, object]:
+        barrier.wait()
+        return stores[index].update_notification_delivery(
+            "delivery-1",
+            status="sending",
+            updated_at="2026-07-16T10:01:00.000Z",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        claims = list(executor.map(claim, range(2)))
+
+    assert sorted(bool(item) for item in claims) == [False, True]
+    assert [item["status"] for item in claims if item] == ["sending"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("id", ""),
+        ("status", "unknown"),
+        ("primary_channel", "unknown"),
+        ("used_channel", "unknown"),
+        ("created_at", "not-a-timestamp"),
+        ("updated_at", "2026-07-16T10:00:00Z"),
+        ("next_attempt_at", "2026-07-16 10:00:00.000+00:00"),
+        ("attempts", {}),
+    ],
+)
+def test_enqueue_notification_delivery_rejects_malformed_rows(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    record = _delivery("delivery-1", "2026-07-16T10:00:00.000Z")
+    record[field] = value
+
+    with pytest.raises(ValueError):
+        store.enqueue_notification_delivery(record)
+
+
+@pytest.mark.parametrize(
+    ("kwargs"),
+    [
+        {"status": "unknown", "updated_at": "2026-07-16T10:01:00.000Z"},
+        {
+            "status": "sending",
+            "used_channel": "unknown",
+            "updated_at": "2026-07-16T10:01:00.000Z",
+        },
+        {"status": "sending", "updated_at": "not-a-timestamp"},
+        {
+            "status": "sending",
+            "updated_at": "2026-07-16T10:01:00.000Z",
+            "next_attempt_at": "2026-07-16T10:02:00Z",
+        },
+        {
+            "status": "sending",
+            "updated_at": "2026-07-16T10:01:00.000Z",
+            "attempts": {},
+        },
+    ],
+)
+def test_update_notification_delivery_rejects_invalid_values(
+    tmp_path: Path, kwargs: dict[str, object]
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.enqueue_notification_delivery(
+        _delivery(
+            "delivery-1",
+            "2026-07-16T10:00:00.000Z",
+            attempts=[{"status": "queued"}],
+        )
+    )
+
+    with pytest.raises(ValueError):
+        store.update_notification_delivery("delivery-1", **kwargs)
+
+    stored = store.query_notification_deliveries()["items"][0]
+    assert stored["status"] == "pending"
+    assert stored["attempts"] == [{"status": "queued"}]
+
+
+def test_notification_delivery_enforces_transitions_and_stale_recovery(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.enqueue_notification_delivery(
+        _delivery("delivery-1", "2026-07-16T10:00:00.000Z")
+    )
+
+    with pytest.raises(ValueError):
+        store.update_notification_delivery(
+            "delivery-1",
+            status="sent",
+            updated_at="2026-07-16T10:01:00.000Z",
+        )
+
+    assert store.update_notification_delivery(
+        "delivery-1",
+        status="sending",
+        updated_at="2026-07-16T10:01:00.000Z",
+    )["status"] == "sending"
+    assert store.update_notification_delivery(
+        "delivery-1",
+        status="pending",
+        updated_at="2026-07-16T10:02:00.000Z",
+        next_attempt_at="2026-07-16T10:03:00.000Z",
+    )["status"] == "pending"
+    assert store.update_notification_delivery(
+        "delivery-1",
+        status="sending",
+        updated_at="2026-07-16T10:03:00.000Z",
+    )["status"] == "sending"
+    assert store.update_notification_delivery(
+        "delivery-1",
+        status="error",
+        used_channel="entra",
+        attempts=[{"channel": "entra", "status": "error"}],
+        updated_at="2026-07-16T10:04:00.000Z",
+    )["status"] == "error"
+
+    with pytest.raises(ValueError):
+        store.update_notification_delivery(
+            "delivery-1",
+            status="pending",
+            updated_at="2026-07-16T10:05:00.000Z",
+        )
+
+
+def test_update_notification_delivery_requires_nonempty_id(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+
+    with pytest.raises(ValueError):
+        store.update_notification_delivery(
+            "",
+            status="sending",
+            updated_at="2026-07-16T10:00:00.000Z",
+        )
+
+
 def test_sqlite_adapter_delegates_notification_delivery_repository(tmp_path: Path) -> None:
     adapter = SqliteDataStoreAdapter(str(tmp_path / "app.sqlite"))
     queued = adapter.enqueue_notification_delivery(
@@ -153,6 +341,11 @@ def test_sqlite_adapter_delegates_notification_delivery_repository(tmp_path: Pat
 
     assert queued["id"] == "delivery-1"
     assert adapter.pending_notification_deliveries()[0]["id"] == "delivery-1"
+    assert adapter.update_notification_delivery(
+        "delivery-1",
+        status="sending",
+        updated_at="2026-07-16T10:00:30.000Z",
+    )["status"] == "sending"
     assert adapter.update_notification_delivery(
         "delivery-1",
         status="sent",

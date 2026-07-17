@@ -52,6 +52,20 @@ def _recipients(value: object) -> list[str]:
     return [text for item in values if (text := _text(item))]
 
 
+def _bool_value(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"", "0", "false", "no", "off"}:
+            return False
+    return default
+
+
 def normalize_email_settings(raw: object) -> dict[str, object]:
     defaults = default_email_settings()
     source = raw if isinstance(raw, dict) else {}
@@ -96,14 +110,14 @@ def normalize_email_settings(raw: object) -> dict[str, object]:
         if not isinstance(raw_rule, dict):
             raw_rule = {}
         rules[severity] = {
-            "enabled": bool(raw_rule.get("enabled", False)),
+            "enabled": _bool_value(raw_rule.get("enabled"), False),
             "recipients": _recipients(raw_rule.get("recipients", [])),
-            "include_actor": bool(raw_rule.get("include_actor", False)),
+            "include_actor": _bool_value(raw_rule.get("include_actor"), False),
         }
 
     return {
         "primary_channel": primary_channel,
-        "fallback_enabled": bool(source.get("fallback_enabled", False)),
+        "fallback_enabled": _bool_value(source.get("fallback_enabled"), False),
         "entra": entra,
         "smtp": smtp,
         "rules": rules,
