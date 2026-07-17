@@ -134,6 +134,19 @@ class SqliteDataStoreAdapter:
             severity=severity, cursor=cursor, limit=limit
         )
 
+    def release_incident_notification(
+        self,
+        incident_id: str,
+        *,
+        claimed_at: str,
+        previous_at: str,
+    ) -> bool:
+        return self.store.release_incident_notification(
+            incident_id,
+            claimed_at=claimed_at,
+            previous_at=previous_at,
+        )
+
     def enqueue_notification_delivery(
         self, record: dict[str, object]
     ) -> dict[str, Any]:

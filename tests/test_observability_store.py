@@ -355,6 +355,25 @@ def test_sqlite_adapter_delegates_notification_delivery_repository(tmp_path: Pat
         "id"
     ] == "delivery-1"
 
+    incident = adapter.coalesce_incident(
+        {
+            "id": "inc-release",
+            "fingerprint": "release-test",
+            "severity": "error",
+            "event_type": "mail.failed",
+            "first_seen_at": "2026-07-16T11:00:00.000Z",
+            "last_seen_at": "2026-07-16T11:00:00.000Z",
+            "first_event_id": "evt-release",
+            "latest_event_id": "evt-release",
+            "notification_window_at": "2026-07-16T11:00:00.000Z",
+        }
+    )
+    assert adapter.release_incident_notification(
+        incident["id"],
+        claimed_at=incident["notification_claim_at"],
+        previous_at=incident["notification_previous_window_at"],
+    ) is True
+
 
 def test_operational_schema_and_cursor_queries(tmp_path: Path) -> None:
     store = SqliteStore(str(tmp_path / "app.sqlite"))
@@ -937,6 +956,37 @@ def test_atomic_incident_coalescing_across_store_connections(tmp_path: Path) -> 
             "SELECT COUNT(*) FROM incidents WHERE fingerprint = ? AND status = 'open'",
             ("same-failure",),
         ).fetchone()[0] == 1
+
+
+def test_release_incident_notification_is_compare_and_swap_safe(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    incident = store.coalesce_incident(
+        {
+            "id": "inc-1",
+            "fingerprint": "ftp-failed",
+            "severity": "error",
+            "event_type": "ftp.failed",
+            "first_seen_at": "2026-07-17T10:00:00.000Z",
+            "last_seen_at": "2026-07-17T10:00:00.000Z",
+            "first_event_id": "evt-1",
+            "latest_event_id": "evt-1",
+            "notification_window_at": "2026-07-17T10:00:00.000Z",
+        }
+    )
+
+    assert incident["notification_claim_at"] == "2026-07-17T10:00:00.000Z"
+    assert incident["notification_previous_window_at"] == ""
+    assert store.release_incident_notification(
+        "inc-1",
+        claimed_at="2026-07-17T09:59:00.000Z",
+        previous_at="",
+    ) is False
+    assert store.release_incident_notification(
+        "inc-1",
+        claimed_at=incident["notification_claim_at"],
+        previous_at=incident["notification_previous_window_at"],
+    ) is True
+    assert store.find_open_incident("ftp-failed")["notification_window_at"] == ""
 
 
 def test_initialize_reconciles_duplicate_open_incidents_before_unique_index(

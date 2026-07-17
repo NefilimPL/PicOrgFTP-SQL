@@ -221,6 +221,45 @@ def test_queue_incident_notification_only_when_due_and_escapes_message() -> None
     assert "secret" not in str(message)
 
 
+def test_incident_message_includes_bounded_redacted_occurrence_context() -> None:
+    store = FakeStore()
+    service = _service(store)
+
+    queued = service.queue_incident_notification(
+        _event(
+            details={
+                "safe": "wartość",
+                "config": {"host": "private.internal"},
+                "traceback_text": "very long internal stack",
+                "cookie": "session-secret",
+            }
+        ),
+        _incident(
+            occurrence_count=7,
+            context={
+                "slot": "01 <front>",
+                "reason": "Brak & blokada",
+                "authorization": "Bearer secret-token",
+                "nested": {"password": "smtp-secret"},
+            },
+        ),
+    )
+
+    assert queued is not None
+    message = queued["message"]
+    assert "Liczba wystąpień: 7" in message["text_body"]
+    assert '"slot": "01 <front>"' in message["text_body"]
+    assert "01 &lt;front&gt;" in message["html_body"]
+    assert "Brak &amp; blokada" in message["html_body"]
+    assert "secret-token" not in str(message)
+    assert "smtp-secret" not in str(message)
+    assert "private.internal" not in str(message)
+    assert "internal stack" not in str(message)
+    assert "session-secret" not in str(message)
+    assert len(message["text_body"]) <= 10_000
+    assert len(message["html_body"]) <= 20_000
+
+
 def test_queue_message_subject_cannot_contain_header_newlines() -> None:
     store = FakeStore()
     service = _service(store)
@@ -265,7 +304,13 @@ def test_process_delivery_falls_back_once_with_same_message_id() -> None:
     assert result["status"] == "fallback"
     assert result["used_channel"] == "smtp"
     assert result["attempts"] == [
-        {"channel": "entra", "status": "error"},
+        {
+            "channel": "entra",
+            "status": "error",
+            "code": "delivery_failed",
+            "category": "delivery",
+            "message": "Kanał nie wysłał wiadomości.",
+        },
         {"channel": "smtp", "status": "sent", "elapsed_ms": 12},
     ]
     assert "secret" not in str(result["attempts"])
@@ -301,9 +346,23 @@ def test_process_delivery_records_both_failures_and_suppresses_recursion() -> No
 
     assert result["status"] == "error"
     assert result["attempts"] == [
-        {"channel": "entra", "status": "error"},
-        {"channel": "smtp", "status": "error"},
+        {
+            "channel": "entra",
+            "status": "error",
+            "code": "delivery_failed",
+            "category": "delivery",
+            "message": "Kanał nie wysłał wiadomości.",
+        },
+        {
+            "channel": "smtp",
+            "status": "error",
+            "code": "delivery_failed",
+            "category": "delivery",
+            "message": "Kanał nie wysłał wiadomości.",
+        },
     ]
+    assert "secret" not in str(result["attempts"])
+    assert "password" not in str(result["attempts"])
     assert emitted[-1]["event_type"] == "notification.failed"
     assert emitted[-1]["details"]["suppress_notifications"] is True
 
@@ -324,6 +383,97 @@ def test_recover_stale_sending_and_process_pending_batch() -> None:
     assert store.deliveries[str(stale["id"])]["status"] == "pending"
     assert service.process_pending_batch(limit=10) == 1
     assert store.deliveries[str(stale["id"])]["status"] == "sent"
+
+
+def test_settings_loader_failure_after_claim_finishes_delivery_as_safe_error() -> None:
+    store = FakeStore()
+    queued = _service(store).queue_incident_notification(_event(), _incident())
+    service = notification_service.NotificationService(
+        store=store,
+        settings_loader=lambda: (_ for _ in ()).throw(
+            RuntimeError("client_secret=super-sensitive")
+        ),
+        user_lookup=lambda _username: None,
+        event_emitter=lambda **_kwargs: None,
+        now=lambda: NOW,
+    )
+
+    result = service.process_delivery(str(queued["id"]))
+
+    assert result["status"] == "error"
+    assert result["attempts"] == [
+        {
+            "channel": "entra",
+            "status": "error",
+            "code": "settings_unavailable",
+            "category": "configuration",
+            "message": "Nie można wczytać konfiguracji poczty.",
+        }
+    ]
+    assert store.deliveries[str(queued["id"])]["status"] == "error"
+    assert "super-sensitive" not in str(result)
+
+
+def test_transport_factory_failure_is_terminal_and_redacted() -> None:
+    store = FakeStore()
+    queued = _service(store).queue_incident_notification(_event(), _incident())
+    service = notification_service.NotificationService(
+        store=store,
+        transport_factory=lambda _channel, _settings: (_ for _ in ()).throw(
+            RuntimeError("smtp_password=factory-secret")
+        ),
+        settings_loader=_settings,
+        user_lookup=lambda _username: None,
+        event_emitter=lambda **_kwargs: None,
+        now=lambda: NOW,
+    )
+
+    result = service.process_delivery(str(queued["id"]))
+
+    assert result["status"] == "error"
+    assert [item["code"] for item in result["attempts"]] == [
+        "transport_unavailable",
+        "transport_unavailable",
+    ]
+    assert "factory-secret" not in str(result)
+
+
+def test_message_build_failure_is_terminal_and_redacted() -> None:
+    class BrokenMessageService(notification_service.NotificationService):
+        def _mail_message(self, *_args, **_kwargs):
+            raise ValueError("authorization=message-secret")
+
+    store = FakeStore()
+    queued = _service(store).queue_incident_notification(_event(), _incident())
+    service = BrokenMessageService(
+        store=store,
+        transport_factory=lambda _channel, _settings: FakeTransport(),
+        settings_loader=_settings,
+        user_lookup=lambda _username: None,
+        event_emitter=lambda **_kwargs: None,
+        now=lambda: NOW,
+    )
+
+    result = service.process_delivery(str(queued["id"]))
+
+    assert result["status"] == "error"
+    assert [item["code"] for item in result["attempts"]] == [
+        "message_invalid",
+        "message_invalid",
+    ]
+    assert "message-secret" not in str(result)
+
+
+def test_process_delivery_claims_directly_without_scanning_history() -> None:
+    store = FakeStore()
+    queued = _service(store).queue_incident_notification(_event(), _incident())
+    store.query_notification_deliveries = lambda **_kwargs: (_ for _ in ()).throw(
+        AssertionError("history scan is forbidden")
+    )
+
+    result = _service(store).process_delivery(str(queued["id"]))
+
+    assert result["status"] == "sent"
 
 
 def test_send_test_message_is_direct_and_can_fallback() -> None:

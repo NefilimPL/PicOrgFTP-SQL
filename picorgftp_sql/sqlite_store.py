@@ -1200,6 +1200,8 @@ class SqliteStore:
                 (candidate["fingerprint"],),
             ).fetchone()
             notification_due = row is None
+            notification_previous_window_at = ""
+            notification_claim_at = ""
             if row is None:
                 conn.execute(
                     """
@@ -1222,6 +1224,7 @@ class SqliteStore:
                     ),
                 )
                 incident_id = candidate["id"]
+                notification_claim_at = candidate["notification_window_at"]
             else:
                 existing = self._incident_from_row(row)
                 old_severity = _text(existing.get("severity"))
@@ -1259,6 +1262,7 @@ class SqliteStore:
                 notification_window_at = _text(
                     existing.get("notification_window_at")
                 )
+                notification_previous_window_at = notification_window_at
                 notification_due = False
                 if candidate_is_latest:
                     try:
@@ -1276,6 +1280,7 @@ class SqliteStore:
                         notification_due = True
                     if notification_due:
                         notification_window_at = candidate["last_seen_at"]
+                        notification_claim_at = notification_window_at
                     latest_job_id = candidate["job_id"]
                     latest_correlation_id = candidate["correlation_id"]
                     if not latest_job_id and not latest_correlation_id:
@@ -1319,7 +1324,42 @@ class SqliteStore:
 
         result = self._incident_from_row(persisted_row)
         result["notification_due"] = notification_due
+        result["notification_claim_at"] = notification_claim_at
+        result["notification_previous_window_at"] = (
+            notification_previous_window_at
+        )
         return result
+
+    def release_incident_notification(
+        self,
+        incident_id: str,
+        *,
+        claimed_at: str,
+        previous_at: str,
+    ) -> bool:
+        """Release one notification-window claim using compare-and-swap."""
+
+        self.initialize()
+        normalized_id = _text(incident_id)
+        normalized_claim = _canonical_timestamp(
+            claimed_at, field="claimed_at"
+        )
+        normalized_previous = _canonical_timestamp(
+            previous_at, field="previous_at", required=False
+        )
+        if not normalized_id:
+            return False
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE incidents
+                SET notification_window_at = ?
+                WHERE id = ? AND status = 'open'
+                  AND notification_window_at = ?
+                """,
+                (normalized_previous, normalized_id, normalized_claim),
+            )
+        return cursor.rowcount == 1
 
     def query_incidents(
         self, *, severity: str = "", cursor: str = "", limit: int = 20

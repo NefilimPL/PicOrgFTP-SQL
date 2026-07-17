@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 from picorgftp_sql import observability
+from picorgftp_sql.sqlite_store import SqliteStore
 
 
 UTC = timezone.utc
@@ -166,7 +167,9 @@ def test_emit_event_coalesces_and_queues_due_incident_best_effort(monkeypatch) -
     monkeypatch.setattr(observability, "observability_store", lambda: fake)
     monkeypatch.setattr(
         "picorgftp_sql.notification_service.queue_incident_notification",
-        lambda event, incident: queued.append((dict(event), dict(incident))),
+        lambda event, incident: (
+            queued.append((dict(event), dict(incident))) or {"status": "pending"}
+        ),
     )
 
     event = observability.emit_event(
@@ -180,6 +183,87 @@ def test_emit_event_coalesces_and_queues_due_incident_best_effort(monkeypatch) -
     assert len(queued) == 1
     assert queued[0][0]["id"] == event["id"]
     assert queued[0][1]["notification_due"] is True
+
+
+def test_non_info_event_enters_stream_once_with_incident_id(
+    monkeypatch, tmp_path
+) -> None:
+    class PublishingStore(SqliteStore):
+        def __init__(self, path: str) -> None:
+            super().__init__(path)
+            self.published: list[dict[str, object]] = []
+
+        def append_operational_event(self, event):
+            self.published.append(dict(event))
+            return super().append_operational_event(event)
+
+    store = PublishingStore(str(tmp_path / "events.sqlite"))
+    monkeypatch.setattr(observability, "observability_store", lambda: store)
+    monkeypatch.setattr(
+        "picorgftp_sql.notification_service.queue_incident_notification",
+        lambda *_args: {"status": "pending"},
+    )
+
+    event = observability.emit_event(
+        severity="error",
+        event_type="ftp.upload_failed",
+        summary="FTP failed",
+    )
+    stream = store.start_operational_event_stream(initial_limit=20)
+
+    assert len(stream["items"]) == 1
+    assert len(store.published) == 1
+    assert store.published[0]["incident_id"] == event["incident_id"]
+    assert stream["items"][0]["id"] == event["id"]
+    assert stream["items"][0]["incident_id"] == event["incident_id"]
+    assert event["incident_id"].startswith("inc-")
+
+
+def test_queue_failure_restores_notification_window_and_next_event_is_due(
+    monkeypatch, tmp_path
+) -> None:
+    store = SqliteStore(str(tmp_path / "events.sqlite"))
+    monkeypatch.setattr(observability, "observability_store", lambda: store)
+    queued: list[dict[str, object]] = []
+
+    def fail_then_queue(event, incident):
+        if not queued:
+            queued.append({"failed": True})
+            raise RuntimeError("sqlite queue unavailable token=secret")
+        queued.append(dict(incident))
+        return {"status": "pending"}
+
+    monkeypatch.setattr(
+        "picorgftp_sql.notification_service.queue_incident_notification",
+        fail_then_queue,
+    )
+    first_now = datetime(2026, 7, 17, 10, 0, tzinfo=UTC)
+    second_now = datetime(2026, 7, 17, 10, 1, tzinfo=UTC)
+    monkeypatch.setattr(observability, "_utc_datetime", lambda _now=None: first_now)
+
+    first = observability.emit_event(
+        severity="error", event_type="ftp.failed", summary="FTP failed"
+    )
+    first_incident = next(
+        item
+        for item in store.query_incidents(limit=20)["items"]
+        if item["id"] == first["incident_id"]
+    )
+
+    assert first_incident["id"] == first["incident_id"]
+    assert first_incident["notification_window_at"] == ""
+    diagnostics = store.query_operational_events(query="notification.queue_failed")
+    assert diagnostics["items"][0]["details"]["suppress_notifications"] is True
+    assert "secret" not in str(diagnostics["items"][0])
+
+    monkeypatch.setattr(observability, "_utc_datetime", lambda _now=None: second_now)
+    second = observability.emit_event(
+        severity="error", event_type="ftp.failed", summary="FTP failed"
+    )
+
+    assert second["incident_id"] == first["incident_id"]
+    assert len(queued) == 2
+    assert queued[-1]["notification_due"] is True
 
 
 def test_emit_event_suppress_notifications_prevents_recursive_queue(monkeypatch) -> None:
@@ -526,6 +610,9 @@ def test_emit_event_mirrors_persistence_failure_and_is_strict_only_on_request(
         def append_operational_event(self, event: dict[str, object]) -> None:
             raise OSError("database unavailable")
 
+        def coalesce_incident(self, occurrence: dict[str, object]) -> None:
+            raise OSError("database unavailable")
+
     mirrored: list[dict[str, object]] = []
     monkeypatch.setattr(observability, "observability_store", FailingStore)
     observability.register_event_mirror(lambda event: mirrored.append(dict(event)))
@@ -556,6 +643,9 @@ def test_failing_mirror_does_not_recurse_or_replace_storage_failure(
 ) -> None:
     class FailingStore:
         def append_operational_event(self, event: dict[str, object]) -> None:
+            raise OSError("database unavailable")
+
+        def coalesce_incident(self, occurrence: dict[str, object]) -> None:
             raise OSError("database unavailable")
 
     calls = 0

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import threading
 import uuid
 from collections.abc import Callable, Mapping
@@ -121,6 +122,24 @@ def resolve_recipients(
     return result
 
 
+_MAIL_CONTEXT_BLOCKED_KEY = re.compile(
+    r"traceback|config|authorization|cookie|headers?|request_body|raw_content",
+    re.IGNORECASE,
+)
+
+
+def _project_mail_context(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            str(key): _project_mail_context(item)
+            for key, item in value.items()
+            if not _MAIL_CONTEXT_BLOCKED_KEY.search(str(key))
+        }
+    if isinstance(value, list):
+        return [_project_mail_context(item) for item in value[:50]]
+    return value
+
+
 def _safe_details(event: Mapping[str, object]) -> str:
     from .observability import redact_value
 
@@ -129,7 +148,21 @@ def _safe_details(event: Mapping[str, object]) -> str:
         return ""
     details.pop("suppress_notifications", None)
     return json.dumps(
-        details,
+        _project_mail_context(details),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(", ", ": "),
+    )[:4_000]
+
+
+def _safe_incident_context(incident: Mapping[str, object]) -> str:
+    from .observability import redact_value
+
+    context = redact_value(incident.get("context", {}))
+    if not isinstance(context, dict):
+        return ""
+    return json.dumps(
+        _project_mail_context(context),
         ensure_ascii=False,
         sort_keys=True,
         separators=(", ", ": "),
@@ -142,17 +175,23 @@ def _message_payload(
     severity = _text(event.get("severity")).upper()
     summary = _text(event.get("summary")) or "Zdarzenie wymaga uwagi"
     subject = _header_text(f"[PicOrgFTP-SQL][{severity}] {summary}")
+    try:
+        occurrence_count = max(1, int(incident.get("occurrence_count") or 1))
+    except (TypeError, ValueError):
+        occurrence_count = 1
     rows = [
         ("Poziom", severity),
         ("Typ", _text(event.get("event_type"))),
         ("Czas", _text(event.get("created_at"))),
         ("Incydent", _text(incident.get("id"))),
+        ("Liczba wystąpień", str(occurrence_count)),
         ("Zadanie", _text(event.get("job_id"))),
         ("EAN", _text(event.get("ean"))),
         ("Użytkownik", _text(event.get("username"))),
         ("Podsumowanie", summary),
         ("Zalecane działanie", _text(event.get("recommended_action"))),
         ("Szczegóły", _safe_details(event)),
+        ("Kontekst incydentu", _safe_incident_context(incident)),
     ]
     populated = [(label, value) for label, value in rows if value]
     text_body = "\n".join(f"{label}: {value}" for label, value in populated)
@@ -188,6 +227,18 @@ def _safe_attempt(channel: str, result: Mapping[str, object]) -> dict[str, objec
         if isinstance(value, int) and not isinstance(value, bool):
             attempt[key] = max(0, value)
     return attempt
+
+
+def _failure_attempt(
+    channel: str, *, code: str, category: str, message: str
+) -> dict[str, object]:
+    return {
+        "channel": channel,
+        "status": "error",
+        "code": code,
+        "category": category,
+        "message": message,
+    }
 
 
 class NotificationService:
@@ -248,22 +299,6 @@ class NotificationService:
         }
         return self.store.enqueue_notification_delivery(record)
 
-    def _find_delivery(self, delivery_id: str) -> dict[str, object]:
-        cursor = ""
-        seen: set[str] = set()
-        while True:
-            page = self.store.query_notification_deliveries(
-                cursor=cursor, limit=100
-            )
-            for item in page.get("items", []):
-                if isinstance(item, dict) and _text(item.get("id")) == delivery_id:
-                    return dict(item)
-            next_cursor = _text(page.get("next_cursor"))
-            if not next_cursor or next_cursor in seen:
-                return {}
-            seen.add(next_cursor)
-            cursor = next_cursor
-
     def _mail_message(
         self,
         delivery: Mapping[str, object],
@@ -296,11 +331,33 @@ class NotificationService:
                 channel,
                 channel_settings if isinstance(channel_settings, Mapping) else {},
             )
-            result = transport.send(self._mail_message(delivery, channel, settings))
+        except Exception:
+            return _failure_attempt(
+                channel,
+                code="transport_unavailable",
+                category="transport",
+                message="Nie można przygotować kanału wysyłki.",
+            ), False
+        try:
+            message = self._mail_message(delivery, channel, settings)
+        except Exception:
+            return _failure_attempt(
+                channel,
+                code="message_invalid",
+                category="message",
+                message="Nie można przygotować wiadomości.",
+            ), False
+        try:
+            result = transport.send(message)
             safe_result = result if isinstance(result, Mapping) else {}
             return _safe_attempt(channel, safe_result), True
         except Exception:
-            return {"channel": channel, "status": "error"}, False
+            return _failure_attempt(
+                channel,
+                code="delivery_failed",
+                category="delivery",
+                message="Kanał nie wysłał wiadomości.",
+            ), False
 
     def _deliver_claimed(
         self,
@@ -325,20 +382,43 @@ class NotificationService:
         return "error", primary, attempts
 
     def process_delivery(self, delivery_id: str) -> dict[str, object]:
-        current = self._find_delivery(_text(delivery_id))
-        if not current:
-            return {}
         claimed = self.store.update_notification_delivery(
             _text(delivery_id), status="sending", updated_at=_iso_utc(self.now())
         )
         if not claimed:
             return {}
-        settings = self._settings()
-        status, used_channel, attempts = self._deliver_claimed(
-            claimed,
-            settings,
-            allow_fallback=bool(settings.get("fallback_enabled")),
-        )
+        primary = _text(claimed.get("primary_channel")).lower()
+        try:
+            settings = self._settings()
+        except Exception:
+            status = "error"
+            used_channel = primary
+            attempts = [
+                _failure_attempt(
+                    primary,
+                    code="settings_unavailable",
+                    category="configuration",
+                    message="Nie można wczytać konfiguracji poczty.",
+                )
+            ]
+        else:
+            try:
+                status, used_channel, attempts = self._deliver_claimed(
+                    claimed,
+                    settings,
+                    allow_fallback=bool(settings.get("fallback_enabled")),
+                )
+            except Exception:
+                status = "error"
+                used_channel = primary
+                attempts = [
+                    _failure_attempt(
+                        primary,
+                        code="processing_failed",
+                        category="internal",
+                        message="Nie można zakończyć obsługi powiadomienia.",
+                    )
+                ]
         completed = self.store.update_notification_delivery(
             _text(delivery_id),
             status=status,
