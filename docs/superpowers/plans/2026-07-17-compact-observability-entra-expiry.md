@@ -197,7 +197,7 @@ CREATE TABLE IF NOT EXISTS entra_secret_reminders (
 );
 ```
 
-`get_entra_secret_status` returns a public projection and removes `credential_key_id`. `claim_entra_secret_reminder` uses `INSERT ... ON CONFLICT DO NOTHING` inside `BEGIN IMMEDIATE`; its boolean result is derived from `cursor.rowcount == 1`. Increment `SCHEMA_VERSION` to `7`, index `last_checked_at`, and include both tables in `clear_operational_data()` only if their data is defined as operational. Do **not** clear them for normal log clearing; expose count `0` only if unchanged.
+`get_entra_secret_status` returns a public projection and removes `credential_key_id`. `claim_entra_secret_reminder` uses `INSERT ... ON CONFLICT DO NOTHING` inside `BEGIN IMMEDIATE`; its boolean result is derived from `cursor.rowcount == 1`. Increment `SCHEMA_VERSION` to `7` and index `last_checked_at`. Do **not** include either table in `clear_operational_data()`: normal log clearing must preserve the cached status and sent-threshold claims.
 
 - [ ] **Step 4: Run focused storage and notification tests**
 
