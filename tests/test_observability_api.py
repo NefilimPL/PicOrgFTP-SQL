@@ -384,6 +384,67 @@ def test_live_api_cursor_reaches_oldest_of_4000_retained_events(
     assert "evt-live-0000" in reached
 
 
+def test_live_seed_and_older_page_apply_same_literal_substring_filters(
+    api_environment,
+) -> None:
+    client, store = api_environment
+    _login(client)
+    start = datetime.now(timezone.utc) - timedelta(hours=2)
+    with store.connection() as conn:
+        for index in range(205):
+            payload = store._normalize_operational_event(
+                {
+                    **_event(
+                        f"evt-filter-{index:03d}",
+                        (start + timedelta(seconds=index))
+                        .isoformat(timespec="milliseconds")
+                        .replace("+00:00", "Z"),
+                    ),
+                    "module": "Pimcore" if index else "Pim%core",
+                }
+            )
+            store._insert_operational_event(conn, payload)
+        store._insert_operational_event(
+            conn,
+            store._normalize_operational_event(
+                {
+                    **_event(
+                        "evt-filter-decoy",
+                        (start + timedelta(seconds=100, milliseconds=500))
+                        .isoformat(timespec="milliseconds")
+                        .replace("+00:00", "Z"),
+                    ),
+                    "module": "FTP",
+                }
+            ),
+        )
+
+    seed = client.get(
+        "/api/observability/events",
+        params={"live_seed": 1, "module": "pim"},
+    )
+    assert seed.status_code == 200
+    payload = seed.json()
+    older = client.get(
+        "/api/observability/events",
+        params={
+            "cursor": payload["next_cursor"],
+            "since": payload["archive_since"],
+            "module": "pim",
+            "limit": 20,
+        },
+    )
+    literal = client.get(
+        "/api/observability/events",
+        params={"live_seed": 1, "module": "pim%"},
+    )
+
+    assert len(payload["items"]) == 200
+    assert {item["module"] for item in payload["items"]} == {"Pimcore"}
+    assert len(older.json()["items"]) == 5
+    assert [item["id"] for item in literal.json()["items"]] == ["evt-filter-000"]
+
+
 def test_incidents_include_matching_delivery_status_with_strict_safe_projection(
     api_environment, monkeypatch: pytest.MonkeyPatch
 ) -> None:

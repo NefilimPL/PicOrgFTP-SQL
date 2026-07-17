@@ -250,6 +250,45 @@ def _runtime_context_lines(
     return sections
 
 
+def _escape_html_bounded(value: object, budget: int) -> str:
+    pieces: list[str] = []
+    used = 0
+    for character in str(value or ""):
+        escaped = html.escape(character)
+        if used + len(escaped) > max(0, budget):
+            break
+        pieces.append(escaped)
+        used += len(escaped)
+    return "".join(pieces)
+
+
+def _html_context_section(label: str, lines: list[str], budget: int) -> str:
+    opening = f"<section><h3>{html.escape(label)}</h3>"
+    closing = "</section>"
+    empty = "<p>Brak zdarzeń.</p>"
+    if not lines:
+        return opening + empty + closing
+    list_open, list_close = "<ul>", "</ul>"
+    fixed_size = len(opening) + len(list_open) + len(list_close) + len(closing)
+    remaining = max(0, budget - fixed_size)
+    items: list[str] = []
+    for index, line in enumerate(lines):
+        item_tags_size = len("<li></li>")
+        if remaining <= item_tags_size:
+            break
+        remaining_items = max(1, len(lines) - index)
+        text_budget = max(0, remaining // remaining_items - item_tags_size)
+        escaped = _escape_html_bounded(line, text_budget)
+        item = f"<li>{escaped}</li>"
+        if len(item) > remaining:
+            break
+        items.append(item)
+        remaining -= len(item)
+    if not items:
+        return opening + empty + closing
+    return opening + list_open + "".join(items) + list_close + closing
+
+
 def _append_runtime_context(
     message: Mapping[str, object], context: Mapping[str, object]
 ) -> dict[str, str]:
@@ -262,30 +301,37 @@ def _append_runtime_context(
     sections = _runtime_context_lines(context)
     text_sections = []
     html_sections = []
+    section_budgets = {"Przed": 1_800, "Problem": 3_200, "Po": 1_800}
     for label, lines in sections:
         text_sections.append(
             f"{label}:\n" + "\n".join(f"- {line}" for line in lines)
             if lines
             else f"{label}: Brak zdarzeń."
         )
-        html_items = (
-            "<ul>"
-            + "".join(f"<li>{html.escape(line)}</li>" for line in lines)
-            + "</ul>"
-            if lines
-            else "<p>Brak zdarzeń.</p>"
+        html_sections.append(
+            _html_context_section(label, lines, section_budgets[label])
         )
-        html_sections.append(f"<h3>{html.escape(label)}</h3>{html_items}")
     text_context = "\n\nKontekst zdarzeń\n" + "\n\n".join(text_sections)
-    html_context = "<h2>Kontekst zdarzeń</h2>" + "".join(html_sections)
+    html_context = (
+        "<div><h2>Kontekst zdarzeń</h2>"
+        + "".join(html_sections)
+        + "</div>"
+    )
     enriched["text_body"] = (
         enriched["text_body"][: max(0, 10_000 - len(text_context))]
         + text_context[:10_000]
     )[:10_000]
-    enriched["html_body"] = (
-        enriched["html_body"][: max(0, 20_000 - len(html_context))]
-        + html_context[:20_000]
-    )[:20_000]
+    html_base_budget = max(0, 20_000 - len(html_context))
+    html_base = enriched["html_body"]
+    if len(html_base) > html_base_budget:
+        pre_open, pre_close = "<pre>", "</pre>"
+        excerpt_budget = max(0, html_base_budget - len(pre_open) - len(pre_close))
+        html_base = (
+            pre_open
+            + _escape_html_bounded(html_base, excerpt_budget)
+            + pre_close
+        )
+    enriched["html_body"] = html_base + html_context
     return enriched
 
 

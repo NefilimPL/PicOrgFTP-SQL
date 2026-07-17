@@ -5147,8 +5147,29 @@ function logFilterInputValues() {
   };
 }
 
+function resetLiveArchiveForFilters() {
+  const live = observabilityTab("live");
+  stopObservabilityStream();
+  state.observability.seedGeneration = Number(state.observability.seedGeneration || 0) + 1;
+  state.observability.streamSeeded = false;
+  state.observability.streamAfterId = "";
+  state.observability.seedLoading = false;
+  state.observability.buffer = [];
+  live.requestId = Number(live.requestId || 0) + 1;
+  live.loading = false;
+  live.items = [];
+  live.nextCursor = "";
+  live.archiveSince = "";
+}
+
 function commitLogFilters(filters = logFilterInputValues()) {
-  state.observability.committedFilters = { ...filters };
+  const normalized = { ...filters };
+  const changed = JSON.stringify(normalized) !== JSON.stringify(
+    state.observability.committedFilters
+  );
+  state.observability.committedFilters = normalized;
+  if (changed) resetLiveArchiveForFilters();
+  return changed;
 }
 
 function resetCommittedLogFilters() {
@@ -5162,7 +5183,14 @@ function resetCommittedLogFilters() {
   ]) {
     if (control) control.value = "";
   }
-  commitLogFilters({ query: "", severity: "", module: "", username: "", ean: "", jobId: "" });
+  return commitLogFilters({
+    query: "",
+    severity: "",
+    module: "",
+    username: "",
+    ean: "",
+    jobId: "",
+  });
 }
 
 function logItemMatchesFilters(item) {
@@ -5516,6 +5544,13 @@ async function seedLiveLogs({ force = false } = {}) {
   }
   try {
     const params = new URLSearchParams({ live_seed: "1" });
+    const filters = state.observability.committedFilters;
+    if (filters.query) params.set("query", filters.query);
+    if (filters.severity) params.set("severity", filters.severity);
+    if (filters.module) params.set("module", filters.module);
+    if (filters.username) params.set("username", filters.username);
+    if (filters.ean) params.set("ean", filters.ean);
+    if (filters.jobId) params.set("job_id", filters.jobId);
     const payload = await requestObservabilityPayload(
       "/api/observability/events?" + params.toString()
     );
@@ -5570,16 +5605,25 @@ async function loadOlderLiveLogs() {
   const live = observabilityTab("live");
   if (live.loading || !live.nextCursor || !live.archiveSince) return;
   const cursor = live.nextCursor;
+  const requestId = Number(live.requestId || 0) + 1;
+  const seedGeneration = Number(state.observability.seedGeneration || 0);
+  live.requestId = requestId;
   live.loading = true;
   renderLogs();
   try {
     const payload = await requestObservabilityPayload(liveArchiveEndpoint(cursor));
+    if (
+      live.requestId !== requestId ||
+      state.observability.seedGeneration !== seedGeneration
+    ) return;
     const older = Array.isArray(payload.items) ? payload.items : [];
     live.items = mergeLiveItems([...older, ...live.items], live.archiveSince, true);
     live.nextCursor = String(payload.next_cursor || "");
   } finally {
-    live.loading = false;
-    if (state.observability.activeTab === "live") renderLogs();
+    if (live.requestId === requestId) {
+      live.loading = false;
+      if (state.observability.activeTab === "live") renderLogs();
+    }
   }
 }
 
@@ -11485,18 +11529,24 @@ document.querySelectorAll("[data-log-tab]").forEach((button) => {
 
 logsFilters?.addEventListener("submit", (event) => {
   event.preventDefault();
-  commitLogFilters();
+  const filtersChanged = commitLogFilters();
   renderLogs();
   const tabName = state.observability.activeTab;
+  if (filtersChanged && tabName === "live") {
+    seedLiveLogs({ force: true }).catch(showLogsError);
+  }
   if (["critical", "error", "warning"].includes(tabName)) {
     markSeverityRead(tabName, observabilityTab(tabName).requestId).catch(showLogsError);
   }
 });
 
 logsFilters?.addEventListener("reset", () => {
-  resetCommittedLogFilters();
+  const filtersChanged = resetCommittedLogFilters();
   renderLogs();
   const tabName = state.observability.activeTab;
+  if (filtersChanged && tabName === "live") {
+    seedLiveLogs({ force: true }).catch(showLogsError);
+  }
   if (["critical", "error", "warning"].includes(tabName)) {
     markSeverityRead(tabName, observabilityTab(tabName).requestId).catch(showLogsError);
   }

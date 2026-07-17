@@ -12,6 +12,7 @@ from threading import Barrier
 import pytest
 
 from picorgftp_sql.data_store import SqliteDataStoreAdapter
+from picorgftp_sql import sqlite_store
 from picorgftp_sql.sqlite_store import SqliteStore
 
 
@@ -403,7 +404,6 @@ def test_operational_schema_and_cursor_queries(tmp_path: Path) -> None:
             summary="Pimcore warning",
         )
     )
-
     error_page = store.query_operational_events(severities=("error",), limit=20)
     assert [item["id"] for item in error_page["items"]] == ["evt-2"]
     assert error_page["items"][0]["details"] == {"step": 1}
@@ -526,31 +526,58 @@ def test_incident_context_is_indexed_bounded_and_cursor_paginated(
         job_plan = " ".join(
             str(row[3])
             for row in conn.execute(
-                """
-                EXPLAIN QUERY PLAN
-                SELECT * FROM operational_events
-                WHERE job_id = ? AND created_at < ?
-                ORDER BY created_at DESC, id DESC LIMIT 5
-                """,
-                ("job-context", "2026-07-16T10:00:00.000Z"),
+                "EXPLAIN QUERY PLAN "
+                + sqlite_store._INCIDENT_CONTEXT_BEFORE_SQL.format(
+                    scope_column="job_id"
+                ),
+                (
+                    "job-context",
+                    "2026-07-16T10:00:00.000Z",
+                    "problem-000",
+                    5,
+                ),
             )
         )
         correlation_plan = " ".join(
             str(row[3])
             for row in conn.execute(
-                """
-                EXPLAIN QUERY PLAN
-                SELECT * FROM operational_events
-                WHERE correlation_id = ? AND created_at > ?
-                ORDER BY created_at ASC, id ASC LIMIT 5
-                """,
-                ("correlation-1", "2026-07-16T10:00:00.000Z"),
+                "EXPLAIN QUERY PLAN "
+                + sqlite_store._INCIDENT_CONTEXT_AFTER_SQL.format(
+                    scope_column="correlation_id"
+                ),
+                (
+                    "correlation-1",
+                    "2026-07-16T10:00:00.000Z",
+                    "problem-000",
+                    5,
+                ),
+            )
+        )
+        problem_plan = " ".join(
+            str(row[3])
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN "
+                + sqlite_store._INCIDENT_CONTEXT_PROBLEM_SQL.format(
+                    scope_column="job_id",
+                    cursor_clause="AND (created_at, id) > (?, ?)",
+                ),
+                (
+                    "job-context",
+                    "2026-07-16T10:00:00.000Z",
+                    "problem-000",
+                    "2026-07-16T10:02:04.000Z",
+                    "problem-124",
+                    "2026-07-16T10:00:19.000Z",
+                    "problem-019",
+                    21,
+                ),
             )
         )
     assert "idx_operational_events_job_created_at_id" in indexes
     assert "idx_operational_events_correlation_created_at_id" in indexes
     assert "idx_operational_events_job_created_at_id" in job_plan
     assert "idx_operational_events_correlation_created_at_id" in correlation_plan
+    assert "idx_operational_events_job_created_at_id" in problem_plan
 
 
 def test_incident_context_uses_correlation_ties_and_rejects_bad_cursor(
@@ -594,34 +621,41 @@ def test_incident_context_uses_correlation_ties_and_rejects_bad_cursor(
         store.query_incident_context("inc-ties", problem_cursor="not-base64!")
 
 
-def test_incident_context_rejects_boundaries_outside_its_scope(tmp_path: Path) -> None:
+def test_incident_context_falls_back_to_latest_scope_when_first_job_is_old(
+    tmp_path: Path,
+) -> None:
     store = SqliteStore(str(tmp_path / "app.sqlite"))
     store.append_operational_event(
-        _event("wrong-first", "2026-07-16T10:00:00.000Z", job_id="other")
+        _event("old-first", "2026-07-16T10:00:00.000Z", job_id="job-old")
     )
     store.append_operational_event(
-        _event("right-latest", "2026-07-16T10:01:00.000Z", job_id="target")
+        _event("new-before", "2026-07-16T10:00:30.000Z", job_id="job-new")
+    )
+    store.append_operational_event(
+        _event("new-latest", "2026-07-16T10:01:00.000Z", job_id="job-new")
+    )
+    store.append_operational_event(
+        _event("new-after", "2026-07-16T10:02:00.000Z", job_id="job-new")
     )
     store.upsert_incident(
         {
-            "id": "inc-wrong-boundary",
-            "fingerprint": "wrong-boundary",
+            "id": "inc-cross-job",
+            "fingerprint": "cross-job",
             "severity": "error",
             "event_type": "test.failure",
-            "first_event_id": "wrong-first",
-            "latest_event_id": "right-latest",
-            "job_id": "target",
+            "first_event_id": "old-first",
+            "latest_event_id": "new-latest",
+            "job_id": "job-new",
+            "occurrence_count": 2,
         }
     )
 
-    context = store.query_incident_context("inc-wrong-boundary")
+    context = store.query_incident_context("inc-cross-job")
 
-    assert context == {
-        "before": [],
-        "problem": [],
-        "after": [],
-        "problem_next_cursor": "",
-    }
+    assert [item["id"] for item in context["before"]] == ["new-before"]
+    assert [item["id"] for item in context["problem"]] == ["new-latest"]
+    assert [item["id"] for item in context["after"]] == ["new-after"]
+    assert store.query_incidents()["items"][0]["occurrence_count"] == 2
 
 
 def test_live_snapshot_pages_entire_24h_archive_without_eager_loading(
@@ -714,6 +748,128 @@ def test_equal_timestamp_cursor_uses_id_tie_breaker_and_handles_bad_cursor(
         "evt-b",
         "evt-a",
     ]
+
+
+def test_archive_filters_are_case_insensitive_literal_substrings(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.append_operational_event(
+        _event(
+            "evt-pim-literal",
+            "2026-07-16T10:00:00.000Z",
+            module="Pim%core_Service",
+            username="Alice.Admin",
+            ean="EAN_590",
+            job_id="JOB%_42",
+            summary="Literal 100% marker",
+        )
+    )
+    store.append_operational_event(
+        _event(
+            "evt-pim-decoy",
+            "2026-07-16T10:01:00.000Z",
+            module="PimXcore-Service",
+            username="Bob",
+            ean="EANX590",
+            job_id="JOBXX42",
+            summary="Literal 100X marker",
+        )
+    )
+    store.append_operational_event(
+        _event(
+            "evt-id-only-needle",
+            "2026-07-16T10:02:00.000Z",
+            module="FTP",
+            job_id="unrelated-job",
+        )
+    )
+    store.append_operational_event(
+        _event(
+            "evt-fallback-needle",
+            "2026-07-16T10:03:00.000Z",
+            module="FTP",
+            job_id="",
+        )
+    )
+
+    assert [
+        item["id"]
+        for item in store.query_operational_events(module="pim%core")["items"]
+    ] == ["evt-pim-literal"]
+    assert [
+        item["id"]
+        for item in store.query_operational_events(username="alice.ad")["items"]
+    ] == ["evt-pim-literal"]
+    assert [
+        item["id"]
+        for item in store.query_operational_events(ean="ean_5")["items"]
+    ] == ["evt-pim-literal"]
+    assert [
+        item["id"]
+        for item in store.query_operational_events(job_id="job%_4")["items"]
+    ] == ["evt-pim-literal"]
+    assert [
+        item["id"]
+        for item in store.query_operational_events(query="100%")["items"]
+    ] == ["evt-pim-literal"]
+    assert {
+        item["id"]
+        for item in store.query_operational_events(query="pim")["items"]
+    } == {"evt-pim-literal", "evt-pim-decoy"}
+    assert [
+        item["id"]
+        for item in store.query_operational_events(job_id="needle")["items"]
+    ] == ["evt-fallback-needle"]
+
+
+def test_filtered_live_snapshot_and_older_page_share_literal_filter_semantics(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    since = "2026-07-16T00:00:00.000Z"
+    store.initialize()
+    with store.connection() as conn:
+        for index in range(205):
+            payload = store._normalize_operational_event(
+                _event(
+                    f"evt-pim-{index:03d}",
+                    (datetime(2026, 7, 16, tzinfo=timezone.utc) + timedelta(seconds=index))
+                    .isoformat(timespec="milliseconds")
+                    .replace("+00:00", "Z"),
+                    module="Pimcore" if index != 0 else "Pim%core",
+                )
+            )
+            store._insert_operational_event(conn, payload)
+        store._insert_operational_event(
+            conn,
+            store._normalize_operational_event(
+                _event(
+                    "evt-decoy",
+                    "2026-07-16T00:01:00.500Z",
+                    module="FTP",
+                )
+            ),
+        )
+
+    seed = store.snapshot_operational_event_stream(
+        since=since, limit=200, module="pim"
+    )
+    older = store.query_operational_events(
+        since=seed["archive_since"],
+        cursor=seed["next_cursor"],
+        module="pim",
+        limit=20,
+    )
+    literal = store.snapshot_operational_event_stream(
+        since=since, limit=20, module="pim%"
+    )
+
+    assert len(seed["items"]) == 200
+    assert len(older["items"]) == 5
+    assert {item["module"] for item in seed["items"]} == {"Pimcore"}
+    assert "evt-pim-000" in {item["id"] for item in older["items"]}
+    assert [item["id"] for item in literal["items"]] == ["evt-pim-000"]
 
 
 def test_stream_position_pages_every_later_insert_without_timestamp_ordering(

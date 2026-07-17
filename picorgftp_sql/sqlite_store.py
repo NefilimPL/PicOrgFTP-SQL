@@ -50,6 +50,47 @@ ENTRY_HEADERS = (
     PRODUCT_ID_HEADER,
 )
 
+_INCIDENT_CONTEXT_BEFORE_SQL = """
+    SELECT * FROM operational_events
+    WHERE {scope_column} = ? AND (created_at, id) < (?, ?)
+    ORDER BY created_at DESC, id DESC
+    LIMIT ?
+"""
+_INCIDENT_CONTEXT_PROBLEM_SQL = """
+    SELECT * FROM operational_events
+    WHERE {scope_column} = ?
+      AND (created_at, id) >= (?, ?)
+      AND (created_at, id) <= (?, ?)
+      {cursor_clause}
+    ORDER BY created_at ASC, id ASC
+    LIMIT ?
+"""
+_INCIDENT_CONTEXT_AFTER_SQL = """
+    SELECT * FROM operational_events
+    WHERE {scope_column} = ? AND (created_at, id) > (?, ?)
+    ORDER BY created_at ASC, id ASC
+    LIMIT ?
+"""
+_OPERATIONAL_EVENT_QUERY_COLUMNS = (
+    "id",
+    "severity",
+    "event_type",
+    "module",
+    "stage",
+    "username",
+    "ean",
+    "product_id",
+    "slot",
+    "job_id",
+    "correlation_id",
+    "incident_id",
+    "summary",
+    "recommended_action",
+    "details_json",
+    "exception_type",
+    "traceback_text",
+)
+
 
 def _text(value: object) -> str:
     return str(value or "").strip()
@@ -96,6 +137,64 @@ def _bounded_page_limit(value: object) -> int:
     except (TypeError, ValueError):
         parsed = 20
     return max(1, min(100, parsed))
+
+
+def _literal_like_pattern(value: object) -> str:
+    needle = _text(value).lower()
+    escaped = (
+        needle.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+    return f"%{escaped}%"
+
+
+def _append_operational_event_filters(
+    clauses: list[str],
+    params: list[object],
+    *,
+    severities=(),
+    username: str = "",
+    ean: str = "",
+    job_id: str = "",
+    module: str = "",
+    query: str = "",
+    since: str = "",
+    prefix: str = "",
+) -> None:
+    severity_values = (
+        [_text(severities)]
+        if isinstance(severities, str)
+        else [_text(value) for value in severities]
+    )
+    severity_values = [value for value in severity_values if value]
+    if severity_values:
+        clauses.append(
+            f"{prefix}severity IN ({', '.join('?' for _ in severity_values)})"
+        )
+        params.extend(severity_values)
+    for column, value in (("username", username), ("ean", ean), ("module", module)):
+        if _text(value):
+            clauses.append(f"LOWER({prefix}{column}) LIKE ? ESCAPE '\\'")
+            params.append(_literal_like_pattern(value))
+    if _text(job_id):
+        clauses.append(
+            f"LOWER(CASE WHEN {prefix}job_id <> '' THEN {prefix}job_id "
+            f"ELSE {prefix}id END) LIKE ? ESCAPE '\\'"
+        )
+        pattern = _literal_like_pattern(job_id)
+        params.append(pattern)
+    if _text(query):
+        pattern = _literal_like_pattern(query)
+        query_clauses = " OR ".join(
+                f"LOWER({prefix}{column}) LIKE ? ESCAPE '\\'"
+                for column in _OPERATIONAL_EVENT_QUERY_COLUMNS
+        )
+        clauses.append(f"({query_clauses})")
+        params.extend([pattern] * len(_OPERATIONAL_EVENT_QUERY_COLUMNS))
+    if _text(since):
+        clauses.append(f"{prefix}created_at >= ?")
+        params.append(_text(since))
 
 
 def _now_iso() -> str:
@@ -858,7 +957,16 @@ class SqliteStore:
         }
 
     def snapshot_operational_event_stream(
-        self, *, since: str, limit: int = 200
+        self,
+        *,
+        since: str,
+        limit: int = 200,
+        severities=(),
+        username: str = "",
+        ean: str = "",
+        job_id: str = "",
+        module: str = "",
+        query: str = "",
     ) -> dict[str, Any]:
         """Return a bounded live snapshot, archive cursor and atomic checkpoint."""
 
@@ -868,6 +976,20 @@ class SqliteStore:
         except (TypeError, ValueError):
             snapshot_limit = 200
         archive_since = _text(since)
+        clauses = ["s.sequence <= ?"]
+        params: list[object] = []
+        _append_operational_event_filters(
+            clauses,
+            params,
+            severities=severities,
+            username=username,
+            ean=ean,
+            job_id=job_id,
+            module=module,
+            query=query,
+            since=archive_since,
+            prefix="e.",
+        )
         with self.connection() as conn:
             conn.execute("BEGIN")
             marker = conn.execute(
@@ -886,15 +1008,15 @@ class SqliteStore:
                     "archive_since": archive_since,
                 }
             rows = conn.execute(
-                """
+                f"""
                 SELECT s.sequence AS _stream_sequence, e.*
                 FROM operational_event_stream AS s
                 JOIN operational_events AS e ON e.id = s.event_id
-                WHERE s.sequence <= ? AND e.created_at >= ?
+                WHERE {' AND '.join(clauses)}
                 ORDER BY e.created_at DESC, e.id DESC
                 LIMIT ?
                 """,
-                (int(marker["sequence"]), archive_since, snapshot_limit + 1),
+                (int(marker["sequence"]), *params, snapshot_limit + 1),
             ).fetchall()
         has_more = len(rows) > snapshot_limit
         selected = rows[:snapshot_limit]
@@ -963,37 +1085,20 @@ class SqliteStore:
         self.initialize()
         clauses: list[str] = []
         params: list[object] = []
-        severity_values = (
-            [_text(severities)]
-            if isinstance(severities, str)
-            else [_text(value) for value in severities]
+        _append_operational_event_filters(
+            clauses,
+            params,
+            severities=severities,
+            username=username,
+            ean=ean,
+            job_id=job_id,
+            module=module,
+            query=query,
+            since=since,
         )
-        severity_values = [value for value in severity_values if value]
-        if severity_values:
-            clauses.append(
-                f"severity IN ({', '.join('?' for _ in severity_values)})"
-            )
-            params.extend(severity_values)
-        for column, value in (
-            ("username", username),
-            ("ean", ean),
-            ("job_id", job_id),
-            ("correlation_id", correlation_id),
-            ("module", module),
-        ):
-            if _text(value):
-                clauses.append(f"{column} = ?")
-                params.append(_text(value))
-        if _text(query):
-            needle = f"%{_text(query)}%"
-            clauses.append(
-                "(summary LIKE ? OR event_type LIKE ? OR details_json LIKE ? "
-                "OR exception_type LIKE ? OR traceback_text LIKE ?)"
-            )
-            params.extend([needle] * 5)
-        if _text(since):
-            clauses.append("created_at >= ?")
-            params.append(_text(since))
+        if _text(correlation_id):
+            clauses.append("correlation_id = ?")
+            params.append(_text(correlation_id))
         cursor_at, cursor_id = _decode_page_cursor(cursor)
         if cursor_at and cursor_id:
             clauses.append("(created_at < ? OR (created_at = ? AND id < ?))")
@@ -1510,9 +1615,7 @@ class SqliteStore:
             first_row = boundaries.get(_text(incident.get("first_event_id")))
             latest_row = boundaries.get(_text(incident.get("latest_event_id")))
             if (
-                first_row is None
-                or latest_row is None
-                or _text(first_row[scope_column]) != scope_value
+                latest_row is None
                 or _text(latest_row[scope_column]) != scope_value
             ):
                 return {
@@ -1521,62 +1624,45 @@ class SqliteStore:
                     "after": [],
                     "problem_next_cursor": "",
                 }
+            if (
+                first_row is None
+                or _text(first_row[scope_column]) != scope_value
+            ):
+                first_row = latest_row
             first = (_text(first_row["created_at"]), _text(first_row["id"]))
             latest = (_text(latest_row["created_at"]), _text(latest_row["id"]))
             if latest < first:
                 first, latest = latest, first
 
             before_rows = conn.execute(
-                f"""
-                SELECT * FROM operational_events
-                WHERE {scope_column} = ?
-                  AND (created_at < ? OR (created_at = ? AND id < ?))
-                ORDER BY created_at DESC, id DESC
-                LIMIT ?
-                """,
-                (scope_value, first[0], first[0], first[1], bounded_before),
+                _INCIDENT_CONTEXT_BEFORE_SQL.format(scope_column=scope_column),
+                (scope_value, first[0], first[1], bounded_before),
             ).fetchall()
 
-            problem_clauses = [
-                f"{scope_column} = ?",
-                "(created_at > ? OR (created_at = ? AND id >= ?))",
-                "(created_at < ? OR (created_at = ? AND id <= ?))",
-            ]
             problem_params: list[object] = [
                 scope_value,
                 first[0],
-                first[0],
                 first[1],
-                latest[0],
                 latest[0],
                 latest[1],
             ]
             cursor_at, cursor_id = _decode_page_cursor(problem_cursor)
             if _text(problem_cursor) and not (cursor_at and cursor_id):
                 raise ValueError("invalid incident context cursor")
+            cursor_clause = ""
             if cursor_at and cursor_id:
-                problem_clauses.append(
-                    "(created_at > ? OR (created_at = ? AND id > ?))"
-                )
-                problem_params.extend([cursor_at, cursor_at, cursor_id])
+                cursor_clause = "AND (created_at, id) > (?, ?)"
+                problem_params.extend([cursor_at, cursor_id])
             problem_rows = conn.execute(
-                f"""
-                SELECT * FROM operational_events
-                WHERE {' AND '.join(problem_clauses)}
-                ORDER BY created_at ASC, id ASC
-                LIMIT ?
-                """,
+                _INCIDENT_CONTEXT_PROBLEM_SQL.format(
+                    scope_column=scope_column,
+                    cursor_clause=cursor_clause,
+                ),
                 (*problem_params, page_limit + 1),
             ).fetchall()
             after_rows = conn.execute(
-                f"""
-                SELECT * FROM operational_events
-                WHERE {scope_column} = ?
-                  AND (created_at > ? OR (created_at = ? AND id > ?))
-                ORDER BY created_at ASC, id ASC
-                LIMIT ?
-                """,
-                (scope_value, latest[0], latest[0], latest[1], bounded_after),
+                _INCIDENT_CONTEXT_AFTER_SQL.format(scope_column=scope_column),
+                (scope_value, latest[0], latest[1], bounded_after),
             ).fetchall()
 
         has_more = len(problem_rows) > page_limit

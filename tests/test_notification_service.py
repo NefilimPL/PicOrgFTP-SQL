@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import re
 
 import pytest
 
@@ -415,6 +416,32 @@ def test_delivery_context_is_preserved_when_queued_body_is_near_size_cap() -> No
     assert "Runtime context marker" in transport.messages[0].html_body
     assert len(transport.messages[0].text_body) <= 10_000
     assert len(transport.messages[0].html_body) <= 20_000
+
+
+def test_delivery_context_html_keeps_complete_sections_under_worst_case_budget() -> None:
+    store = FakeStore()
+    huge = "<&>" * 2_000
+    store.incident_context = {
+        "before": [_event(id=f"before-{index}", summary=huge) for index in range(3)],
+        "problem": [_event(id=f"problem-{index}", summary=huge) for index in range(5)],
+        "after": [_event(id=f"after-{index}", summary=huge) for index in range(3)],
+    }
+    transport = FakeTransport()
+    service = _service(store, {"entra": transport, "smtp": FakeTransport()})
+    queued = service.queue_incident_notification(_event(), _incident())
+    store.deliveries[str(queued["id"])]["message"]["html_body"] = "x" * 19_999
+
+    result = service.process_delivery(str(queued["id"]))
+
+    assert result["status"] == "sent"
+    body = transport.messages[0].html_body
+    assert len(body) <= 20_000
+    assert body.endswith("</div>")
+    for label in ("Przed", "Problem", "Po"):
+        assert f"<h3>{label}</h3>" in body
+    for tag in ("div", "section", "ul", "li", "pre"):
+        assert body.count(f"<{tag}") == body.count(f"</{tag}>")
+    assert not re.search(r"&(?:[A-Za-z]*|#[0-9]*)$", body)
 
 
 def test_process_delivery_records_both_failures_and_suppresses_recursion() -> None:

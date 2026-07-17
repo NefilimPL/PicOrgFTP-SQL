@@ -195,6 +195,64 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("logsOutput.appendChild(renderLogEvent(event))", append_live)
         self.assertNotIn("renderLogs()", append_live)
 
+    def test_live_filter_transition_invalidates_archive_and_stale_requests(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+        reset_source = source[
+            source.index("function resetLiveArchiveForFilters") : source.index(
+                "function commitLogFilters"
+            )
+        ]
+        for required in (
+            "stopObservabilityStream()",
+            "seedGeneration",
+            "streamSeeded = false",
+            "live.requestId",
+            'live.nextCursor = ""',
+            'live.archiveSince = ""',
+            "live.items = []",
+            'state.observability.streamAfterId = ""',
+        ):
+            self.assertIn(required, reset_source)
+        commit_source = source[
+            source.index("function commitLogFilters") : source.index(
+                "function resetCommittedLogFilters"
+            )
+        ]
+        self.assertIn("resetLiveArchiveForFilters", commit_source)
+        self.assertIn("return changed", commit_source)
+        seed_source = source[
+            source.index("async function seedLiveLogs") : source.index(
+                "function liveArchiveEndpoint"
+            )
+        ]
+        for filter_name in ("query", "severity", "module", "username", "ean"):
+            self.assertIn(f'params.set("{filter_name}"', seed_source)
+        self.assertIn('params.set("job_id"', seed_source)
+        older_source = source[
+            source.index("async function loadOlderLiveLogs") : source.index(
+                "function appendLiveEvent"
+            )
+        ]
+        self.assertIn("requestId", older_source)
+        self.assertIn("seedGeneration", older_source)
+        self.assertIn("live.requestId !== requestId", older_source)
+        self.assertIn("state.observability.seedGeneration !== seedGeneration", older_source)
+        handlers = source[
+            source.index('logsFilters?.addEventListener("submit"') : source.index(
+                'logsPauseButton?.addEventListener("click"'
+            )
+        ]
+        self.assertGreaterEqual(
+            handlers.count("seedLiveLogs({ force: true })"),
+            2,
+        )
+
     def test_web_logs_gate_reads_navigation_unread_and_filters(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]

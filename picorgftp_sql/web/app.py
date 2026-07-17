@@ -4587,12 +4587,19 @@ def create_app() -> FastAPI:
         current_user = _require_admin(request)
         store = observability_store()
         if live_seed:
+            live_severities = _validated_severities(severity)
             seed_since = (
                 datetime.now(timezone.utc) - timedelta(hours=24)
             ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
             page = store.snapshot_operational_event_stream(
                 since=seed_since,
                 limit=200,
+                severities=live_severities,
+                username=username,
+                ean=ean,
+                job_id=job_id,
+                module=module,
+                query=query,
             )
             response = _observability_api_payload(
                 str(current_user.get("username") or ""), page
