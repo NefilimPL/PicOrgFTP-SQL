@@ -513,6 +513,30 @@ def test_partial_unknown_routing_fails_closed_without_fallback(
     assert fallback.messages == []
 
 
+def test_explicit_routing_unknown_never_becomes_success_or_fallback() -> None:
+    class UnknownRoutingTransport(FakeTransport):
+        def send(self, message: object) -> dict[str, object]:
+            self.messages.append(message)
+            return {
+                "status": "routing_unknown",
+                "routing_known": False,
+                "refusal_codes": [],
+                "refused_recipients": [],
+            }
+
+    store = FakeStore()
+    primary = UnknownRoutingTransport()
+    fallback = FakeTransport()
+    service = _service(store, {"entra": primary, "smtp": fallback})
+    queued = service.queue_incident_notification(_event(), _incident())
+
+    result = service.process_delivery(str(queued["id"]))
+
+    assert result["status"] == "error"
+    assert result["attempts"][0]["code"] == "partial_routing_unknown"
+    assert fallback.messages == []
+
+
 def test_process_delivery_enriches_mail_with_bounded_redacted_runtime_context() -> None:
     store = FakeStore()
     store.incident_context = {

@@ -662,7 +662,7 @@ class NotificationService:
             safe_result = result if isinstance(result, Mapping) else {}
             attempt = _safe_attempt(channel, safe_result)
             status = _text(safe_result.get("status")).lower()
-            if status in {"partial", "refused"}:
+            if status in {"partial", "refused", "routing_unknown"}:
                 refused = _verified_refused_recipients(message, safe_result)
                 if refused is not None:
                     return attempt, False, refused, True

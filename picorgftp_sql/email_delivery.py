@@ -181,6 +181,7 @@ class SmtpMailTransport:
 
         client = None
         refused_recipients: object = None
+        refusal_exception = False
         try:
             if self._security == "tls":
                 client = smtplib.SMTP_SSL(
@@ -206,6 +207,7 @@ class SmtpMailTransport:
                 client.login(self._username, self._password)
             refused_recipients = client.send_message(outbound)
         except smtplib.SMTPRecipientsRefused as exc:
+            refusal_exception = True
             refused_recipients = getattr(exc, "recipients", None)
         except Exception:
             raise RuntimeError("SMTP delivery failed.") from None
@@ -219,14 +221,26 @@ class SmtpMailTransport:
                     except Exception:
                         pass
 
-        return _smtp_result(message, refused_recipients, started)
+        return _smtp_result(
+            message,
+            refused_recipients,
+            started,
+            refusal_exception=refusal_exception,
+        )
 
 
 def _smtp_result(
     message: MailMessage,
     refused_recipients: object,
     started: float,
+    *,
+    refusal_exception: bool = False,
 ) -> dict[str, object]:
+    if refusal_exception and (
+        not isinstance(refused_recipients, Mapping)
+        or not refused_recipients
+    ):
+        return _smtp_unknown_routing(started)
     if not refused_recipients:
         return {
             "channel": "smtp",
@@ -271,6 +285,8 @@ def _smtp_result(
             refusal_codes.append(max(0, diagnostic[0]))
     if len(seen) != len(refused):
         routing_known = False
+    if not routing_known:
+        return _smtp_unknown_routing(started, refusal_codes)
     refused_count = len(refused_addresses)
     accepted_count = max(0, len(original) - refused_count)
     status = "refused" if refused_count == len(original) else "partial"
@@ -284,6 +300,20 @@ def _smtp_result(
         # Internal-only routing data; NotificationService strips it before
         # persistence and public projection.
         "refused_recipients": refused_addresses,
+        "elapsed_ms": _elapsed_ms(started),
+    }
+
+
+def _smtp_unknown_routing(
+    started: float,
+    refusal_codes: Sequence[int] = (),
+) -> dict[str, object]:
+    return {
+        "channel": "smtp",
+        "status": "routing_unknown",
+        "routing_known": False,
+        "refusal_codes": sorted(set(refusal_codes)),
+        "refused_recipients": [],
         "elapsed_ms": _elapsed_ms(started),
     }
 

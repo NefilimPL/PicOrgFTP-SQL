@@ -494,6 +494,34 @@ def test_smtp_all_recipients_refused_exception_uses_safe_internal_routing(
     assert smtp.calls[-1] == "quit"
 
 
+@pytest.mark.parametrize("recipients", [{}, None, ["malformed"]])
+def test_smtp_recipients_refused_with_unknown_payload_never_becomes_success(
+    monkeypatch,
+    recipients: object,
+) -> None:
+    smtp = FakeSmtp(send_error=smtplib.SMTPRecipientsRefused(recipients))
+    monkeypatch.setattr(
+        email_delivery.smtplib,
+        "SMTP",
+        lambda host, port, timeout: smtp,
+    )
+
+    result = SmtpMailTransport(
+        {"host": "smtp.example", "port": 25, "security": "none"}
+    ).send(sample_message())
+
+    assert result == {
+        "channel": "smtp",
+        "status": "routing_unknown",
+        "routing_known": False,
+        "refusal_codes": [],
+        "refused_recipients": [],
+        "elapsed_ms": result["elapsed_ms"],
+    }
+    assert "malformed" not in repr(result)
+    assert smtp.calls[-1] == "quit"
+
+
 def test_build_transport_selects_supported_channel() -> None:
     assert isinstance(build_transport("entra", {}), GraphMailTransport)
     assert isinstance(build_transport("smtp", {}), SmtpMailTransport)
