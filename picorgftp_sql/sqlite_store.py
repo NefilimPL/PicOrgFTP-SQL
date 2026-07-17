@@ -25,7 +25,7 @@ from .excel_utils import (
     TYPE_HEADER,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 LIST_SHEETS = ("NAZWY", "TYPY", "MODELE", "KOLORY", "DODATKI")
 ENTRY_HEADERS = (
     EAN_HEADER,
@@ -351,6 +351,21 @@ class SqliteStore:
         """Create schema tables when the database is first used."""
 
         with self.connection() as conn:
+            previous_user_version_row = conn.execute("PRAGMA user_version").fetchone()
+            previous_user_version = (
+                int(previous_user_version_row[0] or 0)
+                if previous_user_version_row
+                else 0
+            )
+            stream_table_existed = (
+                conn.execute(
+                    """
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'operational_event_stream'
+                    """
+                ).fetchone()
+                is not None
+            )
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS schema_version (
@@ -467,6 +482,11 @@ class SqliteStore:
                     traceback_text TEXT NOT NULL DEFAULT ''
                 );
 
+                CREATE TABLE IF NOT EXISTS operational_event_stream (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id TEXT NOT NULL UNIQUE
+                );
+
                 CREATE TABLE IF NOT EXISTS job_runs (
                     id TEXT PRIMARY KEY,
                     username TEXT NOT NULL DEFAULT '',
@@ -507,6 +527,13 @@ class SqliteStore:
             )
             _migrate_web_history_created_at(conn)
             _reconcile_duplicate_open_incidents(conn)
+            if previous_user_version < SCHEMA_VERSION or not stream_table_existed:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO operational_event_stream (event_id)
+                    SELECT id FROM operational_events ORDER BY rowid
+                    """
+                )
             conn.executescript(
                 """
                 CREATE INDEX IF NOT EXISTS idx_web_history_created_at
@@ -552,6 +579,7 @@ class SqliteStore:
                     "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                     (SCHEMA_VERSION, _now_iso()),
                 )
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     @staticmethod
     def _event_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -637,7 +665,99 @@ class SqliteStore:
                     payload["exception_type"], payload["traceback_text"],
                 ),
             )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO operational_event_stream (event_id)
+                VALUES (?)
+                """,
+                (payload["id"],),
+            )
         return payload
+
+    @staticmethod
+    def _stream_event_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        payload = dict(row)
+        payload.pop("_stream_sequence", None)
+        payload["details"] = _json_loads(payload.pop("details_json", "{}"), {})
+        return payload
+
+    @staticmethod
+    def _stream_high_water(conn: sqlite3.Connection) -> int:
+        row = conn.execute(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'operational_event_stream'"
+        ).fetchone()
+        return max(0, int(row[0] or 0)) if row else 0
+
+    def start_operational_event_stream(
+        self, *, after_id: str = "", initial_limit: int = 100
+    ) -> dict[str, Any]:
+        """Resolve a reconnect marker or return a bounded initial snapshot."""
+
+        self.initialize()
+        page_limit = _bounded_page_limit(initial_limit)
+        with self.connection() as conn:
+            high_water = self._stream_high_water(conn)
+            marker_id = _text(after_id)
+            if marker_id:
+                marker = conn.execute(
+                    """
+                    SELECT sequence FROM operational_event_stream
+                    WHERE event_id = ?
+                    """,
+                    (marker_id,),
+                ).fetchone()
+                return {
+                    "items": [],
+                    "position": int(marker[0]) if marker else high_water,
+                }
+            rows = conn.execute(
+                """
+                SELECT s.sequence AS _stream_sequence, e.*
+                FROM operational_event_stream AS s
+                JOIN operational_events AS e ON e.id = s.event_id
+                WHERE s.sequence <= ?
+                ORDER BY s.sequence DESC
+                LIMIT ?
+                """,
+                (high_water, page_limit),
+            ).fetchall()
+        return {
+            "items": [self._stream_event_from_row(row) for row in reversed(rows)],
+            "position": high_water,
+        }
+
+    def poll_operational_event_stream(
+        self, *, position: int, limit: int = 100
+    ) -> dict[str, Any]:
+        """Return later inserted events in durable ascending sequence order."""
+
+        self.initialize()
+        try:
+            current_position = max(0, int(position))
+        except (TypeError, ValueError):
+            current_position = 0
+        page_limit = _bounded_page_limit(limit)
+        with self.connection() as conn:
+            high_water = self._stream_high_water(conn)
+            rows = conn.execute(
+                """
+                SELECT s.sequence AS _stream_sequence, e.*
+                FROM operational_event_stream AS s
+                JOIN operational_events AS e ON e.id = s.event_id
+                WHERE s.sequence > ? AND s.sequence <= ?
+                ORDER BY s.sequence ASC
+                LIMIT ?
+                """,
+                (current_position, high_water, page_limit),
+            ).fetchall()
+        if len(rows) >= page_limit:
+            next_position = int(rows[-1]["_stream_sequence"])
+        else:
+            next_position = max(current_position, high_water)
+        return {
+            "items": [self._stream_event_from_row(row) for row in rows],
+            "position": next_position,
+        }
 
     def query_operational_events(
         self,

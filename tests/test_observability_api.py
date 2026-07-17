@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -108,6 +110,34 @@ def test_events_are_admin_only_paginated_filtered_and_validate_cursor(
     assert client.get(
         "/api/observability/events", params={"cursor": "not-a-cursor"}
     ).status_code == 400
+    assert client.get(
+        "/api/observability/events",
+        params={"cursor": first_page.json()["next_cursor"] + "!"},
+    ).status_code == 400
+    assert client.get(
+        "/api/observability/events",
+        params={"cursor": " " + first_page.json()["next_cursor"]},
+    ).status_code == 400
+    assert client.get(
+        "/api/observability/events",
+        params={"cursor": first_page.json()["next_cursor"]},
+    ).status_code == 200
+    not_a_date = base64.urlsafe_b64encode(
+        json.dumps(["not-a-date", "evt-1"]).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    assert client.get(
+        "/api/observability/events", params={"cursor": not_a_date}
+    ).status_code == 400
+    for noncanonical_timestamp in (
+        "2026-07-16 10:05:00.000+00:00",
+        "2026-07-16T12:05:00.000+02:00",
+    ):
+        noncanonical = base64.urlsafe_b64encode(
+            json.dumps([noncanonical_timestamp, "evt-1"]).encode("utf-8")
+        ).decode("ascii").rstrip("=")
+        assert client.get(
+            "/api/observability/events", params={"cursor": noncanonical}
+        ).status_code == 400
 
 
 def test_incidents_include_only_their_correlated_context(api_environment) -> None:
@@ -190,6 +220,8 @@ def test_sse_stream_is_admin_only_and_frames_events(api_environment) -> None:
     )
 
     class RequestStub:
+        headers: dict[str, str] = {}
+
         async def is_disconnected(self) -> bool:
             return False
 
@@ -212,15 +244,179 @@ def test_sse_stream_is_admin_only_and_frames_events(api_environment) -> None:
     assert frame.endswith("\n\n")
 
 
-def test_mark_read_state_is_scoped_to_current_admin(api_environment) -> None:
+def test_sse_stream_yields_nothing_when_already_disconnected(api_environment) -> None:
+    _client, store = api_environment
+    store.append_operational_event(
+        _event("evt-snapshot", "2026-07-16T10:00:00.000Z")
+    )
+    endpoint = next(
+        route.endpoint
+        for route in web_app.app.routes
+        if getattr(route, "path", "") == "/api/observability/stream"
+    )
+
+    class RequestStub:
+        headers: dict[str, str] = {}
+
+        async def is_disconnected(self) -> bool:
+            return True
+
+    async def collect() -> list[str]:
+        with patch.object(
+            web_app,
+            "_require_admin",
+            return_value={"username": "admin", "role": "admin"},
+        ):
+            response = await endpoint(RequestStub(), after_id="")
+            return [frame async for frame in response.body_iterator]
+
+    assert asyncio.run(collect()) == []
+
+
+def test_sse_stream_stops_during_initial_snapshot(api_environment) -> None:
+    _client, store = api_environment
+    for index in range(3):
+        store.append_operational_event(
+            _event(f"evt-{index}", f"2026-07-16T10:0{index}:00.000Z")
+        )
+    endpoint = next(
+        route.endpoint
+        for route in web_app.app.routes
+        if getattr(route, "path", "") == "/api/observability/stream"
+    )
+
+    class RequestStub:
+        headers: dict[str, str] = {}
+
+        def __init__(self) -> None:
+            self.states = iter((False, True))
+
+        async def is_disconnected(self) -> bool:
+            return next(self.states, True)
+
+    async def collect() -> list[str]:
+        with patch.object(
+            web_app,
+            "_require_admin",
+            return_value={"username": "admin", "role": "admin"},
+        ):
+            response = await endpoint(RequestStub(), after_id="")
+            return [frame async for frame in response.body_iterator]
+
+    frames = asyncio.run(collect())
+    assert len(frames) == 1
+    assert frames[0].startswith("id: evt-0\n")
+
+
+def test_sse_stream_reconnect_drains_more_than_one_page_without_duplicates(
+    api_environment,
+) -> None:
     client, store = api_environment
-    web_data.add_user("second-admin", "secret", "admin")
+    _login(client)
+    store.append_operational_event(
+        _event("evt-marker", "2026-07-16T10:00:00.000Z")
+    )
+    expected = []
+    for index in range(205):
+        identity = f"evt-{index:03d}"
+        expected.append(identity)
+        store.append_operational_event(
+            _event(identity, "2026-07-16T10:00:00.000Z")
+        )
+    endpoint = next(
+        route.endpoint
+        for route in web_app.app.routes
+        if getattr(route, "path", "") == "/api/observability/stream"
+    )
+
+    class RequestStub:
+        headers: dict[str, str] = {}
+        calls = 0
+
+        async def is_disconnected(self) -> bool:
+            self.calls += 1
+            return self.calls > 1000
+
+    async def event_ids() -> list[str]:
+        with (
+            patch.object(
+                web_app,
+                "_require_admin",
+                return_value={"username": "admin", "role": "admin"},
+            ),
+            patch.object(web_app.asyncio, "sleep", return_value=None),
+        ):
+            response = await endpoint(RequestStub(), after_id="evt-marker")
+            iterator = response.body_iterator
+            identities = []
+            try:
+                while len(identities) < len(expected):
+                    frame = await anext(iterator)
+                    if frame.startswith("id: "):
+                        identities.append(frame.splitlines()[0][4:])
+            except StopAsyncIteration:
+                pass
+            await iterator.aclose()
+            return identities
+
+    streamed = asyncio.run(event_ids())
+    assert streamed == expected
+    assert len(streamed) == len(set(streamed))
+
+
+def test_sse_stream_prefers_standard_last_event_id_header(api_environment) -> None:
+    client, store = api_environment
+    _login(client)
+    for identity in ("evt-query-marker", "evt-replayed", "evt-header-marker", "evt-next"):
+        store.append_operational_event(
+            _event(identity, "2026-07-16T10:00:00.000Z")
+        )
+    endpoint = next(
+        route.endpoint
+        for route in web_app.app.routes
+        if getattr(route, "path", "") == "/api/observability/stream"
+    )
+
+    class RequestStub:
+        headers = {"last-event-id": "evt-header-marker"}
+
+        async def is_disconnected(self) -> bool:
+            return False
+
+    async def first_frame() -> str:
+        with patch.object(
+            web_app,
+            "_require_admin",
+            return_value={"username": "admin", "role": "admin"},
+        ):
+            response = await endpoint(RequestStub(), after_id="evt-query-marker")
+            iterator = response.body_iterator
+            frame = await anext(iterator)
+            await iterator.aclose()
+            return frame
+
+    frame = asyncio.run(first_frame())
+    assert frame.startswith("id: evt-next\n")
+    assert "evt-replayed" not in frame
+
+
+def test_mark_read_state_is_scoped_to_current_authenticated_user(api_environment) -> None:
+    client, store = api_environment
+    web_data.add_user("operator", "secret", "user")
+    web_data.add_user("second-operator", "secret", "user")
     store.append_operational_event(
         _event("evt-warning", "2026-07-16T10:00:00.000Z", "warning")
     )
-    csrf = _login(client)
-    before = client.get("/api/observability/events").json()["unread"]
-    assert before["warning"] == 1
+    anonymous = TestClient(web_app.app)
+    assert anonymous.post(
+        "/api/observability/read",
+        json={
+            "severity": "warning",
+            "event_id": "evt-warning",
+            "created_at": "2026-07-16T10:00:00.000Z",
+        },
+    ).status_code == 401
+    csrf = _login(client, "operator", "secret")
 
     marked = client.post(
         "/api/observability/read",
@@ -229,17 +425,14 @@ def test_mark_read_state_is_scoped_to_current_admin(api_environment) -> None:
             "severity": "warning",
             "event_id": "evt-warning",
             "created_at": "2026-07-16T10:00:00.000Z",
+            "username": "second-operator",
         },
     )
 
     assert marked.status_code == 200
     assert marked.json()["unread"]["warning"] == 0
-    second_client = TestClient(web_app.app)
-    _login(second_client, "second-admin", "secret")
-    assert (
-        second_client.get("/api/observability/events").json()["unread"]["warning"]
-        == 1
-    )
+    assert store.unread_alert_summary("operator")["warning"] == 0
+    assert store.unread_alert_summary("second-operator")["warning"] == 1
 
 
 def test_clear_logs_clears_operational_tables_but_preserves_audits(
@@ -348,3 +541,58 @@ def test_health_reports_local_components_and_last_known_integrations(
     assert "password" not in response.text.lower()
     assert "private" not in response.text.lower()
 
+
+def test_last_known_integration_stops_at_newest_unknown_status(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.append_operational_event(
+        _event(
+            "evt-known",
+            "2026-07-16T10:00:00.000Z",
+            event_type="integration.ftp.completed",
+            details={"status": "success"},
+        )
+    )
+    store.append_operational_event(
+        _event(
+            "evt-unknown",
+            "2026-07-16T10:01:00.000Z",
+            event_type="integration.ftp.completed",
+            details={"status": "unexpected-status"},
+        )
+    )
+
+    result = web_app._last_known_integrations(store)
+
+    assert result["ftp"] == {
+        "status": "unknown",
+        "observed_at": "2026-07-16T10:01:00.000Z",
+    }
+
+
+def test_operational_clear_invalidates_cached_health_integrations(
+    api_environment,
+) -> None:
+    client, store = api_environment
+    csrf = _login(client)
+    store.append_operational_event(
+        _event(
+            "evt-ftp",
+            "2026-07-16T10:00:00.000Z",
+            event_type="integration.ftp.completed",
+            details={"status": "error"},
+        )
+    )
+    with patch.object(web_app, "_HEALTH_INTEGRATION_CACHE_SECONDS", 3600):
+        assert client.get("/api/health").json()["integrations"]["ftp"]["status"] == "error"
+
+        with patch.object(
+            web_app, "_clear_log_files", return_value={"cleared": [], "errors": []}
+        ):
+            response = client.post(
+                "/api/logs/clear",
+                headers={"X-PicOrg-CSRF": csrf},
+                json={"password": "admin"},
+            )
+
+        assert response.status_code == 200
+        assert client.get("/api/health").json()["integrations"]["ftp"]["status"] == "unknown"

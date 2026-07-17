@@ -3935,8 +3935,9 @@ def _prune_live_events_if_due(*, force: bool = False) -> int:
         and now - _LIVE_EVENT_LAST_PRUNED < _LIVE_EVENT_PRUNE_INTERVAL_SECONDS
     ):
         return 0
+    removed = max(0, int(prune_live_events() or 0))
     _LIVE_EVENT_LAST_PRUNED = now
-    return max(0, int(prune_live_events() or 0))
+    return removed
 
 
 def _backup_scheduler_loop() -> None:
@@ -3988,20 +3989,45 @@ def _observability_limit(value: object) -> int:
 
 
 def _validate_observability_cursor(value: object) -> str:
-    cursor = str(value or "").strip()
+    cursor = str(value or "")
     if not cursor:
         return ""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", cursor):
+        raise HTTPException(status_code=400, detail="Niepoprawny kursor.")
     padded = cursor + "=" * (-len(cursor) % 4)
     try:
-        decoded = base64.urlsafe_b64decode(padded).decode("utf-8")
+        decoded_bytes = base64.b64decode(
+            padded.encode("ascii"), altchars=b"-_", validate=True
+        )
+        canonical = base64.urlsafe_b64encode(decoded_bytes).decode("ascii").rstrip("=")
+        if canonical != cursor:
+            raise ValueError("non-canonical cursor")
+        decoded = decoded_bytes.decode("utf-8")
         payload = json.loads(decoded)
-    except (binascii.Error, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+    except (
+        binascii.Error,
+        UnicodeDecodeError,
+        UnicodeEncodeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
         raise HTTPException(status_code=400, detail="Niepoprawny kursor.") from exc
     if (
         not isinstance(payload, list)
         or len(payload) != 2
         or not all(isinstance(item, str) and item.strip() for item in payload)
     ):
+        raise HTTPException(status_code=400, detail="Niepoprawny kursor.")
+    try:
+        parsed_at = datetime.fromisoformat(payload[0].replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Niepoprawny kursor.") from exc
+    if parsed_at.tzinfo is None or parsed_at.utcoffset() is None:
+        raise HTTPException(status_code=400, detail="Niepoprawny kursor.")
+    canonical_timestamp = parsed_at.astimezone(timezone.utc).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+    if payload[0] != canonical_timestamp:
         raise HTTPException(status_code=400, detail="Niepoprawny kursor.")
     return cursor
 
@@ -4062,6 +4088,7 @@ def _last_known_integrations(store: Any) -> Dict[str, Any]:
         "sql_profiles": [],
         "pimcore": dict(unknown),
     }
+    seen_components: set[str] = set()
     seen_profiles: set[str] = set()
     page = store.query_operational_events(limit=100)
     for event in page.get("items") or []:
@@ -4071,8 +4098,9 @@ def _last_known_integrations(store: Any) -> Dict[str, Any]:
         observed_at = str(event.get("created_at") or "")
         status = _safe_integration_status(event)
         component = _INTEGRATION_EVENT_NAMES.get(event_type)
-        if component and result[component]["status"] == "unknown":
+        if component and component not in seen_components:
             result[component] = {"status": status, "observed_at": observed_at}
+            seen_components.add(component)
             continue
         if event_type != "integration.sql_profile.completed":
             continue
@@ -4109,6 +4137,16 @@ def _cached_last_known_integrations(store: Any) -> Dict[str, Any]:
         _HEALTH_INTEGRATION_CACHE_PATH = store_path
         _HEALTH_INTEGRATION_CACHE_AT = now
         return snapshot
+
+
+def _invalidate_health_integration_cache() -> None:
+    global _HEALTH_INTEGRATION_CACHE
+    global _HEALTH_INTEGRATION_CACHE_AT
+    global _HEALTH_INTEGRATION_CACHE_PATH
+    with _HEALTH_INTEGRATION_CACHE_LOCK:
+        _HEALTH_INTEGRATION_CACHE = None
+        _HEALTH_INTEGRATION_CACHE_AT = 0.0
+        _HEALTH_INTEGRATION_CACHE_PATH = ""
 
 
 def _integration_component_status(status: object) -> str:
@@ -4505,20 +4543,39 @@ def create_app() -> FastAPI:
         _require_admin(request)
 
         async def generate():
-            cursor = str(after_id or "").strip()
+            store = observability_store()
+            reconnect_id = str(request.headers.get("last-event-id") or "").strip()
+            start = store.start_operational_event_stream(
+                after_id=reconnect_id or str(after_id or "").strip(),
+                initial_limit=100,
+            )
+            position = int(start.get("position") or 0)
             next_heartbeat = time.monotonic()
-            while not await request.is_disconnected():
-                page = observability_store().query_operational_events(
-                    after_id=cursor, limit=100
+            for item in start.get("items") or []:
+                if await request.is_disconnected():
+                    return
+                event_id = str(item.get("id") or "")
+                yield (
+                    f"id: {event_id}\n"
+                    f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
                 )
-                for item in reversed(page.get("items") or []):
-                    cursor = str(item.get("id") or "")
+            while not await request.is_disconnected():
+                page = store.poll_operational_event_stream(
+                    position=position, limit=100
+                )
+                position = int(page.get("position") or position)
+                for item in page.get("items") or []:
+                    if await request.is_disconnected():
+                        return
+                    event_id = str(item.get("id") or "")
                     yield (
-                        f"id: {cursor}\n"
+                        f"id: {event_id}\n"
                         f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
                     )
                 now = time.monotonic()
                 if now >= next_heartbeat:
+                    if await request.is_disconnected():
+                        return
                     yield ": heartbeat\n\n"
                     next_heartbeat = now + 15
                 await asyncio.sleep(1)
@@ -4527,7 +4584,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/observability/read")
     async def observability_read_api(request: Request) -> Dict[str, Any]:
-        current_user = _require_admin(request)
+        username = _require_user(request)
         try:
             payload = await request.json()
         except Exception as exc:
@@ -4543,7 +4600,6 @@ def create_app() -> FastAPI:
             datetime.fromisoformat(created_at.replace("Z", "+00:00"))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Niepoprawne dane odczytu.") from exc
-        username = str(current_user.get("username") or "")
         store = observability_store()
         store.mark_alerts_read(username, severities[0], event_id, created_at)
         return {
@@ -4578,6 +4634,7 @@ def create_app() -> FastAPI:
         if not verified or verified.get("role") != "admin":
             raise HTTPException(status_code=403, detail="Niepoprawne haslo administratora.")
         structured_result = observability_store().clear_operational_data()
+        _invalidate_health_integration_cache()
         clear_result = _clear_log_files()
         response = _logs_response(400)
         response["cleared"] = clear_result["cleared"]

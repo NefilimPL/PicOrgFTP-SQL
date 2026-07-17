@@ -392,6 +392,23 @@ class WebSmokeCiTests(unittest.TestCase):
 
         self.assertEqual(prune.call_count, 2)
 
+    def test_failed_live_event_pruning_retries_without_throttle(self) -> None:
+        with (
+            patch.object(
+                web_app,
+                "prune_live_events",
+                side_effect=[RuntimeError("database busy"), 3],
+            ) as prune,
+            patch.object(web_app.time, "monotonic", side_effect=[100.0, 101.0]),
+        ):
+            web_app._LIVE_EVENT_LAST_PRUNED = 0.0
+            with self.assertRaises(RuntimeError):
+                web_app._prune_live_events_if_due(force=True)
+            self.assertEqual(web_app._LIVE_EVENT_LAST_PRUNED, 0.0)
+            self.assertEqual(web_app._prune_live_events_if_due(), 3)
+
+        self.assertEqual(prune.call_count, 2)
+
     def test_sql_column_detection_endpoint_updates_settings(self) -> None:
         client = TestClient(web_app.app)
         cfg = {

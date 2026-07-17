@@ -161,6 +161,194 @@ def test_equal_timestamp_cursor_uses_id_tie_breaker_and_handles_bad_cursor(
     ]
 
 
+def test_stream_position_pages_every_later_insert_without_timestamp_ordering(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    marker = store.append_operational_event(
+        _event("evt-marker", "2026-07-16T10:00:00.000Z")
+    )
+    expected = []
+    for index in range(205):
+        identity = f"evt-{index:03d}"
+        if index == 204:
+            identity = "evt-000-later-lower-id"
+        expected.append(identity)
+        store.append_operational_event(
+            _event(identity, marker["created_at"])
+        )
+
+    start = store.start_operational_event_stream(after_id="evt-marker")
+    position = start["position"]
+    streamed = []
+    page_sizes = []
+    while True:
+        page = store.poll_operational_event_stream(position=position, limit=100)
+        page_sizes.append(len(page["items"]))
+        streamed.extend(item["id"] for item in page["items"])
+        assert all("sequence" not in item for item in page["items"])
+        position = page["position"]
+        if not page["items"]:
+            break
+
+    assert page_sizes == [100, 100, 5, 0]
+    assert streamed == expected
+    assert len(streamed) == len(set(streamed))
+
+
+def test_stream_missing_marker_resets_to_high_water_without_replay(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.append_operational_event(_event("evt-old", "2026-07-16T10:00:00.000Z"))
+
+    start = store.start_operational_event_stream(after_id="evt-deleted")
+    assert start["items"] == []
+    assert store.poll_operational_event_stream(position=start["position"])["items"] == []
+
+    store.append_operational_event(_event("evt-new", "2026-07-16T10:01:00.000Z"))
+    page = store.poll_operational_event_stream(position=start["position"])
+    assert [item["id"] for item in page["items"]] == ["evt-new"]
+
+
+def test_connected_stream_survives_pruning_and_full_clear(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.append_operational_event(_event("evt-marker", "2026-07-15T09:00:00.000Z"))
+
+    assert store.prune_info_events("2026-07-16T09:00:00.000Z") == 1
+    store.append_operational_event(_event("evt-after-prune", "2026-07-16T10:00:00.000Z"))
+    reconnect_after_prune = store.start_operational_event_stream(after_id="evt-marker")
+    after_prune = store.poll_operational_event_stream(
+        position=reconnect_after_prune["position"]
+    )
+    assert [item["id"] for item in after_prune["items"]] == ["evt-after-prune"]
+
+    store.clear_operational_data()
+    store.append_operational_event(_event("evt-after-clear", "2026-07-16T10:01:00.000Z"))
+    reconnect_after_clear = store.start_operational_event_stream(after_id="evt-marker")
+    after_clear = store.poll_operational_event_stream(
+        position=reconnect_after_clear["position"]
+    )
+    assert [item["id"] for item in after_clear["items"]] == ["evt-after-clear"]
+    assert store.poll_operational_event_stream(position=after_clear["position"])["items"] == []
+    with sqlite3.connect(tmp_path / "app.sqlite") as conn:
+        assert conn.execute("SELECT COUNT(*) FROM operational_events").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM operational_event_stream").fetchone()[0] == 3
+
+
+def test_v5_migration_backfills_stream_once_in_rowid_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "legacy-v5.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            PRAGMA user_version = 5;
+            CREATE TABLE schema_version (
+                version INTEGER NOT NULL,
+                applied_at TEXT NOT NULL
+            );
+            INSERT INTO schema_version VALUES (5, '2026-07-16T09:00:00.000Z');
+            CREATE TABLE operational_events (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                module TEXT NOT NULL DEFAULT '',
+                stage TEXT NOT NULL DEFAULT '',
+                username TEXT NOT NULL DEFAULT '',
+                ean TEXT NOT NULL DEFAULT '',
+                product_id TEXT NOT NULL DEFAULT '',
+                slot TEXT NOT NULL DEFAULT '',
+                job_id TEXT NOT NULL DEFAULT '',
+                correlation_id TEXT NOT NULL DEFAULT '',
+                incident_id TEXT NOT NULL DEFAULT '',
+                summary TEXT NOT NULL,
+                recommended_action TEXT NOT NULL DEFAULT '',
+                details_json TEXT NOT NULL DEFAULT '{}',
+                exception_type TEXT NOT NULL DEFAULT '',
+                traceback_text TEXT NOT NULL DEFAULT ''
+            );
+            INSERT INTO operational_events (id, created_at, severity, event_type, summary)
+            VALUES ('evt-z', '2026-07-16T10:02:00.000Z', 'info', 'legacy', 'first');
+            INSERT INTO operational_events (id, created_at, severity, event_type, summary)
+            VALUES ('evt-a', '2026-07-16T10:00:00.000Z', 'info', 'legacy', 'second');
+            INSERT INTO operational_events (id, created_at, severity, event_type, summary)
+            VALUES ('evt-m', '2026-07-16T10:01:00.000Z', 'info', 'legacy', 'third');
+            """
+        )
+
+    traced_sql: list[str] = []
+    store = SqliteStore(str(db_path))
+    original_connect = store.connect
+
+    def traced_connect() -> sqlite3.Connection:
+        conn = original_connect()
+        conn.set_trace_callback(traced_sql.append)
+        return conn
+
+    monkeypatch.setattr(store, "connect", traced_connect)
+    store.initialize()
+
+    first_initialize_backfills = [
+        statement
+        for statement in traced_sql
+        if "INSERT OR IGNORE INTO operational_event_stream (event_id)" in statement
+        and "SELECT id FROM operational_events ORDER BY rowid" in statement
+    ]
+    assert len(first_initialize_backfills) == 1
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        mappings = conn.execute(
+            "SELECT sequence, event_id FROM operational_event_stream ORDER BY sequence"
+        ).fetchall()
+    assert mappings == [(1, "evt-z"), (2, "evt-a"), (3, "evt-m")]
+
+    traced_sql.clear()
+    store.initialize()
+
+    assert not any(
+        "INSERT OR IGNORE INTO operational_event_stream (event_id)" in statement
+        or "SELECT id FROM operational_events ORDER BY rowid" in statement
+        for statement in traced_sql
+    )
+
+    start = store.start_operational_event_stream(after_id="evt-z")
+    page = store.poll_operational_event_stream(position=start["position"])
+    assert [item["id"] for item in page["items"]] == ["evt-a", "evt-m"]
+
+
+def test_initialize_recovers_missing_v6_stream_table(tmp_path: Path) -> None:
+    db_path = tmp_path / "missing-stream.sqlite"
+    store = SqliteStore(str(db_path))
+    store.append_operational_event(_event("evt-a", "2026-07-16T10:00:00.000Z"))
+    store.append_operational_event(_event("evt-b", "2026-07-16T10:01:00.000Z"))
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        conn.execute("DROP TABLE operational_event_stream")
+
+    store.initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        mappings = conn.execute(
+            "SELECT sequence, event_id FROM operational_event_stream ORDER BY sequence"
+        ).fetchall()
+    assert mappings == [(1, "evt-a"), (2, "evt-b")]
+
+
+def test_empty_stream_marker_returns_bounded_latest_snapshot(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    for index in range(105):
+        store.append_operational_event(
+            _event(f"evt-{index:03d}", f"2026-07-16T10:{index // 60:02d}:{index % 60:02d}.000Z")
+        )
+
+    start = store.start_operational_event_stream(initial_limit=100)
+
+    assert [item["id"] for item in start["items"]] == [
+        f"evt-{index:03d}" for index in range(5, 105)
+    ]
+    assert store.poll_operational_event_stream(position=start["position"])["items"] == []
+
+
 def test_job_and_incident_roundtrips_use_descending_cursors(tmp_path: Path) -> None:
     store = SqliteStore(str(tmp_path / "app.sqlite"))
     store.initialize()
@@ -588,6 +776,10 @@ def test_prune_and_clear_operational_data_preserve_web_history(tmp_path: Path) -
         "alert_reads": 1,
     }
     assert store.load_history()[0]["id"] == "history-1"
+    with sqlite3.connect(tmp_path / "app.sqlite") as conn:
+        assert conn.execute(
+            "SELECT event_id FROM operational_event_stream ORDER BY sequence"
+        ).fetchall() == [("evt-old",), ("evt-boundary",), ("evt-warning",)]
 
 
 def test_sqlite_adapter_delegates_observability_repository(tmp_path: Path) -> None:

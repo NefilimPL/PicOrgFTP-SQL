@@ -36,6 +36,7 @@ def test_schema_creates_expected_tables(tmp_path: Path) -> None:
         "file_index_cache",
         "pimcore_submissions",
         "operational_events",
+        "operational_event_stream",
         "job_runs",
         "incidents",
         "alert_reads",
@@ -43,8 +44,16 @@ def test_schema_creates_expected_tables(tmp_path: Path) -> None:
 
     with sqlite3.connect(db_path) as conn:
         version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+        stream_columns = [
+            row[1] for row in conn.execute("PRAGMA table_info(operational_event_stream)")
+        ]
+        stream_foreign_keys = conn.execute(
+            "PRAGMA foreign_key_list(operational_event_stream)"
+        ).fetchall()
 
-    assert version == 5
+    assert version == 6
+    assert stream_columns == ["sequence", "event_id"]
+    assert stream_foreign_keys == []
 
 
 def test_pimcore_submissions_roundtrip_and_filter(tmp_path: Path) -> None:
