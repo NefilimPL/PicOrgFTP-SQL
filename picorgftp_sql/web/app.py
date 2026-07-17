@@ -2002,12 +2002,16 @@ def _sync_result_to_sql(
             except Exception:
                 pass
         payload["rolled_back"] = rollback_succeeded
-        for slot in attempted_slots:
-            item = slot_results[slot]
-            item["status"] = (
-                "rolled_back"
-                if rollback_succeeded and item["status"] in {"updated", "cleared"}
-                else "error"
+        for slot, item in slot_results.items():
+            was_successful = item["status"] in {"updated", "cleared"}
+            item.update(
+                {
+                    "status": "error",
+                    "provider": "sql",
+                    "reason": str(exc),
+                    "attempted": slot in attempted_slots,
+                    "rolled_back": rollback_succeeded and was_successful,
+                }
             )
     finally:
         payload["elapsed_ms"] = int((time.perf_counter() - started) * 1000)

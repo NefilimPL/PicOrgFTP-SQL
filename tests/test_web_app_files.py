@@ -1407,6 +1407,7 @@ class WebAppFileTests(unittest.TestCase):
             saved_files=[
                 SimpleNamespace(prefix="03", filename="5901234567890_03_NEW.jpg"),
                 SimpleNamespace(prefix="04", filename="5901234567890_04_NEW.jpg"),
+                SimpleNamespace(prefix="05", filename="5901234567890_05_NEW.jpg"),
             ],
         )
 
@@ -1450,7 +1451,11 @@ class WebAppFileTests(unittest.TestCase):
                     web_app.u: True,
                     web_app.p: web_app.K,
                     web_app.w: "UPDATE object_query_1 SET {col} = '{filename}' WHERE EAN = '{ean}'",
-                    web_app.SQL_COLUMN_MAP_KEY: {"03": "img_03", "04": "img_04"},
+                    web_app.SQL_COLUMN_MAP_KEY: {
+                        "03": "img_03",
+                        "04": "img_04",
+                        "05": "img_05",
+                    },
                 },
                 clear=False,
             ),
@@ -1464,9 +1469,88 @@ class WebAppFileTests(unittest.TestCase):
         assert payload["rolled_back"] is True
         assert conn.rolled_back is True
         assert conn.committed is False
-        assert [(item["slot"], item["status"]) for item in payload["slot_results"]] == [
-            ("03", "rolled_back"),
-            ("04", "error"),
+        assert payload["slot_results"] == [
+            {
+                "slot": "03",
+                "operation": "update",
+                "status": "error",
+                "elapsed_ms": payload["elapsed_ms"],
+                "provider": "sql",
+                "reason": "second slot failed",
+                "attempted": True,
+                "rolled_back": True,
+            },
+            {
+                "slot": "04",
+                "operation": "update",
+                "status": "error",
+                "elapsed_ms": payload["elapsed_ms"],
+                "provider": "sql",
+                "reason": "second slot failed",
+                "attempted": True,
+                "rolled_back": False,
+            },
+            {
+                "slot": "05",
+                "operation": "update",
+                "status": "error",
+                "elapsed_ms": payload["elapsed_ms"],
+                "provider": "sql",
+                "reason": "second slot failed",
+                "attempted": False,
+                "rolled_back": False,
+            },
+        ]
+
+    def test_sql_sync_connect_failure_marks_every_requested_slot_as_error(self) -> None:
+        result = SimpleNamespace(
+            ean="5901234567890",
+            saved_files=[
+                SimpleNamespace(prefix="03", filename="5901234567890_03_NEW.jpg")
+            ],
+        )
+
+        with (
+            patch.dict(
+                web_app.config.CONFIG,
+                {
+                    web_app.u: True,
+                    web_app.p: web_app.K,
+                    web_app.w: "UPDATE object_query_1 SET {col} = '{filename}' WHERE EAN = '{ean}'",
+                    web_app.SQL_COLUMN_MAP_KEY: {"03": "img_03", "04": "img_04"},
+                },
+                clear=False,
+            ),
+            patch.object(web_app, "connect_db", side_effect=RuntimeError("sql offline")),
+        ):
+            payload = web_app._sync_result_to_sql(result, clear_prefixes={"04"})
+
+        assert payload["error"] == "sql offline"
+        assert payload["updated"] == 0
+        assert payload["cleared"] == 0
+        assert payload["rows"] == 0
+        assert payload["rolled_back"] is False
+        assert payload["slot_results"] == [
+            {
+                "slot": "03",
+                "operation": "update",
+                "status": "error",
+                "elapsed_ms": payload["elapsed_ms"],
+                "provider": "sql",
+                "reason": "sql offline",
+                "attempted": False,
+                "rolled_back": False,
+            },
+            {
+                "slot": "04",
+                "operation": "clear",
+                "status": "error",
+                "elapsed_ms": payload["elapsed_ms"],
+                "provider": "sql",
+                "reason": "sql offline",
+                "attempted": False,
+                "rolled_back": False,
+            },
         ]
 
     def test_local_slot_results_preserve_save_and_delete_evidence_for_same_slot(self) -> None:
