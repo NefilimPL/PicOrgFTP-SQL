@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from email.utils import parseaddr
 
 
@@ -10,19 +11,49 @@ EMAIL_SETTINGS_KEY = "email_notifications"
 EMAIL_CLIENT_SECRET = "client_secret"
 EMAIL_SMTP_PASSWORD = "password"
 EMAIL_SEVERITIES = ("info", "warning", "error", "critical")
+_EMAIL_LOCAL_RE = re.compile(r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+\Z")
+_EMAIL_DOMAIN_LABEL_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z"
+)
 
 
 def normalize_email_address(value: object) -> str:
     """Return one normalized mailbox address or an empty optional value."""
 
-    text = str(value or "").strip()
+    raw_text = str(value or "")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw_text):
+        raise ValueError("Niepoprawny adres e-mail.")
+    text = raw_text.strip()
     if not text:
         return ""
     display, address = parseaddr(text)
-    if display or address != text or address.count("@") != 1:
+    if (
+        display
+        or address != text
+        or len(address) > 254
+        or address.count("@") != 1
+    ):
         raise ValueError("Niepoprawny adres e-mail.")
     local, domain = address.rsplit("@", 1)
-    if not local or "." not in domain or any(ch.isspace() for ch in address):
+    if (
+        not local
+        or len(local) > 64
+        or local.startswith(".")
+        or local.endswith(".")
+        or ".." in local
+        or not _EMAIL_LOCAL_RE.fullmatch(local)
+        or any(ch.isspace() for ch in address)
+    ):
+        raise ValueError("Niepoprawny adres e-mail.")
+    labels = domain.split(".")
+    if (
+        len(domain) > 253
+        or len(labels) < 2
+        or any(
+            len(label) > 63 or not _EMAIL_DOMAIN_LABEL_RE.fullmatch(label)
+            for label in labels
+        )
+    ):
         raise ValueError("Niepoprawny adres e-mail.")
     return f"{local}@{domain.lower()}"
 

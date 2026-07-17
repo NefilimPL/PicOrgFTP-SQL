@@ -11,9 +11,47 @@ from picorgftp_sql.email_settings import (
     EMAIL_SETTINGS_KEY,
     EMAIL_SMTP_PASSWORD,
     default_email_settings,
+    normalize_email_address,
     normalize_email_settings,
     public_email_settings,
 )
+
+
+def test_normalize_email_address_preserves_local_case_and_lowercases_domain() -> None:
+    assert (
+        normalize_email_address(" User.Name+tag@Example.COM ")
+        == "User.Name+tag@example.com"
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "\x00a@example.com",
+        "a@exam\x1fple.com",
+        "a@example.com\x7f",
+        "a@example.com\r\nBcc: victim@example.com",
+        "a@.com",
+        "a@example.",
+        "a@foo..com",
+        "a@-foo.com",
+        "a@foo-.com",
+        "a@foo_bar.com",
+        f"a@{'x' * 64}.com",
+        f"a@{'.'.join(['x' * 63] * 4)}",
+        ".a@example.com",
+        "a.@example.com",
+        "a..b@example.com",
+        "a b@example.com",
+        f"{'a' * 65}@example.com",
+        f"{'a' * 64}@{'.'.join(['x' * 63] * 3)}",
+    ],
+)
+def test_normalize_email_address_rejects_unsafe_or_malformed_address(
+    value: str,
+) -> None:
+    with pytest.raises(ValueError, match="Niepoprawny adres e-mail"):
+        normalize_email_address(value)
 
 
 @pytest.mark.parametrize("value", [False, "false", "0", "off", "no", ""])

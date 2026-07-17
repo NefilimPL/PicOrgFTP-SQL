@@ -80,6 +80,39 @@ class WebSmokeCiTests(unittest.TestCase):
             "operator@example.com",
         )
 
+    def test_add_user_route_defaults_omitted_email_to_empty_string(self) -> None:
+        client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
+        with (
+            patch.object(web_app, "_require_admin", return_value=admin),
+            patch.object(web_app, "_current_user_payload", return_value=admin),
+            patch.object(
+                web_data,
+                "load_user_records",
+                return_value=[web_data._default_admin()],
+            ),
+            patch.object(
+                web_data,
+                "save_users",
+                side_effect=lambda records: [
+                    web_data._public_user(record) for record in records
+                ],
+            ),
+            patch.object(web_app, "add_user", wraps=web_data.add_user) as add_user,
+        ):
+            response = client.post(
+                "/api/users",
+                json={
+                    "username": "operator",
+                    "password": "secret",
+                    "role": "user",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        add_user.assert_called_once_with("operator", "secret", "user", "")
+        self.assertEqual(response.json()["users"][0]["email"], "")
+
     def test_update_user_route_forwards_email(self) -> None:
         client = TestClient(web_app.app)
         admin = {"username": "admin", "role": "admin"}

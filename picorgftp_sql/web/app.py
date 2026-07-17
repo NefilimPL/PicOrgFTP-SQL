@@ -5622,12 +5622,14 @@ def create_app() -> FastAPI:
     async def users_add(request: Request) -> JSONResponse:
         _require_admin(request)
         payload = await request.json()
+        email = payload.get("email", "") if isinstance(payload, dict) else ""
+        email = "" if email is None else str(email)
         try:
             users = add_user(
                 str(payload.get("username") if isinstance(payload, dict) else ""),
                 str(payload.get("password") if isinstance(payload, dict) else ""),
                 str(payload.get("role") if isinstance(payload, dict) else "user"),
-                str(payload.get("email") if isinstance(payload, dict) else ""),
+                email,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
