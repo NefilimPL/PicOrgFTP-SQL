@@ -32,6 +32,10 @@ from picorgftp_sql.web import app as web_app
 class WebSmokeCiTests(unittest.TestCase):
     def setUp(self) -> None:
         os.environ["PICORG_WEB_AUTH"] = "0"
+        web_app._RATE_LIMITS.clear()
+
+    def tearDown(self) -> None:
+        web_app._RATE_LIMITS.clear()
 
     def test_health_endpoint_returns_versioned_ok_payload(self) -> None:
         client = TestClient(web_app.app)
