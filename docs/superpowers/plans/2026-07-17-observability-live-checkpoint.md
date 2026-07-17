@@ -27,7 +27,7 @@
 **Interfaces:**
 - Produces: `snapshot_operational_event_stream(*, since: str, limit: int = 2000) -> dict[str, Any]` with `items` and `stream_after_id`.
 
-- [ ] Add failing tests for an empty marker, latest surviving window rows, a pruned/tombstone marker, no sequence leakage, and polling more than 100 events inserted after the checkpoint.
+- [ ] Add failing tests for a fresh origin marker with no items, latest surviving window rows, a pruned/tombstone marker, no sequence leakage, and polling more than 100 events inserted after the checkpoint.
 - [ ] Run the focused store tests and confirm failures are caused by the missing snapshot method.
 - [ ] Implement the single-connection read transaction, bounded 2,000-row query, and chronological output.
 - [ ] Run the focused store tests to GREEN.

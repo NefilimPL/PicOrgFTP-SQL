@@ -19,7 +19,8 @@ class SourceIntegrityTests(unittest.TestCase):
         )
         source = app_path.read_text(encoding="utf-8")
 
-        self.assertIn('new EventSource("/api/observability/stream', source)
+        self.assertIn("new EventSource(", source)
+        self.assertIn('"/api/observability/stream?after_id="', source)
         self.assertIn('"/api/observability/events', source)
         self.assertIn('"/api/observability/incidents', source)
         self.assertIn('"/api/observability/jobs', source)
@@ -44,6 +45,7 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("seedGeneration", seed_source)
         self.assertIn("live_seed", seed_source)
         self.assertIn("stream_after_id", seed_source)
+        self.assertIn("if (!streamAfterId)", seed_source)
         self.assertIn("mergeLiveItems", seed_source)
         self.assertLess(
             seed_source.index('"/api/observability/events?"'),
@@ -75,6 +77,9 @@ class SourceIntegrityTests(unittest.TestCase):
             )
         ]
         self.assertIn("encodeURIComponent(afterId)", stream_source)
+        self.assertNotIn(': new EventSource("/api/observability/stream")', stream_source)
+        self.assertIn("streamConnected = true", stream_source)
+        self.assertIn("streamConnected = false", stream_source)
         self.assertIn('state.observability.paused ? "Wstrzymano" : "Polaczono"', stream_source)
         self.assertIn("if (tab.loading) return;", source)
         self.assertIn("logsLoadMoreButton.disabled = Boolean(tab.loading)", source)
@@ -154,6 +159,13 @@ class SourceIntegrityTests(unittest.TestCase):
             )
         ]
         self.assertIn("jobs.nextCursor = payload.next_cursor", jobs_walk)
+        resume_source = source[
+            source.index('logsPauseButton?.addEventListener("click"') : source.index(
+                "if (logsAutoscrollToggle)"
+            )
+        ]
+        self.assertIn("state.observability.streamConnected", resume_source)
+        self.assertIn('"Rozlaczono"', resume_source)
 
     def test_web_client_reports_deduplicated_global_failures(self) -> None:
         app_path = (

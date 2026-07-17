@@ -181,6 +181,53 @@ def test_live_seed_is_admin_only_atomic_and_exposes_only_opaque_marker(
     admin.close()
 
 
+def test_fresh_live_seed_origin_marker_streams_later_events_without_sentinel_data(
+    api_environment,
+) -> None:
+    client, store = api_environment
+    _login(client)
+
+    seed = client.get("/api/observability/events", params={"live_seed": 1})
+
+    assert seed.status_code == 200
+    payload = seed.json()
+    assert payload["items"] == []
+    assert payload["stream_after_id"]
+    assert "sequence" not in json.dumps(payload)
+    store.append_operational_event(
+        _event("evt-after-origin", datetime.now(timezone.utc).isoformat())
+    )
+    endpoint = next(
+        route.endpoint
+        for route in web_app.app.routes
+        if getattr(route, "path", "") == "/api/observability/stream"
+    )
+
+    class RequestStub:
+        headers: dict[str, str] = {}
+
+        async def is_disconnected(self) -> bool:
+            return False
+
+    async def first_frame() -> str:
+        with patch.object(
+            web_app,
+            "_require_admin",
+            return_value={"username": "admin", "role": "admin"},
+        ):
+            response = await endpoint(
+                RequestStub(), after_id=payload["stream_after_id"]
+            )
+            iterator = response.body_iterator
+            frame = await anext(iterator)
+            await iterator.aclose()
+            return frame
+
+    frame = asyncio.run(first_frame())
+    assert frame.startswith("id: evt-after-origin\n")
+    assert payload["stream_after_id"] not in frame
+
+
 def test_incidents_include_only_their_correlated_context(api_environment) -> None:
     client, store = api_environment
     _login(client)

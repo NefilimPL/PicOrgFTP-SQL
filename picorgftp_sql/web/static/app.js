@@ -54,6 +54,7 @@ const state = {
     activeTab: "live",
     unread: { critical: 0, error: 0, warning: 0, total: 0, highest: "" },
     stream: null,
+    streamConnected: false,
     streamSeeded: false,
     streamAfterId: "",
     seedGeneration: 0,
@@ -5140,6 +5141,9 @@ async function seedLiveLogs({ force = false } = {}) {
     if (state.observability.seedGeneration !== seedGeneration) return;
     const seedItems = mergeLiveItems(Array.isArray(payload.items) ? payload.items : []);
     const streamAfterId = String(payload.stream_after_id || "");
+    if (!streamAfterId) {
+      throw new Error("Serwer nie zwrocil punktu wznowienia strumienia.");
+    }
     if (state.observability.paused) {
       appendPausedObservabilityEvents(seedItems);
     } else {
@@ -5153,6 +5157,8 @@ async function seedLiveLogs({ force = false } = {}) {
     if (state.observability.seedGeneration !== seedGeneration) return;
     if (state.observability.streamAfterId) {
       startObservabilityStream(state.observability.streamAfterId);
+    } else if (logsStreamStatus) {
+      logsStreamStatus.textContent = "Rozlaczono";
     }
     throw error;
   } finally {
@@ -5227,17 +5233,30 @@ function startObservabilityStream(afterId = state.observability.streamAfterId ||
   ) {
     return;
   }
-  const stream = afterId
-    ? new EventSource("/api/observability/stream?after_id=" + encodeURIComponent(afterId))
-    : new EventSource("/api/observability/stream");
+  if (!afterId) {
+    state.observability.streamConnected = false;
+    if (logsStreamStatus) logsStreamStatus.textContent = "Rozlaczono";
+    return;
+  }
+  const stream = new EventSource(
+    "/api/observability/stream?after_id=" + encodeURIComponent(afterId)
+  );
   state.observability.stream = stream;
+  state.observability.streamConnected = false;
+  if (logsStreamStatus && !state.observability.paused) {
+    logsStreamStatus.textContent = "Laczenie...";
+  }
   stream.onopen = () => {
+    if (state.observability.stream !== stream) return;
+    state.observability.streamConnected = true;
     if (logsStreamStatus) {
       logsStreamStatus.textContent = state.observability.paused ? "Wstrzymano" : "Polaczono";
     }
   };
   stream.onmessage = handleObservabilityEvent;
   stream.onerror = () => {
+    if (state.observability.stream !== stream) return;
+    state.observability.streamConnected = false;
     if (logsStreamStatus) {
       logsStreamStatus.textContent = state.observability.paused
         ? "Wstrzymano"
@@ -5249,6 +5268,7 @@ function startObservabilityStream(afterId = state.observability.streamAfterId ||
 function stopObservabilityStream() {
   state.observability.stream?.close();
   state.observability.stream = null;
+  state.observability.streamConnected = false;
   if (logsStreamStatus) logsStreamStatus.textContent = "";
 }
 
@@ -10716,7 +10736,13 @@ logsPauseButton?.addEventListener("click", () => {
   const buffered = state.observability.buffer.splice(0);
   const live = observabilityTab("live");
   live.items = mergeLiveItems([...live.items, ...buffered]);
-  if (logsStreamStatus) logsStreamStatus.textContent = "Polaczono";
+  if (logsStreamStatus) {
+    logsStreamStatus.textContent = state.observability.streamConnected
+      ? "Polaczono"
+      : state.observability.stream
+        ? "Laczenie..."
+        : "Rozlaczono";
+  }
   renderLogs();
 });
 

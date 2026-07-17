@@ -231,7 +231,7 @@ def test_connected_stream_survives_pruning_and_full_clear(tmp_path: Path) -> Non
     assert store.poll_operational_event_stream(position=after_clear["position"])["items"] == []
     with sqlite3.connect(tmp_path / "app.sqlite") as conn:
         assert conn.execute("SELECT COUNT(*) FROM operational_events").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM operational_event_stream").fetchone()[0] == 3
+        assert conn.execute("SELECT COUNT(*) FROM operational_event_stream").fetchone()[0] == 4
 
 
 def test_v5_migration_backfills_stream_once_in_rowid_order(
@@ -300,7 +300,9 @@ def test_v5_migration_backfills_stream_once_in_rowid_order(
         mappings = conn.execute(
             "SELECT sequence, event_id FROM operational_event_stream ORDER BY sequence"
         ).fetchall()
-    assert mappings == [(1, "evt-z"), (2, "evt-a"), (3, "evt-m")]
+    assert mappings[0][0] == 0
+    assert mappings[0][1]
+    assert mappings[1:] == [(1, "evt-z"), (2, "evt-a"), (3, "evt-m")]
 
     traced_sql.clear()
     store.initialize()
@@ -331,7 +333,9 @@ def test_initialize_recovers_missing_v6_stream_table(tmp_path: Path) -> None:
         mappings = conn.execute(
             "SELECT sequence, event_id FROM operational_event_stream ORDER BY sequence"
         ).fetchall()
-    assert mappings == [(1, "evt-a"), (2, "evt-b")]
+    assert mappings[0][0] == 0
+    assert mappings[0][1]
+    assert mappings[1:] == [(1, "evt-a"), (2, "evt-b")]
 
 
 def test_empty_stream_marker_returns_bounded_latest_snapshot(tmp_path: Path) -> None:
@@ -349,14 +353,89 @@ def test_empty_stream_marker_returns_bounded_latest_snapshot(tmp_path: Path) -> 
     assert store.poll_operational_event_stream(position=start["position"])["items"] == []
 
 
-def test_live_snapshot_returns_empty_marker_for_empty_stream(tmp_path: Path) -> None:
+def test_live_snapshot_returns_origin_marker_for_empty_stream(tmp_path: Path) -> None:
     store = SqliteStore(str(tmp_path / "app.sqlite"))
 
     snapshot = store.snapshot_operational_event_stream(
         since="2026-07-16T00:00:00.000Z"
     )
 
-    assert snapshot == {"items": [], "stream_after_id": ""}
+    assert snapshot["items"] == []
+    assert snapshot["stream_after_id"]
+    with sqlite3.connect(tmp_path / "app.sqlite") as conn:
+        assert conn.execute(
+            "SELECT sequence, event_id FROM operational_event_stream"
+        ).fetchall() == [(0, snapshot["stream_after_id"])]
+        assert conn.execute("SELECT COUNT(*) FROM operational_events").fetchone()[0] == 0
+
+
+def test_origin_checkpoint_drains_all_later_events_and_survives_clear(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    initial = store.snapshot_operational_event_stream(
+        since="2026-07-16T00:00:00.000Z"
+    )
+    origin_id = initial["stream_after_id"]
+    expected = []
+    for index in range(205):
+        identity = f"evt-after-origin-{index:03d}"
+        expected.append(identity)
+        store.append_operational_event(
+            _event(identity, "2026-07-16T10:00:00.000Z")
+        )
+
+    start = store.start_operational_event_stream(after_id=origin_id)
+    position = start["position"]
+    streamed = []
+    page_sizes = []
+    while True:
+        page = store.poll_operational_event_stream(position=position, limit=100)
+        page_sizes.append(len(page["items"]))
+        streamed.extend(item["id"] for item in page["items"])
+        position = page["position"]
+        if not page["items"]:
+            break
+
+    assert start["items"] == []
+    assert page_sizes == [100, 100, 5, 0]
+    assert streamed == expected
+    assert origin_id not in streamed
+    assert all(
+        "sequence" not in item
+        for item in store.query_operational_events(limit=100)["items"]
+    )
+
+    store.clear_operational_data()
+    cleared = store.snapshot_operational_event_stream(
+        since="2026-07-16T00:00:00.000Z"
+    )
+    assert cleared["items"] == []
+    assert cleared["stream_after_id"]
+    with sqlite3.connect(tmp_path / "app.sqlite") as conn:
+        assert conn.execute(
+            "SELECT event_id FROM operational_event_stream WHERE sequence = 0"
+        ).fetchone() == (origin_id,)
+
+
+def test_initialize_recovers_missing_origin_without_disturbing_real_sequence(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    origin_id = store.snapshot_operational_event_stream(
+        since="2026-07-16T00:00:00.000Z"
+    )["stream_after_id"]
+    with sqlite3.connect(tmp_path / "app.sqlite") as conn:
+        conn.execute("DELETE FROM operational_event_stream WHERE sequence = 0")
+
+    store.initialize()
+    store.append_operational_event(_event("evt-real", "2026-07-16T10:00:00.000Z"))
+
+    with sqlite3.connect(tmp_path / "app.sqlite") as conn:
+        mappings = conn.execute(
+            "SELECT sequence, event_id FROM operational_event_stream ORDER BY sequence"
+        ).fetchall()
+    assert mappings == [(0, origin_id), (1, "evt-real")]
 
 
 def test_live_snapshot_uses_tombstone_checkpoint_and_drains_every_later_event(
@@ -852,9 +931,11 @@ def test_prune_and_clear_operational_data_preserve_web_history(tmp_path: Path) -
     }
     assert store.load_history()[0]["id"] == "history-1"
     with sqlite3.connect(tmp_path / "app.sqlite") as conn:
-        assert conn.execute(
+        stream_ids = conn.execute(
             "SELECT event_id FROM operational_event_stream ORDER BY sequence"
-        ).fetchall() == [("evt-old",), ("evt-boundary",), ("evt-warning",)]
+        ).fetchall()
+        assert stream_ids[0][0]
+        assert stream_ids[1:] == [("evt-old",), ("evt-boundary",), ("evt-warning",)]
 
 
 def test_sqlite_adapter_delegates_observability_repository(tmp_path: Path) -> None:

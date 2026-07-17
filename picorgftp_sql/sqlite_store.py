@@ -26,6 +26,9 @@ from .excel_utils import (
 )
 
 SCHEMA_VERSION = 6
+_OPERATIONAL_EVENT_STREAM_ORIGIN_ID = (
+    "sys-4e680c0b1c744a0e82e385cad10b47d1"
+)
 LIST_SHEETS = ("NAZWY", "TYPY", "MODELE", "KOLORY", "DODATKI")
 ENTRY_HEADERS = (
     EAN_HEADER,
@@ -527,6 +530,27 @@ class SqliteStore:
             )
             _migrate_web_history_created_at(conn)
             _reconcile_duplicate_open_incidents(conn)
+            conn.execute(
+                """
+                DELETE FROM operational_event_stream
+                WHERE sequence = 0 AND event_id <> ?
+                """,
+                (_OPERATIONAL_EVENT_STREAM_ORIGIN_ID,),
+            )
+            conn.execute(
+                """
+                DELETE FROM operational_event_stream
+                WHERE event_id = ? AND sequence <> 0
+                """,
+                (_OPERATIONAL_EVENT_STREAM_ORIGIN_ID,),
+            )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO operational_event_stream (sequence, event_id)
+                VALUES (0, ?)
+                """,
+                (_OPERATIONAL_EVENT_STREAM_ORIGIN_ID,),
+            )
             if previous_user_version < SCHEMA_VERSION or not stream_table_existed:
                 conn.execute(
                     """
