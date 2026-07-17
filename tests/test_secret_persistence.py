@@ -44,6 +44,9 @@ def test_free_text_redaction_covers_credentials_without_harming_identifiers() ->
         "FOLDED_COOKIE_SENTINEL_F1",
         "PUNCTUATION_SUFFIX_SENTINEL_F1",
         "BRACED_SUFFIX_SENTINEL_F1",
+        "ADJACENT_EAN_SENTINEL_F1",
+        "ADJACENT_OBJECT_SENTINEL_F1",
+        "ADJACENT_PATH_SENTINEL_F1",
         "§",
         "¤",
     ]
@@ -81,6 +84,18 @@ def test_free_text_redaction_covers_credentials_without_harming_identifiers() ->
             "Server=sql.local;Password={prefix;BRACED_SUFFIX_SENTINEL_F1};"
             "Database=products"
         ),
+        "adjacent_ean": (
+            "password=ADJACENT_EAN_SENTINEL_F1,EAN=5901234567890"
+        ),
+        "adjacent_object": (
+            "token=ADJACENT_OBJECT_SENTINEL_F1)object_id=12842"
+        ),
+        "adjacent_path": (
+            "pwd=ADJACENT_PATH_SENTINEL_F1,path=C:\\obrazy\\produkt.jpg"
+        ),
+        "empty_header": (
+            "Authorization:\nX-Diagnostic: EAN 5901234567890"
+        ),
         "diagnostic": (
             "Nie udało się zaktualizować produktu EAN 5901234567890, "
             "object ID 12842, plik C:\\obrazy\\5901234567890_01.jpg"
@@ -103,6 +118,18 @@ def test_free_text_redaction_covers_credentials_without_harming_identifiers() ->
         redacted["folded_http"]
     )
     assert "Następna linia diagnostyczna" in str(redacted["folded_session"])
+    assert redacted["adjacent_ean"] == (
+        "password=[REDACTED],EAN=5901234567890"
+    )
+    assert redacted["adjacent_object"] == (
+        "token=[REDACTED])object_id=12842"
+    )
+    assert redacted["adjacent_path"] == (
+        "pwd=[REDACTED],path=C:\\obrazy\\produkt.jpg"
+    )
+    assert redacted["empty_header"] == (
+        "Authorization:[REDACTED]\nX-Diagnostic: EAN 5901234567890"
+    )
 
 
 def test_recursive_redaction_stringifies_and_sanitizes_unknown_objects() -> None:

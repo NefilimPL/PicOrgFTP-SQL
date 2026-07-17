@@ -21,33 +21,42 @@ _SECRET_NAME = (
 )
 _HEADER_RE = re.compile(
     r"(?im)(?P<prefix>\b(?:authorization|proxy-authorization|cookie|set-cookie)"
-    r"\s*:\s*)[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*"
+    r"[ \t]*:[ \t]*)[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*"
 )
 _URI_USERINFO_RE = re.compile(
     r"(?i)(?P<prefix>\b[a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@/\s]+@"
 )
 _DOUBLE_QUOTED_VALUE_RE = re.compile(
     rf"(?i)(?P<prefix>(?<![\w-])[\"']?(?:{_SECRET_NAME})[\"']?"
-    r"\s*[:=]\s*)\"(?:\\[^\r\n]|[^\"\\\r\n])*\""
+    r"[ \t]*[:=][ \t]*)\"(?:\\[^\r\n]|[^\"\\\r\n])*\""
 )
 _SINGLE_QUOTED_VALUE_RE = re.compile(
     rf"(?i)(?P<prefix>(?<![\w-])[\"']?(?:{_SECRET_NAME})[\"']?"
-    r"\s*[:=]\s*)'(?:\\[^\r\n]|[^'\\\r\n])*'"
+    r"[ \t]*[:=][ \t]*)'(?:\\[^\r\n]|[^'\\\r\n])*'"
 )
 _BRACED_VALUE_RE = re.compile(
     rf"(?i)(?P<prefix>(?<![\w-])[\"']?(?:{_SECRET_NAME})[\"']?"
-    r"\s*[:=]\s*)\{(?:\}\}|[^}\r\n])*\}"
+    r"[ \t]*[:=][ \t]*)\{(?:\}\}|[^}\r\n])*\}"
 )
-_CONNECTION_VALUE_RE = re.compile(
-    rf"(?i)(?P<prefix>(?:^|;)\s*(?:{_SECRET_NAME})\s*=\s*)"
-    r"(?!\{)[^;\r\n]*(?=;)"
+_CONNECTION_PREFIX_RE = re.compile(
+    rf"(?i)(?P<prefix>(?:^|;)[ \t]*(?:{_SECRET_NAME})[ \t]*=[ \t]*)"
+    r"(?=[^\r\n]*;)"
 )
-_PLAIN_VALUE_RE = re.compile(
+_PLAIN_PREFIX_RE = re.compile(
     rf"(?i)(?P<prefix>(?<![\w-])[\"']?(?:{_SECRET_NAME})[\"']?"
-    r"\s*[:=]\s*)(?!\[REDACTED\])[^\s;\r\n]+"
+    r"[ \t]*[:=][ \t]*)"
 )
 _AUTH_SCHEME_RE = re.compile(
-    r"(?i)(?P<prefix>\b(?:Bearer|Basic)\s+)(?!\[REDACTED\])\S+"
+    r"(?i)(?P<prefix>\b(?:Bearer|Basic)[ \t]+)(?!\[REDACTED\])\S+"
+)
+_STRUCTURED_FIELD_RE = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_.-]*[ \t]*[:=]"
+)
+_SAFE_REDACTED_VALUES = (
+    REDACTED,
+    f'"{REDACTED}"',
+    f"'{REDACTED}'",
+    f"{{{REDACTED}}}",
 )
 
 
@@ -79,6 +88,63 @@ def _replace_uri_password(match: re.Match[str]) -> str:
     return f"{match.group('prefix')}{REDACTED}@"
 
 
+def _next_structured_field(text: str, delimiter_at: int) -> bool:
+    index = delimiter_at + 1
+    while index < len(text) and text[index] in " \t":
+        index += 1
+    return _STRUCTURED_FIELD_RE.match(text, index) is not None
+
+
+def _safe_redacted_value_end(text: str, start: int) -> int | None:
+    for value in _SAFE_REDACTED_VALUES:
+        if text.startswith(value, start):
+            return start + len(value)
+    return None
+
+
+def _redact_prefixed_values(
+    text: str,
+    prefix_re: re.Pattern[str],
+    *,
+    stop_at_whitespace: bool,
+) -> str:
+    """Redact prefix-matched values with a single forward scan per match."""
+
+    output: list[str] = []
+    emitted_to = 0
+    search_from = 0
+    while match := prefix_re.search(text, search_from):
+        value_start = match.end()
+        safe_end = _safe_redacted_value_end(text, value_start)
+        if safe_end is not None:
+            search_from = safe_end
+            continue
+
+        value_end = value_start
+        while value_end < len(text):
+            character = text[value_end]
+            if character in "\r\n;":
+                break
+            if stop_at_whitespace and character.isspace():
+                break
+            if character in ",)" and _next_structured_field(text, value_end):
+                break
+            value_end += 1
+
+        if value_end == value_start:
+            search_from = value_start + 1
+            continue
+        output.append(text[emitted_to:value_start])
+        output.append(REDACTED)
+        emitted_to = value_end
+        search_from = value_end
+
+    if not output:
+        return text
+    output.append(text[emitted_to:])
+    return "".join(output)
+
+
 def sanitize_free_text(value: object, *, limit: int = DEFAULT_TEXT_LIMIT) -> str:
     """Redact credential-shaped fragments, then cap the result by UTF-8 bytes."""
 
@@ -96,8 +162,16 @@ def sanitize_free_text(value: object, *, limit: int = DEFAULT_TEXT_LIMIT) -> str
     text = _DOUBLE_QUOTED_VALUE_RE.sub(_replace_double_quoted_value, text)
     text = _SINGLE_QUOTED_VALUE_RE.sub(_replace_single_quoted_value, text)
     text = _BRACED_VALUE_RE.sub(_replace_braced_value, text)
-    text = _CONNECTION_VALUE_RE.sub(_replace_value, text)
-    text = _PLAIN_VALUE_RE.sub(_replace_value, text)
+    text = _redact_prefixed_values(
+        text,
+        _CONNECTION_PREFIX_RE,
+        stop_at_whitespace=False,
+    )
+    text = _redact_prefixed_values(
+        text,
+        _PLAIN_PREFIX_RE,
+        stop_at_whitespace=True,
+    )
     text = _AUTH_SCHEME_RE.sub(_replace_value, text)
     return _truncate_utf8(text, limit)
 
