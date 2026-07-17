@@ -196,6 +196,23 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("renderHistoryTiming(item)", js_source)
         self.assertIn("historySearchInput?.addEventListener", js_source)
 
+    def test_history_exposes_detailed_changes_modal(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        js_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        html_source = (
+            root / "picorgftp_sql" / "web" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('id="historyChangesModal"', html_source)
+        self.assertIn('changesButton.textContent = "Zmiany"', js_source)
+        self.assertIn("renderHistoryChanges(item)", js_source)
+        self.assertIn(
+            "Szczegolowy zapis zmian nie byl jeszcze dostepny",
+            js_source,
+        )
+
     def test_web_autocomplete_keeps_local_values_first(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]

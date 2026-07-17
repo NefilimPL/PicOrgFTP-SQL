@@ -232,6 +232,10 @@ const historyDetailTitle = document.querySelector("#historyDetailTitle");
 const historyDetailOutput = document.querySelector("#historyDetailOutput");
 const historyTimingTitle = document.querySelector("#historyTimingTitle");
 const historyTimingOutput = document.querySelector("#historyTimingOutput");
+const historyChangesModal = document.querySelector("#historyChangesModal");
+const historyChangesTitle = document.querySelector("#historyChangesTitle");
+const historyChangesOutput = document.querySelector("#historyChangesOutput");
+const historyChangesCloseButton = document.querySelector("#historyChangesCloseButton");
 const pimcoreTestModal = document.querySelector("#pimcoreTestModal");
 const pimcoreTestForm = document.querySelector("#pimcoreTestForm");
 const pimcoreLiveLog = document.querySelector("#pimcoreLiveLog");
@@ -4184,6 +4188,113 @@ function timingMs(value) {
   return `${Math.max(0, Math.round(Number(value || 0)))} ms`;
 }
 
+function historyChangeValue(value) {
+  if (value === null || value === undefined || value === "") return "Brak danych";
+  return String(value);
+}
+
+function formatBytes(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "Brak danych";
+  const bytes = Math.max(0, Number(value));
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+}
+
+function historyChangeRow(label, value) {
+  const row = document.createElement("div");
+  const name = document.createElement("strong");
+  const output = document.createElement("span");
+  row.className = "history-change-row";
+  name.textContent = label;
+  output.textContent = historyChangeValue(value);
+  row.append(name, output);
+  return row;
+}
+
+function historyChangeSection(title) {
+  const section = document.createElement("section");
+  const heading = document.createElement("h2");
+  section.className = "history-change-section";
+  heading.textContent = title;
+  section.appendChild(heading);
+  return section;
+}
+
+function historyChangeComparison(label, before, after, formatter = historyChangeValue) {
+  const row = document.createElement("div");
+  const heading = document.createElement("strong");
+  const values = document.createElement("div");
+  const beforeCell = document.createElement("div");
+  const beforeLabel = document.createElement("small");
+  const beforeValue = document.createElement("span");
+  const afterCell = document.createElement("div");
+  const afterLabel = document.createElement("small");
+  const afterValue = document.createElement("span");
+  row.className = "history-change-comparison";
+  heading.textContent = historyChangeValue(label);
+  values.className = "history-change-before-after";
+  beforeCell.className = "history-change-before";
+  beforeLabel.textContent = "Przed";
+  beforeValue.textContent = formatter(before);
+  afterCell.className = "history-change-after";
+  afterLabel.textContent = "Po";
+  afterValue.textContent = formatter(after);
+  beforeCell.append(beforeLabel, beforeValue);
+  afterCell.append(afterLabel, afterValue);
+  values.append(beforeCell, afterCell);
+  row.append(heading, values);
+  return row;
+}
+
+function appendHistoryChangeObject(container, label, value) {
+  if (Array.isArray(value)) {
+    if (!value.length) {
+      container.appendChild(historyChangeRow(label, null));
+      return;
+    }
+    value.forEach((item, index) => appendHistoryChangeObject(container, `${label} ${index + 1}`, item));
+    return;
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value);
+    if (!entries.length) {
+      container.appendChild(historyChangeRow(label, null));
+      return;
+    }
+    const group = document.createElement("div");
+    const heading = document.createElement("h3");
+    group.className = "history-change-object";
+    heading.textContent = historyChangeValue(label);
+    group.appendChild(heading);
+    for (const [key, nestedValue] of entries) {
+      appendHistoryChangeObject(group, key, nestedValue);
+    }
+    container.appendChild(group);
+    return;
+  }
+  container.appendChild(historyChangeRow(label, value));
+}
+
+function historyFileOperationLabel(operation) {
+  return {
+    added: "Dodano",
+    deleted: "Usunieto",
+    replaced: "Zastapiono",
+    migrated: "Przeniesiono",
+  }[operation] || historyChangeValue(operation);
+}
+
+let historyChangesReturnFocus = null;
+
+function closeHistoryChangesModal() {
+  historyChangesModal?.classList.remove("active");
+  if (historyChangesReturnFocus?.focus) {
+    historyChangesReturnFocus.focus();
+  }
+  historyChangesReturnFocus = null;
+}
+
 function renderHistoryTiming(item = {}) {
   if (!historyTimingTitle || !historyTimingOutput) {
     return;
@@ -4213,6 +4324,125 @@ function renderHistoryTiming(item = {}) {
   document.querySelector("#historyTimingModal")?.classList.add("active");
 }
 
+function renderHistoryChanges(item = {}) {
+  if (!historyChangesModal || !historyChangesTitle || !historyChangesOutput) {
+    return;
+  }
+  const details = item.details && typeof item.details === "object" ? item.details : {};
+  const changeSet = details.change_set && typeof details.change_set === "object"
+    ? details.change_set
+    : null;
+  historyChangesReturnFocus = document.activeElement;
+  historyChangesTitle.textContent = `Zmiany: ${item.time || item.summary || "operacja"}`;
+  historyChangesOutput.textContent = "";
+
+  if (!changeSet) {
+    const compatibility = document.createElement("p");
+    historyChangesOutput.className = "history-changes-output empty-state";
+    compatibility.textContent = "Szczegolowy zapis zmian nie byl jeszcze dostepny dla tej operacji.";
+    historyChangesOutput.appendChild(compatibility);
+    historyChangesModal.classList.add("active");
+    window.setTimeout(() => historyChangesCloseButton?.focus(), 0);
+    return;
+  }
+
+  historyChangesOutput.className = "history-changes-output";
+  const overview = historyChangeSection("Operacja");
+  overview.appendChild(historyChangeRow("Rodzaj", changeSet.kind));
+  const jobId = details.job_id ?? changeSet.job_id;
+  if (jobId !== null && jobId !== undefined && jobId !== "") {
+    overview.appendChild(historyChangeRow("ID zadania", details.job_id ?? changeSet.job_id));
+  }
+  historyChangesOutput.appendChild(overview);
+
+  const fields = Array.isArray(changeSet.fields) ? changeSet.fields : [];
+  if (fields.length) {
+    const section = historyChangeSection("Pola produktu");
+    for (const field of fields) {
+      section.appendChild(
+        historyChangeComparison(field.label || field.key, field.before, field.after)
+      );
+    }
+    historyChangesOutput.appendChild(section);
+  }
+
+  const pimcore = changeSet.pimcore && typeof changeSet.pimcore === "object"
+    ? changeSet.pimcore
+    : {};
+  const pimcoreFields = Array.isArray(pimcore.fields) ? pimcore.fields : [];
+  if (pimcore.kind || pimcoreFields.length) {
+    const section = historyChangeSection("Pimcore");
+    if (pimcore.kind) {
+      section.appendChild(historyChangeRow("Rodzaj", pimcore.kind));
+    }
+    for (const field of pimcoreFields) {
+      section.appendChild(
+        historyChangeComparison(field.label || field.key, field.before, field.after)
+      );
+    }
+    historyChangesOutput.appendChild(section);
+  }
+
+  const files = Array.isArray(changeSet.files) ? changeSet.files : [];
+  if (files.length) {
+    const section = historyChangeSection("Pliki");
+    for (const file of files) {
+      const operation = String(file.operation || "unknown").toLowerCase();
+      const operationClass = ["added", "deleted", "replaced", "migrated"].includes(operation)
+        ? operation
+        : "unknown";
+      const card = document.createElement("article");
+      const heading = document.createElement("h3");
+      card.className = `history-file-change history-file-change-${operationClass}`;
+      heading.textContent = `Slot ${historyChangeValue(file.slot)}: ${historyFileOperationLabel(operation)}`;
+      card.appendChild(heading);
+      card.appendChild(
+        historyChangeComparison("Nazwa", file.before_name, file.after_name)
+      );
+      card.appendChild(
+        historyChangeComparison(
+          "Rozmiar",
+          file.before_size_bytes,
+          file.after_size_bytes,
+          formatBytes
+        )
+      );
+      if (file.source_name !== undefined || file.source_size_bytes !== undefined) {
+        card.appendChild(historyChangeRow("Plik zrodlowy", file.source_name));
+        card.appendChild(historyChangeRow("Rozmiar zrodlowy", formatBytes(file.source_size_bytes)));
+      }
+      if (file.processing_operation !== undefined) {
+        card.appendChild(historyChangeRow("Przetwarzanie", file.processing_operation));
+      }
+      if (file.elapsed_ms !== undefined) {
+        card.appendChild(historyChangeRow("Czas", `${historyChangeValue(file.elapsed_ms)} ms`));
+      }
+      if (file.content_fit !== undefined) {
+        card.appendChild(historyChangeRow("Dopasowanie zawartosci", file.content_fit ? "Tak" : "Nie"));
+      }
+      if (file.preprocessed !== undefined) {
+        card.appendChild(historyChangeRow("Wstepnie przetworzony", file.preprocessed ? "Tak" : "Nie"));
+      }
+      section.appendChild(card);
+    }
+    historyChangesOutput.appendChild(section);
+  }
+
+  const integrations = changeSet.integrations && typeof changeSet.integrations === "object"
+    ? changeSet.integrations
+    : null;
+  if (integrations && Object.keys(integrations).length) {
+    const section = historyChangeSection("Integracje");
+    for (const [key, value] of Object.entries(integrations)) {
+      appendHistoryChangeObject(section, key, value);
+    }
+    historyChangesOutput.appendChild(section);
+  }
+
+  historyChangesModal.classList.add("active");
+  window.setTimeout(() => historyChangesCloseButton?.focus(), 0);
+}
+
 function renderHistoryDetails(group) {
   historyDetailTitle.textContent = `Historia EAN ${group.ean}`;
   historyDetailOutput.textContent = "";
@@ -4222,6 +4452,7 @@ function renderHistoryDetails(group) {
     const summary = document.createElement("strong");
     const details = document.createElement("span");
     const actions = document.createElement("div");
+    const changesButton = document.createElement("button");
     const timingButton = document.createElement("button");
     row.className = "history-item";
     meta.className = "history-meta";
@@ -4242,12 +4473,21 @@ function renderHistoryDetails(group) {
       .filter(Boolean)
       .join(" | ");
     actions.className = "history-item-actions";
+    changesButton.type = "button";
+    changesButton.className = "secondary-button";
+    changesButton.textContent = "Zmiany";
+    const hasChangeSet = Boolean(item.details?.change_set);
+    const hasLegacyDetails = Boolean(
+      item.details && typeof item.details === "object" && Object.keys(item.details).length
+    );
+    changesButton.disabled = !hasChangeSet && !hasLegacyDetails;
+    changesButton.addEventListener("click", () => renderHistoryChanges(item));
     timingButton.type = "button";
     timingButton.className = "secondary-button";
     timingButton.textContent = "Czasy";
     timingButton.disabled = !item.details?.timing;
     timingButton.addEventListener("click", () => renderHistoryTiming(item));
-    actions.appendChild(timingButton);
+    actions.append(changesButton, timingButton);
     row.append(meta, summary, details, actions);
     historyDetailOutput.appendChild(row);
   }
@@ -9436,6 +9676,10 @@ document.querySelectorAll("[data-close-history-timing]").forEach((button) => {
   button.addEventListener("click", () => {
     document.querySelector("#historyTimingModal")?.classList.remove("active");
   });
+});
+
+document.querySelectorAll("[data-close-history-changes]").forEach((button) => {
+  button.addEventListener("click", closeHistoryChangesModal);
 });
 
 document.querySelectorAll("[data-close-backup-history]").forEach((button) => {

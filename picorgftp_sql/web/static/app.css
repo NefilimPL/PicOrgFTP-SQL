@@ -1910,10 +1910,117 @@ button.slot-badge.on:hover {
   min-height: 32px;
 }
 
+.history-changes-panel {
+  width: min(980px, calc(100vw - 32px));
+}
+
+.history-changes-output,
+.history-change-section,
+.history-change-object {
+  display: grid;
+  gap: 8px;
+}
+
+.history-changes-output {
+  gap: 14px;
+}
+
+.history-change-section {
+  border-top: 1px solid var(--surface-2);
+  padding-top: 12px;
+}
+
+.history-change-section:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.history-change-section h2,
+.history-change-section h3,
+.history-change-object h3 {
+  margin: 0;
+}
+
+.history-change-section h2 {
+  font-size: 16px;
+}
+
+.history-change-section h3,
+.history-change-object h3 {
+  font-size: 14px;
+}
+
+.history-change-row {
+  display: grid;
+  grid-template-columns: minmax(120px, .35fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.history-change-row span,
+.history-change-before-after span {
+  overflow-wrap: anywhere;
+}
+
+.history-change-comparison {
+  display: grid;
+  gap: 5px;
+}
+
+.history-change-before-after {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.history-change-before,
+.history-change-after {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 8px;
+}
+
+.history-change-before small,
+.history-change-after small {
+  color: var(--muted);
+}
+
+.history-file-change,
+.history-change-object {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+  padding: 10px;
+}
+
+.history-file-change-added {
+  border-left-color: var(--accent);
+}
+
+.history-file-change-deleted {
+  border-left-color: var(--danger);
+}
+
+.history-file-change-replaced,
+.history-file-change-migrated {
+  border-left-color: var(--warn);
+}
+
 @media (max-width: 700px) {
   .pimcore-setup-progress,
   .pimcore-setup-grid,
   .pimcore-setup-field-row {
+    grid-template-columns: 1fr;
+  }
+
+  .history-change-before-after,
+  .history-change-row {
     grid-template-columns: 1fr;
   }
 

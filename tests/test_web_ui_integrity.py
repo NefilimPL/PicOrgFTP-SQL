@@ -750,6 +750,55 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("nested-modal", modal_classes["backupHistoryModal"])
         self.assertIn("nested-modal", modal_classes["backupDiffModal"])
 
+    def test_history_changes_modal_is_safe_detailed_and_responsive(self) -> None:
+        html = _parse(INDEX_HTML)
+        html_source = INDEX_HTML.read_text(encoding="utf-8")
+        js_source = APP_JS.read_text(encoding="utf-8")
+        css_source = (
+            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+
+        for element_id in (
+            "historyChangesModal",
+            "historyChangesTitle",
+            "historyChangesOutput",
+        ):
+            self.assertIn(element_id, html.ids)
+        self.assertIn('class="modal-view nested-modal"', html_source)
+        self.assertIn('role="dialog"', html_source)
+        self.assertIn('aria-modal="true"', html_source)
+        self.assertIn('aria-labelledby="historyChangesTitle"', html_source)
+        self.assertIn("data-close-history-changes", html_source)
+
+        renderer_start = js_source.index("function renderHistoryChanges")
+        renderer_end = js_source.index("function renderHistoryDetails", renderer_start)
+        renderer = js_source[renderer_start:renderer_end]
+        self.assertNotIn("innerHTML", renderer)
+        self.assertNotIn("history-file-change-${operation}", renderer)
+        for value in (
+            "field.before",
+            "field.after",
+            "file.before_name",
+            "file.after_name",
+            "file.before_size_bytes",
+            "file.after_size_bytes",
+            "file.elapsed_ms",
+            "details.job_id",
+        ):
+            self.assertIn(value, renderer)
+        self.assertIn("textContent", renderer)
+        self.assertIn("historyChangesCloseButton?.focus()", renderer)
+        self.assertIn(
+            "changesButton.disabled = !hasChangeSet && !hasLegacyDetails",
+            js_source,
+        )
+        self.assertIn("historyChangesReturnFocus.focus()", js_source)
+        self.assertIn("history-change-before-after", css_source)
+        self.assertIn("history-file-change-added", css_source)
+        self.assertIn("history-file-change-deleted", css_source)
+        self.assertIn("history-file-change-replaced", css_source)
+        self.assertIn("@media (max-width: 700px)", css_source)
+
 
 if __name__ == "__main__":
     unittest.main()
