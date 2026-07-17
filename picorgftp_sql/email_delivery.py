@@ -203,7 +203,9 @@ class SmtpMailTransport:
 
             if self._username:
                 client.login(self._username, self._password)
-            client.send_message(outbound)
+            refused_recipients = client.send_message(outbound)
+            if refused_recipients:
+                raise RuntimeError("SMTP delivery failed.")
         except Exception:
             raise RuntimeError("SMTP delivery failed.") from None
         finally:

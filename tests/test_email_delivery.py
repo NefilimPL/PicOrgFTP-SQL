@@ -39,12 +39,18 @@ class FakeResponse:
 
 
 class FakeSmtp:
-    def __init__(self, *, send_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        send_error: Exception | None = None,
+        send_result: object = None,
+    ) -> None:
         self.calls: list[str] = []
         self.login_args: tuple[str, str] | None = None
         self.message = ""
         self.starttls_context: ssl.SSLContext | None = None
         self.send_error = send_error
+        self.send_result = send_result
 
     def ehlo(self) -> None:
         self.calls.append("ehlo")
@@ -57,11 +63,12 @@ class FakeSmtp:
         self.calls.append("login")
         self.login_args = (username, password)
 
-    def send_message(self, message: object) -> None:
+    def send_message(self, message: object) -> object:
         self.calls.append("send_message")
         self.message = message.as_string()
         if self.send_error is not None:
             raise self.send_error
+        return self.send_result
 
     def quit(self) -> None:
         self.calls.append("quit")
@@ -278,7 +285,7 @@ def test_smtp_transport_uses_starttls_login_and_message_id(monkeypatch) -> None:
 
 
 def test_smtp_transport_uses_implicit_tls_without_empty_username_login(monkeypatch) -> None:
-    smtp = FakeSmtp()
+    smtp = FakeSmtp(send_result={})
     calls: list[tuple[str, int, int, ssl.SSLContext]] = []
 
     def fake_smtp_ssl(
@@ -359,6 +366,45 @@ def test_smtp_transport_redacts_errors_and_always_cleans_up(monkeypatch) -> None
         ).send(sample_message())
 
     assert password not in str(exc_info.value)
+    assert smtp.calls[-1] == "quit"
+
+
+def test_smtp_transport_rejects_redacted_recipient_refusals_and_cleans_up(
+    monkeypatch,
+) -> None:
+    sensitive_response = (
+        "550 password-sensitive recipient@example.com Plain incident body"
+    )
+    smtp = FakeSmtp(
+        send_result={
+            "recipient@example.com": (550, sensitive_response.encode("utf-8"))
+        }
+    )
+    monkeypatch.setattr(
+        email_delivery.smtplib,
+        "SMTP",
+        lambda host, port, timeout: smtp,
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        SmtpMailTransport(
+            {
+                "host": "smtp.example",
+                "port": 25,
+                "security": "none",
+                "username": "sender",
+                "password": "password-sensitive",
+            }
+        ).send(sample_message())
+
+    assert str(exc_info.value) == "SMTP delivery failed."
+    for sensitive in (
+        sensitive_response,
+        "password-sensitive",
+        "recipient@example.com",
+        "Plain incident body",
+    ):
+        assert sensitive not in str(exc_info.value)
     assert smtp.calls[-1] == "quit"
 
 
