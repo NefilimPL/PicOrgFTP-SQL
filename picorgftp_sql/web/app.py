@@ -201,6 +201,9 @@ _HEALTH_INTEGRATION_CACHE_LOCK = threading.Lock()
 _HEALTH_INTEGRATION_CACHE_PATH = ""
 _HEALTH_INTEGRATION_CACHE_AT = 0.0
 _HEALTH_INTEGRATION_CACHE: Dict[str, Any] | None = None
+_HEALTH_STORE_CACHE_LOCK = threading.Lock()
+_HEALTH_STORE_CACHE_PATH = ""
+_HEALTH_STORE_CACHE: Any = None
 RATE_LIMIT_LOGIN_ATTEMPTS = 20
 RATE_LIMIT_LOGIN_WINDOW_SECONDS = 10 * 60
 RATE_LIMIT_UPLOAD_ATTEMPTS = 80
@@ -4376,10 +4379,30 @@ def _cached_last_known_integrations(store: Any) -> Dict[str, Any]:
         return snapshot
 
 
+def _cached_health_store() -> Any:
+    """Initialize the health SQLite store once per configured database path."""
+
+    global _HEALTH_STORE_CACHE
+    global _HEALTH_STORE_CACHE_PATH
+    store_path = str(storage_settings.resolve_sqlite_path())
+    with _HEALTH_STORE_CACHE_LOCK:
+        if _HEALTH_STORE_CACHE is not None and _HEALTH_STORE_CACHE_PATH == store_path:
+            return _HEALTH_STORE_CACHE
+        store = observability_store()
+        _HEALTH_STORE_CACHE = store
+        _HEALTH_STORE_CACHE_PATH = store_path
+        return store
+
+
 def _invalidate_health_integration_cache() -> None:
     global _HEALTH_INTEGRATION_CACHE
     global _HEALTH_INTEGRATION_CACHE_AT
     global _HEALTH_INTEGRATION_CACHE_PATH
+    global _HEALTH_STORE_CACHE
+    global _HEALTH_STORE_CACHE_PATH
+    with _HEALTH_STORE_CACHE_LOCK:
+        _HEALTH_STORE_CACHE = None
+        _HEALTH_STORE_CACHE_PATH = ""
     with _HEALTH_INTEGRATION_CACHE_LOCK:
         _HEALTH_INTEGRATION_CACHE = None
         _HEALTH_INTEGRATION_CACHE_AT = 0.0
@@ -4432,7 +4455,7 @@ def _health_payload() -> Dict[str, Any]:
         "pimcore": {"status": "unknown", "observed_at": ""},
     }
     try:
-        store = observability_store()
+        store = _cached_health_store()
         with store.connection() as conn:
             conn.execute("SELECT 1").fetchone()
         components["sqlite"] = {"status": "online", "observed_at": server_time}

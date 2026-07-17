@@ -941,6 +941,7 @@ def test_clear_logs_clears_operational_tables_but_preserves_audits(
         "alert_reads": 1,
         "notification_deliveries": 0,
         "notification_outbox": 0,
+        "pimcore_integration_contexts": 0,
     }
     assert store.query_operational_events()["items"] == []
     assert store.query_job_runs()["items"] == []

@@ -47,6 +47,14 @@ class WebSmokeCiTests(unittest.TestCase):
                 "resolve_sqlite_path",
                 return_value=os.path.join(temp_dir, "health.sqlite"),
             ),
+            patch.object(
+                web_app,
+                "notification_worker_health",
+                return_value={
+                    "status": "online",
+                    "observed_at": "2026-07-17T08:00:00.000Z",
+                },
+            ),
         ):
             web_app._invalidate_health_integration_cache()
             response = client.get("/api/health")
@@ -62,6 +70,9 @@ class WebSmokeCiTests(unittest.TestCase):
         self.assertIn(
             payload["components"]["job_processor"]["status"],
             {"online", "critical"},
+        )
+        self.assertEqual(
+            payload["components"]["notification_worker"]["status"], "online"
         )
 
     def test_add_user_route_forwards_email(self) -> None:
