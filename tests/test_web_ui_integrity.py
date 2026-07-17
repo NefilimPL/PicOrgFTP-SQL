@@ -768,6 +768,7 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn('role="dialog"', html_source)
         self.assertIn('aria-modal="true"', html_source)
         self.assertIn('aria-labelledby="historyChangesTitle"', html_source)
+        self.assertIn('tabindex="-1"', html_source)
         self.assertIn("data-close-history-changes", html_source)
 
         renderer_start = js_source.index("function renderHistoryChanges")
@@ -783,11 +784,11 @@ class WebUiIntegrityTests(unittest.TestCase):
             "file.before_size_bytes",
             "file.after_size_bytes",
             "file.elapsed_ms",
-            "details.job_id",
+            "historyChangeJobId(details, changeSet)",
         ):
             self.assertIn(value, renderer)
         self.assertIn("textContent", renderer)
-        self.assertIn("historyChangesCloseButton?.focus()", renderer)
+        self.assertIn("historyChangesCloseButton?.focus()", js_source)
         self.assertIn(
             "changesButton.disabled = !hasChangeSet && !hasLegacyDetails",
             js_source,
@@ -798,6 +799,65 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("history-file-change-deleted", css_source)
         self.assertIn("history-file-change-replaced", css_source)
         self.assertIn("@media (max-width: 700px)", css_source)
+
+    def test_history_changes_formats_structured_values_and_unknown_durations(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        css_source = (
+            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+        self.assertIn("function formatHistoryDuration", source)
+        value_start = source.index("function historyChangeValue")
+        value_end = source.index("function formatBytes", value_start)
+        value_formatter = source[value_start:value_end]
+        duration_start = source.index("function formatHistoryDuration")
+        duration_end = source.index("function historyChangeRow", duration_start)
+        duration_formatter = source[duration_start:duration_end]
+
+        self.assertIn('typeof value === "object"', value_formatter)
+        self.assertIn("JSON.stringify", value_formatter)
+        self.assertIn("Object.keys(nested).sort()", value_formatter)
+        self.assertIn(
+            'return serialized === undefined ? "Brak danych" : serialized',
+            value_formatter,
+        )
+        self.assertIn('return "Brak danych"', duration_formatter)
+        self.assertIn('return `${Math.max(0, Number(value))} ms`', duration_formatter)
+        self.assertIn("formatHistoryDuration(file.elapsed_ms)", source)
+        self.assertNotIn('`${historyChangeValue(file.elapsed_ms)} ms`', source)
+        style_start = css_source.index(".history-change-row span,")
+        style_end = css_source.index("}", style_start)
+        self.assertIn("white-space: pre-wrap", css_source[style_start:style_end])
+
+    def test_history_changes_resolves_pimcore_operation_identifier(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        self.assertIn("function historyChangeJobId", source)
+        resolver_start = source.index("function historyChangeJobId")
+        resolver_end = source.index("function historyFileOperationLabel", resolver_start)
+        resolver = source[resolver_start:resolver_end]
+
+        self.assertIn("details.job_id", resolver)
+        self.assertIn("changeSet.job_id", resolver)
+        self.assertIn("details.pimcore_operation?.operation_id", resolver)
+        self.assertIn("changeSet.pimcore?.operation_id", resolver)
+        self.assertIn("historyChangeJobId(details, changeSet)", source)
+
+    def test_history_changes_modal_isolates_background_and_traps_focus(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("historyChangesBackgroundState", source)
+        self.assertIn('"#historyView.active, #historyDetailModal.active, #historyTimingModal.active"', source)
+        self.assertIn('modal.getAttribute("inert")', source)
+        self.assertIn('modal.setAttribute("inert", "")', source)
+        self.assertIn('modal.setAttribute("aria-hidden", "true")', source)
+        self.assertIn('modal.removeAttribute("inert")', source)
+        self.assertIn('modal.removeAttribute("aria-hidden")', source)
+        self.assertIn('event.key !== "Tab"', source)
+        self.assertIn("event.shiftKey", source)
+        self.assertIn('event.key === "Escape"', source)
+        self.assertIn("closeHistoryChangesModal()", source)
+        self.assertIn('historyChangesModal.classList.contains("active")', source)
+        self.assertIn("if (historyChangesBackgroundState.length) return", source)
+        self.assertIn("historyChangesReturnFocus.focus()", source)
 
 
 if __name__ == "__main__":

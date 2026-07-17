@@ -631,6 +631,7 @@ function openGithubStatusModal() {
 }
 
 function closeModals() {
+  closeHistoryChangesModal({ restoreFocus: false });
   document.querySelectorAll(".modal-view").forEach((modal) => modal.classList.remove("active"));
   if (logsClearPassword) logsClearPassword.value = "";
   if (logsClearStatus) logsClearStatus.textContent = "";
@@ -4190,6 +4191,27 @@ function timingMs(value) {
 
 function historyChangeValue(value) {
   if (value === null || value === undefined || value === "") return "Brak danych";
+  if (typeof value === "object") {
+    const seen = new WeakSet();
+    try {
+      const serialized = JSON.stringify(
+        value,
+        (_key, nested) => {
+          if (!nested || typeof nested !== "object") return nested;
+          if (seen.has(nested)) return "[Dane cykliczne]";
+          seen.add(nested);
+          if (Array.isArray(nested)) return nested;
+          return Object.fromEntries(
+            Object.keys(nested).sort().map((key) => [key, nested[key]])
+          );
+        },
+        2
+      );
+      return serialized === undefined ? "Brak danych" : serialized;
+    } catch (_error) {
+      return "Nie mozna wyswietlic danych";
+    }
+  }
   return String(value);
 }
 
@@ -4199,6 +4221,13 @@ function formatBytes(value) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+}
+
+function formatHistoryDuration(value) {
+  if (value === null || value === undefined || value === "" || Number.isNaN(Number(value))) {
+    return "Brak danych";
+  }
+  return `${Math.max(0, Number(value))} ms`;
 }
 
 function historyChangeRow(label, value) {
@@ -4247,33 +4276,13 @@ function historyChangeComparison(label, before, after, formatter = historyChange
   return row;
 }
 
-function appendHistoryChangeObject(container, label, value) {
-  if (Array.isArray(value)) {
-    if (!value.length) {
-      container.appendChild(historyChangeRow(label, null));
-      return;
-    }
-    value.forEach((item, index) => appendHistoryChangeObject(container, `${label} ${index + 1}`, item));
-    return;
-  }
-  if (value && typeof value === "object") {
-    const entries = Object.entries(value);
-    if (!entries.length) {
-      container.appendChild(historyChangeRow(label, null));
-      return;
-    }
-    const group = document.createElement("div");
-    const heading = document.createElement("h3");
-    group.className = "history-change-object";
-    heading.textContent = historyChangeValue(label);
-    group.appendChild(heading);
-    for (const [key, nestedValue] of entries) {
-      appendHistoryChangeObject(group, key, nestedValue);
-    }
-    container.appendChild(group);
-    return;
-  }
-  container.appendChild(historyChangeRow(label, value));
+function historyChangeJobId(details = {}, changeSet = {}) {
+  return (
+    details.job_id ??
+    changeSet.job_id ??
+    details.pimcore_operation?.operation_id ??
+    changeSet.pimcore?.operation_id
+  );
 }
 
 function historyFileOperationLabel(operation) {
@@ -4286,13 +4295,91 @@ function historyFileOperationLabel(operation) {
 }
 
 let historyChangesReturnFocus = null;
+let historyChangesBackgroundState = [];
 
-function closeHistoryChangesModal() {
+function setHistoryChangesBackgroundInert() {
+  if (historyChangesBackgroundState.length) return;
+  const backgroundModals = document.querySelectorAll(
+    "#historyView.active, #historyDetailModal.active, #historyTimingModal.active"
+  );
+  historyChangesBackgroundState = Array.from(backgroundModals)
+    .filter((modal) => modal !== historyChangesModal)
+    .map((modal) => {
+      const state = {
+        modal,
+        inert: modal.getAttribute("inert"),
+        ariaHidden: modal.getAttribute("aria-hidden"),
+      };
+      modal.setAttribute("inert", "");
+      modal.setAttribute("aria-hidden", "true");
+      return state;
+    });
+}
+
+function restoreHistoryChangesBackground() {
+  for (const state of historyChangesBackgroundState) {
+    if (state.inert === null) {
+      state.modal.removeAttribute("inert");
+    } else {
+      state.modal.setAttribute("inert", state.inert);
+    }
+    if (state.ariaHidden === null) {
+      state.modal.removeAttribute("aria-hidden");
+    } else {
+      state.modal.setAttribute("aria-hidden", state.ariaHidden);
+    }
+  }
+  historyChangesBackgroundState = [];
+}
+
+function openHistoryChangesModal() {
+  if (!historyChangesModal) return;
+  if (!historyChangesModal.classList.contains("active")) {
+    historyChangesReturnFocus = document.activeElement;
+    setHistoryChangesBackgroundInert();
+  }
+  historyChangesModal.classList.add("active");
+  window.setTimeout(() => historyChangesCloseButton?.focus(), 0);
+}
+
+function closeHistoryChangesModal({ restoreFocus = true } = {}) {
   historyChangesModal?.classList.remove("active");
-  if (historyChangesReturnFocus?.focus) {
+  restoreHistoryChangesBackground();
+  if (restoreFocus && historyChangesReturnFocus?.focus) {
     historyChangesReturnFocus.focus();
   }
   historyChangesReturnFocus = null;
+}
+
+function trapHistoryChangesFocus(event) {
+  if (!historyChangesModal?.classList.contains("active")) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeHistoryChangesModal();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusable = Array.from(
+    historyChangesModal.querySelectorAll(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )
+  ).filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
+  if (!focusable.length) {
+    event.preventDefault();
+    historyChangesModal.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const focusOutside = !historyChangesModal.contains(document.activeElement);
+  if (event.shiftKey && (document.activeElement === first || focusOutside)) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (document.activeElement === last || focusOutside)) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 function renderHistoryTiming(item = {}) {
@@ -4332,7 +4419,6 @@ function renderHistoryChanges(item = {}) {
   const changeSet = details.change_set && typeof details.change_set === "object"
     ? details.change_set
     : null;
-  historyChangesReturnFocus = document.activeElement;
   historyChangesTitle.textContent = `Zmiany: ${item.time || item.summary || "operacja"}`;
   historyChangesOutput.textContent = "";
 
@@ -4341,17 +4427,23 @@ function renderHistoryChanges(item = {}) {
     historyChangesOutput.className = "history-changes-output empty-state";
     compatibility.textContent = "Szczegolowy zapis zmian nie byl jeszcze dostepny dla tej operacji.";
     historyChangesOutput.appendChild(compatibility);
-    historyChangesModal.classList.add("active");
-    window.setTimeout(() => historyChangesCloseButton?.focus(), 0);
+    if (Object.keys(details).length) {
+      const legacy = historyChangeSection("Dane historyczne");
+      for (const [key, value] of Object.entries(details)) {
+        legacy.appendChild(historyChangeRow(key, value));
+      }
+      historyChangesOutput.appendChild(legacy);
+    }
+    openHistoryChangesModal();
     return;
   }
 
   historyChangesOutput.className = "history-changes-output";
   const overview = historyChangeSection("Operacja");
   overview.appendChild(historyChangeRow("Rodzaj", changeSet.kind));
-  const jobId = details.job_id ?? changeSet.job_id;
+  const jobId = historyChangeJobId(details, changeSet);
   if (jobId !== null && jobId !== undefined && jobId !== "") {
-    overview.appendChild(historyChangeRow("ID zadania", details.job_id ?? changeSet.job_id));
+    overview.appendChild(historyChangeRow("ID zadania", jobId));
   }
   historyChangesOutput.appendChild(overview);
 
@@ -4415,7 +4507,7 @@ function renderHistoryChanges(item = {}) {
         card.appendChild(historyChangeRow("Przetwarzanie", file.processing_operation));
       }
       if (file.elapsed_ms !== undefined) {
-        card.appendChild(historyChangeRow("Czas", `${historyChangeValue(file.elapsed_ms)} ms`));
+        card.appendChild(historyChangeRow("Czas", formatHistoryDuration(file.elapsed_ms)));
       }
       if (file.content_fit !== undefined) {
         card.appendChild(historyChangeRow("Dopasowanie zawartosci", file.content_fit ? "Tak" : "Nie"));
@@ -4434,13 +4526,12 @@ function renderHistoryChanges(item = {}) {
   if (integrations && Object.keys(integrations).length) {
     const section = historyChangeSection("Integracje");
     for (const [key, value] of Object.entries(integrations)) {
-      appendHistoryChangeObject(section, key, value);
+      section.appendChild(historyChangeRow(key, value));
     }
     historyChangesOutput.appendChild(section);
   }
 
-  historyChangesModal.classList.add("active");
-  window.setTimeout(() => historyChangesCloseButton?.focus(), 0);
+  openHistoryChangesModal();
 }
 
 function renderHistoryDetails(group) {
@@ -9681,6 +9772,7 @@ document.querySelectorAll("[data-close-history-timing]").forEach((button) => {
 document.querySelectorAll("[data-close-history-changes]").forEach((button) => {
   button.addEventListener("click", closeHistoryChangesModal);
 });
+historyChangesModal?.addEventListener("keydown", trapHistoryChangesFocus);
 
 document.querySelectorAll("[data-close-backup-history]").forEach((button) => {
   button.addEventListener("click", () => {

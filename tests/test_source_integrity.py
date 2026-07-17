@@ -213,6 +213,32 @@ class SourceIntegrityTests(unittest.TestCase):
             js_source,
         )
 
+    def test_history_changes_preserve_structured_values_and_pimcore_job_ids(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        js_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        web_data_source = (root / "picorgftp_sql" / "web_data.py").read_text(
+            encoding="utf-8"
+        )
+        pimcore_history_item = {
+            "details": {
+                "pimcore_operation": {"operation_id": "pimcore-operation-123"},
+                "change_set": {"pimcore": {"operation_id": "structured-operation-456"}},
+            }
+        }
+
+        self.assertEqual(
+            pimcore_history_item["details"]["pimcore_operation"]["operation_id"],
+            "pimcore-operation-123",
+        )
+        self.assertIn('"pimcore_operation": redact_pimcore_log_value(report)', web_data_source)
+        self.assertIn("JSON.stringify", js_source)
+        self.assertIn("Object.keys(nested).sort()", js_source)
+        self.assertIn("historyChangeRow(key, value)", js_source)
+        self.assertIn("details.pimcore_operation?.operation_id", js_source)
+        self.assertIn("changeSet.pimcore?.operation_id", js_source)
+
     def test_web_autocomplete_keeps_local_values_first(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]

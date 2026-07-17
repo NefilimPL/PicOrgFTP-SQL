@@ -1915,8 +1915,7 @@ button.slot-badge.on:hover {
 }
 
 .history-changes-output,
-.history-change-section,
-.history-change-object {
+.history-change-section {
   display: grid;
   gap: 8px;
 }
@@ -1936,8 +1935,7 @@ button.slot-badge.on:hover {
 }
 
 .history-change-section h2,
-.history-change-section h3,
-.history-change-object h3 {
+.history-change-section h3 {
   margin: 0;
 }
 
@@ -1959,6 +1957,7 @@ button.slot-badge.on:hover {
 .history-change-row span,
 .history-change-before-after span {
   overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .history-change-comparison {
@@ -1988,8 +1987,7 @@ button.slot-badge.on:hover {
   color: var(--muted);
 }
 
-.history-file-change,
-.history-change-object {
+.history-file-change {
   display: grid;
   gap: 8px;
   border: 1px solid var(--line);
