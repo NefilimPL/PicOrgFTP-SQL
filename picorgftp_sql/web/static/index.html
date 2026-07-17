@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicOrgFTP-SQL Web</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260706-sql-profiles">
+    <link rel="stylesheet" href="/static/app.css?v=20260706-sql-profiles-health2">
   </head>
   <body class="app-screen">
     <header class="topbar">
@@ -14,8 +14,29 @@
             <path fill="currentColor" d="M8 .2a8 8 0 0 0-2.5 15.6c.4.1.5-.2.5-.4v-1.4c-2.1.5-2.5-.9-2.5-.9-.3-.8-.8-1-.8-1-.7-.5.1-.5.1-.5.7.1 1.1.8 1.1.8.7 1.1 1.7.8 2.1.6.1-.5.3-.8.5-1-1.7-.2-3.4-.8-3.4-3.6 0-.8.3-1.5.8-2-.1-.2-.3-1 .1-2 0 0 .6-.2 2.1.8a7 7 0 0 1 3.8 0c1.5-1 2.1-.8 2.1-.8.4 1 .2 1.8.1 2 .5.5.8 1.2.8 2 0 2.8-1.7 3.4-3.4 3.6.3.2.5.7.5 1.4v2.1c0 .2.1.5.5.4A8 8 0 0 0 8 .2Z"/>
           </svg>
         </button>
-        <div>
-          <strong>PicOrgFTP-SQL Web</strong>
+        <div class="topbar-brand-info">
+          <div class="topbar-title-row">
+            <strong>PicOrgFTP-SQL Web</strong>
+            <div class="backend-health-indicator">
+              <button id="backendHealthStatus" type="button" class="backend-health-status" data-level="checking" aria-live="polite" aria-controls="backendHealthDetails" aria-describedby="backendHealthDetails" aria-expanded="false">
+                <span class="backend-health-dot" aria-hidden="true"></span>
+                <span id="backendHealthText">Sprawdzanie...</span>
+              </button>
+              <div id="backendHealthDetails" class="backend-health-details" role="tooltip" hidden>
+                <strong>Stan komponentow</strong>
+                <ul id="backendHealthDetailsList">
+                  <li><span>Backend</span><strong>Sprawdzanie...</strong></li>
+                  <li><span>SQLite</span><strong>Sprawdzanie...</strong></li>
+                  <li><span>Proces zadan</span><strong>Sprawdzanie...</strong></li>
+                  <li><span>Powiadomienia</span><strong>Sprawdzanie...</strong></li>
+                  <li><span>FTP</span><strong>Brak danych</strong></li>
+                  <li><span>SQL</span><strong>Brak danych</strong></li>
+                  <li><span>Profile SQL</span><strong>Brak danych</strong></li>
+                  <li><span>Pimcore</span><strong>Brak danych</strong></li>
+                </ul>
+              </div>
+            </div>
+          </div>
           <span id="versionInfo"></span>
           <span id="serverInfo"></span>
         </div>
@@ -293,6 +314,16 @@
       </section>
     </div>
 
+    <div id="historyChangesModal" class="modal-view nested-modal" role="dialog" aria-modal="true" aria-labelledby="historyChangesTitle" tabindex="-1">
+      <section class="modal-panel history-changes-panel">
+        <div class="section-heading">
+          <h1 id="historyChangesTitle">Szczegoly zmian</h1>
+          <button id="historyChangesCloseButton" type="button" class="ghost-button modal-close" data-close-history-changes>Zamknij</button>
+        </div>
+        <div id="historyChangesOutput" class="history-changes-output"></div>
+      </section>
+    </div>
+
     <div id="backupHistoryModal" class="modal-view nested-modal">
       <section class="manager-panel">
         <div class="section-heading">
@@ -323,7 +354,38 @@
             <button type="button" class="ghost-button modal-close" data-close-modal>Zamknij</button>
           </div>
         </div>
+        <div class="logs-tabs" role="tablist" aria-label="Kategorie logow">
+          <button type="button" class="logs-tab active" data-log-tab="live" role="tab" aria-selected="true">Na zywo <span data-log-badge="live">0</span></button>
+          <button type="button" class="logs-tab" data-log-tab="critical" role="tab" aria-selected="false">Krytyczne <span data-log-badge="critical">0</span></button>
+          <button type="button" class="logs-tab" data-log-tab="error" role="tab" aria-selected="false">Bledy <span data-log-badge="error">0</span></button>
+          <button type="button" class="logs-tab" data-log-tab="warning" role="tab" aria-selected="false">Ostrzezenia <span data-log-badge="warning">0</span></button>
+          <button type="button" class="logs-tab" data-log-tab="jobs" role="tab" aria-selected="false">Zadania <span data-log-badge="jobs">0</span></button>
+        </div>
+        <form id="logsFilters" class="logs-filters">
+          <input id="logsTextFilter" type="search" placeholder="Szukaj w logach" aria-label="Szukaj w logach" autocomplete="off" />
+          <select id="logsSeverityFilter" aria-label="Poziom zdarzenia">
+            <option value="">Wszystkie poziomy</option>
+            <option value="critical">Krytyczne</option>
+            <option value="error">Bledy</option>
+            <option value="warning">Ostrzezenia</option>
+            <option value="info">Informacje</option>
+          </select>
+          <input id="logsModuleFilter" placeholder="Modul" aria-label="Modul" autocomplete="off" />
+          <input id="logsUserFilter" placeholder="Uzytkownik" aria-label="Uzytkownik" autocomplete="off" />
+          <input id="logsEanFilter" placeholder="EAN" aria-label="EAN" autocomplete="off" />
+          <input id="logsJobFilter" placeholder="ID zadania" aria-label="ID zadania" autocomplete="off" />
+          <button type="submit" class="secondary-button">Filtruj</button>
+          <button id="logsResetFiltersButton" type="reset" class="ghost-button">Wyczysc filtry</button>
+        </form>
+        <div class="logs-live-controls">
+          <button id="logsPauseButton" type="button" class="secondary-button">Wstrzymaj</button>
+          <label><input id="logsAutoscrollToggle" type="checkbox" /> Przewijaj automatycznie</label>
+          <span id="logsStreamStatus" role="status"></span>
+        </div>
         <div id="logsOutput" class="logs-output empty-state">Logi sa dostepne tylko dla administratora.</div>
+        <div class="logs-pagination">
+          <button id="logsLoadMoreButton" type="button" class="secondary-button" hidden>Wczytaj wiecej</button>
+        </div>
       </section>
     </div>
 
@@ -377,6 +439,7 @@
           <button type="button" class="settings-tab" data-settings-tab="ftp">FTP</button>
           <button type="button" class="settings-tab" data-settings-tab="sql">SQL</button>
           <button type="button" class="settings-tab" data-settings-tab="pimcore">Pimcore</button>
+          <button type="button" class="settings-tab" data-settings-tab="mail">Poczta</button>
           <button type="button" class="settings-tab" data-settings-tab="slots">Sloty</button>
           <button type="button" class="settings-tab" data-settings-tab="users">Uzytkownicy</button>
         </div>
@@ -622,6 +685,6 @@
       </article>
     </template>
 
-    <script src="/static/app.js?v=20260706-sql-profiles"></script>
+    <script src="/static/app.js?v=20260706-sql-profiles-health2"></script>
   </body>
 </html>

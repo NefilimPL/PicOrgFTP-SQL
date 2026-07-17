@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
+import secrets
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +25,19 @@ from .excel_utils import (
     PRODUCT_ID_HEADER,
     TYPE_HEADER,
 )
+from .redaction import redact_sensitive_value, sanitize_free_text
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
+_NOTIFICATION_DELIVERY_STATUSES = frozenset(
+    {"pending", "sending", "sent", "fallback", "skipped", "error"}
+)
+_NOTIFICATION_DELIVERY_CHANNELS = frozenset({"entra", "smtp"})
+_NOTIFICATION_DELIVERY_SEVERITIES = frozenset(
+    {"info", "warning", "error", "critical"}
+)
+_OPERATIONAL_EVENT_STREAM_ORIGIN_ID = (
+    "sys-4e680c0b1c744a0e82e385cad10b47d1"
+)
 LIST_SHEETS = ("NAZWY", "TYPY", "MODELE", "KOLORY", "DODATKI")
 ENTRY_HEADERS = (
     EAN_HEADER,
@@ -37,9 +51,57 @@ ENTRY_HEADERS = (
     PRODUCT_ID_HEADER,
 )
 
+_INCIDENT_CONTEXT_BEFORE_SQL = """
+    SELECT * FROM operational_events
+    WHERE {scope_column} = ? AND (created_at, id) < (?, ?)
+    ORDER BY created_at DESC, id DESC
+    LIMIT ?
+"""
+_INCIDENT_CONTEXT_PROBLEM_SQL = """
+    SELECT * FROM operational_events
+    WHERE {scope_column} = ?
+      AND (created_at, id) >= (?, ?)
+      AND (created_at, id) <= (?, ?)
+      {cursor_clause}
+    ORDER BY created_at ASC, id ASC
+    LIMIT ?
+"""
+_INCIDENT_CONTEXT_AFTER_SQL = """
+    SELECT * FROM operational_events
+    WHERE {scope_column} = ? AND (created_at, id) > (?, ?)
+    ORDER BY created_at ASC, id ASC
+    LIMIT ?
+"""
+_OPERATIONAL_EVENT_QUERY_COLUMNS = (
+    "created_at",
+    "id",
+    "severity",
+    "event_type",
+    "module",
+    "stage",
+    "username",
+    "ean",
+    "product_id",
+    "slot",
+    "job_id",
+    "correlation_id",
+    "incident_id",
+    "summary",
+    "recommended_action",
+    "details_json",
+    "exception_type",
+    "traceback_text",
+)
+
 
 def _text(value: object) -> str:
     return str(value or "").strip()
+
+
+def _unicode_lower(value: object) -> str:
+    """Normalize SQLite text with Python's Unicode-aware case mapping."""
+
+    return str(value or "").lower()
 
 
 def _upper(value: object) -> str:
@@ -57,6 +119,96 @@ def _json_loads(payload: object, fallback: object) -> object:
         return fallback
 
 
+def _page_cursor(created_at: object, identity: object) -> str:
+    raw = _json_dumps([_text(created_at), _text(identity)]).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_page_cursor(value: object) -> tuple[str, str]:
+    text = _text(value)
+    if not text:
+        return "", ""
+    padded = text + "=" * (-len(text) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(padded).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return "", ""
+    payload = _json_loads(decoded, [])
+    if not isinstance(payload, list) or len(payload) != 2:
+        return "", ""
+    return _text(payload[0]), _text(payload[1])
+
+
+def _bounded_page_limit(value: object) -> int:
+    try:
+        parsed = int(value or 20)
+    except (TypeError, ValueError):
+        parsed = 20
+    return max(1, min(100, parsed))
+
+
+def _literal_like_pattern(value: object) -> str:
+    needle = _text(value)
+    escaped = (
+        needle.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+    return f"%{escaped}%"
+
+
+def _append_operational_event_filters(
+    clauses: list[str],
+    params: list[object],
+    *,
+    severities=(),
+    username: str = "",
+    ean: str = "",
+    job_id: str = "",
+    module: str = "",
+    query: str = "",
+    since: str = "",
+    prefix: str = "",
+) -> None:
+    severity_values = (
+        [_text(severities)]
+        if isinstance(severities, str)
+        else [_text(value) for value in severities]
+    )
+    severity_values = [value for value in severity_values if value]
+    if severity_values:
+        clauses.append(
+            f"{prefix}severity IN ({', '.join('?' for _ in severity_values)})"
+        )
+        params.extend(severity_values)
+    for column, value in (("username", username), ("ean", ean), ("module", module)):
+        if _text(value):
+            clauses.append(
+                f"picorg_lower({prefix}{column}) "
+                "LIKE picorg_lower(?) ESCAPE '\\'"
+            )
+            params.append(_literal_like_pattern(value))
+    if _text(job_id):
+        clauses.append(
+            f"picorg_lower(CASE WHEN {prefix}job_id <> '' THEN {prefix}job_id "
+            f"ELSE {prefix}id END) LIKE picorg_lower(?) ESCAPE '\\'"
+        )
+        pattern = _literal_like_pattern(job_id)
+        params.append(pattern)
+    if _text(query):
+        pattern = _literal_like_pattern(query)
+        query_clauses = " OR ".join(
+                f"picorg_lower({prefix}{column}) "
+                "LIKE picorg_lower(?) ESCAPE '\\'"
+                for column in _OPERATIONAL_EVENT_QUERY_COLUMNS
+        )
+        clauses.append(f"({query_clauses})")
+        params.extend([pattern] * len(_OPERATIONAL_EVENT_QUERY_COLUMNS))
+    if _text(since):
+        clauses.append(f"{prefix}created_at >= ?")
+        params.append(_text(since))
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
         "+00:00", "Z"
@@ -64,21 +216,66 @@ def _now_iso() -> str:
 
 
 def _iso_from_timestamp(value: object) -> str:
-    if isinstance(value, str):
+    parsed: datetime | None = None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
         text = value.strip()
-        if text.endswith("Z") and "T" in text:
-            return text
         try:
-            value = float(text)
-        except (TypeError, ValueError):
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            value = text
+    if parsed is None:
+        try:
+            parsed = datetime.fromtimestamp(float(value), timezone.utc)
+        except (TypeError, ValueError, OverflowError, OSError):
             return _now_iso()
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return _now_iso()
-    return datetime.fromtimestamp(number, timezone.utc).isoformat(
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat(
         timespec="milliseconds"
     ).replace("+00:00", "Z")
+
+
+def _canonical_timestamp(
+    value: object, *, field: str, required: bool = True
+) -> str:
+    if value is None:
+        text = ""
+    elif isinstance(value, str):
+        text = value
+    else:
+        raise ValueError(f"{field} must be a canonical timestamp")
+    if not text:
+        if required:
+            raise ValueError(f"{field} is required")
+        return ""
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{field} must be a canonical timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field} must be a canonical timestamp")
+    canonical = parsed.astimezone(timezone.utc).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+    if text != canonical:
+        raise ValueError(f"{field} must be a canonical timestamp")
+    return canonical
+
+
+def _delivery_status(value: object) -> str:
+    status = _text(value)
+    if status not in _NOTIFICATION_DELIVERY_STATUSES:
+        raise ValueError("invalid notification delivery status")
+    return status
+
+
+def _delivery_channel(value: object, *, allow_empty: bool) -> str:
+    channel = _text(value)
+    if (not channel and allow_empty) or channel in _NOTIFICATION_DELIVERY_CHANNELS:
+        return channel
+    raise ValueError("invalid notification delivery channel")
 
 
 def _history_created_at(payload: dict[str, object]) -> str:
@@ -142,6 +339,96 @@ def _migrate_web_history_created_at(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE web_history_legacy_ts")
 
 
+def _severity_rank(value: object) -> int:
+    severities = ("info", "warning", "error", "critical")
+    text = _text(value)
+    return severities.index(text) if text in severities else -1
+
+
+def _incident_context_from_row(row: sqlite3.Row) -> dict[str, object]:
+    context = _json_loads(row["context_json"], {})
+    return dict(context) if isinstance(context, dict) else {}
+
+
+def _reconcile_duplicate_open_incidents(conn: sqlite3.Connection) -> None:
+    """Merge duplicate v5 open incidents before adding the unique index."""
+
+    fingerprints = conn.execute(
+        """
+        SELECT fingerprint FROM incidents
+        WHERE status = 'open'
+        GROUP BY fingerprint
+        HAVING COUNT(*) > 1
+        ORDER BY fingerprint
+        """
+    ).fetchall()
+    for group in fingerprints:
+        rows = conn.execute(
+            """
+            SELECT * FROM incidents
+            WHERE fingerprint = ? AND status = 'open'
+            ORDER BY id
+            """,
+            (group["fingerprint"],),
+        ).fetchall()
+        first = min(
+            rows,
+            key=lambda row: (
+                row["first_seen_at"], row["first_event_id"], row["id"]
+            ),
+        )
+        latest = max(
+            rows,
+            key=lambda row: (
+                row["last_seen_at"], row["latest_event_id"], row["id"]
+            ),
+        )
+        keeper_id = first["id"]
+        contexts: dict[str, object] = {}
+        for row in sorted(
+            rows,
+            key=lambda item: (
+                item["last_seen_at"], item["latest_event_id"], item["id"]
+            ),
+        ):
+            contexts.update(_incident_context_from_row(row))
+        merged_ids = sorted(row["id"] for row in rows if row["id"] != keeper_id)
+        contexts["merged_incident_ids"] = merged_ids
+        severity = max(rows, key=lambda row: _severity_rank(row["severity"]))[
+            "severity"
+        ]
+        occurrence_count = sum(max(0, int(row["occurrence_count"] or 0)) for row in rows)
+        notification_window_at = max(
+            (_text(row["notification_window_at"]) for row in rows), default=""
+        )
+        conn.execute(
+            """
+            UPDATE incidents SET
+                severity = ?, event_type = ?, status = 'open',
+                first_seen_at = ?, last_seen_at = ?, occurrence_count = ?,
+                first_event_id = ?, latest_event_id = ?, job_id = ?,
+                correlation_id = ?, notification_window_at = ?, context_json = ?
+            WHERE id = ?
+            """,
+            (
+                severity, latest["event_type"], first["first_seen_at"],
+                latest["last_seen_at"], occurrence_count,
+                first["first_event_id"], latest["latest_event_id"],
+                latest["job_id"], latest["correlation_id"],
+                notification_window_at, _json_dumps(contexts), keeper_id,
+            ),
+        )
+        for row in rows:
+            if row["id"] == keeper_id:
+                continue
+            merged_context = _incident_context_from_row(row)
+            merged_context["merged_into_incident_id"] = keeper_id
+            conn.execute(
+                "UPDATE incidents SET status = 'merged', context_json = ? WHERE id = ?",
+                (_json_dumps(merged_context), row["id"]),
+            )
+
+
 def _flatten_config(payload: dict[str, object]) -> list[tuple[str, object]]:
     rows: list[tuple[str, object]] = []
 
@@ -201,6 +488,9 @@ def _entry_payload(payload: dict[str, object]) -> dict[str, str]:
 class SqliteStore:
     """Small SQLite persistence wrapper used by the active data store layer."""
 
+    supports_atomic_incident_event = True
+    supports_notification_outbox = True
+
     def __init__(self, path: str):
         self.path = str(Path(path))
 
@@ -209,6 +499,12 @@ class SqliteStore:
         directory.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
+        conn.create_function(
+            "picorg_lower",
+            1,
+            _unicode_lower,
+            deterministic=True,
+        )
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
@@ -227,6 +523,21 @@ class SqliteStore:
         """Create schema tables when the database is first used."""
 
         with self.connection() as conn:
+            previous_user_version_row = conn.execute("PRAGMA user_version").fetchone()
+            previous_user_version = (
+                int(previous_user_version_row[0] or 0)
+                if previous_user_version_row
+                else 0
+            )
+            stream_table_existed = (
+                conn.execute(
+                    """
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'operational_event_stream'
+                    """
+                ).fetchone()
+                is not None
+            )
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS schema_version (
@@ -321,9 +632,139 @@ class SqliteStore:
                     warnings_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS pimcore_integration_contexts (
+                    id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    mode TEXT NOT NULL CHECK (mode IN ('create', 'edit')),
+                    object_id TEXT NOT NULL DEFAULT '',
+                    results_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    consumed_at TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE TABLE IF NOT EXISTS operational_events (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    module TEXT NOT NULL DEFAULT '',
+                    stage TEXT NOT NULL DEFAULT '',
+                    username TEXT NOT NULL DEFAULT '',
+                    ean TEXT NOT NULL DEFAULT '',
+                    product_id TEXT NOT NULL DEFAULT '',
+                    slot TEXT NOT NULL DEFAULT '',
+                    job_id TEXT NOT NULL DEFAULT '',
+                    correlation_id TEXT NOT NULL DEFAULT '',
+                    incident_id TEXT NOT NULL DEFAULT '',
+                    summary TEXT NOT NULL,
+                    recommended_action TEXT NOT NULL DEFAULT '',
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    exception_type TEXT NOT NULL DEFAULT '',
+                    traceback_text TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE TABLE IF NOT EXISTS operational_event_stream (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id TEXT NOT NULL UNIQUE
+                );
+
+                CREATE TABLE IF NOT EXISTS job_runs (
+                    id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL DEFAULT '',
+                    ean TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    summary TEXT NOT NULL DEFAULT '',
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT NOT NULL DEFAULT '',
+                    stages_json TEXT NOT NULL DEFAULT '[]',
+                    details_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE TABLE IF NOT EXISTS incidents (
+                    id TEXT PRIMARY KEY,
+                    fingerprint TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    occurrence_count INTEGER NOT NULL DEFAULT 1,
+                    first_event_id TEXT NOT NULL,
+                    latest_event_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL DEFAULT '',
+                    correlation_id TEXT NOT NULL DEFAULT '',
+                    notification_window_at TEXT NOT NULL DEFAULT '',
+                    context_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE TABLE IF NOT EXISTS alert_reads (
+                    username TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (username, severity)
+                );
+
+                CREATE TABLE IF NOT EXISTS notification_deliveries (
+                    id TEXT PRIMARY KEY,
+                    incident_id TEXT NOT NULL DEFAULT '',
+                    event_id TEXT NOT NULL DEFAULT '',
+                    severity TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    primary_channel TEXT NOT NULL,
+                    used_channel TEXT NOT NULL DEFAULT '',
+                    recipients_json TEXT NOT NULL DEFAULT '[]',
+                    message_json TEXT NOT NULL,
+                    attempts_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    next_attempt_at TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE TABLE IF NOT EXISTS notification_outbox (
+                    id TEXT PRIMARY KEY,
+                    event_id TEXT NOT NULL UNIQUE,
+                    incident_id TEXT NOT NULL DEFAULT '',
+                    severity TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT NOT NULL DEFAULT ''
+                );
                 """
             )
             _migrate_web_history_created_at(conn)
+            _reconcile_duplicate_open_incidents(conn)
+            conn.execute(
+                """
+                DELETE FROM operational_event_stream
+                WHERE sequence = 0 AND event_id <> ?
+                """,
+                (_OPERATIONAL_EVENT_STREAM_ORIGIN_ID,),
+            )
+            conn.execute(
+                """
+                DELETE FROM operational_event_stream
+                WHERE event_id = ? AND sequence <> 0
+                """,
+                (_OPERATIONAL_EVENT_STREAM_ORIGIN_ID,),
+            )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO operational_event_stream (sequence, event_id)
+                VALUES (0, ?)
+                """,
+                (_OPERATIONAL_EVENT_STREAM_ORIGIN_ID,),
+            )
+            if previous_user_version < SCHEMA_VERSION or not stream_table_existed:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO operational_event_stream (event_id)
+                    SELECT id FROM operational_events ORDER BY rowid
+                    """
+                )
             conn.executescript(
                 """
                 CREATE INDEX IF NOT EXISTS idx_web_history_created_at
@@ -344,6 +785,32 @@ class SqliteStore:
                     ON pimcore_submissions(ean);
                 CREATE INDEX IF NOT EXISTS idx_pimcore_submissions_user
                     ON pimcore_submissions(username);
+                CREATE INDEX IF NOT EXISTS idx_pimcore_integration_contexts_expiry
+                    ON pimcore_integration_contexts(expires_at, consumed_at);
+                CREATE INDEX IF NOT EXISTS idx_operational_events_created_at_id
+                    ON operational_events(created_at, id);
+                CREATE INDEX IF NOT EXISTS idx_operational_events_severity_created_at
+                    ON operational_events(severity, created_at);
+                CREATE INDEX IF NOT EXISTS idx_operational_events_job_id
+                    ON operational_events(job_id);
+                CREATE INDEX IF NOT EXISTS idx_operational_events_correlation_id
+                    ON operational_events(correlation_id);
+                CREATE INDEX IF NOT EXISTS idx_operational_events_job_created_at_id
+                    ON operational_events(job_id, created_at, id);
+                CREATE INDEX IF NOT EXISTS idx_operational_events_correlation_created_at_id
+                    ON operational_events(correlation_id, created_at, id);
+                CREATE INDEX IF NOT EXISTS idx_incidents_fingerprint_last_seen_at
+                    ON incidents(fingerprint, last_seen_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_incidents_one_open_fingerprint
+                    ON incidents(fingerprint) WHERE status = 'open';
+                CREATE INDEX IF NOT EXISTS idx_job_runs_started_at_id
+                    ON job_runs(started_at, id);
+                CREATE INDEX IF NOT EXISTS idx_notification_deliveries_pending
+                    ON notification_deliveries(status, next_attempt_at, created_at);
+                CREATE INDEX IF NOT EXISTS idx_notification_deliveries_incident
+                    ON notification_deliveries(incident_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_notification_outbox_pending
+                    ON notification_outbox(status, created_at, id);
                 """
             )
             version_row = conn.execute(
@@ -355,6 +822,1617 @@ class SqliteStore:
                     "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                     (SCHEMA_VERSION, _now_iso()),
                 )
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    @staticmethod
+    def _event_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        payload = dict(row)
+        payload["details"] = _json_loads(payload.pop("details_json", "{}"), {})
+        redacted = redact_sensitive_value(payload, text_limit=32 * 1024)
+        return redacted if isinstance(redacted, dict) else {}
+
+    @staticmethod
+    def _job_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        payload = dict(row)
+        payload["stages"] = _json_loads(payload.pop("stages_json", "[]"), [])
+        payload["details"] = _json_loads(payload.pop("details_json", "{}"), {})
+        redacted = redact_sensitive_value(payload)
+        return redacted if isinstance(redacted, dict) else {}
+
+    @staticmethod
+    def _incident_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        payload = dict(row)
+        payload["context"] = _json_loads(payload.pop("context_json", "{}"), {})
+        redacted = redact_sensitive_value(payload)
+        return redacted if isinstance(redacted, dict) else {}
+
+    @staticmethod
+    def _delivery_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        payload = dict(row)
+        payload["recipients"] = _json_loads(
+            payload.pop("recipients_json", "[]"), []
+        )
+        payload["message"] = _json_loads(payload.pop("message_json", "{}"), {})
+        payload["attempts"] = _json_loads(
+            payload.pop("attempts_json", "[]"), []
+        )
+        return payload
+
+    def append_operational_event(
+        self,
+        event: dict[str, object],
+        *,
+        create_notification_intent: bool = False,
+    ) -> dict[str, Any]:
+        """Persist one structured operational event."""
+
+        self.initialize()
+        payload = self._normalize_operational_event(event)
+        with self.connection() as conn:
+            self._insert_operational_event(conn, payload)
+            if create_notification_intent:
+                self._insert_notification_intent(
+                    conn,
+                    event_id=payload["id"],
+                    incident_id=payload["incident_id"],
+                    severity=payload["severity"],
+                    created_at=payload["created_at"],
+                )
+        return payload
+
+    @staticmethod
+    def _insert_notification_intent(
+        conn: sqlite3.Connection,
+        *,
+        event_id: object,
+        incident_id: object,
+        severity: object,
+        created_at: object,
+    ) -> None:
+        normalized_event_id = _text(event_id)
+        if not normalized_event_id:
+            raise ValueError("notification intent event id is required")
+        normalized_severity = _text(severity).lower()
+        if normalized_severity not in _NOTIFICATION_DELIVERY_SEVERITIES:
+            raise ValueError("invalid notification intent severity")
+        timestamp = _canonical_timestamp(created_at, field="created_at")
+        expected_id = f"intent-{normalized_event_id}"
+        conn.execute(
+            """
+            INSERT INTO notification_outbox (
+                id, event_id, incident_id, severity, status,
+                created_at, updated_at, completed_at
+            ) VALUES (?, ?, ?, ?, 'pending', ?, ?, '')
+            ON CONFLICT(event_id) DO NOTHING
+            """,
+            (
+                expected_id,
+                normalized_event_id,
+                _text(incident_id),
+                normalized_severity,
+                timestamp,
+                timestamp,
+            ),
+        )
+        row = conn.execute(
+            "SELECT id FROM notification_outbox WHERE event_id = ?",
+            (normalized_event_id,),
+        ).fetchone()
+        if row is None or _text(row["id"]) != expected_id:
+            raise RuntimeError("notification intent identity conflict")
+
+    @staticmethod
+    def _normalize_operational_event(
+        event: dict[str, object],
+    ) -> dict[str, Any]:
+        details = redact_sensitive_value(event.get("details"))
+        return {
+            "id": _text(event.get("id")) or f"evt-{uuid.uuid4().hex}",
+            "created_at": _iso_from_timestamp(event.get("created_at") or _now_iso()),
+            "severity": _text(event.get("severity")),
+            "event_type": _text(event.get("event_type")),
+            "module": _text(event.get("module")),
+            "stage": _text(event.get("stage")),
+            "username": _text(event.get("username")),
+            "ean": _text(event.get("ean")),
+            "product_id": _text(event.get("product_id")),
+            "slot": _text(event.get("slot")),
+            "job_id": _text(event.get("job_id")),
+            "correlation_id": _text(event.get("correlation_id")),
+            "incident_id": _text(event.get("incident_id")),
+            "summary": sanitize_free_text(event.get("summary")).strip(),
+            "recommended_action": sanitize_free_text(
+                event.get("recommended_action")
+            ).strip(),
+            "details": details if isinstance(details, dict) else {},
+            "exception_type": sanitize_free_text(event.get("exception_type")).strip(),
+            "traceback_text": sanitize_free_text(
+                event.get("traceback_text"), limit=32 * 1024
+            ).strip(),
+        }
+
+    @staticmethod
+    def _insert_operational_event(
+        conn: sqlite3.Connection, payload: dict[str, Any]
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO operational_events (
+                id, created_at, severity, event_type, module, stage,
+                username, ean, product_id, slot, job_id, correlation_id,
+                incident_id, summary, recommended_action, details_json,
+                exception_type, traceback_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                created_at = excluded.created_at,
+                severity = excluded.severity,
+                event_type = excluded.event_type,
+                module = excluded.module,
+                stage = excluded.stage,
+                username = excluded.username,
+                ean = excluded.ean,
+                product_id = excluded.product_id,
+                slot = excluded.slot,
+                job_id = excluded.job_id,
+                correlation_id = excluded.correlation_id,
+                incident_id = excluded.incident_id,
+                summary = excluded.summary,
+                recommended_action = excluded.recommended_action,
+                details_json = excluded.details_json,
+                exception_type = excluded.exception_type,
+                traceback_text = excluded.traceback_text
+            """,
+            (
+                payload["id"], payload["created_at"], payload["severity"],
+                payload["event_type"], payload["module"], payload["stage"],
+                payload["username"], payload["ean"], payload["product_id"],
+                payload["slot"], payload["job_id"], payload["correlation_id"],
+                payload["incident_id"], payload["summary"],
+                payload["recommended_action"], _json_dumps(payload["details"]),
+                payload["exception_type"], payload["traceback_text"],
+            ),
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO operational_event_stream (event_id)
+            VALUES (?)
+            """,
+            (payload["id"],),
+        )
+
+    @staticmethod
+    def _stream_event_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        payload = dict(row)
+        payload.pop("_stream_sequence", None)
+        payload["details"] = _json_loads(payload.pop("details_json", "{}"), {})
+        redacted = redact_sensitive_value(payload, text_limit=32 * 1024)
+        return redacted if isinstance(redacted, dict) else {}
+
+    @staticmethod
+    def _stream_high_water(conn: sqlite3.Connection) -> int:
+        row = conn.execute(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'operational_event_stream'"
+        ).fetchone()
+        return max(0, int(row[0] or 0)) if row else 0
+
+    def start_operational_event_stream(
+        self, *, after_id: str = "", initial_limit: int = 100
+    ) -> dict[str, Any]:
+        """Resolve a reconnect marker or return a bounded initial snapshot."""
+
+        self.initialize()
+        page_limit = _bounded_page_limit(initial_limit)
+        with self.connection() as conn:
+            high_water = self._stream_high_water(conn)
+            marker_id = _text(after_id)
+            if marker_id:
+                marker = conn.execute(
+                    """
+                    SELECT sequence FROM operational_event_stream
+                    WHERE event_id = ?
+                    """,
+                    (marker_id,),
+                ).fetchone()
+                return {
+                    "items": [],
+                    "position": int(marker[0]) if marker else high_water,
+                }
+            rows = conn.execute(
+                """
+                SELECT s.sequence AS _stream_sequence, e.*
+                FROM operational_event_stream AS s
+                JOIN operational_events AS e ON e.id = s.event_id
+                WHERE s.sequence <= ?
+                ORDER BY s.sequence DESC
+                LIMIT ?
+                """,
+                (high_water, page_limit),
+            ).fetchall()
+        return {
+            "items": [self._stream_event_from_row(row) for row in reversed(rows)],
+            "position": high_water,
+        }
+
+    def snapshot_operational_event_stream(
+        self,
+        *,
+        since: str,
+        limit: int = 200,
+        severities=(),
+        username: str = "",
+        ean: str = "",
+        job_id: str = "",
+        module: str = "",
+        query: str = "",
+    ) -> dict[str, Any]:
+        """Return a bounded live snapshot, archive cursor and atomic checkpoint."""
+
+        self.initialize()
+        try:
+            snapshot_limit = max(1, min(500, int(limit or 200)))
+        except (TypeError, ValueError):
+            snapshot_limit = 200
+        archive_since = _text(since)
+        clauses = ["s.sequence <= ?"]
+        params: list[object] = []
+        _append_operational_event_filters(
+            clauses,
+            params,
+            severities=severities,
+            username=username,
+            ean=ean,
+            job_id=job_id,
+            module=module,
+            query=query,
+            since=archive_since,
+            prefix="e.",
+        )
+        with self.connection() as conn:
+            conn.execute("BEGIN")
+            marker = conn.execute(
+                """
+                SELECT sequence, event_id
+                FROM operational_event_stream
+                ORDER BY sequence DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if marker is None:
+                return {
+                    "items": [],
+                    "stream_after_id": "",
+                    "next_cursor": "",
+                    "archive_since": archive_since,
+                }
+            rows = conn.execute(
+                f"""
+                SELECT s.sequence AS _stream_sequence, e.*
+                FROM operational_event_stream AS s
+                JOIN operational_events AS e ON e.id = s.event_id
+                WHERE {' AND '.join(clauses)}
+                ORDER BY e.created_at DESC, e.id DESC
+                LIMIT ?
+                """,
+                (int(marker["sequence"]), *params, snapshot_limit + 1),
+            ).fetchall()
+        has_more = len(rows) > snapshot_limit
+        selected = rows[:snapshot_limit]
+        items = [self._stream_event_from_row(row) for row in reversed(selected)]
+        return {
+            "items": items,
+            "stream_after_id": _text(marker["event_id"]),
+            "next_cursor": (
+                _page_cursor(items[0]["created_at"], items[0]["id"])
+                if has_more and items
+                else ""
+            ),
+            "archive_since": archive_since,
+        }
+
+    def poll_operational_event_stream(
+        self, *, position: int, limit: int = 100
+    ) -> dict[str, Any]:
+        """Return later inserted events in durable ascending sequence order."""
+
+        self.initialize()
+        try:
+            current_position = max(0, int(position))
+        except (TypeError, ValueError):
+            current_position = 0
+        page_limit = _bounded_page_limit(limit)
+        with self.connection() as conn:
+            high_water = self._stream_high_water(conn)
+            rows = conn.execute(
+                """
+                SELECT s.sequence AS _stream_sequence, e.*
+                FROM operational_event_stream AS s
+                JOIN operational_events AS e ON e.id = s.event_id
+                WHERE s.sequence > ? AND s.sequence <= ?
+                ORDER BY s.sequence ASC
+                LIMIT ?
+                """,
+                (current_position, high_water, page_limit),
+            ).fetchall()
+        if len(rows) >= page_limit:
+            next_position = int(rows[-1]["_stream_sequence"])
+        else:
+            next_position = max(current_position, high_water)
+        return {
+            "items": [self._stream_event_from_row(row) for row in rows],
+            "position": next_position,
+        }
+
+    def query_operational_events(
+        self,
+        *,
+        severities=(),
+        username: str = "",
+        ean: str = "",
+        job_id: str = "",
+        correlation_id: str = "",
+        module: str = "",
+        query: str = "",
+        after_id: str = "",
+        cursor: str = "",
+        limit: int = 20,
+        since: str = "",
+    ) -> dict[str, Any]:
+        """Return a descending cursor page of operational events."""
+
+        self.initialize()
+        clauses: list[str] = []
+        params: list[object] = []
+        _append_operational_event_filters(
+            clauses,
+            params,
+            severities=severities,
+            username=username,
+            ean=ean,
+            job_id=job_id,
+            module=module,
+            query=query,
+            since=since,
+        )
+        if _text(correlation_id):
+            clauses.append("correlation_id = ?")
+            params.append(_text(correlation_id))
+        cursor_at, cursor_id = _decode_page_cursor(cursor)
+        if cursor_at and cursor_id:
+            clauses.append("(created_at < ? OR (created_at = ? AND id < ?))")
+            params.extend([cursor_at, cursor_at, cursor_id])
+        with self.connection() as conn:
+            if _text(after_id):
+                marker = conn.execute(
+                    "SELECT created_at, id FROM operational_events WHERE id = ?",
+                    (_text(after_id),),
+                ).fetchone()
+                if marker:
+                    clauses.append(
+                        "(created_at > ? OR (created_at = ? AND id > ?))"
+                    )
+                    params.extend(
+                        [marker["created_at"], marker["created_at"], marker["id"]]
+                    )
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            page_limit = _bounded_page_limit(limit)
+            rows = conn.execute(
+                f"""
+                SELECT * FROM operational_events
+                {where}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (*params, page_limit + 1),
+            ).fetchall()
+        has_more = len(rows) > page_limit
+        items = [self._event_from_row(row) for row in rows[:page_limit]]
+        next_cursor = (
+            _page_cursor(items[-1]["created_at"], items[-1]["id"])
+            if has_more and items
+            else ""
+        )
+        return {"items": items, "next_cursor": next_cursor}
+
+    def upsert_job_run(self, job: dict[str, object]) -> dict[str, Any]:
+        """Insert or update a durable job summary."""
+
+        self.initialize()
+        stages = redact_sensitive_value(job.get("stages"))
+        details = redact_sensitive_value(job.get("details"))
+        payload: dict[str, Any] = {
+            "id": _text(job.get("id")) or f"job-{uuid.uuid4().hex}",
+            "username": _text(job.get("username")),
+            "ean": _text(job.get("ean")),
+            "status": _text(job.get("status")),
+            "summary": sanitize_free_text(job.get("summary")).strip(),
+            "started_at": _iso_from_timestamp(job.get("started_at") or _now_iso()),
+            "finished_at": _text(job.get("finished_at")),
+            "stages": stages if isinstance(stages, list) else [],
+            "details": details if isinstance(details, dict) else {},
+        }
+        if payload["finished_at"]:
+            payload["finished_at"] = _iso_from_timestamp(payload["finished_at"])
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO job_runs (
+                    id, username, ean, status, summary, started_at,
+                    finished_at, stages_json, details_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    username = excluded.username,
+                    ean = excluded.ean,
+                    status = excluded.status,
+                    summary = excluded.summary,
+                    started_at = excluded.started_at,
+                    finished_at = excluded.finished_at,
+                    stages_json = excluded.stages_json,
+                    details_json = excluded.details_json
+                """,
+                (
+                    payload["id"], payload["username"], payload["ean"],
+                    payload["status"], payload["summary"], payload["started_at"],
+                    payload["finished_at"], _json_dumps(payload["stages"]),
+                    _json_dumps(payload["details"]),
+                ),
+            )
+        return payload
+
+    def query_job_runs(self, *, cursor: str = "", limit: int = 20) -> dict[str, Any]:
+        """Return a descending cursor page of job summaries."""
+
+        self.initialize()
+        clauses: list[str] = []
+        params: list[object] = []
+        cursor_at, cursor_id = _decode_page_cursor(cursor)
+        if cursor_at and cursor_id:
+            clauses.append("(started_at < ? OR (started_at = ? AND id < ?))")
+            params.extend([cursor_at, cursor_at, cursor_id])
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        page_limit = _bounded_page_limit(limit)
+        with self.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM job_runs
+                {where}
+                ORDER BY started_at DESC, id DESC
+                LIMIT ?
+                """,
+                (*params, page_limit + 1),
+            ).fetchall()
+        has_more = len(rows) > page_limit
+        items = [self._job_from_row(row) for row in rows[:page_limit]]
+        next_cursor = (
+            _page_cursor(items[-1]["started_at"], items[-1]["id"])
+            if has_more and items
+            else ""
+        )
+        return {"items": items, "next_cursor": next_cursor}
+
+    def upsert_incident(self, incident: dict[str, object]) -> dict[str, Any]:
+        """Insert or update an incident aggregate."""
+
+        self.initialize()
+        context = redact_sensitive_value(incident.get("context"))
+        try:
+            occurrence_count = int(incident.get("occurrence_count") or 1)
+        except (TypeError, ValueError):
+            occurrence_count = 1
+        payload: dict[str, Any] = {
+            "id": _text(incident.get("id")) or f"inc-{uuid.uuid4().hex}",
+            "fingerprint": _text(incident.get("fingerprint")),
+            "severity": _text(incident.get("severity")),
+            "event_type": _text(incident.get("event_type")),
+            "status": _text(incident.get("status")) or "open",
+            "first_seen_at": _iso_from_timestamp(
+                incident.get("first_seen_at") or _now_iso()
+            ),
+            "last_seen_at": _iso_from_timestamp(
+                incident.get("last_seen_at") or _now_iso()
+            ),
+            "occurrence_count": occurrence_count,
+            "first_event_id": _text(incident.get("first_event_id")),
+            "latest_event_id": _text(incident.get("latest_event_id")),
+            "job_id": _text(incident.get("job_id")),
+            "correlation_id": _text(incident.get("correlation_id")),
+            "notification_window_at": _text(incident.get("notification_window_at")),
+            "context": context if isinstance(context, dict) else {},
+        }
+        if payload["notification_window_at"]:
+            payload["notification_window_at"] = _iso_from_timestamp(
+                payload["notification_window_at"]
+            )
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO incidents (
+                    id, fingerprint, severity, event_type, status, first_seen_at,
+                    last_seen_at, occurrence_count, first_event_id,
+                    latest_event_id, job_id, correlation_id,
+                    notification_window_at, context_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    fingerprint = excluded.fingerprint,
+                    severity = excluded.severity,
+                    event_type = excluded.event_type,
+                    status = excluded.status,
+                    first_seen_at = excluded.first_seen_at,
+                    last_seen_at = excluded.last_seen_at,
+                    occurrence_count = excluded.occurrence_count,
+                    first_event_id = excluded.first_event_id,
+                    latest_event_id = excluded.latest_event_id,
+                    job_id = excluded.job_id,
+                    correlation_id = excluded.correlation_id,
+                    notification_window_at = excluded.notification_window_at,
+                    context_json = excluded.context_json
+                """,
+                (
+                    payload["id"], payload["fingerprint"], payload["severity"],
+                    payload["event_type"], payload["status"],
+                    payload["first_seen_at"], payload["last_seen_at"],
+                    payload["occurrence_count"], payload["first_event_id"],
+                    payload["latest_event_id"], payload["job_id"],
+                    payload["correlation_id"], payload["notification_window_at"],
+                    _json_dumps(payload["context"]),
+                ),
+            )
+        return payload
+
+    def find_open_incident(self, fingerprint: str) -> dict[str, Any] | None:
+        """Return the newest open incident matching a fingerprint."""
+
+        self.initialize()
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM incidents
+                WHERE fingerprint = ? AND status = 'open'
+                ORDER BY last_seen_at DESC, id DESC
+                LIMIT 1
+                """,
+                (_text(fingerprint),),
+            ).fetchone()
+        return self._incident_from_row(row) if row else None
+
+    def coalesce_incident(
+        self,
+        occurrence: dict[str, object],
+        notification_window_seconds: int = 15 * 60,
+        source_event: dict[str, object] | None = None,
+        create_notification_intent: bool = False,
+    ) -> dict[str, Any]:
+        """Atomically coalesce an incident and optionally publish its event."""
+
+        self.initialize()
+        context = redact_sensitive_value(occurrence.get("context"))
+        candidate: dict[str, Any] = {
+            "id": _text(occurrence.get("id")) or f"inc-{uuid.uuid4().hex}",
+            "fingerprint": _text(occurrence.get("fingerprint")),
+            "severity": _text(occurrence.get("severity")),
+            "event_type": _text(occurrence.get("event_type")),
+            "status": "open",
+            "first_seen_at": _iso_from_timestamp(
+                occurrence.get("first_seen_at") or _now_iso()
+            ),
+            "last_seen_at": _iso_from_timestamp(
+                occurrence.get("last_seen_at") or _now_iso()
+            ),
+            "occurrence_count": 1,
+            "first_event_id": _text(occurrence.get("first_event_id")),
+            "latest_event_id": _text(occurrence.get("latest_event_id")),
+            "job_id": _text(occurrence.get("job_id")),
+            "correlation_id": _text(occurrence.get("correlation_id")),
+            "notification_window_at": _iso_from_timestamp(
+                occurrence.get("notification_window_at")
+                or occurrence.get("last_seen_at")
+                or _now_iso()
+            ),
+            "context": context if isinstance(context, dict) else {},
+        }
+        try:
+            window_seconds = max(0, int(notification_window_seconds))
+        except (TypeError, ValueError):
+            window_seconds = 15 * 60
+
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT * FROM incidents
+                WHERE fingerprint = ? AND status = 'open'
+                ORDER BY last_seen_at DESC, id DESC
+                LIMIT 1
+                """,
+                (candidate["fingerprint"],),
+            ).fetchone()
+            notification_due = row is None
+            notification_previous_window_at = ""
+            notification_claim_at = ""
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO incidents (
+                        id, fingerprint, severity, event_type, status,
+                        first_seen_at, last_seen_at, occurrence_count,
+                        first_event_id, latest_event_id, job_id, correlation_id,
+                        notification_window_at, context_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        candidate["id"], candidate["fingerprint"],
+                        candidate["severity"], candidate["event_type"],
+                        candidate["status"], candidate["first_seen_at"],
+                        candidate["last_seen_at"], 1,
+                        candidate["first_event_id"], candidate["latest_event_id"],
+                        candidate["job_id"], candidate["correlation_id"],
+                        candidate["notification_window_at"],
+                        _json_dumps(candidate["context"]),
+                    ),
+                )
+                incident_id = candidate["id"]
+                notification_claim_at = candidate["notification_window_at"]
+            else:
+                existing = self._incident_from_row(row)
+                old_severity = _text(existing.get("severity"))
+                new_severity = candidate["severity"]
+                severity = (
+                    old_severity
+                    if _severity_rank(old_severity) >= _severity_rank(new_severity)
+                    else new_severity
+                )
+                candidate_is_latest = (
+                    candidate["last_seen_at"], candidate["latest_event_id"]
+                ) >= (
+                    _text(existing.get("last_seen_at")),
+                    _text(existing.get("latest_event_id")),
+                )
+                candidate_is_first = (
+                    candidate["first_seen_at"],
+                    candidate["first_event_id"],
+                    candidate["id"],
+                ) < (
+                    _text(existing.get("first_seen_at")),
+                    _text(existing.get("first_event_id")),
+                    _text(existing.get("id")),
+                )
+                first_seen_at = (
+                    candidate["first_seen_at"]
+                    if candidate_is_first
+                    else _text(existing.get("first_seen_at"))
+                )
+                first_event_id = (
+                    candidate["first_event_id"]
+                    if candidate_is_first
+                    else _text(existing.get("first_event_id"))
+                )
+                notification_window_at = _text(
+                    existing.get("notification_window_at")
+                )
+                notification_previous_window_at = notification_window_at
+                notification_due = False
+                if candidate_is_latest:
+                    try:
+                        current = datetime.fromisoformat(
+                            candidate["last_seen_at"].replace("Z", "+00:00")
+                        )
+                        window_started = datetime.fromisoformat(
+                            notification_window_at.replace("Z", "+00:00")
+                        )
+                        notification_due = (
+                            current - window_started
+                            >= timedelta(seconds=window_seconds)
+                        )
+                    except (TypeError, ValueError):
+                        notification_due = True
+                    if notification_due:
+                        notification_window_at = candidate["last_seen_at"]
+                        notification_claim_at = notification_window_at
+                    latest_job_id = candidate["job_id"]
+                    latest_correlation_id = candidate["correlation_id"]
+                    if not latest_job_id and not latest_correlation_id:
+                        latest_job_id = _text(existing.get("job_id"))
+                        latest_correlation_id = _text(
+                            existing.get("correlation_id")
+                        )
+                    merged_context = dict(existing.get("context") or {})
+                    merged_context.update(candidate["context"])
+                    sanitized_context = redact_sensitive_value(merged_context)
+                    merged_context = (
+                        sanitized_context
+                        if isinstance(sanitized_context, dict)
+                        else {}
+                    )
+                    event_type = candidate["event_type"]
+                    last_seen_at = candidate["last_seen_at"]
+                    latest_event_id = candidate["latest_event_id"]
+                else:
+                    latest_job_id = _text(existing.get("job_id"))
+                    latest_correlation_id = _text(existing.get("correlation_id"))
+                    merged_context = dict(existing.get("context") or {})
+                    event_type = _text(existing.get("event_type"))
+                    last_seen_at = _text(existing.get("last_seen_at"))
+                    latest_event_id = _text(existing.get("latest_event_id"))
+                incident_id = _text(existing.get("id"))
+                conn.execute(
+                    """
+                    UPDATE incidents SET
+                        severity = ?, event_type = ?, first_seen_at = ?,
+                        last_seen_at = ?, first_event_id = ?,
+                        occurrence_count = occurrence_count + 1,
+                        latest_event_id = ?, job_id = ?, correlation_id = ?,
+                        notification_window_at = ?, context_json = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        severity, event_type, first_seen_at, last_seen_at,
+                        first_event_id, latest_event_id, latest_job_id,
+                        latest_correlation_id, notification_window_at,
+                        _json_dumps(merged_context), incident_id,
+                    ),
+                )
+            persisted_row = conn.execute(
+                "SELECT * FROM incidents WHERE id = ?", (incident_id,)
+            ).fetchone()
+            if source_event is not None:
+                event_payload = self._normalize_operational_event(source_event)
+                event_payload["incident_id"] = incident_id
+                self._insert_operational_event(conn, event_payload)
+                if create_notification_intent and notification_due:
+                    self._insert_notification_intent(
+                        conn,
+                        event_id=event_payload["id"],
+                        incident_id=incident_id,
+                        severity=event_payload["severity"],
+                        created_at=event_payload["created_at"],
+                    )
+
+        result = self._incident_from_row(persisted_row)
+        result["notification_due"] = notification_due
+        result["notification_claim_at"] = notification_claim_at
+        result["notification_previous_window_at"] = (
+            notification_previous_window_at
+        )
+        return result
+
+    def release_incident_notification(
+        self,
+        incident_id: str,
+        *,
+        claimed_at: str,
+        previous_at: str,
+    ) -> bool:
+        """Release one notification-window claim using compare-and-swap."""
+
+        self.initialize()
+        normalized_id = _text(incident_id)
+        normalized_claim = _canonical_timestamp(
+            claimed_at, field="claimed_at"
+        )
+        normalized_previous = _canonical_timestamp(
+            previous_at, field="previous_at", required=False
+        )
+        if not normalized_id:
+            return False
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE incidents
+                SET notification_window_at = ?
+                WHERE id = ? AND status = 'open'
+                  AND notification_window_at = ?
+                """,
+                (normalized_previous, normalized_id, normalized_claim),
+            )
+        return cursor.rowcount == 1
+
+    def query_incidents(
+        self, *, severity: str = "", cursor: str = "", limit: int = 20
+    ) -> dict[str, Any]:
+        """Return a descending cursor page of incidents."""
+
+        self.initialize()
+        clauses: list[str] = []
+        params: list[object] = []
+        if _text(severity):
+            clauses.append("severity = ?")
+            params.append(_text(severity))
+        cursor_at, cursor_id = _decode_page_cursor(cursor)
+        if cursor_at and cursor_id:
+            clauses.append("(last_seen_at < ? OR (last_seen_at = ? AND id < ?))")
+            params.extend([cursor_at, cursor_at, cursor_id])
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        page_limit = _bounded_page_limit(limit)
+        with self.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM incidents
+                {where}
+                ORDER BY last_seen_at DESC, id DESC
+                LIMIT ?
+                """,
+                (*params, page_limit + 1),
+            ).fetchall()
+        has_more = len(rows) > page_limit
+        items = [self._incident_from_row(row) for row in rows[:page_limit]]
+        next_cursor = (
+            _page_cursor(items[-1]["last_seen_at"], items[-1]["id"])
+            if has_more and items
+            else ""
+        )
+        return {"items": items, "next_cursor": next_cursor}
+
+    def query_incident_context(
+        self,
+        incident_id: str,
+        *,
+        problem_cursor: str = "",
+        problem_limit: int = 20,
+        before_limit: int = 5,
+        after_limit: int = 5,
+    ) -> dict[str, Any] | None:
+        """Return one bounded chronological incident context without scanning."""
+
+        self.initialize()
+        normalized_id = _text(incident_id)
+        if not normalized_id:
+            return None
+        page_limit = _bounded_page_limit(problem_limit)
+        try:
+            bounded_before = max(0, min(5, int(before_limit)))
+        except (TypeError, ValueError):
+            bounded_before = 5
+        try:
+            bounded_after = max(0, min(5, int(after_limit)))
+        except (TypeError, ValueError):
+            bounded_after = 5
+
+        with self.connection() as conn:
+            incident_row = conn.execute(
+                "SELECT * FROM incidents WHERE id = ?", (normalized_id,)
+            ).fetchone()
+            if incident_row is None:
+                return None
+            incident = self._incident_from_row(incident_row)
+            job_id = _text(incident.get("job_id"))
+            correlation_id = _text(incident.get("correlation_id"))
+            if job_id:
+                scope_column, scope_value = "job_id", job_id
+            elif correlation_id:
+                scope_column, scope_value = "correlation_id", correlation_id
+            else:
+                return {
+                    "before": [],
+                    "problem": [],
+                    "after": [],
+                    "problem_next_cursor": "",
+                }
+            boundary_rows = conn.execute(
+                """
+                SELECT id, created_at, job_id, correlation_id
+                FROM operational_events
+                WHERE id IN (?, ?)
+                """,
+                (
+                    _text(incident.get("first_event_id")),
+                    _text(incident.get("latest_event_id")),
+                ),
+            ).fetchall()
+            boundaries = {_text(row["id"]): row for row in boundary_rows}
+            first_row = boundaries.get(_text(incident.get("first_event_id")))
+            latest_row = boundaries.get(_text(incident.get("latest_event_id")))
+            if (
+                latest_row is None
+                or _text(latest_row[scope_column]) != scope_value
+            ):
+                return {
+                    "before": [],
+                    "problem": [],
+                    "after": [],
+                    "problem_next_cursor": "",
+                }
+            if (
+                first_row is None
+                or _text(first_row[scope_column]) != scope_value
+            ):
+                first_row = latest_row
+            first = (_text(first_row["created_at"]), _text(first_row["id"]))
+            latest = (_text(latest_row["created_at"]), _text(latest_row["id"]))
+            if latest < first:
+                first, latest = latest, first
+
+            before_rows = conn.execute(
+                _INCIDENT_CONTEXT_BEFORE_SQL.format(scope_column=scope_column),
+                (scope_value, first[0], first[1], bounded_before),
+            ).fetchall()
+
+            problem_params: list[object] = [
+                scope_value,
+                first[0],
+                first[1],
+                latest[0],
+                latest[1],
+            ]
+            cursor_at, cursor_id = _decode_page_cursor(problem_cursor)
+            if _text(problem_cursor) and not (cursor_at and cursor_id):
+                raise ValueError("invalid incident context cursor")
+            cursor_clause = ""
+            if cursor_at and cursor_id:
+                cursor_clause = "AND (created_at, id) > (?, ?)"
+                problem_params.extend([cursor_at, cursor_id])
+            problem_rows = conn.execute(
+                _INCIDENT_CONTEXT_PROBLEM_SQL.format(
+                    scope_column=scope_column,
+                    cursor_clause=cursor_clause,
+                ),
+                (*problem_params, page_limit + 1),
+            ).fetchall()
+            after_rows = conn.execute(
+                _INCIDENT_CONTEXT_AFTER_SQL.format(scope_column=scope_column),
+                (scope_value, latest[0], latest[1], bounded_after),
+            ).fetchall()
+
+        has_more = len(problem_rows) > page_limit
+        problem = [self._event_from_row(row) for row in problem_rows[:page_limit]]
+        return {
+            "before": [
+                self._event_from_row(row) for row in reversed(before_rows)
+            ],
+            "problem": problem,
+            "after": [self._event_from_row(row) for row in after_rows],
+            "problem_next_cursor": (
+                _page_cursor(problem[-1]["created_at"], problem[-1]["id"])
+                if has_more and problem
+                else ""
+            ),
+        }
+
+    @staticmethod
+    def _notification_delivery_payload(
+        record: dict[str, object],
+    ) -> dict[str, Any]:
+        delivery_id = _text(record.get("id"))
+        if not delivery_id:
+            raise ValueError("notification delivery id is required")
+        status = _delivery_status(record.get("status"))
+        primary_channel = _delivery_channel(
+            record.get("primary_channel"), allow_empty=False
+        )
+        used_channel = _delivery_channel(
+            record.get("used_channel"), allow_empty=True
+        )
+        severity = _text(record.get("severity"))
+        if severity not in _NOTIFICATION_DELIVERY_SEVERITIES:
+            raise ValueError("invalid notification delivery severity")
+        created_at = _canonical_timestamp(
+            record.get("created_at"), field="created_at"
+        )
+        updated_at = _canonical_timestamp(
+            record.get("updated_at"), field="updated_at"
+        )
+        next_attempt_at = _canonical_timestamp(
+            record.get("next_attempt_at"),
+            field="next_attempt_at",
+            required=False,
+        )
+        recipients = record.get("recipients", [])
+        if not isinstance(recipients, list):
+            raise ValueError("notification delivery recipients must be a list")
+        message = record.get("message", {})
+        if not isinstance(message, dict):
+            raise ValueError("notification delivery message must be an object")
+        attempts = record.get("attempts", [])
+        if not isinstance(attempts, list):
+            raise ValueError("notification delivery attempts must be a list")
+        return {
+            "id": delivery_id,
+            "incident_id": _text(record.get("incident_id")),
+            "event_id": _text(record.get("event_id")),
+            "severity": severity,
+            "status": status,
+            "primary_channel": primary_channel,
+            "used_channel": used_channel,
+            "recipients": recipients,
+            "message": message,
+            "attempts": attempts,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "next_attempt_at": next_attempt_at,
+        }
+
+    @staticmethod
+    def _insert_notification_delivery(
+        conn: sqlite3.Connection, payload: dict[str, Any]
+    ) -> None:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO notification_deliveries (
+                id, incident_id, event_id, severity, status,
+                primary_channel, used_channel, recipients_json,
+                message_json, attempts_json, created_at, updated_at,
+                next_attempt_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload["id"], payload["incident_id"], payload["event_id"],
+                payload["severity"], payload["status"],
+                payload["primary_channel"], payload["used_channel"],
+                _json_dumps(payload["recipients"]),
+                _json_dumps(payload["message"]),
+                _json_dumps(payload["attempts"]), payload["created_at"],
+                payload["updated_at"], payload["next_attempt_at"],
+            ),
+        )
+
+    def enqueue_notification_delivery(
+        self, record: dict[str, object]
+    ) -> dict[str, Any]:
+        """Insert one durable notification delivery and return its stored form."""
+
+        self.initialize()
+        payload = self._notification_delivery_payload(record)
+        with self.connection() as conn:
+            self._insert_notification_delivery(conn, payload)
+            row = conn.execute(
+                "SELECT * FROM notification_deliveries WHERE id = ?",
+                (payload["id"],),
+            ).fetchone()
+        return self._delivery_from_row(row)
+
+    def pending_notification_intents(
+        self, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Return a bounded deterministic batch of pending outbox intents."""
+
+        self.initialize()
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, event_id, incident_id, severity, status,
+                       created_at, updated_at, completed_at
+                FROM notification_outbox
+                WHERE status = 'pending'
+                ORDER BY created_at ASC, id ASC
+                LIMIT ?
+                """,
+                (_bounded_page_limit(limit),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def notification_intent_context(
+        self, intent_id: str
+    ) -> dict[str, Any] | None:
+        """Load the durable event and optional incident needed to materialize an intent."""
+
+        self.initialize()
+        with self.connection() as conn:
+            intent = conn.execute(
+                "SELECT * FROM notification_outbox WHERE id = ? AND status = 'pending'",
+                (_text(intent_id),),
+            ).fetchone()
+            if intent is None:
+                return None
+            event_row = conn.execute(
+                "SELECT * FROM operational_events WHERE id = ?",
+                (intent["event_id"],),
+            ).fetchone()
+            incident_row = None
+            if _text(intent["incident_id"]):
+                incident_row = conn.execute(
+                    "SELECT * FROM incidents WHERE id = ?",
+                    (intent["incident_id"],),
+                ).fetchone()
+        if event_row is None:
+            raise RuntimeError("notification intent source event is unavailable")
+        return {
+            "intent": dict(intent),
+            "event": self._event_from_row(event_row),
+            "incident": self._incident_from_row(incident_row) if incident_row else {},
+        }
+
+    def materialize_notification_intent(
+        self,
+        intent_id: str,
+        *,
+        delivery: dict[str, object] | None,
+        completed_at: str,
+    ) -> dict[str, Any]:
+        """Atomically create at most one delivery and complete an outbox intent."""
+
+        self.initialize()
+        normalized_id = _text(intent_id)
+        completed = _canonical_timestamp(completed_at, field="completed_at")
+        payload = (
+            self._notification_delivery_payload(delivery)
+            if isinstance(delivery, dict)
+            else None
+        )
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            intent = conn.execute(
+                "SELECT * FROM notification_outbox WHERE id = ?",
+                (normalized_id,),
+            ).fetchone()
+            if intent is None:
+                return {}
+            if payload is not None:
+                if payload["event_id"] != _text(intent["event_id"]):
+                    raise ValueError("delivery event does not match notification intent")
+                existing = conn.execute(
+                    """
+                    SELECT * FROM notification_deliveries
+                    WHERE event_id = ?
+                    ORDER BY created_at, id LIMIT 1
+                    """,
+                    (payload["event_id"],),
+                ).fetchone()
+                if existing is None and intent["status"] == "pending":
+                    self._insert_notification_delivery(conn, payload)
+                    existing = conn.execute(
+                        "SELECT * FROM notification_deliveries WHERE id = ?",
+                        (payload["id"],),
+                    ).fetchone()
+                    if (
+                        existing is None
+                        or _text(existing["event_id"]) != payload["event_id"]
+                    ):
+                        raise RuntimeError(
+                            "notification delivery identity conflict"
+                        )
+            else:
+                existing = None
+            if intent["status"] == "pending":
+                conn.execute(
+                    """
+                    UPDATE notification_outbox
+                    SET status = 'done', updated_at = ?, completed_at = ?
+                    WHERE id = ? AND status = 'pending'
+                    """,
+                    (completed, completed, normalized_id),
+                )
+        return self._delivery_from_row(existing) if existing is not None else {}
+
+    def prune_done_notification_intents(self, before: str) -> int:
+        """Delete completed intents older than the idempotency retention boundary."""
+
+        self.initialize()
+        boundary = _canonical_timestamp(before, field="before")
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM notification_outbox
+                WHERE status = 'done' AND completed_at < ?
+                """,
+                (boundary,),
+            )
+        return max(0, cursor.rowcount)
+
+    def pending_notification_deliveries(
+        self, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Return due pending deliveries in deterministic queue order."""
+
+        self.initialize()
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM notification_deliveries
+                WHERE status = 'pending'
+                  AND (next_attempt_at = '' OR next_attempt_at <= ?)
+                ORDER BY COALESCE(NULLIF(next_attempt_at, ''), created_at) ASC,
+                         created_at ASC, id ASC
+                LIMIT ?
+                """,
+                (_now_iso(), _bounded_page_limit(limit)),
+            ).fetchall()
+        return [self._delivery_from_row(row) for row in rows]
+
+    def update_notification_delivery(
+        self,
+        delivery_id: str,
+        *,
+        status: str,
+        used_channel: str = "",
+        attempts: object = None,
+        updated_at: str,
+        next_attempt_at: str = "",
+    ) -> dict[str, Any]:
+        """Update mutable delivery state and return the decoded row."""
+
+        self.initialize()
+        normalized_id = _text(delivery_id)
+        if not normalized_id:
+            raise ValueError("notification delivery id is required")
+        normalized_status = _delivery_status(status)
+        normalized_channel = _delivery_channel(used_channel, allow_empty=True)
+        normalized_updated_at = _canonical_timestamp(
+            updated_at, field="updated_at"
+        )
+        normalized_next_attempt = _canonical_timestamp(
+            next_attempt_at, field="next_attempt_at", required=False
+        )
+        if attempts is not None and not isinstance(attempts, list):
+            raise ValueError("notification delivery attempts must be a list")
+        expected_status = "pending" if normalized_status == "sending" else "sending"
+        with self.connection() as conn:
+            assignments = [
+                "status = ?",
+                "used_channel = ?",
+                "updated_at = ?",
+                "next_attempt_at = ?",
+            ]
+            params: list[object] = [
+                normalized_status,
+                normalized_channel,
+                normalized_updated_at,
+                normalized_next_attempt,
+            ]
+            if attempts is not None:
+                assignments.append("attempts_json = ?")
+                params.append(_json_dumps(attempts))
+            params.extend([normalized_id, expected_status])
+            cursor = conn.execute(
+                f"""
+                UPDATE notification_deliveries
+                SET {", ".join(assignments)}
+                WHERE id = ? AND status = ?
+                """,
+                params,
+            )
+            if cursor.rowcount == 0:
+                row = conn.execute(
+                    "SELECT status FROM notification_deliveries WHERE id = ?",
+                    (normalized_id,),
+                ).fetchone()
+                if normalized_status == "sending" or row is None:
+                    return {}
+                raise ValueError(
+                    f"invalid notification delivery transition: "
+                    f"{row['status']} -> {normalized_status}"
+                )
+            row = conn.execute(
+                "SELECT * FROM notification_deliveries WHERE id = ?",
+                (normalized_id,),
+            ).fetchone()
+        return self._delivery_from_row(row) if row else {}
+
+    def query_notification_deliveries(
+        self, *, incident_id: str = "", cursor: str = "", limit: int = 20
+    ) -> dict[str, Any]:
+        """Return a descending cursor page of notification deliveries."""
+
+        self.initialize()
+        clauses: list[str] = []
+        params: list[object] = []
+        if _text(incident_id):
+            clauses.append("incident_id = ?")
+            params.append(_text(incident_id))
+        cursor_at, cursor_id = _decode_page_cursor(cursor)
+        if cursor_at and cursor_id:
+            clauses.append("(created_at < ? OR (created_at = ? AND id < ?))")
+            params.extend([cursor_at, cursor_at, cursor_id])
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        page_limit = _bounded_page_limit(limit)
+        with self.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM notification_deliveries
+                {where}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (*params, page_limit + 1),
+            ).fetchall()
+        has_more = len(rows) > page_limit
+        items = [self._delivery_from_row(row) for row in rows[:page_limit]]
+        next_cursor = (
+            _page_cursor(items[-1]["created_at"], items[-1]["id"])
+            if has_more and items
+            else ""
+        )
+        return {"items": items, "next_cursor": next_cursor}
+
+    def notification_deliveries_for_incidents(
+        self, incident_ids: list[str], *, per_incident_limit: int = 5
+    ) -> list[dict[str, Any]]:
+        """Return a bounded recent delivery set for a bounded incident page."""
+
+        self.initialize()
+        normalized_ids = list(
+            dict.fromkeys(_text(value) for value in incident_ids if _text(value))
+        )[:100]
+        if not normalized_ids:
+            return []
+        bounded_limit = max(1, min(10, int(per_incident_limit or 5)))
+        placeholders = ", ".join("?" for _value in normalized_ids)
+        with self.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM (
+                    SELECT notification_deliveries.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY incident_id
+                               ORDER BY created_at DESC, id DESC
+                           ) AS delivery_rank
+                    FROM notification_deliveries
+                    WHERE incident_id IN ({placeholders})
+                )
+                WHERE delivery_rank <= ?
+                ORDER BY created_at DESC, id DESC
+                """,
+                (*normalized_ids, bounded_limit),
+            ).fetchall()
+        deliveries = [self._delivery_from_row(row) for row in rows]
+        for delivery in deliveries:
+            delivery.pop("delivery_rank", None)
+        return deliveries
+
+    def mark_alerts_read(
+        self, username: str, severity: str, event_id: str, created_at: str
+    ) -> None:
+        """Store a user's latest read marker for one alert severity."""
+
+        self.initialize()
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO alert_reads (username, severity, event_id, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(username, severity) DO UPDATE SET
+                    event_id = excluded.event_id,
+                    created_at = excluded.created_at
+                WHERE excluded.created_at > alert_reads.created_at
+                    OR (
+                        excluded.created_at = alert_reads.created_at
+                        AND excluded.event_id > alert_reads.event_id
+                    )
+                """,
+                (
+                    _text(username), _text(severity), _text(event_id),
+                    _iso_from_timestamp(created_at),
+                ),
+            )
+
+    def unread_alert_summary(self, username: str) -> dict[str, object]:
+        """Return unread counts and highest alert severity for one user."""
+
+        self.initialize()
+        counts: dict[str, int] = {}
+        with self.connection() as conn:
+            for severity in ("warning", "error", "critical"):
+                marker = conn.execute(
+                    """
+                    SELECT event_id, created_at FROM alert_reads
+                    WHERE username = ? AND severity = ?
+                    """,
+                    (_text(username), severity),
+                ).fetchone()
+                if marker:
+                    row = conn.execute(
+                        """
+                        SELECT COUNT(*) FROM operational_events
+                        WHERE severity = ? AND (
+                            created_at > ? OR (created_at = ? AND id > ?)
+                        )
+                        """,
+                        (
+                            severity, marker["created_at"], marker["created_at"],
+                            marker["event_id"],
+                        ),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT COUNT(*) FROM operational_events WHERE severity = ?",
+                        (severity,),
+                    ).fetchone()
+                counts[severity] = int(row[0] or 0) if row else 0
+        highest = ""
+        for severity in ("critical", "error", "warning"):
+            if counts[severity]:
+                highest = severity
+                break
+        return {
+            **counts,
+            "total": sum(counts.values()),
+            "highest": highest,
+        }
+
+    def prune_info_events(self, before: str) -> int:
+        """Delete old info events and compact obsolete pre-checkpoint markers.
+
+        A marker older than retention is intentionally no longer resolvable and
+        reconnects at the current high-water; retained history comes from the
+        bounded archive snapshot. Sequence zero and the newest checkpoint stay.
+        """
+
+        self.initialize()
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM operational_events
+                WHERE severity = 'info' AND created_at < ?
+                  AND id NOT IN (
+                      SELECT event_id FROM notification_outbox
+                      WHERE status = 'pending'
+                  )
+                """,
+                (_text(before),),
+            )
+            removed = max(0, cursor.rowcount)
+            conn.execute(
+                """
+                DELETE FROM operational_event_stream
+                WHERE sequence <> 0
+                  AND sequence < (
+                      SELECT COALESCE(MAX(sequence), 0)
+                      FROM operational_event_stream
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM operational_events AS e
+                      WHERE e.id = operational_event_stream.event_id
+                  )
+                """
+            )
+            now = _now_iso()
+            conn.execute(
+                "DELETE FROM pimcore_integration_contexts WHERE expires_at <= ?",
+                (now,),
+            )
+            return removed
+
+    def create_pimcore_integration_context(
+        self,
+        *,
+        username: str,
+        mode: str,
+        object_id: object,
+        results: object,
+        ttl_seconds: int = 10 * 60,
+        now: datetime | None = None,
+    ) -> str:
+        """Persist redacted SQL-profile evidence behind an opaque short-lived ID."""
+
+        self.initialize()
+        bound_user = _text(username)
+        bound_mode = _text(mode).lower()
+        bound_object_id = _text(object_id)
+        if not bound_user:
+            raise ValueError("Pimcore integration context requires a user")
+        if bound_mode not in {"create", "edit"}:
+            raise ValueError("Pimcore integration context mode is invalid")
+        if bound_mode == "create":
+            bound_object_id = ""
+        elif not bound_object_id:
+            raise ValueError("Pimcore edit integration context requires an object")
+        try:
+            bounded_ttl = max(30, min(int(ttl_seconds), 30 * 60))
+        except (TypeError, ValueError):
+            bounded_ttl = 10 * 60
+        created = now or datetime.now(timezone.utc)
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        created = created.astimezone(timezone.utc)
+        created_at = _iso_from_timestamp(created)
+        expires_at = _iso_from_timestamp(created + timedelta(seconds=bounded_ttl))
+        safe_results = redact_sensitive_value(
+            results if isinstance(results, dict) else {}, text_limit=32 * 1024
+        )
+        if not isinstance(safe_results, dict):
+            safe_results = {}
+        context_id = secrets.token_urlsafe(32)
+        with self.connection() as conn:
+            conn.execute(
+                "DELETE FROM pimcore_integration_contexts WHERE expires_at <= ?",
+                (created_at,),
+            )
+            conn.execute(
+                """
+                INSERT INTO pimcore_integration_contexts (
+                    id, username, mode, object_id, results_json,
+                    created_at, expires_at, consumed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, '')
+                """,
+                (
+                    context_id,
+                    bound_user,
+                    bound_mode,
+                    bound_object_id,
+                    _json_dumps(safe_results),
+                    created_at,
+                    expires_at,
+                ),
+            )
+        return context_id
+
+    def consume_pimcore_integration_context(
+        self,
+        context_id: object,
+        *,
+        username: str,
+        mode: str,
+        object_id: object,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically consume evidence only when every server binding matches."""
+
+        self.initialize()
+        identity = _text(context_id)
+        bound_user = _text(username)
+        bound_mode = _text(mode).lower()
+        bound_object_id = "" if bound_mode == "create" else _text(object_id)
+        if not identity or not bound_user or bound_mode not in {"create", "edit"}:
+            return None
+        consumed_at = _iso_from_timestamp(now or datetime.now(timezone.utc))
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "DELETE FROM pimcore_integration_contexts WHERE expires_at <= ?",
+                (consumed_at,),
+            )
+            row = conn.execute(
+                """
+                SELECT results_json FROM pimcore_integration_contexts
+                WHERE id = ? AND username = ? AND mode = ? AND object_id = ?
+                  AND consumed_at = '' AND expires_at > ?
+                """,
+                (
+                    identity,
+                    bound_user,
+                    bound_mode,
+                    bound_object_id,
+                    consumed_at,
+                ),
+            ).fetchone()
+            if row is None:
+                return None
+            cursor = conn.execute(
+                """
+                UPDATE pimcore_integration_contexts SET consumed_at = ?
+                WHERE id = ? AND consumed_at = ''
+                """,
+                (consumed_at, identity),
+            )
+            if cursor.rowcount != 1:
+                return None
+            payload = _json_loads(row["results_json"], {})
+            return dict(payload) if isinstance(payload, dict) else {}
+
+    def prune_pimcore_integration_contexts(
+        self, *, now: datetime | None = None
+    ) -> int:
+        """Bound retained integration contexts during regular maintenance."""
+
+        self.initialize()
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        current = current.astimezone(timezone.utc)
+        current_at = _iso_from_timestamp(current)
+        consumed_before = _iso_from_timestamp(current - timedelta(days=1))
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM pimcore_integration_contexts
+                WHERE expires_at <= ?
+                   OR (consumed_at <> '' AND consumed_at <= ?)
+                """,
+                (current_at, consumed_before),
+            )
+            return max(0, cursor.rowcount)
+
+    def clear_operational_data(self) -> dict[str, int]:
+        """Clear structured operational tables without touching product history."""
+
+        self.initialize()
+        deleted: dict[str, int] = {}
+        with self.connection() as conn:
+            for table in (
+                "operational_events", "job_runs", "incidents", "alert_reads",
+                "notification_deliveries", "notification_outbox",
+                "pimcore_integration_contexts",
+            ):
+                cursor = conn.execute(f"DELETE FROM {table}")
+                deleted[table] = max(0, cursor.rowcount)
+        return deleted
 
     def load_config(self) -> dict[str, Any]:
         """Return the stored config payload."""
@@ -406,6 +2484,8 @@ class SqliteStore:
         """Persist one Pimcore submission audit record."""
 
         self.initialize()
+        safe_record = redact_sensitive_value(record)
+        record = safe_record if isinstance(safe_record, dict) else {}
         record_id = _text(record.get("id")) or f"pim-{uuid.uuid4().hex}"
         created_at = _iso_from_timestamp(record.get("created_at") or _now_iso())
         payload = {
@@ -520,7 +2600,7 @@ class SqliteStore:
             ).fetchall()
         result = []
         for row in rows:
-            result.append(
+            item = redact_sensitive_value(
                 {
                     "id": row["id"],
                     "operation_id": row["operation_id"],
@@ -537,6 +2617,8 @@ class SqliteStore:
                     "created_at": row["created_at"],
                 }
             )
+            if isinstance(item, dict):
+                result.append(item)
         return result
 
     def load_slots(self) -> tuple[list[dict[str, str]], dict[str, str]]:
@@ -859,7 +2941,9 @@ class SqliteStore:
         for row in rows:
             payload = _json_loads(row["payload_json"], {})
             if isinstance(payload, dict):
-                records.append(payload)
+                redacted = redact_sensitive_value(payload)
+                if isinstance(redacted, dict):
+                    records.append(redacted)
         return records
 
     def save_history(self, records: list[dict[str, object]]) -> None:
@@ -872,7 +2956,8 @@ class SqliteStore:
                 if not isinstance(item, dict):
                     continue
                 record_id = _text(item.get("id")) or f"hist-{uuid.uuid4().hex}"
-                payload = dict(item)
+                safe_item = redact_sensitive_value(item)
+                payload = dict(safe_item) if isinstance(safe_item, dict) else {}
                 payload["id"] = record_id
                 created_at = _history_created_at(payload)
                 payload["created_at"] = created_at
@@ -895,7 +2980,8 @@ class SqliteStore:
         if not isinstance(record, dict):
             return
         record_id = _text(record.get("id")) or f"hist-{uuid.uuid4().hex}"
-        payload = dict(record)
+        safe_record = redact_sensitive_value(record)
+        payload = dict(safe_record) if isinstance(safe_record, dict) else {}
         payload["id"] = record_id
         created_at = _history_created_at(payload)
         payload["created_at"] = created_at

@@ -12,6 +12,7 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from ..common import SSL_CONTEXT
+from ..history_changes import field_changes
 from ..pimcore_config import (
     PIMCORE_API_KEY,
     PIMCORE_FIELD_NAME,
@@ -1128,10 +1129,11 @@ def create_product(
     if duplicate:
         emit(
             "duplicate_check",
-            "warning",
+            "success",
             "EAN juz istnieje w Pimcore.",
             object_id=duplicate["id"],
             object_path=duplicate["path"],
+            status="existing",
             stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
         )
         return {
@@ -1217,6 +1219,13 @@ def create_product(
         "object": identity,
         "object_id": identity["id"],
         "payload": payload,
+        "change_set": {
+            "kind": "created",
+            "fields": [
+                {"key": key, "label": key, "before": None, "after": value}
+                for key, value in sorted(values.items())
+            ],
+        },
     }
 
 
@@ -1235,6 +1244,7 @@ def update_product(
     stage_started = time.perf_counter()
     current_payload = api.object_by_id(numeric_id)
     current_data = _object_data(current_payload)
+    current_values = _configured_values(config, current_data)
     current_marker = _object_marker(current_data)
     if current_marker != str(expected_marker or ""):
         emit(
@@ -1317,10 +1327,15 @@ def update_product(
         object_path=identity["path"],
         stage_elapsed_ms=int((time.perf_counter() - stage_started) * 1000),
     )
+    changes = field_changes(current_values, verified_values)
     return {
         "object": identity,
         "values": verified_values,
         "marker": _object_marker(verified_data),
+        "change_set": {
+            "kind": "updated" if changes else "synchronized",
+            "fields": changes,
+        },
     }
 
 

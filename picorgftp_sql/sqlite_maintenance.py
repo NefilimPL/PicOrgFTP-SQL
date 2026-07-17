@@ -21,6 +21,16 @@ TIMESTAMP_COLUMNS = (
     ("web_history", "created_at"),
     ("file_index_cache", "updated_at"),
     ("file_index_segments", "updated_at"),
+    ("operational_events", "created_at"),
+    ("job_runs", "started_at"),
+    ("job_runs", "finished_at"),
+    ("incidents", "first_seen_at"),
+    ("incidents", "last_seen_at"),
+    ("incidents", "notification_window_at"),
+    ("alert_reads", "created_at"),
+    ("notification_deliveries", "created_at"),
+    ("notification_deliveries", "updated_at"),
+    ("notification_deliveries", "next_attempt_at"),
 )
 
 
@@ -59,8 +69,6 @@ def _iso_from_legacy_timestamp(value: object) -> str | None:
     text = str(value or "").strip()
     if not text:
         return None
-    if text.endswith("Z") and "T" in text:
-        return text
     try:
         number = float(text)
     except (TypeError, ValueError):
@@ -71,7 +79,11 @@ def _iso_from_legacy_timestamp(value: object) -> str | None:
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    return datetime.fromtimestamp(number, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    try:
+        parsed = datetime.fromtimestamp(number, timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None
+    return parsed.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def normalize_timestamp_columns(conn: sqlite3.Connection) -> int:

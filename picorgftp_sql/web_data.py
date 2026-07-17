@@ -52,6 +52,15 @@ from .common import (
     w,
 )
 from .config import save_config
+from .email_settings import (
+    EMAIL_CLIENT_SECRET,
+    EMAIL_SETTINGS_KEY,
+    EMAIL_SMTP_PASSWORD,
+    normalize_email_address,
+    normalize_email_settings,
+    public_email_settings,
+    validate_email_rule_recipients,
+)
 from .database import connect_db
 from .excel_utils import (
     COLOR1_HEADER,
@@ -72,6 +81,7 @@ from .excel_utils import (
     NO_EAN_PLACEHOLDER,
 )
 from .logging_utils import log_error
+from .observability import SECRET_KEY_RE, emit_event
 from .services.ftp_service import connect_ftp, list_remote_files_for_ean, list_remote_filenames
 from .services.sql_service import (
     extract_presence_context,
@@ -100,6 +110,7 @@ from .pimcore_templates import (
     render_mapping_templates,
 )
 from .sqlite_store import SqliteStore
+from .redaction import redact_sensitive_value, sanitize_free_text
 from .services.pimcore_service import (
     PimcoreClient,
     PimcoreConflictError,
@@ -116,6 +127,7 @@ from .services.pimcore_service import (
 from .services.translation_service import translate_text
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
 from .sql_profiles import (
+    DEFAULT_SQL_PROFILE_ID,
     SQL_PROFILES_KEY,
     additional_sql_profiles,
     normalize_sql_profiles,
@@ -128,6 +140,7 @@ from .product_fields import (
     missing_required_fields,
     normalize_product_fields,
 )
+
 from .workflow_utils import (
     build_product_directory,
     parse_slot_filename,
@@ -136,6 +149,14 @@ from .workflow_utils import (
 )
 from .web_workflow import available_convert_formats
 from .version import get_display_version
+
+
+SQL_PROFILE_WARNING_CODES_MAX = 20
+SQL_PROFILE_ERROR_MAX_BYTES = 2000
+_SQL_ASSIGNMENT_RE = re.compile(
+    r"(?ix)(?<![a-z0-9_.-])(?P<key>[a-z0-9_.-]+)\s*[:=]\s*"
+    r'(?:"(?:\\.|[^"\r\n])*"|\'(?:\\.|[^\'\r\n])*\'|[^\r\n;,]*)'
+)
 
 
 WEB_FTP_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
@@ -181,6 +202,7 @@ _CONFIG_SECRET_FIELDS = {
     K: {N, M},
     TRANSLATION_SETTINGS_KEY: {TRANSLATION_API_KEY},
     PIMCORE_SETTINGS_KEY: {PIMCORE_API_KEY},
+    EMAIL_SETTINGS_KEY: {"entra.client_secret", "smtp.password"},
 }
 _PIMCORE_OPERATIONS = PimcoreOperationRegistry()
 
@@ -464,17 +486,29 @@ def _load_history_records() -> list[dict[str, object]]:
         return []
     if not isinstance(payload, list):
         return []
-    return [item for item in payload if isinstance(item, dict)]
+    records: list[dict[str, object]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        redacted = redact_sensitive_value(item)
+        if isinstance(redacted, dict):
+            records.append(redacted)
+    return records
 
 
 def _save_history_records(records: list[dict[str, object]]) -> None:
+    safe_records = redact_sensitive_value(records[-2000:])
+    bounded_records = safe_records if isinstance(safe_records, list) else []
     sqlite_store = _active_sqlite_store()
     if sqlite_store is not None:
-        sqlite_store.save_history(records)
+        sqlite_store.save_history(bounded_records)
         return
     path = _history_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(records[-2000:], indent=2, ensure_ascii=False), encoding="utf-8")
+    path.write_text(
+        json.dumps(bounded_records, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def record_history(
@@ -500,6 +534,8 @@ def record_history(
         "summary": _text(summary),
         "details": details or {},
     }
+    safe_record = redact_sensitive_value(record)
+    record = safe_record if isinstance(safe_record, dict) else {}
     records = _load_history_records()
     records.append(record)
     _save_history_records(records)
@@ -878,6 +914,7 @@ def _public_user(user: dict[str, object]) -> dict[str, object]:
     token_last_used_at = _float_user_value(user.get("extension_token_last_used_at"))
     return {
         "username": _text(user.get("username")),
+        "email": normalize_email_address(user.get("email")),
         "role": "admin" if _text(user.get("role")) == "admin" else "user",
         "enabled": bool(user.get("enabled", True)),
         "has_password": bool(_text(user.get("password_hash"))),
@@ -903,6 +940,7 @@ def _public_user(user: dict[str, object]) -> dict[str, object]:
 def _default_admin() -> dict[str, object]:
     return {
         "username": "admin",
+        "email": "",
         "role": "admin",
         "enabled": True,
         "password_hash": _hash_password("admin"),
@@ -947,6 +985,7 @@ def _normalized_user_record(item: dict[str, object]) -> dict[str, object] | None
     role = _text(item.get("role")) or "user"
     return {
         "username": username,
+        "email": normalize_email_address(item.get("email")),
         "role": "admin" if role == "admin" else "user",
         "enabled": bool(item.get("enabled", True)),
         "password_hash": _text(item.get("password_hash"))
@@ -1165,7 +1204,12 @@ def find_user(username: str) -> dict[str, object] | None:
     return None
 
 
-def add_user(username: str, password: str, role: str = "user") -> list[dict[str, object]]:
+def add_user(
+    username: str,
+    password: str,
+    role: str = "user",
+    email: str = "",
+) -> list[dict[str, object]]:
     """Add a web user account."""
 
     username = _text(username)
@@ -1173,12 +1217,14 @@ def add_user(username: str, password: str, role: str = "user") -> list[dict[str,
         raise ValueError("Nazwa uzytkownika nie moze byc pusta.")
     if not _text(password):
         raise ValueError("Haslo uzytkownika nie moze byc puste.")
+    email = normalize_email_address(email)
     users = load_user_records()
     if any(user["username"].lower() == username.lower() for user in users):
         raise ValueError("Taki uzytkownik juz istnieje.")
     users.append(
         {
             "username": username,
+            "email": email,
             "role": "admin" if _text(role) == "admin" else "user",
             "enabled": True,
             "password_hash": _hash_password(password),
@@ -1204,6 +1250,7 @@ def update_user(
     enabled: bool | None = None,
     role: str | None = None,
     password: str | None = None,
+    email: str | None = None,
     unlock: bool | None = None,
     revoke_sessions: bool | None = None,
     revoke_extension_token: bool | None = None,
@@ -1221,6 +1268,8 @@ def update_user(
             user["enabled"] = bool(enabled)
         if role is not None:
             user["role"] = "admin" if _text(role) == "admin" else "user"
+        if email is not None:
+            user["email"] = normalize_email_address(email)
         if password is not None and _text(password):
             user["password_hash"] = _hash_password(password)
             _bump_user_counter(user, "session_version")
@@ -1637,13 +1686,78 @@ def _persist_pimcore_operation(report: dict[str, object]) -> dict[str, object]:
         action = "pimcore_product_create_rejected"
     else:
         action = "pimcore_product_create"
+    pimcore_change_set = (
+        result.get("change_set")
+        if isinstance(result.get("change_set"), dict)
+        else {}
+    )
+    if pimcore_change_set:
+        pimcore_change_set = dict(pimcore_change_set)
+        object_id = _text(
+            result.get("object_id")
+            or result.get("id")
+            or result_object.get("id")
+        )
+        object_path = _text(
+            result.get("object_path")
+            or result.get("path")
+            or result_object.get("path")
+            or result_object.get("fullPath")
+        )
+        if object_id:
+            pimcore_change_set["object_id"] = object_id
+        if object_path:
+            pimcore_change_set["object_path"] = object_path
+
+        def safe_elapsed(value: object) -> int | None:
+            if isinstance(value, bool):
+                return None
+            try:
+                return max(0, min(int(value), 86_400_000))
+            except (TypeError, ValueError):
+                return None
+
+        total_ms = safe_elapsed(report.get("total_ms"))
+        if total_ms is not None:
+            pimcore_change_set["total_ms"] = total_ms
+        events = report.get("events") if isinstance(report.get("events"), list) else []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            elapsed = safe_elapsed(event.get("stage_elapsed_ms"))
+            if elapsed is None:
+                continue
+            stage = _text(event.get("stage")).lower()
+            if stage in {"create", "update"}:
+                pimcore_change_set["send_ms"] = elapsed
+            elif stage == "verify":
+                pimcore_change_set["verification_ms"] = elapsed
+        pimcore_change_set = redact_pimcore_log_value(pimcore_change_set)
+    integrations = (
+        report.get("integration_results")
+        if isinstance(report.get("integration_results"), dict)
+        else pimcore_change_set.get("integrations")
+        if isinstance(pimcore_change_set.get("integrations"), dict)
+        else {}
+    )
+    details: dict[str, object] = {
+        "pimcore_operation": redact_pimcore_log_value(report)
+    }
+    if pimcore_change_set:
+        details["change_set"] = {
+            "kind": pimcore_change_set.get("kind", "synchronized"),
+            "fields": [],
+            "files": [],
+            "integrations": integrations,
+            "pimcore": pimcore_change_set,
+        }
     return record_history(
         username=_text(report.get("username")),
         action=action,
         ean=values.get("EAN", ""),
         product_id=result.get("object_id") or result_object.get("id", ""),
         summary=f"Pimcore: {report.get('status', 'unknown')}.",
-        details={"pimcore_operation": redact_pimcore_log_value(report)},
+        details=details,
     )
 
 
@@ -1853,6 +1967,38 @@ def _rewrite_sql_template_source(template: object, source: object) -> str:
     return re.sub(r"\{([^{}]+)\}", replace, str(template or ""))
 
 
+def _redact_sql_integration_error(
+    value: object,
+    profiles: list[dict[str, object]],
+) -> str:
+    text = str(value or "")
+
+    def redact_assignment(match: re.Match[str]) -> str:
+        if not SECRET_KEY_RE.search(match.group("key")):
+            return match.group(0)
+        return "credential=[REDACTED]"
+
+    text = _SQL_ASSIGNMENT_RE.sub(redact_assignment, text)
+    known_secrets = {
+        str(profile.get("password") or "")
+        for profile in profiles
+        if str(profile.get("password") or "")
+    }
+    for secret in sorted(known_secrets, key=len, reverse=True):
+        text = text.replace(secret, "[REDACTED]")
+    return sanitize_free_text(text, limit=SQL_PROFILE_ERROR_MAX_BYTES)
+
+
+def _sql_warning_codes(warnings: object) -> list[str]:
+    if not isinstance(warnings, list):
+        return []
+    return [
+        _text(warning.get("code"))
+        for warning in warnings[:SQL_PROFILE_WARNING_CODES_MAX]
+        if isinstance(warning, dict) and _text(warning.get("code"))
+    ]
+
+
 def _render_templates(
     settings_payload: dict[str, object],
     product_values: object,
@@ -1902,14 +2048,19 @@ def _render_templates(
     }
     extra_sources: list[SourceDefinition] = []
     extra_values: dict[str, object] = {}
+    sql_profile_results: list[dict[str, object]] = []
     for source in sql_template_sources:
         mapping = mappings[source]
+        required = bool(mapping.get("required"))
         sql_key = _sql_template_source(source)
         extra_sources.append(
             SourceDefinition(sql_key, f"SQL {mapping.get('label') or source}", "sql", (sql_key,))
         )
+        integration_started = time.perf_counter()
+        profile_id = _text(mapping.get("sql_profile_id"))
         try:
             profile = resolve_sql_profile(profiles, mapping.get("sql_profile_id"))
+            profile_id = _text(profile.get("id")) or profile_id
             if not profile.get("enabled", True):
                 label = profile.get("label") or profile.get("id")
                 raise ValueError(f"Profil SQL {label} jest wylaczony.")
@@ -1921,11 +2072,35 @@ def _render_templates(
                 mappings=mappings_list,
             )
         except Exception as exc:
-            warnings.append({"source": source, "code": "sql_error", "message": str(exc)})
+            safe_error = _redact_sql_integration_error(exc, profiles)
+            warnings.append({"source": source, "code": "sql_error", "message": safe_error})
             extra_values[sql_key] = ""
+            sql_profile_results.append(
+                {
+                    "profile_id": profile_id,
+                    "source": source,
+                    "status": "error",
+                    "elapsed_ms": int((time.perf_counter() - integration_started) * 1000),
+                    "warning_codes": ["sql_error"],
+                    "error": safe_error,
+                    "required": required,
+                }
+            )
         else:
             extra_values[sql_key] = sql_result.value
             warnings.extend({"source": source, **warning} for warning in sql_result.warnings)
+            warning_codes = _sql_warning_codes(sql_result.warnings)
+            sql_profile_results.append(
+                {
+                    "profile_id": profile_id,
+                    "source": source,
+                    "status": "warning" if warning_codes else "success",
+                    "elapsed_ms": int((time.perf_counter() - integration_started) * 1000),
+                    "warning_codes": warning_codes,
+                    "error": "",
+                    "required": required,
+                }
+            )
     rendered = render_mapping_templates(
         template_mappings,
         product_values=product_context,
@@ -1950,6 +2125,7 @@ def _render_templates(
         output[source] = value
     for mapping in mappings_list:
         source = mapping["source"]
+        required = bool(mapping.get("required"))
         if source not in selected_targets:
             continue
         if source not in sql_sources:
@@ -1957,8 +2133,11 @@ def _render_templates(
                 calculated_values[source] = output[source]
                 changed[source] = str(submitted.get(source, "")) != str(output[source])
             continue
+        integration_started = time.perf_counter()
+        profile_id = _text(mapping.get("sql_profile_id"))
         try:
             profile = resolve_sql_profile(profiles, mapping.get("sql_profile_id"))
+            profile_id = _text(profile.get("id")) or profile_id
             if not profile.get("enabled", True):
                 label = profile.get("label") or profile.get("id")
                 raise ValueError(f"Profil SQL {label} jest wylaczony.")
@@ -1970,11 +2149,35 @@ def _render_templates(
                 mappings=mappings_list,
             )
         except Exception as exc:
-            warnings.append({"source": source, "code": "sql_error", "message": str(exc)})
+            safe_error = _redact_sql_integration_error(exc, profiles)
+            warnings.append({"source": source, "code": "sql_error", "message": safe_error})
             calculated = ""
+            sql_profile_results.append(
+                {
+                    "profile_id": profile_id,
+                    "source": source,
+                    "status": "error",
+                    "elapsed_ms": int((time.perf_counter() - integration_started) * 1000),
+                    "warning_codes": ["sql_error"],
+                    "error": safe_error,
+                    "required": required,
+                }
+            )
         else:
             calculated = sql_result.value
             warnings.extend({"source": source, **warning} for warning in sql_result.warnings)
+            warning_codes = _sql_warning_codes(sql_result.warnings)
+            sql_profile_results.append(
+                {
+                    "profile_id": profile_id,
+                    "source": source,
+                    "status": "warning" if warning_codes else "success",
+                    "elapsed_ms": int((time.perf_counter() - integration_started) * 1000),
+                    "warning_codes": warning_codes,
+                    "error": "",
+                    "required": required,
+                }
+            )
         calculated_values[source] = calculated
         current = str(submitted.get(source, ""))
         changed[source] = current != str(calculated)
@@ -1986,6 +2189,7 @@ def _render_templates(
         "calculated_values": calculated_values,
         "warnings": warnings,
         "changed": changed,
+        "integrations": {"sql_profiles": sql_profile_results},
     }
 
 
@@ -2076,9 +2280,149 @@ def find_pimcore_product_by_ean(ean: object) -> dict[str, object]:
     }
 
 
-def create_pimcore_product(values: object, username: str) -> dict[str, object]:
+def _safe_pimcore_integration_results(
+    value: object,
+    settings_payload: dict[str, object],
+) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    raw_profiles = source.get("sql_profiles")
+    profiles: list[dict[str, object]] = []
+    if not isinstance(raw_profiles, list):
+        return {"sql_profiles": profiles}
+    configured_profiles = normalize_sql_profiles(config.CONFIG)
+    trusted_mappings: dict[tuple[str, str], bool] = {}
+    for mapping in settings_payload.get("field_mappings", []):
+        if not isinstance(mapping, dict):
+            continue
+        template = mapping.get("value_template")
+        if not (
+            str(template or "").strip().casefold() == "sql"
+            or _template_uses_sql_source(template)
+        ):
+            continue
+        mapping_source = _text(mapping.get("source"))
+        profile_id = _text(mapping.get("sql_profile_id")) or DEFAULT_SQL_PROFILE_ID
+        if mapping_source:
+            trusted_mappings[(mapping_source, profile_id)] = bool(mapping.get("required"))
+    for item in raw_profiles[:100]:
+        if not isinstance(item, dict):
+            continue
+        profile_id = _text(item.get("profile_id")) or DEFAULT_SQL_PROFILE_ID
+        item_source = _text(item.get("source"))
+        trusted_key = (item_source, profile_id)
+        if trusted_key not in trusted_mappings:
+            continue
+        status = _text(item.get("status")).casefold()
+        if status not in {"success", "warning", "error"}:
+            status = "error"
+        try:
+            elapsed_ms = max(0, min(int(item.get("elapsed_ms") or 0), 86_400_000))
+        except (TypeError, ValueError):
+            elapsed_ms = 0
+        raw_codes = item.get("warning_codes")
+        warning_codes = (
+            [
+                _text(code)[:100]
+                for code in raw_codes[:SQL_PROFILE_WARNING_CODES_MAX]
+                if isinstance(code, str) and _text(code)
+            ]
+            if isinstance(raw_codes, list)
+            else []
+        )
+        filtered = {
+            "profile_id": profile_id[:200],
+            "source": item_source[:200],
+            "status": status,
+            "elapsed_ms": elapsed_ms,
+            "warning_codes": warning_codes,
+            "error": _redact_sql_integration_error(item.get("error"), configured_profiles),
+            "required": trusted_mappings[trusted_key],
+        }
+        safe = redact_pimcore_log_value(filtered)
+        profiles.append(safe if isinstance(safe, dict) else filtered)
+    return {"sql_profiles": profiles}
+
+
+def _emit_sql_profile_integration_events(
+    integrations: dict[str, object],
+    *,
+    username: str,
+    job_id: str,
+    ean: object,
+) -> None:
+    profiles = integrations.get("sql_profiles")
+    if not isinstance(profiles, list):
+        return
+    for item in profiles:
+        if not isinstance(item, dict):
+            continue
+        status = _text(item.get("status"))
+        warning_codes = item.get("warning_codes")
+        event_details = {
+            **item,
+            "warning_count": len(warning_codes) if isinstance(warning_codes, list) else 0,
+        }
+        emit_event(
+            severity=(
+                "error"
+                if status == "error" and bool(item.get("required"))
+                else "info"
+            ),
+            event_type="integration.sql_profile.completed",
+            module="pimcore.runtime",
+            stage="sql_profile",
+            username=username,
+            ean=_text(ean),
+            job_id=job_id,
+            summary=f"Profil SQL {_text(item.get('profile_id'))}: {status}.",
+            details=event_details,
+        )
+
+
+def _emit_pimcore_integration_event(
+    result: dict[str, object],
+    *,
+    status: str,
+    operation_type: str,
+    username: str,
+    job_id: str,
+    ean: object,
+    elapsed_ms: int,
+) -> None:
+    change_set = result.get("change_set") if isinstance(result.get("change_set"), dict) else {}
+    fields = change_set.get("fields") if isinstance(change_set.get("fields"), list) else []
+    result_object = result.get("object") if isinstance(result.get("object"), dict) else {}
+    emit_event(
+        severity="error" if status == "failed" else "info",
+        event_type="integration.pimcore.completed",
+        module="pimcore.runtime",
+        stage=operation_type,
+        username=username,
+        ean=_text(ean),
+        job_id=job_id,
+        summary=f"Integracja Pimcore: {status}.",
+        details={
+            "status": status,
+            "operation_type": operation_type,
+            "elapsed_ms": max(0, int(elapsed_ms)),
+            "field_count": len(fields),
+            "object_count": 1 if result_object else 0,
+            "object_id": result_object.get("id", ""),
+        },
+    )
+
+
+def create_pimcore_product(
+    values: object,
+    username: str,
+    integration_results: object = None,
+) -> dict[str, object]:
     submitted = dict(values) if isinstance(values, dict) else {}
     settings_payload = _active_pimcore_runtime_settings()
+    safe_integrations = _safe_pimcore_integration_results(
+        integration_results,
+        settings_payload,
+    )
     operation_id = secrets.token_hex(12)
     started = time.time()
     events: list[dict[str, object]] = []
@@ -2100,6 +2444,9 @@ def create_pimcore_product(values: object, username: str) -> dict[str, object]:
 
     try:
         result = create_product(settings_payload, submitted, emit=emit)
+        change_set = result.get("change_set") if isinstance(result.get("change_set"), dict) else {}
+        if change_set:
+            result["change_set"] = {**change_set, "integrations": safe_integrations}
         status = "duplicate" if result.get("duplicate") else "completed"
         return result
     except Exception as exc:
@@ -2120,10 +2467,26 @@ def create_pimcore_product(values: object, username: str) -> dict[str, object]:
                 "total_ms": int(max(0, finished - started) * 1000),
                 "events": events,
                 "result": result,
+                "integration_results": safe_integrations,
             }
         )
         _persist_pimcore_operation(report)
         _persist_pimcore_submission(report)
+        _emit_sql_profile_integration_events(
+            safe_integrations,
+            username=username,
+            job_id=operation_id,
+            ean=submitted.get("EAN"),
+        )
+        _emit_pimcore_integration_event(
+            result,
+            status=status,
+            operation_type="create",
+            username=username,
+            job_id=operation_id,
+            ean=submitted.get("EAN"),
+            elapsed_ms=int(max(0, finished - started) * 1000),
+        )
 
 
 def get_pimcore_product_for_edit(
@@ -2193,9 +2556,14 @@ def update_pimcore_product(
     marker: object,
     values: object,
     username: str,
+    integration_results: object = None,
 ) -> dict[str, object]:
     settings_payload = _active_pimcore_runtime_settings()
     submitted = dict(values) if isinstance(values, dict) else {}
+    safe_integrations = _safe_pimcore_integration_results(
+        integration_results,
+        settings_payload,
+    )
     operation_id = secrets.token_hex(12)
     started = time.time()
     events: list[dict[str, object]] = []
@@ -2223,6 +2591,9 @@ def update_pimcore_product(
             submitted,
             emit=emit,
         )
+        change_set = result.get("change_set") if isinstance(result.get("change_set"), dict) else {}
+        if change_set:
+            result["change_set"] = {**change_set, "integrations": safe_integrations}
         status = "completed"
         return result
     except PimcoreConflictError:
@@ -2244,9 +2615,25 @@ def update_pimcore_product(
             "total_ms": int(max(0, finished - started) * 1000),
             "events": events,
             "result": result,
+            "integration_results": safe_integrations,
         }
         _persist_pimcore_operation(report)
         _persist_pimcore_submission(report)
+        _emit_sql_profile_integration_events(
+            safe_integrations,
+            username=username,
+            job_id=operation_id,
+            ean=submitted.get("EAN"),
+        )
+        _emit_pimcore_integration_event(
+            result,
+            status=status,
+            operation_type="update",
+            username=username,
+            job_id=operation_id,
+            ean=submitted.get("EAN"),
+            elapsed_ms=int(max(0, finished - started) * 1000),
+        )
 
 
 def pimcore_operation_status(
@@ -2446,6 +2833,18 @@ def _preserve_unsubmitted_config_secrets(payload: dict[str, object]) -> dict[str
     pimcore_payload = payload.get(PIMCORE_SETTINGS_KEY)
     if isinstance(pimcore_payload, dict) and _text(pimcore_payload.get(PIMCORE_API_KEY)):
         preserve[PIMCORE_SETTINGS_KEY].discard(PIMCORE_API_KEY)
+    email_payload = payload.get(EMAIL_SETTINGS_KEY)
+    if isinstance(email_payload, dict):
+        entra_payload = email_payload.get("entra")
+        if isinstance(entra_payload, dict) and _text(
+            entra_payload.get(EMAIL_CLIENT_SECRET)
+        ):
+            preserve[EMAIL_SETTINGS_KEY].discard("entra.client_secret")
+        smtp_payload = email_payload.get("smtp")
+        if isinstance(smtp_payload, dict) and _text(
+            smtp_payload.get(EMAIL_SMTP_PASSWORD)
+        ):
+            preserve[EMAIL_SETTINGS_KEY].discard("smtp.password")
     return {section: keys for section, keys in preserve.items() if keys}
 
 
@@ -2485,6 +2884,9 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
     processing_payload = payload.get("processing") if isinstance(payload.get("processing"), dict) else {}
     security_payload = payload.get("security") if isinstance(payload.get("security"), dict) else {}
     pimcore_payload = payload.get(PIMCORE_SETTINGS_KEY)
+    email_payload = payload.get(EMAIL_SETTINGS_KEY)
+    if isinstance(email_payload, dict):
+        validate_email_rule_recipients(email_payload)
     backup_payload = payload.get("sqlite_backup") if isinstance(payload.get("sqlite_backup"), dict) else None
     slots_payload = payload.get("slots") if isinstance(payload.get("slots"), list) else None
     runtime_reloaded = False
@@ -2562,6 +2964,24 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
         if not _text(pimcore_payload.get(PIMCORE_API_KEY)):
             merged[PIMCORE_API_KEY] = current[PIMCORE_API_KEY]
         cfg[PIMCORE_SETTINGS_KEY] = normalize_pimcore_settings(merged)
+
+    if isinstance(email_payload, dict):
+        current_email = normalize_email_settings(cfg.get(EMAIL_SETTINGS_KEY))
+        merged_email = dict(current_email)
+        merged_email.update(email_payload)
+        for channel, secret_key in (
+            ("entra", EMAIL_CLIENT_SECRET),
+            ("smtp", EMAIL_SMTP_PASSWORD),
+        ):
+            current_channel = current_email[channel]
+            submitted_channel = email_payload.get(channel)
+            if isinstance(submitted_channel, dict):
+                merged_channel = dict(current_channel)
+                merged_channel.update(submitted_channel)
+                if not _text(submitted_channel.get(secret_key)):
+                    merged_channel[secret_key] = current_channel[secret_key]
+                merged_email[channel] = merged_channel
+        cfg[EMAIL_SETTINGS_KEY] = normalize_email_settings(merged_email)
 
     if ftp_payload:
         ftp = cfg.setdefault(H, {})
@@ -2709,6 +3129,7 @@ def settings_snapshot() -> dict[str, object]:
             legacy_color_labels=cfg.get(COLOR_FIELD_LABELS_KEY),
         ),
         "pimcore": pimcore_public,
+        EMAIL_SETTINGS_KEY: public_email_settings(cfg.get(EMAIL_SETTINGS_KEY)),
         "slots": [
             {
                 "prefix": slot.get("prefix", ""),

@@ -3,6 +3,7 @@
 from .common import *  # noqa: F401,F403 - reuse shared helpers
 from . import settings
 from . import localization
+from .redaction import sanitize_free_text
 
 AG = None
 
@@ -74,18 +75,25 @@ def _ensure_log_parent(path):
 def log_error(message, ui_message=None):
     """Write an error entry to the log files and optionally the UI."""
 
+    safe_message = sanitize_free_text(message, limit=32 * 1024)
     try:
         path = settings.AM
         _ensure_log_parent(path)
         rotate_log(path)
         timestamp = A9.now().strftime(A6)
         with x(path, "a", encoding=k) as handle:
-            handle.write(f"[{timestamp}] [USER: {AO}] [PC: {AF}] ERROR: {message}\n")
+            handle.write(
+                f"[{timestamp}] [USER: {AO}] [PC: {AF}] ERROR: {safe_message}\n"
+            )
     except E:
         pass
     try:
         if AG:
-            ui_text = ui_message if ui_message is not None else _summarize_for_ui(message)
+            ui_text = (
+                sanitize_free_text(ui_message)
+                if ui_message is not None
+                else _summarize_for_ui(safe_message)
+            )
             if ui_text:
                 if threading.current_thread() != threading.main_thread():
                     AG.after(0, lambda msg=ui_text: AG._ui_log(f"❗ {msg}"))
@@ -98,18 +106,23 @@ def log_error(message, ui_message=None):
 def log_info(message, ui_message=None):
     """Write an informational log entry and mirror it to the UI."""
 
+    safe_message = sanitize_free_text(message)
     try:
         path = settings.BM
         _ensure_log_parent(path)
         rotate_log(path)
         timestamp = A9.now().strftime(A6)
         with x(path, "a", encoding=k) as handle:
-            handle.write(f"[{timestamp}] [USER: {AO}] [PC: {AF}] {message}\n")
+            handle.write(f"[{timestamp}] [USER: {AO}] [PC: {AF}] {safe_message}\n")
     except E:
         pass
     try:
         if AG:
-            ui_text = ui_message if ui_message is not None else _summarize_for_ui(message)
+            ui_text = (
+                sanitize_free_text(ui_message)
+                if ui_message is not None
+                else _summarize_for_ui(safe_message)
+            )
             if ui_text:
                 if threading.current_thread() != threading.main_thread():
                     AG.after(0, lambda msg=ui_text: AG._ui_log(f"• {msg}"))

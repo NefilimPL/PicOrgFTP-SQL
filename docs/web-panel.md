@@ -49,6 +49,44 @@ http://IP_SERWERA:8000
 
 Ustawienia są widoczne tylko dla użytkowników webowych z rolą `admin`.
 
+## Historia i obserwowalność administratora
+
+Widok **Historia** pokazuje przebieg operacji produktu. Przycisk **Zmiany** otwiera bezpieczny podgląd wartości przed i po operacji, zmian plików, czasu wykonania oraz identyfikatora powiązanego zadania.
+
+Administrator ma także widok **Logi** z kartami **Na żywo**, **Krytyczne**, **Błędy**, **Ostrzeżenia** i **Zadania**. Strumień na żywo obejmuje zdarzenia z ostatnich 24 godzin. Powiązane zdarzenia są grupowane w incydenty i zadania, a nieprzeczytane wpisy są sygnalizowane według najwyższego priorytetu: krytyczne, błędy, a następnie ostrzeżenia.
+
+Karta incydentu pokazuje także ostatni stan jego powiadomienia e-mail: **Oczekuje**, **Wysłano**, **Fallback**, **Pominięto** albo **Błąd**. Po rozwinięciu widać wyłącznie kanał, czas lub kod próby, bezpieczny opis i liczbę odbiorców. Adresy odbiorców, treść wiadomości oraz dane konfiguracyjne nie są zwracane przez API logów. Nieudana wysyłka poczty nie zmienia ważności incydentu i nie zasłania pierwotnego błędu operacyjnego.
+
+## Powiadomienia e-mail
+
+Administrator konfiguruje pocztę w **Ustawienia -> Poczta**. Jedna konfiguracja przechowuje dwa możliwe kanały:
+
+- **Microsoft Entra / Graph**: Tenant ID, Client ID, Client Secret oraz adres nadawcy (**Od**),
+- **SMTP**: host, port, tryb połączenia `TLS`, `STARTTLS` albo `bez szyfrowania`, opcjonalny login i hasło oraz adres i nazwa nadawcy.
+
+Należy wybrać kanał podstawowy. Opcjonalny fallback wykonuje najwyżej jedną natychmiastową próbę drugim kanałem, gdy kanał podstawowy jest niedostępny. Obie próby należą do tej samej logicznej wiadomości. Hasła i Client Secret są szyfrowane w istniejącej bazie SQLite i nie są odsyłane do przeglądarki.
+
+Dla każdego poziomu **Informacja**, **Ostrzeżenie**, **Błąd** i **Krytyczny** dostępny jest osobny blok reguł. W każdym bloku można:
+
+- włączyć lub wyłączyć wysyłanie,
+- podać listę adresów rozdzielonych przecinkami,
+- zaznaczyć wysłanie także do użytkownika powiązanego z incydentem, jeżeli jego konto ma uzupełniony adres e-mail.
+
+Powtarzające się wystąpienia tego samego incydentu są grupowane, a kolejne powiadomienie może zostać utworzone najwcześniej po 15 minutach. Przycisk wysyłki testowej pozwala sprawdzić kanał podstawowy, Entra albo SMTP oraz opcjonalny fallback. Test nie tworzy incydentu ani trwałego zadania dostawy.
+
+Integracja Graph korzysta z uprawnienia aplikacyjnego Microsoft Graph `Mail.Send`. W dzierżawie Microsoft Entra administrator musi nadać tej aplikacji zgodę administracyjną (**admin consent**), a skonfigurowany adres **Od** musi być skrzynką, z której aplikacja może wysyłać. Dla SMTP można użyć dowolnego dostawcy, między innymi firmowej poczty, Gmaila, Onetu lub O2. Dostawca może wymagać włączenia SMTP i wygenerowania osobnego hasła aplikacji zamiast zwykłego hasła do konta. Preferowane jest połączenie TLS albo STARTTLS; tryb bez szyfrowania powinien być używany wyłącznie w kontrolowanej sieci.
+
+## Stan backendu w nagłówku
+
+Obok nazwy aplikacji widoczny jest tekstowy stan backendu z kropką i medianą czasu odpowiedzi z pięciu ostatnich udanych pomiarów. Szczegóły po najechaniu, ustawieniu fokusu lub kliknięciu pokazują stan backendu, SQLite, procesora zadań oraz ostatni znany stan FTP, SQL, profili SQL i Pimcore. Panel pokazuje wyłącznie znormalizowane stany, bez ścieżek, sekretów i treści wyjątków.
+
+- **Online**: lokalne komponenty odpowiadają prawidłowo, mediana jest poniżej 300 ms i brak stanu ograniczonego.
+- **Wolno**: mediana wynosi co najmniej 300 ms albo któryś komponent ma stan ograniczony.
+- **Krytyczny**: backend lub SQLite zgłasza problem albo mediana przekracza 1000 ms.
+- **Offline**: trzy kolejne próby pobrania stanu zakończyły się błędem; szczegóły zachowują ostatni znany stan komponentów z poprzedniego udanego pomiaru.
+
+Pomiar jest wykonywany co pięć sekund. Przeglądarka wstrzymuje go w ukrytej karcie i odświeża stan natychmiast po powrocie.
+
 ## Bezpieczeństwo LAN
 
 Panel jest przeznaczony do zaufanej sieci LAN albo VPN. Nie wystawiaj tego panelu bezpośrednio do publicznego internetu bez dodatkowej warstwy zabezpieczeń, aktualizacji haseł, kontroli dostępu i przeglądu konfiguracji serwera.

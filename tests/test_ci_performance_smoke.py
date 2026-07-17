@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import time
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("PICORGFTP_SQL_HEADLESS", "1")
 os.environ.setdefault("PICORG_WEB_AUTH", "0")
@@ -86,10 +87,18 @@ class CiPerformanceSmokeTests(unittest.TestCase):
         client = TestClient(web_app.app)
 
         started = time.perf_counter()
-        for _ in range(120):
-            response = client.get("/api/health")
-            self.assertEqual(response.status_code, 200)
-            self.assertIs(response.json()["ok"], True)
+        with patch.object(
+            web_app,
+            "notification_worker_health",
+            return_value={
+                "status": "online",
+                "observed_at": "2026-07-17T08:00:00.000Z",
+            },
+        ):
+            for _ in range(120):
+                response = client.get("/api/health")
+                self.assertEqual(response.status_code, 200)
+                self.assertIs(response.json()["ok"], True)
         elapsed = time.perf_counter() - started
 
         self.assertLess(elapsed, _budget(10.0))

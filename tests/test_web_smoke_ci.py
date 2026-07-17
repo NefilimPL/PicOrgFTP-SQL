@@ -21,6 +21,7 @@ else:
     TEST_CLIENT_IMPORT_ERROR = None
 
 from picorgftp_sql import web_data
+from picorgftp_sql import observability
 from picorgftp_sql.web import app as web_app
 
 
@@ -31,17 +32,297 @@ from picorgftp_sql.web import app as web_app
 class WebSmokeCiTests(unittest.TestCase):
     def setUp(self) -> None:
         os.environ["PICORG_WEB_AUTH"] = "0"
+        web_app._RATE_LIMITS.clear()
+
+    def tearDown(self) -> None:
+        web_app._RATE_LIMITS.clear()
 
     def test_health_endpoint_returns_versioned_ok_payload(self) -> None:
         client = TestClient(web_app.app)
 
-        response = client.get("/api/health")
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.object(
+                web_app.storage_settings,
+                "resolve_sqlite_path",
+                return_value=os.path.join(temp_dir, "health.sqlite"),
+            ),
+            patch.object(
+                web_app,
+                "notification_worker_health",
+                return_value={
+                    "status": "online",
+                    "observed_at": "2026-07-17T08:00:00.000Z",
+                },
+            ),
+        ):
+            web_app._invalidate_health_integration_cache()
+            response = client.get("/api/health")
+        web_app._invalidate_health_integration_cache()
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertIs(payload["ok"], True)
         self.assertTrue(str(payload["version"]).strip())
         self.assertTrue(str(payload["time"]).strip())
+        self.assertEqual(payload["components"]["backend"]["status"], "online")
+        self.assertIn(payload["components"]["sqlite"]["status"], {"online", "critical"})
+        self.assertIn(
+            payload["components"]["job_processor"]["status"],
+            {"online", "critical"},
+        )
+        self.assertEqual(
+            payload["components"]["notification_worker"]["status"], "online"
+        )
+
+    def test_add_user_route_forwards_email(self) -> None:
+        client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
+        with (
+            patch.object(web_app, "_require_admin", return_value=admin),
+            patch.object(web_app, "_current_user_payload", return_value=admin),
+            patch.object(web_app, "add_user", return_value=[]) as add_user,
+        ):
+            response = client.post(
+                "/api/users",
+                json={
+                    "username": "operator",
+                    "password": "secret",
+                    "role": "user",
+                    "email": "operator@example.com",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        add_user.assert_called_once_with(
+            "operator",
+            "secret",
+            "user",
+            "operator@example.com",
+        )
+
+    def test_add_user_route_defaults_omitted_email_to_empty_string(self) -> None:
+        client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
+        with (
+            patch.object(web_app, "_require_admin", return_value=admin),
+            patch.object(web_app, "_current_user_payload", return_value=admin),
+            patch.object(
+                web_data,
+                "load_user_records",
+                return_value=[web_data._default_admin()],
+            ),
+            patch.object(
+                web_data,
+                "save_users",
+                side_effect=lambda records: [
+                    web_data._public_user(record) for record in records
+                ],
+            ),
+            patch.object(web_app, "add_user", wraps=web_data.add_user) as add_user,
+        ):
+            response = client.post(
+                "/api/users",
+                json={
+                    "username": "operator",
+                    "password": "secret",
+                    "role": "user",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        add_user.assert_called_once_with("operator", "secret", "user", "")
+        self.assertEqual(response.json()["users"][0]["email"], "")
+
+    def test_update_user_route_forwards_email(self) -> None:
+        client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
+        with (
+            patch.object(web_app, "_require_admin", return_value=admin),
+            patch.object(web_app, "_current_user_payload", return_value=admin),
+            patch.object(web_app, "update_user", return_value=[]) as update_user,
+        ):
+            response = client.patch(
+                "/api/users/operator",
+                json={"email": ""},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(update_user.call_args.kwargs["email"], "")
+
+    def test_client_error_route_requires_auth_and_csrf_and_emits_redacted_critical(self) -> None:
+        class EventStore:
+            supports_atomic_incident_event = True
+
+            def __init__(self) -> None:
+                self.events = []
+
+            def append_operational_event(self, event):
+                self.events.append(dict(event))
+                return dict(event)
+
+            def coalesce_incident(self, incident, *, source_event=None):
+                if source_event is not None:
+                    self.events.append(dict(source_event))
+                return {
+                    **dict(incident),
+                    "notification_due": False,
+                    "notification_claim_at": "",
+                }
+
+        previous = os.environ.get("PICORG_WEB_AUTH")
+        os.environ["PICORG_WEB_AUTH"] = "1"
+        store = EventStore()
+        try:
+            client = TestClient(web_app.app)
+            payload = {
+                "kind": "error",
+                "message": "Frontend exploded",
+                "source": "app.js",
+                "line": 42,
+                "column": 7,
+                "stack": "Error: Frontend exploded",
+                "token": "browser-secret",
+            }
+
+            anonymous = client.post("/api/observability/client-errors", json=payload)
+            self.assertEqual(anonymous.status_code, 401)
+
+            login = client.post(
+                "/api/login",
+                data={"username": "admin", "password": "admin"},
+                headers={"X-Requested-With": "XMLHttpRequest"},
+            )
+            self.assertEqual(login.status_code, 200)
+            csrf = login.json()["csrf_token"]
+            forged = client.post(
+                "/api/observability/client-errors",
+                json=payload,
+                headers={"X-PicOrg-CSRF": "bad"},
+            )
+            self.assertEqual(forged.status_code, 403)
+
+            with patch.object(observability, "observability_store", return_value=store):
+                response = client.post(
+                    "/api/observability/client-errors",
+                    json=payload,
+                    headers={"X-PicOrg-CSRF": csrf},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), {"ok": True})
+            event = store.events[-1]
+            self.assertEqual(event["severity"], "critical")
+            self.assertEqual(event["event_type"], "frontend.unhandled_error")
+            self.assertEqual(event["details"]["token"], "[REDACTED]")
+        finally:
+            if previous is None:
+                os.environ.pop("PICORG_WEB_AUTH", None)
+            else:
+                os.environ["PICORG_WEB_AUTH"] = previous
+
+    def test_unhandled_backend_error_returns_only_safe_correlation_payload(self) -> None:
+        test_app = web_app.create_app()
+
+        @test_app.get("/api/test-unhandled-error")
+        def fail_for_test():
+            raise RuntimeError("database password=top-secret")
+
+        client = TestClient(test_app, raise_server_exceptions=False)
+        with (
+            patch.object(web_app, "emit_event") as emit_event,
+            patch.object(web_app, "log_error") as log_error,
+        ):
+            response = client.get("/api/test-unhandled-error")
+
+        self.assertEqual(response.status_code, 500)
+        payload = response.json()
+        self.assertEqual(payload["detail"], "Wystapil nieoczekiwany blad aplikacji.")
+        self.assertTrue(payload["correlation_id"])
+        self.assertNotIn("password", response.text)
+        self.assertEqual(emit_event.call_args.kwargs["severity"], "critical")
+        self.assertEqual(
+            emit_event.call_args.kwargs["correlation_id"], payload["correlation_id"]
+        )
+        self.assertIsInstance(emit_event.call_args.kwargs["exception"], RuntimeError)
+        self.assertIn(payload["correlation_id"], log_error.call_args.args[0])
+
+    def test_synchronous_process_endpoint_persists_correlated_success(self) -> None:
+        snapshot = web_app._ProcessFormSnapshot(
+            fields={"ean": "5901234567890", "name": "Created product"}
+        )
+        result = {
+            "timing": {"stages": [{"key": "prepare", "elapsed_ms": 12}]},
+            "ftp": {},
+            "sql": {},
+            "local_delete": {},
+            "skipped_slots": [],
+            "entry": {"product_id": "123"},
+        }
+        client = TestClient(web_app.app)
+
+        with (
+            patch.object(web_app, "_materialize_process_form", return_value=snapshot),
+            patch.object(web_app, "_process_upload_snapshot", return_value=result) as process,
+            patch.object(web_app, "record_job") as record_job,
+            patch.object(web_app, "emit_event") as emit_event,
+        ):
+            response = client.post("/api/process", data={})
+
+        self.assertEqual(response.status_code, 200)
+        job_id = process.call_args.kwargs["job_id"]
+        self.assertTrue(job_id)
+        self.assertEqual(
+            [call.args[0]["status"] for call in record_job.call_args_list],
+            ["running", "completed"],
+        )
+        self.assertTrue(
+            all(call.args[0]["id"] == job_id for call in record_job.call_args_list)
+        )
+        result_event = emit_event.call_args_list[-1]
+        self.assertEqual(result_event.kwargs["event_type"], "process.completed")
+        self.assertEqual(result_event.kwargs["severity"], "info")
+        self.assertEqual(result_event.kwargs["job_id"], job_id)
+
+    def test_synchronous_process_failure_is_job_correlated_and_returns_safe_500(self) -> None:
+        snapshot = web_app._ProcessFormSnapshot(fields={"ean": "5901234567890"})
+        client = TestClient(web_app.app, raise_server_exceptions=False)
+
+        with (
+            patch.object(web_app, "_materialize_process_form", return_value=snapshot),
+            patch.object(
+                web_app,
+                "_process_upload_snapshot",
+                side_effect=RuntimeError("database password=top-secret"),
+            ) as process,
+            patch.object(web_app, "record_job") as record_job,
+            patch.object(web_app, "emit_event") as emit_event,
+            patch.object(web_app, "log_error"),
+        ):
+            response = client.post("/api/process", data={})
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json()["detail"], "Wystapil nieoczekiwany blad aplikacji.")
+        job_id = process.call_args.kwargs["job_id"]
+        self.assertTrue(job_id)
+        self.assertEqual(record_job.call_args_list[-1].args[0]["status"], "failed")
+        self.assertEqual(record_job.call_args_list[-1].args[0]["id"], job_id)
+        process_failure = next(
+            call
+            for call in emit_event.call_args_list
+            if call.kwargs["event_type"] == "process.failed"
+        )
+        self.assertEqual(process_failure.kwargs["severity"], "critical")
+        self.assertEqual(process_failure.kwargs["job_id"], job_id)
+        backend_failure = next(
+            call
+            for call in emit_event.call_args_list
+            if call.kwargs["event_type"] == "backend.unhandled_error"
+        )
+        self.assertEqual(
+            backend_failure.kwargs["correlation_id"], response.json()["correlation_id"]
+        )
+
 
     def test_public_pages_and_static_assets_are_served(self) -> None:
         client = TestClient(web_app.app)
@@ -90,6 +371,7 @@ class WebSmokeCiTests(unittest.TestCase):
             "/api/file",
             "/api/thumbnail",
             "/api/settings",
+            "/api/settings/email/test",
             "/api/settings/import-legacy",
             "/api/settings/sqlite/repair",
             "/api/settings/sqlite/backup",
@@ -102,6 +384,253 @@ class WebSmokeCiTests(unittest.TestCase):
             "/api/users",
         }
         self.assertEqual(expected_paths - route_paths, set())
+
+    def test_email_test_route_returns_only_redacted_delivery_summary(self) -> None:
+        client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
+        result = {
+            "status": "fallback",
+            "used_channel": "smtp",
+            "message_id": "must-not-be-returned",
+            "attempts": [
+                {
+                    "channel": "entra",
+                    "status": "error",
+                    "code": "delivery_failed",
+                    "category": "delivery",
+                    "message": "token=TOP-SECRET server=mail.internal",
+                    "raw_response": "client_secret=LEAK",
+                },
+                {
+                    "channel": "smtp",
+                    "status": "sent",
+                    "code": "sent",
+                    "category": "delivery",
+                    "message": "smtp password=LEAK",
+                },
+            ],
+        }
+        with (
+            patch.object(web_app, "_require_admin", return_value=admin),
+            patch.object(web_app, "send_test_message", return_value=result) as sender,
+        ):
+            response = client.post(
+                "/api/settings/email/test",
+                json={
+                    "recipient": "admin@example.com",
+                    "channel": "entra",
+                    "use_fallback": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(
+            set(payload),
+            {"ok", "status", "used_channel", "attempts", "elapsed_ms"},
+        )
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "fallback")
+        self.assertEqual(payload["used_channel"], "smtp")
+        self.assertGreaterEqual(payload["elapsed_ms"], 0)
+        self.assertNotIn("TOP-SECRET", response.text)
+        self.assertNotIn("mail.internal", response.text)
+        self.assertNotIn("LEAK", response.text)
+        self.assertNotIn("message_id", response.text)
+        sender.assert_called_once_with(
+            channel="entra",
+            recipient="admin@example.com",
+            use_fallback=True,
+        )
+
+    def test_email_test_route_resolves_primary_and_maps_delivery_error_to_502(self) -> None:
+        client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
+        with (
+            patch.object(web_app, "_require_admin", return_value=admin),
+            patch.object(
+                web_app,
+                "settings_snapshot",
+                return_value={
+                    "email_notifications": {"primary_channel": "smtp"}
+                },
+            ),
+            patch.object(
+                web_app,
+                "send_test_message",
+                return_value={
+                    "status": "error",
+                    "used_channel": "smtp",
+                    "attempts": [
+                        {
+                            "channel": "smtp",
+                            "status": "error",
+                            "code": "transport_unavailable",
+                            "category": "transport",
+                            "message": "host=smtp.secret.example password=hunter2",
+                        }
+                    ],
+                },
+            ) as sender,
+        ):
+            response = client.post(
+                "/api/settings/email/test",
+                json={
+                    "recipient": "admin@example.com",
+                    "channel": "primary",
+                    "use_fallback": False,
+                },
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertFalse(response.json()["ok"])
+        self.assertNotIn("smtp.secret.example", response.text)
+        self.assertNotIn("hunter2", response.text)
+        sender.assert_called_once_with(
+            channel="smtp",
+            recipient="admin@example.com",
+            use_fallback=False,
+        )
+
+    def test_email_test_route_replaces_untrusted_attempt_codes_from_api(self) -> None:
+        client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
+        untrusted_codes = [
+            "ToPSeCrEt123",
+            {"nested": {"token": "LEAK"}},
+            "server_password_token_" + ("X" * 200),
+        ]
+
+        for raw_code in untrusted_codes:
+            with self.subTest(raw_code=raw_code):
+                with (
+                    patch.object(web_app, "_require_admin", return_value=admin),
+                    patch.object(
+                        web_app,
+                        "send_test_message",
+                        return_value={
+                            "status": "error",
+                            "used_channel": "entra",
+                            "attempts": [
+                                {
+                                    "channel": "entra",
+                                    "status": "error",
+                                    "code": raw_code,
+                                    "category": "delivery",
+                                    "message": "token=TOPSECRET123",
+                                }
+                            ],
+                        },
+                    ),
+                ):
+                    response = client.post(
+                        "/api/settings/email/test",
+                        json={
+                            "recipient": "admin@example.com",
+                            "channel": "entra",
+                            "use_fallback": False,
+                        },
+                    )
+
+                self.assertEqual(response.status_code, 502)
+                self.assertEqual(
+                    response.json(),
+                    {
+                        "ok": False,
+                        "status": "error",
+                        "used_channel": "entra",
+                        "attempts": [
+                            {
+                                "channel": "entra",
+                                "status": "error",
+                                "code": "delivery_failed",
+                                "category": "delivery",
+                                "message": "Kanal nie wyslal wiadomosci.",
+                            }
+                        ],
+                        "elapsed_ms": response.json()["elapsed_ms"],
+                    },
+                )
+                self.assertNotIn("TOPSECRET", response.text.upper())
+                self.assertNotIn("SERVER_PASSWORD", response.text.upper())
+
+    def test_email_test_route_rejects_invalid_payload_without_sending(self) -> None:
+        client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
+        with (
+            patch.object(web_app, "_require_admin", return_value=admin),
+            patch.object(web_app, "send_test_message") as sender,
+        ):
+            bad_channel = client.post(
+                "/api/settings/email/test",
+                json={
+                    "recipient": "admin@example.com",
+                    "channel": "exchange",
+                    "use_fallback": False,
+                },
+            )
+            bad_flag = client.post(
+                "/api/settings/email/test",
+                json={
+                    "recipient": "admin@example.com",
+                    "channel": "smtp",
+                    "use_fallback": "yes",
+                },
+            )
+
+        self.assertEqual(bad_channel.status_code, 400)
+        self.assertEqual(bad_flag.status_code, 400)
+        sender.assert_not_called()
+
+    def test_email_test_route_requires_admin_session_and_csrf(self) -> None:
+        previous = os.environ.get("PICORG_WEB_AUTH")
+        os.environ["PICORG_WEB_AUTH"] = "1"
+        try:
+            client = TestClient(web_app.app)
+            request_payload = {
+                "recipient": "admin@example.com",
+                "channel": "smtp",
+                "use_fallback": False,
+            }
+            anonymous = client.post(
+                "/api/settings/email/test", json=request_payload
+            )
+            self.assertEqual(anonymous.status_code, 401)
+
+            login = client.post(
+                "/api/login",
+                data={"username": "admin", "password": "admin"},
+                headers={"X-Requested-With": "XMLHttpRequest"},
+            )
+            self.assertEqual(login.status_code, 200)
+            forged = client.post(
+                "/api/settings/email/test",
+                json=request_payload,
+                headers={"X-PicOrg-CSRF": "bad"},
+            )
+            self.assertEqual(forged.status_code, 403)
+
+            with patch.object(
+                web_app,
+                "send_test_message",
+                return_value={
+                    "status": "sent",
+                    "used_channel": "smtp",
+                    "attempts": [{"channel": "smtp", "status": "sent"}],
+                },
+            ):
+                accepted = client.post(
+                    "/api/settings/email/test",
+                    json=request_payload,
+                    headers={"X-PicOrg-CSRF": login.json()["csrf_token"]},
+                )
+            self.assertEqual(accepted.status_code, 200)
+            self.assertTrue(accepted.json()["ok"])
+        finally:
+            if previous is None:
+                os.environ.pop("PICORG_WEB_AUTH", None)
+            else:
+                os.environ["PICORG_WEB_AUTH"] = previous
 
     def test_github_repository_endpoint_returns_status_payload(self) -> None:
         client = TestClient(web_app.app)
@@ -209,6 +738,35 @@ class WebSmokeCiTests(unittest.TestCase):
 
         self.assertEqual(result["created"], 1)
         save_backup_settings.assert_called_once()
+
+    def test_live_event_pruning_runs_no_more_than_hourly(self) -> None:
+        with (
+            patch.object(web_app, "prune_live_events", return_value=3) as prune,
+            patch.object(web_app.time, "monotonic", side_effect=[100.0, 200.0, 3701.0]),
+        ):
+            web_app._LIVE_EVENT_LAST_PRUNED = 0.0
+            self.assertEqual(web_app._prune_live_events_if_due(force=True), 3)
+            self.assertEqual(web_app._prune_live_events_if_due(), 0)
+            self.assertEqual(web_app._prune_live_events_if_due(), 3)
+
+        self.assertEqual(prune.call_count, 2)
+
+    def test_failed_live_event_pruning_retries_without_throttle(self) -> None:
+        with (
+            patch.object(
+                web_app,
+                "prune_live_events",
+                side_effect=[RuntimeError("database busy"), 3],
+            ) as prune,
+            patch.object(web_app.time, "monotonic", side_effect=[100.0, 101.0]),
+        ):
+            web_app._LIVE_EVENT_LAST_PRUNED = 0.0
+            with self.assertRaises(RuntimeError):
+                web_app._prune_live_events_if_due(force=True)
+            self.assertEqual(web_app._LIVE_EVENT_LAST_PRUNED, 0.0)
+            self.assertEqual(web_app._prune_live_events_if_due(), 3)
+
+        self.assertEqual(prune.call_count, 2)
 
     def test_sql_column_detection_endpoint_updates_settings(self) -> None:
         client = TestClient(web_app.app)
