@@ -326,3 +326,44 @@ def test_fetch_redacts_secrets_and_access_tokens_echoed_by_graph_metadata():
     assert result["status"] == "ok"
     assert client_secret not in serialized
     assert "access-token-sentinel" not in serialized
+
+
+def test_fetch_redacts_partial_overlength_secret_and_token_metadata(monkeypatch):
+    client_secret = "c" * 513 + "-client-secret-sentinel"
+    access_token = "t" * 513 + "-access-token-sentinel"
+
+    class LongTokenApplication:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def acquire_token_for_client(self, _scopes):
+            return {"access_token": access_token}
+
+    class LongTokenMsal:
+        ConfidentialClientApplication = LongTokenApplication
+
+    monkeypatch.setattr(expiry, "msal", LongTokenMsal)
+    result = expiry.fetch_entra_secret_expiry(
+        _settings(client_secret),
+        now=NOW,
+        opener=_graph_opener(
+            {
+                "appId": "client-id",
+                "displayName": "untrusted-" + client_secret,
+                "passwordCredentials": [
+                    _credential(
+                        hint="ccc",
+                        name="untrusted-" + client_secret,
+                        key="untrusted-" + access_token,
+                    )
+                ],
+            }
+        ),
+    )
+
+    for field, value in result.items():
+        rendered = str(value)
+        assert client_secret not in rendered, field
+        assert access_token not in rendered, field
+        assert client_secret[:64] not in rendered, field
+        assert access_token[:64] not in rendered, field

@@ -330,11 +330,11 @@ def _canonical_timestamp(value: datetime) -> str:
 def _safe_graph_text(value: object, *sensitive_values: str) -> str:
     if not isinstance(value, str):
         return ""
-    text = sanitize_free_text(value, limit=512)
+    text = value
     for sensitive_value in sensitive_values:
         if sensitive_value:
             text = text.replace(sensitive_value, "[REDACTED]")
-    return text.strip()
+    return sanitize_free_text(text, limit=512).strip()
 
 
 def _http_error_code(status_code: object) -> str:
