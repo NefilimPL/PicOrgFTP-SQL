@@ -70,6 +70,31 @@ def test_worker_isolates_entra_expiry_monitor_errors(monkeypatch):
     assert calls == ["delivery"]
 
 
+def test_starting_a_fresh_worker_resets_the_entra_monitor_guard(monkeypatch):
+    started = []
+
+    class Thread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            started.append(True)
+
+        def is_alive(self):
+            return False
+
+    service = type("Service", (), {"recover_stale_deliveries": lambda self: None})()
+    monkeypatch.setattr(notification_service, "_default_service", lambda: service)
+    monkeypatch.setattr(notification_service.threading, "Thread", Thread)
+    monkeypatch.setattr(notification_service, "_WORKER_THREAD", None)
+    monkeypatch.setattr(notification_service, "_WORKER_LAST_ENTRA_MONITOR_AT", NOW)
+
+    notification_service.start_notification_worker()
+
+    assert started == [True]
+    assert notification_service._WORKER_LAST_ENTRA_MONITOR_AT is None
+
+
 def _event(**overrides: object) -> dict[str, object]:
     result: dict[str, object] = {
         "id": "evt-1",

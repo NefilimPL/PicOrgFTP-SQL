@@ -10,6 +10,8 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from urllib.error import HTTPError
 
+import requests
+
 from picorgftp_sql.redaction import sanitize_free_text
 
 try:
@@ -53,6 +55,22 @@ class _InvalidResponse(Exception):
 
 class _TransportUnavailable(Exception):
     pass
+
+
+class _TimeoutHttpClient:
+    """MSAL transport adapter that forces a bounded timeout on token requests."""
+
+    def __init__(self, timeout_seconds: int) -> None:
+        self.timeout_seconds = timeout_seconds
+        self._session = requests.Session()
+
+    def get(self, *args, **kwargs):
+        kwargs["timeout"] = self.timeout_seconds
+        return self._session.get(*args, **kwargs)
+
+    def post(self, *args, **kwargs):
+        kwargs["timeout"] = self.timeout_seconds
+        return self._session.post(*args, **kwargs)
 
 
 def fetch_entra_secret_expiry(
@@ -150,6 +168,7 @@ def _access_token(tenant_id: str, client_id: str, client_secret: str) -> str:
             client_id,
             authority="https://login.microsoftonline.com/" + tenant_id,
             client_credential=client_secret,
+            http_client=_TimeoutHttpClient(_REQUEST_TIMEOUT_SECONDS),
         )
         token_result = application.acquire_token_for_client([_GRAPH_SCOPE])
     except Exception:

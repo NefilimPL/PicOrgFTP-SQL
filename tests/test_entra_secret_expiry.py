@@ -37,10 +37,11 @@ class _Response:
 
 
 class _MsalApplication:
-    def __init__(self, client_id, authority, client_credential):
+    def __init__(self, client_id, authority, client_credential, http_client=None):
         self.client_id = client_id
         self.authority = authority
         self.client_credential = client_credential
+        self.http_client = http_client
 
     def acquire_token_for_client(self, scopes):
         assert scopes == ["https://graph.microsoft.com/.default"]
@@ -117,6 +118,31 @@ def test_fetch_selects_unique_hint_matching_active_secret_and_requests_minimum_f
     assert len(requests) == 1
     assert "/v1.0/applications(appId='client-id')" in requests[0].full_url
     assert "%24select=appId%2CdisplayName%2CpasswordCredentials" in requests[0].full_url
+
+
+def test_fetch_supplies_a_timeout_bound_http_client_to_msal(monkeypatch):
+    clients = []
+
+    class MsalApplication:
+        def __init__(self, *_args, http_client=None, **_kwargs):
+            clients.append(http_client)
+
+        def acquire_token_for_client(self, _scopes):
+            return {"access_token": "safe-access-token"}
+
+    class Msal:
+        ConfidentialClientApplication = MsalApplication
+
+    monkeypatch.setattr(expiry, "msal", Msal)
+    result = expiry.fetch_entra_secret_expiry(
+        _settings(),
+        now=NOW,
+        opener=_graph_opener({"appId": "client-id", "passwordCredentials": [_credential()]}),
+    )
+
+    assert result["status"] == "ok"
+    assert len(clients) == 1
+    assert clients[0].timeout_seconds == 20
 
 
 def test_fetch_uses_the_only_active_credential_when_no_hint_matches():

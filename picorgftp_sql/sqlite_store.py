@@ -1169,6 +1169,40 @@ class SqliteStore:
             )
         return cursor.rowcount == 1
 
+    def entra_secret_reminder_claimed(
+        self,
+        tenant_id: str,
+        client_id: str,
+        credential_key_id: str,
+        expires_at: str,
+        threshold_days: int,
+    ) -> bool:
+        """Return whether the exact Entra reminder has already been claimed."""
+
+        tenant = _bounded_scalar_text(tenant_id, field="tenant_id", limit=256, required=True)
+        client = _bounded_scalar_text(client_id, field="client_id", limit=256, required=True)
+        credential = _bounded_scalar_text(
+            credential_key_id, field="credential_key_id", limit=256, required=True
+        )
+        try:
+            threshold = int(threshold_days)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("threshold_days must be an integer") from exc
+        if threshold < 0:
+            raise ValueError("threshold_days must be non-negative")
+        expiry = _canonical_timestamp(expires_at, field="expires_at")
+        self.initialize()
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM entra_secret_reminders
+                WHERE tenant_id = ? AND client_id = ? AND credential_key_id = ?
+                  AND expires_at = ? AND threshold_days = ?
+                """,
+                (tenant, client, credential, expiry, threshold),
+            ).fetchone()
+        return row is not None
+
     def append_operational_event(
         self,
         event: dict[str, object],

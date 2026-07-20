@@ -956,7 +956,7 @@ def _worker_loop(service: NotificationService, stop_event: threading.Event) -> N
 def start_notification_worker() -> None:
     """Recover stale claims and start one bounded daemon queue worker."""
 
-    global _WORKER_OBSERVED_AT, _WORKER_SERVICE, _WORKER_STOP, _WORKER_THREAD
+    global _WORKER_LAST_ENTRA_MONITOR_AT, _WORKER_OBSERVED_AT, _WORKER_SERVICE, _WORKER_STOP, _WORKER_THREAD
     with _WORKER_LOCK:
         if _WORKER_THREAD is not None and _WORKER_THREAD.is_alive():
             return
@@ -974,6 +974,7 @@ def start_notification_worker() -> None:
         stop_event = threading.Event()
         _WORKER_SERVICE = service
         _WORKER_STOP = stop_event
+        _WORKER_LAST_ENTRA_MONITOR_AT = None
         _WORKER_THREAD = threading.Thread(
             target=_worker_loop,
             args=(service, stop_event),

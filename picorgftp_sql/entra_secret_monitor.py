@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from hashlib import sha256
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 
@@ -157,16 +158,48 @@ def refresh_entra_secret_status(*, force: bool = False, now: datetime | None = N
     return _public(persisted, source="cached" if was_successful else "microsoft_graph")
 
 
-def _emit_due(status: Mapping[str, str], threshold: int, *, expired: bool) -> None:
+def _remaining_context(expires: datetime, current: datetime) -> dict[str, object]:
+    remaining_seconds = int((expires - current).total_seconds())
+    absolute_days = (abs(remaining_seconds) + 86_399) // 86_400
+    absolute_hours = (abs(remaining_seconds) + 3_599) // 3_600
+    if remaining_seconds <= 0:
+        human = "wygasł" if not absolute_days else f"wygasł {absolute_days} dni temu"
+        return {"remaining_days": -absolute_days, "remaining_time": human}
+    return {
+        "remaining_days": absolute_days,
+        "remaining_time": f"{absolute_days} dni ({absolute_hours} h)",
+    }
+
+
+def _reminder_event_id(
+    tenant_id: str, client_id: str, credential_key_id: str, expires_at: str, threshold: int
+) -> str:
+    identity = "\x1f".join((tenant_id, client_id, credential_key_id, expires_at, str(threshold)))
+    return "evt-entra-secret-reminder-" + sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _emit_due(
+    status: Mapping[str, str], threshold: int, *, expired: bool, current: datetime, event_id: str
+) -> None:
     event_type = "entra.secret_expired" if expired else "entra.secret_expiry_due"
     summary = "Client Secret Microsoft Entra wygasł." if expired else "Client Secret Microsoft Entra wkrótce wygaśnie."
-    details: dict[str, object] = {"expires_at": status["expires_at"], "status": status["status"]}
+    expires = _parse(status.get("expires_at"))
+    if expires is None:
+        raise ValueError("expires_at must be canonical for a due reminder")
+    details: dict[str, object] = {
+        "application_name": _safe_graph_text(status.get("application_name")),
+        "credential_name": _safe_graph_text(status.get("credential_name")),
+        "expires_at": _iso(expires),
+        "status": status["status"],
+        **_remaining_context(expires, current),
+    }
     if not expired:
         details["threshold_days"] = threshold
     emit_event(
         severity="critical", event_type=event_type, summary=summary,
         module="entra", stage="secret_expiry", username="",
         recommended_action="Utwórz nowy Client Secret i zaktualizuj konfigurację.", details=details,
+        strict=True, event_id=event_id, created_at=_iso(current),
     )
 
 
@@ -188,18 +221,29 @@ def process_due_entra_secret_reminders(*, now: datetime | None = None) -> int:
         return 0
     expires_at = status["expires_at"]
     if expires <= current:
-        if store.claim_entra_secret_reminder(tenant_id, client_id, credential_key_id, expires_at, 0, _iso(current)):
-            _emit_due(status, 0, expired=True)
-            return 1
+        threshold = 0
+        expired = True
+    else:
+        remaining_seconds = (expires - current).total_seconds()
+        threshold = next(
+            (candidate for candidate in sorted(REMINDER_THRESHOLDS) if remaining_seconds <= candidate * 86_400),
+            None,
+        )
+        if threshold is None:
+            return 0
+        expired = False
+
+    if store.entra_secret_reminder_claimed(
+        tenant_id, client_id, credential_key_id, expires_at, threshold
+    ):
         return 0
-    remaining_seconds = (expires - current).total_seconds()
-    for threshold in sorted(REMINDER_THRESHOLDS):
-        if remaining_seconds > threshold * 86_400:
-            continue
-        if store.claim_entra_secret_reminder(tenant_id, client_id, credential_key_id, expires_at, threshold, _iso(current)):
-            _emit_due(status, threshold, expired=False)
-            return 1
-        # This is the current nearest due threshold, already emitted by another
-        # monitor pass.  Never back-fill a less urgent historical threshold.
+    event_id = _reminder_event_id(tenant_id, client_id, credential_key_id, expires_at, threshold)
+    try:
+        _emit_due(status, threshold, expired=expired, current=current, event_id=event_id)
+        claimed = store.claim_entra_secret_reminder(
+            tenant_id, client_id, credential_key_id, expires_at, threshold, _iso(current)
+        )
+    except Exception:
+        # A retry reuses the same event id, so a durable event/outbox is never duplicated.
         return 0
-    return 0
+    return 1 if claimed else 0

@@ -1063,8 +1063,12 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("event.recommended_action", renderer)
         self.assertIn("event.traceback_text", renderer)
         self.assertIn("JSON.stringify(event.details, null, 2)", renderer)
+        self.assertIn("title.title = title.textContent", renderer)
+        self.assertIn("Podsumowanie: ${event.summary", renderer)
         self.assertIn(".log-event-compact", css_source)
         self.assertIn(".log-event-summary-row", css_source)
+        self.assertIn(".logs-output-live {\n  max-height: min(65vh, 760px);\n  overflow: auto;\n  gap: 0;", css_source)
+        self.assertIn("text-overflow: ellipsis", css_source)
 
     def test_history_changes_formats_structured_values_and_unknown_durations(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -1073,19 +1077,16 @@ class WebUiIntegrityTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("function formatHistoryDuration", source)
         value_start = source.index("function historyChangeValue")
-        value_end = source.index("function formatBytes", value_start)
+        value_end = source.index("function historyTechnicalValue", value_start)
         value_formatter = source[value_start:value_end]
         duration_start = source.index("function formatHistoryDuration")
         duration_end = source.index("function historyChangeRow", duration_start)
         duration_formatter = source[duration_start:duration_end]
 
         self.assertIn('typeof value === "object"', value_formatter)
-        self.assertIn("JSON.stringify", value_formatter)
-        self.assertIn("Object.keys(nested).sort()", value_formatter)
-        self.assertIn(
-            'return serialized === undefined ? "Brak danych" : serialized',
-            value_formatter,
-        )
+        self.assertNotIn("JSON.stringify", value_formatter)
+        self.assertIn("Dane zlozone", value_formatter)
+        self.assertIn("function historyTechnicalValue", source)
         self.assertIn('return "Brak danych"', duration_formatter)
         self.assertIn('return `${Math.max(0, Number(value))} ms`', duration_formatter)
         self.assertIn("formatHistoryDuration(file.elapsed_ms)", source)

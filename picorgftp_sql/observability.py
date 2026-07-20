@@ -108,6 +108,8 @@ def emit_event(
     details: object = None,
     exception: BaseException | None = None,
     strict: bool = False,
+    event_id: str = "",
+    created_at: datetime | str | None = None,
 ) -> dict[str, object]:
     """Normalize, redact, and persist one operational event."""
 
@@ -130,8 +132,8 @@ def emit_event(
 
     safe_details = redact_value(details if isinstance(details, dict) else {})
     event: dict[str, object] = {
-        "id": f"evt-{uuid.uuid4().hex}",
-        "created_at": _iso_utc(),
+        "id": _text(event_id) or f"evt-{uuid.uuid4().hex}",
+        "created_at": _iso_utc(_parse_datetime(created_at)),
         "severity": normalized_severity,
         "event_type": _text(event_type),
         "module": _text(module),

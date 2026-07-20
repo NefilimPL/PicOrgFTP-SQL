@@ -643,7 +643,7 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn('"pimcore_operation": redact_pimcore_log_value(report)', web_data_source)
         self.assertIn("JSON.stringify", js_source)
         self.assertIn("Object.keys(nested).sort()", js_source)
-        self.assertIn("historyChangeRow(key, value)", js_source)
+        self.assertIn("historyChangeRow(key, value, historyTechnicalValue)", js_source)
         self.assertIn("details.pimcore_operation?.operation_id", js_source)
         self.assertIn("changeSet.pimcore?.operation_id", js_source)
 

@@ -69,7 +69,7 @@ def test_v6_schema_adds_notification_deliveries_to_fresh_and_existing_databases(
     fresh_path = tmp_path / "fresh.sqlite"
     SqliteStore(str(fresh_path)).initialize()
     with sqlite3.connect(fresh_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == sqlite_store.SCHEMA_VERSION
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notification_deliveries'"
         ).fetchone()
@@ -85,7 +85,7 @@ def test_v6_schema_adds_notification_deliveries_to_fresh_and_existing_databases(
     existing.initialize()
     with sqlite3.connect(existing_path) as conn:
         conn.execute("DROP TABLE notification_deliveries")
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == sqlite_store.SCHEMA_VERSION
     existing.initialize()
     with sqlite3.connect(existing_path) as conn:
         assert conn.execute(
@@ -1107,7 +1107,7 @@ def test_v5_migration_backfills_stream_once_in_rowid_order(
     ]
     assert len(first_initialize_backfills) == 1
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == sqlite_store.SCHEMA_VERSION
         mappings = conn.execute(
             "SELECT sequence, event_id FROM operational_event_stream ORDER BY sequence"
         ).fetchall()
@@ -1135,7 +1135,7 @@ def test_initialize_recovers_missing_v6_stream_table(tmp_path: Path) -> None:
     store.append_operational_event(_event("evt-a", "2026-07-16T10:00:00.000Z"))
     store.append_operational_event(_event("evt-b", "2026-07-16T10:01:00.000Z"))
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == sqlite_store.SCHEMA_VERSION
         conn.execute("DROP TABLE operational_event_stream")
 
     store.initialize()

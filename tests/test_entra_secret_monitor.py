@@ -130,6 +130,43 @@ def test_due_thresholds_are_exact_and_emit_critical_events(monitor, monkeypatch,
     assert events[0]["severity"] == "critical"
     assert events[0]["event_type"] == "entra.secret_expiry_due"
     assert events[0]["details"]["threshold_days"] == days
+    assert events[0]["details"]["application_name"] == "App [REDACTED]"
+    assert events[0]["details"]["credential_name"] == "Credential [REDACTED]"
+    assert events[0]["details"]["expires_at"] == (NOW + timedelta(days=days)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    assert events[0]["details"]["remaining_days"] == days
+    assert events[0]["details"]["remaining_time"]
+
+
+def test_due_reminder_retries_after_claim_failure_without_duplicate_event_or_outbox(
+    monitor, monkeypatch
+):
+    module, store = monitor
+    import picorgftp_sql.observability as observability
+
+    monkeypatch.setattr(observability, "observability_store", lambda: store)
+    monkeypatch.setattr(module, "emit_event", observability.emit_event)
+    monkeypatch.setattr(
+        module,
+        "fetch_entra_secret_expiry",
+        lambda settings, now: _graph_result(expires_at=NOW + timedelta(days=3)),
+    )
+    original_claim = store.claim_entra_secret_reminder
+    attempts = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("simulated crash before reminder claim")
+        return original_claim(*args, **kwargs)
+
+    monkeypatch.setattr(store, "claim_entra_secret_reminder", fail_once)
+
+    assert module.process_due_entra_secret_reminders(now=NOW) == 0
+    assert module.process_due_entra_secret_reminders(now=NOW) == 1
+    assert module.process_due_entra_secret_reminders(now=NOW) == 0
+    assert len(store.query_operational_events(limit=10)["items"]) == 1
+    assert len(store.pending_notification_intents(limit=10)) == 1
 
 
 def test_multiple_due_thresholds_emit_only_the_nearest_unsent_one(monitor, monkeypatch):

@@ -4269,27 +4269,29 @@ function timingMs(value) {
 function historyChangeValue(value) {
   if (value === null || value === undefined || value === "") return "Brak danych";
   if (typeof value === "object") {
-    const seen = new WeakSet();
-    try {
-      const serialized = JSON.stringify(
-        value,
-        (_key, nested) => {
-          if (!nested || typeof nested !== "object") return nested;
-          if (seen.has(nested)) return "[Dane cykliczne]";
-          seen.add(nested);
-          if (Array.isArray(nested)) return nested;
-          return Object.fromEntries(
-            Object.keys(nested).sort().map((key) => [key, nested[key]])
-          );
-        },
-        2
-      );
-      return serialized === undefined ? "Brak danych" : serialized;
-    } catch (_error) {
-      return "Nie mozna wyswietlic danych";
-    }
+    return Array.isArray(value)
+      ? `Dane zlozone: lista (${value.length})`
+      : `Dane zlozone: obiekt (${Object.keys(value).length})`;
   }
   return String(value);
+}
+
+function historyTechnicalValue(value) {
+  if (value === null || value === undefined || value === "") return "Brak danych";
+  if (typeof value !== "object") return String(value);
+  const seen = new WeakSet();
+  try {
+    const serialized = JSON.stringify(value, (_key, nested) => {
+      if (!nested || typeof nested !== "object") return nested;
+      if (seen.has(nested)) return "[Dane cykliczne]";
+      seen.add(nested);
+      if (Array.isArray(nested)) return nested;
+      return Object.fromEntries(Object.keys(nested).sort().map((key) => [key, nested[key]]));
+    }, 2);
+    return serialized === undefined ? "Brak danych" : serialized;
+  } catch (_error) {
+    return "Nie mozna wyswietlic danych";
+  }
 }
 
 function formatBytes(value) {
@@ -4307,13 +4309,13 @@ function formatHistoryDuration(value) {
   return `${Math.max(0, Number(value))} ms`;
 }
 
-function historyChangeRow(label, value) {
+function historyChangeRow(label, value, formatter = historyChangeValue) {
   const row = document.createElement("div");
   const name = document.createElement("strong");
   const output = document.createElement("span");
   row.className = "history-change-row";
   name.textContent = label;
-  output.textContent = historyChangeValue(value);
+  output.textContent = formatter(value);
   row.append(name, output);
   return row;
 }
@@ -4630,7 +4632,7 @@ function renderHistoryChanges(item = {}) {
     if (Object.keys(details).length) {
       const legacy = historyTechnicalDetails("Dane techniczne");
       for (const [key, value] of Object.entries(details)) {
-        legacy.content.appendChild(historyChangeRow(key, value));
+        legacy.content.appendChild(historyChangeRow(key, value, historyTechnicalValue));
       }
       historyChangesOutput.appendChild(legacy.details);
     }
@@ -4705,7 +4707,7 @@ function renderHistoryChanges(item = {}) {
   if (integrations && Object.keys(integrations).length) {
     const section = historyTechnicalDetails("Dane techniczne");
     for (const [key, value] of Object.entries(integrations)) {
-      section.content.appendChild(historyChangeRow(key, value));
+      section.content.appendChild(historyChangeRow(key, value, historyTechnicalValue));
     }
     historyChangesOutput.appendChild(section.details);
   }
@@ -4916,6 +4918,7 @@ function renderLogEvent(event) {
   severityBadge.className = `log-event-severity log-event-severity-${severity}`;
   severityBadge.textContent = logSeverityLabel(severity);
   title.textContent = event.summary || "Zdarzenie";
+  title.title = title.textContent;
   summary.className = "log-event-summary-row";
   context.textContent = [
     event.username ? `uzytkownik: ${event.username}` : "",
@@ -4929,6 +4932,7 @@ function renderLogEvent(event) {
   disclosure.textContent = "Szczegoly";
   lines.className = "log-lines";
   lines.textContent = [
+    event.summary ? `Podsumowanie: ${event.summary}` : "",
     event.recommended_action ? `Zalecane dzialanie: ${event.recommended_action}` : "",
     event.exception_type ? `Wyjatek: ${event.exception_type}` : "",
     event.traceback_text || "",

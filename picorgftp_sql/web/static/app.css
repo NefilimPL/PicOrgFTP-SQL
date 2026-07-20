@@ -2258,6 +2258,7 @@ button.slot-badge.on:hover {
 .logs-output-live {
   max-height: min(65vh, 760px);
   overflow: auto;
+  gap: 0;
 }
 
 .logs-pagination {
@@ -2945,6 +2946,12 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
 .log-event-summary-row > * {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.log-event-summary-row > strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .log-event-summary-row > small {
