@@ -10971,25 +10971,25 @@ function renderEntraExpiryStatus(container, status = {}) {
   const successfulAt = entraExpiryDateTime(status.last_success_at);
   const remainingDays = entraExpiryRemainingDays(status.expires_at);
   const permissionRequired = status.error_code === "permission_required";
-  let severity = "info";
+  const expirySeverity = remainingDays === null
+    ? "info"
+    : remainingDays <= 3 ? "critical" : remainingDays <= 14 ? "warning" : "info";
   let summary = "Nie ma jeszcze zapisanego statusu terminu waznosci Client Secret.";
 
   panel.className = "entra-expiry-panel";
   details.className = "entra-expiry-metadata";
   if (permissionRequired) {
-    severity = "warning";
     summary = "Nadaj aplikacji uprawnienie Application.Read.All i zatwierdz admin consent, aby odczytac termin waznosci.";
   } else if (status.status === "ok" && remainingDays !== null) {
-    if (remainingDays <= 3) severity = "critical";
-    else if (remainingDays <= 14) severity = "warning";
     summary = remainingDays < 0
       ? "Client Secret wygasl. Zaktualizuj konfiguracje Microsoft Entra."
       : `Client Secret wygasa za ${remainingDays} ${remainingDays === 1 ? "dzien" : "dni"}.`;
   } else if (status.status === "unavailable") {
-    severity = "warning";
     summary = "Nie mozna teraz odczytac statusu Microsoft Entra. Sprobuj ponownie pozniej.";
   }
-  panel.classList.add(`entra-expiry-${severity}`);
+  panel.classList.add(`entra-expiry-${expirySeverity}`);
+  if (permissionRequired) panel.classList.add("entra-expiry-permission-required");
+  if (permissionRequired || status.status === "unavailable") panel.classList.add("entra-expiry-warning");
   heading.textContent = summary;
   details.append(
     entraExpiryMetadata("Aplikacja", String(status.application_name || "Brak danych")),

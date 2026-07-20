@@ -77,6 +77,13 @@ class SourceIntegrityTests(unittest.TestCase):
             renderer_source.index("if (permissionRequired)"),
             renderer_source.index('if (status.status === "ok"'),
         )
+        self.assertIn("const expirySeverity", renderer_source)
+        self.assertIn('remainingDays <= 3 ? "critical"', renderer_source)
+        self.assertIn('panel.classList.add(`entra-expiry-${expirySeverity}`)', renderer_source)
+        self.assertIn(
+            'panel.classList.add("entra-expiry-permission-required")',
+            renderer_source,
+        )
         self.assertIn("textContent", renderer_source)
         self.assertNotIn("innerHTML", renderer_source)
         self.assertNotIn("credential_key_id", renderer_source)
@@ -85,6 +92,7 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn(".entra-expiry-metadata", css_source)
         self.assertIn(".entra-expiry-warning", css_source)
         self.assertIn(".entra-expiry-critical", css_source)
+        self.assertIn(".entra-expiry-permission-required", css_source)
 
     def test_header_contains_smoothed_backend_health_indicator(self) -> None:
         root = Path(__file__).resolve().parents[1]
