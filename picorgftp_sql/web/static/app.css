@@ -1272,6 +1272,71 @@ h2 {
   line-height: 1.4;
 }
 
+.entra-expiry-status {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.entra-expiry-panel {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+  padding: 8px 10px;
+}
+
+.entra-expiry-panel > strong {
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.entra-expiry-metadata {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 6px 10px;
+  margin: 0;
+}
+
+.entra-expiry-meta-row {
+  min-width: 0;
+}
+
+.entra-expiry-meta-row dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.entra-expiry-meta-row dd {
+  min-width: 0;
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.entra-expiry-warning {
+  border-color: var(--warn);
+  border-left-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, var(--surface));
+}
+
+.entra-expiry-critical {
+  border-color: var(--danger);
+  border-left-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+}
+
+.entra-expiry-refresh {
+  justify-self: start;
+}
+
+.entra-expiry-refresh-error {
+  margin: 8px 0 0;
+  color: var(--error);
+  font-size: 12px;
+}
+
 .mail-test-status {
   grid-column: 1 / -1;
   min-height: 22px;

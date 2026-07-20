@@ -55,6 +55,33 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("mail-test-attempt", css_source)
         self.assertIn("@media (max-width: 920px)", css_source)
 
+    def test_mail_settings_renders_safe_entra_expiry_status_and_explicit_refresh(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        js_source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+        css_source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+
+        renderer_start = js_source.index("function renderEntraExpiryStatus")
+        renderer_end = js_source.index("function renderSettingsMail", renderer_start)
+        renderer_source = js_source[renderer_start:renderer_end]
+
+        self.assertIn("renderEntraExpiryStatus", js_source)
+        self.assertIn('"/api/settings/email/entra-expiry"', js_source)
+        self.assertIn('"/api/settings/email/entra-expiry/refresh"', js_source)
+        self.assertIn("Sprawdz teraz", js_source)
+        self.assertIn("Application.Read.All", renderer_source)
+        self.assertIn("textContent", renderer_source)
+        self.assertNotIn("innerHTML", renderer_source)
+        self.assertNotIn("credential_key_id", renderer_source)
+        self.assertNotIn("error_message", renderer_source)
+        self.assertIn(".entra-expiry-panel", css_source)
+        self.assertIn(".entra-expiry-metadata", css_source)
+        self.assertIn(".entra-expiry-warning", css_source)
+        self.assertIn(".entra-expiry-critical", css_source)
+
     def test_header_contains_smoothed_backend_health_indicator(self) -> None:
         root = Path(__file__).resolve().parents[1]
         html_source = (

@@ -10929,6 +10929,106 @@ function renderMailTestResult(container, result) {
   }
 }
 
+function entraExpiryDateTime(value) {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) {
+    return { text: "Brak danych", title: "" };
+  }
+  return {
+    text: date.toLocaleString(),
+    title: date.toISOString(),
+  };
+}
+
+function entraExpiryRemainingDays(value) {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) return null;
+  const milliseconds = date.getTime() - Date.now();
+  const day = 24 * 60 * 60 * 1000;
+  return milliseconds >= 0 ? Math.ceil(milliseconds / day) : Math.floor(milliseconds / day);
+}
+
+function entraExpiryMetadata(label, value, title = "") {
+  const row = document.createElement("div");
+  const term = document.createElement("dt");
+  const description = document.createElement("dd");
+  row.className = "entra-expiry-meta-row";
+  term.textContent = label;
+  description.textContent = value;
+  if (title) description.title = title;
+  row.append(term, description);
+  return row;
+}
+
+function renderEntraExpiryStatus(container, status = {}) {
+  container.textContent = "";
+  const panel = document.createElement("section");
+  const heading = document.createElement("strong");
+  const details = document.createElement("dl");
+  const source = String(status.source || "saved");
+  const expiresAt = entraExpiryDateTime(status.expires_at);
+  const checkedAt = entraExpiryDateTime(status.last_checked_at);
+  const successfulAt = entraExpiryDateTime(status.last_success_at);
+  const remainingDays = entraExpiryRemainingDays(status.expires_at);
+  const permissionRequired = status.error_code === "permission_required";
+  let severity = "info";
+  let summary = "Nie ma jeszcze zapisanego statusu terminu waznosci Client Secret.";
+
+  panel.className = "entra-expiry-panel";
+  details.className = "entra-expiry-metadata";
+  if (status.status === "ok" && remainingDays !== null) {
+    if (remainingDays <= 3) severity = "critical";
+    else if (remainingDays <= 14) severity = "warning";
+    summary = remainingDays < 0
+      ? "Client Secret wygasl. Zaktualizuj konfiguracje Microsoft Entra."
+      : `Client Secret wygasa za ${remainingDays} ${remainingDays === 1 ? "dzien" : "dni"}.`;
+  } else if (permissionRequired) {
+    severity = "warning";
+    summary = "Nadaj aplikacji uprawnienie Application.Read.All i zatwierdz admin consent, aby odczytac termin waznosci.";
+  } else if (status.status === "unavailable") {
+    severity = "warning";
+    summary = "Nie mozna teraz odczytac statusu Microsoft Entra. Sprobuj ponownie pozniej.";
+  }
+  panel.classList.add(`entra-expiry-${severity}`);
+  heading.textContent = summary;
+  details.append(
+    entraExpiryMetadata("Aplikacja", String(status.application_name || "Brak danych")),
+    entraExpiryMetadata("Credential", String(status.credential_name || "Brak danych")),
+    entraExpiryMetadata("Wygasa", expiresAt.text, expiresAt.title),
+    entraExpiryMetadata(
+      "Pozostalo",
+      remainingDays === null ? "Brak danych" : remainingDays < 0 ? `${Math.abs(remainingDays)} dni po terminie` : `${remainingDays} dni`
+    ),
+    entraExpiryMetadata("Ostatnia kontrola", checkedAt.text, checkedAt.title),
+    entraExpiryMetadata("Ostatni sukces", successfulAt.text, successfulAt.title),
+    entraExpiryMetadata(
+      "W cache",
+      source === "microsoft_graph" ? "Nie - odswiezono teraz" : "Tak - zapisany bezpieczny stan"
+    )
+  );
+  panel.append(heading, details);
+  container.appendChild(panel);
+}
+
+function renderEntraExpiryRefreshFailure(container) {
+  const existing = container.querySelector(".entra-expiry-refresh-error");
+  if (existing) existing.remove();
+  const message = document.createElement("p");
+  message.className = "entra-expiry-refresh-error";
+  message.setAttribute("role", "alert");
+  message.textContent = "Nie udalo sie odswiezyc statusu. Wyswietlono poprzednia bezpieczna wartosc.";
+  container.appendChild(message);
+}
+
+async function loadCachedEntraExpiryStatus(container) {
+  try {
+    const status = await requestJson("/api/settings/email/entra-expiry");
+    renderEntraExpiryStatus(container, status);
+  } catch (_error) {
+    renderEntraExpiryStatus(container, { status: "unavailable" });
+  }
+}
+
 function renderSettingsMail() {
   const email = state.settings.email_notifications || {};
   const form = document.createElement("form");
@@ -10938,6 +11038,8 @@ function renderSettingsMail() {
   const entraTitle = document.createElement("h3");
   const smtpTitle = document.createElement("h3");
   const smtpWarning = document.createElement("p");
+  const entraExpiryStatus = document.createElement("div");
+  const entraExpiryRefreshButton = document.createElement("button");
   const smtpSecurity = selectField(
     "email_smtp_security",
     "Szyfrowanie polaczenia",
@@ -10963,10 +11065,32 @@ function renderSettingsMail() {
   smtpWarning.setAttribute("role", "alert");
   smtpWarning.textContent =
     "Uwaga: tryb bez TLS. Nie szyfruje polaczenia ani danych logowania. Uzywaj go tylko w zaufanej sieci.";
+  entraExpiryStatus.className = "entra-expiry-status";
+  entraExpiryStatus.setAttribute("role", "status");
+  entraExpiryStatus.setAttribute("aria-live", "polite");
+  entraExpiryStatus.textContent = "Pobieranie zapisanego statusu Client Secret...";
+  entraExpiryRefreshButton.type = "button";
+  entraExpiryRefreshButton.className = "secondary-button entra-expiry-refresh";
+  entraExpiryRefreshButton.textContent = "Sprawdz teraz";
+  entraExpiryRefreshButton.addEventListener("click", async () => {
+    entraExpiryRefreshButton.disabled = true;
+    try {
+      const status = await requestJson("/api/settings/email/entra-expiry/refresh", {
+        method: "POST",
+      });
+      renderEntraExpiryStatus(entraExpiryStatus, status);
+    } catch (_error) {
+      renderEntraExpiryRefreshFailure(entraExpiryStatus);
+    } finally {
+      entraExpiryRefreshButton.disabled = false;
+    }
+  });
   smtpSecuritySelect.addEventListener("change", updateSmtpWarning);
   updateSmtpWarning();
   entraCard.append(
     entraTitle,
+    entraExpiryStatus,
+    entraExpiryRefreshButton,
     inputField("email_entra_tenant_id", "Tenant ID", email.entra?.tenant_id || ""),
     inputField("email_entra_client_id", "Client ID", email.entra?.client_id || ""),
     credentialField(
@@ -10980,6 +11104,7 @@ function renderSettingsMail() {
       placeholder: "powiadomienia@example.com",
     })
   );
+  loadCachedEntraExpiryStatus(entraExpiryStatus);
   smtpCard.append(
     smtpTitle,
     inputField("email_smtp_host", "Host SMTP", email.smtp?.host || ""),
