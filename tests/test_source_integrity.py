@@ -73,6 +73,10 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn('"/api/settings/email/entra-expiry/refresh"', js_source)
         self.assertIn("Sprawdz teraz", js_source)
         self.assertIn("Application.Read.All", renderer_source)
+        self.assertLess(
+            renderer_source.index("if (permissionRequired)"),
+            renderer_source.index('if (status.status === "ok"'),
+        )
         self.assertIn("textContent", renderer_source)
         self.assertNotIn("innerHTML", renderer_source)
         self.assertNotIn("credential_key_id", renderer_source)

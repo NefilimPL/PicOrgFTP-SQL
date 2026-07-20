@@ -10976,15 +10976,15 @@ function renderEntraExpiryStatus(container, status = {}) {
 
   panel.className = "entra-expiry-panel";
   details.className = "entra-expiry-metadata";
-  if (status.status === "ok" && remainingDays !== null) {
+  if (permissionRequired) {
+    severity = "warning";
+    summary = "Nadaj aplikacji uprawnienie Application.Read.All i zatwierdz admin consent, aby odczytac termin waznosci.";
+  } else if (status.status === "ok" && remainingDays !== null) {
     if (remainingDays <= 3) severity = "critical";
     else if (remainingDays <= 14) severity = "warning";
     summary = remainingDays < 0
       ? "Client Secret wygasl. Zaktualizuj konfiguracje Microsoft Entra."
       : `Client Secret wygasa za ${remainingDays} ${remainingDays === 1 ? "dzien" : "dni"}.`;
-  } else if (permissionRequired) {
-    severity = "warning";
-    summary = "Nadaj aplikacji uprawnienie Application.Read.All i zatwierdz admin consent, aby odczytac termin waznosci.";
   } else if (status.status === "unavailable") {
     severity = "warning";
     summary = "Nie mozna teraz odczytac statusu Microsoft Entra. Sprobuj ponownie pozniej.";
