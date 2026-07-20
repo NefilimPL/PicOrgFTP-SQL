@@ -27,7 +27,7 @@ from .excel_utils import (
 )
 from .redaction import redact_sensitive_value, sanitize_free_text
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 9
 _NOTIFICATION_DELIVERY_STATUSES = frozenset(
     {"pending", "sending", "sent", "fallback", "skipped", "error"}
 )
@@ -380,6 +380,26 @@ def _migrate_web_history_created_at(conn: sqlite3.Connection) -> None:
             (payload["id"], _json_dumps(payload), created_at),
         )
     conn.execute("DROP TABLE web_history_legacy_ts")
+
+
+def _migrate_daily_change_summary_reports(conn: sqlite3.Connection) -> None:
+    """Add retry scheduling to databases created by the first v8 release."""
+
+    if not _table_exists(conn, "daily_change_summary_reports"):
+        return
+    columns = {
+        row["name"]
+        for row in conn.execute(
+            "PRAGMA table_info(daily_change_summary_reports)"
+        ).fetchall()
+    }
+    if "next_attempt_at" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE daily_change_summary_reports
+            ADD COLUMN next_attempt_at TEXT NOT NULL DEFAULT ''
+            """
+        )
 
 
 def _severity_rank(value: object) -> int:
@@ -805,9 +825,21 @@ class SqliteStore:
                         threshold_days
                     )
                 );
+
+                CREATE TABLE IF NOT EXISTS daily_change_summary_reports (
+                    window_end TEXT PRIMARY KEY,
+                    window_start TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('pending', 'sending', 'sent')),
+                    claimed_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    sent_at TEXT NOT NULL DEFAULT '',
+                    next_attempt_at TEXT NOT NULL DEFAULT ''
+                );
                 """
             )
             _migrate_web_history_created_at(conn)
+            _migrate_daily_change_summary_reports(conn)
             _reconcile_duplicate_open_incidents(conn)
             conn.execute(
                 """
@@ -885,6 +917,8 @@ class SqliteStore:
                     ON notification_outbox(status, created_at, id);
                 CREATE INDEX IF NOT EXISTS idx_entra_secret_status_last_checked_at
                     ON entra_secret_status(last_checked_at);
+                CREATE INDEX IF NOT EXISTS idx_daily_change_summary_reports_status
+                    ON daily_change_summary_reports(status, window_end);
                 """
             )
             version_row = conn.execute(
@@ -3342,6 +3376,153 @@ class SqliteStore:
                 """,
                 (record_id, _json_dumps(payload), created_at),
             )
+
+    def claim_daily_change_summary(
+        self, window_end: str, *, claimed_at: str
+    ) -> dict[str, str] | None:
+        """Claim one scheduled report while preserving the last successful window."""
+
+        end = _canonical_timestamp(window_end, field="window_end")
+        claimed = _canonical_timestamp(claimed_at, field="claimed_at")
+        self.initialize()
+        with self.connection() as conn:
+            # A later scheduled interval must never jump ahead of a failed
+            # one; it would otherwise overlap the same history range.
+            outstanding = conn.execute(
+                """
+                SELECT window_start, window_end, status, next_attempt_at
+                FROM daily_change_summary_reports
+                WHERE status IN ('pending', 'sending')
+                ORDER BY window_end ASC
+                LIMIT 1
+                """
+            ).fetchone()
+            if outstanding is not None:
+                if _text(outstanding["status"]) != "pending":
+                    return None
+                retry_at = _text(outstanding["next_attempt_at"])
+                if retry_at and retry_at > claimed:
+                    return None
+                pending_end = _text(outstanding["window_end"])
+                result = conn.execute(
+                    """
+                    UPDATE daily_change_summary_reports
+                    SET status = 'sending', claimed_at = ?, updated_at = ?
+                    WHERE window_end = ? AND status = 'pending'
+                      AND (next_attempt_at = '' OR next_attempt_at <= ?)
+                    """,
+                    (claimed, claimed, pending_end, claimed),
+                )
+                if result.rowcount != 1:
+                    return None
+                return {
+                    "window_start": _text(outstanding["window_start"]),
+                    "window_end": pending_end,
+                    "status": "sending",
+                }
+            existing = conn.execute(
+                "SELECT window_start, status FROM daily_change_summary_reports WHERE window_end = ?",
+                (end,),
+            ).fetchone()
+            if existing is not None:
+                return None
+            previous = conn.execute(
+                """
+                SELECT window_end FROM daily_change_summary_reports
+                WHERE status = 'sent' AND window_end < ?
+                ORDER BY window_end DESC LIMIT 1
+                """,
+                (end,),
+            ).fetchone()
+            if previous is None:
+                end_datetime = datetime.fromisoformat(end.replace("Z", "+00:00"))
+                start = (end_datetime - timedelta(days=1)).isoformat(
+                    timespec="milliseconds"
+                ).replace("+00:00", "Z")
+            else:
+                start = _text(previous["window_end"])
+            result = conn.execute(
+                """
+                INSERT OR IGNORE INTO daily_change_summary_reports (
+                    window_end, window_start, status, claimed_at, created_at, updated_at
+                ) VALUES (?, ?, 'sending', ?, ?, ?)
+                """,
+                (end, start, claimed, claimed, claimed),
+            )
+            if result.rowcount != 1:
+                return None
+            return {"window_start": start, "window_end": end, "status": "sending"}
+
+    def finalize_daily_change_summary(
+        self, window_end: str, *, status: str, next_attempt_at: str = ""
+    ) -> bool:
+        """Finalize a claimed report; pending reports are safe to retry."""
+
+        end = _canonical_timestamp(window_end, field="window_end")
+        normalized = _text(status)
+        if normalized not in {"pending", "sent"}:
+            raise ValueError("invalid daily change summary status")
+        retry_at = (
+            _canonical_timestamp(next_attempt_at, field="next_attempt_at")
+            if normalized == "pending" and _text(next_attempt_at)
+            else ""
+        )
+        now = _now_iso()
+        self.initialize()
+        with self.connection() as conn:
+            result = conn.execute(
+                """
+                UPDATE daily_change_summary_reports
+                SET status = ?, updated_at = ?, sent_at = CASE WHEN ? = 'sent' THEN ? ELSE '' END,
+                    claimed_at = CASE WHEN ? = 'pending' THEN '' ELSE claimed_at END,
+                    next_attempt_at = ?
+                WHERE window_end = ? AND status = 'sending'
+                """,
+                (normalized, now, normalized, now, normalized, retry_at, end),
+            )
+        return result.rowcount == 1
+
+    def recover_daily_change_summaries(self, *, stale_before: str) -> int:
+        """Release interrupted report sends when a worker starts again."""
+
+        boundary = _canonical_timestamp(stale_before, field="stale_before")
+        self.initialize()
+        with self.connection() as conn:
+            result = conn.execute(
+                """
+                UPDATE daily_change_summary_reports
+                SET status = 'pending', claimed_at = '', updated_at = ?
+                WHERE status = 'sending' AND claimed_at <> '' AND claimed_at <= ?
+                """,
+                (_now_iso(), boundary),
+            )
+        return max(0, result.rowcount)
+
+    def daily_change_history(
+        self, *, window_start: str, window_end: str
+    ) -> list[dict[str, Any]]:
+        """Return history belonging strictly to one durable report interval."""
+
+        start = _canonical_timestamp(window_start, field="window_start")
+        end = _canonical_timestamp(window_end, field="window_end")
+        self.initialize()
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT payload_json FROM web_history
+                WHERE created_at > ? AND created_at <= ?
+                ORDER BY created_at, rowid
+                """,
+                (start, end),
+            ).fetchall()
+        records: list[dict[str, Any]] = []
+        for row in rows:
+            payload = _json_loads(row["payload_json"], {})
+            if isinstance(payload, dict):
+                safe = redact_sensitive_value(payload)
+                if isinstance(safe, dict):
+                    records.append(safe)
+        return records
 
     def load_file_index_cache(self, key: str = "default") -> dict[str, Any]:
         """Return stored local file index cache payload."""

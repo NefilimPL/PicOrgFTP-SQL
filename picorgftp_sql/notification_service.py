@@ -11,6 +11,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .email_delivery import MailMessage, MailTransport, build_transport
 from .email_settings import (
@@ -26,6 +27,9 @@ WORKER_BATCH_LIMIT = 20
 WORKER_STOP_TIMEOUT_SECONDS = 23.0
 STALE_SENDING_AFTER = timedelta(minutes=5)
 OUTBOX_DONE_RETENTION = timedelta(days=7)
+DAILY_SUMMARY_TIME_ZONE = ZoneInfo("Europe/Warsaw")
+DAILY_SUMMARY_RETRY_DELAY = timedelta(minutes=5)
+DAILY_SUMMARY_STALE_CLAIM_AFTER = timedelta(minutes=10)
 
 
 _TEST_NOTIFICATION_SCENARIOS: tuple[dict[str, object], ...] = (
@@ -109,6 +113,122 @@ def _text(value: object, limit: int = 2_000) -> str:
 
 def _header_text(value: object, limit: int = 300) -> str:
     return " ".join(_text(value, limit).splitlines())[:limit]
+
+
+def _daily_summary_due_end(now: datetime, schedule: object) -> str:
+    """Return the latest configured Warsaw run slot, or an empty value before it."""
+
+    text = _text(schedule, 5)
+    if len(text) != 5 or text[2] != ":" or not (text[:2] + text[3:]).isdigit():
+        return ""
+    hour, minute = int(text[:2]), int(text[3:])
+    if hour > 23 or minute > 59:
+        return ""
+    current = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    local = current.astimezone(DAILY_SUMMARY_TIME_ZONE)
+    # A fall-back hour occurs twice; fold=0 makes the daily wall-clock slot
+    # stable, so the second occurrence cannot create a duplicate report.
+    scheduled = local.replace(
+        hour=hour, minute=minute, second=0, microsecond=0, fold=0
+    )
+    if local < scheduled:
+        return ""
+    return _iso_utc(scheduled)
+
+
+def _daily_change_sources(record: Mapping[str, object]) -> list[Mapping[str, object]]:
+    details = record.get("details")
+    if not isinstance(details, Mapping):
+        return []
+    change_set = details.get("change_set")
+    if not isinstance(change_set, Mapping):
+        return []
+    sources: list[Mapping[str, object]] = [change_set]
+    pimcore = change_set.get("pimcore")
+    if isinstance(pimcore, Mapping):
+        sources.append(pimcore)
+    return sources
+
+
+def _compact_daily_change_rows(
+    history: list[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Project history into user-facing EAN rows without operational evidence."""
+
+    grouped: dict[str, dict[str, object]] = {}
+    for record in history:
+        ean = _text(record.get("ean"), 128)
+        if not ean or ean == "BRAK-EAN":
+            continue
+        sources = _daily_change_sources(record)
+        if not sources:
+            continue
+        row = grouped.setdefault(
+            ean, {"ean": ean, "created": False, "fields": set(), "slots": set()}
+        )
+        for source in sources:
+            created_source = _text(source.get("kind")).lower() == "created"
+            if created_source:
+                row["created"] = True
+            raw_fields = source.get("fields")
+            if not created_source and isinstance(raw_fields, list):
+                fields = row["fields"]
+                if isinstance(fields, set):
+                    for item in raw_fields:
+                        if isinstance(item, Mapping):
+                            label = _text(item.get("label") or item.get("key"), 200)
+                            if label:
+                                fields.add(label)
+            raw_files = source.get("files")
+            if isinstance(raw_files, list):
+                slots = row["slots"]
+                if isinstance(slots, set):
+                    for item in raw_files:
+                        if isinstance(item, Mapping):
+                            slot = _text(item.get("slot") or item.get("prefix"), 40)
+                            if slot:
+                                slots.add(slot)
+    rows: list[dict[str, object]] = []
+    for ean in sorted(grouped):
+        row = grouped[ean]
+        fields = sorted(row["fields"]) if isinstance(row["fields"], set) else []
+        slots = sorted(row["slots"]) if isinstance(row["slots"], set) else []
+        if bool(row["created"]) or fields or slots:
+            rows.append({"ean": ean, "created": bool(row["created"]), "fields": fields, "slots": slots})
+    return rows
+
+
+def _daily_summary_message(
+    rows: list[Mapping[str, object]], *, window_start: str, window_end: str
+) -> dict[str, str]:
+    lines: list[str] = []
+    html_items: list[str] = []
+    for row in rows:
+        parts: list[str] = []
+        if bool(row.get("created")):
+            parts.append("utworzono nowy wpis")
+        fields = row.get("fields")
+        if isinstance(fields, list) and fields:
+            parts.append("zaktualizowano dane PIMcore: " + ", ".join(_text(value, 200) for value in fields))
+        slots = row.get("slots")
+        if isinstance(slots, list) and slots:
+            parts.append("zaktualizowano zdjęcia: sloty " + ", ".join(_text(value, 40) for value in slots))
+        line = f"{_text(row.get('ean'), 128)} — " + "; ".join(parts)
+        lines.append("• " + line)
+        html_items.append(f"<li>{html.escape(line)}</li>")
+    start = _text(window_start, 40)
+    end = _text(window_end, 40)
+    heading = "Dzienne podsumowanie zmian produktów"
+    text_body = f"{heading}\nOkres: {start} — {end}\n\n" + "\n".join(lines)
+    return {
+        "message_id": f"daily-change-summary-{_text(window_end, 40)}",
+        "subject": "[PicOrgFTP-SQL] Dzienne podsumowanie zmian",
+        "text_body": text_body,
+        "html_body": (
+            f"<h2>{html.escape(heading)}</h2><p>Okres: {html.escape(start)} — "
+            f"{html.escape(end)}</p><ul>{''.join(html_items)}</ul>"
+        ),
+    }
 
 
 def _default_settings_loader() -> dict[str, object]:
@@ -588,6 +708,14 @@ class NotificationService:
             if not isinstance(event, Mapping):
                 return False
             incident_values = incident if isinstance(incident, Mapping) else {}
+            severity = _text(event.get("severity")).lower()
+            # Releases made before daily summaries existed may still contain
+            # informational intents. Complete them without sending stale spam.
+            if severity == "info":
+                self.store.materialize_notification_intent(
+                    _text(intent_id), delivery=None, completed_at=_iso_utc(self.now())
+                )
+                return True
             settings = self._settings()
             recipients = resolve_recipients(
                 event,
@@ -595,13 +723,7 @@ class NotificationService:
                 self.user_lookup,
                 tolerate_lookup_errors=False,
             )
-            severity = _text(event.get("severity")).lower()
             completed_at = _iso_utc(self.now())
-            if severity == "info" and not recipients:
-                self.store.materialize_notification_intent(
-                    _text(intent_id), delivery=None, completed_at=completed_at
-                )
-                return True
             event_id = _text(event.get("id"))
             message_id = f"notify-{event_id}"
             delivery_id = f"delivery-{event_id}"
@@ -640,6 +762,86 @@ class NotificationService:
             ):
                 processed += 1
         return processed
+
+    def process_due_daily_change_summary(self) -> dict[str, object]:
+        """Send exactly one compact daily report for the current Warsaw slot."""
+
+        settings = self._settings()
+        window_end = _daily_summary_due_end(
+            self.now(), settings.get("daily_summary_time", "16:00")
+        )
+        if not window_end:
+            return {"status": "not_due", "product_count": 0}
+        recipients = resolve_recipients(
+            {"severity": "info", "username": ""}, settings, self.user_lookup
+        )
+        if not recipients:
+            return {"status": "not_configured", "product_count": 0}
+        claim = self.store.claim_daily_change_summary(
+            window_end, claimed_at=_iso_utc(self.now())
+        )
+        if not isinstance(claim, Mapping):
+            return {"status": "already_processed", "product_count": 0}
+        report_end = _text(claim.get("window_end"), 40)
+        if not report_end:
+            return {"status": "error", "product_count": 0}
+        start = _text(claim.get("window_start"), 40)
+        try:
+            history = self.store.daily_change_history(
+                window_start=start, window_end=report_end
+            )
+            records = [item for item in history if isinstance(item, Mapping)]
+            rows = _compact_daily_change_rows(records)
+        except Exception:
+            self.store.finalize_daily_change_summary(
+                report_end,
+                status="pending",
+                next_attempt_at=_iso_utc(self.now() + DAILY_SUMMARY_RETRY_DELAY),
+            )
+            return {"status": "error", "product_count": 0}
+        if not rows:
+            self.store.finalize_daily_change_summary(report_end, status="sent")
+            return {"status": "skipped", "product_count": 0}
+        delivery = {
+            "id": f"daily-summary-{report_end}",
+            "primary_channel": _text(settings.get("primary_channel")).lower(),
+            "recipients": recipients,
+            "message": _daily_summary_message(
+                rows, window_start=start, window_end=report_end
+            ),
+        }
+        status, _channel, _attempts = self._deliver_claimed(
+            delivery, settings, allow_fallback=bool(settings.get("fallback_enabled"))
+        )
+        final_status = "sent" if status != "error" else "pending"
+        self.store.finalize_daily_change_summary(
+            report_end,
+            status=final_status,
+            next_attempt_at=(
+                _iso_utc(self.now() + DAILY_SUMMARY_RETRY_DELAY)
+                if final_status == "pending"
+                else ""
+            ),
+        )
+        return {"status": status, "product_count": len(rows)}
+
+    def recover_daily_change_summaries(self) -> int:
+        """Release only report sends abandoned longer than the claim timeout."""
+
+        recover = getattr(self.store, "recover_daily_change_summaries", None)
+        if not callable(recover):
+            return 0
+        return max(
+            0,
+            int(
+                recover(
+                    stale_before=_iso_utc(
+                        self.now() - DAILY_SUMMARY_STALE_CLAIM_AFTER
+                    )
+                )
+                or 0
+            ),
+        )
 
     def _mail_message(
         self,
@@ -862,6 +1064,11 @@ class NotificationService:
         return recovered
 
     def process_pending_batch(self, limit: int = WORKER_BATCH_LIMIT) -> int:
+        try:
+            self.process_due_daily_change_summary()
+        except Exception:
+            # Daily reports are isolated from incident delivery and are retryable.
+            pass
         self.process_notification_intents(limit=limit)
         processed = 0
         for delivery in self.store.pending_notification_deliveries(limit=limit):
@@ -1128,6 +1335,10 @@ def start_notification_worker() -> None:
             return
         try:
             service.recover_stale_deliveries()
+        except Exception:
+            pass
+        try:
+            service.recover_daily_change_summaries()
         except Exception:
             pass
         stop_event = threading.Event()

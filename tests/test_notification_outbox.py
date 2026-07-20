@@ -107,7 +107,7 @@ def test_same_v7_database_adds_notification_outbox_idempotently(tmp_path: Path) 
     store.initialize()
 
     with store.connection() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='notification_outbox'"
         ).fetchone()
@@ -490,7 +490,7 @@ def test_transient_actor_lookup_failure_leaves_intent_pending(tmp_path: Path) ->
     assert store.query_notification_deliveries()["items"] == []
 
 
-def test_info_event_outbox_is_atomic_and_disabled_rule_completes_without_delivery(
+def test_info_event_is_stored_without_creating_an_immediate_outbox_intent(
     monkeypatch, tmp_path: Path
 ) -> None:
     store = SqliteStore(str(tmp_path / "app.sqlite"))
@@ -500,17 +500,11 @@ def test_info_event_outbox_is_atomic_and_disabled_rule_completes_without_deliver
         severity="info", event_type="job.started", summary="Job started"
     )
     assert event["incident_id"] == ""
-    assert [item["event_id"] for item in store.pending_notification_intents(10)] == [
-        event["id"]
-    ]
-
-    service = _service(store, RecordingTransport(), info_enabled=False)
-    assert service.process_notification_intents(limit=10) == 1
     assert store.pending_notification_intents(10) == []
     assert store.query_notification_deliveries()["items"] == []
 
 
-def test_enabled_info_rule_materializes_and_sends_non_incident_delivery(
+def test_enabled_info_rule_does_not_send_one_mail_per_operational_event(
     monkeypatch, tmp_path: Path
 ) -> None:
     store = SqliteStore(str(tmp_path / "app.sqlite"))
@@ -518,16 +512,24 @@ def test_enabled_info_rule_materializes_and_sends_non_incident_delivery(
     event = observability.emit_event(
         severity="info", event_type="job.started", summary="Job started"
     )
+    assert store.pending_notification_intents(limit=10) == []
+    assert store.query_notification_deliveries()["items"] == []
+
+
+def test_legacy_info_intent_is_completed_without_creating_a_delivery(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    event = _event("evt-legacy-info", "info")
+    store.append_operational_event(event, create_notification_intent=True)
     transport = RecordingTransport()
-
     service = _service(store, transport, info_enabled=True)
-    assert service.process_pending_batch(limit=10) == 1
 
-    delivery = store.query_notification_deliveries()["items"][0]
-    assert delivery["incident_id"] == ""
-    assert delivery["event_id"] == event["id"]
-    assert delivery["status"] == "sent"
-    assert len(transport.messages) == 1
+    assert service.process_notification_intents(limit=10) == 1
+
+    assert store.pending_notification_intents(limit=10) == []
+    assert store.query_notification_deliveries()["items"] == []
+    assert transport.messages == []
 
 
 def test_suppressed_notification_event_never_creates_an_outbox_intent(

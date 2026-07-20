@@ -140,6 +140,31 @@ def test_emit_event_normalizes_and_redacts_before_storage(monkeypatch) -> None:
     assert fake.events[0] == event
 
 
+def test_info_events_are_persisted_without_an_immediate_mail_intent(monkeypatch) -> None:
+    class InfoStore(FakeStore):
+        supports_notification_outbox = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.intent_flags: list[bool] = []
+
+        def append_operational_event(
+            self, event: dict[str, object], *, create_notification_intent: bool = False
+        ) -> dict[str, object]:
+            self.intent_flags.append(create_notification_intent)
+            return super().append_operational_event(event)
+
+    store = InfoStore()
+    monkeypatch.setattr(observability, "observability_store", lambda: store)
+
+    observability.emit_event(
+        severity="info", event_type="pimcore.updated", summary="Updated"
+    )
+
+    assert len(store.events) == 1
+    assert store.intent_flags == [False]
+
+
 def test_emit_event_rejects_unknown_severity(monkeypatch) -> None:
     fake = FakeStore()
     monkeypatch.setattr(observability, "observability_store", lambda: fake)

@@ -150,6 +150,21 @@ def test_normalize_email_settings_builds_both_channels_and_rules() -> None:
     assert set(result["rules"]) == {"info", "warning", "error", "critical"}
 
 
+def test_normalize_email_settings_uses_a_safe_configurable_daily_summary_time() -> None:
+    assert default_email_settings()["daily_summary_time"] == "16:00"
+    assert normalize_email_settings({})["daily_summary_time"] == "16:00"
+    assert normalize_email_settings({"daily_summary_time": "09:05"})[
+        "daily_summary_time"
+    ] == "09:05"
+    assert normalize_email_settings({"daily_summary_time": "9:5"})[
+        "daily_summary_time"
+    ] == "16:00"
+    # Europe/Warsaw skips 02:00–02:59 during the spring DST transition.
+    assert normalize_email_settings({"daily_summary_time": "02:30"})[
+        "daily_summary_time"
+    ] == "16:00"
+
+
 def test_normalize_email_settings_bounds_enums_port_and_recipient_lists() -> None:
     result = normalize_email_settings(
         {

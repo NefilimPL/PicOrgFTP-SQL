@@ -71,6 +71,7 @@ def default_email_settings() -> dict[str, object]:
     return {
         "primary_channel": "entra",
         "fallback_enabled": False,
+        "daily_summary_time": "16:00",
         "entra": {
             "tenant_id": "",
             "client_id": "",
@@ -162,6 +163,23 @@ def _bool_value(value: object, default: bool = False) -> bool:
     return default
 
 
+def _daily_summary_time(value: object) -> str:
+    """Return a strict, portable 24-hour schedule value."""
+
+    text = _text(value)
+    if len(text) != 5 or text[2] != ":":
+        return "16:00"
+    hour, minute = text[:2], text[3:]
+    if not hour.isascii() or not minute.isascii() or not hour.isdigit() or not minute.isdigit():
+        return "16:00"
+    if int(hour) > 23 or int(minute) > 59:
+        return "16:00"
+    # Europe/Warsaw skips this hour in spring and repeats it in autumn.
+    if int(hour) == 2:
+        return "16:00"
+    return text
+
+
 def normalize_email_settings(raw: object) -> dict[str, object]:
     defaults = default_email_settings()
     source = raw if isinstance(raw, dict) else {}
@@ -214,6 +232,7 @@ def normalize_email_settings(raw: object) -> dict[str, object]:
     return {
         "primary_channel": primary_channel,
         "fallback_enabled": _bool_value(source.get("fallback_enabled"), False),
+        "daily_summary_time": _daily_summary_time(source.get("daily_summary_time")),
         "entra": entra,
         "smtp": smtp,
         "rules": rules,

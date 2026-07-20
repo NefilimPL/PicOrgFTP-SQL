@@ -210,6 +210,39 @@ class FakeTransport:
         return {"status": "sent", "elapsed_ms": 12, "secret": "never-store"}
 
 
+class SummaryStore(FakeStore):
+    def __init__(self, history: list[dict[str, object]]) -> None:
+        super().__init__()
+        self.history = history
+        self.claims: list[dict[str, str]] = []
+        self.finalized: list[tuple[str, str]] = []
+
+    def claim_daily_change_summary(
+        self, window_end: str, *, claimed_at: str
+    ) -> dict[str, str] | None:
+        report = {
+            "window_start": "2026-07-19T14:00:00.000Z",
+            "window_end": window_end,
+            "status": "sending",
+        }
+        self.claims.append({**report, "claimed_at": claimed_at})
+        return report
+
+    def daily_change_history(
+        self, *, window_start: str, window_end: str
+    ) -> list[dict[str, object]]:
+        assert window_start == "2026-07-19T14:00:00.000Z"
+        assert window_end == "2026-07-20T14:00:00.000Z"
+        return list(self.history)
+
+    def finalize_daily_change_summary(
+        self, window_end: str, *, status: str, next_attempt_at: str = ""
+    ) -> bool:
+        del next_attempt_at
+        self.finalized.append((window_end, status))
+        return True
+
+
 def _service(
     store: FakeStore,
     transports: dict[str, FakeTransport] | None = None,
@@ -937,6 +970,131 @@ def test_send_test_notification_suite_routes_five_scenarios_without_store_writes
     assert any("Client Secret" in message.text_body for message in fallback.messages)
     assert store.deliveries == {}
     assert lookups == []
+
+
+def test_daily_change_summary_sends_one_compact_grouped_email_without_technical_data() -> None:
+    store = SummaryStore(
+        [
+            {
+                "ean": "5900000000001",
+                "details": {
+                    "change_set": {
+                        "kind": "created",
+                        "fields": [{"label": "EAN"}, {"label": "Kolor"}],
+                        "files": [],
+                    }
+                },
+            },
+            {
+                "ean": "5900000000002",
+                "details": {
+                    "change_set": {
+                        "kind": "updated",
+                        "fields": [{"label": "Kolor"}, {"label": "Model"}],
+                        "files": [{"slot": "08"}, {"slot": "09"}],
+                        "integrations": {"sql": {"elapsed_ms": 300}},
+                    }
+                },
+            },
+        ]
+    )
+    transport = FakeTransport()
+    settings = _settings()
+    settings["rules"]["info"] = {
+        "enabled": True,
+        "recipients": ["users@example.com"],
+        "include_actor": True,
+    }
+    settings["daily_summary_time"] = "16:00"
+    lookups: list[str] = []
+    service = notification_service.NotificationService(
+        store=store,
+        transport_factory=lambda _channel, _settings: transport,
+        settings_loader=lambda: settings,
+        user_lookup=lambda username: lookups.append(username) or None,
+        event_emitter=lambda **_kwargs: None,
+        now=lambda: datetime(2026, 7, 20, 14, 5, tzinfo=UTC),
+    )
+
+    result = service.process_due_daily_change_summary()
+
+    assert result == {"status": "sent", "product_count": 2}
+    assert len(transport.messages) == 1
+    message = transport.messages[0]
+    assert message.recipients == ["users@example.com"]
+    assert "5900000000001 — utworzono nowy wpis" in message.text_body
+    assert "5900000000001 — utworzono nowy wpis; zaktualizowano dane" not in message.text_body
+    assert (
+        "5900000000002 — zaktualizowano dane PIMcore: Kolor, Model; "
+        "zaktualizowano zdjęcia: sloty 08, 09"
+    ) in message.text_body
+    assert "SQL" not in message.text_body
+    assert "elapsed_ms" not in message.text_body
+    assert lookups == []
+    assert store.finalized == [("2026-07-20T14:00:00.000Z", "sent")]
+
+
+def test_daily_change_summary_marks_an_empty_interval_sent_without_mail() -> None:
+    store = SummaryStore([])
+    transport = FakeTransport()
+    settings = _settings()
+    settings["rules"]["info"] = {
+        "enabled": True,
+        "recipients": ["users@example.com"],
+        "include_actor": False,
+    }
+    service = notification_service.NotificationService(
+        store=store,
+        transport_factory=lambda _channel, _settings: transport,
+        settings_loader=lambda: settings,
+        user_lookup=lambda _username: None,
+        event_emitter=lambda **_kwargs: None,
+        now=lambda: datetime(2026, 7, 20, 14, 5, tzinfo=UTC),
+    )
+
+    result = service.process_due_daily_change_summary()
+
+    assert result == {"status": "skipped", "product_count": 0}
+    assert transport.messages == []
+    assert store.finalized == [("2026-07-20T14:00:00.000Z", "sent")]
+
+
+def test_daily_change_summary_releases_failed_delivery_for_retry() -> None:
+    store = SummaryStore(
+        [{"ean": "5900000000001", "details": {"change_set": {"kind": "created"}}}]
+    )
+    settings = _settings()
+    settings["rules"]["info"] = {
+        "enabled": True,
+        "recipients": ["users@example.com"],
+        "include_actor": False,
+    }
+    service = notification_service.NotificationService(
+        store=store,
+        transport_factory=lambda _channel, _settings: FakeTransport(error=RuntimeError("down")),
+        settings_loader=lambda: settings,
+        user_lookup=lambda _username: None,
+        event_emitter=lambda **_kwargs: None,
+        now=lambda: datetime(2026, 7, 20, 14, 5, tzinfo=UTC),
+    )
+
+    result = service.process_due_daily_change_summary()
+
+    assert result == {"status": "error", "product_count": 1}
+    assert store.finalized == [("2026-07-20T14:00:00.000Z", "pending")]
+
+
+def test_daily_summary_dst_fallback_keeps_one_wall_clock_schedule_slot() -> None:
+    first_occurrence = datetime(2026, 10, 25, 0, 45, tzinfo=UTC)
+    repeated_occurrence = datetime(2026, 10, 25, 1, 45, tzinfo=UTC)
+
+    first = notification_service._daily_summary_due_end(first_occurrence, "02:30")
+    repeated = notification_service._daily_summary_due_end(
+        repeated_occurrence, "02:30"
+    )
+
+    assert first == "2026-10-25T00:30:00.000Z"
+    assert repeated == first
 
 
 def test_send_test_message_rejects_invalid_recipient_without_network() -> None:

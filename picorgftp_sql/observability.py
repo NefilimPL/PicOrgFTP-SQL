@@ -154,12 +154,9 @@ def emit_event(
     if normalized_severity == "info":
         try:
             store = observability_store()
-            suppress = isinstance(safe_details, dict) and bool(
-                safe_details.get("suppress_notifications")
-            )
             if bool(getattr(store, "supports_notification_outbox", False)):
                 return store.append_operational_event(
-                    event, create_notification_intent=not suppress
+                    event, create_notification_intent=False
                 )
             return store.append_operational_event(event)
         except Exception:

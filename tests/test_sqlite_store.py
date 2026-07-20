@@ -47,6 +47,7 @@ def test_schema_creates_expected_tables(tmp_path: Path) -> None:
         "pimcore_integration_contexts",
         "entra_secret_status",
         "entra_secret_reminders",
+        "daily_change_summary_reports",
     } <= tables
 
     with sqlite3.connect(db_path) as conn:
@@ -58,7 +59,7 @@ def test_schema_creates_expected_tables(tmp_path: Path) -> None:
             "PRAGMA foreign_key_list(operational_event_stream)"
         ).fetchall()
 
-    assert version == 7
+    assert version == 9
     assert stream_columns == ["sequence", "event_id"]
     assert stream_foreign_keys == []
 
@@ -576,6 +577,118 @@ def test_web_history_schema_uses_iso_created_at(tmp_path: Path) -> None:
     assert "T" in row[0]
     payload = json.loads(row[1])
     assert payload["created_at"] == row[0]
+
+
+def test_daily_change_summary_claims_one_retryable_continuous_window(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    first_end = "2026-07-20T14:00:00.000Z"
+    second_end = "2026-07-21T14:00:00.000Z"
+
+    first = store.claim_daily_change_summary(first_end, claimed_at=first_end)
+
+    assert first == {
+        "window_start": "2026-07-19T14:00:00.000Z",
+        "window_end": first_end,
+        "status": "sending",
+    }
+    assert store.claim_daily_change_summary(first_end, claimed_at=first_end) is None
+    assert store.finalize_daily_change_summary(first_end, status="pending") is True
+    retry = store.claim_daily_change_summary(first_end, claimed_at=first_end)
+    assert retry == first
+    assert store.finalize_daily_change_summary(first_end, status="sent") is True
+
+    second = store.claim_daily_change_summary(second_end, claimed_at=second_end)
+
+    assert second == {
+        "window_start": first_end,
+        "window_end": second_end,
+        "status": "sending",
+    }
+
+
+def test_daily_change_summary_retries_the_oldest_pending_window_before_a_new_one(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    first_end = "2026-07-20T14:00:00.000Z"
+    retry_at = "2026-07-21T14:05:00.000Z"
+    next_end = "2026-07-22T14:00:00.000Z"
+
+    first = store.claim_daily_change_summary(first_end, claimed_at=first_end)
+    assert first is not None
+    assert store.finalize_daily_change_summary(
+        first_end, status="pending", next_attempt_at=retry_at
+    ) is True
+
+    # A bounded backoff must prevent a new, overlapping interval.
+    assert store.claim_daily_change_summary(next_end, claimed_at="2026-07-21T14:01:00.000Z") is None
+    retried = store.claim_daily_change_summary(next_end, claimed_at=retry_at)
+
+    assert retried == {
+        "window_start": "2026-07-19T14:00:00.000Z",
+        "window_end": first_end,
+        "status": "sending",
+    }
+    assert store.finalize_daily_change_summary(first_end, status="sent") is True
+    next_report = store.claim_daily_change_summary(next_end, claimed_at=next_end)
+    assert next_report == {
+        "window_start": first_end,
+        "window_end": next_end,
+        "status": "sending",
+    }
+
+
+def test_daily_change_summary_recovery_only_releases_stale_sending_claims(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    old_end = "2026-07-20T14:00:00.000Z"
+    active_end = "2026-07-21T14:00:00.000Z"
+    assert store.claim_daily_change_summary(old_end, claimed_at="2026-07-20T14:00:00.000Z")
+    assert store.finalize_daily_change_summary(old_end, status="sent")
+    assert store.claim_daily_change_summary(active_end, claimed_at="2026-07-21T14:00:00.000Z")
+
+    released = store.recover_daily_change_summaries(
+        stale_before="2026-07-21T13:55:00.000Z"
+    )
+
+    assert released == 0
+    assert store.claim_daily_change_summary(
+        "2026-07-22T14:00:00.000Z", claimed_at="2026-07-22T14:00:00.000Z"
+    ) is None
+    assert store.recover_daily_change_summaries(
+        stale_before="2026-07-21T14:10:00.000Z"
+    ) == 1
+
+
+def test_daily_change_summary_migrates_existing_v8_report_table_for_retry(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "data.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE daily_change_summary_reports (
+                window_end TEXT PRIMARY KEY,
+                window_start TEXT NOT NULL,
+                status TEXT NOT NULL,
+                claimed_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                sent_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+
+    SqliteStore(str(db_path)).initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(daily_change_summary_reports)")
+        }
+    assert "next_attempt_at" in columns
 
 
 def test_migration_converts_legacy_web_history_ts_real(tmp_path: Path) -> None:
