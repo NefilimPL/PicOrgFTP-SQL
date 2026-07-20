@@ -52,9 +52,10 @@ _AUTH_SCHEME_RE = re.compile(
     rf"(?i)(?P<prefix>\b(?:Bearer|Basic){_SCHEME_GAP})"
     r"(?!\[REDACTED\])\S+"
 )
-_STRUCTURED_FIELD_RE = re.compile(
-    r"[A-Za-z_][A-Za-z0-9_.-]*[ \t]*[:=]"
+_ASCII_FIELD_START = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_"
 )
+_ASCII_FIELD_CONTINUATION = _ASCII_FIELD_START | frozenset("0123456789.-")
 _SAFE_REDACTED_VALUES = (
     REDACTED,
     f'"{REDACTED}"',
@@ -95,7 +96,14 @@ def _next_structured_field(text: str, delimiter_at: int) -> bool:
     index = delimiter_at + 1
     while index < len(text) and text[index] in " \t":
         index += 1
-    return _STRUCTURED_FIELD_RE.match(text, index) is not None
+    if index >= len(text) or text[index] not in _ASCII_FIELD_START:
+        return False
+    index += 1
+    while index < len(text) and text[index] in _ASCII_FIELD_CONTINUATION:
+        index += 1
+    while index < len(text) and text[index] in " \t":
+        index += 1
+    return index < len(text) and text[index] in ":="
 
 
 def _safe_redacted_value_end(text: str, start: int) -> int | None:

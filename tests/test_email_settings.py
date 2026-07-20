@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from picorgftp_sql import common, config, web_data
+from picorgftp_sql import common, config, email_settings, web_data
 from picorgftp_sql.email_settings import (
     EMAIL_CLIENT_SECRET,
     EMAIL_SETTINGS_KEY,
@@ -22,6 +23,30 @@ def test_normalize_email_address_preserves_local_case_and_lowercases_domain() ->
         normalize_email_address(" User.Name+tag@Example.COM ")
         == "User.Name+tag@example.com"
     )
+
+
+@pytest.mark.parametrize(
+    "local",
+    [
+        "name+tag",
+        "x!$%&'*+/=?^_`{|}~-",
+    ],
+)
+def test_normalize_email_address_accepts_existing_ascii_atom_characters(
+    local: str,
+) -> None:
+    assert normalize_email_address(f"{local}@Example.COM") == f"{local}@example.com"
+
+
+def test_normalize_email_address_rejects_very_long_untrusted_input() -> None:
+    with pytest.raises(ValueError, match="Niepoprawny adres e-mail"):
+        normalize_email_address(f"{'!' * 1_000_000}@example.com")
+
+
+def test_email_settings_has_no_local_part_regular_expression() -> None:
+    source = Path(email_settings.__file__).read_text(encoding="utf-8")
+
+    assert "_EMAIL_LOCAL_RE" not in source
 
 
 @pytest.mark.parametrize(

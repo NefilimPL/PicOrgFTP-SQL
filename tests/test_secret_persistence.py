@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from picorgftp_sql import config, logging_utils, observability, web_data
+from picorgftp_sql import config, logging_utils, observability, redaction, web_data
 from picorgftp_sql.redaction import redact_sensitive_value
 from picorgftp_sql.sqlite_store import SqliteStore
 from picorgftp_sql.web import app as web_app
@@ -199,6 +199,19 @@ def test_unterminated_quoted_backslashes_are_processed_within_fixed_timeout() ->
     )
 
     assert completed.returncode == 0
+
+
+def test_next_structured_field_keeps_existing_field_grammar() -> None:
+    assert redaction._next_structured_field(", next.field-2 = value", 0) is True
+    assert redaction._next_structured_field(")_field:\tvalue", 0) is True
+    assert redaction._next_structured_field(", 1field=value", 0) is False
+    assert redaction._next_structured_field(", pól=wartosc", 0) is False
+
+
+def test_redaction_has_no_structured_field_regular_expression() -> None:
+    source = Path(redaction.__file__).read_text(encoding="utf-8")
+
+    assert "_STRUCTURED_FIELD_RE" not in source
 
 
 def test_sqlite_persistence_sanitizes_events_incidents_and_history(tmp_path: Path) -> None:

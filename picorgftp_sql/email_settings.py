@@ -11,10 +11,19 @@ EMAIL_SETTINGS_KEY = "email_notifications"
 EMAIL_CLIENT_SECRET = "client_secret"
 EMAIL_SMTP_PASSWORD = "password"
 EMAIL_SEVERITIES = ("info", "warning", "error", "critical")
-_EMAIL_LOCAL_RE = re.compile(r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+\Z")
+_EMAIL_LOCAL_ALLOWED = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    "!#$%&'*+/=?^_`{|}~.-"
+)
 _EMAIL_DOMAIN_LABEL_RE = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z"
 )
+
+
+def _is_valid_email_local_part(value: str) -> bool:
+    if not value:
+        return False
+    return all(character in _EMAIL_LOCAL_ALLOWED for character in value)
 
 
 def normalize_email_address(value: object) -> str:
@@ -41,7 +50,7 @@ def normalize_email_address(value: object) -> str:
         or local.startswith(".")
         or local.endswith(".")
         or ".." in local
-        or not _EMAIL_LOCAL_RE.fullmatch(local)
+        or not _is_valid_email_local_part(local)
         or any(ch.isspace() for ch in address)
     ):
         raise ValueError("Niepoprawny adres e-mail.")
