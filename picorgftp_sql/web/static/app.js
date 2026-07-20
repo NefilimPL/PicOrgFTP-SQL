@@ -10933,6 +10933,47 @@ function renderMailTestResult(container, result) {
   }
 }
 
+function renderMailTestSuiteResult(container, result) {
+  container.textContent = "";
+  container.className = `mail-test-status ${result.ok ? "success-text" : "error-text"}`;
+  const summary = document.createElement("strong");
+  const scenarios = Array.isArray(result.scenarios) ? result.scenarios : [];
+  const finished = scenarios.filter((item) =>
+    ["sent", "fallback", "skipped"].includes(item?.status)
+  ).length;
+  summary.textContent = result.ok
+    ? `Przetestowano ${finished}/${scenarios.length} typow powiadomien (${Number(result.elapsed_ms || 0)} ms).`
+    : `Test zestawu zakonczyl sie problemem (${finished}/${scenarios.length} poprawnych, ${Number(result.elapsed_ms || 0)} ms).`;
+  container.appendChild(summary);
+  const labels = {
+    information: "Informacja",
+    warning: "Ostrzezenie",
+    error: "Blad",
+    critical: "Blad krytyczny",
+    entra_secret_expiry: "Wygasanie Client Secret Entra",
+  };
+  const statuses = {
+    sent: "wyslano",
+    fallback: "wyslano fallbackiem",
+    skipped: "pominieto — brak aktywnych odbiorcow",
+    error: "blad wysylki",
+  };
+  const list = document.createElement("div");
+  list.className = "mail-test-attempts";
+  for (const scenario of scenarios) {
+    const row = document.createElement("div");
+    const status = statuses[scenario?.status] || "blad wysylki";
+    const channel = scenario?.used_channel === "smtp" ? "SMTP" : "Entra";
+    const recipients = Number.isFinite(scenario?.recipient_count)
+      ? `, odbiorcow: ${scenario.recipient_count}`
+      : "";
+    row.className = `mail-test-attempt mail-test-attempt-${["sent", "fallback", "skipped"].includes(scenario?.status) ? "sent" : "error"}`;
+    row.textContent = `${labels[scenario?.kind] || "Powiadomienie"}: ${status} (${channel}${recipients}).`;
+    list.appendChild(row);
+  }
+  container.appendChild(list);
+}
+
 function entraExpiryDateTime(value) {
   const date = new Date(value || "");
   if (Number.isNaN(date.getTime())) {
@@ -11160,12 +11201,19 @@ function renderSettingsMail() {
     Boolean(email.fallback_enabled)
   );
   const testButton = document.createElement("button");
+  const testSuiteButton = document.createElement("button");
   const testStatus = document.createElement("div");
+  const testSuiteStatus = document.createElement("div");
   testButton.type = "button";
   testButton.textContent = "Wyslij wiadomosc testowa";
+  testSuiteButton.type = "button";
+  testSuiteButton.textContent = "Testuj wszystkie typy powiadomien";
   testStatus.className = "mail-test-status";
+  testSuiteStatus.className = "mail-test-status";
   testStatus.setAttribute("role", "status");
   testStatus.setAttribute("aria-live", "polite");
+  testSuiteStatus.setAttribute("role", "status");
+  testSuiteStatus.setAttribute("aria-live", "polite");
   testButton.addEventListener("click", async () => {
     const recipient = testRecipient.querySelector("input").value.trim();
     if (!recipient) {
@@ -11200,6 +11248,33 @@ function renderSettingsMail() {
       testButton.disabled = false;
     }
   });
+  testSuiteButton.addEventListener("click", async () => {
+    testSuiteButton.disabled = true;
+    testSuiteStatus.className = "mail-test-status";
+    testSuiteStatus.textContent = "Wysylanie pieciu testowych powiadomien...";
+    try {
+      const result = await requestJson("/api/settings/email/test-suite", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          channel: testChannel.querySelector("select").value,
+          use_fallback: testFallback.querySelector("input").checked,
+        }),
+        timeoutMs: 180000,
+      });
+      renderMailTestSuiteResult(testSuiteStatus, result);
+    } catch (error) {
+      const result = error.payload || error.detail;
+      if (result && typeof result === "object" && Array.isArray(result.scenarios)) {
+        renderMailTestSuiteResult(testSuiteStatus, result);
+      } else {
+        testSuiteStatus.className = "mail-test-status error-text";
+        testSuiteStatus.textContent = "Test zestawu nie powiodl sie. Sprawdz konfiguracje kanalow.";
+      }
+    } finally {
+      testSuiteButton.disabled = false;
+    }
+  });
 
   form.append(
     settingsFieldGroup(
@@ -11227,8 +11302,9 @@ function renderSettingsMail() {
       testRecipient,
       testChannel,
       testFallback,
-      actionRow(testButton),
-      testStatus
+      actionRow(testButton, testSuiteButton),
+      testStatus,
+      testSuiteStatus
     )
   );
   settingsSaveButton(form, (data) => ({

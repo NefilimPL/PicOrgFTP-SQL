@@ -372,6 +372,7 @@ class WebSmokeCiTests(unittest.TestCase):
             "/api/thumbnail",
             "/api/settings",
             "/api/settings/email/test",
+            "/api/settings/email/test-suite",
             "/api/settings/import-legacy",
             "/api/settings/sqlite/repair",
             "/api/settings/sqlite/backup",
@@ -442,6 +443,61 @@ class WebSmokeCiTests(unittest.TestCase):
             recipient="admin@example.com",
             use_fallback=True,
         )
+
+    def test_email_test_suite_returns_safe_scenario_summaries(self) -> None:
+        client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
+        result = {
+            "scenarios": [
+                {
+                    "kind": "information",
+                    "severity": "info",
+                    "status": "sent",
+                    "used_channel": "entra",
+                    "recipient_count": 2,
+                    "message_id": "must-not-be-returned",
+                    "attempts": [{"channel": "entra", "status": "sent"}],
+                },
+                {
+                    "kind": "entra_secret_expiry",
+                    "severity": "critical",
+                    "status": "error",
+                    "used_channel": "smtp",
+                    "recipient_count": 1,
+                    "recipients": ["secret@example.com"],
+                    "attempts": [{
+                        "channel": "smtp",
+                        "status": "error",
+                        "code": "untrusted_secret_code",
+                        "category": "delivery",
+                        "message": "password=LEAK",
+                    }],
+                },
+            ]
+        }
+        with (
+            patch.object(web_app, "_require_admin", return_value=admin),
+            patch.object(web_app, "send_test_notification_suite", return_value=result) as sender,
+        ):
+            response = client.post(
+                "/api/settings/email/test-suite",
+                json={"channel": "entra", "use_fallback": True},
+            )
+
+        self.assertEqual(response.status_code, 502)
+        payload = response.json()
+        self.assertEqual(set(payload), {"ok", "scenarios", "elapsed_ms"})
+        self.assertFalse(payload["ok"])
+        self.assertEqual(len(payload["scenarios"]), 2)
+        self.assertEqual(
+            set(payload["scenarios"][0]),
+            {"kind", "severity", "status", "used_channel", "recipient_count", "attempts"},
+        )
+        self.assertEqual(payload["scenarios"][1]["attempts"][0]["code"], "delivery_failed")
+        self.assertNotIn("LEAK", response.text)
+        self.assertNotIn("secret@example.com", response.text)
+        self.assertNotIn("message_id", response.text)
+        sender.assert_called_once_with(channel="entra", use_fallback=True)
 
     def test_email_test_route_resolves_primary_and_maps_delivery_error_to_502(self) -> None:
         client = TestClient(web_app.app)

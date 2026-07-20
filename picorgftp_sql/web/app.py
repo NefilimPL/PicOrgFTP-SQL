@@ -74,6 +74,7 @@ from ..redaction import redact_sensitive_value, sanitize_free_text
 from ..notification_service import (
     notification_worker_health,
     send_test_message,
+    send_test_notification_suite,
     start_notification_worker,
     stop_notification_worker,
 )
@@ -4516,6 +4517,12 @@ _EMAIL_TEST_ATTEMPT_CODES = frozenset(
     }
 )
 
+_EMAIL_TEST_SUITE_KINDS = frozenset(
+    {"information", "warning", "error", "critical", "entra_secret_expiry"}
+)
+_EMAIL_TEST_SUITE_SEVERITIES = frozenset({"info", "warning", "error", "critical"})
+_EMAIL_TEST_SUITE_STATUSES = frozenset({"sent", "fallback", "skipped", "error"})
+
 
 def _redacted_email_test_attempt(raw: object) -> Dict[str, Any]:
     """Project one transport attempt without returning provider diagnostics."""
@@ -4567,6 +4574,39 @@ def _redacted_email_test_attempt(raw: object) -> Dict[str, Any]:
     }
     attempt.update({"code": code, "category": category, "message": messages[category]})
     return attempt
+
+
+def _redacted_email_test_suite_scenario(raw: object) -> Dict[str, Any]:
+    """Project one test-suite result without messages, recipients or IDs."""
+
+    item = raw if isinstance(raw, dict) else {}
+    kind = str(item.get("kind") or "").strip().lower()
+    if kind not in _EMAIL_TEST_SUITE_KINDS:
+        kind = ""
+    severity = str(item.get("severity") or "").strip().lower()
+    if severity not in _EMAIL_TEST_SUITE_SEVERITIES:
+        severity = "critical" if kind == "entra_secret_expiry" else ""
+    status = str(item.get("status") or "").strip().lower()
+    if status not in _EMAIL_TEST_SUITE_STATUSES:
+        status = "error"
+    channel = str(item.get("used_channel") or "").strip().lower()
+    if channel not in {"entra", "smtp"}:
+        channel = ""
+    recipient_count = item.get("recipient_count")
+    if not isinstance(recipient_count, int) or isinstance(recipient_count, bool):
+        recipient_count = 0
+    attempts = item.get("attempts")
+    return {
+        "kind": kind,
+        "severity": severity,
+        "status": status,
+        "used_channel": channel,
+        "recipient_count": max(0, recipient_count),
+        "attempts": [
+            _redacted_email_test_attempt(attempt)
+            for attempt in (attempts if isinstance(attempts, list) else [])[:2]
+        ],
+    }
 
 
 _INCIDENT_DELIVERY_STATUSES = frozenset(
@@ -5670,6 +5710,65 @@ def create_app() -> FastAPI:
         return JSONResponse(
             response_payload,
             status_code=200 if response_payload["ok"] else 502,
+        )
+
+    @app.post("/api/settings/email/test-suite")
+    async def settings_email_test_suite(request: Request) -> JSONResponse:
+        _require_admin(request)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            return JSONResponse({"ok": False, "scenarios": [], "elapsed_ms": 0}, status_code=400)
+        channel_value = payload.get("channel")
+        use_fallback = payload.get("use_fallback", False)
+        if not isinstance(channel_value, str):
+            channel_value = ""
+        selected = channel_value.strip().lower()
+        if selected not in {"entra", "smtp", "primary"} or not isinstance(use_fallback, bool):
+            return JSONResponse({"ok": False, "scenarios": [], "elapsed_ms": 0}, status_code=400)
+        if selected == "primary":
+            try:
+                email_settings = settings_snapshot().get(EMAIL_SETTINGS_KEY, {})
+                selected = str(
+                    email_settings.get("primary_channel")
+                    if isinstance(email_settings, dict)
+                    else ""
+                ).strip().lower()
+            except Exception:
+                selected = ""
+            if selected not in {"entra", "smtp"}:
+                selected = "entra"
+
+        started = time.perf_counter()
+        try:
+            result = await run_in_threadpool(
+                send_test_notification_suite,
+                channel=selected,
+                use_fallback=use_fallback,
+            )
+        except ValueError:
+            elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+            return JSONResponse(
+                {"ok": False, "scenarios": [], "elapsed_ms": elapsed_ms},
+                status_code=400,
+            )
+        except Exception:
+            result = {"scenarios": []}
+        elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+        values = result.get("scenarios") if isinstance(result, dict) else []
+        scenarios = [
+            _redacted_email_test_suite_scenario(item)
+            for item in (values if isinstance(values, list) else [])[:5]
+        ]
+        ok = len(scenarios) == 5 and all(
+            item["status"] in {"sent", "fallback", "skipped"}
+            for item in scenarios
+        )
+        return JSONResponse(
+            {"ok": ok, "scenarios": scenarios, "elapsed_ms": elapsed_ms},
+            status_code=200 if ok else 502,
         )
 
     @app.get("/api/settings/email/entra-expiry")

@@ -890,6 +890,55 @@ def test_send_test_message_is_direct_and_can_fallback() -> None:
     assert primary.messages[0].message_id == fallback.messages[0].message_id
 
 
+def test_send_test_notification_suite_routes_five_scenarios_without_store_writes() -> None:
+    store = FakeStore()
+    primary = FakeTransport(error=RuntimeError("down"))
+    fallback = FakeTransport()
+    settings = _settings()
+    settings["rules"]["info"]["enabled"] = True
+    settings["rules"]["warning"]["enabled"] = False
+    for severity, rule in settings["rules"].items():
+        rule["recipients"] = [f"{severity}@example.com"]
+    lookups: list[str] = []
+    service = notification_service.NotificationService(
+        store=store,
+        transport_factory=lambda channel, _settings: {
+            "entra": primary,
+            "smtp": fallback,
+        }[channel],
+        settings_loader=lambda: settings,
+        user_lookup=lambda username: lookups.append(username) or None,
+        event_emitter=lambda **_kwargs: pytest.fail("test suite must not emit events"),
+        now=lambda: NOW,
+    )
+
+    result = service.send_test_notification_suite(channel="entra", use_fallback=True)
+
+    scenarios = result["scenarios"]
+    assert [item["severity"] for item in scenarios] == [
+        "info",
+        "warning",
+        "error",
+        "critical",
+        "critical",
+    ]
+    assert [item["status"] for item in scenarios] == [
+        "fallback",
+        "skipped",
+        "fallback",
+        "fallback",
+        "fallback",
+    ]
+    assert scenarios[-1]["kind"] == "entra_secret_expiry"
+    assert all(item["recipient_count"] == 1 for item in scenarios if item["status"] != "skipped")
+    assert scenarios[1]["recipient_count"] == 0
+    assert len(primary.messages) == len(fallback.messages) == 4
+    assert all("[TEST]" in message.subject for message in fallback.messages)
+    assert any("Client Secret" in message.text_body for message in fallback.messages)
+    assert store.deliveries == {}
+    assert lookups == []
+
+
 def test_send_test_message_rejects_invalid_recipient_without_network() -> None:
     transport = FakeTransport()
     service = _service(FakeStore(), {"entra": transport, "smtp": FakeTransport()})

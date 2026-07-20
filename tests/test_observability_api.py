@@ -156,6 +156,50 @@ def test_direct_entra_test_mail_refreshes_status_only_after_entra_success(
     assert client.get("/api/settings/email/entra-expiry").json() == prior_status
 
 
+def test_notification_test_suite_uses_selected_channel_and_requires_csrf(
+    api_environment, monkeypatch
+) -> None:
+    client, _store = api_environment
+    with web_app._RATE_LIMITS_LOCK:
+        web_app._RATE_LIMITS.clear()
+    csrf = _login(client)
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        web_app,
+        "send_test_notification_suite",
+        lambda **kwargs: calls.append(kwargs) or {
+            "scenarios": [
+                {
+                    "kind": kind,
+                    "severity": severity,
+                    "status": "skipped",
+                    "used_channel": "smtp",
+                    "recipient_count": 0,
+                    "attempts": [],
+                }
+                for kind, severity in (
+                    ("information", "info"),
+                    ("warning", "warning"),
+                    ("error", "error"),
+                    ("critical", "critical"),
+                    ("entra_secret_expiry", "critical"),
+                )
+            ]
+        },
+    )
+
+    response = client.post(
+        "/api/settings/email/test-suite",
+        headers={"X-PicOrg-CSRF": csrf},
+        json={"channel": "smtp", "use_fallback": False},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["scenarios"][0]["status"] == "skipped"
+    assert calls == [{"channel": "smtp", "use_fallback": False}]
+
+
 def test_events_are_admin_only_paginated_filtered_and_validate_cursor(
     api_environment,
 ) -> None:

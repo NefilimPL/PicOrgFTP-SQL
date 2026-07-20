@@ -28,6 +28,9 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertLess(mail_tab, slots_tab)
         self.assertIn("function renderSettingsMail()", js_source)
         self.assertIn('requestJson("/api/settings/email/test"', js_source)
+        self.assertIn('requestJson("/api/settings/email/test-suite"', js_source)
+        self.assertIn("Testuj wszystkie typy powiadomien", js_source)
+        self.assertIn("renderMailTestSuiteResult", js_source)
         for name in (
             "email_primary_channel",
             "email_fallback_enabled",

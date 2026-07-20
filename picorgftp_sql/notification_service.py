@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import re
+import secrets
 import threading
 import uuid
 from collections.abc import Callable, Mapping
@@ -25,6 +26,55 @@ WORKER_BATCH_LIMIT = 20
 WORKER_STOP_TIMEOUT_SECONDS = 23.0
 STALE_SENDING_AFTER = timedelta(minutes=5)
 OUTBOX_DONE_RETENTION = timedelta(days=7)
+
+
+_TEST_NOTIFICATION_SCENARIOS: tuple[dict[str, object], ...] = (
+    {
+        "kind": "information",
+        "severity": "info",
+        "title": "Informacja testowa",
+        "descriptions": (
+            "Symulacja poprawnego zakończenia zadania.",
+            "Symulacja zwykłej informacji operacyjnej.",
+        ),
+    },
+    {
+        "kind": "warning",
+        "severity": "warning",
+        "title": "Ostrzeżenie testowe",
+        "descriptions": (
+            "Symulacja niepełnych danych przekazanych przez użytkownika.",
+            "Symulacja problemu wymagającego sprawdzenia konfiguracji.",
+        ),
+    },
+    {
+        "kind": "error",
+        "severity": "error",
+        "title": "Błąd testowy",
+        "descriptions": (
+            "Symulacja błędu podczas wysyłania danych.",
+            "Symulacja błędu lokalnej aktualizacji danych.",
+        ),
+    },
+    {
+        "kind": "critical",
+        "severity": "critical",
+        "title": "Błąd krytyczny testowy",
+        "descriptions": (
+            "Symulacja wyjątku backendu blokującego zadanie.",
+            "Symulacja krytycznej awarii uniemożliwiającej aktualizację danych.",
+        ),
+    },
+    {
+        "kind": "entra_secret_expiry",
+        "severity": "critical",
+        "title": "Test wygasania Client Secret Entra",
+        "descriptions": (
+            "Symulacja alertu: Client Secret Microsoft Entra zbliża się do wygaśnięcia.",
+            "Symulacja krytycznego alertu o wygasającym Client Secret Microsoft Entra.",
+        ),
+    },
+)
 
 
 def _utc_now() -> datetime:
@@ -896,6 +946,107 @@ class NotificationService:
             "message_id": message_id,
         }
 
+    def send_test_notification_suite(
+        self, *, channel: str, use_fallback: bool = False
+    ) -> dict[str, object]:
+        """Send five direct test messages without recording any operational state."""
+
+        selected = _text(channel).lower()
+        if selected not in {"entra", "smtp"}:
+            raise ValueError("Niepoprawny kanał wysyłki.")
+        try:
+            settings = self._settings()
+        except Exception:
+            settings = None
+
+        results: list[dict[str, object]] = []
+        for scenario in _TEST_NOTIFICATION_SCENARIOS:
+            kind = _text(scenario.get("kind"))
+            severity = _text(scenario.get("severity")).lower()
+            title = _header_text(scenario.get("title"))
+            descriptions = scenario.get("descriptions")
+            choices = (
+                tuple(item for item in descriptions if isinstance(item, str))
+                if isinstance(descriptions, tuple)
+                else ()
+            )
+            description = _text(secrets.choice(choices) if choices else title, 1_000)
+            result: dict[str, object] = {
+                "kind": kind,
+                "severity": severity,
+                "status": "error",
+                "used_channel": selected,
+                "recipient_count": 0,
+                "attempts": [],
+            }
+            if settings is None:
+                result["attempts"] = [
+                    _failure_attempt(
+                        selected,
+                        code="settings_unavailable",
+                        category="configuration",
+                        message="Nie można wczytać konfiguracji poczty.",
+                    )
+                ]
+                results.append(result)
+                continue
+
+            event = {"severity": severity, "username": ""}
+            recipients = resolve_recipients(event, settings, self.user_lookup)
+            result["recipient_count"] = len(recipients)
+            if not recipients:
+                result["status"] = "skipped"
+                results.append(result)
+                continue
+
+            now = _iso_utc(self.now())
+            message_id = f"test-suite-{uuid.uuid4().hex}"
+            delivery = {
+                "id": f"test-suite-{uuid.uuid4().hex}",
+                "incident_id": "",
+                "primary_channel": selected,
+                "recipients": recipients,
+                "message": {
+                    "message_id": message_id,
+                    "subject": f"[TEST] PicOrgFTP-SQL — {title}",
+                    "text_body": f"[TEST] {description}\nCzas: {now}",
+                    "html_body": (
+                        "<h2>[TEST] PicOrgFTP-SQL</h2>"
+                        f"<p>{html.escape(description)}</p>"
+                        f"<p>Czas: {html.escape(now)}</p>"
+                    ),
+                },
+            }
+            try:
+                status, used_channel, attempts = self._deliver_claimed(
+                    delivery,
+                    settings,
+                    allow_fallback=(
+                        use_fallback and bool(settings.get("fallback_enabled"))
+                    ),
+                )
+            except Exception:
+                status, used_channel, attempts = (
+                    "error",
+                    selected,
+                    [
+                        _failure_attempt(
+                            selected,
+                            code="test_failed",
+                            category="internal",
+                            message="Nie można zakończyć testu wysyłki.",
+                        )
+                    ],
+                )
+            result.update(
+                status=status,
+                used_channel=used_channel,
+                attempts=attempts,
+                message_id=message_id,
+            )
+            results.append(result)
+        return {"scenarios": results}
+
 
 def _default_service() -> NotificationService:
     from .observability import observability_store
@@ -918,6 +1069,14 @@ def send_test_message(
 ) -> dict[str, object]:
     return _default_service().send_test_message(
         channel=channel, recipient=recipient, use_fallback=use_fallback
+    )
+
+
+def send_test_notification_suite(
+    *, channel: str, use_fallback: bool = False
+) -> dict[str, object]:
+    return _default_service().send_test_notification_suite(
+        channel=channel, use_fallback=use_fallback
     )
 
 
