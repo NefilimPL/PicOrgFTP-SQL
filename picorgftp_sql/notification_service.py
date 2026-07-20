@@ -17,6 +17,7 @@ from .email_settings import (
     normalize_email_address,
     normalize_email_settings,
 )
+from .entra_secret_monitor import process_due_entra_secret_reminders
 
 
 WORKER_POLL_SECONDS = 2.0
@@ -925,10 +926,24 @@ _WORKER_STOP: threading.Event | None = None
 _WORKER_THREAD: threading.Thread | None = None
 _WORKER_SERVICE: NotificationService | None = None
 _WORKER_OBSERVED_AT = ""
+_WORKER_LAST_ENTRA_MONITOR_AT: datetime | None = None
 
 
 def _worker_loop(service: NotificationService, stop_event: threading.Event) -> None:
+    global _WORKER_LAST_ENTRA_MONITOR_AT
     while not stop_event.is_set():
+        monitor_now = _utc_now()
+        if (
+            _WORKER_LAST_ENTRA_MONITOR_AT is None
+            or monitor_now - _WORKER_LAST_ENTRA_MONITOR_AT >= timedelta(hours=24)
+        ):
+            try:
+                process_due_entra_secret_reminders()
+            except Exception:
+                # Monitoring must never delay or stop notification delivery.
+                pass
+            finally:
+                _WORKER_LAST_ENTRA_MONITOR_AT = monitor_now
         try:
             service.process_pending_batch(limit=WORKER_BATCH_LIMIT)
         except Exception:

@@ -44,6 +44,32 @@ def _settings(**overrides: object) -> dict[str, object]:
     return result
 
 
+def test_worker_runs_entra_expiry_monitor_at_most_once_each_24_hours(monkeypatch):
+    calls = []
+    service = type("Service", (), {"process_pending_batch": lambda self, limit: None})()
+    stop_event = type("Stop", (), {"is_set": lambda self: False, "wait": lambda self, value: True})()
+    monkeypatch.setattr(notification_service, "process_due_entra_secret_reminders", lambda: calls.append(True))
+    monkeypatch.setattr(notification_service, "_WORKER_LAST_ENTRA_MONITOR_AT", None)
+    monkeypatch.setattr(notification_service, "_utc_now", lambda: NOW)
+    notification_service._worker_loop(service, stop_event)
+    notification_service._worker_loop(service, stop_event)
+
+    assert calls == [True]
+
+
+def test_worker_isolates_entra_expiry_monitor_errors(monkeypatch):
+    calls = []
+    service = type("Service", (), {"process_pending_batch": lambda self, limit: calls.append("delivery")})()
+    stop_event = type("Stop", (), {"is_set": lambda self: False, "wait": lambda self, value: True})()
+    monkeypatch.setattr(notification_service, "process_due_entra_secret_reminders", lambda: (_ for _ in ()).throw(RuntimeError("monitor failed")))
+    monkeypatch.setattr(notification_service, "_WORKER_LAST_ENTRA_MONITOR_AT", None)
+    monkeypatch.setattr(notification_service, "_utc_now", lambda: NOW)
+
+    notification_service._worker_loop(service, stop_event)
+
+    assert calls == ["delivery"]
+
+
 def _event(**overrides: object) -> dict[str, object]:
     result: dict[str, object] = {
         "id": "evt-1",

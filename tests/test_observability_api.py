@@ -74,6 +74,45 @@ def _login(client: TestClient, username: str = "admin", password: str = "admin")
     return str(response.json()["csrf_token"])
 
 
+def test_entra_expiry_endpoints_require_admin_csrf_and_return_only_public_status(
+    api_environment, monkeypatch
+) -> None:
+    client, _store = api_environment
+    public_status = {
+        "tenant_id": "tenant",
+        "client_id": "client",
+        "status": "ok",
+        "expires_at": "2026-08-01T10:00:00.000Z",
+        "credential_name": "safe credential",
+        "application_name": "safe application",
+        "source": "saved",
+        "last_checked_at": "2026-07-20T10:00:00.000Z",
+        "last_success_at": "2026-07-20T10:00:00.000Z",
+        "error_code": "",
+        "error_message": "",
+    }
+    monkeypatch.setattr(web_app, "entra_secret_status", lambda: public_status)
+    monkeypatch.setattr(web_app, "refresh_entra_secret_status", lambda force=True: public_status)
+
+    assert client.get("/api/settings/email/entra-expiry").status_code == 401
+    csrf = _login(client)
+    assert client.post("/api/settings/email/entra-expiry/refresh", json={}).status_code == 403
+
+    get_response = client.get("/api/settings/email/entra-expiry")
+    post_response = client.post(
+        "/api/settings/email/entra-expiry/refresh",
+        headers={"X-PicOrg-CSRF": csrf},
+        json={},
+    )
+
+    assert get_response.status_code == 200
+    assert post_response.status_code == 200
+    assert get_response.json() == public_status
+    assert post_response.json() == public_status
+    assert "client_secret" not in get_response.text
+    assert "credential_key_id" not in post_response.text
+
+
 def test_events_are_admin_only_paginated_filtered_and_validate_cursor(
     api_environment,
 ) -> None:

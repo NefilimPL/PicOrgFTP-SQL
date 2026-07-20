@@ -62,6 +62,7 @@ from ..image_utils import fit_image_to_content
 from ..legacy_import import import_legacy_to_sqlite
 from ..logging_utils import log_error
 from ..email_settings import EMAIL_SETTINGS_KEY
+from ..entra_secret_monitor import entra_secret_status, refresh_entra_secret_status
 from ..observability import (
     SEVERITIES,
     emit_event,
@@ -5661,10 +5662,29 @@ def create_app() -> FastAPI:
             "attempts": attempts,
             "elapsed_ms": elapsed_ms,
         }
+        if response_payload["ok"] and used_channel == "entra":
+            try:
+                await run_in_threadpool(refresh_entra_secret_status, force=True)
+            except Exception:
+                pass
         return JSONResponse(
             response_payload,
             status_code=200 if response_payload["ok"] else 502,
         )
+
+    @app.get("/api/settings/email/entra-expiry")
+    def settings_entra_expiry_status(request: Request) -> JSONResponse:
+        _require_admin(request)
+        return JSONResponse(entra_secret_status())
+
+    @app.post("/api/settings/email/entra-expiry/refresh")
+    async def settings_entra_expiry_refresh(request: Request) -> JSONResponse:
+        _require_admin(request)
+        try:
+            status = await run_in_threadpool(refresh_entra_secret_status, force=True)
+        except Exception:
+            status = entra_secret_status()
+        return JSONResponse(status)
 
     @app.post("/api/settings/sql-profiles/{profile_id}/test")
     async def settings_sql_profile_test(

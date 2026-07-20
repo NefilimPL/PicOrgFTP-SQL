@@ -2885,6 +2885,9 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
     security_payload = payload.get("security") if isinstance(payload.get("security"), dict) else {}
     pimcore_payload = payload.get(PIMCORE_SETTINGS_KEY)
     email_payload = payload.get(EMAIL_SETTINGS_KEY)
+    previous_entra_identity = ("", "")
+    updated_entra_identity = ("", "")
+    entra_configuration_changed = False
     if isinstance(email_payload, dict):
         validate_email_rule_recipients(email_payload)
     backup_payload = payload.get("sqlite_backup") if isinstance(payload.get("sqlite_backup"), dict) else None
@@ -2967,6 +2970,11 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
 
     if isinstance(email_payload, dict):
         current_email = normalize_email_settings(cfg.get(EMAIL_SETTINGS_KEY))
+        current_entra = current_email["entra"]
+        previous_entra_identity = (
+            _text(current_entra.get("tenant_id")),
+            _text(current_entra.get("client_id")),
+        )
         merged_email = dict(current_email)
         merged_email.update(email_payload)
         for channel, secret_key in (
@@ -2982,6 +2990,15 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
                     merged_channel[secret_key] = current_channel[secret_key]
                 merged_email[channel] = merged_channel
         cfg[EMAIL_SETTINGS_KEY] = normalize_email_settings(merged_email)
+        updated_entra = cfg[EMAIL_SETTINGS_KEY]["entra"]
+        updated_entra_identity = (
+            _text(updated_entra.get("tenant_id")),
+            _text(updated_entra.get("client_id")),
+        )
+        entra_configuration_changed = any(
+            _text(current_entra.get(key)) != _text(updated_entra.get(key))
+            for key in ("tenant_id", "client_id", EMAIL_CLIENT_SECRET)
+        )
 
     if ftp_payload:
         ftp = cfg.setdefault(H, {})
@@ -3049,6 +3066,22 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
 
     save_config(cfg, preserve_secrets=_preserve_unsubmitted_config_secrets(payload))
     config.initialize_config(interactive=False)
+    if entra_configuration_changed:
+        try:
+            from .entra_secret_monitor import refresh_entra_secret_status
+            from .observability import observability_store
+
+            store = observability_store()
+            for tenant_id, client_id in {
+                previous_entra_identity,
+                updated_entra_identity,
+            }:
+                if tenant_id and client_id:
+                    store.clear_entra_secret_status(tenant_id, client_id)
+            refresh_entra_secret_status(force=True)
+        except Exception:
+            # A configuration save is valid even when Graph cannot be reached.
+            pass
     return settings_snapshot()
 
 
