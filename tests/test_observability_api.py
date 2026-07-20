@@ -113,6 +113,49 @@ def test_entra_expiry_endpoints_require_admin_csrf_and_return_only_public_status
     assert "credential_key_id" not in post_response.text
 
 
+def test_direct_entra_test_mail_refreshes_status_only_after_entra_success(
+    api_environment, monkeypatch
+) -> None:
+    client, _store = api_environment
+    with web_app._RATE_LIMITS_LOCK:
+        web_app._RATE_LIMITS.clear()
+    csrf = _login(client)
+    refreshes = []
+    prior_status = {"status": "ok", "source": "saved", "expires_at": "2026-08-01T10:00:00.000Z"}
+    monkeypatch.setattr(web_app, "entra_secret_status", lambda: prior_status)
+    monkeypatch.setattr(web_app, "refresh_entra_secret_status", lambda force=True: refreshes.append(force) or prior_status)
+    monkeypatch.setattr(
+        web_app,
+        "send_test_message",
+        lambda **_kwargs: {"status": "sent", "used_channel": "entra", "attempts": []},
+    )
+
+    success = client.post(
+        "/api/settings/email/test",
+        headers={"X-PicOrg-CSRF": csrf},
+        json={"channel": "entra", "recipient": "admin@example.com", "use_fallback": False},
+    )
+
+    assert success.status_code == 200
+    assert refreshes == [True]
+    monkeypatch.setattr(
+        web_app,
+        "send_test_message",
+        lambda **_kwargs: {"status": "error", "used_channel": "entra", "attempts": []},
+    )
+    refreshes.clear()
+
+    failed = client.post(
+        "/api/settings/email/test",
+        headers={"X-PicOrg-CSRF": csrf},
+        json={"channel": "entra", "recipient": "admin@example.com", "use_fallback": False},
+    )
+
+    assert failed.status_code == 502
+    assert refreshes == []
+    assert client.get("/api/settings/email/entra-expiry").json() == prior_status
+
+
 def test_events_are_admin_only_paginated_filtered_and_validate_cursor(
     api_environment,
 ) -> None:

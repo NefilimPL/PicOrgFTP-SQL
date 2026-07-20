@@ -108,6 +108,25 @@ def test_entra_expiry_status_round_trip_returns_only_safe_metadata(
     assert "must-not-persist" not in " ".join(str(value) for value in persisted)
 
 
+def test_entra_expiry_internal_status_retains_key_id_without_public_projection(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.upsert_entra_secret_status(
+        {
+            "tenant_id": "tenant",
+            "client_id": "client",
+            "status": "ok",
+            "credential_key_id": "key-internal-only",
+        }
+    )
+
+    internal = store.get_entra_secret_status_internal("tenant", "client")
+
+    assert internal["credential_key_id"] == "key-internal-only"
+    assert "credential_key_id" not in store.get_entra_secret_status("tenant", "client")
+
+
 def test_entra_expiry_status_requires_canonical_timestamps(tmp_path: Path) -> None:
     store = SqliteStore(str(tmp_path / "app.sqlite"))
 

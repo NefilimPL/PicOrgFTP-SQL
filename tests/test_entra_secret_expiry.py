@@ -162,6 +162,47 @@ def test_fetch_refuses_ambiguous_active_credentials_without_selecting_latest_exp
     assert result["credential_key_id"] == ""
 
 
+def test_fetch_returns_uniquely_matched_expired_credential_with_negative_remaining_time():
+    result = expiry.fetch_entra_secret_expiry(
+        _settings(),
+        now=NOW,
+        opener=_graph_opener(
+            {
+                "appId": "client-id",
+                "passwordCredentials": [
+                    _credential(end="2026-07-19T00:00:00Z", key="expired-key"),
+                    _credential(hint="old", end="2026-08-01T00:00:00Z", key="other-active-key"),
+                ],
+            }
+        ),
+    )
+
+    assert result["status"] == "ok"
+    assert result["credential_key_id"] == "expired-key"
+    assert result["expires_at"] == "2026-07-19T00:00:00.000Z"
+    assert result["remaining_seconds"] < 0
+    assert result["remaining_days"] < 0
+
+
+def test_fetch_refuses_ambiguous_expired_credentials_without_selecting_one():
+    result = expiry.fetch_entra_secret_expiry(
+        _settings("zzz-secret"),
+        now=NOW,
+        opener=_graph_opener(
+            {
+                "appId": "client-id",
+                "passwordCredentials": [
+                    _credential(hint="one", end="2026-07-19T00:00:00Z", key="expired-one"),
+                    _credential(hint="two", end="2026-07-18T00:00:00Z", key="expired-two"),
+                ],
+            }
+        ),
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["code"] == "credential_ambiguous"
+
+
 def test_fetch_maps_graph_forbidden_to_permission_required_without_raw_response():
     error = HTTPError(
         "https://graph.microsoft.com/v1.0/applications",

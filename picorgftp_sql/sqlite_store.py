@@ -981,6 +981,42 @@ class SqliteStore:
             ).fetchone()
         return self._public_entra_secret_status(row) if row else {}
 
+    def get_entra_secret_status_internal(
+        self, tenant_id: str, client_id: str
+    ) -> dict[str, str]:
+        """Return monitor-only status including the Graph credential key ID.
+
+        This accessor is intentionally separate from the public projection used
+        by web/API callers.  It never accepts or returns client secrets/tokens.
+        """
+
+        self.initialize()
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT tenant_id, client_id, status, expires_at, credential_name,
+                       credential_key_id, application_name, source, last_checked_at,
+                       last_success_at, error_code, error_message
+                FROM entra_secret_status
+                WHERE tenant_id = ? AND client_id = ?
+                """,
+                (
+                    _bounded_scalar_text(
+                        tenant_id, field="tenant_id", limit=256, required=True
+                    ),
+                    _bounded_scalar_text(
+                        client_id, field="client_id", limit=256, required=True
+                    ),
+                ),
+            ).fetchone()
+        if row is None:
+            return {}
+        result = self._public_entra_secret_status(row)
+        result["credential_key_id"] = sanitize_free_text(
+            row["credential_key_id"], limit=256
+        ).strip()
+        return result
+
     def clear_entra_secret_status(self, tenant_id: str, client_id: str) -> int:
         """Remove an Entra status record and all reminder claims for its identity."""
 

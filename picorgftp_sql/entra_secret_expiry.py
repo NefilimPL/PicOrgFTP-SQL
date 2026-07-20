@@ -102,8 +102,8 @@ def fetch_entra_secret_expiry(
         "status": "ok",
         "code": "ok",
         "expires_at": _canonical_timestamp(expires_at),
-        "remaining_seconds": max(0, math.floor(remaining)),
-        "remaining_days": max(0, math.ceil(remaining / 86_400)),
+        "remaining_seconds": math.floor(remaining),
+        "remaining_days": math.ceil(remaining / 86_400),
         "application_name": _safe_graph_text(
             application.get("displayName"), client_secret, access_token
         ),
@@ -282,6 +282,7 @@ def _select_credential(
     if not isinstance(credentials, list):
         raise _InvalidResponse
     active: list[tuple[datetime, str, str, str]] = []
+    expired: list[tuple[datetime, str, str, str]] = []
     for credential in credentials:
         if not isinstance(credential, Mapping):
             raise _InvalidResponse
@@ -290,28 +291,34 @@ def _select_credential(
         if not isinstance(end_date, str) or not isinstance(key_id, str) or not key_id:
             raise _InvalidResponse
         expires_at = _parse_timestamp(end_date)
-        if expires_at <= now:
-            continue
         hint = credential.get("hint")
         name = credential.get("displayName")
-        active.append(
-            (
-                expires_at,
-                hint if isinstance(hint, str) else "",
-                _safe_graph_text(name, client_secret, access_token),
-                _safe_graph_text(key_id, client_secret, access_token),
-            )
+        item = (
+            expires_at,
+            hint if isinstance(hint, str) else "",
+            _safe_graph_text(name, client_secret, access_token),
+            _safe_graph_text(key_id, client_secret, access_token),
         )
-    if not active:
+        if expires_at > now:
+            active.append(item)
+        else:
+            expired.append(item)
+    all_credentials = active + expired
+    if not all_credentials:
         return None
-    hint_matches = [item for item in active if item[1] == client_secret[:3]]
-    candidates = hint_matches or active
+    hint_matches = [
+        item for item in all_credentials if item[1] == client_secret[:3]
+    ]
+    if hint_matches:
+        candidates = hint_matches
+    elif active:
+        candidates = active
+    else:
+        candidates = expired
     if len(candidates) != 1:
         return "ambiguous"
     expires_at, _hint, name, key_id = candidates[0]
     return expires_at, name, key_id
-
-
 def _parse_timestamp(value: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))

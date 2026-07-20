@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import re
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
@@ -112,7 +111,7 @@ def refresh_entra_secret_status(*, force: bool = False, now: datetime | None = N
     if not tenant_id or not client_id or not client_secret:
         return _empty_status(tenant_id, client_id)
     store = _store()
-    saved = store.get_entra_secret_status(tenant_id, client_id)
+    saved = store.get_entra_secret_status_internal(tenant_id, client_id)
     if saved and not force and _is_fresh(saved, current):
         return _public(saved, source="saved")
 
@@ -140,6 +139,7 @@ def refresh_entra_secret_status(*, force: bool = False, now: datetime | None = N
         "status": "ok" if was_successful else "unavailable",
         "expires_at": saved.get("expires_at", "") if was_successful else "",
         "credential_name": saved.get("credential_name", "") if was_successful else "",
+        "credential_key_id": saved.get("credential_key_id", "") if was_successful else "",
         "application_name": saved.get("application_name", "") if was_successful else "",
         "source": "cached" if was_successful else "microsoft_graph",
         "last_checked_at": _iso(current),
@@ -155,10 +155,6 @@ def refresh_entra_secret_status(*, force: bool = False, now: datetime | None = N
             details={"code": code, "suppress_notifications": True},
         )
     return _public(persisted, source="cached" if was_successful else "microsoft_graph")
-
-
-def _claim_key(client_id: str, expires_at: str) -> str:
-    return hashlib.sha256(f"{client_id}|{expires_at}".encode("utf-8")).hexdigest()
 
 
 def _emit_due(status: Mapping[str, str], threshold: int, *, expired: bool) -> None:
@@ -186,10 +182,13 @@ def process_due_entra_secret_reminders(*, now: datetime | None = None) -> int:
     if expires is None or not tenant_id or not client_id:
         return 0
     store = _store()
+    internal = store.get_entra_secret_status_internal(tenant_id, client_id)
+    credential_key_id = str(internal.get("credential_key_id") or "").strip()
+    if not credential_key_id:
+        return 0
     expires_at = status["expires_at"]
-    key = _claim_key(client_id, expires_at)
     if expires <= current:
-        if store.claim_entra_secret_reminder(tenant_id, client_id, key, expires_at, 0, _iso(current)):
+        if store.claim_entra_secret_reminder(tenant_id, client_id, credential_key_id, expires_at, 0, _iso(current)):
             _emit_due(status, 0, expired=True)
             return 1
         return 0
@@ -197,7 +196,7 @@ def process_due_entra_secret_reminders(*, now: datetime | None = None) -> int:
     for threshold in sorted(REMINDER_THRESHOLDS):
         if remaining_seconds > threshold * 86_400:
             continue
-        if store.claim_entra_secret_reminder(tenant_id, client_id, key, expires_at, threshold, _iso(current)):
+        if store.claim_entra_secret_reminder(tenant_id, client_id, credential_key_id, expires_at, threshold, _iso(current)):
             _emit_due(status, threshold, expired=False)
             return 1
         # This is the current nearest due threshold, already emitted by another

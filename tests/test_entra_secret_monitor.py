@@ -24,7 +24,7 @@ def _settings() -> dict[str, object]:
     }
 
 
-def _graph_result(*, expires_at: datetime, code: str = "ok") -> dict[str, object]:
+def _graph_result(*, expires_at: datetime, code: str = "ok", key_id: str = "key-id") -> dict[str, object]:
     if code != "ok":
         return {
             "status": "unavailable",
@@ -47,7 +47,7 @@ def _graph_result(*, expires_at: datetime, code: str = "ok") -> dict[str, object
         "remaining_days": max(0, (seconds + 86_399) // 86_400),
         "application_name": "App " + SECRET,
         "credential_name": "Credential " + TOKEN,
-        "credential_key_id": "key-id",
+        "credential_key_id": key_id,
         "source": "microsoft_graph",
         "error_message": "",
     }
@@ -156,6 +156,66 @@ def test_duplicate_reminder_claim_is_atomic_and_prevents_second_event(monitor, m
     assert module.process_due_entra_secret_reminders(now=NOW) == 1
     assert module.process_due_entra_secret_reminders(now=NOW) == 0
     assert len(events) == 1
+
+
+def test_changed_graph_credential_key_id_with_same_expiry_can_send_new_reminder(
+    monitor, monkeypatch
+):
+    module, _store = monitor
+    events = []
+    current_key = "key-one"
+    monkeypatch.setattr(module, "emit_event", lambda **event: events.append(event))
+    monkeypatch.setattr(
+        module,
+        "fetch_entra_secret_expiry",
+        lambda settings, now: _graph_result(
+            expires_at=NOW + timedelta(days=3), key_id=current_key
+        ),
+    )
+
+    assert module.process_due_entra_secret_reminders(now=NOW) == 1
+    current_key = "key-two"
+    module.refresh_entra_secret_status(force=True, now=NOW + timedelta(minutes=1))
+
+    assert module.process_due_entra_secret_reminders(now=NOW + timedelta(minutes=1)) == 1
+    assert len(events) == 2
+
+
+def test_real_reader_expired_credential_reaches_expired_monitor_event(monitor, monkeypatch):
+    import picorgftp_sql.entra_secret_expiry as expiry
+
+    module, _store = monitor
+    events = []
+
+    class MsalApplication:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def acquire_token_for_client(self, _scopes):
+            return {"access_token": "safe-access-token"}
+
+    class Msal:
+        ConfidentialClientApplication = MsalApplication
+
+    class Response:
+        def read(self):
+            return b'{"appId":"client-id","passwordCredentials":[{"hint":"sup","displayName":"Expired","keyId":"expired-key","endDateTime":"2026-07-19T10:00:00Z"}]}'
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(expiry, "msal", Msal)
+    monkeypatch.setattr(
+        module,
+        "fetch_entra_secret_expiry",
+        lambda settings, now: expiry.fetch_entra_secret_expiry(
+            settings, now=now, opener=lambda _request, timeout: Response()
+        ),
+    )
+    monkeypatch.setattr(module, "emit_event", lambda **event: events.append(event))
+
+    assert module.process_due_entra_secret_reminders(now=NOW) == 1
+    assert events[0]["event_type"] == "entra.secret_expired"
 
 
 def test_expired_secret_emits_a_separately_deduplicated_critical_event(monitor, monkeypatch):

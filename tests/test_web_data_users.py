@@ -8,7 +8,7 @@ from pathlib import Path
 import shutil
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from picorgftp_sql import data_store, email_settings, storage_settings, web_data
 from picorgftp_sql.sqlite_store import SqliteStore
@@ -1190,6 +1190,44 @@ class WebDataUserTests(unittest.TestCase):
             self.assertEqual(snapshot["sqlite_backup_dir"], str(temp_dir / "BACKUP"))
         finally:
             shutil.rmtree(temp_dir)
+
+    def test_entra_settings_change_invalidates_and_refreshes_without_secret_logging(self) -> None:
+        original_config = dict(web_data.config.CONFIG)
+        prior_secret = "prior-client-secret"
+        updated_secret = "updated-client-secret"
+        store = Mock()
+        try:
+            web_data.config.CONFIG.clear()
+            web_data.config.CONFIG.update(
+                {
+                    email_settings.EMAIL_SETTINGS_KEY: email_settings.normalize_email_settings(
+                        {"entra": {"tenant_id": "tenant", "client_id": "client", "client_secret": prior_secret}}
+                    )
+                }
+            )
+            with (
+                patch.object(web_data, "save_config"),
+                patch.object(web_data.config, "initialize_config", return_value=web_data.config.CONFIG),
+                patch.object(web_data, "settings_snapshot", return_value={}),
+                patch("picorgftp_sql.observability.observability_store", return_value=store),
+                patch("picorgftp_sql.entra_secret_monitor.refresh_entra_secret_status") as refresh,
+                patch.object(web_data, "log_error") as log_error,
+            ):
+                web_data.update_settings(
+                    {
+                        email_settings.EMAIL_SETTINGS_KEY: {
+                            "entra": {"tenant_id": "tenant", "client_id": "client", "client_secret": updated_secret}
+                        }
+                    }
+                )
+
+            refresh.assert_called_once_with(force=True)
+            self.assertEqual(store.clear_entra_secret_status.call_count, 1)
+            self.assertFalse(log_error.called)
+            self.assertNotIn(updated_secret, repr(log_error.call_args_list))
+        finally:
+            web_data.config.CONFIG.clear()
+            web_data.config.CONFIG.update(original_config)
 
 
 if __name__ == "__main__":
