@@ -22,6 +22,8 @@ _ZDJECIA PRZEROBIONE_/
 .venv
 .venv-build/
 .vscode
+.worktrees/
+.superpowers/
 \__pycache__/
 .pytest_cache/
 .tmp-test/

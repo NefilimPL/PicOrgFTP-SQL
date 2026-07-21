@@ -603,6 +603,50 @@ def test_update_product_uses_content_marker_when_timestamp_is_missing():
     update_client.update_object.assert_not_called()
 
 
+def test_update_product_returns_only_verified_field_changes():
+    verified = json.loads(json.dumps(EDIT_OBJECT))
+    verified["modificationDate"] = 101
+    next(item for item in verified["elements"] if item["name"] == "SKU")["value"] = "NEW"
+    client = Mock()
+    client.object_by_id.side_effect = [{"data": EDIT_OBJECT}, {"data": verified}]
+    client.update_object.return_value = {"success": True}
+
+    result = update_product(
+        PRODUCT_CONFIG,
+        91,
+        "100",
+        {"SKU": "NEW", "EAN": "5904804578169"},
+        client=client,
+        emit=lambda *args, **kwargs: None,
+    )
+
+    assert result["change_set"] == {
+        "kind": "updated",
+        "fields": [
+            {"key": "SKU", "label": "SKU", "before": "OLD", "after": "NEW"}
+        ],
+    }
+
+
+def test_update_product_classifies_verified_noop_as_synchronized():
+    verified = json.loads(json.dumps(EDIT_OBJECT))
+    verified["modificationDate"] = 101
+    client = Mock()
+    client.object_by_id.side_effect = [{"data": EDIT_OBJECT}, {"data": verified}]
+    client.update_object.return_value = {"success": True}
+
+    result = update_product(
+        PRODUCT_CONFIG,
+        91,
+        "100",
+        {"SKU": "OLD", "EAN": "5904804578169"},
+        client=client,
+        emit=lambda *args, **kwargs: None,
+    )
+
+    assert result["change_set"] == {"kind": "synchronized", "fields": []}
+
+
 def test_find_product_by_ean_returns_normalized_identity():
     client = ProductClient(existing=[{"id": 51, "key": "ABC", "fullPath": "/Produkty/ABC"}])
 
@@ -643,6 +687,22 @@ def test_create_product_rechecks_duplicate_before_post():
     assert client.created == []
 
 
+def test_create_product_reports_existing_duplicate_as_success_data():
+    events = []
+    result = create_product(
+        PRODUCT_CONFIG,
+        {"SKU": "ABC-1", "EAN": "5904804578169"},
+        client=ProductClient(
+            existing=[{"id": 51, "key": "ABC", "fullPath": "/Produkty/ABC"}]
+        ),
+        emit=lambda *args, **kwargs: events.append((args, kwargs)),
+    )
+
+    assert result["duplicate"] is True
+    assert events[0][0][1] == "success"
+    assert events[0][1]["status"] == "existing"
+
+
 def test_create_product_posts_when_ean_is_missing():
     client = ProductClient()
 
@@ -656,6 +716,28 @@ def test_create_product_posts_when_ean_is_missing():
     assert result["created"] is True
     assert result["object"] == {"id": 91, "key": "ABC-1", "path": "/Produkty/ABC-1"}
     assert client.created[0]["published"] is True
+
+
+def test_create_product_returns_initial_value_change_set():
+    result = create_product(
+        PRODUCT_CONFIG,
+        {"SKU": "ABC-1", "EAN": "5904804578169"},
+        client=ProductClient(),
+        emit=lambda *args, **kwargs: None,
+    )
+
+    assert result["change_set"] == {
+        "kind": "created",
+        "fields": [
+            {
+                "key": "EAN",
+                "label": "EAN",
+                "before": None,
+                "after": "5904804578169",
+            },
+            {"key": "SKU", "label": "SKU", "before": None, "after": "ABC-1"},
+        ],
+    }
 
 
 def test_client_reports_status_endpoint_and_response_without_api_key():

@@ -1,0 +1,88 @@
+<h2>Jak uporządkować logi bez utraty kontekstu?</h2>
+<p class="subtitle">Wybierz kierunek. Każdy wariant oddziela bieżący strumień diagnostyczny od zdarzeń wymagających reakcji.</p>
+
+<div class="cards">
+  <div class="card" data-choice="a-hybrid" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">A · Centrum operacyjne — rekomendowane</div>
+        <div class="mockup-body" style="display:grid;gap:10px">
+          <div class="mock-nav">Na żywo <strong style="color:#5fd6a4">● działa</strong> &nbsp; | &nbsp; Ostrzeżenia 3 &nbsp; | &nbsp; Krytyczne 1 &nbsp; | &nbsp; Archiwum</div>
+          <div style="display:grid;grid-template-columns:1.2fr .8fr;gap:10px">
+            <div class="placeholder" style="text-align:left;min-height:190px;font-family:monospace">
+              <strong>Strumień na żywo</strong><br><br>
+              14:32:01 Rozpoczęto aktualizację EAN 590…<br>
+              14:32:02 Slot 03: walidacja pliku ✓<br>
+              14:32:04 FTP: wysyłanie 590…_03.png<br>
+              14:32:06 SQL: aktualizacja rekordu ✓<br>
+              14:32:07 Pimcore: aktualizacja pól ✓
+            </div>
+            <div style="display:grid;gap:8px;align-content:start">
+              <div class="placeholder" style="text-align:left;border-left:4px solid #ef7777"><strong>Krytyczne · 1</strong><br>Nie udało się zaktualizować Pimcore</div>
+              <div class="placeholder" style="text-align:left;border-left:4px solid #e8b75c"><strong>Ostrzeżenia · 3</strong><br>Plik odrzucony · blokada FTP</div>
+              <div class="placeholder" style="text-align:left"><strong>Ostatnie zadanie</strong><br>7 etapów · 6 poprawnych · 1 błąd</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Strumień + skrzynka problemów</h3>
+      <p>Konsola pokazuje wszystko na żywo, ale trwałe zakładki zachowują tylko ostrzeżenia i błędy wraz z kontekstem „przed / problem / po”. Najlepsza baza pod e-maile.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b-runs" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">B · Zadania jako osie czasu</div>
+        <div class="mockup-body" style="display:grid;gap:8px">
+          <div class="mock-nav">Wszystkie &nbsp; | &nbsp; Nieudane &nbsp; | &nbsp; W toku</div>
+          <div class="placeholder" style="text-align:left;border-left:4px solid #ef7777">
+            <strong>14:32 · Aktualizacja EAN 590… · NIEUDANE</strong><br>
+            ○ Dane wejściowe &nbsp; ● Pliki &nbsp; ● FTP &nbsp; <strong>× Pimcore</strong> &nbsp; ○ SQL<br>
+            <small>Rozwiń pełną oś zdarzeń (18)</small>
+          </div>
+          <div class="placeholder" style="text-align:left;border-left:4px solid #5fd6a4">
+            <strong>14:25 · Synchronizacja EAN 590… · GOTOWE</strong><br>
+            ● Dane &nbsp; ● Pliki &nbsp; ● FTP &nbsp; ● SQL<br>
+            <small>Rozwiń pełną oś zdarzeń (12)</small>
+          </div>
+          <div class="placeholder" style="text-align:left"><strong>13:58 · Logowanie administratora</strong><br><small>Zdarzenie systemowe</small></div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Grupowanie według zadania</h3>
+      <p>Każde kliknięcie „Aktualizuj”, operacja Pimcore lub zadanie systemowe tworzy własną oś czasu. Kontekst jest świetny, ale zdarzenia bez identyfikatora zadania wymagają osobnego koszyka.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c-incidents" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">C · Skrzynka incydentów</div>
+        <div class="mockup-body" style="display:grid;gap:8px">
+          <div class="mock-nav">Nowe 4 &nbsp; | &nbsp; W analizie 2 &nbsp; | &nbsp; Zamknięte 38</div>
+          <div class="placeholder" style="text-align:left;border-left:4px solid #ef7777">
+            <strong>Pimcore odrzucił aktualizację</strong><br>
+            14:31–14:33 · użytkownik: d.kuzian · EAN 590…<br>
+            <small>5 zdarzeń przed · błąd · 3 zdarzenia po</small>
+          </div>
+          <div class="placeholder" style="text-align:left;border-left:4px solid #e8b75c">
+            <strong>Plik nie powinien być wysyłany</strong><br>
+            Slot 08 · format EXE · wysyłka zablokowana<br>
+            <small>Powiadomiono użytkownika</small>
+          </div>
+          <div class="placeholder" style="text-align:left"><strong>Reguły powiadomień e-mail</strong><br><small>Krytyczne natychmiast · ostrzeżenia jako zestawienie</small></div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Tylko problemy wymagające reakcji</h3>
+      <p>Najmniej szumu i najlepsza obsługa statusów incydentu. Nie daje jednak pełnego obrazu działania aplikacji bez dodatkowej, osobnej konsoli technicznej.</p>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle">Kliknij wariant, który jest najbliżej oczekiwań. Możesz też opisać połączenie elementów z kilku wariantów.</p>

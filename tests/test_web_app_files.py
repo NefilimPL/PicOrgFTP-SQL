@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import io
 from pathlib import Path
 import shutil
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -46,6 +48,229 @@ class _MemoryUpload:
 
 
 class WebAppFileTests(unittest.TestCase):
+    def test_application_lifecycle_starts_and_stops_notification_worker(self) -> None:
+        source = inspect.getsource(web_app.create_app)
+
+        self.assertIn("start_notification_worker()", source)
+        self.assertIn("stop_notification_worker()", source)
+        self.assertIn("_start_backup_scheduler()", source)
+        self.assertIn("_stop_backup_scheduler()", source)
+
+    def test_process_job_persists_correlated_result(self) -> None:
+        form = web_app._ProcessFormSnapshot(
+            fields={"ean": "5901234567890", "name": "Test product"}
+        )
+        result = {
+            "timing": {"stages": [{"key": "prepare", "elapsed_ms": 12}]},
+            "ftp": {},
+            "sql": {},
+            "local_delete": {},
+            "skipped_slots": [],
+        }
+
+        with (
+            patch.object(web_app._PROCESS_EXECUTOR, "submit"),
+            patch.object(web_app, "_process_upload_snapshot", return_value=result) as process,
+            patch.object(web_app, "record_job") as record_job,
+            patch.object(web_app, "emit_event") as emit_event,
+        ):
+            queued = web_app._queue_process_job(
+                username="alice", cache_scope="scope", form=form
+            )
+            web_app._run_process_job(queued["job_id"])
+
+        process.assert_called_once()
+        self.assertEqual(process.call_args.kwargs["job_id"], queued["job_id"])
+        states = [call.args[0]["status"] for call in record_job.call_args_list]
+        self.assertEqual(states, ["queued", "running", "completed"])
+        self.assertTrue(
+            all(call.args[0]["id"] == queued["job_id"] for call in record_job.call_args_list)
+        )
+        completed = record_job.call_args_list[-1].args[0]
+        self.assertEqual(completed["stages"], result["timing"]["stages"])
+        self.assertEqual(emit_event.call_args.kwargs["severity"], "info")
+        self.assertEqual(emit_event.call_args.kwargs["job_id"], queued["job_id"])
+
+    def test_process_job_persists_critical_unexpected_failure(self) -> None:
+        form = web_app._ProcessFormSnapshot(fields={"ean": "5901234567890"})
+
+        with (
+            patch.object(web_app._PROCESS_EXECUTOR, "submit"),
+            patch.object(
+                web_app,
+                "_process_upload_snapshot",
+                side_effect=RuntimeError("database password=secret"),
+            ),
+            patch.object(web_app, "record_job") as record_job,
+            patch.object(web_app, "emit_event") as emit_event,
+        ):
+            queued = web_app._queue_process_job(
+                username="alice", cache_scope="scope", form=form
+            )
+            web_app._run_process_job(queued["job_id"])
+
+        failed = record_job.call_args_list[-1].args[0]
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["id"], queued["job_id"])
+        self.assertEqual(emit_event.call_args.kwargs["severity"], "critical")
+        self.assertIsInstance(emit_event.call_args.kwargs["exception"], RuntimeError)
+        self.assertEqual(emit_event.call_args.kwargs["job_id"], queued["job_id"])
+
+    def test_failed_process_job_persists_the_active_stage(self) -> None:
+        form = web_app._ProcessFormSnapshot(fields={"ean": "5901234567890"})
+
+        def fail_during_stage(*, progress, **_kwargs):
+            progress(
+                45,
+                "FTP upload",
+                [{"key": "prepare", "elapsed_ms": 10}],
+                {
+                    "key": "ftp",
+                    "label": "FTP upload",
+                    "started_at": time.time() - 0.05,
+                    "elapsed_ms": 0,
+                    "running": True,
+                },
+            )
+            raise RuntimeError("FTP crashed")
+
+        with (
+            patch.object(web_app._PROCESS_EXECUTOR, "submit"),
+            patch.object(web_app, "_process_upload_snapshot", side_effect=fail_during_stage),
+            patch.object(web_app, "record_job") as record_job,
+            patch.object(web_app, "emit_event"),
+        ):
+            queued = web_app._queue_process_job(
+                username="alice", cache_scope="scope", form=form
+            )
+            web_app._run_process_job(queued["job_id"])
+
+        failed = record_job.call_args_list[-1].args[0]
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual([stage["key"] for stage in failed["stages"]], ["prepare", "ftp"])
+        failing_stage = failed["stages"][-1]
+        self.assertGreaterEqual(failing_stage["elapsed_ms"], 40)
+        self.assertIs(failing_stage["running"], False)
+        self.assertIs(failing_stage["failed"], True)
+        self.assertEqual(failing_stage["error"], "FTP crashed")
+
+    def test_process_result_severity_distinguishes_blocking_and_skipped_results(self) -> None:
+        self.assertEqual(
+            web_app._result_severity(
+                {"ftp": {"error": "offline"}, "sql": {}, "local_delete": {}}
+            ),
+            "error",
+        )
+        self.assertEqual(
+            web_app._result_severity(
+                {"ftp": {}, "sql": {}, "local_delete": {}, "skipped_slots": ["01"]}
+            ),
+            "warning",
+        )
+        self.assertEqual(
+            web_app._result_severity(
+                {"ftp": {}, "sql": {}, "local_delete": {}, "skipped_slots": []}
+            ),
+            "info",
+        )
+
+    def test_process_snapshot_emits_correlated_stage_and_validation_events(self) -> None:
+        form = web_app._ProcessFormSnapshot()
+        with (
+            patch.object(web_app, "slot_definitions_from_config", return_value=[]),
+            patch.object(web_app, "_active_product_field_settings", return_value={}),
+            patch.object(
+                web_app,
+                "effective_product_form",
+                side_effect=lambda product, _settings: product,
+            ),
+            patch.object(web_app, "validate_product_form", return_value=["Missing EAN"]),
+            patch.object(web_app, "emit_event") as emit_event,
+        ):
+            with self.assertRaises(HTTPException) as caught:
+                web_app._process_upload_snapshot(
+                    username="alice",
+                    cache_scope="scope",
+                    form=form,
+                    job_id="job-correlated",
+                )
+
+        self.assertEqual(caught.exception.status_code, 400)
+        self.assertEqual(
+            [call.kwargs["severity"] for call in emit_event.call_args_list],
+            ["info", "warning"],
+        )
+        self.assertEqual(
+            [call.kwargs["event_type"] for call in emit_event.call_args_list],
+            ["process.stage_started", "process.validation_rejected"],
+        )
+        self.assertTrue(
+            all(
+                call.kwargs["job_id"] == "job-correlated"
+                for call in emit_event.call_args_list
+            )
+        )
+
+    def test_existing_photo_snapshot_captures_size_before_local_mutation(self) -> None:
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            photo = Path(temp_dir) / "old.jpg"
+            photo.write_bytes(b"old-photo")
+
+            snapshot = web_app._snapshot_existing_photos(
+                [
+                    {
+                        "prefix": "03",
+                        "filename": photo.name,
+                        "path": str(photo),
+                        "ftp_filename": "5901234567890_03.jpg",
+                    },
+                    {
+                        "prefix": "04",
+                        "path": "",
+                        "ftp_filename": "5901234567890_04.jpg",
+                    },
+                ]
+            )
+            photo.unlink()
+
+        self.assertEqual(snapshot[0]["size_bytes"], 9)
+        self.assertEqual(snapshot[0]["filename"], "old.jpg")
+        self.assertEqual(snapshot[1]["ftp_filename"], "5901234567890_04.jpg")
+        self.assertIsNone(snapshot[1]["size_bytes"])
+
+    def test_process_integration_events_reuse_results_and_job_id(self) -> None:
+        with patch.object(web_app, "emit_event") as emit_event:
+            web_app._emit_process_integration_events(
+                username="alice",
+                job_id="job-123",
+                ean="5901234567890",
+                ftp_result={
+                    "enabled": True,
+                    "uploaded": 2,
+                    "deleted": 1,
+                    "elapsed_ms": 14,
+                    "error": "",
+                },
+                sql_result={
+                    "enabled": True,
+                    "updated": 0,
+                    "cleared": 0,
+                    "rows": 0,
+                    "elapsed_ms": 6,
+                    "error": "database unavailable",
+                },
+            )
+
+        self.assertEqual(emit_event.call_count, 2)
+        ftp_event, sql_event = emit_event.call_args_list
+        self.assertEqual(ftp_event.kwargs["severity"], "info")
+        self.assertEqual(ftp_event.kwargs["event_type"], "integration.ftp.completed")
+        self.assertEqual(ftp_event.kwargs["details"]["uploaded"], 2)
+        self.assertEqual(sql_event.kwargs["severity"], "error")
+        self.assertEqual(sql_event.kwargs["event_type"], "integration.sql.completed")
+        self.assertTrue(all(call.kwargs["job_id"] == "job-123" for call in emit_event.call_args_list))
+
     def _image_bytes(self, image_format: str, mode: str = "RGB") -> bytes:
         if Image is None:
             self.skipTest("Pillow unavailable")
@@ -609,9 +834,9 @@ class WebAppFileTests(unittest.TestCase):
 
             result = web_app._delete_local_files(
                 [
-                    {"local_path": str(delete_file)},
-                    {"local_path": str(saved_file)},
-                    {"local_path": str(missing_file)},
+                    {"prefix": "03", "local_path": str(delete_file)},
+                    {"prefix": "04", "local_path": str(saved_file)},
+                    {"prefix": "05", "local_path": str(missing_file)},
                 ],
                 {str(saved_file)},
             )
@@ -619,6 +844,11 @@ class WebAppFileTests(unittest.TestCase):
             self.assertEqual(result["deleted"], 1)
             self.assertEqual(result["skipped"], 2)
             self.assertEqual(result["errors"], [])
+            self.assertEqual(
+                [(item["slot"], item["status"]) for item in result["slot_results"]],
+                [("03", "deleted"), ("04", "skipped"), ("05", "skipped")],
+            )
+            self.assertTrue(all(item["elapsed_ms"] >= 0 for item in result["slot_results"]))
             self.assertFalse(delete_file.exists())
             self.assertTrue(saved_file.exists())
 
@@ -649,7 +879,61 @@ class WebAppFileTests(unittest.TestCase):
 
         self.assertTrue(payload["enabled"])
         self.assertEqual(payload["uploaded"], 0)
+        self.assertEqual(
+            payload["slot_results"],
+            [
+                {
+                    "slot": "03",
+                    "upload_status": "skipped",
+                    "delete_status": "not_requested",
+                    "elapsed_ms": 0,
+                }
+            ],
+        )
         sync_remote.assert_not_called()
+
+    def test_ftp_sync_derives_slot_specific_statuses_from_requested_and_provider_result(self) -> None:
+        result = SimpleNamespace(
+            output_dir="processed",
+            saved_files=[
+                SimpleNamespace(prefix="03", filename="5901234567890_03_NEW.jpg"),
+                SimpleNamespace(prefix="04", filename="5901234567890_04_NEW.jpg"),
+            ],
+        )
+        with (
+            patch.dict(web_app.config.CONFIG, {web_app.ft: True, web_app.H: {}}, clear=False),
+            patch.object(
+                web_app,
+                "sync_remote_files",
+                return_value={"uploaded": 1, "deleted": 1, "elapsed_ms": 25, "error": "network"},
+            ),
+        ):
+            payload = web_app._sync_result_to_ftp(
+                result,
+                ["5901234567890_05_OLD.jpg"],
+            )
+
+        assert payload["slot_results"] == [
+            {
+                "slot": "03",
+                "upload_status": "partial",
+                "delete_status": "not_requested",
+                "elapsed_ms": 25,
+                "upload_count": 1,
+                "upload_requested": 2,
+                "provider_error": True,
+            },
+            {
+                "slot": "04",
+                "upload_status": "partial",
+                "delete_status": "not_requested",
+                "elapsed_ms": 25,
+                "upload_count": 1,
+                "upload_requested": 2,
+                "provider_error": True,
+            },
+            {"slot": "05", "upload_status": "not_requested", "delete_status": "deleted", "elapsed_ms": 25},
+        ]
 
     def test_existing_local_photos_are_migrated_when_product_path_changes(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]
@@ -694,6 +978,8 @@ class WebAppFileTests(unittest.TestCase):
                             "prefix": "03",
                             "path": str(photo_path),
                             "filename": photo_path.name,
+                            "ftp": True,
+                            "ftp_filename": "5901234567890_03.jpg",
                         }
                     ],
                 ),
@@ -709,6 +995,7 @@ class WebAppFileTests(unittest.TestCase):
             self.assertEqual(migrated, ["03"])
             self.assertEqual(uploaded_slots[0].prefix, "03")
             self.assertEqual(uploaded_slots[0].source_path, str(photo_path))
+            self.assertEqual(uploaded_slots[0].original_filename, photo_path.name)
             self.assertEqual(delete_requests[0]["local_path"], str(photo_path))
 
     def test_ftp_only_photos_are_downloaded_when_local_file_is_missing(self) -> None:
@@ -1043,6 +1330,10 @@ class WebAppFileTests(unittest.TestCase):
         self.assertEqual(len(conn.cursor_obj.queries), 1)
         self.assertIn("SELECT 1", conn.cursor_obj.queries[0])
         self.assertFalse(conn.committed)
+        self.assertEqual(
+            payload["slot_results"],
+            [{"slot": "03", "operation": "update", "status": "skipped", "elapsed_ms": payload["elapsed_ms"]}],
+        )
 
     def test_sql_sync_does_not_count_zero_row_updates(self) -> None:
         result = SimpleNamespace(
@@ -1109,6 +1400,173 @@ class WebAppFileTests(unittest.TestCase):
         self.assertEqual(payload["rows"], 0)
         self.assertEqual(len(conn.cursor_obj.queries), 2)
         self.assertFalse(conn.committed)
+
+    def test_sql_sync_rolls_back_success_evidence_when_later_slot_fails(self) -> None:
+        result = SimpleNamespace(
+            ean="5901234567890",
+            saved_files=[
+                SimpleNamespace(prefix="03", filename="5901234567890_03_NEW.jpg"),
+                SimpleNamespace(prefix="04", filename="5901234567890_04_NEW.jpg"),
+                SimpleNamespace(prefix="05", filename="5901234567890_05_NEW.jpg"),
+            ],
+        )
+
+        class Cursor:
+            rowcount = -1
+
+            def execute(self, query):
+                if "img_04" in str(query):
+                    raise RuntimeError("second slot failed")
+                self.rowcount = 1 if str(query).lstrip().upper().startswith("UPDATE") else -1
+
+            def fetchone(self):
+                return (1,)
+
+            def close(self):
+                return None
+
+        class Connection:
+            def __init__(self):
+                self.cursor_obj = Cursor()
+                self.committed = False
+                self.rolled_back = False
+
+            def cursor(self):
+                return self.cursor_obj
+
+            def commit(self):
+                self.committed = True
+
+            def rollback(self):
+                self.rolled_back = True
+
+            def close(self):
+                return None
+
+        conn = Connection()
+        with (
+            patch.dict(
+                web_app.config.CONFIG,
+                {
+                    web_app.u: True,
+                    web_app.p: web_app.K,
+                    web_app.w: "UPDATE object_query_1 SET {col} = '{filename}' WHERE EAN = '{ean}'",
+                    web_app.SQL_COLUMN_MAP_KEY: {
+                        "03": "img_03",
+                        "04": "img_04",
+                        "05": "img_05",
+                    },
+                },
+                clear=False,
+            ),
+            patch.object(web_app, "connect_db", return_value=conn),
+        ):
+            payload = web_app._sync_result_to_sql(result)
+
+        assert payload["error"] == "second slot failed"
+        assert payload["updated"] == 0
+        assert payload["rows"] == 0
+        assert payload["rolled_back"] is True
+        assert conn.rolled_back is True
+        assert conn.committed is False
+        assert payload["slot_results"] == [
+            {
+                "slot": "03",
+                "operation": "update",
+                "status": "error",
+                "elapsed_ms": payload["elapsed_ms"],
+                "provider": "sql",
+                "reason": "second slot failed",
+                "attempted": True,
+                "rolled_back": True,
+            },
+            {
+                "slot": "04",
+                "operation": "update",
+                "status": "error",
+                "elapsed_ms": payload["elapsed_ms"],
+                "provider": "sql",
+                "reason": "second slot failed",
+                "attempted": True,
+                "rolled_back": False,
+            },
+            {
+                "slot": "05",
+                "operation": "update",
+                "status": "error",
+                "elapsed_ms": payload["elapsed_ms"],
+                "provider": "sql",
+                "reason": "second slot failed",
+                "attempted": False,
+                "rolled_back": False,
+            },
+        ]
+
+    def test_sql_sync_connect_failure_marks_every_requested_slot_as_error(self) -> None:
+        result = SimpleNamespace(
+            ean="5901234567890",
+            saved_files=[
+                SimpleNamespace(prefix="03", filename="5901234567890_03_NEW.jpg")
+            ],
+        )
+
+        with (
+            patch.dict(
+                web_app.config.CONFIG,
+                {
+                    web_app.u: True,
+                    web_app.p: web_app.K,
+                    web_app.w: "UPDATE object_query_1 SET {col} = '{filename}' WHERE EAN = '{ean}'",
+                    web_app.SQL_COLUMN_MAP_KEY: {"03": "img_03", "04": "img_04"},
+                },
+                clear=False,
+            ),
+            patch.object(web_app, "connect_db", side_effect=RuntimeError("sql offline")),
+        ):
+            payload = web_app._sync_result_to_sql(result, clear_prefixes={"04"})
+
+        assert payload["error"] == "sql offline"
+        assert payload["updated"] == 0
+        assert payload["cleared"] == 0
+        assert payload["rows"] == 0
+        assert payload["rolled_back"] is False
+        assert payload["slot_results"] == [
+            {
+                "slot": "03",
+                "operation": "update",
+                "status": "error",
+                "elapsed_ms": payload["elapsed_ms"],
+                "provider": "sql",
+                "reason": "sql offline",
+                "attempted": False,
+                "rolled_back": False,
+            },
+            {
+                "slot": "04",
+                "operation": "clear",
+                "status": "error",
+                "elapsed_ms": payload["elapsed_ms"],
+                "provider": "sql",
+                "reason": "sql offline",
+                "attempted": False,
+                "rolled_back": False,
+            },
+        ]
+
+    def test_local_slot_results_preserve_save_and_delete_evidence_for_same_slot(self) -> None:
+        result = web_app._local_slot_results(
+            [{"prefix": "03", "elapsed_ms": 12}],
+            {
+                "slot_results": [
+                    {"slot": "03", "status": "error", "elapsed_ms": 4}
+                ]
+            },
+        )
+
+        assert result == [
+            {"slot": "03", "operation": "save", "status": "saved", "elapsed_ms": 12},
+            {"slot": "03", "operation": "delete", "status": "error", "elapsed_ms": 4},
+        ]
 
     def test_complete_existing_photo_is_not_appended_without_missing_sources(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]

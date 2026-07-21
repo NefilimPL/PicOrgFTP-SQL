@@ -722,6 +722,37 @@ def test_runtime_create_route_allows_logged_in_user_and_returns_created_object()
     create.assert_called_once_with({"SKU": "ABC", "EAN": "5904804578169"}, "operator")
 
 
+def test_runtime_create_route_ignores_browser_supplied_integration_results():
+    client = TestClient(web_app.app)
+    integrations = {
+        "sql_profiles": [
+            {
+                "profile_id": "stock",
+                "source": "STOCK",
+                "status": "success",
+                "elapsed_ms": 8,
+                "warning_codes": [],
+                "error": "",
+            }
+        ]
+    }
+    with (
+        patch.object(web_app, "_require_user", return_value="operator"),
+        patch.object(
+            web_app,
+            "create_pimcore_product",
+            return_value={"created": True, "object": {"id": 91}},
+        ) as create,
+    ):
+        response = client.post(
+            "/api/pimcore/products",
+            json={"values": {"EAN": "5904804578169"}, "integration_results": integrations},
+        )
+
+    assert response.status_code == 200
+    create.assert_called_once_with({"EAN": "5904804578169"}, "operator")
+
+
 def test_edit_adapter_requires_enabled_complete_setup():
     cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
     cfg["pimcore"].update({"enabled": False, "setup_complete": True})
@@ -770,6 +801,301 @@ def test_create_adapter_uses_manual_create_operation_kind():
         web_data.create_pimcore_product({"EAN": "5904804578169"}, "operator")
 
     assert persist.call_args.args[0]["operation_type"] == "manual_create"
+
+
+def test_create_adapter_filters_and_attaches_integration_results_to_audit_and_change_set():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update(
+        {
+            "enabled": True,
+            "setup_complete": True,
+            "field_mappings": [
+                {
+                    "source": "STOCK",
+                    "label": "Stock",
+                    "pimcore_field": "stockText",
+                    "type": "input",
+                    "parser": "text",
+                    "required": False,
+                    "value_template": "SQL",
+                    "sql_query": "SELECT 1",
+                    "sql_profile_id": "stock",
+                }
+            ],
+        }
+    )
+    cfg["sql_profiles"] = [{"id": "stock", "enabled": True}]
+    change_set = {
+        "kind": "created",
+        "fields": [
+            {"key": "EAN", "label": "EAN", "before": None, "after": "5904804578169"}
+        ],
+    }
+    browser_results = {
+        "sql_profiles": [
+            {
+                "profile_id": "stock",
+                "source": "STOCK",
+                "status": "success",
+                "elapsed_ms": 8,
+                "warning_codes": ["multiple_rows", {"not": "safe"}],
+                "error": "",
+                "password": "do-not-persist",
+            },
+            "not-an-object",
+        ],
+        "arbitrary": {"token": "do-not-persist"},
+    }
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(
+            web_data,
+            "create_product",
+            return_value={
+                "created": True,
+                "duplicate": False,
+                "object": {"id": 91},
+                "change_set": change_set,
+            },
+        ),
+        patch.object(web_data, "_persist_pimcore_operation") as persist,
+        patch.object(web_data, "_persist_pimcore_submission"),
+        patch.object(web_data, "emit_event") as emit_event,
+    ):
+        result = web_data.create_pimcore_product(
+            {"EAN": "5904804578169"},
+            "operator",
+            browser_results,
+        )
+
+    expected = {
+        "sql_profiles": [
+            {
+                "profile_id": "stock",
+                "source": "STOCK",
+                "status": "success",
+                "elapsed_ms": 8,
+                "warning_codes": ["multiple_rows"],
+                "error": "",
+                "required": False,
+            }
+        ]
+    }
+    assert result["change_set"]["integrations"] == expected
+    report = persist.call_args.args[0]
+    assert report["integration_results"] == expected
+    assert "do-not-persist" not in json.dumps(report)
+    assert emit_event.call_count == 2
+    assert [call.kwargs["event_type"] for call in emit_event.call_args_list] == [
+        "integration.sql_profile.completed",
+        "integration.pimcore.completed",
+    ]
+    assert all(
+        call.kwargs["job_id"] == report["operation_id"]
+        for call in emit_event.call_args_list
+    )
+    assert all(call.kwargs["severity"] == "info" for call in emit_event.call_args_list)
+
+
+def test_pimcore_history_change_set_includes_object_identity_and_stage_timings(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        web_data,
+        "record_history",
+        lambda **kwargs: captured.update(kwargs) or kwargs,
+    )
+    report = {
+        "operation_type": "manual_update",
+        "username": "alice",
+        "status": "completed",
+        "total_ms": 91,
+        "values": {"EAN": "5904804578169"},
+        "events": [
+            {"stage": "update", "stage_elapsed_ms": 31},
+            {"stage": "verify", "stage_elapsed_ms": 17},
+        ],
+        "result": {
+            "object": {"id": 91, "path": "/Produkty/ABC"},
+            "change_set": {
+                "kind": "updated",
+                "fields": [
+                    {"key": "SKU", "label": "SKU", "before": "OLD", "after": "NEW"}
+                ],
+            },
+        },
+    }
+
+    web_data._persist_pimcore_operation(report)
+
+    pimcore = captured["details"]["change_set"]["pimcore"]
+    assert pimcore == {
+        "kind": "updated",
+        "fields": [
+            {"key": "SKU", "label": "SKU", "before": "OLD", "after": "NEW"}
+        ],
+        "object_id": "91",
+        "object_path": "/Produkty/ABC",
+        "total_ms": 91,
+        "send_ms": 31,
+        "verification_ms": 17,
+    }
+def test_integration_results_use_trusted_requiredness_redact_errors_and_bound_warnings():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update(
+        {
+            "enabled": True,
+            "setup_complete": True,
+            "field_mappings": [
+                {
+                    "source": "REQUIRED_STOCK",
+                    "label": "Required stock",
+                    "pimcore_field": "requiredStock",
+                    "type": "input",
+                    "parser": "text",
+                    "required": True,
+                    "value_template": "SQL",
+                    "sql_query": "SELECT 1",
+                    "sql_profile_id": "required-profile",
+                },
+                {
+                    "source": "OPTIONAL_STOCK",
+                    "label": "Optional stock",
+                    "pimcore_field": "optionalStock",
+                    "type": "input",
+                    "parser": "text",
+                    "required": False,
+                    "value_template": "SQL",
+                    "sql_query": "SELECT 1",
+                    "sql_profile_id": "optional-profile",
+                },
+            ],
+        }
+    )
+    cfg["sql_profiles"] = [
+        {"id": "required-profile", "password": "q7", "enabled": True},
+        {"id": "optional-profile", "password": "server-optional-secret", "enabled": True},
+    ]
+    browser_results = {
+        "sql_profiles": [
+            {
+                "profile_id": "required-profile",
+                "source": "REQUIRED_STOCK",
+                "status": "error",
+                "required": False,
+                "elapsed_ms": 8,
+                "warning_codes": [f"warning-{index}" for index in range(40)],
+                "error": (
+                    "unlabeled q7; secret=browser secret with spaces; "
+                    "password=browser-password; token=browser-token; "
+                    "access_token=browser access token; "
+                    "refresh_token='browser refresh token'; "
+                    "client_secret=browser client secret; "
+                    "db_password=browser database password; "
+                    "x_api_key=browser compound api key; query_id=trace-42; "
+                    + ("x" * 5000)
+                ),
+            },
+            {
+                "profile_id": "optional-profile",
+                "source": "OPTIONAL_STOCK",
+                "status": "error",
+                "required": True,
+                "elapsed_ms": 9,
+                "warning_codes": [],
+                "error": (
+                    "server-optional-secret authorization=Bearer browser-auth "
+                    "cookie=session=browser-cookie"
+                ),
+            },
+        ]
+    }
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(
+            web_data,
+            "create_product",
+            return_value={
+                "created": True,
+                "duplicate": False,
+                "object": {"id": 91},
+                "change_set": {"kind": "created", "fields": []},
+            },
+        ),
+        patch.object(web_data, "record_history", return_value={}) as record_history,
+        patch.object(web_data, "_persist_pimcore_submission"),
+        patch.object(web_data, "emit_event") as emit_event,
+    ):
+        result = web_data.create_pimcore_product(
+            {"EAN": "5904804578169"}, "operator", browser_results
+        )
+
+    profiles = result["change_set"]["integrations"]["sql_profiles"]
+    assert [item["required"] for item in profiles] == [True, False]
+    assert len(profiles[0]["warning_codes"]) == web_data.SQL_PROFILE_WARNING_CODES_MAX == 20
+    assert len(profiles[0]["error"].encode("utf-8")) <= web_data.SQL_PROFILE_ERROR_MAX_BYTES
+    serialized_result = json.dumps(result)
+    history_details = record_history.call_args.kwargs["details"]
+    serialized_history = json.dumps(history_details)
+    serialized_events = json.dumps([call.kwargs["details"] for call in emit_event.call_args_list])
+    for secret in (
+        "q7",
+        "server-optional-secret",
+        "browser secret with spaces",
+        "browser-password",
+        "browser-token",
+        "browser access token",
+        "browser refresh token",
+        "browser client secret",
+        "browser database password",
+        "browser compound api key",
+        "browser-auth",
+        "browser-cookie",
+    ):
+        assert secret not in serialized_result
+        assert secret not in serialized_history
+        assert secret not in serialized_events
+    assert "query_id=trace-42" in profiles[0]["error"]
+    assert [call.kwargs["severity"] for call in emit_event.call_args_list[:2]] == [
+        "error",
+        "info",
+    ]
+
+
+def test_pimcore_history_persists_common_change_set_with_nested_pimcore_diff():
+    pimcore_change = {
+        "kind": "updated",
+        "fields": [{"key": "SKU", "label": "SKU", "before": "OLD", "after": "NEW"}],
+    }
+    integrations = {"sql_profiles": []}
+    report = {
+        "operation_type": "manual_update",
+        "username": "operator",
+        "values": {"EAN": "5904804578169"},
+        "status": "completed",
+        "result": {
+            "object": {"id": 91},
+            "change_set": {**pimcore_change, "integrations": integrations},
+        },
+        "integration_results": integrations,
+    }
+    with patch.object(web_data, "record_history", return_value={}) as record_history:
+        web_data._persist_pimcore_operation(report)
+
+    details = record_history.call_args.kwargs["details"]
+    assert details["pimcore_operation"]["result"]["change_set"]["fields"] == pimcore_change[
+        "fields"
+    ]
+    assert details["change_set"] == {
+        "kind": "updated",
+        "fields": [],
+        "files": [],
+        "integrations": integrations,
+        "pimcore": {
+            **pimcore_change,
+            "integrations": integrations,
+            "object_id": "91",
+        },
+    }
 
 
 def test_create_adapter_persists_detailed_sqlite_submission_when_store_active():
@@ -938,6 +1264,123 @@ def test_runtime_edit_routes_allow_logged_in_user():
 
     assert get_response.json() == loaded
     assert put_response.json() == updated
+
+
+def test_runtime_edit_route_ignores_browser_supplied_integration_results():
+    client = TestClient(web_app.app)
+    integrations = {
+        "sql_profiles": [
+            {
+                "profile_id": "stock",
+                "source": "STOCK",
+                "status": "success",
+                "elapsed_ms": 8,
+                "warning_codes": [],
+                "error": "",
+            }
+        ]
+    }
+    with (
+        patch.object(web_app, "_require_user", return_value="operator"),
+        patch.object(
+            web_app,
+            "update_pimcore_product",
+            return_value={"object": {"id": 91}},
+        ) as update,
+    ):
+        response = client.put(
+            "/api/pimcore/products/91",
+            json={
+                "marker": "100",
+                "values": {"EAN": "5904804578169"},
+                "integration_results": integrations,
+            },
+        )
+
+    assert response.status_code == 200
+    update.assert_called_once_with(
+        91,
+        "100",
+        {"EAN": "5904804578169"},
+        "operator",
+    )
+
+
+def test_rendered_integration_context_is_bound_consumed_once_and_forwarded(tmp_path):
+    client = TestClient(web_app.app)
+    store = SqliteStore(str(tmp_path / "context.sqlite"))
+    integrations = {
+        "sql_profiles": [
+            {
+                "profile_id": "stock",
+                "source": "STOCK",
+                "status": "success",
+                "elapsed_ms": 8,
+                "warning_codes": [],
+                "error": "",
+            }
+        ]
+    }
+    rendered = {
+        "values": {"STOCK": "12"},
+        "warnings": [],
+        "integrations": integrations,
+    }
+    with (
+        patch.object(web_app, "_require_user", return_value="operator"),
+        patch.object(web_app, "observability_store", return_value=store),
+        patch.object(web_app, "render_saved_pimcore_templates", return_value=rendered),
+        patch.object(
+            web_app,
+            "update_pimcore_product",
+            return_value={"object": {"id": 91}},
+        ) as update,
+    ):
+        render_response = client.post(
+            "/api/pimcore/render-templates",
+            json={
+                "product_values": {"ean": "5904804578169"},
+                "values": {"EAN": "5904804578169"},
+                "targets": ["STOCK"],
+                "mode": "edit",
+                "object_id": 91,
+            },
+        )
+        context_id = render_response.json()["integration_context_id"]
+        first = client.put(
+            "/api/pimcore/products/91",
+            json={
+                "marker": "100",
+                "values": {"EAN": "5904804578169"},
+                "integration_context_id": context_id,
+                "integration_results": {"sql_profiles": [{"status": "fake-critical"}]},
+            },
+        )
+        replay = client.put(
+            "/api/pimcore/products/91",
+            json={
+                "marker": "100",
+                "values": {"EAN": "5904804578169"},
+                "integration_context_id": context_id,
+            },
+        )
+
+    assert render_response.status_code == 200
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert update.call_args_list[0].args == (
+        91,
+        "100",
+        {"EAN": "5904804578169"},
+        "operator",
+        integrations,
+    )
+    assert update.call_args_list[1].args == (
+        91,
+        "100",
+        {"EAN": "5904804578169"},
+        "operator",
+    )
 
 
 def test_runtime_edit_conflict_returns_409():
@@ -1185,6 +1628,184 @@ def test_render_saved_pimcore_templates_auto_applies_sql_only_when_empty():
     assert manual["values"]["STOCK"] == "manual"
     assert manual["calculated_values"]["STOCK"] == "12"
     assert manual["changed"]["STOCK"] is True
+
+
+def test_render_saved_pimcore_templates_reports_each_sql_profile_integration():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update(
+        {
+            "enabled": True,
+            "setup_complete": True,
+            "field_mappings": [
+                {
+                    "source": "STOCK",
+                    "label": "Stan",
+                    "pimcore_field": "stockText",
+                    "type": "input",
+                    "parser": "text",
+                    "value_template": "SQL",
+                    "sql_query": "SELECT stock FROM product WHERE ean = {ean}",
+                    "sql_profile_id": "stock",
+                }
+            ],
+        }
+    )
+    cfg["sql_profiles"] = [
+        {
+            "id": "stock",
+            "label": "Stock",
+            "type": "mysql",
+            "host": "mysql.local",
+            "database": "catalog",
+            "user": "reader",
+            "password": "secret",
+            "enabled": True,
+        }
+    ]
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(
+            web_data,
+            "execute_sql_value_query",
+            return_value=web_data.SqlValueResult(
+                "12",
+                [{"code": "multiple_rows", "message": "Used first row"}]
+                + [
+                    {"code": f"warning-{index}", "message": "warning"}
+                    for index in range(40)
+                ],
+            ),
+        ),
+    ):
+        result = web_data.render_saved_pimcore_templates(
+            {"ean": "5901234567890"},
+            {"STOCK": ""},
+            ["STOCK"],
+        )
+
+    integration = result["integrations"]["sql_profiles"][0]
+    assert integration["profile_id"] == "stock"
+    assert integration["source"] == "STOCK"
+    assert integration["status"] == "warning"
+    assert integration["warning_codes"][0] == "multiple_rows"
+    assert len(integration["warning_codes"]) == web_data.SQL_PROFILE_WARNING_CODES_MAX
+    assert integration["error"] == ""
+    assert integration["elapsed_ms"] >= 0
+
+
+def test_render_sql_profile_error_redacts_assignments_and_known_profile_secret():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update(
+        {
+            "enabled": True,
+            "setup_complete": True,
+            "field_mappings": [
+                {
+                    "source": "STOCK",
+                    "label": "Stock",
+                    "pimcore_field": "stockText",
+                    "type": "input",
+                    "parser": "text",
+                    "required": True,
+                    "value_template": "SQL",
+                    "sql_query": "SELECT stock",
+                    "sql_profile_id": "stock",
+                }
+            ],
+        }
+    )
+    cfg["sql_profiles"] = [{"id": "stock", "password": "q7", "enabled": True}]
+    raw_error = (
+        "unlabeled q7; PWD=driver secret with spaces; "
+        "password='inline secret with spaces'; pass=pass secret with spaces; "
+        "secret=plain secret with spaces; token=token secret with spaces; "
+        "authorization=Bearer auth secret with spaces; "
+        "api_key=underscore api secret; api-key=hyphen api secret; "
+        "cookie=session cookie secret; access_token=render access token; "
+        "refresh_token='render refresh token'; "
+        "client_secret=render client secret; db_password=render database password; "
+        "x_api_key=render compound api key; query_id=trace-42\nsafe diagnostic"
+    )
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "execute_sql_value_query", side_effect=RuntimeError(raw_error)),
+    ):
+        result = web_data.render_saved_pimcore_templates(
+            {"ean": "5901234567890"}, {"STOCK": ""}, ["STOCK"]
+        )
+
+    serialized = json.dumps(result)
+    for secret in (
+        "q7",
+        "driver secret with spaces",
+        "inline secret with spaces",
+        "pass secret with spaces",
+        "plain secret with spaces",
+        "token secret with spaces",
+        "auth secret with spaces",
+        "underscore api secret",
+        "hyphen api secret",
+        "session cookie secret",
+        "render access token",
+        "render refresh token",
+        "render client secret",
+        "render database password",
+        "render compound api key",
+    ):
+        assert secret not in serialized
+    assert "[REDACTED]" in serialized
+    integration = result["integrations"]["sql_profiles"][0]
+    assert integration["required"] is True
+    assert "query_id=trace-42" in integration["error"]
+
+
+def test_sql_warning_codes_caps_before_iterating_warning_collection():
+    class SliceOnlyWarnings(list):
+        def __iter__(self):
+            raise AssertionError("warning collection was traversed before capping")
+
+    warnings = SliceOnlyWarnings(
+        [{"code": f"warning-{index}"} for index in range(1000)]
+    )
+
+    assert web_data._sql_warning_codes(warnings) == [
+        f"warning-{index}" for index in range(web_data.SQL_PROFILE_WARNING_CODES_MAX)
+    ]
+
+
+def test_safe_integration_results_caps_browser_warning_codes_before_iterating():
+    class SliceOnlyCodes(list):
+        def __iter__(self):
+            raise AssertionError("warning codes were traversed before capping")
+
+    settings = {
+        "field_mappings": [
+            {
+                "source": "STOCK",
+                "required": False,
+                "value_template": "SQL",
+                "sql_profile_id": "stock",
+            }
+        ]
+    }
+    submitted = {
+        "sql_profiles": [
+            {
+                "profile_id": "stock",
+                "source": "STOCK",
+                "status": "warning",
+                "warning_codes": SliceOnlyCodes(
+                    [f"warning-{index}" for index in range(1000)]
+                ),
+            }
+        ]
+    }
+
+    result = web_data._safe_pimcore_integration_results(submitted, settings)
+
+    assert result["sql_profiles"][0]["warning_codes"] == [
+        f"warning-{index}" for index in range(web_data.SQL_PROFILE_WARNING_CODES_MAX)
+    ]
 
 
 def test_render_saved_pimcore_templates_uses_sql_as_template_source():

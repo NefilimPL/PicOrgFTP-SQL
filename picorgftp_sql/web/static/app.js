@@ -29,12 +29,16 @@ const state = {
   pimcoreLastCheckedEan: "",
   pimcoreMissingEan: "",
   pimcoreCreateSchema: [],
+  pimcoreCreateIntegrations: { sql_profiles: [] },
+  pimcoreCreateIntegrationContextId: "",
   pimcoreRuntimeEnabled: false,
   pimcoreExistingObject: null,
   pimcoreEditObjectId: 0,
   pimcoreEditRequestId: 0,
   pimcoreEditMarker: "",
   pimcoreEditSchema: [],
+  pimcoreEditIntegrations: { sql_profiles: [] },
+  pimcoreEditIntegrationContextId: "",
   pimcoreTemplateRow: null,
   pimcoreSetup: {
     step: 1,
@@ -48,7 +52,42 @@ const state = {
     report: null,
   },
   pimcoreSetupPrompted: false,
-  logs: null,
+  observability: {
+    activeTab: "live",
+    unread: { critical: 0, error: 0, warning: 0, total: 0, highest: "" },
+    stream: null,
+    streamConnected: false,
+    streamSeeded: false,
+    streamAfterId: "",
+    seedGeneration: 0,
+    seedLoading: false,
+    unreadRequestId: 0,
+    paused: false,
+    buffer: [],
+    autoscroll: true,
+    committedFilters: {
+      query: "",
+      severity: "",
+      module: "",
+      username: "",
+      ean: "",
+      jobId: "",
+    },
+    tabs: {
+      live: {
+        items: [],
+        nextCursor: "",
+        archiveSince: "",
+        unread: 0,
+        loading: false,
+        requestId: 0,
+      },
+      critical: { items: [], nextCursor: "", unread: 0, loading: false, requestId: 0 },
+      error: { items: [], nextCursor: "", unread: 0, loading: false, requestId: 0 },
+      warning: { items: [], nextCursor: "", unread: 0, loading: false, requestId: 0 },
+      jobs: { items: [], nextCursor: "", unread: 0, loading: false, requestId: 0 },
+    },
+  },
   settingsSecrets: null,
   theme: localStorage.getItem("picorg-theme") || "light",
   suppressAutoSearch: false,
@@ -109,6 +148,24 @@ const CLIENT_ID_HEADER = "X-PicOrg-Client-Id";
 const CSRF_SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const SECRET_REVEAL_MS = 60000;
 const POLL_HIDDEN_DELAY_MS = 30000;
+const CLIENT_FAILURE_DEDUPE_MS = 60000;
+const LOG_AUTOSCROLL_KEY = "picorg-log-autoscroll";
+const MAX_LIVE_LOG_EVENTS = 2000;
+const OBSERVABILITY_PAGE_SIZE = 20;
+const HEALTH_POLL_INTERVAL_MS = 5000;
+const HEALTH_SLOW_MS = 300;
+const HEALTH_CRITICAL_MS = 1000;
+const HEALTH_OFFLINE_FAILURES = 3;
+state.observability.autoscroll = localStorage.getItem(LOG_AUTOSCROLL_KEY) !== "false";
+const clientFailureFingerprints = new Map();
+const healthSamples = [];
+let healthFailures = 0;
+let healthPollTimer = 0;
+let healthPollGeneration = 0;
+let healthPollController = null;
+let lastSuccessfulHealthComponents = {};
+let healthDetailsPinned = false;
+let healthDetailsPointerInside = false;
 const SQLITE_BACKUP_DAYS = [
   ["mon", "Pon"],
   ["tue", "Wt"],
@@ -171,6 +228,11 @@ const fileIndexInfo = document.querySelector("#fileIndexInfo");
 const latencyInfo = document.querySelector("#latencyInfo");
 const serverInfo = document.querySelector("#serverInfo");
 const versionInfo = document.querySelector("#versionInfo");
+const backendHealthIndicator = document.querySelector(".backend-health-indicator");
+const backendHealthStatus = document.querySelector("#backendHealthStatus");
+const backendHealthText = document.querySelector("#backendHealthText");
+const backendHealthDetails = document.querySelector("#backendHealthDetails");
+const backendHealthDetailsList = document.querySelector("#backendHealthDetailsList");
 const githubStatusButton = document.querySelector("#githubStatusButton");
 const githubStatusModal = document.querySelector("#githubStatusModal");
 const githubStatusOutput = document.querySelector("#githubStatusOutput");
@@ -228,6 +290,10 @@ const historyDetailTitle = document.querySelector("#historyDetailTitle");
 const historyDetailOutput = document.querySelector("#historyDetailOutput");
 const historyTimingTitle = document.querySelector("#historyTimingTitle");
 const historyTimingOutput = document.querySelector("#historyTimingOutput");
+const historyChangesModal = document.querySelector("#historyChangesModal");
+const historyChangesTitle = document.querySelector("#historyChangesTitle");
+const historyChangesOutput = document.querySelector("#historyChangesOutput");
+const historyChangesCloseButton = document.querySelector("#historyChangesCloseButton");
 const pimcoreTestModal = document.querySelector("#pimcoreTestModal");
 const pimcoreTestForm = document.querySelector("#pimcoreTestForm");
 const pimcoreLiveLog = document.querySelector("#pimcoreLiveLog");
@@ -297,6 +363,18 @@ const logsClearPassword = document.querySelector("#logsClearPassword");
 const logsClearStatus = document.querySelector("#logsClearStatus");
 const logsOutput = document.querySelector("#logsOutput");
 const logsButton = document.querySelector('[data-modal="logs"]');
+const logsView = document.querySelector("#logsView");
+const logsFilters = document.querySelector("#logsFilters");
+const logsTextFilter = document.querySelector("#logsTextFilter");
+const logsSeverityFilter = document.querySelector("#logsSeverityFilter");
+const logsModuleFilter = document.querySelector("#logsModuleFilter");
+const logsUserFilter = document.querySelector("#logsUserFilter");
+const logsEanFilter = document.querySelector("#logsEanFilter");
+const logsJobFilter = document.querySelector("#logsJobFilter");
+const logsPauseButton = document.querySelector("#logsPauseButton");
+const logsAutoscrollToggle = document.querySelector("#logsAutoscrollToggle");
+const logsStreamStatus = document.querySelector("#logsStreamStatus");
+const logsLoadMoreButton = document.querySelector("#logsLoadMoreButton");
 const secretRevealModal = document.querySelector("#secretRevealModal");
 const secretRevealForm = document.querySelector("#secretRevealForm");
 const secretRevealPassword = document.querySelector("#secretRevealPassword");
@@ -375,6 +453,7 @@ async function requestJson(path, options = {}) {
   const timeoutMs = Number(options.timeoutMs || 0);
   const fetchOptions = { ...options };
   delete fetchOptions.timeoutMs;
+  const hasExternalSignal = Boolean(fetchOptions.signal);
   applyClientIdentityHeader(path, fetchOptions);
   applyPanelRequestHeaders(path, fetchOptions);
   let timeoutId = 0;
@@ -387,6 +466,9 @@ async function requestJson(path, options = {}) {
   try {
     response = await fetch(path, fetchOptions);
   } catch (error) {
+    if (error?.name === "AbortError" && hasExternalSignal) {
+      throw error;
+    }
     if (error?.name === "AbortError") {
       throw new Error(
         `Backend nie odpowiedzial w ciagu ${Math.round(timeoutMs / 1000)} s (${path}). ` +
@@ -414,6 +496,7 @@ async function requestJson(path, options = {}) {
     const error = new Error(message);
     error.status = response.status;
     error.detail = detail;
+    error.payload = payload;
     throw error;
   }
   if (payload.csrf_token) {
@@ -422,12 +505,65 @@ async function requestJson(path, options = {}) {
   return payload;
 }
 
+function clientFailureFingerprint(payload) {
+  return JSON.stringify([
+    payload.kind || "",
+    payload.message || "",
+    payload.source || "",
+    Number(payload.line || 0),
+    Number(payload.column || 0),
+    payload.stack || "",
+  ]);
+}
+
+async function reportClientFailure(payload) {
+  const now = Date.now();
+  const fingerprint = clientFailureFingerprint(payload);
+  const lastReportedAt = Number(clientFailureFingerprints.get(fingerprint) || 0);
+  if (now - lastReportedAt < CLIENT_FAILURE_DEDUPE_MS) return;
+  clientFailureFingerprints.set(fingerprint, now);
+  for (const [key, reportedAt] of clientFailureFingerprints.entries()) {
+    if (now - reportedAt >= CLIENT_FAILURE_DEDUPE_MS) {
+      clientFailureFingerprints.delete(key);
+    }
+  }
+  await requestJson("/api/observability/client-errors", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+window.addEventListener("error", (event) => {
+  reportClientFailure({
+    kind: "error",
+    message: event.message || "Frontend error",
+    source: event.filename || "",
+    line: Number(event.lineno || 0),
+    column: Number(event.colno || 0),
+    stack: event.error?.stack || "",
+  }).catch(() => {});
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  const reason = event.reason;
+  reportClientFailure({
+    kind: "unhandledrejection",
+    message: reason?.message || String(reason || "Unhandled promise rejection"),
+    source: "",
+    line: 0,
+    column: 0,
+    stack: reason?.stack || "",
+  }).catch(() => {});
+});
+
 function updateAdminUi() {
   state.isAdmin = state.currentUser?.role === "admin";
   document.querySelectorAll(".admin-only").forEach((node) => {
     node.hidden = !state.isAdmin;
   });
   if (!state.isAdmin) {
+    stopObservabilityStream();
     updateLogAlert({});
   }
 }
@@ -571,6 +707,8 @@ function openGithubStatusModal() {
 }
 
 function closeModals() {
+  stopObservabilityStream();
+  closeHistoryChangesModal({ restoreFocus: false });
   document.querySelectorAll(".modal-view").forEach((modal) => modal.classList.remove("active"));
   if (logsClearPassword) logsClearPassword.value = "";
   if (logsClearStatus) logsClearStatus.textContent = "";
@@ -4128,6 +4266,324 @@ function timingMs(value) {
   return `${Math.max(0, Math.round(Number(value || 0)))} ms`;
 }
 
+function historyChangeValue(value) {
+  if (value === null || value === undefined || value === "") return "Brak danych";
+  if (typeof value === "object") {
+    return Array.isArray(value)
+      ? `Dane zlozone: lista (${value.length})`
+      : `Dane zlozone: obiekt (${Object.keys(value).length})`;
+  }
+  return String(value);
+}
+
+function historyTechnicalValue(value) {
+  if (value === null || value === undefined || value === "") return "Brak danych";
+  if (typeof value !== "object") return String(value);
+  const seen = new WeakSet();
+  try {
+    const serialized = JSON.stringify(value, (_key, nested) => {
+      if (!nested || typeof nested !== "object") return nested;
+      if (seen.has(nested)) return "[Dane cykliczne]";
+      seen.add(nested);
+      if (Array.isArray(nested)) return nested;
+      return Object.fromEntries(Object.keys(nested).sort().map((key) => [key, nested[key]]));
+    }, 2);
+    return serialized === undefined ? "Brak danych" : serialized;
+  } catch (_error) {
+    return "Nie mozna wyswietlic danych";
+  }
+}
+
+function formatBytes(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "Brak danych";
+  const bytes = Math.max(0, Number(value));
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+}
+
+function formatHistoryDuration(value) {
+  if (value === null || value === undefined || value === "" || Number.isNaN(Number(value))) {
+    return "Brak danych";
+  }
+  return `${Math.max(0, Number(value))} ms`;
+}
+
+function historyChangeRow(label, value, formatter = historyChangeValue) {
+  const row = document.createElement("div");
+  const name = document.createElement("strong");
+  const output = document.createElement("span");
+  row.className = "history-change-row";
+  name.textContent = label;
+  output.textContent = formatter(value);
+  row.append(name, output);
+  return row;
+}
+
+function historyChangeSection(title) {
+  const section = document.createElement("section");
+  const heading = document.createElement("h2");
+  section.className = "history-change-section";
+  heading.textContent = title;
+  section.appendChild(heading);
+  return section;
+}
+
+function historyChangeComparison(label, before, after, formatter = historyChangeValue) {
+  const row = document.createElement("div");
+  const heading = document.createElement("strong");
+  const values = document.createElement("div");
+  const beforeCell = document.createElement("div");
+  const beforeLabel = document.createElement("small");
+  const beforeValue = document.createElement("span");
+  const afterCell = document.createElement("div");
+  const afterLabel = document.createElement("small");
+  const afterValue = document.createElement("span");
+  row.className = "history-change-comparison";
+  heading.textContent = historyChangeValue(label);
+  values.className = "history-change-before-after";
+  beforeCell.className = "history-change-before";
+  beforeLabel.textContent = "Przed";
+  beforeValue.textContent = formatter(before);
+  afterCell.className = "history-change-after";
+  afterLabel.textContent = "Po";
+  afterValue.textContent = formatter(after);
+  beforeCell.append(beforeLabel, beforeValue);
+  afterCell.append(afterLabel, afterValue);
+  values.append(beforeCell, afterCell);
+  row.append(heading, values);
+  return row;
+}
+
+function historyChangeJobId(details = {}, changeSet = {}) {
+  return (
+    details.job_id ??
+    changeSet.job_id ??
+    details.pimcore_operation?.operation_id ??
+    changeSet.pimcore?.operation_id
+  );
+}
+
+function historyFileOperationLabel(operation) {
+  return {
+    added: "Dodano",
+    deleted: "Usunieto",
+    replaced: "Zastapiono",
+    migrated: "Przeniesiono",
+  }[operation] || historyChangeValue(operation);
+}
+
+function historyTechnicalDetails(title) {
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  const content = document.createElement("div");
+  details.className = "history-technical-details";
+  summary.textContent = title;
+  content.className = "history-technical-content";
+  details.append(summary, content);
+  return { details, content };
+}
+
+function historyEvidenceEntries(value) {
+  if (Array.isArray(value)) return value.filter((entry) => entry && typeof entry === "object");
+  return value && typeof value === "object" ? [value] : [];
+}
+
+function historyEvidenceStatuses(entry = {}) {
+  const statuses = [];
+  if (entry.status !== undefined) statuses.push(String(entry.status));
+  if (entry.upload_status !== undefined) statuses.push(`wysylka: ${entry.upload_status}`);
+  if (entry.delete_status !== undefined) statuses.push(`usuniecie: ${entry.delete_status}`);
+  return statuses.length ? statuses : ["brak danych"];
+}
+
+function historyEvidenceBadges(evidence = {}) {
+  const badges = document.createElement("div");
+  badges.className = "history-evidence-badges";
+  for (const [key, label] of Object.entries({ local: "Lokalnie", ftp: "FTP", sql: "SQL" })) {
+    const entries = historyEvidenceEntries(evidence[key]);
+    if (!entries.length) continue;
+    const badge = document.createElement("span");
+    badge.className = `history-evidence-badge history-evidence-${key}`;
+    badge.textContent = `${label}: ${entries.map((entry) => {
+      const operation = entry.operation ? `${entry.operation} ` : "";
+      const duration = entry.elapsed_ms === undefined ? "" : ` · ${formatHistoryDuration(entry.elapsed_ms)}`;
+      return `${operation}${historyEvidenceStatuses(entry).join(", ")}${duration}`;
+    }).join(" / ")}`;
+    badges.appendChild(badge);
+  }
+  return badges;
+}
+
+function historyEvidenceDetails(evidence = {}) {
+  const wrapper = document.createElement("section");
+  wrapper.className = "history-evidence-details";
+  for (const [key, label] of Object.entries({ local: "Lokalnie", ftp: "FTP", sql: "SQL" })) {
+    const entries = historyEvidenceEntries(evidence[key]);
+    for (const entry of entries) {
+      const operation = document.createElement("article");
+      const heading = document.createElement("h4");
+      operation.className = `history-evidence-operation history-evidence-${key}`;
+      heading.textContent = `${label}: ${entry.operation || "operacja"}`;
+      operation.append(
+        heading,
+        historyChangeRow("Status", historyEvidenceStatuses(entry).join(", "))
+      );
+      if (entry.elapsed_ms !== undefined) {
+        operation.appendChild(historyChangeRow("Czas", formatHistoryDuration(entry.elapsed_ms)));
+      }
+      for (const [field, fieldLabel] of Object.entries({
+        filename: "Plik",
+        path: "Sciezka",
+        local_path: "Sciezka lokalna",
+        remote_path: "Sciezka FTP",
+        sql_value: "Wartosc SQL",
+      })) {
+        if (entry[field] !== undefined) operation.appendChild(historyChangeRow(fieldLabel, entry[field]));
+      }
+      wrapper.appendChild(operation);
+    }
+  }
+  return wrapper;
+}
+
+function historyCompactFileRow(file = {}) {
+  const operation = String(file.operation || "unknown").toLowerCase();
+  const operationClass = ["added", "deleted", "replaced", "migrated"].includes(operation)
+    ? operation
+    : "unknown";
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  const slot = document.createElement("strong");
+  const action = document.createElement("span");
+  const filename = document.createElement("span");
+  const size = document.createElement("span");
+  const content = document.createElement("div");
+  const evidence = file.evidence && typeof file.evidence === "object" ? file.evidence : {};
+  details.className = `history-file-change history-file-change-${operationClass}`;
+  summary.className = "history-file-summary-row";
+  slot.textContent = `Slot ${historyChangeValue(file.slot)}`;
+  action.textContent = historyFileOperationLabel(operation);
+  filename.textContent = `${historyChangeValue(file.before_name)} → ${historyChangeValue(file.after_name)}`;
+  size.textContent = `${formatBytes(file.before_size_bytes)} → ${formatBytes(file.after_size_bytes)}`;
+  content.className = "history-file-details";
+  summary.append(slot, action, filename, size, historyEvidenceBadges(evidence));
+  content.append(
+    historyChangeComparison("Nazwa", file.before_name, file.after_name),
+    historyChangeComparison("Rozmiar", file.before_size_bytes, file.after_size_bytes, formatBytes)
+  );
+  if (file.source_name !== undefined || file.source_size_bytes !== undefined) {
+    content.append(
+      historyChangeRow("Plik zrodlowy", file.source_name),
+      historyChangeRow("Rozmiar zrodlowy", formatBytes(file.source_size_bytes))
+    );
+  }
+  if (file.processing_operation !== undefined) {
+    content.appendChild(historyChangeRow("Przetwarzanie", file.processing_operation));
+  }
+  if (file.elapsed_ms !== undefined) {
+    content.appendChild(historyChangeRow("Czas", formatHistoryDuration(file.elapsed_ms)));
+  }
+  if (file.content_fit !== undefined) {
+    content.appendChild(historyChangeRow("Dopasowanie zawartosci", file.content_fit ? "Tak" : "Nie"));
+  }
+  if (file.preprocessed !== undefined) {
+    content.appendChild(historyChangeRow("Wstepnie przetworzony", file.preprocessed ? "Tak" : "Nie"));
+  }
+  const evidenceDetails = historyEvidenceDetails(evidence);
+  if (evidenceDetails.childElementCount) content.appendChild(evidenceDetails);
+  details.append(summary, content);
+  return details;
+}
+
+let historyChangesReturnFocus = null;
+let historyChangesBackgroundState = [];
+
+function setHistoryChangesBackgroundInert() {
+  if (historyChangesBackgroundState.length) return;
+  const backgroundModals = document.querySelectorAll(
+    "#historyView.active, #historyDetailModal.active, #historyTimingModal.active"
+  );
+  historyChangesBackgroundState = Array.from(backgroundModals)
+    .filter((modal) => modal !== historyChangesModal)
+    .map((modal) => {
+      const state = {
+        modal,
+        inert: modal.getAttribute("inert"),
+        ariaHidden: modal.getAttribute("aria-hidden"),
+      };
+      modal.setAttribute("inert", "");
+      modal.setAttribute("aria-hidden", "true");
+      return state;
+    });
+}
+
+function restoreHistoryChangesBackground() {
+  for (const state of historyChangesBackgroundState) {
+    if (state.inert === null) {
+      state.modal.removeAttribute("inert");
+    } else {
+      state.modal.setAttribute("inert", state.inert);
+    }
+    if (state.ariaHidden === null) {
+      state.modal.removeAttribute("aria-hidden");
+    } else {
+      state.modal.setAttribute("aria-hidden", state.ariaHidden);
+    }
+  }
+  historyChangesBackgroundState = [];
+}
+
+function openHistoryChangesModal() {
+  if (!historyChangesModal) return;
+  if (!historyChangesModal.classList.contains("active")) {
+    historyChangesReturnFocus = document.activeElement;
+    setHistoryChangesBackgroundInert();
+  }
+  historyChangesModal.classList.add("active");
+  window.setTimeout(() => historyChangesCloseButton?.focus(), 0);
+}
+
+function closeHistoryChangesModal({ restoreFocus = true } = {}) {
+  historyChangesModal?.classList.remove("active");
+  restoreHistoryChangesBackground();
+  if (restoreFocus && historyChangesReturnFocus?.focus) {
+    historyChangesReturnFocus.focus();
+  }
+  historyChangesReturnFocus = null;
+}
+
+function trapHistoryChangesFocus(event) {
+  if (!historyChangesModal?.classList.contains("active")) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeHistoryChangesModal();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusable = Array.from(
+    historyChangesModal.querySelectorAll(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )
+  ).filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
+  if (!focusable.length) {
+    event.preventDefault();
+    historyChangesModal.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const focusOutside = !historyChangesModal.contains(document.activeElement);
+  if (event.shiftKey && (document.activeElement === first || focusOutside)) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (document.activeElement === last || focusOutside)) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
 function renderHistoryTiming(item = {}) {
   if (!historyTimingTitle || !historyTimingOutput) {
     return;
@@ -4157,6 +4613,108 @@ function renderHistoryTiming(item = {}) {
   document.querySelector("#historyTimingModal")?.classList.add("active");
 }
 
+function renderHistoryChanges(item = {}) {
+  if (!historyChangesModal || !historyChangesTitle || !historyChangesOutput) {
+    return;
+  }
+  const details = item.details && typeof item.details === "object" ? item.details : {};
+  const changeSet = details.change_set && typeof details.change_set === "object"
+    ? details.change_set
+    : null;
+  historyChangesTitle.textContent = `Zmiany: ${item.time || item.summary || "operacja"}`;
+  historyChangesOutput.textContent = "";
+
+  if (!changeSet) {
+    const compatibility = document.createElement("p");
+    historyChangesOutput.className = "history-changes-output empty-state";
+    compatibility.textContent = "Szczegolowy zapis zmian nie byl jeszcze dostepny dla tej operacji.";
+    historyChangesOutput.appendChild(compatibility);
+    if (Object.keys(details).length) {
+      const legacy = historyTechnicalDetails("Dane techniczne");
+      for (const [key, value] of Object.entries(details)) {
+        legacy.content.appendChild(historyChangeRow(key, value, historyTechnicalValue));
+      }
+      historyChangesOutput.appendChild(legacy.details);
+    }
+    openHistoryChangesModal();
+    return;
+  }
+
+  historyChangesOutput.className = "history-changes-output";
+  const overview = historyChangeSection("Operacja");
+  overview.appendChild(historyChangeRow("Rodzaj", changeSet.kind));
+  const jobId = historyChangeJobId(details, changeSet);
+  if (jobId !== null && jobId !== undefined && jobId !== "") {
+    overview.appendChild(historyChangeRow("ID zadania", jobId));
+  }
+  historyChangesOutput.appendChild(overview);
+
+  const fields = Array.isArray(changeSet.fields) ? changeSet.fields : [];
+  if (fields.length) {
+    const section = historyChangeSection("Pola produktu");
+    for (const field of fields) {
+      section.appendChild(
+        historyChangeComparison(field.label || field.key, field.before, field.after)
+      );
+    }
+    historyChangesOutput.appendChild(section);
+  }
+
+  const pimcore = changeSet.pimcore && typeof changeSet.pimcore === "object"
+    ? changeSet.pimcore
+    : {};
+  const pimcoreFields = Array.isArray(pimcore.fields) ? pimcore.fields : [];
+  if (pimcore.kind || pimcoreFields.length) {
+    const section = historyChangeSection("Pimcore");
+    if (pimcore.kind) {
+      section.appendChild(historyChangeRow("Rodzaj", pimcore.kind));
+    }
+    if (pimcore.object_id !== undefined) {
+      section.appendChild(historyChangeRow("ID obiektu", pimcore.object_id));
+    }
+    if (pimcore.object_path !== undefined) {
+      section.appendChild(historyChangeRow("Sciezka obiektu", pimcore.object_path));
+    }
+    if (pimcore.total_ms !== undefined) {
+      section.appendChild(historyChangeRow("Czas calkowity", formatHistoryDuration(pimcore.total_ms)));
+    }
+    if (pimcore.send_ms !== undefined) {
+      section.appendChild(historyChangeRow("Wysylka", formatHistoryDuration(pimcore.send_ms)));
+    }
+    if (pimcore.verification_ms !== undefined) {
+      section.appendChild(historyChangeRow("Weryfikacja", formatHistoryDuration(pimcore.verification_ms)));
+    }
+    for (const field of pimcoreFields) {
+      section.appendChild(
+        historyChangeComparison(field.label || field.key, field.before, field.after)
+      );
+    }
+    historyChangesOutput.appendChild(section);
+  }
+
+  const files = Array.isArray(changeSet.files) ? changeSet.files : [];
+  if (files.length) {
+    const section = historyChangeSection("Pliki");
+    for (const file of files) {
+      section.appendChild(historyCompactFileRow(file));
+    }
+    historyChangesOutput.appendChild(section);
+  }
+
+  const integrations = changeSet.integrations && typeof changeSet.integrations === "object"
+    ? changeSet.integrations
+    : null;
+  if (integrations && Object.keys(integrations).length) {
+    const section = historyTechnicalDetails("Dane techniczne");
+    for (const [key, value] of Object.entries(integrations)) {
+      section.content.appendChild(historyChangeRow(key, value, historyTechnicalValue));
+    }
+    historyChangesOutput.appendChild(section.details);
+  }
+
+  openHistoryChangesModal();
+}
+
 function renderHistoryDetails(group) {
   historyDetailTitle.textContent = `Historia EAN ${group.ean}`;
   historyDetailOutput.textContent = "";
@@ -4166,6 +4724,7 @@ function renderHistoryDetails(group) {
     const summary = document.createElement("strong");
     const details = document.createElement("span");
     const actions = document.createElement("div");
+    const changesButton = document.createElement("button");
     const timingButton = document.createElement("button");
     row.className = "history-item";
     meta.className = "history-meta";
@@ -4186,12 +4745,21 @@ function renderHistoryDetails(group) {
       .filter(Boolean)
       .join(" | ");
     actions.className = "history-item-actions";
+    changesButton.type = "button";
+    changesButton.className = "secondary-button";
+    changesButton.textContent = "Zmiany";
+    const hasChangeSet = Boolean(item.details?.change_set);
+    const hasLegacyDetails = Boolean(
+      item.details && typeof item.details === "object" && Object.keys(item.details).length
+    );
+    changesButton.disabled = !hasChangeSet && !hasLegacyDetails;
+    changesButton.addEventListener("click", () => renderHistoryChanges(item));
     timingButton.type = "button";
     timingButton.className = "secondary-button";
     timingButton.textContent = "Czasy";
     timingButton.disabled = !item.details?.timing;
     timingButton.addEventListener("click", () => renderHistoryTiming(item));
-    actions.appendChild(timingButton);
+    actions.append(changesButton, timingButton);
     row.append(meta, summary, details, actions);
     historyDetailOutput.appendChild(row);
   }
@@ -4278,52 +4846,46 @@ function showHistoryLoadError(error) {
   }
 }
 
-function logReadStorageKey() {
-  const username = state.currentUser?.username || "anonymous";
-  return `picorg-log-read-${username}`;
+function observabilityTab(tab = state.observability.activeTab) {
+  return state.observability.tabs[tab] || state.observability.tabs.live;
 }
 
-function readLogMarker() {
-  try {
-    return JSON.parse(localStorage.getItem(logReadStorageKey()) || "{}");
-  } catch (_error) {
-    return {};
-  }
+function updateLogBadges() {
+  const tabs = state.observability.tabs;
+  document.querySelectorAll("[data-log-badge]").forEach((badge) => {
+    const tab = badge.dataset.logBadge || "";
+    const value = ["critical", "error", "warning"].includes(tab)
+      ? Number(tabs[tab]?.unread || 0)
+      : Number(tabs[tab]?.items?.length || 0);
+    badge.textContent = String(value);
+    badge.hidden = value === 0;
+  });
 }
 
-function writeLogMarker(summary = {}) {
-  const marker = {
-    critical: summary.latest_critical_id || "",
-    warning: summary.latest_warning_id || "",
+function updateLogAlert(unread = {}) {
+  state.observability.unread = {
+    critical: Number(unread.critical || 0),
+    error: Number(unread.error || 0),
+    warning: Number(unread.warning || 0),
+    total: Number(unread.total || 0),
+    highest: String(unread.highest || ""),
   };
-  localStorage.setItem(logReadStorageKey(), JSON.stringify(marker));
-  return marker;
-}
-
-function unreadLogSeverity(summary = {}) {
-  const marker = readLogMarker();
-  if (summary.latest_critical_id && summary.latest_critical_id !== marker.critical) {
-    return "critical";
+  for (const severity of ["critical", "error", "warning"]) {
+    state.observability.tabs[severity].unread = state.observability.unread[severity];
   }
-  if (summary.latest_warning_id && summary.latest_warning_id !== marker.warning) {
-    return "warning";
-  }
-  return "";
-}
-
-function updateLogAlert(summary = {}, { initialize = false } = {}) {
+  updateLogBadges();
   if (!logsButton || !state.isAdmin) {
-    logsButton?.classList.remove("log-alert-critical", "log-alert-warning");
+    logsButton?.classList.remove("log-alert-critical", "log-alert-error", "log-alert-warning");
     return;
   }
-  if (initialize && !localStorage.getItem(logReadStorageKey())) {
-    writeLogMarker(summary);
-  }
-  const severity = unreadLogSeverity(summary);
+  const severity = state.observability.unread.highest;
   logsButton.classList.toggle("log-alert-critical", severity === "critical");
+  logsButton.classList.toggle("log-alert-error", severity === "error");
   logsButton.classList.toggle("log-alert-warning", severity === "warning");
   if (severity === "critical") {
     logsButton.title = "Nowy krytyczny blad w logach.";
+  } else if (severity === "error") {
+    logsButton.title = "Nowy blad w logach.";
   } else if (severity === "warning") {
     logsButton.title = "Nowe ostrzezenie w logach.";
   } else {
@@ -4331,92 +4893,1275 @@ function updateLogAlert(summary = {}, { initialize = false } = {}) {
   }
 }
 
-function markLogsRead(payload = {}) {
-  writeLogMarker(payload.summary || {});
-  updateLogAlert(payload.summary || {});
-}
-
 function logSeverityLabel(severity = "info") {
   if (severity === "critical") return "Krytyczny";
+  if (severity === "error") return "Blad";
   if (severity === "warning") return "Ostrzezenie";
   return "Info";
 }
 
 function renderLogEvent(event) {
   const block = document.createElement("article");
-  const meta = document.createElement("div");
+  const meta = document.createElement("span");
+  const severityBadge = document.createElement("span");
   const title = document.createElement("strong");
-  const source = document.createElement("span");
+  const context = document.createElement("span");
   const details = document.createElement("details");
   const summary = document.createElement("summary");
+  const disclosure = document.createElement("small");
   const lines = document.createElement("pre");
   const severity = event.severity || "info";
-  block.className = `log-event log-event-${severity}`;
-  meta.className = "log-event-meta";
-  meta.textContent = [event.time || "", logSeverityLabel(severity)].filter(Boolean).join(" | ");
+  block.className = `log-event log-event-compact log-event-${severity}`;
+  block.dataset.observabilityId = event.id || "";
+  meta.className = "log-event-meta log-event-time";
+  meta.textContent = event.created_at || "";
+  severityBadge.className = `log-event-severity log-event-severity-${severity}`;
+  severityBadge.textContent = logSeverityLabel(severity);
   title.textContent = event.summary || "Zdarzenie";
-  source.textContent = event.path || "";
-  summary.textContent = "Szczegoly";
+  title.title = title.textContent;
+  summary.className = "log-event-summary-row";
+  context.textContent = [
+    event.username ? `uzytkownik: ${event.username}` : "",
+    event.ean ? `EAN: ${event.ean}` : "",
+    event.job_id ? `zadanie: ${event.job_id}` : "",
+    event.module || "",
+    event.stage || "",
+  ]
+    .filter(Boolean)
+    .join(" | ");
+  disclosure.textContent = "Szczegoly";
   lines.className = "log-lines";
-  lines.textContent = (event.lines || []).join("\n");
+  lines.textContent = [
+    event.summary ? `Podsumowanie: ${event.summary}` : "",
+    event.recommended_action ? `Zalecane dzialanie: ${event.recommended_action}` : "",
+    event.exception_type ? `Wyjatek: ${event.exception_type}` : "",
+    event.traceback_text || "",
+    Object.keys(event.details || {}).length ? JSON.stringify(event.details, null, 2) : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  if (!lines.textContent) lines.textContent = "Brak dodatkowych szczegolow.";
+  summary.append(meta, severityBadge, title, context, disclosure);
   details.append(summary, lines);
-  block.append(meta, title, source, details);
+  block.appendChild(details);
   return block;
 }
 
-function renderLogs(payload) {
-  state.logs = payload;
+function incidentValue(incident, key) {
+  return incident[key] || incident.context?.[key] || "";
+}
+
+const DELIVERY_STATUS_LABELS = {
+  pending: "Oczekuje",
+  sending: "Oczekuje",
+  sent: "Wysłano",
+  fallback: "Fallback",
+  skipped: "Pominięto",
+  error: "Błąd",
+};
+
+function deliveryStatusLabel(status) {
+  return DELIVERY_STATUS_LABELS[status] || "Błąd";
+}
+
+function deliveryChannelLabel(channel) {
+  if (channel === "smtp") return "SMTP";
+  if (channel === "entra") return "Microsoft Entra";
+  return "brak kanału";
+}
+
+function renderIncidentDeliveries(incident) {
+  const deliveries = Array.isArray(incident.deliveries) ? incident.deliveries : [];
+  if (!deliveries.length) return null;
+  const wrapper = document.createElement("div");
+  const latest = deliveries[0];
+  const badge = document.createElement("span");
+  const details = document.createElement("details");
+  const heading = document.createElement("summary");
+  const list = document.createElement("div");
+  wrapper.className = "log-delivery-summary";
+  badge.className = `log-delivery-badge log-delivery-${latest.status || "error"}`;
+  badge.textContent = `${deliveryStatusLabel(latest.status)} · ${deliveryChannelLabel(
+    latest.used_channel
+  )}`;
+  details.className = "log-delivery-details";
+  heading.textContent = `Powiadomienia e-mail (${deliveries.length})`;
+  list.className = "log-delivery-list";
+  for (const delivery of deliveries) {
+    const item = document.createElement("section");
+    const meta = document.createElement("strong");
+    const recipients = document.createElement("span");
+    const attempts = document.createElement("ul");
+    item.className = "log-delivery-item";
+    meta.textContent = [
+      deliveryStatusLabel(delivery.status),
+      deliveryChannelLabel(delivery.used_channel),
+      delivery.updated_at || delivery.created_at || "",
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    recipients.textContent = `Liczba odbiorców: ${Number(delivery.recipient_count || 0)}`;
+    attempts.className = "log-delivery-attempts";
+    for (const attempt of delivery.attempts || []) {
+      const row = document.createElement("li");
+      row.textContent = [
+        deliveryChannelLabel(attempt.channel),
+        attempt.status === "sent" ? "Wysłano" : "Błąd",
+        Number.isInteger(attempt.status_code) ? `kod ${attempt.status_code}` : "",
+        Number.isInteger(attempt.elapsed_ms) ? `${attempt.elapsed_ms} ms` : "",
+        attempt.code || "",
+        attempt.message || "",
+      ]
+        .filter(Boolean)
+        .join(" | ");
+      attempts.appendChild(row);
+    }
+    item.append(meta, recipients);
+    if (attempts.childElementCount) item.appendChild(attempts);
+    list.appendChild(item);
+  }
+  details.append(heading, list);
+  wrapper.append(badge, details);
+  return wrapper;
+}
+
+function renderIncidentContext(incident, key, label) {
+  const details = document.createElement("details");
+  const heading = document.createElement("summary");
+  const output = document.createElement("div");
+  const items = Array.isArray(incident[key]) ? incident[key] : [];
+  details.className = `log-incident-context log-incident-context-${key}`;
+  heading.textContent = `${label} (${items.length})`;
+  output.className = "log-context-events";
+  if (!items.length) {
+    const empty = document.createElement("span");
+    empty.textContent = "Brak zdarzen.";
+    output.appendChild(empty);
+  } else {
+    for (const item of items) output.appendChild(renderLogEvent(item));
+  }
+  details.append(heading, output);
+  return details;
+}
+
+function renderLazyIncidentContext(incident) {
+  const details = document.createElement("details");
+  const heading = document.createElement("summary");
+  const output = document.createElement("div");
+  let loading = false;
+  let loaded = false;
+  let problemNextCursor = "";
+  const context = { before: [], problem: [], after: [] };
+  details.className = "log-incident-context-lazy";
+  heading.textContent = "Kontekst zdarzenia";
+  output.className = "log-incident-context-content";
+  output.textContent = "Rozwin, aby wczytac kontekst.";
+
+  const paint = () => {
+    output.textContent = "";
+    output.append(
+      renderIncidentContext(context, "before", "Przed"),
+      renderIncidentContext(context, "problem", "Problem"),
+      renderIncidentContext(context, "after", "Po")
+    );
+    if (problemNextCursor) {
+      const loadMore = document.createElement("button");
+      loadMore.type = "button";
+      loadMore.className = "secondary-button";
+      loadMore.textContent = "Wczytaj wiecej";
+      loadMore.disabled = loading;
+      loadMore.addEventListener("click", (event) => {
+        event.preventDefault();
+        loadPage(problemNextCursor).catch(showLogsError);
+      });
+      output.appendChild(loadMore);
+    }
+  };
+  const loadPage = async (cursor = "") => {
+    if (loading || !incident.id) return;
+    loading = true;
+    const params = new URLSearchParams({ limit: String(OBSERVABILITY_PAGE_SIZE) });
+    if (cursor) params.set("cursor", cursor);
+    try {
+      const payload = await requestObservabilityPayload(
+        `/api/observability/incidents/${encodeURIComponent(incident.id)}/context?${params}`
+      );
+      if (!cursor) {
+        context.before = Array.isArray(payload.before) ? payload.before : [];
+        context.after = Array.isArray(payload.after) ? payload.after : [];
+      }
+      const known = new Set(context.problem.map((item) => item.id));
+      for (const item of Array.isArray(payload.problem) ? payload.problem : []) {
+        if (item?.id && !known.has(item.id)) {
+          known.add(item.id);
+          context.problem.push(item);
+        }
+      }
+      context.problem.sort((left, right) =>
+        `${left.created_at || ""}\u0000${left.id || ""}`.localeCompare(
+          `${right.created_at || ""}\u0000${right.id || ""}`
+        )
+      );
+      problemNextCursor = String(payload.problem_next_cursor || "");
+      loaded = true;
+      paint();
+    } catch (error) {
+      output.textContent = error?.message || "Nie mozna wczytac kontekstu.";
+      throw error;
+    } finally {
+      loading = false;
+    }
+  };
+  details.addEventListener("toggle", () => {
+    if (details.open && !loaded && !loading) loadPage().catch(() => {});
+  });
+  details.append(heading, output);
+  return details;
+}
+
+function openHistoryForEan(ean) {
+  if (!ean || !historySearchInput) return;
+  closeModals();
+  historySearchInput.value = ean;
+  state.historyPage = 1;
+  openModal("history");
+}
+
+function renderIncidentCard(incident) {
+  const card = document.createElement("article");
+  const meta = document.createElement("div");
+  const title = document.createElement("strong");
+  const action = document.createElement("p");
+  const context = document.createElement("span");
+  const links = document.createElement("div");
+  const severity = incident.severity || "warning";
+  const ean = incidentValue(incident, "ean");
+  const jobId = incident.job_id || incidentValue(incident, "job_id");
+  card.id = incident.id || "";
+  card.dataset.observabilityId = incident.id || "";
+  card.tabIndex = -1;
+  card.className = `log-incident log-event-${severity}`;
+  meta.className = "log-event-meta";
+  meta.textContent = [
+    incident.last_seen_at || incident.first_seen_at || "",
+    logSeverityLabel(severity),
+    `wystapienia: ${Number(incident.occurrence_count || 1)}`,
+  ]
+    .filter(Boolean)
+    .join(" | ");
+  title.textContent = incidentValue(incident, "summary") || incident.event_type || "Incydent";
+  action.className = "log-recommended-action";
+  action.textContent = incidentValue(incident, "recommended_action")
+    ? `Zalecane dzialanie: ${incidentValue(incident, "recommended_action")}`
+    : "Brak zalecanego dzialania.";
+  context.textContent = [
+    incidentValue(incident, "username") ? `uzytkownik: ${incidentValue(incident, "username")}` : "",
+    ean ? `EAN: ${ean}` : "",
+    jobId ? `zadanie: ${jobId}` : "",
+    incidentValue(incident, "module") ? `modul: ${incidentValue(incident, "module")}` : "",
+  ]
+    .filter(Boolean)
+    .join(" | ");
+  links.className = "log-card-links";
+  if (ean) {
+    const historyLink = document.createElement("button");
+    historyLink.type = "button";
+    historyLink.className = "ghost-button";
+    historyLink.textContent = "Historia EAN";
+    historyLink.addEventListener("click", () => openHistoryForEan(ean));
+    links.appendChild(historyLink);
+  }
+  if (jobId) {
+    const jobLink = document.createElement("button");
+    jobLink.type = "button";
+    jobLink.className = "ghost-button";
+    jobLink.textContent = "Pokaz zadanie";
+    jobLink.addEventListener("click", () => {
+      openObservabilityRecord("jobs", jobId).catch(showLogsError);
+    });
+    links.appendChild(jobLink);
+  }
+  card.append(meta, title, action);
+  if (context.textContent) card.appendChild(context);
+  if (links.childElementCount) card.appendChild(links);
+  const deliveryStatus = renderIncidentDeliveries(incident);
+  if (deliveryStatus) card.appendChild(deliveryStatus);
+  card.appendChild(renderLazyIncidentContext(incident));
+  return card;
+}
+
+function renderJobCard(job) {
+  const card = document.createElement("article");
+  const meta = document.createElement("div");
+  const title = document.createElement("strong");
+  const context = document.createElement("span");
+  const stages = document.createElement("ol");
+  const links = document.createElement("div");
+  const jobId = job.id || job.job_id || "";
+  const ean = job.ean || job.entry?.ean || job.details?.ean || "";
+  const incidentId = job.incident_id || job.details?.incident_id || "";
+  card.className = `log-job log-job-${job.status || "unknown"}`;
+  card.dataset.observabilityId = jobId;
+  card.tabIndex = -1;
+  meta.className = "log-event-meta";
+  meta.textContent = [job.started_at || "", job.finished_at || "", job.status || ""]
+    .filter(Boolean)
+    .join(" | ");
+  title.textContent = job.summary || jobId || "Zadanie";
+  context.textContent = [
+    job.username ? `uzytkownik: ${job.username}` : "",
+    ean ? `EAN: ${ean}` : "",
+    jobId ? `ID: ${jobId}` : "",
+  ]
+    .filter(Boolean)
+    .join(" | ");
+  stages.className = "log-job-stages";
+  for (const stage of job.stages || []) {
+    const item = document.createElement("li");
+    item.textContent = [stage.name || stage.key || "Etap", stage.status || "", stage.error || ""]
+      .filter(Boolean)
+      .join(" | ");
+    stages.appendChild(item);
+  }
+  links.className = "log-card-links";
+  if (incidentId) {
+    const incidentLink = document.createElement("button");
+    incidentLink.type = "button";
+    incidentLink.className = "ghost-button";
+    incidentLink.textContent = "Pokaz incydent";
+    incidentLink.addEventListener("click", () => {
+      openObservabilityRecord("incidents", incidentId).catch(showLogsError);
+    });
+    links.appendChild(incidentLink);
+  }
+  if (ean) {
+    const historyLink = document.createElement("button");
+    historyLink.type = "button";
+    historyLink.className = "ghost-button";
+    historyLink.textContent = "Historia EAN";
+    historyLink.addEventListener("click", () => openHistoryForEan(ean));
+    links.appendChild(historyLink);
+  }
+  card.append(meta, title);
+  if (context.textContent) card.appendChild(context);
+  if (stages.childElementCount) card.appendChild(stages);
+  if (links.childElementCount) card.appendChild(links);
+  return card;
+}
+
+function normalizeLogSearchText(value) {
+  return String(value || "").toLowerCase();
+}
+
+function logFilterInputValues() {
+  return {
+    query: normalizeLogSearchText(logsTextFilter?.value).trim(),
+    severity: logsSeverityFilter?.value || "",
+    module: normalizeLogSearchText(logsModuleFilter?.value).trim(),
+    username: normalizeLogSearchText(logsUserFilter?.value).trim(),
+    ean: normalizeLogSearchText(logsEanFilter?.value).trim(),
+    jobId: normalizeLogSearchText(logsJobFilter?.value).trim(),
+  };
+}
+
+function resetLiveArchiveForFilters() {
+  const live = observabilityTab("live");
+  stopObservabilityStream();
+  state.observability.seedGeneration = Number(state.observability.seedGeneration || 0) + 1;
+  state.observability.streamSeeded = false;
+  state.observability.streamAfterId = "";
+  state.observability.seedLoading = false;
+  state.observability.buffer = [];
+  live.requestId = Number(live.requestId || 0) + 1;
+  live.loading = false;
+  live.items = [];
+  live.nextCursor = "";
+  live.archiveSince = "";
+}
+
+function commitLogFilters(filters = logFilterInputValues()) {
+  const normalized = { ...filters };
+  const changed = JSON.stringify(normalized) !== JSON.stringify(
+    state.observability.committedFilters
+  );
+  state.observability.committedFilters = normalized;
+  if (changed) resetLiveArchiveForFilters();
+  return changed;
+}
+
+function resetCommittedLogFilters() {
+  for (const control of [
+    logsTextFilter,
+    logsSeverityFilter,
+    logsModuleFilter,
+    logsUserFilter,
+    logsEanFilter,
+    logsJobFilter,
+  ]) {
+    if (control) control.value = "";
+  }
+  return commitLogFilters({
+    query: "",
+    severity: "",
+    module: "",
+    username: "",
+    ean: "",
+    jobId: "",
+  });
+}
+
+function logEventSearchText(item) {
+  return normalizeLogSearchText([
+    item.created_at,
+    item.id,
+    item.severity,
+    item.event_type,
+    item.module,
+    item.stage,
+    item.username,
+    item.ean,
+    item.product_id,
+    item.slot,
+    item.job_id,
+    item.correlation_id,
+    item.incident_id,
+    item.summary,
+    item.recommended_action,
+    JSON.stringify(item.details || {}),
+    item.exception_type,
+    item.traceback_text,
+  ]
+    .map((value) => String(value || ""))
+    .join("\n"));
+}
+
+function logItemMatchesFilters(item) {
+  const filters = state.observability.committedFilters;
+  const { query, severity, username, ean, jobId } = filters;
+  const moduleName = filters.module;
+  const context = item.context || {};
+  const searchText = item.created_at
+    ? logEventSearchText(item)
+    : normalizeLogSearchText(JSON.stringify(item));
+  if (query && !searchText.includes(query)) return false;
+  if (severity && (item.severity || "") !== severity) return false;
+  if (moduleName && !normalizeLogSearchText(item.module || context.module).includes(moduleName)) return false;
+  if (username && !normalizeLogSearchText(item.username || context.username).includes(username)) return false;
+  if (ean && !normalizeLogSearchText(item.ean || context.ean || item.entry?.ean).includes(ean)) return false;
+  if (jobId && !normalizeLogSearchText(item.job_id || item.id || context.job_id).includes(jobId)) return false;
+  return true;
+}
+
+function renderLogs() {
   logsOutput.textContent = "";
-  const logs = payload.logs || [];
-  const hasEvents = logs.some((log) => (log.events || []).length);
-  if (!hasEvents) {
+  const tabName = state.observability.activeTab;
+  const items = observabilityTab(tabName).items.filter(logItemMatchesFilters);
+  if (!items.length) {
     logsOutput.className = "logs-output empty-state";
-    logsOutput.textContent = "Brak zdarzen w logach systemowych.";
+    logsOutput.textContent = "Brak zdarzen dla wybranych filtrow.";
+  } else {
+    logsOutput.className = `logs-output logs-output-${tabName}`;
+    for (const item of items) {
+      if (tabName === "live") logsOutput.appendChild(renderLogEvent(item));
+      else if (tabName === "jobs") logsOutput.appendChild(renderJobCard(item));
+      else logsOutput.appendChild(renderIncidentCard(item));
+    }
+  }
+  const tab = observabilityTab(tabName);
+  logsLoadMoreButton.textContent = "Wczytaj wiecej";
+  logsLoadMoreButton.hidden = !tab.nextCursor;
+  logsLoadMoreButton.disabled = Boolean(tab.loading);
+  updateLogBadges();
+  if (tabName === "live" && state.observability.autoscroll) {
+    logsOutput.scrollTop = logsOutput.scrollHeight;
+  }
+}
+
+function applyObservabilityUnread(unread = {}, requestId = 0) {
+  if (requestId !== state.observability.unreadRequestId) return false;
+  updateLogAlert(unread);
+  return true;
+}
+
+async function requestObservabilityPayload(path, options = {}) {
+  const requestId = Number(state.observability.unreadRequestId || 0) + 1;
+  state.observability.unreadRequestId = requestId;
+  const payload = await requestJson(path, options);
+  applyObservabilityUnread(payload.unread || {}, requestId);
+  return payload;
+}
+
+const HEALTH_COMPONENT_LABELS = [
+  ["backend", "Backend"],
+  ["sqlite", "SQLite"],
+  ["job_processor", "Proces zadan"],
+  ["notification_worker", "Powiadomienia"],
+  ["ftp", "FTP"],
+  ["sql", "SQL"],
+  ["sql_profiles", "Profile SQL"],
+  ["pimcore", "Pimcore"],
+];
+
+const HEALTH_STATUS_LABELS = {
+  online: "Online",
+  degraded: "Ograniczony",
+  critical: "Krytyczny",
+  disabled: "Wylaczony",
+  unknown: "Brak danych",
+};
+
+function normalizedHealthStatus(value) {
+  const status = String(value || "unknown").toLowerCase();
+  return Object.hasOwn(HEALTH_STATUS_LABELS, status) ? status : "unknown";
+}
+
+function normalizedHealthComponents(components = {}) {
+  return Object.fromEntries(
+    HEALTH_COMPONENT_LABELS.map(([key]) => [
+      key,
+      {
+        status: normalizedHealthStatus(components[key]?.status),
+        observed_at: String(components[key]?.observed_at || ""),
+      },
+    ])
+  );
+}
+
+function canonicalHealthTimestamp(value) {
+  const text = String(value || "");
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/.test(text) ? text : "";
+}
+
+function renderBackendHealthDetails(
+  components = {},
+  { serverTime = "", currentLatencyMs = 0, medianLatencyMs = 0 } = {}
+) {
+  if (!backendHealthDetailsList) return;
+  const rows = HEALTH_COMPONENT_LABELS.map(([key, label]) => {
+    const item = document.createElement("li");
+    const name = document.createElement("span");
+    const status = document.createElement("strong");
+    const normalized = normalizedHealthStatus(components[key]?.status);
+    name.textContent = label;
+    const observedAt = canonicalHealthTimestamp(components[key]?.observed_at);
+    status.textContent = observedAt
+      ? `${HEALTH_STATUS_LABELS[normalized]} · ${observedAt}`
+      : HEALTH_STATUS_LABELS[normalized];
+    item.dataset.level = normalized;
+    item.append(name, status);
+    return item;
+  });
+  const metrics = [
+    ["Biezace opoznienie", `${Math.round(currentLatencyMs)} ms`],
+    ["Mediana opoznienia", `${Math.round(medianLatencyMs)} ms`],
+    ["Czas serwera UTC", canonicalHealthTimestamp(serverTime) || "Brak danych"],
+  ].map(([label, value]) => {
+    const item = document.createElement("li");
+    const name = document.createElement("span");
+    const status = document.createElement("strong");
+    name.textContent = label;
+    status.textContent = value;
+    item.append(name, status);
+    return item;
+  });
+  backendHealthDetailsList.replaceChildren(...rows, ...metrics);
+}
+
+function medianHealthLatency() {
+  const recentSamples = healthSamples.slice(-5).sort((left, right) => left - right);
+  if (!recentSamples.length) return 0;
+  const middle = Math.floor(recentSamples.length / 2);
+  if (recentSamples.length % 2) return recentSamples[middle];
+  return (recentSamples[middle - 1] + recentSamples[middle]) / 2;
+}
+
+function updateBackendHealthStatus(
+  level,
+  currentLatencyMs = 0,
+  components = {},
+  { medianLatencyMs = currentLatencyMs, serverTime = "" } = {}
+) {
+  if (!backendHealthStatus || !backendHealthText) return;
+  const labels = {
+    online: "Online",
+    slow: "Wolno",
+    critical: "Krytyczny",
+    offline: "Offline",
+  };
+  const safeLevel = Object.hasOwn(labels, level) ? level : "critical";
+  backendHealthStatus.dataset.level = safeLevel;
+  backendHealthText.textContent =
+    safeLevel === "offline"
+      ? labels[safeLevel]
+      : `${labels[safeLevel]} · ${Math.round(currentLatencyMs)} ms`;
+  renderBackendHealthDetails(components, { serverTime, currentLatencyMs, medianLatencyMs });
+}
+
+function healthLevel(ms, components = {}, payloadOk = true) {
+  if (
+    payloadOk === false ||
+    components.backend?.status !== "online" ||
+    components.sqlite?.status === "critical" ||
+    components.job_processor?.status === "critical" ||
+    components.notification_worker?.status === "critical"
+  ) {
+    return "critical";
+  }
+  if (ms > HEALTH_CRITICAL_MS) return "critical";
+  if (ms >= HEALTH_SLOW_MS || Object.values(components).some((item) => item.status === "degraded")) {
+    return "slow";
+  }
+  return "online";
+}
+
+function scheduleBackendHealthPoll(requestGeneration = healthPollGeneration) {
+  if (healthPollTimer) window.clearTimeout(healthPollTimer);
+  healthPollTimer = 0;
+  if (document.hidden) return;
+  healthPollTimer = window.setTimeout(() => {
+    healthPollTimer = 0;
+    if (document.hidden || requestGeneration !== healthPollGeneration) return;
+    pollBackendHealth().catch(() => {});
+  }, HEALTH_POLL_INTERVAL_MS);
+}
+
+async function pollBackendHealth() {
+  if (document.hidden) return;
+  if (healthPollTimer) window.clearTimeout(healthPollTimer);
+  healthPollTimer = 0;
+  const requestGeneration = ++healthPollGeneration;
+  healthPollController?.abort();
+  const controller = new AbortController();
+  healthPollController = controller;
+  const startedAt = performance.now();
+  try {
+    const payload = await requestJson("/api/health", { signal: controller.signal });
+    const elapsedMs = Math.max(0, performance.now() - startedAt);
+    if (
+      requestGeneration !== healthPollGeneration ||
+      controller.signal.aborted ||
+      document.hidden
+    ) {
+      return;
+    }
+    const components = normalizedHealthComponents(payload.components || {});
+    lastSuccessfulHealthComponents = components;
+    healthFailures = 0;
+    healthSamples.push(elapsedMs);
+    if (healthSamples.length > 5) healthSamples.shift();
+    const medianMs = medianHealthLatency();
+    updateBackendHealthStatus(
+      healthLevel(medianMs, components, payload.ok),
+      elapsedMs,
+      components,
+      { medianLatencyMs: medianMs, serverTime: payload.time }
+    );
+  } catch (error) {
+    if (
+      error?.name === "AbortError" ||
+      controller.signal.aborted ||
+      requestGeneration !== healthPollGeneration ||
+      document.hidden
+    ) {
+      return;
+    }
+    healthFailures += 1;
+    if (healthFailures >= HEALTH_OFFLINE_FAILURES) {
+      updateBackendHealthStatus("offline", 0, lastSuccessfulHealthComponents);
+    }
+  } finally {
+    if (requestGeneration === healthPollGeneration) {
+      if (healthPollController === controller) healthPollController = null;
+      if (!document.hidden) scheduleBackendHealthPoll(requestGeneration);
+    }
+  }
+}
+
+function setBackendHealthDetailsExpanded(expanded, { pinned = healthDetailsPinned } = {}) {
+  healthDetailsPinned = pinned;
+  backendHealthIndicator?.classList.toggle("details-open", expanded);
+  if (backendHealthDetails) backendHealthDetails.hidden = !expanded;
+  backendHealthStatus?.setAttribute("aria-expanded", expanded ? "true" : "false");
+}
+
+function refreshBackendHealthDetailsExpanded() {
+  const expanded = Boolean(
+    healthDetailsPinned ||
+      healthDetailsPointerInside ||
+      backendHealthIndicator?.contains(document.activeElement)
+  );
+  setBackendHealthDetailsExpanded(expanded);
+}
+
+backendHealthIndicator?.addEventListener("pointerenter", () => {
+  healthDetailsPointerInside = true;
+  setBackendHealthDetailsExpanded(true);
+});
+
+backendHealthIndicator?.addEventListener("pointerleave", () => {
+  healthDetailsPointerInside = false;
+  refreshBackendHealthDetailsExpanded();
+});
+
+backendHealthIndicator?.addEventListener("focusin", () => {
+  setBackendHealthDetailsExpanded(true);
+});
+
+backendHealthIndicator?.addEventListener("focusout", () => {
+  window.setTimeout(refreshBackendHealthDetailsExpanded, 0);
+});
+
+backendHealthStatus?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  const pinned = !healthDetailsPinned;
+  setBackendHealthDetailsExpanded(
+    Boolean(
+      pinned ||
+        healthDetailsPointerInside ||
+        backendHealthIndicator?.contains(document.activeElement)
+    ),
+    { pinned }
+  );
+});
+
+backendHealthStatus?.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  setBackendHealthDetailsExpanded(false, { pinned: false });
+  backendHealthStatus.focus();
+});
+
+document.addEventListener("click", (event) => {
+  if (backendHealthIndicator?.contains(event.target)) return;
+  setBackendHealthDetailsExpanded(false, { pinned: false });
+});
+
+function showLogsError(error) {
+  if (!logsOutput) return;
+  logsOutput.className = "logs-output empty-state";
+  logsOutput.textContent = error.message || String(error);
+}
+
+function waitForLogsPaint() {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(resolve);
+    });
+  });
+}
+
+async function markSeverityRead(severity, requestId) {
+  const tab = observabilityTab(severity);
+  if (!tab.items.length || !tab.unread || tab.readInFlight) return;
+  tab.readInFlight = true;
+  try {
+    await waitForLogsPaint();
+    if (
+      !logsView?.classList.contains("active") ||
+      state.observability.activeTab !== severity ||
+      tab.requestId !== requestId
+    ) {
+      return;
+    }
+    const card = logsOutput.querySelector(".log-incident[data-observability-id]");
+    if (!card || card.hidden || !card.isConnected || !card.getClientRects().length) return;
+    const incident = tab.items.find((item) => item.id === card.dataset.observabilityId);
+    const eventId = incident?.latest_event_id || incident?.first_event_id || "";
+    const createdAt = incident?.last_seen_at || incident?.first_seen_at || "";
+    if (!eventId || !createdAt) return;
+    await requestObservabilityPayload("/api/observability/read", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ severity, event_id: eventId, created_at: createdAt }),
+    });
+  } finally {
+    tab.readInFlight = false;
+  }
+}
+
+function mergeLiveItems(items = [], since = "", keepOldest = false) {
+  const byId = new Map();
+  for (const item of items) {
+    if (!item?.id || (since && String(item.created_at || "") < since)) continue;
+    byId.set(item.id, item);
+  }
+  const ordered = [...byId.values()]
+    .sort((left, right) =>
+      `${left.created_at || ""}\u0000${left.id}`.localeCompare(
+        `${right.created_at || ""}\u0000${right.id}`
+      )
+    );
+  return keepOldest
+    ? ordered.slice(0, MAX_LIVE_LOG_EVENTS)
+    : ordered.slice(-MAX_LIVE_LOG_EVENTS);
+}
+
+function appendPausedObservabilityEvents(items = []) {
+  const live = observabilityTab("live");
+  const knownIds = new Set(
+    [...live.items, ...state.observability.buffer].map((item) => item.id)
+  );
+  for (const item of items) {
+    if (
+      item?.id &&
+      (!live.archiveSince || String(item.created_at || "") >= live.archiveSince) &&
+      !knownIds.has(item.id)
+    ) {
+      knownIds.add(item.id);
+      state.observability.buffer.push(item);
+    }
+  }
+  if (state.observability.buffer.length > MAX_LIVE_LOG_EVENTS) {
+    state.observability.buffer.splice(
+      0,
+      state.observability.buffer.length - MAX_LIVE_LOG_EVENTS
+    );
+  }
+}
+
+async function seedLiveLogs({ force = false } = {}) {
+  const live = observabilityTab("live");
+  if (state.observability.streamSeeded && !force) {
+    renderLogs();
     return;
   }
-  logsOutput.className = "logs-output";
-  for (const log of logs) {
-    const category = document.createElement("section");
-    const heading = document.createElement("div");
-    const title = document.createElement("strong");
-    const path = document.createElement("span");
-    const events = log.events || [];
-    category.className = "log-category";
-    heading.className = "log-category-heading";
-    title.textContent = `${log.label || log.key || "Log"} (${events.length})`;
-    path.textContent = log.path || "";
-    heading.append(title, path);
-    category.appendChild(heading);
-    if (!events.length) {
-      const empty = document.createElement("p");
-      empty.className = "empty-state";
-      empty.textContent = "Brak zdarzen w tej kategorii.";
-      category.appendChild(empty);
+  if (state.observability.seedLoading && !force) return;
+  const seedGeneration = Number(state.observability.seedGeneration || 0) + 1;
+  state.observability.seedGeneration = seedGeneration;
+  state.observability.seedLoading = true;
+  stopObservabilityStream();
+  if (state.observability.paused && logsStreamStatus) {
+    logsStreamStatus.textContent = "Wstrzymano";
+  }
+  try {
+    const params = new URLSearchParams({ live_seed: "1" });
+    const filters = state.observability.committedFilters;
+    if (filters.query) params.set("query", filters.query);
+    if (filters.severity) params.set("severity", filters.severity);
+    if (filters.module) params.set("module", filters.module);
+    if (filters.username) params.set("username", filters.username);
+    if (filters.ean) params.set("ean", filters.ean);
+    if (filters.jobId) params.set("job_id", filters.jobId);
+    const payload = await requestObservabilityPayload(
+      "/api/observability/events?" + params.toString()
+    );
+    if (state.observability.seedGeneration !== seedGeneration) return;
+    const seedItems = mergeLiveItems(Array.isArray(payload.items) ? payload.items : []);
+    const streamAfterId = String(payload.stream_after_id || "");
+    if (!streamAfterId) {
+      throw new Error("Serwer nie zwrocil punktu wznowienia strumienia.");
+    }
+    if (state.observability.paused) {
+      appendPausedObservabilityEvents(seedItems);
     } else {
-      for (const event of events) {
-        category.appendChild(renderLogEvent(event));
+      live.items = seedItems;
+      if (state.observability.activeTab === "live") renderLogs();
+    }
+    live.nextCursor = String(payload.next_cursor || "");
+    live.archiveSince = String(payload.archive_since || "");
+    state.observability.streamAfterId = streamAfterId;
+    state.observability.streamSeeded = true;
+    startObservabilityStream(streamAfterId);
+  } catch (error) {
+    if (state.observability.seedGeneration !== seedGeneration) return;
+    if (state.observability.streamAfterId) {
+      startObservabilityStream(state.observability.streamAfterId);
+    } else if (logsStreamStatus) {
+      logsStreamStatus.textContent = "Rozlaczono";
+    }
+    throw error;
+  } finally {
+    if (state.observability.seedGeneration === seedGeneration) {
+      state.observability.seedLoading = false;
+    }
+  }
+}
+
+function liveArchiveEndpoint(cursor = "") {
+  const live = observabilityTab("live");
+  const filters = state.observability.committedFilters;
+  const params = new URLSearchParams({ limit: String(OBSERVABILITY_PAGE_SIZE) });
+  if (cursor) params.set("cursor", cursor);
+  if (live.archiveSince) params.set("since", live.archiveSince);
+  if (filters.query) params.set("query", filters.query);
+  if (filters.severity) params.set("severity", filters.severity);
+  if (filters.module) params.set("module", filters.module);
+  if (filters.username) params.set("username", filters.username);
+  if (filters.ean) params.set("ean", filters.ean);
+  if (filters.jobId) params.set("job_id", filters.jobId);
+  return "/api/observability/events?" + params.toString();
+}
+
+async function loadOlderLiveLogs() {
+  const live = observabilityTab("live");
+  if (live.loading || !live.nextCursor || !live.archiveSince) return;
+  const cursor = live.nextCursor;
+  const requestId = Number(live.requestId || 0) + 1;
+  const seedGeneration = Number(state.observability.seedGeneration || 0);
+  live.requestId = requestId;
+  live.loading = true;
+  renderLogs();
+  try {
+    const payload = await requestObservabilityPayload(liveArchiveEndpoint(cursor));
+    if (
+      live.requestId !== requestId ||
+      state.observability.seedGeneration !== seedGeneration
+    ) return;
+    const older = Array.isArray(payload.items) ? payload.items : [];
+    live.items = mergeLiveItems([...older, ...live.items], live.archiveSince, true);
+    live.nextCursor = String(payload.next_cursor || "");
+  } finally {
+    if (live.requestId === requestId) {
+      live.loading = false;
+      if (state.observability.activeTab === "live") renderLogs();
+    }
+  }
+}
+
+function appendLiveEvent(event) {
+  const live = observabilityTab("live");
+  if (
+    !event?.id ||
+    (live.archiveSince && String(event.created_at || "") < live.archiveSince) ||
+    live.items.some((item) => item.id === event.id)
+  ) return;
+  live.items.push(event);
+  live.items.sort((left, right) =>
+    `${left.created_at || ""}\u0000${left.id || ""}`.localeCompare(
+      `${right.created_at || ""}\u0000${right.id || ""}`
+    )
+  );
+  let removed = [];
+  if (live.items.length > MAX_LIVE_LOG_EVENTS) {
+    removed = live.items.splice(0, live.items.length - MAX_LIVE_LOG_EVENTS);
+  }
+  if (state.observability.activeTab !== "live") {
+    updateLogBadges();
+    return;
+  }
+  if (!live.items.some((item) => item.id === event.id)) {
+    updateLogBadges();
+    return;
+  }
+  for (const item of removed) {
+    if (logItemMatchesFilters(item)) logsOutput.firstElementChild?.remove();
+  }
+  if (!logItemMatchesFilters(event)) {
+    updateLogBadges();
+    if (!logsOutput.childElementCount) {
+      logsOutput.className = "logs-output empty-state";
+      logsOutput.textContent = "Brak zdarzen dla wybranych filtrow.";
+    }
+    return;
+  }
+  if (logsOutput.classList.contains("empty-state")) {
+    logsOutput.textContent = "";
+    logsOutput.className = "logs-output logs-output-live";
+  }
+  const eventIndex = live.items.findIndex((item) => item.id === event.id);
+  const nextVisible = live.items
+    .slice(eventIndex + 1)
+    .find((item) => logItemMatchesFilters(item));
+  const nextNode = nextVisible
+    ? [...logsOutput.children].find(
+        (node) => node.dataset.observabilityId === nextVisible.id
+      )
+    : null;
+  if (nextNode) {
+    logsOutput.insertBefore(renderLogEvent(event), nextNode);
+  } else {
+    logsOutput.appendChild(renderLogEvent(event));
+  }
+  while (logsOutput.childElementCount > MAX_LIVE_LOG_EVENTS) {
+    logsOutput.firstElementChild?.remove();
+  }
+  updateLogBadges();
+  if (state.observability.autoscroll) {
+    logsOutput.scrollTop = logsOutput.scrollHeight;
+  }
+}
+
+function handleObservabilityEvent(event) {
+  let item;
+  try {
+    item = JSON.parse(event.data);
+  } catch (_error) {
+    return;
+  }
+  if (!item || typeof item !== "object") return;
+  state.observability.streamAfterId =
+    item.id || event.lastEventId || state.observability.streamAfterId;
+  if (state.observability.paused) {
+    appendPausedObservabilityEvents([item]);
+    if (logsStreamStatus) {
+      logsStreamStatus.textContent = `Wstrzymano (${state.observability.buffer.length} oczekuje)`;
+    }
+    return;
+  }
+  appendLiveEvent(item);
+}
+
+function startObservabilityStream(afterId = state.observability.streamAfterId || "") {
+  if (
+    state.observability.stream ||
+    !state.isAdmin ||
+    !logsView?.classList.contains("active")
+  ) {
+    return;
+  }
+  if (!afterId) {
+    state.observability.streamConnected = false;
+    if (logsStreamStatus) logsStreamStatus.textContent = "Rozlaczono";
+    return;
+  }
+  const stream = new EventSource(
+    "/api/observability/stream?after_id=" + encodeURIComponent(afterId)
+  );
+  state.observability.stream = stream;
+  state.observability.streamConnected = false;
+  if (logsStreamStatus && !state.observability.paused) {
+    logsStreamStatus.textContent = "Laczenie...";
+  }
+  stream.onopen = () => {
+    if (state.observability.stream !== stream) return;
+    state.observability.streamConnected = true;
+    if (logsStreamStatus) {
+      logsStreamStatus.textContent = state.observability.paused ? "Wstrzymano" : "Polaczono";
+    }
+  };
+  stream.onmessage = handleObservabilityEvent;
+  stream.onerror = () => {
+    if (state.observability.stream !== stream) return;
+    state.observability.streamConnected = false;
+    if (logsStreamStatus) {
+      logsStreamStatus.textContent = state.observability.paused
+        ? "Wstrzymano"
+        : "Ponowne laczenie...";
+    }
+  };
+}
+
+function stopObservabilityStream() {
+  state.observability.stream?.close();
+  state.observability.stream = null;
+  state.observability.streamConnected = false;
+  if (logsStreamStatus) logsStreamStatus.textContent = "";
+}
+
+function observabilityEndpoint(tabName, cursor = "") {
+  const params = new URLSearchParams({ limit: String(OBSERVABILITY_PAGE_SIZE) });
+  if (cursor) params.set("cursor", cursor);
+  if (tabName === "jobs") return "/api/observability/jobs?" + params.toString();
+  params.set("severity", tabName);
+  return "/api/observability/incidents?" + params.toString();
+}
+
+function appendUniqueObservabilityItems(tab, items = []) {
+  const knownIds = new Set(tab.items.map((item) => item.id).filter(Boolean));
+  tab.items = tab.items.concat(
+    items.filter((item) => {
+      if (!item?.id || knownIds.has(item.id)) return false;
+      knownIds.add(item.id);
+      return true;
+    })
+  );
+}
+
+async function findIncidentRecord(recordId) {
+  let cursor = "";
+  const visitedCursors = new Set();
+  while (true) {
+    const params = new URLSearchParams({ limit: String(OBSERVABILITY_PAGE_SIZE) });
+    if (cursor) params.set("cursor", cursor);
+    const payload = await requestObservabilityPayload(
+      `/api/observability/incidents?${params.toString()}`
+    );
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    const found = items.find((item) => item.id === recordId);
+    if (found) return found;
+    const nextCursor = payload.next_cursor || "";
+    if (!nextCursor || visitedCursors.has(nextCursor)) return null;
+    visitedCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+  return null;
+}
+
+async function loadIncidentThroughRecord(severity, recordId) {
+  if (!["critical", "error", "warning"].includes(severity)) return null;
+  const tab = observabilityTab(severity);
+  const requestId = Number(tab.requestId || 0) + 1;
+  tab.requestId = requestId;
+  tab.loading = true;
+  tab.items = [];
+  tab.nextCursor = "";
+  let cursor = "";
+  const visitedCursors = new Set();
+  try {
+    while (true) {
+      const payload = await requestObservabilityPayload(observabilityEndpoint(severity, cursor));
+      if (tab.requestId !== requestId) return null;
+      appendUniqueObservabilityItems(
+        tab,
+        (Array.isArray(payload.items) ? payload.items : []).filter(
+          (item) => item.severity === severity
+        )
+      );
+      tab.nextCursor = payload.next_cursor || "";
+      const found = tab.items.find((item) => item.id === recordId);
+      if (found) return found;
+      if (!tab.nextCursor || visitedCursors.has(tab.nextCursor)) return null;
+      visitedCursors.add(tab.nextCursor);
+      cursor = tab.nextCursor;
+    }
+  } finally {
+    if (tab.requestId === requestId) tab.loading = false;
+  }
+}
+
+async function loadJobThroughRecord(recordId) {
+  const jobs = observabilityTab("jobs");
+  const requestId = Number(jobs.requestId || 0) + 1;
+  jobs.requestId = requestId;
+  jobs.loading = true;
+  jobs.items = [];
+  jobs.nextCursor = "";
+  let cursor = "";
+  const visitedCursors = new Set();
+  try {
+    while (true) {
+      const payload = await requestObservabilityPayload(observabilityEndpoint("jobs", cursor));
+      if (jobs.requestId !== requestId) return null;
+      appendUniqueObservabilityItems(jobs, Array.isArray(payload.items) ? payload.items : []);
+      jobs.nextCursor = payload.next_cursor || "";
+      const found = jobs.items.find((item) => item.id === recordId);
+      if (found) return found;
+      if (!jobs.nextCursor || visitedCursors.has(jobs.nextCursor)) return null;
+      visitedCursors.add(jobs.nextCursor);
+      cursor = jobs.nextCursor;
+    }
+  } finally {
+    if (jobs.requestId === requestId) jobs.loading = false;
+  }
+}
+
+async function walkObservabilityPages(kind, recordId) {
+  if (!recordId || !["incidents", "jobs"].includes(kind)) return null;
+  if (kind === "jobs") {
+    const item = await loadJobThroughRecord(recordId);
+    return item ? { item, tabName: "jobs" } : null;
+  }
+  const discovered = await findIncidentRecord(recordId);
+  if (!discovered) return null;
+  const item = await loadIncidentThroughRecord(discovered.severity, recordId);
+  return item ? { item, tabName: discovered.severity } : null;
+}
+
+function focusObservabilityRecord(recordId) {
+  const card = [...logsOutput.querySelectorAll("[data-observability-id]")].find(
+    (item) => item.dataset.observabilityId === recordId
+  );
+  if (!card) return false;
+  card.classList.add("log-card-highlight");
+  card.focus({ preventScroll: true });
+  card.scrollIntoView({ block: "center", behavior: "smooth" });
+  window.setTimeout(() => card.classList.remove("log-card-highlight"), 2400);
+  return true;
+}
+
+async function openObservabilityRecord(kind, recordId) {
+  const located = await walkObservabilityPages(kind, recordId);
+  if (!located || !state.observability.tabs[located.tabName]) {
+    throw new Error("Nie znaleziono wskazanego rekordu obserwowalnosci.");
+  }
+  resetCommittedLogFilters();
+  await switchLogTab(located.tabName);
+  await waitForLogsPaint();
+  if (!focusObservabilityRecord(recordId)) {
+    throw new Error("Nie mozna pokazac wskazanego rekordu obserwowalnosci.");
+  }
+}
+
+async function loadObservabilityTab(tabName, { append = false, force = false } = {}) {
+  if (tabName === "live") {
+    if (append) {
+      await loadOlderLiveLogs();
+      return;
+    }
+    await seedLiveLogs({ force });
+    startObservabilityStream();
+    return;
+  }
+  const tab = observabilityTab(tabName);
+  if (tab.loading) return;
+  if (force) {
+    tab.items = [];
+    tab.nextCursor = "";
+  }
+  if (!append && tab.items.length) {
+    renderLogs();
+    if (["critical", "error", "warning"].includes(tabName)) {
+      await markSeverityRead(tabName, tab.requestId);
+    }
+    return;
+  }
+  const cursor = append ? tab.nextCursor : "";
+  const endpoint = observabilityEndpoint(tabName, cursor);
+  const requestId = Number(tab.requestId || 0) + 1;
+  tab.requestId = requestId;
+  tab.loading = true;
+  if (state.observability.activeTab === tabName) renderLogs();
+  let rendered = false;
+  try {
+    const payload = await requestObservabilityPayload(endpoint);
+    if (tab.requestId !== requestId) return;
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    if (append) {
+      appendUniqueObservabilityItems(tab, items);
+    } else {
+      tab.items = items;
+    }
+    tab.nextCursor = payload.next_cursor || "";
+    if (state.observability.activeTab === tabName) {
+      tab.loading = false;
+      renderLogs();
+      rendered = true;
+      if (!append && ["critical", "error", "warning"].includes(tabName)) {
+        await markSeverityRead(tabName, requestId);
       }
     }
-    logsOutput.appendChild(category);
+  } finally {
+    if (tab.requestId === requestId) {
+      tab.loading = false;
+      if (!rendered && state.observability.activeTab === tabName) renderLogs();
+    }
   }
 }
 
-async function loadLogs({ markRead = true } = {}) {
-  const payload = await requestJson("/api/logs?limit=400");
-  updateLogAlert(payload.summary || {});
-  renderLogs(payload);
-  if (markRead) {
-    markLogsRead(payload);
-  }
+async function switchLogTab(tabName) {
+  if (!state.observability.tabs[tabName]) return;
+  state.observability.activeTab = tabName;
+  document.querySelectorAll("[data-log-tab]").forEach((button) => {
+    const active = button.dataset.logTab === tabName;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  document.querySelector(".logs-live-controls")?.toggleAttribute("hidden", tabName !== "live");
+  renderLogs();
+  await loadObservabilityTab(tabName);
 }
 
-async function pollLogStatus({ initialize = false } = {}) {
+async function loadLogs({ refresh = false } = {}) {
+  const tabName = state.observability.activeTab;
+  await loadObservabilityTab(tabName, { force: refresh });
+  startObservabilityStream();
+}
+
+async function pollLogStatus() {
   if (!state.isAdmin) {
     updateLogAlert({});
     return;
   }
-  const payload = await requestJson("/api/logs?limit=120");
-  updateLogAlert(payload.summary || {}, { initialize });
+  await requestObservabilityPayload("/api/observability/events?limit=1");
 }
 
 function createPoller(name, intervalMs, callback, options = {}) {
@@ -4482,8 +6227,14 @@ function startBackgroundPollers() {
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
+    if (healthPollTimer) window.clearTimeout(healthPollTimer);
+    healthPollTimer = 0;
+    healthPollGeneration += 1;
+    healthPollController?.abort();
+    healthPollController = null;
     return;
   }
+  pollBackendHealth().catch(() => {});
   state.pollers.forEach((poller) => poller.kick());
   if ([...state.processJobs.values()].some(processJobIsActive)) {
     scheduleProcessJobPoll(0);
@@ -4509,6 +6260,24 @@ function closeLogsClearModal() {
   document.querySelector("#logsClearModal")?.classList.remove("active");
 }
 
+function resetObservabilityLists() {
+  stopObservabilityStream();
+  state.observability.streamSeeded = false;
+  state.observability.streamAfterId = "";
+  state.observability.seedGeneration = Number(state.observability.seedGeneration || 0) + 1;
+  state.observability.seedLoading = false;
+  state.observability.unreadRequestId = Number(state.observability.unreadRequestId || 0) + 1;
+  state.observability.buffer = [];
+  for (const tab of Object.values(state.observability.tabs)) {
+    tab.requestId = Number(tab.requestId || 0) + 1;
+    tab.loading = false;
+    tab.items = [];
+    tab.nextCursor = "";
+    tab.unread = 0;
+  }
+  updateLogAlert({});
+}
+
 async function clearLogs(password) {
   if (!password) {
     return;
@@ -4521,8 +6290,8 @@ async function clearLogs(password) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ password }),
   });
-  renderLogs(payload);
-  markLogsRead(payload);
+  resetObservabilityLists();
+  await loadLogs({ refresh: true });
   if ((payload.clear_errors || []).length) {
     if (logsClearStatus) {
       logsClearStatus.textContent = `Nie wyczyszczono wszystkich logow: ${(payload.clear_errors || []).join(
@@ -5141,7 +6910,7 @@ async function loadBootstrap(options = {}) {
     renderActiveUsersPresence({ enabled: false, users: [] });
   });
   applyTimingDetailsVisibility();
-  pollLogStatus({ initialize: true }).catch(() => {});
+  pollLogStatus().catch(() => {});
   loadRecentProcessJobs().catch(() => {});
   refreshProcessQueue().catch(() => {});
   refreshGithubStatus().catch(() => {});
@@ -8250,8 +10019,12 @@ async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
   const selected = Array.isArray(targets)
     ? targets
     : (schema || []).filter((mapping) => mapping.value_template).map((mapping) => mapping.source);
+  if (form === pimcoreCreateForm) state.pimcoreCreateIntegrationContextId = "";
+  if (form === pimcoreEditForm) state.pimcoreEditIntegrationContextId = "";
   if (!selected.length) return { values: {}, warnings: [], calculated_values: {}, changed: {} };
   const values = Object.fromEntries(new FormData(form).entries());
+  if (form === pimcoreCreateForm) state.pimcoreCreateIntegrations = { sql_profiles: [] };
+  if (form === pimcoreEditForm) state.pimcoreEditIntegrations = { sql_profiles: [] };
   const result = await requestJson("/api/pimcore/render-templates", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -8260,8 +10033,19 @@ async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
       values,
       targets: selected,
       mode: form.dataset.pimcoreMode || "create",
+      object_id:
+        form === pimcoreEditForm ? Number(state.pimcoreEditObjectId || 0) : null,
     }),
   });
+  const integrationContext = result.integrations || { sql_profiles: [] };
+  if (form === pimcoreCreateForm) state.pimcoreCreateIntegrations = integrationContext;
+  if (form === pimcoreEditForm) state.pimcoreEditIntegrations = integrationContext;
+  if (form === pimcoreCreateForm) {
+    state.pimcoreCreateIntegrationContextId = String(result.integration_context_id || "");
+  }
+  if (form === pimcoreEditForm) {
+    state.pimcoreEditIntegrationContextId = String(result.integration_context_id || "");
+  }
   for (const source of selected) {
     const input = form.elements[source];
     if (input && Object.prototype.hasOwnProperty.call(result.values || {}, source)) {
@@ -8711,6 +10495,8 @@ async function checkPimcoreProductStatus(ean) {
 function openPimcoreCreateModal(ean) {
   if (!pimcoreCreateForm || !pimcoreCreateModal) return;
   pimcoreCreateForm.dataset.pimcoreMode = "create";
+  state.pimcoreCreateIntegrations = { sql_profiles: [] };
+  state.pimcoreCreateIntegrationContextId = "";
   const values = Object.fromEntries(
     (state.pimcoreCreateSchema || []).map((mapping) => [
       mapping.source,
@@ -8761,7 +10547,10 @@ async function submitPimcoreRuntimeCreate(event) {
     const payload = await requestJson("/api/pimcore/products", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ values }),
+      body: JSON.stringify({
+        values,
+        integration_context_id: state.pimcoreCreateIntegrationContextId,
+      }),
       timeoutMs: 120000,
     });
     const object = payload.object || {};
@@ -8809,6 +10598,8 @@ async function openPimcoreEditModal() {
   if (pimcoreEditButton) pimcoreEditButton.disabled = true;
   state.pimcoreEditObjectId = 0;
   state.pimcoreEditMarker = "";
+  state.pimcoreEditIntegrations = { sql_profiles: [] };
+  state.pimcoreEditIntegrationContextId = "";
   pimcoreEditForm.textContent = "";
   pimcoreEditObjectInfo.textContent = `ID ${objectId}`;
   pimcoreEditStatus.textContent = "Pobieranie danych Pimcore...";
@@ -8887,6 +10678,8 @@ function closePimcoreEditModal() {
   state.pimcoreEditObjectId = 0;
   state.pimcoreEditMarker = "";
   state.pimcoreEditSchema = [];
+  state.pimcoreEditIntegrations = { sql_profiles: [] };
+  state.pimcoreEditIntegrationContextId = "";
 }
 
 async function submitPimcoreRuntimeEdit(event) {
@@ -8902,7 +10695,11 @@ async function submitPimcoreRuntimeEdit(event) {
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ marker: state.pimcoreEditMarker, values }),
+        body: JSON.stringify({
+          marker: state.pimcoreEditMarker,
+          values,
+          integration_context_id: state.pimcoreEditIntegrationContextId,
+        }),
         timeoutMs: 120000,
       }
     );
@@ -9040,6 +10837,645 @@ function renderSettingsPimcore() {
   settingsOutput.appendChild(form);
 }
 
+function splitEmailRecipients(value) {
+  const recipients = [];
+  const seen = new Set();
+  for (const rawItem of String(value || "").split(",")) {
+    const item = rawItem.trim();
+    const identity = item.toLowerCase();
+    if (!item || seen.has(identity)) continue;
+    seen.add(identity);
+    recipients.push(item);
+  }
+  return recipients;
+}
+
+const MAIL_SEVERITY_RULES = [
+  {
+    severity: "info",
+    label: "Informacje",
+    help:
+      "Dla zwyklych uzytkownikow. Jeden dzienny, kompaktowy raport jest wysylany tylko wtedy, gdy zaszly zmiany. Zawiera EAN oraz informacje o utworzeniu wpisu, zmianie danych PIMcore lub zdjec. Nie zawiera krokow SQL, FTP ani logow technicznych.",
+    enabledName: "email_rule_info_enabled",
+    recipientsName: "email_rule_info_recipients",
+    includeActorName: "email_rule_info_include_actor",
+  },
+  {
+    severity: "warning",
+    label: "Ostrzezenia",
+    help:
+      "Dla uzytkownika i opcjonalnie osoby wykonujacej zadanie. Dotyczy problemow, ktore wymagaja korekty, ale zadanie moze zostac ukonczone czesciowo, np. niedozwolony plik w slocie, brak wymaganego pola lub pominiete zdjecie.",
+    enabledName: "email_rule_warning_enabled",
+    recipientsName: "email_rule_warning_recipients",
+    includeActorName: "email_rule_warning_include_actor",
+  },
+  {
+    severity: "error",
+    label: "Bledy",
+    help:
+      "Dla administracji oraz opcjonalnie osoby wykonujacej zadanie. Dotyczy problemow blokujacych dana operacje, np. Brak mozliwosci aktualizacji PIMcore, blad wymaganego profilu SQL, FTP albo zapisu zdjec.",
+    enabledName: "email_rule_error_enabled",
+    recipientsName: "email_rule_error_recipients",
+    includeActorName: "email_rule_error_include_actor",
+  },
+  {
+    severity: "critical",
+    label: "Bledy krytyczne",
+    help:
+      "Dla administracji. Natychmiastowy alert o awarii wymagajacej reakcji, np. nieobsluzony wyjatek backendu lub frontendu, niedostepny backend albo wygasajacy Client Secret Entra.",
+    enabledName: "email_rule_critical_enabled",
+    recipientsName: "email_rule_critical_recipients",
+    includeActorName: "email_rule_critical_include_actor",
+  },
+];
+
+let openMailHelpPopover = null;
+let mailHelpPopoverSequence = 0;
+
+function closeMailHelpPopover({ restoreFocus = false } = {}) {
+  if (!openMailHelpPopover) return;
+  const { button, popover } = openMailHelpPopover;
+  popover.hidden = true;
+  button.setAttribute("aria-expanded", "false");
+  openMailHelpPopover = null;
+  if (restoreFocus) button.focus();
+}
+
+function createMailHelpPopover(label, message) {
+  const wrapper = document.createElement("span");
+  const button = document.createElement("button");
+  const popover = document.createElement("span");
+  const popoverId = `mail-help-${mailHelpPopoverSequence += 1}`;
+  wrapper.className = "mail-help";
+  button.type = "button";
+  button.className = "mail-help-trigger";
+  button.textContent = "?";
+  button.setAttribute("aria-label", `Pomoc: ${label}`);
+  button.setAttribute("aria-controls", popoverId);
+  button.setAttribute("aria-expanded", "false");
+  popover.id = popoverId;
+  popover.className = "mail-help-popover";
+  popover.hidden = true;
+  popover.setAttribute("role", "tooltip");
+  popover.textContent = message;
+  button.addEventListener("click", () => {
+    const isOpen = openMailHelpPopover?.button === button;
+    closeMailHelpPopover();
+    if (isOpen) return;
+    popover.hidden = false;
+    button.setAttribute("aria-expanded", "true");
+    openMailHelpPopover = { button, popover };
+  });
+  wrapper.append(button, popover);
+  return wrapper;
+}
+
+function mailHelpTitle(label, message, tagName = "span") {
+  const title = document.createElement(tagName);
+  title.className = "mail-help-title";
+  title.append(document.createTextNode(label), createMailHelpPopover(label, message));
+  return title;
+}
+
+function addMailFieldHelp(field, label, message) {
+  const title = mailHelpTitle(label, message);
+  if (field.firstChild) {
+    field.replaceChild(title, field.firstChild);
+  } else {
+    field.appendChild(title);
+  }
+  return field;
+}
+
+function mailRuleCard(definition, rule = {}) {
+  const card = document.createElement("div");
+  card.className = `mail-rule-card mail-rule-${definition.severity}`;
+  card.append(
+    mailHelpTitle(definition.label, definition.help, "h3"),
+    checkField(
+      definition.enabledName,
+      "Wysylaj powiadomienia",
+      Boolean(rule.enabled)
+    ),
+    inputField(
+      definition.recipientsName,
+      "Adresy odbiorcow (oddzielone przecinkami)",
+      Array.isArray(rule.recipients) ? rule.recipients.join(", ") : "",
+      { placeholder: "np. admin@example.com, serwis@example.com" }
+    ),
+    checkField(
+      definition.includeActorName,
+      "Wyslij takze do powiazanego uzytkownika",
+      Boolean(rule.include_actor),
+      "Adres jest pobierany z konta osoby powiazanej ze zdarzeniem."
+    )
+  );
+  return card;
+}
+
+function renderMailTestResult(container, result) {
+  container.textContent = "";
+  container.className = `mail-test-status ${result.ok ? "success-text" : "error-text"}`;
+  const summary = document.createElement("strong");
+  const channel = result.used_channel === "smtp" ? "SMTP" : "Microsoft Entra";
+  summary.textContent = result.ok
+    ? `Wiadomosc wyslana przez ${channel} (${Number(result.elapsed_ms || 0)} ms).`
+    : `Test wysylki nie powiodl sie (${Number(result.elapsed_ms || 0)} ms).`;
+  container.appendChild(summary);
+  const attempts = Array.isArray(result.attempts) ? result.attempts : [];
+  if (attempts.length) {
+    const list = document.createElement("div");
+    list.className = "mail-test-attempts";
+    for (const attempt of attempts) {
+      const row = document.createElement("div");
+      const attemptChannel = attempt.channel === "smtp" ? "SMTP" : "Entra";
+      row.className = `mail-test-attempt mail-test-attempt-${attempt.status === "sent" ? "sent" : "error"}`;
+      row.textContent = attempt.status === "sent"
+        ? `${attemptChannel}: wyslano${Number.isFinite(attempt.elapsed_ms) ? ` (${attempt.elapsed_ms} ms)` : ""}.`
+        : `${attemptChannel}: ${attempt.message || "kanal nie wyslal wiadomosci"}`;
+      list.appendChild(row);
+    }
+    container.appendChild(list);
+  }
+}
+
+function renderMailTestSuiteResult(container, result) {
+  container.textContent = "";
+  container.className = `mail-test-status ${result.ok ? "success-text" : "error-text"}`;
+  const summary = document.createElement("strong");
+  const scenarios = Array.isArray(result.scenarios) ? result.scenarios : [];
+  const finished = scenarios.filter((item) =>
+    ["sent", "fallback", "skipped"].includes(item?.status)
+  ).length;
+  summary.textContent = result.ok
+    ? `Przetestowano ${finished}/${scenarios.length} typow powiadomien (${Number(result.elapsed_ms || 0)} ms).`
+    : `Test zestawu zakonczyl sie problemem (${finished}/${scenarios.length} poprawnych, ${Number(result.elapsed_ms || 0)} ms).`;
+  container.appendChild(summary);
+  const labels = {
+    information: "Informacja",
+    warning: "Ostrzezenie",
+    error: "Blad",
+    critical: "Blad krytyczny",
+    entra_secret_expiry: "Wygasanie Client Secret Entra",
+  };
+  const statuses = {
+    sent: "wyslano",
+    fallback: "wyslano fallbackiem",
+    skipped: "pominieto — brak aktywnych odbiorcow",
+    error: "blad wysylki",
+  };
+  const list = document.createElement("div");
+  list.className = "mail-test-attempts";
+  for (const scenario of scenarios) {
+    const row = document.createElement("div");
+    const status = statuses[scenario?.status] || "blad wysylki";
+    const channel = scenario?.used_channel === "smtp" ? "SMTP" : "Entra";
+    const recipients = Number.isFinite(scenario?.recipient_count)
+      ? `, odbiorcow: ${scenario.recipient_count}`
+      : "";
+    row.className = `mail-test-attempt mail-test-attempt-${["sent", "fallback", "skipped"].includes(scenario?.status) ? "sent" : "error"}`;
+    row.textContent = `${labels[scenario?.kind] || "Powiadomienie"}: ${status} (${channel}${recipients}).`;
+    list.appendChild(row);
+  }
+  container.appendChild(list);
+}
+
+function entraExpiryDateTime(value) {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) {
+    return { text: "Brak danych", title: "" };
+  }
+  return {
+    text: date.toLocaleString(),
+    title: date.toISOString(),
+  };
+}
+
+function entraExpiryRemainingDays(value) {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) return null;
+  const milliseconds = date.getTime() - Date.now();
+  const day = 24 * 60 * 60 * 1000;
+  return milliseconds >= 0 ? Math.ceil(milliseconds / day) : Math.floor(milliseconds / day);
+}
+
+function entraExpiryMetadata(label, value, title = "") {
+  const row = document.createElement("div");
+  const term = document.createElement("dt");
+  const description = document.createElement("dd");
+  row.className = "entra-expiry-meta-row";
+  term.textContent = label;
+  description.textContent = value;
+  if (title) description.title = title;
+  row.append(term, description);
+  return row;
+}
+
+function renderEntraExpiryStatus(container, status = {}) {
+  container.textContent = "";
+  const panel = document.createElement("section");
+  const heading = document.createElement("strong");
+  const details = document.createElement("dl");
+  const source = String(status.source || "saved");
+  const expiresAt = entraExpiryDateTime(status.expires_at);
+  const checkedAt = entraExpiryDateTime(status.last_checked_at);
+  const successfulAt = entraExpiryDateTime(status.last_success_at);
+  const remainingDays = entraExpiryRemainingDays(status.expires_at);
+  const permissionRequired = status.error_code === "permission_required";
+  const expirySeverity = remainingDays === null
+    ? "info"
+    : remainingDays <= 3 ? "critical" : remainingDays <= 14 ? "warning" : "info";
+  let summary = "Nie ma jeszcze zapisanego statusu terminu waznosci Client Secret.";
+
+  panel.className = "entra-expiry-panel";
+  details.className = "entra-expiry-metadata";
+  if (permissionRequired) {
+    summary = "Nadaj aplikacji uprawnienie Application.Read.All i zatwierdz admin consent, aby odczytac termin waznosci.";
+  } else if (status.status === "ok" && remainingDays !== null) {
+    summary = remainingDays < 0
+      ? "Client Secret wygasl. Zaktualizuj konfiguracje Microsoft Entra."
+      : `Client Secret wygasa za ${remainingDays} ${remainingDays === 1 ? "dzien" : "dni"}.`;
+  } else if (status.status === "unavailable") {
+    summary = "Nie mozna teraz odczytac statusu Microsoft Entra. Sprobuj ponownie pozniej.";
+  }
+  panel.classList.add(`entra-expiry-${expirySeverity}`);
+  if (permissionRequired) panel.classList.add("entra-expiry-permission-required");
+  if (permissionRequired || status.status === "unavailable") panel.classList.add("entra-expiry-warning");
+  heading.textContent = summary;
+  details.append(
+    entraExpiryMetadata("Aplikacja", String(status.application_name || "Brak danych")),
+    entraExpiryMetadata("Credential", String(status.credential_name || "Brak danych")),
+    entraExpiryMetadata("Wygasa", expiresAt.text, expiresAt.title),
+    entraExpiryMetadata(
+      "Pozostalo",
+      remainingDays === null ? "Brak danych" : remainingDays < 0 ? `${Math.abs(remainingDays)} dni po terminie` : `${remainingDays} dni`
+    ),
+    entraExpiryMetadata("Ostatnia kontrola", checkedAt.text, checkedAt.title),
+    entraExpiryMetadata("Ostatni sukces", successfulAt.text, successfulAt.title),
+    entraExpiryMetadata(
+      "W cache",
+      source === "microsoft_graph" ? "Nie - odswiezono teraz" : "Tak - zapisany bezpieczny stan"
+    )
+  );
+  panel.append(heading, details);
+  container.appendChild(panel);
+}
+
+function renderEntraExpiryRefreshFailure(container) {
+  const existing = container.querySelector(".entra-expiry-refresh-error");
+  if (existing) existing.remove();
+  const message = document.createElement("p");
+  message.className = "entra-expiry-refresh-error";
+  message.setAttribute("role", "alert");
+  message.textContent = "Nie udalo sie odswiezyc statusu. Wyswietlono poprzednia bezpieczna wartosc.";
+  container.appendChild(message);
+}
+
+async function loadCachedEntraExpiryStatus(container) {
+  try {
+    const status = await requestJson("/api/settings/email/entra-expiry");
+    renderEntraExpiryStatus(container, status);
+  } catch (_error) {
+    renderEntraExpiryStatus(container, { status: "unavailable" });
+  }
+}
+
+function renderSettingsMail() {
+  const email = state.settings.email_notifications || {};
+  const form = document.createElement("form");
+  const channelGrid = document.createElement("div");
+  const entraCard = document.createElement("section");
+  const smtpCard = document.createElement("section");
+  const entraTitle = document.createElement("h3");
+  const smtpTitle = document.createElement("h3");
+  const smtpWarning = document.createElement("p");
+  const entraExpiryStatus = document.createElement("div");
+  const entraExpiryRefreshButton = document.createElement("button");
+  const entraTenantId = addMailFieldHelp(
+    inputField("email_entra_tenant_id", "Tenant ID", email.entra?.tenant_id || ""),
+    "Tenant ID",
+    "Pozycja: Identyfikator katalogu (dzierzawy) w widoku Przeglad rejestracji aplikacji Microsoft Entra. Nie jest to Identyfikator obiektu."
+  );
+  const entraClientId = addMailFieldHelp(
+    inputField("email_entra_client_id", "Client ID", email.entra?.client_id || ""),
+    "Client ID",
+    "Pozycja: Identyfikator aplikacji (klienta) w widoku Przeglad tej rejestracji aplikacji Microsoft Entra. Nie jest to Identyfikator obiektu."
+  );
+  const entraClientSecret = addMailFieldHelp(
+    credentialField(
+      "email_entra_client_secret",
+      "Client Secret",
+      Boolean(email.entra?.client_secret_set),
+      { type: "password" }
+    ),
+    "Client Secret",
+    "Pozycja: Wartosc w Certyfikaty i wpisy tajne -> Wpisy tajne klienta dla utworzonego sekretu. Nie wpisuj Identyfikatora wpisu tajnego ani Identyfikatora obiektu. Wartosc jest widoczna w Entra tylko bezposrednio po utworzeniu sekretu."
+  );
+  const entraFromAddress = addMailFieldHelp(
+    inputField("email_entra_from_address", "Adres Od", email.entra?.from_address || "", {
+      type: "email",
+      placeholder: "powiadomienia@example.com",
+    }),
+    "Adres Od",
+    "Adres skrzynki Microsoft 365, z ktorej odbiorcy zobacza wiadomosci. Aplikacja Entra musi miec prawo wysylania z tej skrzynki."
+  );
+  const smtpSecurity = selectField(
+    "email_smtp_security",
+    "Szyfrowanie polaczenia",
+    email.smtp?.security || "starttls",
+    [
+      ["starttls", "STARTTLS"],
+      ["tls", "TLS od poczatku polaczenia"],
+      ["none", "Brak szyfrowania"],
+    ]
+  );
+  addMailFieldHelp(
+    smtpSecurity,
+    "Szyfrowanie polaczenia",
+    "Sposob zabezpieczenia polaczenia z serwerem SMTP. Wybierz STARTTLS lub TLS, gdy dostawca je udostepnia."
+  );
+  const smtpSecuritySelect = smtpSecurity.querySelector("select");
+  const updateSmtpWarning = () => {
+    const security = smtpSecuritySelect.value;
+    smtpWarning.hidden = security !== "none";
+  };
+  form.className = "settings-form mail-settings-form";
+  channelGrid.className = "mail-channel-grid wide-field";
+  entraCard.className = "mail-channel-card";
+  smtpCard.className = "mail-channel-card";
+  entraTitle.textContent = "Microsoft Entra / Graph";
+  smtpTitle.textContent = "SMTP (dowolny dostawca)";
+  smtpWarning.className = "mail-security-warning";
+  smtpWarning.setAttribute("role", "alert");
+  smtpWarning.textContent =
+    "Uwaga: tryb bez TLS. Nie szyfruje polaczenia ani danych logowania. Uzywaj go tylko w zaufanej sieci.";
+  entraExpiryStatus.className = "entra-expiry-status";
+  entraExpiryStatus.setAttribute("role", "status");
+  entraExpiryStatus.setAttribute("aria-live", "polite");
+  entraExpiryStatus.textContent = "Pobieranie zapisanego statusu Client Secret...";
+  entraExpiryRefreshButton.type = "button";
+  entraExpiryRefreshButton.className = "secondary-button entra-expiry-refresh";
+  entraExpiryRefreshButton.textContent = "Sprawdz teraz";
+  entraExpiryRefreshButton.addEventListener("click", async () => {
+    entraExpiryRefreshButton.disabled = true;
+    try {
+      const status = await requestJson("/api/settings/email/entra-expiry/refresh", {
+        method: "POST",
+      });
+      renderEntraExpiryStatus(entraExpiryStatus, status);
+    } catch (_error) {
+      renderEntraExpiryRefreshFailure(entraExpiryStatus);
+    } finally {
+      entraExpiryRefreshButton.disabled = false;
+    }
+  });
+  smtpSecuritySelect.addEventListener("change", updateSmtpWarning);
+  updateSmtpWarning();
+  entraCard.append(
+    entraTitle,
+    entraExpiryStatus,
+    entraExpiryRefreshButton,
+    entraTenantId,
+    entraClientId,
+    entraClientSecret,
+    entraFromAddress
+  );
+  loadCachedEntraExpiryStatus(entraExpiryStatus);
+  smtpCard.append(
+    smtpTitle,
+    addMailFieldHelp(
+      inputField("email_smtp_host", "Host SMTP", email.smtp?.host || ""),
+      "Host SMTP",
+      "Adres serwera SMTP udostepniony przez dostawce poczty, np. smtp.gmail.com."
+    ),
+    addMailFieldHelp(
+      inputField("email_smtp_port", "Port", email.smtp?.port || 587, {
+        type: "number",
+        min: 1,
+        max: 65535,
+      }),
+      "Port",
+      "Port serwera SMTP wskazany przez dostawce poczty. Dla STARTTLS najczesciej jest to 587."
+    ),
+    smtpSecurity,
+    smtpWarning,
+    addMailFieldHelp(
+      inputField("email_smtp_username", "Login", email.smtp?.username || ""),
+      "Login",
+      "Login wymagany przez serwer SMTP; u wielu dostawcow jest to pelny adres e-mail skrzynki."
+    ),
+    addMailFieldHelp(
+      credentialField(
+        "email_smtp_password",
+        "Haslo",
+        Boolean(email.smtp?.password_set),
+        { type: "password" }
+      ),
+      "Haslo",
+      "Haslo SMTP lub haslo aplikacji wygenerowane przez dostawce poczty. Nie jest to haslo do panelu PicOrgFTP-SQL."
+    ),
+    addMailFieldHelp(
+      inputField("email_smtp_from_address", "Adres Od", email.smtp?.from_address || "", {
+        type: "email",
+        placeholder: "powiadomienia@example.com",
+      }),
+      "Adres Od",
+      "Adres skrzynki SMTP, z ktorej odbiorcy zobacza wiadomosci. Zwykle musi odpowiadac skonfigurowanemu loginowi."
+    ),
+    addMailFieldHelp(
+      inputField("email_smtp_from_name", "Nazwa Od", email.smtp?.from_name || "PicOrgFTP-SQL"),
+      "Nazwa Od",
+      "Czytelna nazwa nadawcy wyswietlana odbiorcom obok adresu skrzynki."
+    )
+  );
+  channelGrid.append(entraCard, smtpCard);
+
+  const rules = email.rules || {};
+  const dailySummaryTime = addMailFieldHelp(
+    inputField(
+      "daily_summary_time",
+      "Godzina dziennego podsumowania",
+      email.daily_summary_time || "16:00",
+      { type: "time" }
+    ),
+    "Godzina dziennego podsumowania",
+    "Godzina wyslania jednego podsumowania zmian dla odbiorcow Informacji. Czas Europe/Warsaw. Raport obejmuje zmiany od poprzedniego poprawnie wyslanego raportu."
+  );
+  const rulesGrid = document.createElement("div");
+  rulesGrid.className = "mail-rule-grid wide-field";
+  rulesGrid.append(
+    ...MAIL_SEVERITY_RULES.map((definition) =>
+      mailRuleCard(definition, rules[definition.severity])
+    )
+  );
+
+  const testRecipient = inputField(
+    "email_test_recipient",
+    "Adres odbiorcy testu",
+    "",
+    { type: "email", placeholder: "admin@example.com" }
+  );
+  const testChannel = selectField("email_test_channel", "Kanal testu", "primary", [
+    ["primary", "Kanal podstawowy"],
+    ["entra", "Microsoft Entra"],
+    ["smtp", "SMTP"],
+  ]);
+  const testFallback = checkField(
+    "email_test_use_fallback",
+    "Uzyj fallbacku, gdy kanal testowy zawiedzie",
+    Boolean(email.fallback_enabled)
+  );
+  const testButton = document.createElement("button");
+  const testSuiteButton = document.createElement("button");
+  const testStatus = document.createElement("div");
+  const testSuiteStatus = document.createElement("div");
+  testButton.type = "button";
+  testButton.textContent = "Wyslij wiadomosc testowa";
+  testSuiteButton.type = "button";
+  testSuiteButton.textContent = "Testuj wszystkie typy powiadomien";
+  testStatus.className = "mail-test-status";
+  testSuiteStatus.className = "mail-test-status";
+  testStatus.setAttribute("role", "status");
+  testStatus.setAttribute("aria-live", "polite");
+  testSuiteStatus.setAttribute("role", "status");
+  testSuiteStatus.setAttribute("aria-live", "polite");
+  testButton.addEventListener("click", async () => {
+    const recipient = testRecipient.querySelector("input").value.trim();
+    if (!recipient) {
+      testStatus.className = "mail-test-status error-text";
+      testStatus.textContent = "Podaj adres odbiorcy testu.";
+      return;
+    }
+    testButton.disabled = true;
+    testStatus.className = "mail-test-status";
+    testStatus.textContent = "Wysylanie testu...";
+    try {
+      const result = await requestJson("/api/settings/email/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recipient,
+          channel: testChannel.querySelector("select").value,
+          use_fallback: testFallback.querySelector("input").checked,
+        }),
+        timeoutMs: 60000,
+      });
+      renderMailTestResult(testStatus, result);
+    } catch (error) {
+      const result = error.payload || error.detail;
+      if (result && typeof result === "object" && Array.isArray(result.attempts)) {
+        renderMailTestResult(testStatus, result);
+      } else {
+        testStatus.className = "mail-test-status error-text";
+        testStatus.textContent = "Test wysylki nie powiodl sie. Sprawdz konfiguracje kanalu.";
+      }
+    } finally {
+      testButton.disabled = false;
+    }
+  });
+  testSuiteButton.addEventListener("click", async () => {
+    testSuiteButton.disabled = true;
+    testSuiteStatus.className = "mail-test-status";
+    testSuiteStatus.textContent = "Wysylanie pieciu testowych powiadomien...";
+    try {
+      const result = await requestJson("/api/settings/email/test-suite", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          channel: testChannel.querySelector("select").value,
+          use_fallback: testFallback.querySelector("input").checked,
+        }),
+        timeoutMs: 180000,
+      });
+      renderMailTestSuiteResult(testSuiteStatus, result);
+    } catch (error) {
+      const result = error.payload || error.detail;
+      if (result && typeof result === "object" && Array.isArray(result.scenarios)) {
+        renderMailTestSuiteResult(testSuiteStatus, result);
+      } else {
+        testSuiteStatus.className = "mail-test-status error-text";
+        testSuiteStatus.textContent = "Test zestawu nie powiodl sie. Sprawdz konfiguracje kanalow.";
+      }
+    } finally {
+      testSuiteButton.disabled = false;
+    }
+  });
+
+  form.append(
+    settingsFieldGroup(
+      "Sposob wysylki",
+      selectField(
+        "email_primary_channel",
+        "Kanal podstawowy",
+        email.primary_channel || "entra",
+        [
+          ["entra", "Microsoft Entra"],
+          ["smtp", "SMTP"],
+        ]
+      ),
+      checkField(
+        "email_fallback_enabled",
+        "Wlacz kanal zapasowy",
+        Boolean(email.fallback_enabled),
+        "Gdy kanal podstawowy zawiedzie, aplikacja wykona jedna probe drugim kanalem."
+      ),
+      channelGrid
+    ),
+    settingsFieldGroup(
+      "Reguly powiadomien",
+      rulesGrid,
+      settingsNote("Znaki zapytania wyjasniaja, kto otrzymuje dany typ wiadomosci i kiedy jest wysylany.")
+    ),
+    settingsFieldGroup(
+      "Dzienne podsumowanie informacji",
+      dailySummaryTime,
+      settingsNote("Jedna wiadomosc tylko wtedy, gdy wystapily zmiany produktow. Strefa czasowa: Europe/Warsaw.")
+    ),
+    settingsFieldGroup(
+      "Wiadomosc testowa",
+      testRecipient,
+      testChannel,
+      testFallback,
+      actionRow(testButton, testSuiteButton),
+      testStatus,
+      testSuiteStatus
+    )
+  );
+  settingsSaveButton(form, (data) => ({
+    email_notifications: {
+      primary_channel: data.get("email_primary_channel"),
+      fallback_enabled: data.has("email_fallback_enabled"),
+      daily_summary_time: data.get("daily_summary_time"),
+      entra: {
+        tenant_id: data.get("email_entra_tenant_id"),
+        client_id: data.get("email_entra_client_id"),
+        client_secret: data.get("email_entra_client_secret"),
+        from_address: data.get("email_entra_from_address"),
+      },
+      smtp: {
+        host: data.get("email_smtp_host"),
+        port: data.get("email_smtp_port"),
+        security: data.get("email_smtp_security"),
+        username: data.get("email_smtp_username"),
+        password: data.get("email_smtp_password"),
+        from_address: data.get("email_smtp_from_address"),
+        from_name: data.get("email_smtp_from_name"),
+      },
+      rules: Object.fromEntries(
+        MAIL_SEVERITY_RULES.map((definition) => [
+          definition.severity,
+          {
+            enabled: data.has(definition.enabledName),
+            recipients: splitEmailRecipients(data.get(definition.recipientsName)),
+            include_actor: data.has(definition.includeActorName),
+          },
+        ])
+      ),
+    },
+  }));
+  settingsOutput.appendChild(form);
+}
+
 function renderSettingsSlots() {
   ensureSqlColumnsDatalist();
   const form = document.createElement("form");
@@ -9124,11 +11560,16 @@ function renderSettingsUsers() {
   const addForm = document.createElement("form");
   addForm.className = "user-add-form wide-field";
   const input = document.createElement("input");
+  const emailInput = document.createElement("input");
   const password = document.createElement("input");
   const role = document.createElement("select");
   const button = document.createElement("button");
   input.name = "username";
   input.placeholder = "Nowy uzytkownik";
+  emailInput.name = "email";
+  emailInput.type = "email";
+  emailInput.autocomplete = "email";
+  emailInput.placeholder = "E-mail opcjonalnie";
   password.name = "password";
   password.type = "password";
   password.placeholder = "Haslo";
@@ -9139,18 +11580,24 @@ function renderSettingsUsers() {
     role.appendChild(option);
   }
   button.textContent = "Dodaj";
-  addForm.append(input, password, role, button);
+  addForm.append(input, emailInput, password, role, button);
   addForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const payload = await requestJson("/api/users", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: input.value, password: password.value, role: role.value }),
+      body: JSON.stringify({
+        username: input.value,
+        email: emailInput.value,
+        password: password.value,
+        role: role.value,
+      }),
     });
     state.settings.users = payload.users;
     state.currentUser = payload.current_user || state.currentUser;
     updateAdminUi();
     input.value = "";
+    emailInput.value = "";
     password.value = "";
     renderSettings();
   });
@@ -9169,6 +11616,7 @@ function renderSettingsUsers() {
     const enabledText = document.createElement("div");
     const enabledTitle = document.createElement("strong");
     const enabledDescription = document.createElement("small");
+    const userEmailInput = document.createElement("input");
     const passwordInput = document.createElement("input");
     const actions = document.createElement("div");
     const save = document.createElement("button");
@@ -9222,6 +11670,11 @@ function renderSettingsUsers() {
     enabledText.append(enabledTitle, enabledDescription);
     enabledWrap.className = "check-row compact-check";
     enabledWrap.append(enabled, enabledText);
+    userEmailInput.name = "email";
+    userEmailInput.type = "email";
+    userEmailInput.autocomplete = "email";
+    userEmailInput.placeholder = "E-mail opcjonalnie";
+    userEmailInput.value = String(user.email || "");
     passwordInput.type = "password";
     passwordInput.placeholder = user.has_password ? "Nowe haslo opcjonalnie" : "Ustaw haslo";
     save.type = "button";
@@ -9235,7 +11688,11 @@ function renderSettingsUsers() {
     revokeExtension.textContent = "Uniewaznij token";
     actions.className = "user-actions";
     save.addEventListener("click", async () => {
-      const payload = { enabled: enabled.checked, role: role.value };
+      const payload = {
+        enabled: enabled.checked,
+        role: role.value,
+        email: userEmailInput.value,
+      };
       if (passwordInput.value) {
         payload.password = passwordInput.value;
       }
@@ -9291,7 +11748,7 @@ function renderSettingsUsers() {
       renderSettings();
     });
     actions.append(save, unlock, revokeSessions, revokeExtension);
-    row.append(name, role, passwordInput, enabledWrap, actions);
+    row.append(name, role, userEmailInput, passwordInput, enabledWrap, actions);
     list.appendChild(row);
   }
   wrapper.append(
@@ -9318,6 +11775,7 @@ function renderSettings() {
   if (state.activeSettingsTab === "ftp") renderSettingsFtp();
   if (state.activeSettingsTab === "sql") renderSettingsSql();
   if (state.activeSettingsTab === "pimcore") renderSettingsPimcore();
+  if (state.activeSettingsTab === "mail") renderSettingsMail();
   if (state.activeSettingsTab === "slots") renderSettingsSlots();
   if (state.activeSettingsTab === "users") renderSettingsUsers();
 }
@@ -9366,6 +11824,11 @@ document.querySelectorAll("[data-close-history-timing]").forEach((button) => {
     document.querySelector("#historyTimingModal")?.classList.remove("active");
   });
 });
+
+document.querySelectorAll("[data-close-history-changes]").forEach((button) => {
+  button.addEventListener("click", closeHistoryChangesModal);
+});
+historyChangesModal?.addEventListener("keydown", trapHistoryChangesFocus);
 
 document.querySelectorAll("[data-close-backup-history]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -9541,6 +12004,9 @@ activeUsersMoreButton?.addEventListener("click", (event) => {
 });
 
 document.addEventListener("click", (event) => {
+  if (!event.target.closest(".mail-help")) {
+    closeMailHelpPopover();
+  }
   if (!activeUsersPresence || activeUsersPresence.contains(event.target)) {
     return;
   }
@@ -9549,6 +12015,7 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
+    closeMailHelpPopover({ restoreFocus: true });
     toggleActiveUsersPopover(false);
   }
 });
@@ -9597,10 +12064,74 @@ historyNextButton?.addEventListener("click", () => {
   loadHistory({ page }).catch(showHistoryLoadError);
 });
 
-logsRefreshButton?.addEventListener("click", () => {
-  loadLogs().catch((error) => {
-    logsOutput.textContent = error.message;
+document.querySelectorAll("[data-log-tab]").forEach((button) => {
+  button.addEventListener("click", () => {
+    switchLogTab(button.dataset.logTab || "live").catch(showLogsError);
   });
+});
+
+logsFilters?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const filtersChanged = commitLogFilters();
+  renderLogs();
+  const tabName = state.observability.activeTab;
+  if (filtersChanged && tabName === "live") {
+    seedLiveLogs({ force: true }).catch(showLogsError);
+  }
+  if (["critical", "error", "warning"].includes(tabName)) {
+    markSeverityRead(tabName, observabilityTab(tabName).requestId).catch(showLogsError);
+  }
+});
+
+logsFilters?.addEventListener("reset", () => {
+  const filtersChanged = resetCommittedLogFilters();
+  renderLogs();
+  const tabName = state.observability.activeTab;
+  if (filtersChanged && tabName === "live") {
+    seedLiveLogs({ force: true }).catch(showLogsError);
+  }
+  if (["critical", "error", "warning"].includes(tabName)) {
+    markSeverityRead(tabName, observabilityTab(tabName).requestId).catch(showLogsError);
+  }
+});
+
+logsPauseButton?.addEventListener("click", () => {
+  state.observability.paused = !state.observability.paused;
+  logsPauseButton.textContent = state.observability.paused ? "Wznow" : "Wstrzymaj";
+  if (state.observability.paused) {
+    if (logsStreamStatus) logsStreamStatus.textContent = "Wstrzymano";
+    return;
+  }
+  const buffered = state.observability.buffer.splice(0);
+  const live = observabilityTab("live");
+  live.items = mergeLiveItems([...live.items, ...buffered], live.archiveSince);
+  if (logsStreamStatus) {
+    logsStreamStatus.textContent = state.observability.streamConnected
+      ? "Polaczono"
+      : state.observability.stream
+        ? "Laczenie..."
+        : "Rozlaczono";
+  }
+  renderLogs();
+});
+
+if (logsAutoscrollToggle) {
+  logsAutoscrollToggle.checked = state.observability.autoscroll;
+  logsAutoscrollToggle.addEventListener("change", () => {
+    state.observability.autoscroll = logsAutoscrollToggle.checked;
+    localStorage.setItem(LOG_AUTOSCROLL_KEY, String(state.observability.autoscroll));
+    if (state.observability.autoscroll && state.observability.activeTab === "live") {
+      logsOutput.scrollTop = logsOutput.scrollHeight;
+    }
+  });
+}
+
+logsLoadMoreButton?.addEventListener("click", () => {
+  loadObservabilityTab(state.observability.activeTab, { append: true }).catch(showLogsError);
+});
+
+logsRefreshButton?.addEventListener("click", () => {
+  loadLogs({ refresh: true }).catch(showLogsError);
 });
 
 logsClearButton?.addEventListener("click", () => {
@@ -9915,3 +12446,4 @@ setupPageExitGuards();
 applyTheme();
 loadBootstrap().catch(showError);
 startBackgroundPollers();
+pollBackendHealth().catch(() => {});
