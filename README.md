@@ -4,6 +4,20 @@ Organizator zdjęć produktowych dla pracy lokalnej, FTP, SQL oraz panelu webowe
 
 [![Build Windows EXE](https://github.com/NefilimPL/PicOrgFTP-SQL/actions/workflows/build-exe.yml/badge.svg?branch=main)](https://github.com/NefilimPL/PicOrgFTP-SQL/actions/workflows/build-exe.yml)
 [![CI](https://github.com/NefilimPL/PicOrgFTP-SQL/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/NefilimPL/PicOrgFTP-SQL/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/NefilimPL/PicOrgFTP-SQL?display_name=tag)](https://github.com/NefilimPL/PicOrgFTP-SQL/releases/latest)
+[![Release date](https://img.shields.io/github/release-date/NefilimPL/PicOrgFTP-SQL)](https://github.com/NefilimPL/PicOrgFTP-SQL/releases/latest)
+[![License](https://img.shields.io/github/license/NefilimPL/PicOrgFTP-SQL)](LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/NefilimPL/PicOrgFTP-SQL)](https://github.com/NefilimPL/PicOrgFTP-SQL/commits/main)
+[![Repository size](https://img.shields.io/github/repo-size/NefilimPL/PicOrgFTP-SQL)](https://github.com/NefilimPL/PicOrgFTP-SQL)
+[![Open issues](https://img.shields.io/github/issues/NefilimPL/PicOrgFTP-SQL)](https://github.com/NefilimPL/PicOrgFTP-SQL/issues)
+[![Top language](https://img.shields.io/github/languages/top/NefilimPL/PicOrgFTP-SQL)](https://github.com/NefilimPL/PicOrgFTP-SQL)
+[![CI Python](https://img.shields.io/badge/CI%20Python-3.11-3776AB?logo=python&logoColor=white)](https://github.com/NefilimPL/PicOrgFTP-SQL/blob/main/.github/workflows/ci.yml)
+[![EXE build Python](https://img.shields.io/badge/EXE%20build%20Python-3.11%E2%80%933.14-3776AB?logo=python&logoColor=white)](https://github.com/NefilimPL/PicOrgFTP-SQL/blob/main/.github/workflows/build-exe.yml)
+[![Build requirements](https://img.shields.io/badge/build%20requirements-requirements--build.txt-3776AB?logo=python&logoColor=white)](requirements-build.txt)
+[![PyInstaller](https://img.shields.io/badge/PyInstaller-%3E%3D%206.17-FF6F00?logo=python&logoColor=white)](requirements-build.txt)
+[![PySide6](https://img.shields.io/badge/PySide6-desktop%20UI-41CD52?logo=qt&logoColor=white)](requirements-qt.txt)
+[![FastAPI](https://img.shields.io/badge/FastAPI-LAN%20web-009688?logo=fastapi&logoColor=white)](requirements-web.txt)
+[![pytest](https://img.shields.io/badge/pytest-test%20suite-0A9EDC?logo=pytest&logoColor=white)](https://github.com/NefilimPL/PicOrgFTP-SQL/actions/workflows/ci.yml)
 
 <img width="1920" height="1040" alt="PicOrgFTP-SQL desktop" src="https://github.com/user-attachments/assets/8d2f9c31-1103-4368-bea2-7b6899d92761" />
 

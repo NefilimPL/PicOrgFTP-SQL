@@ -15,6 +15,13 @@ local_file_index_*.json.tmp
 web_users.json
 web_history.json
 web_active_clients.json
+# Local SQLite databases and SQLite sidecar files
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
 web_ftp_cache/
 web_upload_cache/
 temp_backup/
