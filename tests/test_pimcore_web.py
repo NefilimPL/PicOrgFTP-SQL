@@ -818,6 +818,56 @@ def test_update_adapter_emits_failure_diagnostics_for_manual_update_error():
     )
 
 
+def test_create_adapter_failed_event_without_exception_has_no_diagnostics():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update({"enabled": True, "setup_complete": True})
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(
+            web_data,
+            "create_product",
+            side_effect=RuntimeError("Pimcore connection lost"),
+        ),
+        patch.object(web_data, "emit_event") as emit_event,
+        pytest.raises(RuntimeError, match="Pimcore connection lost"),
+    ):
+        web_data.create_pimcore_product({"EAN": "5904804578169"}, "operator")
+
+    event = next(
+        call.kwargs
+        for call in emit_event.call_args_list
+        if call.kwargs["event_type"] == "integration.pimcore.completed"
+    )
+    assert "exception" not in event
+    assert "recommended_action" not in event
+
+
+def test_update_adapter_conflict_event_has_no_failure_diagnostics():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update({"enabled": True, "setup_complete": True})
+    error = PimcoreConflictError("Obiekt zostal zmieniony.", 91, "100", "101")
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "update_product", side_effect=error),
+        patch.object(web_data, "emit_event") as emit_event,
+        pytest.raises(PimcoreConflictError),
+    ):
+        web_data.update_pimcore_product(
+            91,
+            "100",
+            {"EAN": "5904804578169"},
+            "operator",
+        )
+
+    event = next(
+        call.kwargs
+        for call in emit_event.call_args_list
+        if call.kwargs["event_type"] == "integration.pimcore.completed"
+    )
+    assert "exception" not in event
+    assert "recommended_action" not in event
+
+
 def test_create_adapter_uses_manual_create_operation_kind():
     cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
     cfg["pimcore"].update({"enabled": True, "setup_complete": True})

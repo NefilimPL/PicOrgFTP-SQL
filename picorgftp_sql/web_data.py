@@ -2394,7 +2394,7 @@ def _emit_pimcore_integration_event(
     fields = change_set.get("fields") if isinstance(change_set.get("fields"), list) else []
     result_object = result.get("object") if isinstance(result.get("object"), dict) else {}
     event_kwargs: dict[str, object] = {}
-    if status == "failed":
+    if status == "failed" and failure is not None:
         event_kwargs = {
             "exception": failure,
             "recommended_action": (
