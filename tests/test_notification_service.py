@@ -360,12 +360,34 @@ def test_incident_message_includes_bounded_redacted_occurrence_context() -> None
 
 
 def test_error_exception_is_sent_as_bounded_redacted_text_attachment() -> None:
-    password_sentinel = "PASSWORD_SENTINEL"
-    key_id_sentinel = "KEY_ID_SENTINEL"
+    secret_sentinels = {
+        "authorization": "TOKEN_SENTINEL",
+        "uri_password": "URI_PASSWORD_SENTINEL",
+        "access_token": "ACCESS_TOKEN_SENTINEL",
+        "refresh_token": "REFRESH_TOKEN_SENTINEL",
+        "api_key": "API_KEY_SENTINEL",
+        "client_secret": "CLIENT_SECRET_SENTINEL",
+        "credential_key_id": "CREDENTIAL_KEY_ID_SENTINEL",
+        "credential-key-id": "CREDENTIAL_DASH_KEY_ID_SENTINEL",
+        "credential key id": "CREDENTIAL_SPACE_KEY_ID_SENTINEL",
+        "key_id": "KEY_ID_SENTINEL",
+        "key-dash-id": "KEY_DASH_ID_SENTINEL",
+        "key space id": "KEY_SPACE_ID_SENTINEL",
+    }
     traceback_text = (
         "Traceback (most recent call last):\n"
-        f"password={password_sentinel}\n"
-        f"key_id={key_id_sentinel}\n"
+        f"Authorization: Bearer {secret_sentinels['authorization']}\n"
+        f"ftp://user:{secret_sentinels['uri_password']}@files.example.test/path\n"
+        f"access_token={secret_sentinels['access_token']}\n"
+        f"refresh_token={secret_sentinels['refresh_token']}\n"
+        f"api_key={secret_sentinels['api_key']}\n"
+        f"Client Secret={secret_sentinels['client_secret']}\n"
+        f"credential_key_id={secret_sentinels['credential_key_id']}\n"
+        f"credential-key-id={secret_sentinels['credential-key-id']}\n"
+        f"credential key id={secret_sentinels['credential key id']}\n"
+        f"key_id={secret_sentinels['key_id']}\n"
+        f"key-id={secret_sentinels['key-dash-id']}\n"
+        f"key id={secret_sentinels['key space id']}\n"
         + "x" * 30_001
     )
     store = FakeStore()
@@ -385,11 +407,13 @@ def test_error_exception_is_sent_as_bounded_redacted_text_attachment() -> None:
     assert attachment.filename == "picorgftp-sql-exception.txt"
     assert attachment.content_type == "text/plain"
     assert len(attachment.content.encode("utf-8")) <= 24 * 1024
-    assert password_sentinel not in attachment.content
-    assert key_id_sentinel not in attachment.content
     persisted_message = store.deliveries[str(queued["id"])]["message"]
-    assert password_sentinel not in str(persisted_message)
-    assert key_id_sentinel not in str(persisted_message)
+    for sentinel in secret_sentinels.values():
+        assert sentinel not in attachment.content
+        assert sentinel not in str(persisted_message)
+    assert attachment.content.splitlines()[0] == (
+        "Uwaga: dane wrażliwe w załączniku zostały zredagowane."
+    )
     assert "RuntimeError" not in message.subject
     assert "RuntimeError" not in message.text_body
     assert "RuntimeError" not in message.html_body

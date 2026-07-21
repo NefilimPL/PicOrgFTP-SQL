@@ -19,6 +19,7 @@ from .email_settings import (
     normalize_email_settings,
 )
 from .entra_secret_monitor import process_due_entra_secret_reminders
+from .redaction import sanitize_free_text
 
 
 WORKER_POLL_SECONDS = 2.0
@@ -361,12 +362,9 @@ def _safe_incident_context(incident: Mapping[str, object]) -> str:
 
 
 def _sanitize_exception_attachment(value: object) -> str:
-    text = value if isinstance(value, str) else str(value or "")
+    text = sanitize_free_text(value, limit=_EXCEPTION_ATTACHMENT_LIMIT)
     safe = _EXCEPTION_SECRET_RE.sub(r"\g<prefix>[REDACTED]", text)
-    encoded = safe.encode("utf-8")
-    if len(encoded) <= _EXCEPTION_ATTACHMENT_LIMIT:
-        return safe
-    return encoded[:_EXCEPTION_ATTACHMENT_LIMIT].decode("utf-8", errors="ignore")
+    return sanitize_free_text(safe, limit=_EXCEPTION_ATTACHMENT_LIMIT)
 
 
 def _exception_attachment_payload(
@@ -378,7 +376,7 @@ def _exception_attachment_payload(
     traceback_text = str(event.get("traceback_text") or "").strip()
     if not exception_type and not traceback_text:
         return None
-    lines = ["Diagnostyka wyjątku PicOrgFTP-SQL"]
+    lines = ["Uwaga: dane wrażliwe w załączniku zostały zredagowane."]
     if exception_type:
         lines.extend(("", f"Typ wyjątku: {exception_type}"))
     if traceback_text:
