@@ -32,6 +32,7 @@ from .common import (
     LOCAL_FILE_INDEX_KEY,
     AUTO_CONTENT_FIT_KEY,
     PROCESSING_SETTINGS_KEY,
+    RESOURCE_MONITOR_SETTINGS_KEY,
     SECURITY_SETTINGS_KEY,
     COLOR_FIELD_LABELS_KEY,
     PRODUCT_FIELDS_KEY,
@@ -249,6 +250,25 @@ def _normalize_processing_settings(raw_settings):
     }
 
 
+def _normalize_resource_monitor_settings(raw_settings):
+    raw = raw_settings if Aq(raw_settings, dict) else {}
+    defaults = DEFAULT_CONFIG[RESOURCE_MONITOR_SETTINGS_KEY]
+
+    def bounded_int(key, minimum, maximum):
+        try:
+            value = int(raw.get(key, defaults[key]))
+        except (TypeError, ValueError):
+            value = int(defaults[key])
+        return max(minimum, min(maximum, value))
+
+    return {
+        "show_status": bool(raw.get("show_status", defaults["show_status"])),
+        "cpu_percent_threshold": bounded_int("cpu_percent_threshold", 10, 90),
+        "memory_percent_threshold": bounded_int("memory_percent_threshold", 1, 90),
+        "io_mib_per_second_threshold": bounded_int("io_mib_per_second_threshold", 1, 256),
+    }
+
+
 def _normalize_security_settings(raw_settings):
     defaults = DEFAULT_CONFIG.get(SECURITY_SETTINGS_KEY, {})
     raw = raw_settings if Aq(raw_settings, dict) else {}
@@ -330,6 +350,12 @@ def _merge_raw_config(raw_config, config_copy):
         raw_config.get(
             PROCESSING_SETTINGS_KEY,
             config_copy.get(PROCESSING_SETTINGS_KEY, {}),
+        )
+    )
+    config_copy[RESOURCE_MONITOR_SETTINGS_KEY] = _normalize_resource_monitor_settings(
+        raw_config.get(
+            RESOURCE_MONITOR_SETTINGS_KEY,
+            config_copy.get(RESOURCE_MONITOR_SETTINGS_KEY, {}),
         )
     )
     raw_security = raw_config.get(
@@ -497,6 +523,9 @@ def load_config(interactive=I):
                 PROCESSING_SETTINGS_KEY: _normalize_processing_settings(
                     config_copy.get(PROCESSING_SETTINGS_KEY)
                 ),
+                RESOURCE_MONITOR_SETTINGS_KEY: _normalize_resource_monitor_settings(
+                    config_copy.get(RESOURCE_MONITOR_SETTINGS_KEY)
+                ),
                 SECURITY_SETTINGS_KEY: _normalize_security_settings(
                     config_copy.get(SECURITY_SETTINGS_KEY)
                 ),
@@ -557,6 +586,12 @@ def load_config(interactive=I):
             raw_config.get(
                 PROCESSING_SETTINGS_KEY,
                 config_copy.get(PROCESSING_SETTINGS_KEY, {}),
+            )
+        )
+        config_copy[RESOURCE_MONITOR_SETTINGS_KEY] = _normalize_resource_monitor_settings(
+            raw_config.get(
+                RESOURCE_MONITOR_SETTINGS_KEY,
+                config_copy.get(RESOURCE_MONITOR_SETTINGS_KEY, {}),
             )
         )
         raw_security = raw_config.get(
@@ -774,6 +809,9 @@ def save_config(config, raw_config=None, preserve_secrets=None):
         AUTO_CONTENT_FIT_KEY: bool(config.get(AUTO_CONTENT_FIT_KEY, False)),
         PROCESSING_SETTINGS_KEY: _normalize_processing_settings(
             config.get(PROCESSING_SETTINGS_KEY, {})
+        ),
+        RESOURCE_MONITOR_SETTINGS_KEY: _normalize_resource_monitor_settings(
+            config.get(RESOURCE_MONITOR_SETTINGS_KEY, {})
         ),
         SECURITY_SETTINGS_KEY: _normalize_security_settings(
             config.get(SECURITY_SETTINGS_KEY, {})

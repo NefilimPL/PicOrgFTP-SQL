@@ -871,6 +871,36 @@ class WebDataUserTests(unittest.TestCase):
         )
         self.assertTrue(saved_config[web_data.SECURITY_SETTINGS_KEY]["antivirus_scan_uploads"])
 
+    def test_update_settings_returns_normalized_resource_monitor_settings(self) -> None:
+        cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+
+        with (
+            patch.object(web_data.config, "CONFIG", cfg),
+            patch.object(web_data, "save_config"),
+            patch.object(web_data.config, "initialize_config", return_value=cfg),
+            patch.object(web_data, "load_users", return_value=[]),
+        ):
+            snapshot = web_data.update_settings(
+                {
+                    "resource_monitor": {
+                        "show_status": False,
+                        "cpu_percent_threshold": 35,
+                        "memory_percent_threshold": 25,
+                        "io_mib_per_second_threshold": 8,
+                    }
+                }
+            )
+
+        self.assertEqual(
+            snapshot["resource_monitor"],
+            {
+                "show_status": False,
+                "cpu_percent_threshold": 35,
+                "memory_percent_threshold": 25,
+                "io_mib_per_second_threshold": 8,
+            },
+        )
+
     def test_security_settings_default_hide_active_web_users(self) -> None:
         normalized = web_data.config._normalize_security_settings({})
 

@@ -35,6 +35,7 @@ from .common import (
     N,
     P,
     PROCESSING_SETTINGS_KEY,
+    RESOURCE_MONITOR_SETTINGS_KEY,
     SECURITY_SETTINGS_KEY,
     SQL_AVAILABLE_COLUMNS_KEY,
     SQL_COLUMN_MAP_KEY,
@@ -2899,6 +2900,11 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
     ftp_payload = payload.get("ftp") if isinstance(payload.get("ftp"), dict) else {}
     db_payload = payload.get("database") if isinstance(payload.get("database"), dict) else {}
     processing_payload = payload.get("processing") if isinstance(payload.get("processing"), dict) else {}
+    resource_monitor_payload = (
+        payload.get(RESOURCE_MONITOR_SETTINGS_KEY)
+        if isinstance(payload.get(RESOURCE_MONITOR_SETTINGS_KEY), dict)
+        else {}
+    )
     security_payload = payload.get("security") if isinstance(payload.get("security"), dict) else {}
     pimcore_payload = payload.get(PIMCORE_SETTINGS_KEY)
     email_payload = payload.get(EMAIL_SETTINGS_KEY)
@@ -2958,6 +2964,15 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
         merged_processing = dict(cfg.get(PROCESSING_SETTINGS_KEY, {}) or {})
         merged_processing.update(processing_payload)
         cfg[PROCESSING_SETTINGS_KEY] = config._normalize_processing_settings(merged_processing)
+
+    if resource_monitor_payload:
+        merged_resource_monitor = config._normalize_resource_monitor_settings(
+            cfg.get(RESOURCE_MONITOR_SETTINGS_KEY, {})
+        )
+        merged_resource_monitor.update(resource_monitor_payload)
+        cfg[RESOURCE_MONITOR_SETTINGS_KEY] = config._normalize_resource_monitor_settings(
+            merged_resource_monitor
+        )
 
     if security_payload:
         merged_security = dict(cfg.get(SECURITY_SETTINGS_KEY, {}) or {})
@@ -3138,6 +3153,9 @@ def settings_snapshot() -> dict[str, object]:
         "auto_content_fit": bool(cfg.get(AUTO_CONTENT_FIT_KEY, False)),
         "processing": config._normalize_processing_settings(
             cfg.get(PROCESSING_SETTINGS_KEY, {})
+        ),
+        RESOURCE_MONITOR_SETTINGS_KEY: config._normalize_resource_monitor_settings(
+            cfg.get(RESOURCE_MONITOR_SETTINGS_KEY, {})
         ),
         "security": config._normalize_security_settings(
             cfg.get(SECURITY_SETTINGS_KEY, {})

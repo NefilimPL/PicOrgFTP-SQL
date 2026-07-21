@@ -10,6 +10,7 @@ from picorgftp_sql import common, config
 from picorgftp_sql.config import (
     _normalize_color_field_labels,
     _normalize_processing_settings,
+    _normalize_resource_monitor_settings,
     _normalize_security_settings,
 )
 from picorgftp_sql.email_settings import (
@@ -143,6 +144,26 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings["target_format"], "JPG")
         self.assertEqual(settings["upload_processing_mode"], "client")
         self.assertTrue(settings["show_timing_details"])
+
+    def test_normalize_resource_monitor_settings_uses_safe_defaults_and_bounds(self) -> None:
+        settings = _normalize_resource_monitor_settings(
+            {
+                "show_status": "yes",
+                "cpu_percent_threshold": "0",
+                "memory_percent_threshold": "1000",
+                "io_mib_per_second_threshold": "-4",
+            }
+        )
+
+        self.assertEqual(
+            settings,
+            {
+                "show_status": True,
+                "cpu_percent_threshold": 10,
+                "memory_percent_threshold": 90,
+                "io_mib_per_second_threshold": 1,
+            },
+        )
 
     def test_normalize_security_settings_bounds_and_cleans_extensions(self) -> None:
         settings = _normalize_security_settings(
