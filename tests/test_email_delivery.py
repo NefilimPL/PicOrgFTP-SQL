@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import json
+from dataclasses import replace
 import smtplib
 import ssl
 from types import SimpleNamespace
@@ -12,6 +14,7 @@ import pytest
 from picorgftp_sql import email_delivery
 from picorgftp_sql.email_delivery import (
     GraphMailTransport,
+    MailAttachment,
     MailMessage,
     SmtpMailTransport,
     build_transport,
@@ -151,6 +154,52 @@ def test_graph_transport_requests_token_and_posts_expected_payload(monkeypatch) 
     assert "client-secret-sensitive" not in repr(result)
 
 
+def test_graph_transport_encodes_text_attachment(monkeypatch) -> None:
+    requests: list[object] = []
+
+    class FakeMsalApplication:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def acquire_token_for_client(self, _scopes: list[str]) -> dict[str, str]:
+            return {"access_token": "access-token-sensitive"}
+
+    def fake_urlopen(request: object, *, timeout: int) -> FakeResponse:
+        requests.append(request)
+        return FakeResponse(202)
+
+    monkeypatch.setattr(
+        email_delivery,
+        "msal",
+        SimpleNamespace(ConfidentialClientApplication=FakeMsalApplication),
+    )
+    monkeypatch.setattr(email_delivery.urllib.request, "urlopen", fake_urlopen)
+
+    message = replace(
+        sample_message(),
+        attachments=(
+            MailAttachment(
+                filename="picorgftp-sql-exception.txt",
+                content_type="text/plain",
+                content="RuntimeError: safe diagnostic",
+            ),
+        ),
+    )
+    GraphMailTransport(
+        {"tenant_id": "tenant", "client_id": "client", "client_secret": "secret"}
+    ).send(message)
+
+    payload = json.loads(requests[0].data.decode("utf-8"))
+    attachment = payload["message"]["attachments"][0]
+    assert attachment["@odata.type"] == "#microsoft.graph.fileAttachment"
+    assert attachment["name"] == "picorgftp-sql-exception.txt"
+    assert attachment["contentType"] == "text/plain"
+    assert (
+        base64.b64decode(attachment["contentBytes"]).decode("utf-8")
+        == "RuntimeError: safe diagnostic"
+    )
+
+
 @pytest.mark.parametrize("status", [200, 201, 204, 400, 500])
 def test_graph_transport_accepts_only_http_202(monkeypatch, status: int) -> None:
     class FakeMsalApplication:
@@ -283,6 +332,33 @@ def test_smtp_transport_uses_starttls_login_and_message_id(monkeypatch) -> None:
     assert result["status"] == "sent"
     assert isinstance(result["elapsed_ms"], int)
     assert "secret" not in repr(result)
+
+
+def test_smtp_transport_serializes_text_attachment(monkeypatch) -> None:
+    smtp = FakeSmtp()
+    monkeypatch.setattr(
+        email_delivery.smtplib,
+        "SMTP",
+        lambda host, port, timeout: smtp,
+    )
+    message = replace(
+        sample_message(),
+        attachments=(
+            MailAttachment(
+                filename="picorgftp-sql-exception.txt",
+                content_type="text/plain",
+                content="RuntimeError: safe diagnostic",
+            ),
+        ),
+    )
+
+    SmtpMailTransport(
+        {"host": "smtp.example", "port": 25, "security": "none"}
+    ).send(message)
+
+    assert "Content-Disposition: attachment;" in smtp.message
+    assert 'filename="picorgftp-sql-exception.txt"' in smtp.message
+    assert "RuntimeError: safe diagnostic" in smtp.message
 
 
 def test_smtp_transport_uses_implicit_tls_without_empty_username_login(monkeypatch) -> None:

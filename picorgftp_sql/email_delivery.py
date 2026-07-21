@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import smtplib
 import ssl
@@ -29,6 +30,15 @@ _DELIVERY_TIMEOUT_SECONDS = 20
 
 
 @dataclass(frozen=True)
+class MailAttachment:
+    """A transport-neutral UTF-8 text mail attachment."""
+
+    filename: str
+    content_type: str
+    content: str
+
+
+@dataclass(frozen=True)
 class MailMessage:
     """A transport-neutral outbound e-mail."""
 
@@ -39,6 +49,7 @@ class MailMessage:
     sender_address: str
     sender_name: str
     recipients: Sequence[str]
+    attachments: Sequence[MailAttachment] = ()
 
 
 class MailTransport(Protocol):
@@ -111,6 +122,18 @@ class GraphMailTransport:
             },
             "saveToSentItems": True,
         }
+        if message.attachments:
+            payload["message"]["attachments"] = [
+                {
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "name": attachment.filename,
+                    "contentType": attachment.content_type,
+                    "contentBytes": base64.b64encode(
+                        attachment.content.encode("utf-8")
+                    ).decode("ascii"),
+                }
+                for attachment in message.attachments
+            ]
         request = urllib.request.Request(
             endpoint,
             data=json.dumps(payload).encode("utf-8"),
@@ -178,6 +201,12 @@ class SmtpMailTransport:
         outbound["Message-ID"] = f"<{message.message_id}@picorgftp-sql>"
         outbound.set_content(message.text_body)
         outbound.add_alternative(message.html_body, subtype="html")
+        for attachment in message.attachments:
+            outbound.add_attachment(
+                attachment.content,
+                subtype="plain",
+                filename=attachment.filename,
+            )
 
         client = None
         refused_recipients: object = None
