@@ -1055,3 +1055,112 @@ def test_memory_and_disk_real_tests_accept_reachable_thresholds(
     assert result["ok"] is True
     assert result["kind"] == kind
     assert result["status"] == "completed"
+
+
+def test_start_reports_stopping_until_slow_sampler_exits_and_closes_reader() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    closed = threading.Event()
+
+    class SlowReader:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def read_host(self) -> dict[str, object]:
+            self.calls += 1
+            if self.calls == 1:
+                entered.set()
+                assert release.wait(2.0)
+            return {"cpu_percent": 1, "memory_percent": 1, "disk_busy_percent": 1}
+
+        def read_backend(self, _worker_pid=None) -> dict[str, object]:
+            return {
+                "cpu_percent": 1,
+                "memory_percent": 1,
+                "disk_io_bytes_per_second": 0,
+            }
+
+        def close(self) -> None:
+            closed.set()
+
+    monitor = _monitor(SlowReader(), [])
+    monitor.STOP_JOIN_SECONDS = 0.01
+    assert monitor.start() is True
+    assert entered.wait(1.0)
+
+    monitor.stop()
+
+    assert monitor.start() is False
+    assert closed.is_set() is False
+    release.set()
+    assert closed.wait(1.0)
+    assert monitor.start() is True
+    monitor.stop()
+
+
+def test_disk_worker_never_exceeds_total_byte_budget_over_long_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from picorgftp_sql import resource_monitor
+
+    now = 0.0
+    written = 0
+    open_calls = 0
+    unlinks = 0
+
+    class StopEvent:
+        def is_set(self) -> bool:
+            return False
+
+    class FakeFile:
+        def open(self, *_args, **_kwargs):
+            nonlocal open_calls
+            open_calls += 1
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def write(self, chunk: bytes) -> int:
+            nonlocal written
+            written += len(chunk)
+            return len(chunk)
+
+        def unlink(self, *, missing_ok: bool = False) -> None:
+            nonlocal unlinks
+            unlinks += 1
+
+    class FakeRoot:
+        def __init__(self) -> None:
+            self.file = FakeFile()
+
+        def mkdir(self, **_kwargs) -> None:
+            return None
+
+        def __truediv__(self, _name: str) -> FakeFile:
+            return self.file
+
+    def monotonic() -> float:
+        return now
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += max(0.0001, seconds)
+
+    monkeypatch.setattr(resource_monitor.time, "monotonic", monotonic)
+    monkeypatch.setattr(resource_monitor.time, "sleep", sleep)
+
+    resource_monitor._run_disk_test(
+        StopEvent(),
+        100.0,
+        FakeRoot(),
+        10,
+        100.0,
+    )
+
+    assert written == 10
+    assert open_calls == 1
+    assert unlinks >= 1

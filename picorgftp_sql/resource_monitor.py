@@ -148,6 +148,7 @@ class _ResourceAlertDetector:
 
 class ResourceMonitor:
     SAMPLE_SECONDS = 5.0
+    STOP_JOIN_SECONDS = 6.0
     HISTORY_SIZE = 12
     CONFIRMING_SAMPLES = 2
     REAL_TEST_SECONDS = 20.0
@@ -155,6 +156,9 @@ class ResourceMonitor:
     MAX_TEST_CPU_PERCENT = 25.0
     MAX_TEST_MEMORY_BYTES = 256 * MIB
     MAX_TEST_DISK_BYTES = 128 * MIB
+    MAX_TEST_DISK_RATE_BYTES_PER_SECOND = MAX_TEST_DISK_BYTES / (
+        CONFIRMING_SAMPLES * SAMPLE_SECONDS
+    )
     REAL_TEST_CPU_MARGIN_PERCENT = 1.0
     REAL_TEST_MEMORY_MARGIN_PERCENT = 0.1
     REAL_TEST_IO_MARGIN_MIB = 1.0
@@ -187,45 +191,50 @@ class ResourceMonitor:
         self._sampling_lock = threading.RLock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._sampler_manages_reader_cleanup = False
         self._worker_process: object | None = None
         self._worker_stop_event: object | None = None
         self._worker_pid: int | None = None
         self._worker_kind: str | None = None
         self._worker_temp_dir: str | None = None
 
-    def start(self) -> None:
+    def start(self) -> bool:
         with self._lifecycle_lock:
             with self._state_lock:
                 if self._thread is not None and self._thread.is_alive():
-                    return
+                    return not self._stop_event.is_set()
                 self._stop_event.clear()
                 self._thread = threading.Thread(
                     target=self._sampling_loop,
                     name="ResourceMonitor",
                     daemon=True,
                 )
-                self._thread.start()
+                self._sampler_manages_reader_cleanup = True
+                try:
+                    self._thread.start()
+                except Exception:
+                    self._thread = None
+                    self._sampler_manages_reader_cleanup = False
+                    self._stop_event.set()
+                    raise
+                return True
 
     def stop(self) -> None:
         with self._lifecycle_lock:
             self._stop_event.set()
             with self._state_lock:
                 thread = self._thread
+                sampler_manages_cleanup = self._sampler_manages_reader_cleanup
             if thread is not None and thread is not threading.current_thread():
-                thread.join(timeout=self.SAMPLE_SECONDS + 1.0)
+                thread.join(timeout=self.STOP_JOIN_SECONDS)
             with self._state_lock:
                 if self._thread is thread and (thread is None or not thread.is_alive()):
                     self._thread = None
+                    self._sampler_manages_reader_cleanup = False
                 sampling_stopped = self._thread is None
             self._cleanup_registered_worker()
-            if sampling_stopped:
-                close = getattr(self._readers, "close", None)
-                if callable(close):
-                    with self._sampling_lock:
-                        try:
-                            close()
-                        except Exception:
-                            pass
+            if sampling_stopped and not sampler_manages_cleanup:
+                self._close_readers()
 
     def latest_public_snapshot(self) -> dict[str, object]:
         with self._state_lock:
@@ -309,6 +318,7 @@ class ResourceMonitor:
                         temp_dir,
                         self.MAX_TEST_MEMORY_BYTES,
                         self.MAX_TEST_DISK_BYTES,
+                        self.MAX_TEST_DISK_RATE_BYTES_PER_SECOND,
                         max(1, os.cpu_count() or 1),
                     ),
                     daemon=True,
@@ -387,12 +397,29 @@ class ResourceMonitor:
         return result
 
     def _sampling_loop(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                self.sample_once()
-            except Exception:
-                pass
-            self._stop_event.wait(self.SAMPLE_SECONDS)
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    self.sample_once()
+                except Exception:
+                    pass
+                self._stop_event.wait(self.SAMPLE_SECONDS)
+        finally:
+            self._close_readers()
+            current = threading.current_thread()
+            with self._state_lock:
+                if self._thread is current:
+                    self._thread = None
+                    self._sampler_manages_reader_cleanup = False
+
+    def _close_readers(self) -> None:
+        close = getattr(self._readers, "close", None)
+        if callable(close):
+            with self._sampling_lock:
+                try:
+                    close()
+                except Exception:
+                    pass
 
     def _read_host(self) -> dict[str, object]:
         try:
@@ -469,7 +496,9 @@ class ResourceMonitor:
         else:
             current_bytes = _number(backend.get("disk_io_bytes_per_second")) or 0.0
             threshold_mib = _number(settings.get("io_mib_per_second_threshold"))
-            maximum_mib = current_bytes / MIB + self.MAX_TEST_DISK_BYTES / MIB / self.SAMPLE_SECONDS
+            maximum_mib = (
+                current_bytes + self.MAX_TEST_DISK_RATE_BYTES_PER_SECOND
+            ) / MIB
             reachable = (
                 threshold_mib is not None
                 and threshold_mib + self.REAL_TEST_IO_MARGIN_MIB <= maximum_mib
@@ -598,6 +627,7 @@ def _resource_test_worker(
     temp_dir: str,
     memory_bytes: int,
     disk_bytes: int,
+    disk_rate_bytes_per_second: float,
     logical_cpus: int,
 ) -> None:
     deadline = time.monotonic() + max(0.0, seconds)
@@ -607,7 +637,13 @@ def _resource_test_worker(
         elif kind == "memory":
             _run_memory_test(stop_event, deadline, memory_bytes)
         elif kind == "disk":
-            _run_disk_test(stop_event, deadline, Path(temp_dir), disk_bytes)
+            _run_disk_test(
+                stop_event,
+                deadline,
+                Path(temp_dir),
+                disk_bytes,
+                disk_rate_bytes_per_second,
+            )
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -656,20 +692,31 @@ def _run_memory_test(stop_event: object, deadline: float, memory_bytes: int) -> 
 
 
 def _run_disk_test(
-    stop_event: object, deadline: float, temp_dir: Path, disk_bytes: int
+    stop_event: object,
+    deadline: float,
+    temp_dir: Path,
+    disk_bytes: int,
+    rate_bytes_per_second: float,
 ) -> None:
     temp_dir.mkdir(parents=True, exist_ok=True)
     path = temp_dir / "resource-test.bin"
-    chunk = bytes(1 * MIB)
+    chunk = bytes(64 * 1024)
+    remaining = max(0, disk_bytes)
+    written = 0
+    started_at = time.monotonic()
+    bounded_rate = max(1.0, float(rate_bytes_per_second))
     try:
-        while not _should_stop(stop_event, deadline):
-            remaining = max(0, disk_bytes)
-            with path.open("wb", buffering=0) as handle:
-                while remaining and not _should_stop(stop_event, deadline):
-                    piece = chunk if remaining >= len(chunk) else chunk[:remaining]
-                    handle.write(piece)
-                    remaining -= len(piece)
-            path.unlink(missing_ok=True)
+        with path.open("wb", buffering=0) as handle:
+            while remaining and not _should_stop(stop_event, deadline):
+                piece = chunk if remaining >= len(chunk) else chunk[:remaining]
+                write_at = started_at + (written + len(piece)) / bounded_rate
+                while time.monotonic() < write_at:
+                    if _should_stop(stop_event, deadline):
+                        return
+                    time.sleep(min(0.05, write_at - time.monotonic()))
+                handle.write(piece)
+                written += len(piece)
+                remaining -= len(piece)
     finally:
         path.unlink(missing_ok=True)
 
