@@ -7,3 +7,5 @@ pyodbc
 certifi
 pystray>=0.19
 msal>=1.37,<2
+requests>=2.31,<3
+tzdata

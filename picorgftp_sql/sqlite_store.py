@@ -3395,6 +3395,7 @@ class SqliteStore:
         claim_token = uuid.uuid4().hex
         self.initialize()
         with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             # A later scheduled interval must never jump ahead of a failed
             # one; it would otherwise overlap the same history range.
             outstanding = conn.execute(

@@ -7,3 +7,5 @@ mysql-connector-python
 pyodbc
 certifi
 msal>=1.37,<2
+requests>=2.31,<3
+tzdata

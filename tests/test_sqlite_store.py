@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -655,6 +656,62 @@ def test_daily_change_summary_retries_the_oldest_pending_window_before_a_new_one
         "window_end": next_end,
         "status": "sending",
     }
+
+
+def test_daily_change_summary_claim_serializes_a_later_window(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.initialize()
+    original_connect = store.connect
+    older_ready = threading.Event()
+    release_older = threading.Event()
+    newer_done = threading.Event()
+    results: dict[str, dict[str, str] | None] = {}
+
+    def connect_with_older_read_barrier() -> sqlite3.Connection:
+        conn = original_connect()
+        if threading.current_thread().name == "daily-summary-older":
+            def pause_before_outstanding_read(statement: str) -> None:
+                if "SELECT window_start, window_end, status, next_attempt_at" in statement:
+                    older_ready.set()
+                    release_older.wait(timeout=5)
+
+            conn.set_trace_callback(pause_before_outstanding_read)
+        return conn
+
+    store.connect = connect_with_older_read_barrier  # type: ignore[method-assign]
+    store.initialize = lambda: None  # type: ignore[method-assign]
+
+    def claim(name: str, window_end: str) -> None:
+        results[name] = store.claim_daily_change_summary(
+            window_end, claimed_at=window_end
+        )
+        if name == "newer":
+            newer_done.set()
+
+    older = threading.Thread(
+        target=claim,
+        args=("older", "2026-07-20T14:00:00.000Z"),
+        name="daily-summary-older",
+    )
+    newer = threading.Thread(
+        target=claim,
+        args=("newer", "2026-07-21T14:00:00.000Z"),
+        name="daily-summary-newer",
+    )
+    older.start()
+    assert older_ready.wait(timeout=2)
+    newer.start()
+    newer_done.wait(timeout=1)
+    release_older.set()
+    older.join(timeout=5)
+    newer.join(timeout=5)
+
+    assert not older.is_alive()
+    assert not newer.is_alive()
+    assert results["older"] is not None
+    assert results["newer"] is None
 
 
 def test_daily_change_summary_recovery_only_releases_stale_sending_claims(

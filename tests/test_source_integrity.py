@@ -9,6 +9,18 @@ import unittest
 
 
 class SourceIntegrityTests(unittest.TestCase):
+    def test_runtime_http_client_dependency_is_declared(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        web_requirements = (root / "requirements-web.txt").read_text(encoding="utf-8")
+        build_requirements = (root / "requirements-build.txt").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("requests", web_requirements)
+        self.assertIn("requests", build_requirements)
+        self.assertIn("tzdata", web_requirements)
+        self.assertIn("tzdata", build_requirements)
+
     def test_mail_settings_ui_wires_both_channels_rules_and_redacted_test(self) -> None:
         root = Path(__file__).resolve().parents[1]
         html_source = (
