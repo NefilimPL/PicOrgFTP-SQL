@@ -44,11 +44,11 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("Testuj wszystkie typy powiadomien", js_source)
         self.assertIn("renderMailTestSuiteResult", js_source)
         for label in (
-            "Odrzucenie przez PIMcore",
+            "Odrzucenie danych PIMcore",
             "Blad transferu FTP",
             "Niedostepna lokalizacja zdjec",
-            "Wyjatek backendu",
-            "Wygasanie Client Secret Entra za 7 dni",
+            "Nieobsluzony wyjatek backendu",
+            "Client Secret Entra wygasa za 7 dni",
         ):
             self.assertIn(label, js_source)
         for name in (

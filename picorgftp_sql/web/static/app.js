@@ -11012,11 +11012,11 @@ function renderMailTestSuiteResult(container, result) {
     : `Test zestawu zakonczyl sie problemem (${finished}/${scenarios.length} poprawnych, ${Number(result.elapsed_ms || 0)} ms).`;
   container.appendChild(summary);
   const labels = {
-    pimcore_rejection: "Odrzucenie przez PIMcore",
+    pimcore_rejection: "Odrzucenie danych PIMcore",
     ftp_failure: "Blad transferu FTP",
     photo_location_unavailable: "Niedostepna lokalizacja zdjec",
-    backend_exception: "Wyjatek backendu",
-    entra_secret_expiry: "Wygasanie Client Secret Entra za 7 dni",
+    backend_exception: "Nieobsluzony wyjatek backendu",
+    entra_secret_expiry: "Client Secret Entra wygasa za 7 dni",
   };
   const statuses = {
     sent: "wyslano",
