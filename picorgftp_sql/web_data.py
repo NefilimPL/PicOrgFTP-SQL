@@ -2439,6 +2439,7 @@ def create_pimcore_product(
     events: list[dict[str, object]] = []
     result: dict[str, object] = {}
     status = "failed"
+    failure: BaseException | None = None
 
     def emit(stage: str, severity: str, message: str, **details: object) -> None:
         now = time.time()
@@ -2462,6 +2463,7 @@ def create_pimcore_product(
         return result
     except Exception as exc:
         status = "failed"
+        failure = exc
         emit("finish", "error", str(exc) or exc.__class__.__name__)
         raise
     finally:
@@ -2497,6 +2499,7 @@ def create_pimcore_product(
             job_id=operation_id,
             ean=submitted.get("EAN"),
             elapsed_ms=int(max(0, finished - started) * 1000),
+            failure=failure,
         )
 
 

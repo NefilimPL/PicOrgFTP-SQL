@@ -818,18 +818,19 @@ def test_update_adapter_emits_failure_diagnostics_for_manual_update_error():
     )
 
 
-def test_create_adapter_failed_event_without_exception_has_no_diagnostics():
+def test_create_adapter_emits_failure_diagnostics_for_manual_create_error():
     cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
     cfg["pimcore"].update({"enabled": True, "setup_complete": True})
+    error = RuntimeError("Authorization: Bearer CREATE_FAILURE_SENTINEL")
     with (
         patch.object(web_data.config, "CONFIG", cfg),
         patch.object(
             web_data,
             "create_product",
-            side_effect=RuntimeError("Pimcore connection lost"),
+            side_effect=error,
         ),
         patch.object(web_data, "emit_event") as emit_event,
-        pytest.raises(RuntimeError, match="Pimcore connection lost"),
+        pytest.raises(RuntimeError, match="CREATE_FAILURE_SENTINEL"),
     ):
         web_data.create_pimcore_product({"EAN": "5904804578169"}, "operator")
 
@@ -838,8 +839,9 @@ def test_create_adapter_failed_event_without_exception_has_no_diagnostics():
         for call in emit_event.call_args_list
         if call.kwargs["event_type"] == "integration.pimcore.completed"
     )
-    assert "exception" not in event
-    assert "recommended_action" not in event
+    assert event["severity"] == "error"
+    assert event["exception"] is error
+    assert event["recommended_action"]
 
 
 def test_update_adapter_conflict_event_has_no_failure_diagnostics():
