@@ -4518,7 +4518,13 @@ _EMAIL_TEST_ATTEMPT_CODES = frozenset(
 )
 
 _EMAIL_TEST_SUITE_KINDS = frozenset(
-    {"information", "warning", "error", "critical", "entra_secret_expiry"}
+    {
+        "pimcore_rejection",
+        "ftp_failure",
+        "photo_location_unavailable",
+        "backend_exception",
+        "entra_secret_expiry",
+    }
 )
 _EMAIL_TEST_SUITE_SEVERITIES = frozenset({"info", "warning", "error", "critical"})
 _EMAIL_TEST_SUITE_STATUSES = frozenset({"sent", "fallback", "skipped", "error"})

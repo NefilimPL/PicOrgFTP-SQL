@@ -450,8 +450,8 @@ class WebSmokeCiTests(unittest.TestCase):
         result = {
             "scenarios": [
                 {
-                    "kind": "information",
-                    "severity": "info",
+                    "kind": "pimcore_rejection",
+                    "severity": "warning",
                     "status": "sent",
                     "used_channel": "entra",
                     "recipient_count": 2,
@@ -459,19 +459,51 @@ class WebSmokeCiTests(unittest.TestCase):
                     "attempts": [{"channel": "entra", "status": "sent"}],
                 },
                 {
-                    "kind": "entra_secret_expiry",
-                    "severity": "critical",
-                    "status": "error",
+                    "kind": "ftp_failure",
+                    "severity": "error",
+                    "status": "fallback",
                     "used_channel": "smtp",
                     "recipient_count": 1,
-                    "recipients": ["secret@example.com"],
-                    "attempts": [{
-                        "channel": "smtp",
-                        "status": "error",
-                        "code": "untrusted_secret_code",
-                        "category": "delivery",
-                        "message": "password=LEAK",
-                    }],
+                    "message_id": "ftp-private-message-id",
+                    "recipients": ["ftp-recipient@example.com"],
+                    "exception_attachment": {
+                        "filename": "ftp-exception.txt",
+                        "content": "TASK4-UNIQUE-SECRET-SENTINEL",
+                    },
+                    "attempts": [
+                        {
+                            "channel": "entra",
+                            "status": "error",
+                            "code": "untrusted_secret_code",
+                            "category": "delivery",
+                            "message": "password=LEAK",
+                        },
+                        {"channel": "smtp", "status": "sent"},
+                    ],
+                },
+                {
+                    "kind": "photo_location_unavailable",
+                    "severity": "error",
+                    "status": "skipped",
+                    "used_channel": "smtp",
+                    "recipient_count": 0,
+                    "attempts": [],
+                },
+                {
+                    "kind": "backend_exception",
+                    "severity": "critical",
+                    "status": "sent",
+                    "used_channel": "entra",
+                    "recipient_count": 1,
+                    "attempts": [{"channel": "entra", "status": "sent"}],
+                },
+                {
+                    "kind": "entra_secret_expiry",
+                    "severity": "critical",
+                    "status": "sent",
+                    "used_channel": "entra",
+                    "recipient_count": 1,
+                    "attempts": [{"channel": "entra", "status": "sent"}],
                 },
             ]
         }
@@ -484,18 +516,30 @@ class WebSmokeCiTests(unittest.TestCase):
                 json={"channel": "entra", "use_fallback": True},
             )
 
-        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(set(payload), {"ok", "scenarios", "elapsed_ms"})
-        self.assertFalse(payload["ok"])
-        self.assertEqual(len(payload["scenarios"]), 2)
+        self.assertTrue(payload["ok"])
         self.assertEqual(
-            set(payload["scenarios"][0]),
-            {"kind", "severity", "status", "used_channel", "recipient_count", "attempts"},
+            [scenario["kind"] for scenario in payload["scenarios"]],
+            [
+                "pimcore_rejection",
+                "ftp_failure",
+                "photo_location_unavailable",
+                "backend_exception",
+                "entra_secret_expiry",
+            ],
         )
+        for scenario in payload["scenarios"]:
+            self.assertEqual(
+                set(scenario),
+                {"kind", "severity", "status", "used_channel", "recipient_count", "attempts"},
+            )
         self.assertEqual(payload["scenarios"][1]["attempts"][0]["code"], "delivery_failed")
         self.assertNotIn("LEAK", response.text)
-        self.assertNotIn("secret@example.com", response.text)
+        self.assertNotIn("ftp-recipient@example.com", response.text)
+        self.assertNotIn("ftp-private-message-id", response.text)
+        self.assertNotIn("TASK4-UNIQUE-SECRET-SENTINEL", response.text)
         self.assertNotIn("message_id", response.text)
         sender.assert_called_once_with(channel="entra", use_fallback=True)
 

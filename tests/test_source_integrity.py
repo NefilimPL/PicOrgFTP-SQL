@@ -43,6 +43,14 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn('requestJson("/api/settings/email/test-suite"', js_source)
         self.assertIn("Testuj wszystkie typy powiadomien", js_source)
         self.assertIn("renderMailTestSuiteResult", js_source)
+        for label in (
+            "Odrzucenie przez PIMcore",
+            "Blad transferu FTP",
+            "Niedostepna lokalizacja zdjec",
+            "Wyjatek backendu",
+            "Wygasanie Client Secret Entra za 7 dni",
+        ):
+            self.assertIn(label, js_source)
         for name in (
             "email_primary_channel",
             "email_fallback_enabled",

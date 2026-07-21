@@ -178,10 +178,10 @@ def test_notification_test_suite_uses_selected_channel_and_requires_csrf(
                     "attempts": [],
                 }
                 for kind, severity in (
-                    ("information", "info"),
-                    ("warning", "warning"),
-                    ("error", "error"),
-                    ("critical", "critical"),
+                    ("pimcore_rejection", "warning"),
+                    ("ftp_failure", "error"),
+                    ("photo_location_unavailable", "error"),
+                    ("backend_exception", "critical"),
                     ("entra_secret_expiry", "critical"),
                 )
             ]
@@ -196,7 +196,20 @@ def test_notification_test_suite_uses_selected_channel_and_requires_csrf(
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
-    assert response.json()["scenarios"][0]["status"] == "skipped"
+    scenarios = response.json()["scenarios"]
+    assert [item["kind"] for item in scenarios] == [
+        "pimcore_rejection",
+        "ftp_failure",
+        "photo_location_unavailable",
+        "backend_exception",
+        "entra_secret_expiry",
+    ]
+    assert all(
+        set(item)
+        == {"kind", "severity", "status", "used_channel", "recipient_count", "attempts"}
+        for item in scenarios
+    )
+    assert all(item["status"] == "skipped" for item in scenarios)
     assert calls == [{"channel": "smtp", "use_fallback": False}]
 
 
