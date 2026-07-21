@@ -206,6 +206,7 @@ class ResourceMonitor:
         self._worker_baseline_event: object | None = None
         self._worker_detection_event: object | None = None
         self._worker_cancel_event: object | None = None
+        self._worker_generation: object | None = None
         self._worker_pid: int | None = None
         self._worker_kind: str | None = None
         self._worker_temp_dir: str | None = None
@@ -258,7 +259,7 @@ class ResourceMonitor:
 
     def _sample_once_locked(self) -> dict[str, object]:
         host = self._read_host()
-        backend = self._read_backend_with_registered_worker()
+        backend, sampled_worker = self._read_backend_with_registered_worker()
         try:
             raw_context = self._context_provider()
         except Exception:
@@ -284,12 +285,27 @@ class ResourceMonitor:
             except Exception:
                 settings = {}
             triggers = self._detector.observe(backend, settings, observed_at)
-            expected_metric = _REAL_TEST_TRIGGER_METRICS.get(self._worker_kind or "")
-            detection_event = self._worker_detection_event
+            (
+                sampled_process,
+                sampled_pid,
+                sampled_kind,
+                sampled_generation,
+                detection_event,
+            ) = sampled_worker
+            expected_metric = _REAL_TEST_TRIGGER_METRICS.get(sampled_kind or "")
+            same_worker = (
+                sampled_process is not None
+                and sampled_pid is not None
+                and sampled_generation is not None
+                and detection_event is not None
+                and self._worker_process is sampled_process
+                and self._worker_pid == sampled_pid
+                and self._worker_kind == sampled_kind
+                and self._worker_generation is sampled_generation
+                and self._worker_detection_event is detection_event
+            )
             if (
-                detection_event is not None
-                and self._worker_process is not None
-                and self._worker_pid is not None
+                same_worker
                 and any(trigger.get("metric") == expected_metric for trigger in triggers)
             ):
                 try:
@@ -370,6 +386,7 @@ class ResourceMonitor:
             self._worker_baseline_event = baseline_event
             self._worker_detection_event = detection_event
             self._worker_cancel_event = cancel_event
+            self._worker_generation = object()
             self._worker_pid = None
             self._worker_kind = normalized_kind
             self._worker_temp_dir = temp_dir
@@ -483,13 +500,28 @@ class ResourceMonitor:
         except Exception:
             return {"available": False}
 
-    def _read_backend_with_registered_worker(self) -> dict[str, object]:
+    def _read_backend_with_registered_worker(
+        self,
+    ) -> tuple[
+        dict[str, object],
+        tuple[object | None, int | None, str | None, object | None, object | None],
+    ]:
         with self._state_lock:
+            worker_process = self._worker_process
             worker_pid = self._worker_pid
             worker_kind = self._worker_kind
+            worker_generation = self._worker_generation
             baseline_event = self._worker_baseline_event
+            detection_event = self._worker_detection_event
             registered = (
-                self._worker_process is not None or self._worker_temp_dir is not None
+                worker_process is not None or self._worker_temp_dir is not None
+            )
+            sampled_worker = (
+                worker_process,
+                worker_pid,
+                worker_kind,
+                worker_generation,
+                detection_event,
             )
         try:
             read_with_baseline = getattr(
@@ -512,7 +544,7 @@ class ResourceMonitor:
         backend["test_worker_registered"] = registered
         if registered:
             backend["test_worker_kind"] = worker_kind
-        return backend
+        return backend, sampled_worker
 
     def _diagnostic_details(
         self, sample: Mapping[str, object], trigger: Mapping[str, object]
@@ -634,6 +666,7 @@ class ResourceMonitor:
             self._worker_baseline_event = None
             self._worker_detection_event = None
             self._worker_cancel_event = None
+            self._worker_generation = None
             self._worker_pid = None
             self._worker_kind = None
             self._worker_temp_dir = None

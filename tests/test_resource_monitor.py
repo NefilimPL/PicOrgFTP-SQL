@@ -184,6 +184,7 @@ def test_real_test_ack_is_set_only_by_requested_detector_latch_transition() -> N
     monitor._worker_process = object()
     monitor._worker_pid = 43210
     monitor._worker_kind = "cpu"
+    monitor._worker_generation = object()
     monitor._worker_detection_event = ack
 
     first = monitor.sample_once()
@@ -215,6 +216,7 @@ def test_unrelated_metric_alert_does_not_ack_registered_real_test() -> None:
     monitor._worker_process = object()
     monitor._worker_pid = 43211
     monitor._worker_kind = "disk"
+    monitor._worker_generation = object()
     monitor._worker_detection_event = ack
 
     monitor.sample_once()
@@ -222,6 +224,79 @@ def test_unrelated_metric_alert_does_not_ack_registered_real_test() -> None:
 
     assert events[0][2]["trigger"]["metric"] == "cpu_percent"
     assert ack.is_set() is False
+
+
+def test_sample_for_replaced_worker_cannot_ack_new_worker() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    class AckEvent:
+        def __init__(self) -> None:
+            self.ready = False
+
+        def is_set(self) -> bool:
+            return self.ready
+
+        def set(self) -> None:
+            self.ready = True
+
+    class BlockingReader:
+        def read_host(self) -> dict[str, object]:
+            return {
+                "cpu_percent": 1,
+                "memory_percent": 2,
+                "memory_used_bytes": 20,
+                "memory_total_bytes": 1000,
+                "disk_busy_percent": 1,
+            }
+
+        def read_backend(self, _worker_pid: int | None = None) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                entered.set()
+                assert release.wait(2.0)
+            return {
+                "cpu_percent": 30 + calls,
+                "memory_percent": 2,
+                "memory_working_set_bytes": 20,
+                "memory_private_bytes": 10,
+                "disk_read_bytes_per_second": 0,
+                "disk_write_bytes_per_second": 0,
+                "disk_io_bytes_per_second": 0,
+            }
+
+    events: list[tuple[str, str, dict[str, object]]] = []
+    monitor = _monitor(BlockingReader(), events)
+    monitor.sample_once()
+    ack_a = AckEvent()
+    ack_b = AckEvent()
+    process_a = object()
+    process_b = object()
+    with monitor._state_lock:
+        monitor._worker_process = process_a
+        monitor._worker_pid = 1111
+        monitor._worker_kind = "cpu"
+        monitor._worker_generation = object()
+        monitor._worker_detection_event = ack_a
+
+    sampler = threading.Thread(target=monitor.sample_once)
+    sampler.start()
+    assert entered.wait(1.0)
+    with monitor._state_lock:
+        monitor._worker_process = process_b
+        monitor._worker_pid = 2222
+        monitor._worker_kind = "cpu"
+        monitor._worker_generation = object()
+        monitor._worker_detection_event = ack_b
+    release.set()
+    sampler.join(2.0)
+
+    assert not sampler.is_alive()
+    assert len(events) == 1
+    assert ack_a.is_set() is False
+    assert ack_b.is_set() is False
 
 
 def test_latch_resets_only_after_two_consecutive_normal_samples() -> None:
