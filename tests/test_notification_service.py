@@ -224,6 +224,7 @@ class SummaryStore(FakeStore):
             "window_start": "2026-07-19T14:00:00.000Z",
             "window_end": window_end,
             "status": "sending",
+            "claim_token": "summary-claim",
         }
         self.claims.append({**report, "claimed_at": claimed_at})
         return report
@@ -236,8 +237,14 @@ class SummaryStore(FakeStore):
         return list(self.history)
 
     def finalize_daily_change_summary(
-        self, window_end: str, *, status: str, next_attempt_at: str = ""
+        self,
+        window_end: str,
+        *,
+        status: str,
+        claim_token: str,
+        next_attempt_at: str = "",
     ) -> bool:
+        assert claim_token == "summary-claim"
         del next_attempt_at
         self.finalized.append((window_end, status))
         return True

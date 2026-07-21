@@ -783,7 +783,8 @@ class NotificationService:
         if not isinstance(claim, Mapping):
             return {"status": "already_processed", "product_count": 0}
         report_end = _text(claim.get("window_end"), 40)
-        if not report_end:
+        claim_token = _text(claim.get("claim_token"), 128)
+        if not report_end or not claim_token:
             return {"status": "error", "product_count": 0}
         start = _text(claim.get("window_start"), 40)
         try:
@@ -796,11 +797,14 @@ class NotificationService:
             self.store.finalize_daily_change_summary(
                 report_end,
                 status="pending",
+                claim_token=claim_token,
                 next_attempt_at=_iso_utc(self.now() + DAILY_SUMMARY_RETRY_DELAY),
             )
             return {"status": "error", "product_count": 0}
         if not rows:
-            self.store.finalize_daily_change_summary(report_end, status="sent")
+            self.store.finalize_daily_change_summary(
+                report_end, status="sent", claim_token=claim_token
+            )
             return {"status": "skipped", "product_count": 0}
         delivery = {
             "id": f"daily-summary-{report_end}",
@@ -817,6 +821,7 @@ class NotificationService:
         self.store.finalize_daily_change_summary(
             report_end,
             status=final_status,
+            claim_token=claim_token,
             next_attempt_at=(
                 _iso_utc(self.now() + DAILY_SUMMARY_RETRY_DELAY)
                 if final_status == "pending"

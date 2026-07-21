@@ -10854,6 +10854,8 @@ const MAIL_SEVERITY_RULES = [
   {
     severity: "info",
     label: "Informacje",
+    help:
+      "Dla zwyklych uzytkownikow. Jeden dzienny, kompaktowy raport jest wysylany tylko wtedy, gdy zaszly zmiany. Zawiera EAN oraz informacje o utworzeniu wpisu, zmianie danych PIMcore lub zdjec. Nie zawiera krokow SQL, FTP ani logow technicznych.",
     enabledName: "email_rule_info_enabled",
     recipientsName: "email_rule_info_recipients",
     includeActorName: "email_rule_info_include_actor",
@@ -10861,6 +10863,8 @@ const MAIL_SEVERITY_RULES = [
   {
     severity: "warning",
     label: "Ostrzezenia",
+    help:
+      "Dla uzytkownika i opcjonalnie osoby wykonujacej zadanie. Dotyczy problemow, ktore wymagaja korekty, ale zadanie moze zostac ukonczone czesciowo, np. niedozwolony plik w slocie, brak wymaganego pola lub pominiete zdjecie.",
     enabledName: "email_rule_warning_enabled",
     recipientsName: "email_rule_warning_recipients",
     includeActorName: "email_rule_warning_include_actor",
@@ -10868,6 +10872,8 @@ const MAIL_SEVERITY_RULES = [
   {
     severity: "error",
     label: "Bledy",
+    help:
+      "Dla administracji oraz opcjonalnie osoby wykonujacej zadanie. Dotyczy problemow blokujacych dana operacje, np. Brak mozliwosci aktualizacji PIMcore, blad wymaganego profilu SQL, FTP albo zapisu zdjec.",
     enabledName: "email_rule_error_enabled",
     recipientsName: "email_rule_error_recipients",
     includeActorName: "email_rule_error_include_actor",
@@ -10875,17 +10881,77 @@ const MAIL_SEVERITY_RULES = [
   {
     severity: "critical",
     label: "Bledy krytyczne",
+    help:
+      "Dla administracji. Natychmiastowy alert o awarii wymagajacej reakcji, np. nieobsluzony wyjatek backendu lub frontendu, niedostepny backend albo wygasajacy Client Secret Entra.",
     enabledName: "email_rule_critical_enabled",
     recipientsName: "email_rule_critical_recipients",
     includeActorName: "email_rule_critical_include_actor",
   },
 ];
 
+let openMailHelpPopover = null;
+let mailHelpPopoverSequence = 0;
+
+function closeMailHelpPopover({ restoreFocus = false } = {}) {
+  if (!openMailHelpPopover) return;
+  const { button, popover } = openMailHelpPopover;
+  popover.hidden = true;
+  button.setAttribute("aria-expanded", "false");
+  openMailHelpPopover = null;
+  if (restoreFocus) button.focus();
+}
+
+function createMailHelpPopover(label, message) {
+  const wrapper = document.createElement("span");
+  const button = document.createElement("button");
+  const popover = document.createElement("span");
+  const popoverId = `mail-help-${mailHelpPopoverSequence += 1}`;
+  wrapper.className = "mail-help";
+  button.type = "button";
+  button.className = "mail-help-trigger";
+  button.textContent = "?";
+  button.setAttribute("aria-label", `Pomoc: ${label}`);
+  button.setAttribute("aria-controls", popoverId);
+  button.setAttribute("aria-expanded", "false");
+  popover.id = popoverId;
+  popover.className = "mail-help-popover";
+  popover.hidden = true;
+  popover.setAttribute("role", "tooltip");
+  popover.textContent = message;
+  button.addEventListener("click", () => {
+    const isOpen = openMailHelpPopover?.button === button;
+    closeMailHelpPopover();
+    if (isOpen) return;
+    popover.hidden = false;
+    button.setAttribute("aria-expanded", "true");
+    openMailHelpPopover = { button, popover };
+  });
+  wrapper.append(button, popover);
+  return wrapper;
+}
+
+function mailHelpTitle(label, message, tagName = "span") {
+  const title = document.createElement(tagName);
+  title.className = "mail-help-title";
+  title.append(document.createTextNode(label), createMailHelpPopover(label, message));
+  return title;
+}
+
+function addMailFieldHelp(field, label, message) {
+  const title = mailHelpTitle(label, message);
+  if (field.firstChild) {
+    field.replaceChild(title, field.firstChild);
+  } else {
+    field.appendChild(title);
+  }
+  return field;
+}
+
 function mailRuleCard(definition, rule = {}) {
   const card = document.createElement("div");
   card.className = `mail-rule-card mail-rule-${definition.severity}`;
   card.append(
-    settingsNote(definition.label),
+    mailHelpTitle(definition.label, definition.help, "h3"),
     checkField(
       definition.enabledName,
       "Wysylaj powiadomienia",
@@ -11085,6 +11151,34 @@ function renderSettingsMail() {
   const smtpWarning = document.createElement("p");
   const entraExpiryStatus = document.createElement("div");
   const entraExpiryRefreshButton = document.createElement("button");
+  const entraTenantId = addMailFieldHelp(
+    inputField("email_entra_tenant_id", "Tenant ID", email.entra?.tenant_id || ""),
+    "Tenant ID",
+    "Pozycja: Identyfikator katalogu (dzierzawy) w widoku Przeglad rejestracji aplikacji Microsoft Entra. Nie jest to Identyfikator obiektu."
+  );
+  const entraClientId = addMailFieldHelp(
+    inputField("email_entra_client_id", "Client ID", email.entra?.client_id || ""),
+    "Client ID",
+    "Pozycja: Identyfikator aplikacji (klienta) w widoku Przeglad tej rejestracji aplikacji Microsoft Entra. Nie jest to Identyfikator obiektu."
+  );
+  const entraClientSecret = addMailFieldHelp(
+    credentialField(
+      "email_entra_client_secret",
+      "Client Secret",
+      Boolean(email.entra?.client_secret_set),
+      { type: "password" }
+    ),
+    "Client Secret",
+    "Pozycja: Wartosc w Certyfikaty i wpisy tajne -> Wpisy tajne klienta dla utworzonego sekretu. Nie wpisuj Identyfikatora wpisu tajnego ani Identyfikatora obiektu. Wartosc jest widoczna w Entra tylko bezposrednio po utworzeniu sekretu."
+  );
+  const entraFromAddress = addMailFieldHelp(
+    inputField("email_entra_from_address", "Adres Od", email.entra?.from_address || "", {
+      type: "email",
+      placeholder: "powiadomienia@example.com",
+    }),
+    "Adres Od",
+    "Adres skrzynki Microsoft 365, z ktorej odbiorcy zobacza wiadomosci. Aplikacja Entra musi miec prawo wysylania z tej skrzynki."
+  );
   const smtpSecurity = selectField(
     "email_smtp_security",
     "Szyfrowanie polaczenia",
@@ -11094,6 +11188,11 @@ function renderSettingsMail() {
       ["tls", "TLS od poczatku polaczenia"],
       ["none", "Brak szyfrowania"],
     ]
+  );
+  addMailFieldHelp(
+    smtpSecurity,
+    "Szyfrowanie polaczenia",
+    "Sposob zabezpieczenia polaczenia z serwerem SMTP. Wybierz STARTTLS lub TLS, gdy dostawca je udostepnia."
   );
   const smtpSecuritySelect = smtpSecurity.querySelector("select");
   const updateSmtpWarning = () => {
@@ -11136,46 +11235,72 @@ function renderSettingsMail() {
     entraTitle,
     entraExpiryStatus,
     entraExpiryRefreshButton,
-    inputField("email_entra_tenant_id", "Tenant ID", email.entra?.tenant_id || ""),
-    inputField("email_entra_client_id", "Client ID", email.entra?.client_id || ""),
-    credentialField(
-      "email_entra_client_secret",
-      "Client Secret",
-      Boolean(email.entra?.client_secret_set),
-      { type: "password" }
-    ),
-    inputField("email_entra_from_address", "Adres Od", email.entra?.from_address || "", {
-      type: "email",
-      placeholder: "powiadomienia@example.com",
-    })
+    entraTenantId,
+    entraClientId,
+    entraClientSecret,
+    entraFromAddress
   );
   loadCachedEntraExpiryStatus(entraExpiryStatus);
   smtpCard.append(
     smtpTitle,
-    inputField("email_smtp_host", "Host SMTP", email.smtp?.host || ""),
-    inputField("email_smtp_port", "Port", email.smtp?.port || 587, {
-      type: "number",
-      min: 1,
-      max: 65535,
-    }),
+    addMailFieldHelp(
+      inputField("email_smtp_host", "Host SMTP", email.smtp?.host || ""),
+      "Host SMTP",
+      "Adres serwera SMTP udostepniony przez dostawce poczty, np. smtp.gmail.com."
+    ),
+    addMailFieldHelp(
+      inputField("email_smtp_port", "Port", email.smtp?.port || 587, {
+        type: "number",
+        min: 1,
+        max: 65535,
+      }),
+      "Port",
+      "Port serwera SMTP wskazany przez dostawce poczty. Dla STARTTLS najczesciej jest to 587."
+    ),
     smtpSecurity,
     smtpWarning,
-    inputField("email_smtp_username", "Login", email.smtp?.username || ""),
-    credentialField(
-      "email_smtp_password",
-      "Haslo",
-      Boolean(email.smtp?.password_set),
-      { type: "password" }
+    addMailFieldHelp(
+      inputField("email_smtp_username", "Login", email.smtp?.username || ""),
+      "Login",
+      "Login wymagany przez serwer SMTP; u wielu dostawcow jest to pelny adres e-mail skrzynki."
     ),
-    inputField("email_smtp_from_address", "Adres Od", email.smtp?.from_address || "", {
-      type: "email",
-      placeholder: "powiadomienia@example.com",
-    }),
-    inputField("email_smtp_from_name", "Nazwa Od", email.smtp?.from_name || "PicOrgFTP-SQL")
+    addMailFieldHelp(
+      credentialField(
+        "email_smtp_password",
+        "Haslo",
+        Boolean(email.smtp?.password_set),
+        { type: "password" }
+      ),
+      "Haslo",
+      "Haslo SMTP lub haslo aplikacji wygenerowane przez dostawce poczty. Nie jest to haslo do panelu PicOrgFTP-SQL."
+    ),
+    addMailFieldHelp(
+      inputField("email_smtp_from_address", "Adres Od", email.smtp?.from_address || "", {
+        type: "email",
+        placeholder: "powiadomienia@example.com",
+      }),
+      "Adres Od",
+      "Adres skrzynki SMTP, z ktorej odbiorcy zobacza wiadomosci. Zwykle musi odpowiadac skonfigurowanemu loginowi."
+    ),
+    addMailFieldHelp(
+      inputField("email_smtp_from_name", "Nazwa Od", email.smtp?.from_name || "PicOrgFTP-SQL"),
+      "Nazwa Od",
+      "Czytelna nazwa nadawcy wyswietlana odbiorcom obok adresu skrzynki."
+    )
   );
   channelGrid.append(entraCard, smtpCard);
 
   const rules = email.rules || {};
+  const dailySummaryTime = addMailFieldHelp(
+    inputField(
+      "daily_summary_time",
+      "Godzina dziennego podsumowania",
+      email.daily_summary_time || "16:00",
+      { type: "time" }
+    ),
+    "Godzina dziennego podsumowania",
+    "Godzina wyslania jednego podsumowania zmian dla odbiorcow Informacji. Czas Europe/Warsaw. Raport obejmuje zmiany od poprzedniego poprawnie wyslanego raportu."
+  );
   const rulesGrid = document.createElement("div");
   rulesGrid.className = "mail-rule-grid wide-field";
   rulesGrid.append(
@@ -11296,7 +11421,16 @@ function renderSettingsMail() {
       ),
       channelGrid
     ),
-    settingsFieldGroup("Reguly powiadomien", rulesGrid),
+    settingsFieldGroup(
+      "Reguly powiadomien",
+      rulesGrid,
+      settingsNote("Znaki zapytania wyjasniaja, kto otrzymuje dany typ wiadomosci i kiedy jest wysylany.")
+    ),
+    settingsFieldGroup(
+      "Dzienne podsumowanie informacji",
+      dailySummaryTime,
+      settingsNote("Jedna wiadomosc tylko wtedy, gdy wystapily zmiany produktow. Strefa czasowa: Europe/Warsaw.")
+    ),
     settingsFieldGroup(
       "Wiadomosc testowa",
       testRecipient,
@@ -11311,6 +11445,7 @@ function renderSettingsMail() {
     email_notifications: {
       primary_channel: data.get("email_primary_channel"),
       fallback_enabled: data.has("email_fallback_enabled"),
+      daily_summary_time: data.get("daily_summary_time"),
       entra: {
         tenant_id: data.get("email_entra_tenant_id"),
         client_id: data.get("email_entra_client_id"),
@@ -11869,6 +12004,9 @@ activeUsersMoreButton?.addEventListener("click", (event) => {
 });
 
 document.addEventListener("click", (event) => {
+  if (!event.target.closest(".mail-help")) {
+    closeMailHelpPopover();
+  }
   if (!activeUsersPresence || activeUsersPresence.contains(event.target)) {
     return;
   }
@@ -11877,6 +12015,7 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
+    closeMailHelpPopover({ restoreFocus: true });
     toggleActiveUsersPopover(false);
   }
 });

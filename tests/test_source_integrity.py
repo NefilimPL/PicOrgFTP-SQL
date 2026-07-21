@@ -97,6 +97,43 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn(".entra-expiry-critical", css_source)
         self.assertIn(".entra-expiry-permission-required", css_source)
 
+    def test_mail_settings_include_daily_summary_schedule_and_accessible_help_popovers(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        js_source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+        css_source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('"daily_summary_time"', js_source)
+        self.assertIn('"Godzina dziennego podsumowania"', js_source)
+        self.assertIn('type: "time"', js_source)
+        self.assertIn('daily_summary_time: data.get("daily_summary_time")', js_source)
+        self.assertIn("Europe/Warsaw", js_source)
+        self.assertIn("function createMailHelpPopover", js_source)
+        self.assertIn("function closeMailHelpPopover", js_source)
+        self.assertIn('popover.setAttribute("role", "tooltip")', js_source)
+        self.assertIn('button.setAttribute("aria-expanded", "false")', js_source)
+        self.assertIn('if (event.key === "Escape")', js_source)
+        self.assertIn('event.target.closest(".mail-help")', js_source)
+        for text in (
+            "Jeden dzienny, kompaktowy raport",
+            "niedozwolony plik",
+            "Brak mozliwosci aktualizacji PIMcore",
+            "nieobsluzony wyjatek",
+            "Identyfikator katalogu (dzierzawy)",
+            "Identyfikator aplikacji (klienta)",
+            "Certyfikaty i wpisy tajne",
+            "Wpisy tajne klienta",
+            "Wartosc",
+            "Identyfikatora wpisu tajnego",
+            "Identyfikatora obiektu",
+        ):
+            self.assertIn(text, js_source)
+        self.assertIn(".mail-help", css_source)
+        self.assertIn(".mail-help-popover", css_source)
+
     def test_header_contains_smoothed_backend_health_indicator(self) -> None:
         root = Path(__file__).resolve().parents[1]
         html_source = (

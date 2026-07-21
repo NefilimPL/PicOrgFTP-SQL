@@ -59,7 +59,7 @@ def test_schema_creates_expected_tables(tmp_path: Path) -> None:
             "PRAGMA foreign_key_list(operational_event_stream)"
         ).fetchall()
 
-    assert version == 9
+    assert version == 10
     assert stream_columns == ["sequence", "event_id"]
     assert stream_foreign_keys == []
 
@@ -588,20 +588,30 @@ def test_daily_change_summary_claims_one_retryable_continuous_window(
 
     first = store.claim_daily_change_summary(first_end, claimed_at=first_end)
 
-    assert first == {
+    assert {key: first[key] for key in ("window_start", "window_end", "status")} == {
         "window_start": "2026-07-19T14:00:00.000Z",
         "window_end": first_end,
         "status": "sending",
     }
+    assert first["claim_token"]
     assert store.claim_daily_change_summary(first_end, claimed_at=first_end) is None
-    assert store.finalize_daily_change_summary(first_end, status="pending") is True
+    assert store.finalize_daily_change_summary(
+        first_end, status="pending", claim_token=first["claim_token"]
+    ) is True
     retry = store.claim_daily_change_summary(first_end, claimed_at=first_end)
-    assert retry == first
-    assert store.finalize_daily_change_summary(first_end, status="sent") is True
+    assert retry is not None
+    assert {key: retry[key] for key in ("window_start", "window_end", "status")} == {
+        key: first[key] for key in ("window_start", "window_end", "status")
+    }
+    assert retry["claim_token"] != first["claim_token"]
+    assert store.finalize_daily_change_summary(
+        first_end, status="sent", claim_token=retry["claim_token"]
+    ) is True
 
     second = store.claim_daily_change_summary(second_end, claimed_at=second_end)
 
-    assert second == {
+    assert second is not None
+    assert {key: second[key] for key in ("window_start", "window_end", "status")} == {
         "window_start": first_end,
         "window_end": second_end,
         "status": "sending",
@@ -619,21 +629,28 @@ def test_daily_change_summary_retries_the_oldest_pending_window_before_a_new_one
     first = store.claim_daily_change_summary(first_end, claimed_at=first_end)
     assert first is not None
     assert store.finalize_daily_change_summary(
-        first_end, status="pending", next_attempt_at=retry_at
+        first_end,
+        status="pending",
+        claim_token=first["claim_token"],
+        next_attempt_at=retry_at,
     ) is True
 
     # A bounded backoff must prevent a new, overlapping interval.
     assert store.claim_daily_change_summary(next_end, claimed_at="2026-07-21T14:01:00.000Z") is None
     retried = store.claim_daily_change_summary(next_end, claimed_at=retry_at)
 
-    assert retried == {
+    assert retried is not None
+    assert {key: retried[key] for key in ("window_start", "window_end", "status")} == {
         "window_start": "2026-07-19T14:00:00.000Z",
         "window_end": first_end,
         "status": "sending",
     }
-    assert store.finalize_daily_change_summary(first_end, status="sent") is True
+    assert store.finalize_daily_change_summary(
+        first_end, status="sent", claim_token=retried["claim_token"]
+    ) is True
     next_report = store.claim_daily_change_summary(next_end, claimed_at=next_end)
-    assert next_report == {
+    assert next_report is not None
+    assert {key: next_report[key] for key in ("window_start", "window_end", "status")} == {
         "window_start": first_end,
         "window_end": next_end,
         "status": "sending",
@@ -646,8 +663,13 @@ def test_daily_change_summary_recovery_only_releases_stale_sending_claims(
     store = SqliteStore(str(tmp_path / "data.sqlite"))
     old_end = "2026-07-20T14:00:00.000Z"
     active_end = "2026-07-21T14:00:00.000Z"
-    assert store.claim_daily_change_summary(old_end, claimed_at="2026-07-20T14:00:00.000Z")
-    assert store.finalize_daily_change_summary(old_end, status="sent")
+    old_claim = store.claim_daily_change_summary(
+        old_end, claimed_at="2026-07-20T14:00:00.000Z"
+    )
+    assert old_claim
+    assert store.finalize_daily_change_summary(
+        old_end, status="sent", claim_token=old_claim["claim_token"]
+    )
     assert store.claim_daily_change_summary(active_end, claimed_at="2026-07-21T14:00:00.000Z")
 
     released = store.recover_daily_change_summaries(
@@ -689,6 +711,34 @@ def test_daily_change_summary_migrates_existing_v8_report_table_for_retry(
             row[1] for row in conn.execute("PRAGMA table_info(daily_change_summary_reports)")
         }
     assert "next_attempt_at" in columns
+    assert "claim_token" in columns
+
+
+def test_daily_change_summary_recovered_claim_cannot_be_finalized_by_old_worker(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    window_end = "2026-07-20T14:00:00.000Z"
+    first_claim = store.claim_daily_change_summary(
+        window_end, claimed_at="2026-07-20T14:00:00.000Z"
+    )
+    assert first_claim is not None
+
+    assert store.recover_daily_change_summaries(
+        stale_before="2026-07-20T14:10:00.000Z"
+    ) == 1
+    second_claim = store.claim_daily_change_summary(
+        window_end, claimed_at="2026-07-20T14:10:00.000Z"
+    )
+    assert second_claim is not None
+    assert second_claim["claim_token"] != first_claim["claim_token"]
+
+    assert store.finalize_daily_change_summary(
+        window_end, status="sent", claim_token=first_claim["claim_token"]
+    ) is False
+    assert store.finalize_daily_change_summary(
+        window_end, status="sent", claim_token=second_claim["claim_token"]
+    ) is True
 
 
 def test_migration_converts_legacy_web_history_ts_real(tmp_path: Path) -> None:

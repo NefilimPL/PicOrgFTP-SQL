@@ -27,7 +27,7 @@ from .excel_utils import (
 )
 from .redaction import redact_sensitive_value, sanitize_free_text
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 _NOTIFICATION_DELIVERY_STATUSES = frozenset(
     {"pending", "sending", "sent", "fallback", "skipped", "error"}
 )
@@ -398,6 +398,13 @@ def _migrate_daily_change_summary_reports(conn: sqlite3.Connection) -> None:
             """
             ALTER TABLE daily_change_summary_reports
             ADD COLUMN next_attempt_at TEXT NOT NULL DEFAULT ''
+            """
+        )
+    if "claim_token" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE daily_change_summary_reports
+            ADD COLUMN claim_token TEXT NOT NULL DEFAULT ''
             """
         )
 
@@ -834,7 +841,8 @@ class SqliteStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     sent_at TEXT NOT NULL DEFAULT '',
-                    next_attempt_at TEXT NOT NULL DEFAULT ''
+                    next_attempt_at TEXT NOT NULL DEFAULT '',
+                    claim_token TEXT NOT NULL DEFAULT ''
                 );
                 """
             )
@@ -3384,6 +3392,7 @@ class SqliteStore:
 
         end = _canonical_timestamp(window_end, field="window_end")
         claimed = _canonical_timestamp(claimed_at, field="claimed_at")
+        claim_token = uuid.uuid4().hex
         self.initialize()
         with self.connection() as conn:
             # A later scheduled interval must never jump ahead of a failed
@@ -3407,11 +3416,11 @@ class SqliteStore:
                 result = conn.execute(
                     """
                     UPDATE daily_change_summary_reports
-                    SET status = 'sending', claimed_at = ?, updated_at = ?
+                    SET status = 'sending', claimed_at = ?, updated_at = ?, claim_token = ?
                     WHERE window_end = ? AND status = 'pending'
                       AND (next_attempt_at = '' OR next_attempt_at <= ?)
                     """,
-                    (claimed, claimed, pending_end, claimed),
+                    (claimed, claimed, claim_token, pending_end, claimed),
                 )
                 if result.rowcount != 1:
                     return None
@@ -3419,6 +3428,7 @@ class SqliteStore:
                     "window_start": _text(outstanding["window_start"]),
                     "window_end": pending_end,
                     "status": "sending",
+                    "claim_token": claim_token,
                 }
             existing = conn.execute(
                 "SELECT window_start, status FROM daily_change_summary_reports WHERE window_end = ?",
@@ -3444,17 +3454,28 @@ class SqliteStore:
             result = conn.execute(
                 """
                 INSERT OR IGNORE INTO daily_change_summary_reports (
-                    window_end, window_start, status, claimed_at, created_at, updated_at
-                ) VALUES (?, ?, 'sending', ?, ?, ?)
+                    window_end, window_start, status, claimed_at, created_at, updated_at,
+                    claim_token
+                ) VALUES (?, ?, 'sending', ?, ?, ?, ?)
                 """,
-                (end, start, claimed, claimed, claimed),
+                (end, start, claimed, claimed, claimed, claim_token),
             )
             if result.rowcount != 1:
                 return None
-            return {"window_start": start, "window_end": end, "status": "sending"}
+            return {
+                "window_start": start,
+                "window_end": end,
+                "status": "sending",
+                "claim_token": claim_token,
+            }
 
     def finalize_daily_change_summary(
-        self, window_end: str, *, status: str, next_attempt_at: str = ""
+        self,
+        window_end: str,
+        *,
+        status: str,
+        claim_token: str,
+        next_attempt_at: str = "",
     ) -> bool:
         """Finalize a claimed report; pending reports are safe to retry."""
 
@@ -3462,6 +3483,9 @@ class SqliteStore:
         normalized = _text(status)
         if normalized not in {"pending", "sent"}:
             raise ValueError("invalid daily change summary status")
+        token = _bounded_scalar_text(
+            claim_token, field="claim_token", limit=128, required=True
+        )
         retry_at = (
             _canonical_timestamp(next_attempt_at, field="next_attempt_at")
             if normalized == "pending" and _text(next_attempt_at)
@@ -3475,10 +3499,10 @@ class SqliteStore:
                 UPDATE daily_change_summary_reports
                 SET status = ?, updated_at = ?, sent_at = CASE WHEN ? = 'sent' THEN ? ELSE '' END,
                     claimed_at = CASE WHEN ? = 'pending' THEN '' ELSE claimed_at END,
-                    next_attempt_at = ?
-                WHERE window_end = ? AND status = 'sending'
+                    next_attempt_at = ?, claim_token = ''
+                WHERE window_end = ? AND status = 'sending' AND claim_token = ?
                 """,
-                (normalized, now, normalized, now, normalized, retry_at, end),
+                (normalized, now, normalized, now, normalized, retry_at, end, token),
             )
         return result.rowcount == 1
 
@@ -3488,15 +3512,32 @@ class SqliteStore:
         boundary = _canonical_timestamp(stale_before, field="stale_before")
         self.initialize()
         with self.connection() as conn:
-            result = conn.execute(
+            rows = conn.execute(
                 """
-                UPDATE daily_change_summary_reports
-                SET status = 'pending', claimed_at = '', updated_at = ?
+                SELECT window_end, claimed_at, claim_token
+                FROM daily_change_summary_reports
                 WHERE status = 'sending' AND claimed_at <> '' AND claimed_at <= ?
                 """,
-                (_now_iso(), boundary),
-            )
-        return max(0, result.rowcount)
+                (boundary,),
+            ).fetchall()
+            recovered = 0
+            for row in rows:
+                result = conn.execute(
+                    """
+                    UPDATE daily_change_summary_reports
+                    SET status = 'pending', claimed_at = '', claim_token = '', updated_at = ?
+                    WHERE window_end = ? AND status = 'sending'
+                      AND claimed_at = ? AND claim_token = ?
+                    """,
+                    (
+                        _now_iso(),
+                        _text(row["window_end"]),
+                        _text(row["claimed_at"]),
+                        _text(row["claim_token"]),
+                    ),
+                )
+                recovered += result.rowcount == 1
+        return recovered
 
     def daily_change_history(
         self, *, window_start: str, window_end: str

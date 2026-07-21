@@ -107,7 +107,7 @@ def test_same_v7_database_adds_notification_outbox_idempotently(tmp_path: Path) 
     store.initialize()
 
     with store.connection() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='notification_outbox'"
         ).fetchone()
