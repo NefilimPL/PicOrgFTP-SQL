@@ -6,6 +6,8 @@ import threading
 import time
 from typing import Callable
 
+from .redaction import sanitize_free_text
+
 TERMINAL_STATUSES = {"completed", "partial", "failed"}
 SENSITIVE_LOG_KEYS = {
     "api_key",
@@ -31,8 +33,10 @@ def redact_pimcore_log_value(value: object) -> object:
             )
             for key, item in value.items()
         }
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return [redact_pimcore_log_value(item) for item in value]
+    if isinstance(value, str):
+        return sanitize_free_text(value)
     return value
 
 
@@ -73,7 +77,7 @@ class PimcoreOperationRegistry:
                 ),
                 "stage": stage,
                 "severity": severity,
-                "message": str(message or ""),
+                "message": sanitize_free_text(message),
             }
             event.update(redact_pimcore_log_value(details))
             operation["events"].append(event)
@@ -144,12 +148,14 @@ class PimcoreOperationRegistry:
             with self._lock:
                 operation = self._items[operation_id]
                 operation["status"] = "failed"
-                operation["error"] = str(exc) or exc.__class__.__name__
+                operation["error"] = sanitize_free_text(
+                    str(exc) or exc.__class__.__name__
+                )
             self._event(
                 operation_id,
                 "finish",
                 "error",
-                str(exc) or exc.__class__.__name__,
+                sanitize_free_text(str(exc) or exc.__class__.__name__),
             )
         finally:
             with self._lock:

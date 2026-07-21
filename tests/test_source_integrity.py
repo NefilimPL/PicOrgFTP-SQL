@@ -9,6 +9,491 @@ import unittest
 
 
 class SourceIntegrityTests(unittest.TestCase):
+    def test_runtime_http_client_dependency_is_declared(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        web_requirements = (root / "requirements-web.txt").read_text(encoding="utf-8")
+        build_requirements = (root / "requirements-build.txt").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("requests", web_requirements)
+        self.assertIn("requests", build_requirements)
+        self.assertIn("tzdata", web_requirements)
+        self.assertIn("tzdata", build_requirements)
+
+    def test_mail_settings_ui_wires_both_channels_rules_and_redacted_test(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        html_source = (
+            root / "picorgftp_sql" / "web" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+        js_source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+        css_source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+
+        pimcore_tab = html_source.index('data-settings-tab="pimcore"')
+        mail_tab = html_source.index('data-settings-tab="mail"')
+        slots_tab = html_source.index('data-settings-tab="slots"')
+        self.assertLess(pimcore_tab, mail_tab)
+        self.assertLess(mail_tab, slots_tab)
+        self.assertIn("function renderSettingsMail()", js_source)
+        self.assertIn('requestJson("/api/settings/email/test"', js_source)
+        self.assertIn('requestJson("/api/settings/email/test-suite"', js_source)
+        self.assertIn("Testuj wszystkie typy powiadomien", js_source)
+        self.assertIn("renderMailTestSuiteResult", js_source)
+        for label in (
+            "Odrzucenie danych PIMcore",
+            "Blad transferu FTP",
+            "Niedostepna lokalizacja zdjec",
+            "Nieobsluzony wyjatek backendu",
+            "Client Secret Entra wygasa za 7 dni",
+        ):
+            self.assertIn(label, js_source)
+        for name in (
+            "email_primary_channel",
+            "email_fallback_enabled",
+            "email_entra_tenant_id",
+            "email_entra_client_id",
+            "email_entra_client_secret",
+            "email_entra_from_address",
+            "email_smtp_host",
+            "email_smtp_port",
+            "email_smtp_security",
+            "email_smtp_username",
+            "email_smtp_password",
+            "email_smtp_from_address",
+            "email_smtp_from_name",
+            "email_test_recipient",
+            "email_test_channel",
+            "email_test_use_fallback",
+        ):
+            self.assertIn(name, js_source)
+        for severity in ("info", "warning", "error", "critical"):
+            self.assertIn(f"email_rule_{severity}_enabled", js_source)
+            self.assertIn(f"email_rule_{severity}_recipients", js_source)
+            self.assertIn(f"email_rule_{severity}_include_actor", js_source)
+        self.assertIn("splitEmailRecipients", js_source)
+        self.assertIn("mail-test-attempt", css_source)
+        self.assertIn("@media (max-width: 920px)", css_source)
+
+    def test_mail_settings_renders_safe_entra_expiry_status_and_explicit_refresh(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        js_source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+        css_source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+
+        renderer_start = js_source.index("function renderEntraExpiryStatus")
+        renderer_end = js_source.index("function renderSettingsMail", renderer_start)
+        renderer_source = js_source[renderer_start:renderer_end]
+
+        self.assertIn("renderEntraExpiryStatus", js_source)
+        self.assertIn('"/api/settings/email/entra-expiry"', js_source)
+        self.assertIn('"/api/settings/email/entra-expiry/refresh"', js_source)
+        self.assertIn("Sprawdz teraz", js_source)
+        self.assertIn("Application.Read.All", renderer_source)
+        self.assertLess(
+            renderer_source.index("if (permissionRequired)"),
+            renderer_source.index('if (status.status === "ok"'),
+        )
+        self.assertIn("const expirySeverity", renderer_source)
+        self.assertIn('remainingDays <= 3 ? "critical"', renderer_source)
+        self.assertIn('panel.classList.add(`entra-expiry-${expirySeverity}`)', renderer_source)
+        self.assertIn(
+            'panel.classList.add("entra-expiry-permission-required")',
+            renderer_source,
+        )
+        self.assertIn("textContent", renderer_source)
+        self.assertNotIn("innerHTML", renderer_source)
+        self.assertNotIn("credential_key_id", renderer_source)
+        self.assertNotIn("error_message", renderer_source)
+        self.assertIn(".entra-expiry-panel", css_source)
+        self.assertIn(".entra-expiry-metadata", css_source)
+        self.assertIn(".entra-expiry-warning", css_source)
+        self.assertIn(".entra-expiry-critical", css_source)
+        self.assertIn(".entra-expiry-permission-required", css_source)
+
+    def test_mail_settings_include_daily_summary_schedule_and_accessible_help_popovers(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        js_source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+        css_source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('"daily_summary_time"', js_source)
+        self.assertIn('"Godzina dziennego podsumowania"', js_source)
+        self.assertIn('type: "time"', js_source)
+        self.assertIn('daily_summary_time: data.get("daily_summary_time")', js_source)
+        self.assertIn("Europe/Warsaw", js_source)
+        self.assertIn("function createMailHelpPopover", js_source)
+        self.assertIn("function closeMailHelpPopover", js_source)
+        self.assertIn('popover.setAttribute("role", "tooltip")', js_source)
+        self.assertIn('button.setAttribute("aria-expanded", "false")', js_source)
+        self.assertIn('if (event.key === "Escape")', js_source)
+        self.assertIn('event.target.closest(".mail-help")', js_source)
+        for text in (
+            "Jeden dzienny, kompaktowy raport",
+            "niedozwolony plik",
+            "Brak mozliwosci aktualizacji PIMcore",
+            "nieobsluzony wyjatek",
+            "Identyfikator katalogu (dzierzawy)",
+            "Identyfikator aplikacji (klienta)",
+            "Certyfikaty i wpisy tajne",
+            "Wpisy tajne klienta",
+            "Wartosc",
+            "Identyfikatora wpisu tajnego",
+            "Identyfikatora obiektu",
+        ):
+            self.assertIn(text, js_source)
+        self.assertIn(".mail-help", css_source)
+        self.assertIn(".mail-help-popover", css_source)
+
+    def test_header_contains_smoothed_backend_health_indicator(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        html_source = (
+            root / "picorgftp_sql" / "web" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+        js_source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('id="backendHealthStatus"', html_source)
+        self.assertIn("HEALTH_SLOW_MS = 300", js_source)
+        self.assertIn("HEALTH_CRITICAL_MS = 1000", js_source)
+        self.assertIn("HEALTH_OFFLINE_FAILURES = 3", js_source)
+        self.assertIn("healthSamples.slice(-5)", js_source)
+
+    def test_backend_health_poll_ignores_hidden_aborted_and_stale_requests(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        js_source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+
+        poll_start = js_source.index("async function pollBackendHealth")
+        poll_end = js_source.index("function setBackendHealthDetailsExpanded", poll_start)
+        poll_source = js_source[poll_start:poll_end]
+        visibility_start = js_source.index('document.addEventListener("visibilitychange"')
+        visibility_end = js_source.index("});", visibility_start) + 3
+        visibility_source = js_source[visibility_start:visibility_end]
+
+        self.assertIn("new AbortController()", poll_source)
+        self.assertIn("requestGeneration !== healthPollGeneration", poll_source)
+        self.assertIn("controller.signal.aborted", poll_source)
+        self.assertIn('error?.name === "AbortError"', poll_source)
+        self.assertLess(
+            poll_source.index("requestGeneration !== healthPollGeneration"),
+            poll_source.index("healthSamples.push"),
+        )
+        self.assertIn("scheduleBackendHealthPoll(requestGeneration)", poll_source)
+        self.assertIn("healthPollGeneration += 1", visibility_source)
+        self.assertIn("healthPollController?.abort()", visibility_source)
+        self.assertIn("pollBackendHealth().catch(() => {})", visibility_source)
+        self.assertNotIn("scheduleBackendHealthPoll(0)", visibility_source)
+
+    def test_backend_health_offline_reuses_normalized_last_successful_components(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        js_source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+        docs_source = (root / "docs" / "web-panel.md").read_text(encoding="utf-8")
+
+        self.assertIn("lastSuccessfulHealthComponents", js_source)
+        self.assertIn("function normalizedHealthComponents", js_source)
+        self.assertIn(
+            'updateBackendHealthStatus("offline", 0, lastSuccessfulHealthComponents)',
+            js_source,
+        )
+        self.assertIn("ostatni znany stan komponentów", docs_source.lower())
+
+    def test_web_logs_use_durable_observability_apis(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        self.assertIn("new EventSource(", source)
+        self.assertIn('"/api/observability/stream?after_id="', source)
+        self.assertIn('"/api/observability/events', source)
+        self.assertIn('"/api/observability/incidents', source)
+        self.assertIn('"/api/observability/jobs', source)
+        self.assertIn('"/api/observability/read"', source)
+        self.assertIn('logsLoadMoreButton.textContent = "Wczytaj wiecej"', source)
+        self.assertNotIn("for (const log of logs)", source)
+        self.assertNotIn("function logReadStorageKey", source)
+
+    def test_web_logs_guard_stream_and_cursor_races(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        seed_start = source.index("async function seedLiveLogs")
+        seed_end = source.index("function appendLiveEvent", seed_start)
+        seed_source = source[seed_start:seed_end]
+        self.assertIn("seedGeneration", seed_source)
+        self.assertIn("live_seed", seed_source)
+        self.assertIn("stream_after_id", seed_source)
+        self.assertIn("if (!streamAfterId)", seed_source)
+        self.assertIn("mergeLiveItems", seed_source)
+        self.assertLess(
+            seed_source.index('"/api/observability/events?"'),
+            seed_source.index("startObservabilityStream(streamAfterId);"),
+        )
+        self.assertNotIn("seedBuffer", seed_source)
+        paused_seed = seed_source[
+            seed_source.index("if (state.observability.paused)") : seed_source.index(
+                "} else", seed_source.index("if (state.observability.paused)")
+            )
+        ]
+        self.assertIn("appendPausedObservabilityEvents(seedItems)", paused_seed)
+        self.assertNotIn("live.items =", paused_seed)
+        self.assertNotIn("renderLogs()", paused_seed)
+        seed_catch = seed_source[seed_source.index("} catch (error)") :]
+        self.assertIn(
+            "if (state.observability.seedGeneration !== seedGeneration) return;",
+            seed_catch,
+        )
+        self.assertIn("if (state.observability.streamAfterId)", seed_catch)
+        self.assertNotIn("observability-live-high-water", source)
+        paused_buffer = source[
+            source.index("function appendPausedObservabilityEvents") : seed_start
+        ]
+        self.assertIn("live.items", paused_buffer)
+        stream_source = source[
+            source.index("function startObservabilityStream") : source.index(
+                "function stopObservabilityStream"
+            )
+        ]
+        self.assertIn("encodeURIComponent(afterId)", stream_source)
+        self.assertNotIn(': new EventSource("/api/observability/stream")', stream_source)
+        self.assertIn("streamConnected = true", stream_source)
+        self.assertIn("streamConnected = false", stream_source)
+        self.assertIn('state.observability.paused ? "Wstrzymano" : "Polaczono"', stream_source)
+        self.assertIn("if (tab.loading) return;", source)
+        self.assertIn("logsLoadMoreButton.disabled = Boolean(tab.loading)", source)
+        self.assertIn("state.observability.activeTab === tabName", source)
+        append_live = source[
+            source.index("function appendLiveEvent") : source.index(
+                "function handleObservabilityEvent"
+            )
+        ]
+        self.assertIn("logsOutput.appendChild(renderLogEvent(event))", append_live)
+        self.assertNotIn("renderLogs()", append_live)
+
+    def test_live_filter_transition_invalidates_archive_and_stale_requests(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+        reset_source = source[
+            source.index("function resetLiveArchiveForFilters") : source.index(
+                "function commitLogFilters"
+            )
+        ]
+        for required in (
+            "stopObservabilityStream()",
+            "seedGeneration",
+            "streamSeeded = false",
+            "live.requestId",
+            'live.nextCursor = ""',
+            'live.archiveSince = ""',
+            "live.items = []",
+            'state.observability.streamAfterId = ""',
+        ):
+            self.assertIn(required, reset_source)
+        commit_source = source[
+            source.index("function commitLogFilters") : source.index(
+                "function resetCommittedLogFilters"
+            )
+        ]
+        self.assertIn("resetLiveArchiveForFilters", commit_source)
+        self.assertIn("return changed", commit_source)
+        seed_source = source[
+            source.index("async function seedLiveLogs") : source.index(
+                "function liveArchiveEndpoint"
+            )
+        ]
+        for filter_name in ("query", "severity", "module", "username", "ean"):
+            self.assertIn(f'params.set("{filter_name}"', seed_source)
+        self.assertIn('params.set("job_id"', seed_source)
+        older_source = source[
+            source.index("async function loadOlderLiveLogs") : source.index(
+                "function appendLiveEvent"
+            )
+        ]
+        self.assertIn("requestId", older_source)
+        self.assertIn("seedGeneration", older_source)
+        self.assertIn("live.requestId !== requestId", older_source)
+        self.assertIn("state.observability.seedGeneration !== seedGeneration", older_source)
+        handlers = source[
+            source.index('logsFilters?.addEventListener("submit"') : source.index(
+                'logsPauseButton?.addEventListener("click"'
+            )
+        ]
+        self.assertGreaterEqual(
+            handlers.count("seedLiveLogs({ force: true })"),
+            2,
+        )
+
+    def test_live_query_uses_explicit_server_aligned_search_projection(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        ).read_text(encoding="utf-8")
+        normalization_source = source[
+            source.index("function normalizeLogSearchText") : source.index(
+                "function logEventSearchText"
+            )
+        ]
+        self.assertIn('String(value || "").toLowerCase()', normalization_source)
+        search_source = source[
+            source.index("function logEventSearchText") : source.index(
+                "function logItemMatchesFilters"
+            )
+        ]
+        for field in (
+            "created_at",
+            "id",
+            "severity",
+            "event_type",
+            "module",
+            "stage",
+            "username",
+            "ean",
+            "product_id",
+            "slot",
+            "job_id",
+            "correlation_id",
+            "incident_id",
+            "summary",
+            "recommended_action",
+            "exception_type",
+            "traceback_text",
+        ):
+            self.assertIn(f"item.{field}", search_source)
+        self.assertIn("JSON.stringify(item.details || {})", search_source)
+        self.assertNotIn("JSON.stringify(item)", search_source)
+        self.assertIn("normalizeLogSearchText", search_source)
+        filter_source = source[
+            source.index("function logItemMatchesFilters") : source.index(
+                "function renderLogs"
+            )
+        ]
+        self.assertIn("logEventSearchText(item)", filter_source)
+        self.assertGreaterEqual(filter_source.count("normalizeLogSearchText"), 5)
+
+    def test_web_logs_gate_reads_navigation_unread_and_filters(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        self.assertIn("function waitForLogsPaint", source)
+        self.assertIn("window.requestAnimationFrame", source)
+        self.assertIn('logsView?.classList.contains("active")', source)
+        self.assertIn("tab.requestId !== requestId", source)
+        self.assertIn(
+            'logsOutput.querySelector(".log-incident[data-observability-id]")',
+            source,
+        )
+        self.assertIn("card.getClientRects().length", source)
+        self.assertIn("async function walkObservabilityPages", source)
+        self.assertIn("async function openObservabilityRecord", source)
+        self.assertIn("focusObservabilityRecord", source)
+        self.assertNotIn("OBSERVABILITY_RECORD_PAGE_LIMIT", source)
+        self.assertIn("visitedCursors.has(nextCursor)", source)
+        self.assertIn("unreadRequestId", source)
+        self.assertIn("applyObservabilityUnread", source)
+        request_source = source[
+            source.index("async function requestObservabilityPayload") : source.index(
+                "function showLogsError"
+            )
+        ]
+        self.assertNotIn("authoritativeUnread", request_source)
+        self.assertEqual(request_source.count("unreadRequestId ="), 1)
+        self.assertIn("committedFilters", source)
+        self.assertIn('logsFilters?.addEventListener("reset"', source)
+        job_renderer = source[
+            source.index("function renderJobCard") : source.index(
+                "function logItemMatchesFilters"
+            )
+        ]
+        self.assertNotIn(': "error"', job_renderer)
+        walk_source = source[
+            source.index("async function walkObservabilityPages") : source.index(
+                "function focusObservabilityRecord"
+            )
+        ]
+        self.assertIn("findIncidentRecord", walk_source)
+        self.assertIn("loadIncidentThroughRecord", walk_source)
+        discovery_source = source[
+            source.index("async function findIncidentRecord") : source.index(
+                "async function loadIncidentThroughRecord"
+            )
+        ]
+        self.assertNotIn("appendUniqueObservabilityItems", discovery_source)
+        severity_walk = source[
+            source.index("async function loadIncidentThroughRecord") : source.index(
+                "async function walkObservabilityPages"
+            )
+        ]
+        self.assertIn("observabilityEndpoint(severity, cursor)", severity_walk)
+        self.assertIn("tab.nextCursor = payload.next_cursor", severity_walk)
+        jobs_walk = source[
+            source.index("async function loadJobThroughRecord") : source.index(
+                "async function walkObservabilityPages"
+            )
+        ]
+        self.assertIn("jobs.nextCursor = payload.next_cursor", jobs_walk)
+        resume_source = source[
+            source.index('logsPauseButton?.addEventListener("click"') : source.index(
+                "if (logsAutoscrollToggle)"
+            )
+        ]
+        self.assertIn("state.observability.streamConnected", resume_source)
+        self.assertIn('"Rozlaczono"', resume_source)
+
+    def test_web_client_reports_deduplicated_global_failures(self) -> None:
+        app_path = (
+            Path(__file__).resolve().parents[1]
+            / "picorgftp_sql"
+            / "web"
+            / "static"
+            / "app.js"
+        )
+        source = app_path.read_text(encoding="utf-8")
+
+        self.assertIn("function reportClientFailure", source)
+        self.assertIn('requestJson("/api/observability/client-errors"', source)
+        self.assertIn('window.addEventListener("error"', source)
+        self.assertIn('window.addEventListener("unhandledrejection"', source)
+        self.assertIn("CLIENT_FAILURE_DEDUPE_MS", source)
+        self.assertIn("clientFailureFingerprints", source)
+
     def test_desktop_uses_generic_product_field_settings(self) -> None:
         app_path = Path(__file__).resolve().parents[1] / "picorgftp_sql" / "app.py"
         source = app_path.read_text(encoding="utf-8")
@@ -178,6 +663,49 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn('timingButton.textContent = "Czasy"', js_source)
         self.assertIn("renderHistoryTiming(item)", js_source)
         self.assertIn("historySearchInput?.addEventListener", js_source)
+
+    def test_history_exposes_detailed_changes_modal(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        js_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        html_source = (
+            root / "picorgftp_sql" / "web" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('id="historyChangesModal"', html_source)
+        self.assertIn('changesButton.textContent = "Zmiany"', js_source)
+        self.assertIn("renderHistoryChanges(item)", js_source)
+        self.assertIn(
+            "Szczegolowy zapis zmian nie byl jeszcze dostepny",
+            js_source,
+        )
+
+    def test_history_changes_preserve_structured_values_and_pimcore_job_ids(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        js_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        web_data_source = (root / "picorgftp_sql" / "web_data.py").read_text(
+            encoding="utf-8"
+        )
+        pimcore_history_item = {
+            "details": {
+                "pimcore_operation": {"operation_id": "pimcore-operation-123"},
+                "change_set": {"pimcore": {"operation_id": "structured-operation-456"}},
+            }
+        }
+
+        self.assertEqual(
+            pimcore_history_item["details"]["pimcore_operation"]["operation_id"],
+            "pimcore-operation-123",
+        )
+        self.assertIn('"pimcore_operation": redact_pimcore_log_value(report)', web_data_source)
+        self.assertIn("JSON.stringify", js_source)
+        self.assertIn("Object.keys(nested).sort()", js_source)
+        self.assertIn("historyChangeRow(key, value, historyTechnicalValue)", js_source)
+        self.assertIn("details.pimcore_operation?.operation_id", js_source)
+        self.assertIn("changeSet.pimcore?.operation_id", js_source)
 
     def test_web_autocomplete_keeps_local_values_first(self) -> None:
         app_path = (

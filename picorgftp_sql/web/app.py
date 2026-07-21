@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import binascii
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import io
@@ -27,7 +29,7 @@ from urllib.parse import urlsplit
 import zipfile
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
@@ -55,9 +57,27 @@ from ..common import (
 )
 from ..database import connect_db
 from ..github_status import github_repository_status
+from ..history_changes import history_change_set
 from ..image_utils import fit_image_to_content
 from ..legacy_import import import_legacy_to_sqlite
 from ..logging_utils import log_error
+from ..email_settings import EMAIL_SETTINGS_KEY
+from ..entra_secret_monitor import entra_secret_status, refresh_entra_secret_status
+from ..observability import (
+    SEVERITIES,
+    emit_event,
+    observability_store,
+    prune_live_events,
+    record_job,
+)
+from ..redaction import redact_sensitive_value, sanitize_free_text
+from ..notification_service import (
+    notification_worker_health,
+    send_test_message,
+    send_test_notification_suite,
+    start_notification_worker,
+    stop_notification_worker,
+)
 from ..product_fields import PRODUCT_FIELDS_KEY, normalize_product_fields
 from ..pimcore_templates import TemplateError
 from ..services.ftp_service import sync_remote_files
@@ -176,6 +196,16 @@ _UPLOAD_SCAN_RESULTS: Dict[str, Dict[str, Any]] = {}
 _UPLOAD_SCAN_RESULTS_LOCK = threading.Lock()
 _BACKUP_SCHEDULER_STOP = threading.Event()
 _BACKUP_SCHEDULER_THREAD: threading.Thread | None = None
+_LIVE_EVENT_PRUNE_INTERVAL_SECONDS = 60 * 60
+_LIVE_EVENT_LAST_PRUNED = 0.0
+_HEALTH_INTEGRATION_CACHE_SECONDS = 1.0
+_HEALTH_INTEGRATION_CACHE_LOCK = threading.Lock()
+_HEALTH_INTEGRATION_CACHE_PATH = ""
+_HEALTH_INTEGRATION_CACHE_AT = 0.0
+_HEALTH_INTEGRATION_CACHE: Dict[str, Any] | None = None
+_HEALTH_STORE_CACHE_LOCK = threading.Lock()
+_HEALTH_STORE_CACHE_PATH = ""
+_HEALTH_STORE_CACHE: Any = None
 RATE_LIMIT_LOGIN_ATTEMPTS = 20
 RATE_LIMIT_LOGIN_WINDOW_SECONDS = 10 * 60
 RATE_LIMIT_UPLOAD_ATTEMPTS = 80
@@ -1669,19 +1699,27 @@ def _remote_name_for_output(filename: str) -> str:
     return f"{parsed.ean}_{parsed.normalized_label}{parsed.extension}"
 
 
+def _transfer_slot(filename: object) -> str:
+    parts = os.path.basename(str(filename or "")).split("_")
+    return parts[1].strip()[:40] if len(parts) > 1 else ""
+
+
 def _sync_result_to_ftp(
     result: Any,
     delete_candidates: Optional[List[str]] = None,
     *,
     skip_upload_prefixes: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
-    if not bool(config.CONFIG.get(ft, True)):
-        return {"enabled": False, "uploaded": 0, "deleted": 0, "elapsed_ms": 0, "error": ""}
     skip_upload_prefixes = {str(prefix) for prefix in (skip_upload_prefixes or set())}
-    filenames = [
+    all_filenames = [
         item.filename
         for item in result.saved_files
-        if getattr(item, "filename", "") and str(getattr(item, "prefix", "")) not in skip_upload_prefixes
+        if getattr(item, "filename", "")
+    ]
+    filenames = [
+        filename
+        for filename in all_filenames
+        if _transfer_slot(filename) not in skip_upload_prefixes
     ]
     uploaded_remote_names = {_remote_name_for_output(filename) for filename in filenames}
     delete_set = {
@@ -1690,8 +1728,56 @@ def _sync_result_to_ftp(
         if os.path.basename(str(item or ""))
     }
     delete_set.difference_update({item for item in uploaded_remote_names if item})
+    slot_results: dict[str, dict[str, object]] = {}
+    for filename in all_filenames:
+        slot = _transfer_slot(filename)
+        if not slot:
+            continue
+        slot_results.setdefault(
+            slot,
+            {
+                "slot": slot,
+                "upload_status": "not_requested",
+                "delete_status": "not_requested",
+                "elapsed_ms": 0,
+            },
+        )["upload_status"] = "skipped" if slot in skip_upload_prefixes else "pending"
+    for filename in sorted(delete_set):
+        slot = _transfer_slot(filename)
+        if not slot:
+            continue
+        slot_results.setdefault(
+            slot,
+            {
+                "slot": slot,
+                "upload_status": "not_requested",
+                "delete_status": "not_requested",
+                "elapsed_ms": 0,
+            },
+        )["delete_status"] = "pending"
+    if not bool(config.CONFIG.get(ft, True)):
+        for item in slot_results.values():
+            if item["upload_status"] == "pending":
+                item["upload_status"] = "skipped"
+            if item["delete_status"] == "pending":
+                item["delete_status"] = "skipped"
+        return {
+            "enabled": False,
+            "uploaded": 0,
+            "deleted": 0,
+            "elapsed_ms": 0,
+            "error": "",
+            "slot_results": [slot_results[key] for key in sorted(slot_results)],
+        }
     if not filenames and not delete_set:
-        return {"enabled": True, "uploaded": 0, "deleted": 0, "elapsed_ms": 0, "error": ""}
+        return {
+            "enabled": True,
+            "uploaded": 0,
+            "deleted": 0,
+            "elapsed_ms": 0,
+            "error": "",
+            "slot_results": [slot_results[key] for key in sorted(slot_results)],
+        }
     try:
         payload = sync_remote_files(
             config.CONFIG.get(H, {}),
@@ -1703,6 +1789,57 @@ def _sync_result_to_ftp(
     except Exception as exc:
         payload = {"uploaded": 0, "deleted": 0, "elapsed_ms": 0, "error": str(exc)}
     payload["enabled"] = True
+    elapsed_ms = max(0, int(payload.get("elapsed_ms") or 0))
+    error = bool(payload.get("error"))
+    uploaded_count = max(0, int(payload.get("uploaded") or 0))
+    deleted_count = max(0, int(payload.get("deleted") or 0))
+    upload_status = (
+        "uploaded"
+        if uploaded_count == len(filenames)
+        else "partial"
+        if 0 < uploaded_count < len(filenames)
+        else "error"
+        if error
+        else "skipped"
+    )
+    delete_status = (
+        "deleted"
+        if deleted_count == len(delete_set)
+        else "partial"
+        if 0 < deleted_count < len(delete_set)
+        else "error"
+        if error
+        else "skipped"
+    )
+    for filename in filenames:
+        slot = _transfer_slot(filename)
+        if slot not in slot_results:
+            continue
+        slot_results[slot]["upload_status"] = upload_status
+        if upload_status == "partial":
+            slot_results[slot].update(
+                {
+                    "upload_count": uploaded_count,
+                    "upload_requested": len(filenames),
+                    "provider_error": error,
+                }
+            )
+    for filename in sorted(delete_set):
+        slot = _transfer_slot(filename)
+        if slot not in slot_results:
+            continue
+        slot_results[slot]["delete_status"] = delete_status
+        if delete_status == "partial":
+            slot_results[slot].update(
+                {
+                    "delete_count": deleted_count,
+                    "delete_requested": len(delete_set),
+                    "provider_error": error,
+                }
+            )
+    for item in slot_results.values():
+        item["elapsed_ms"] = elapsed_ms
+    payload["slot_results"] = [slot_results[key] for key in sorted(slot_results)]
     return payload
 
 
@@ -1734,6 +1871,34 @@ def _sync_result_to_sql(
     *,
     clear_prefixes: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
+    saved_by_prefix = {
+        str(item.prefix): item.filename
+        for item in result.saved_files
+        if getattr(item, "filename", "")
+    }
+    requested_clears = {
+        str(prefix) for prefix in (clear_prefixes or set())
+    } - set(saved_by_prefix)
+    slot_results: dict[str, dict[str, object]] = {
+        prefix: {
+            "slot": prefix,
+            "operation": "update",
+            "status": "skipped",
+            "elapsed_ms": 0,
+        }
+        for prefix in saved_by_prefix
+    }
+    slot_results.update(
+        {
+            prefix: {
+                "slot": prefix,
+                "operation": "clear",
+                "status": "skipped",
+                "elapsed_ms": 0,
+            }
+            for prefix in requested_clears
+        }
+    )
     if not bool(config.CONFIG.get(u, True)):
         return {
             "enabled": False,
@@ -1744,6 +1909,7 @@ def _sync_result_to_sql(
             "error": "",
             "skipped": False,
             "reason": "",
+            "slot_results": [slot_results[key] for key in sorted(slot_results)],
         }
     started = time.perf_counter()
     ean = str(getattr(result, "ean", "") or "").strip()
@@ -1756,22 +1922,30 @@ def _sync_result_to_sql(
         "error": "",
         "skipped": False,
         "reason": "",
+        "slot_results": [],
     }
     if not (ean and len(ean) == 13 and ean.isdigit()):
         payload["error"] = "SQL pominiety: brak poprawnego EAN-13."
+        for item in slot_results.values():
+            item["status"] = "error"
+        payload["slot_results"] = [slot_results[key] for key in sorted(slot_results)]
         return payload
     sql_map = config.CONFIG.get(SQL_COLUMN_MAP_KEY, {}) or {}
     context = extract_presence_context(config.CONFIG, ean)
     if not context:
         payload["error"] = "SQL pominiety: nie mozna ustalic tabeli/warunku z zapytania."
+        for item in slot_results.values():
+            item["status"] = "error"
+        payload["slot_results"] = [slot_results[key] for key in sorted(slot_results)]
         return payload
     table, where_clause = context
-    saved_by_prefix = {item.prefix: item.filename for item in result.saved_files if getattr(item, "filename", "")}
-    clear_prefixes = set(clear_prefixes or set()) - set(saved_by_prefix)
+    clear_prefixes = requested_clears
     if not saved_by_prefix and not clear_prefixes:
+        payload["slot_results"] = []
         return payload
     conn = None
     cur = None
+    attempted_slots: set[str] = set()
     try:
         conn = connect_db()
         cur = conn.cursor()
@@ -1781,11 +1955,13 @@ def _sync_result_to_sql(
             if not cur.fetchone():
                 payload["skipped"] = True
                 payload["reason"] = "nie znaleziono wiersza produktu dla tego EAN"
+                payload["slot_results"] = [slot_results[key] for key in sorted(slot_results)]
                 return payload
         template = str(config.CONFIG.get(w, "") or "").strip()
         if not template:
             payload["skipped"] = True
             payload["reason"] = "nie skonfigurowano zapytania SQL"
+            payload["slot_results"] = [slot_results[key] for key in sorted(slot_results)]
             return payload
         for prefix, filename in saved_by_prefix.items():
             column = _safe_sql_identifier(sql_map.get(prefix, ""))
@@ -1796,33 +1972,57 @@ def _sync_result_to_sql(
                 continue
             short_name = f"{ean}_{prefix}{parsed.extension}"
             query = template.format(col=column, column=column, filename=short_name, ean=ean)
+            attempted_slots.add(str(prefix))
             cur.execute(query)
             rowcount = _cursor_rowcount(cur)
             if rowcount != 0:
                 payload["updated"] += 1
+                slot_results[str(prefix)]["status"] = "updated"
             if rowcount > 0:
                 payload["rows"] += rowcount
         for prefix in clear_prefixes:
             column = _safe_sql_identifier(sql_map.get(prefix, ""))
             if not column:
                 continue
+            attempted_slots.add(str(prefix))
             cur.execute(f"UPDATE {table} SET {column} = ''{where_clause}")
             rowcount = _cursor_rowcount(cur)
             if rowcount != 0:
                 payload["cleared"] += 1
+                slot_results[str(prefix)]["status"] = "cleared"
             if rowcount > 0:
                 payload["rows"] += rowcount
         if payload["updated"] or payload["cleared"]:
             conn.commit()
     except Exception as exc:
         payload["error"] = str(exc)
+        payload["updated"] = 0
+        payload["cleared"] = 0
+        payload["rows"] = 0
+        rollback_succeeded = False
         if conn is not None:
             try:
                 conn.rollback()
+                rollback_succeeded = True
             except Exception:
                 pass
+        payload["rolled_back"] = rollback_succeeded
+        for slot, item in slot_results.items():
+            was_successful = item["status"] in {"updated", "cleared"}
+            item.update(
+                {
+                    "status": "error",
+                    "provider": "sql",
+                    "reason": str(exc),
+                    "attempted": slot in attempted_slots,
+                    "rolled_back": rollback_succeeded and was_successful,
+                }
+            )
     finally:
         payload["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        for item in slot_results.values():
+            item["elapsed_ms"] = payload["elapsed_ms"]
+        payload["slot_results"] = [slot_results[key] for key in sorted(slot_results)]
         if cur is not None:
             try:
                 cur.close()
@@ -1894,25 +2094,64 @@ def _ftp_replacement_delete_candidates(
 
 
 def _delete_local_files(delete_requests: List[Dict[str, Any]], saved_paths: Set[str]) -> Dict[str, Any]:
-    payload = {"deleted": 0, "skipped": 0, "errors": []}
+    payload = {"deleted": 0, "skipped": 0, "errors": [], "slot_results": []}
     normalized_saved_paths = {os.path.normcase(os.path.abspath(path)) for path in saved_paths}
     for item in delete_requests:
+        slot_started = time.perf_counter()
+        slot = str(item.get("prefix") or "").strip()
         path = str(item.get("local_path") or "")
         if not path:
+            if slot:
+                payload["slot_results"].append(
+                    {"slot": slot, "status": "skipped", "elapsed_ms": 0}
+                )
             continue
         abs_path = os.path.abspath(path)
+        status = "skipped"
         if os.path.normcase(abs_path) in normalized_saved_paths:
             payload["skipped"] += 1
-            continue
-        try:
-            if os.path.isfile(abs_path):
-                os.remove(abs_path)
-                payload["deleted"] += 1
-            else:
-                payload["skipped"] += 1
-        except Exception as exc:
-            payload["errors"].append(f"{os.path.basename(abs_path)}: {exc}")
+        else:
+            try:
+                if os.path.isfile(abs_path):
+                    os.remove(abs_path)
+                    payload["deleted"] += 1
+                    status = "deleted"
+                else:
+                    payload["skipped"] += 1
+            except Exception as exc:
+                status = "error"
+                payload["errors"].append(f"{os.path.basename(abs_path)}: {exc}")
+        if slot:
+            payload["slot_results"].append(
+                {
+                    "slot": slot,
+                    "status": status,
+                    "elapsed_ms": int((time.perf_counter() - slot_started) * 1000),
+                }
+            )
     return payload
+
+
+def _local_slot_results(
+    saved_files: List[Dict[str, Any]], local_delete_result: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Keep save and delete evidence as distinct operations for each slot."""
+
+    evidence = [
+        {
+            "slot": str(item.get("prefix") or ""),
+            "operation": "save",
+            "status": "saved",
+            "elapsed_ms": max(0, int(item.get("elapsed_ms") or 0)),
+        }
+        for item in saved_files
+        if str(item.get("prefix") or "")
+    ]
+    for item in local_delete_result.get("slot_results", []):
+        if not isinstance(item, dict) or not str(item.get("slot") or ""):
+            continue
+        evidence.append({**item, "operation": "delete"})
+    return evidence
 
 
 def _entry_payload_from_product(product: WebProductForm) -> Dict[str, Any]:
@@ -2157,7 +2396,11 @@ def _append_existing_photo_sources(
                     label=label,
                     filename_label=filename_label,
                     source_path=source_path,
-                    original_filename=ftp_filename or os.path.basename(source_path),
+                    original_filename=(
+                        os.path.basename(source_path)
+                        if had_local_source
+                        else ftp_filename or os.path.basename(source_path)
+                    ),
                 )
             )
             occupied_prefixes.add(prefix)
@@ -2274,7 +2517,7 @@ TIMESTAMP_LOG_START_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2}")
 
 def _clean_log_line(line: str) -> str:
     text = ANSI_ESCAPE_RE.sub("", str(line))
-    return CONTROL_LOG_RE.sub("", text)
+    return sanitize_free_text(CONTROL_LOG_RE.sub("", text))
 
 
 def _http_statuses(lines: List[str]) -> List[int]:
@@ -2293,7 +2536,12 @@ def _web_events_log_path() -> Path:
 
 
 def _safe_event_detail(value: Any) -> str:
-    text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    text = (
+        sanitize_free_text(value)
+        .replace("\r", " ")
+        .replace("\n", " ")
+        .strip()
+    )
     return re.sub(r"\s+", " ", text)
 
 
@@ -2315,10 +2563,16 @@ def _write_web_event(
         message_text = _safe_event_detail(message)
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(f"[{timestamp}] [USER: {user_text}] {level_text}: {event_text} - {message_text}\n")
-            if details:
+            safe_details = redact_sensitive_value(details or {})
+            if isinstance(safe_details, dict) and safe_details:
                 handle.write(
                     "details: "
-                    + json.dumps(details, ensure_ascii=False, sort_keys=True, default=str)
+                    + json.dumps(
+                        safe_details,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    )
                     + "\n"
                 )
     except OSError:
@@ -2603,11 +2857,69 @@ def _process_warning_messages(payload: Dict[str, Any]) -> List[str]:
     return messages
 
 
+def _snapshot_existing_photos(photos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Copy pre-mutation file metadata, including known local file sizes."""
+
+    snapshot: List[Dict[str, Any]] = []
+    for photo in photos:
+        item = dict(photo)
+        size: Optional[int] = None
+        path = str(item.get("path") or "").strip()
+        if path and os.path.isfile(path):
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = None
+        elif isinstance(item.get("size_bytes"), int) and not isinstance(
+            item.get("size_bytes"), bool
+        ):
+            size = max(0, int(item["size_bytes"]))
+        item["size_bytes"] = size
+        snapshot.append(item)
+    return snapshot
+
+
+def _emit_process_integration_events(
+    *,
+    username: str,
+    job_id: str,
+    ean: str,
+    ftp_result: Dict[str, Any],
+    sql_result: Dict[str, Any],
+) -> None:
+    for name, result, count_keys in (
+        ("ftp", ftp_result, ("uploaded", "deleted")),
+        ("sql", sql_result, ("updated", "cleared", "rows")),
+    ):
+        enabled = bool(result.get("enabled"))
+        error = str(result.get("error") or "")
+        status = "disabled" if not enabled else "error" if error else "success"
+        details = {
+            "enabled": enabled,
+            "status": status,
+            "elapsed_ms": int(result.get("elapsed_ms") or 0),
+            "error": error,
+        }
+        details.update({key: int(result.get(key) or 0) for key in count_keys})
+        emit_event(
+            severity="error" if enabled and error else "info",
+            event_type=f"integration.{name}.completed",
+            module="web.process",
+            stage=name,
+            username=username,
+            ean=ean,
+            job_id=job_id,
+            summary=f"Integracja {name.upper()}: {status}.",
+            details=details,
+        )
+
+
 def _process_upload_snapshot(
     *,
     username: str,
     cache_scope: str,
     form: _ProcessFormSnapshot,
+    job_id: str = "",
     progress: Optional[
         Callable[[int, str, List[Dict[str, Any]], Optional[Dict[str, Any]]], None]
     ] = None,
@@ -2619,6 +2931,17 @@ def _process_upload_snapshot(
         current_key: str = "",
         current_label: str = "",
     ) -> None:
+        if current_key:
+            emit_event(
+                severity="info",
+                event_type="process.stage_started",
+                module="web.process",
+                stage=current_key,
+                username=username,
+                job_id=job_id,
+                summary=current_label or label,
+                details={"percent": percent, "label": label},
+            )
         if progress:
             current_stage = None
             if current_key:
@@ -2784,6 +3107,7 @@ def _process_upload_snapshot(
             include_ftp=bool(config.CONFIG.get(ft, True)),
             include_sql=include_sql_in_existing_photo_scan,
         )
+        existing_photos_snapshot = _snapshot_existing_photos(existing_photos)
         existing_file_photos = [photo for photo in existing_photos if _photo_has_file_source(photo)]
         if existing_entry is None:
             conflicts = _existing_photo_conflicts(
@@ -2996,6 +3320,16 @@ def _process_upload_snapshot(
             message=detail,
             details=details,
         )
+        emit_event(
+            severity="warning" if exc.status_code < 500 else "error",
+            event_type="process.validation_rejected",
+            module="web.process",
+            username=username,
+            job_id=job_id,
+            summary=detail,
+            details=details,
+            exception=exc,
+        )
         raise
     except ValueError as exc:
         details = {}
@@ -3007,6 +3341,16 @@ def _process_upload_snapshot(
             username=username,
             message=str(exc),
             details=details,
+        )
+        emit_event(
+            severity="warning",
+            event_type="process.validation_rejected",
+            module="web.process",
+            username=username,
+            job_id=job_id,
+            summary=str(exc),
+            details=details,
+            exception=exc,
         )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
@@ -3029,6 +3373,26 @@ def _process_upload_snapshot(
     timings.append(_timing_item("file_index", "Odswiezenie indeksu lokalnego", stage_started))
     payload["timing"] = _timing_payload(timings, process_started)
     payload["show_timing_details"] = _show_timing_details()
+    saved_entry = _entry_payload_from_product(product)
+    if isinstance(entry_result, dict):
+        saved_entry["product_id"] = str(entry_result.get("product_id") or saved_entry["product_id"])
+    local_slot_results = _local_slot_results(
+        payload["saved_files"], local_delete_result
+    )
+    integrations = {
+        "local": {"slot_results": local_slot_results},
+        "ftp": ftp_result,
+        "sql": sql_result,
+    }
+    change_set = history_change_set(
+        existing_entry=existing_entry,
+        saved_entry=saved_entry,
+        existing_photos=existing_photos_snapshot,
+        saved_files=payload["saved_files"],
+        delete_requests=delete_requests,
+        migrated_prefixes=migrated_prefixes,
+        integrations=integrations,
+    )
     record_history(
         username=username,
         action="process",
@@ -3054,7 +3418,16 @@ def _process_upload_snapshot(
             "output_dir": payload["output_dir"],
             "timing": payload["timing"],
             "entry": entry_result.get("entry", {}) if isinstance(entry_result, dict) else {},
+            "job_id": job_id,
+            "change_set": change_set,
         },
+    )
+    _emit_process_integration_events(
+        username=username,
+        job_id=job_id,
+        ean=product.ean,
+        ftp_result=ftp_result,
+        sql_result=sql_result,
     )
     event_level = "info"
     event_name = "PROCESS_COMPLETED"
@@ -3097,6 +3470,26 @@ def _exception_message(exc: BaseException) -> str:
         detail = exc.detail
         return detail if isinstance(detail, str) else str(detail)
     return str(exc) or exc.__class__.__name__
+
+
+def _result_severity(payload: Dict[str, Any]) -> str:
+    ftp = payload.get("ftp") if isinstance(payload.get("ftp"), dict) else {}
+    sql = payload.get("sql") if isinstance(payload.get("sql"), dict) else {}
+    local_delete = (
+        payload.get("local_delete")
+        if isinstance(payload.get("local_delete"), dict)
+        else {}
+    )
+    blocking = [
+        ftp.get("error"),
+        sql.get("error"),
+        *(local_delete.get("errors") or []),
+    ]
+    if any(blocking):
+        return "error"
+    if payload.get("skipped_slots"):
+        return "warning"
+    return "info"
 
 
 def _cleanup_process_jobs(now: Optional[float] = None) -> None:
@@ -3150,6 +3543,58 @@ def _process_job_timing(job: Dict[str, Any], now: Optional[float] = None) -> Dic
     return {"total_ms": total_ms, "stages": stages}
 
 
+def _process_job_record(job: Dict[str, Any]) -> Dict[str, Any]:
+    entry = dict(job.get("entry") or {})
+    timing = _process_job_timing(job)
+    details: Dict[str, Any] = {
+        "entry": entry,
+        "entry_label": str(job.get("entry_label") or ""),
+        "progress": int(job.get("progress") or 0),
+        "progress_label": str(job.get("progress_label") or ""),
+        "warning_messages": list(job.get("warning_messages") or []),
+        "error": str(job.get("error") or ""),
+        "timing_total_ms": timing["total_ms"],
+    }
+    if job.get("result") is not None:
+        details["result"] = job.get("result")
+    return {
+        "id": str(job.get("id") or ""),
+        "username": str(job.get("username") or ""),
+        "ean": str(entry.get("ean") or ""),
+        "status": str(job.get("status") or "queued"),
+        "summary": str(job.get("progress_label") or job.get("error") or ""),
+        "started_at": job.get("started_at") or job.get("created_at") or time.time(),
+        "finished_at": job.get("finished_at") or "",
+        "stages": timing["stages"],
+        "details": details,
+    }
+
+
+def _persist_process_job(job: Dict[str, Any]) -> None:
+    try:
+        record_job(_process_job_record(job))
+    except Exception:
+        # Observability must not change the processing job's business outcome.
+        pass
+
+
+def _update_process_job_progress(
+    job: Dict[str, Any],
+    percent: int,
+    label: str,
+    stages: Optional[List[Dict[str, Any]]] = None,
+    current_stage: Optional[Dict[str, Any]] = None,
+) -> None:
+    job["progress"] = max(0, min(100, int(percent or 0)))
+    job["progress_label"] = str(label or "")
+    if stages is not None:
+        job["timing_stages"] = [
+            dict(stage) for stage in stages if isinstance(stage, dict)
+        ]
+    if current_stage is not None:
+        job["current_stage"] = dict(current_stage)
+
+
 def _set_process_job_progress(
     job_id: str,
     percent: int,
@@ -3157,17 +3602,171 @@ def _set_process_job_progress(
     stages: Optional[List[Dict[str, Any]]] = None,
     current_stage: Optional[Dict[str, Any]] = None,
 ) -> None:
-    value = max(0, min(100, int(percent or 0)))
     with _PROCESS_JOBS_LOCK:
         job = _PROCESS_JOBS.get(job_id)
         if not job:
             return
-        job["progress"] = value
-        job["progress_label"] = str(label or "")
-        if stages is not None:
-            job["timing_stages"] = [dict(stage) for stage in stages if isinstance(stage, dict)]
-        if current_stage is not None:
-            job["current_stage"] = dict(current_stage)
+        _update_process_job_progress(job, percent, label, stages, current_stage)
+        durable_job = dict(job)
+    _persist_process_job(durable_job)
+
+
+def _new_process_job(
+    *,
+    username: str,
+    cache_scope: str,
+    form: _ProcessFormSnapshot,
+    status: str,
+) -> Dict[str, Any]:
+    job_id = secrets.token_hex(8)
+    entry = _snapshot_entry_payload(form)
+    created_at = time.time()
+    running = status == "running"
+    return {
+        "id": job_id,
+        "status": status,
+        "username": username,
+        "cache_scope": cache_scope,
+        "form": form,
+        "entry": entry,
+        "entry_label": _process_entry_label(entry),
+        "created_at": created_at,
+        "created_time": time.strftime(
+            "%Y-%m-%d %H:%M:%S", time.localtime(created_at)
+        ),
+        "started_at": created_at if running else 0.0,
+        "finished_at": 0.0,
+        "result": None,
+        "progress": 1 if running else 0,
+        "progress_label": "Start zadania" if running else "Oczekuje w kolejce",
+        "timing_stages": [],
+        "current_stage": None,
+        "error": "",
+        "warning_messages": [],
+    }
+
+
+def _finish_process_job_success(
+    job: Dict[str, Any], payload: Dict[str, Any]
+) -> List[str]:
+    warning_messages = _process_warning_messages(payload)
+    job["status"] = "completed"
+    job["finished_at"] = time.time()
+    job["result"] = payload
+    job["progress"] = 100
+    job["progress_label"] = "Zakonczono"
+    job["timing_stages"] = payload.get("timing", {}).get("stages", [])
+    job["current_stage"] = None
+    job["warning_messages"] = warning_messages
+    job.pop("form", None)
+    return warning_messages
+
+
+def _finish_process_job_failure(
+    job: Dict[str, Any], exc: BaseException
+) -> tuple[str, int, str]:
+    message = _exception_message(exc)
+    status_code = int(getattr(exc, "status_code", 500) or 500)
+    severity = (
+        "warning"
+        if isinstance(exc, HTTPException) and status_code < 500
+        else "error"
+        if isinstance(exc, HTTPException)
+        else "critical"
+    )
+    finished_at = time.time()
+    current = job.get("current_stage")
+    if isinstance(current, dict):
+        failing_stage = dict(current)
+        current_started = float(failing_stage.get("started_at") or 0)
+        elapsed_ms = (
+            int(max(0, finished_at - current_started) * 1000)
+            if current_started
+            else int(failing_stage.get("elapsed_ms") or 0)
+        )
+        failing_stage.update(
+            {
+                "elapsed_ms": max(
+                    elapsed_ms, int(failing_stage.get("elapsed_ms") or 0)
+                ),
+                "running": False,
+                "failed": True,
+                "error": message,
+            }
+        )
+        stages = [
+            dict(stage)
+            for stage in (job.get("timing_stages") or [])
+            if isinstance(stage, dict)
+        ]
+        stages.append(failing_stage)
+        job["timing_stages"] = stages
+    job["status"] = "failed"
+    job["finished_at"] = finished_at
+    job["error"] = message
+    job["progress_label"] = "Blad zadania"
+    job["warning_messages"] = [message]
+    job["current_stage"] = None
+    job.pop("form", None)
+    return message, status_code, severity
+
+
+def _emit_process_completed(
+    job: Dict[str, Any], payload: Dict[str, Any], warning_messages: List[str]
+) -> None:
+    entry = dict(job.get("entry") or {})
+    severity = _result_severity(payload)
+    emit_event(
+        severity=severity,
+        event_type="process.completed",
+        module="web.process",
+        stage="completed",
+        username=str(job.get("username") or ""),
+        ean=str(entry.get("ean") or ""),
+        product_id=str(entry.get("product_id") or ""),
+        job_id=str(job.get("id") or ""),
+        summary=(
+            "Process completed successfully."
+            if severity == "info"
+            else "Process completed with integration failures."
+            if severity == "error"
+            else "Process completed with skipped slots."
+        ),
+        details={"warnings": warning_messages, "result": payload},
+    )
+
+
+def _emit_process_failed(
+    job: Dict[str, Any],
+    exc: BaseException,
+    *,
+    message: str,
+    status_code: int,
+    severity: str,
+) -> None:
+    entry = dict(job.get("entry") or {})
+    username = str(job.get("username") or "")
+    job_id = str(job.get("id") or "")
+    _write_web_event(
+        level="warning" if status_code < 500 else "error",
+        event="PROCESS_JOB_FAILED",
+        username=username,
+        message=f"{str(job.get('entry_label') or '')}: {message}",
+        details={"job_id": job_id, "entry": entry},
+    )
+    emit_event(
+        severity=severity,
+        event_type="process.failed",
+        module="web.process",
+        stage="failed",
+        username=username,
+        ean=str(entry.get("ean") or ""),
+        product_id=str(entry.get("product_id") or ""),
+        job_id=job_id,
+        summary=message,
+        details={"entry": entry, "status_code": status_code},
+        exception=exc,
+    )
 
 
 def _queue_process_job(
@@ -3177,31 +3776,13 @@ def _queue_process_job(
     form: _ProcessFormSnapshot,
 ) -> Dict[str, Any]:
     _cleanup_process_jobs()
-    job_id = secrets.token_hex(8)
-    entry = _snapshot_entry_payload(form)
-    created_at = time.time()
-    job = {
-        "id": job_id,
-        "status": "queued",
-        "username": username,
-        "cache_scope": cache_scope,
-        "form": form,
-        "entry": entry,
-        "entry_label": _process_entry_label(entry),
-        "created_at": created_at,
-        "created_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_at)),
-        "started_at": 0.0,
-        "finished_at": 0.0,
-        "result": None,
-        "progress": 0,
-        "progress_label": "Oczekuje w kolejce",
-        "timing_stages": [],
-        "current_stage": None,
-        "error": "",
-        "warning_messages": [],
-    }
+    job = _new_process_job(
+        username=username, cache_scope=cache_scope, form=form, status="queued"
+    )
+    job_id = str(job["id"])
     with _PROCESS_JOBS_LOCK:
         _PROCESS_JOBS[job_id] = job
+    _persist_process_job(dict(job))
     _PROCESS_EXECUTOR.submit(_run_process_job, job_id)
     return _process_job_payload(job, include_result=False)
 
@@ -3218,13 +3799,14 @@ def _run_process_job(job_id: str) -> None:
         username = str(job.get("username") or "")
         cache_scope = str(job.get("cache_scope") or "")
         form = job.get("form")
-        entry = dict(job.get("entry") or {})
-        entry_label = str(job.get("entry_label") or "")
+        durable_job = dict(job)
+    _persist_process_job(durable_job)
     try:
         payload = _process_upload_snapshot(
             username=username,
             cache_scope=cache_scope,
             form=form,
+            job_id=job_id,
             progress=lambda percent, label, stages, current_stage: _set_process_job_progress(
                 job_id,
                 percent,
@@ -3233,41 +3815,29 @@ def _run_process_job(job_id: str) -> None:
                 current_stage,
             ),
         )
-        warning_messages = _process_warning_messages(payload)
         with _PROCESS_JOBS_LOCK:
             job = _PROCESS_JOBS.get(job_id)
             if not job:
                 return
-            job["status"] = "completed"
-            job["finished_at"] = time.time()
-            job["result"] = payload
-            job["progress"] = 100
-            job["progress_label"] = "Zakonczono"
-            job["timing_stages"] = payload.get("timing", {}).get("stages", [])
-            job["current_stage"] = None
-            job["warning_messages"] = warning_messages
-            job.pop("form", None)
+            warning_messages = _finish_process_job_success(job, payload)
+            durable_job = dict(job)
+        _persist_process_job(durable_job)
+        _emit_process_completed(durable_job, payload, warning_messages)
     except Exception as exc:
-        message = _exception_message(exc)
-        status_code = getattr(exc, "status_code", 500)
-        _write_web_event(
-            level="warning" if int(status_code or 500) < 500 else "error",
-            event="PROCESS_JOB_FAILED",
-            username=username,
-            message=f"{entry_label}: {message}",
-            details={"job_id": job_id, "entry": entry},
-        )
         with _PROCESS_JOBS_LOCK:
             job = _PROCESS_JOBS.get(job_id)
             if not job:
                 return
-            job["status"] = "failed"
-            job["finished_at"] = time.time()
-            job["error"] = message
-            job["progress_label"] = "Blad zadania"
-            job["warning_messages"] = [message]
-            job["current_stage"] = None
-            job.pop("form", None)
+            message, status_code, severity = _finish_process_job_failure(job, exc)
+            durable_job = dict(job)
+        _persist_process_job(durable_job)
+        _emit_process_failed(
+            durable_job,
+            exc,
+            message=message,
+            status_code=status_code,
+            severity=severity,
+        )
 
 
 def _process_job_for_user(job_id: str, username: str) -> Optional[Dict[str, Any]]:
@@ -3595,12 +4165,30 @@ def _run_due_sqlite_backups_once() -> Dict[str, Any]:
     return {"created": 1, "slots": slots, "backup": result}
 
 
+def _prune_live_events_if_due(*, force: bool = False) -> int:
+    global _LIVE_EVENT_LAST_PRUNED
+    now = time.monotonic()
+    if (
+        not force
+        and _LIVE_EVENT_LAST_PRUNED
+        and now - _LIVE_EVENT_LAST_PRUNED < _LIVE_EVENT_PRUNE_INTERVAL_SECONDS
+    ):
+        return 0
+    removed = max(0, int(prune_live_events() or 0))
+    _LIVE_EVENT_LAST_PRUNED = now
+    return removed
+
+
 def _backup_scheduler_loop() -> None:
     while not _BACKUP_SCHEDULER_STOP.wait(60):
         try:
             _run_due_sqlite_backups_once()
         except Exception as exc:
             log_error(f"WEB scheduled SQLite backup failed: {exc}\n{traceback.format_exc()}")
+        try:
+            _prune_live_events_if_due()
+        except Exception as exc:
+            log_error(f"WEB observability pruning failed: {exc}\n{traceback.format_exc()}")
 
 
 def _start_backup_scheduler() -> None:
@@ -3625,11 +4213,469 @@ def _stop_backup_scheduler() -> None:
     _BACKUP_SCHEDULER_THREAD = None
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _observability_limit(value: object) -> int:
+    try:
+        parsed = int(value or 20)
+    except (TypeError, ValueError):
+        parsed = 20
+    return max(1, min(100, parsed))
+
+
+def _validate_observability_cursor(value: object) -> str:
+    cursor = str(value or "")
+    if not cursor:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", cursor):
+        raise HTTPException(status_code=400, detail="Niepoprawny kursor.")
+    padded = cursor + "=" * (-len(cursor) % 4)
+    try:
+        decoded_bytes = base64.b64decode(
+            padded.encode("ascii"), altchars=b"-_", validate=True
+        )
+        canonical = base64.urlsafe_b64encode(decoded_bytes).decode("ascii").rstrip("=")
+        if canonical != cursor:
+            raise ValueError("non-canonical cursor")
+        decoded = decoded_bytes.decode("utf-8")
+        payload = json.loads(decoded)
+    except (
+        binascii.Error,
+        UnicodeDecodeError,
+        UnicodeEncodeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise HTTPException(status_code=400, detail="Niepoprawny kursor.") from exc
+    if (
+        not isinstance(payload, list)
+        or len(payload) != 2
+        or not all(isinstance(item, str) and item.strip() for item in payload)
+    ):
+        raise HTTPException(status_code=400, detail="Niepoprawny kursor.")
+    try:
+        parsed_at = datetime.fromisoformat(payload[0].replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Niepoprawny kursor.") from exc
+    if parsed_at.tzinfo is None or parsed_at.utcoffset() is None:
+        raise HTTPException(status_code=400, detail="Niepoprawny kursor.")
+    canonical_timestamp = parsed_at.astimezone(timezone.utc).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+    if payload[0] != canonical_timestamp:
+        raise HTTPException(status_code=400, detail="Niepoprawny kursor.")
+    return cursor
+
+
+def _validated_severities(value: object, *, multiple: bool = True) -> list[str]:
+    raw_values = str(value or "").split(",") if multiple else [str(value or "")]
+    severities = [item.strip().lower() for item in raw_values if item.strip()]
+    if any(item not in SEVERITIES for item in severities):
+        raise HTTPException(status_code=400, detail="Niepoprawny poziom zdarzenia.")
+    return list(dict.fromkeys(severities))
+
+
+def _observability_api_payload(
+    username: str, page: Dict[str, Any]
+) -> Dict[str, Any]:
+    store = observability_store()
+    safe_items = redact_sensitive_value(
+        list(page.get("items") or []), text_limit=32 * 1024
+    )
+    return {
+        "items": safe_items if isinstance(safe_items, list) else [],
+        "next_cursor": str(page.get("next_cursor") or ""),
+        "unread": store.unread_alert_summary(username),
+        "server_time": _utc_now_iso(),
+    }
+
+
+_INTEGRATION_EVENT_NAMES = {
+    "integration.ftp.completed": "ftp",
+    "integration.sql.completed": "sql",
+    "integration.pimcore.completed": "pimcore",
+}
+_SAFE_INTEGRATION_STATUSES = {
+    "completed",
+    "disabled",
+    "error",
+    "failed",
+    "ok",
+    "online",
+    "success",
+    "unknown",
+    "warning",
+}
+
+
+def _safe_integration_status(event: Dict[str, Any]) -> str:
+    details = event.get("details") if isinstance(event.get("details"), dict) else {}
+    status = str(details.get("status") or "").strip().lower()
+    if status in _SAFE_INTEGRATION_STATUSES:
+        return status
+    if str(event.get("severity") or "") in {"error", "critical"}:
+        return "error"
+    return "unknown"
+
+
+def _last_known_integrations(store: Any) -> Dict[str, Any]:
+    unknown = {"status": "unknown", "observed_at": ""}
+    result: Dict[str, Any] = {
+        "ftp": dict(unknown),
+        "sql": dict(unknown),
+        "sql_profiles": [],
+        "pimcore": dict(unknown),
+    }
+    seen_components: set[str] = set()
+    seen_profiles: set[str] = set()
+    page = store.query_operational_events(limit=100)
+    for event in page.get("items") or []:
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("event_type") or "")
+        observed_at = str(event.get("created_at") or "")
+        status = _safe_integration_status(event)
+        component = _INTEGRATION_EVENT_NAMES.get(event_type)
+        if component and component not in seen_components:
+            result[component] = {"status": status, "observed_at": observed_at}
+            seen_components.add(component)
+            continue
+        if event_type != "integration.sql_profile.completed":
+            continue
+        details = event.get("details") if isinstance(event.get("details"), dict) else {}
+        profile_id = str(details.get("profile_id") or "").strip()[:200]
+        if not profile_id or profile_id in seen_profiles:
+            continue
+        seen_profiles.add(profile_id)
+        result["sql_profiles"].append(
+            {
+                "profile_id": profile_id,
+                "status": status,
+                "observed_at": observed_at,
+            }
+        )
+    return result
+
+
+def _cached_last_known_integrations(store: Any) -> Dict[str, Any]:
+    global _HEALTH_INTEGRATION_CACHE
+    global _HEALTH_INTEGRATION_CACHE_AT
+    global _HEALTH_INTEGRATION_CACHE_PATH
+    store_path = str(getattr(store, "path", "") or "")
+    now = time.monotonic()
+    with _HEALTH_INTEGRATION_CACHE_LOCK:
+        if (
+            _HEALTH_INTEGRATION_CACHE is not None
+            and _HEALTH_INTEGRATION_CACHE_PATH == store_path
+            and now - _HEALTH_INTEGRATION_CACHE_AT < _HEALTH_INTEGRATION_CACHE_SECONDS
+        ):
+            return _HEALTH_INTEGRATION_CACHE
+        snapshot = _last_known_integrations(store)
+        _HEALTH_INTEGRATION_CACHE = snapshot
+        _HEALTH_INTEGRATION_CACHE_PATH = store_path
+        _HEALTH_INTEGRATION_CACHE_AT = now
+        return snapshot
+
+
+def _cached_health_store() -> Any:
+    """Initialize the health SQLite store once per configured database path."""
+
+    global _HEALTH_STORE_CACHE
+    global _HEALTH_STORE_CACHE_PATH
+    store_path = str(storage_settings.resolve_sqlite_path())
+    with _HEALTH_STORE_CACHE_LOCK:
+        if _HEALTH_STORE_CACHE is not None and _HEALTH_STORE_CACHE_PATH == store_path:
+            return _HEALTH_STORE_CACHE
+        store = observability_store()
+        _HEALTH_STORE_CACHE = store
+        _HEALTH_STORE_CACHE_PATH = store_path
+        return store
+
+
+def _invalidate_health_integration_cache() -> None:
+    global _HEALTH_INTEGRATION_CACHE
+    global _HEALTH_INTEGRATION_CACHE_AT
+    global _HEALTH_INTEGRATION_CACHE_PATH
+    global _HEALTH_STORE_CACHE
+    global _HEALTH_STORE_CACHE_PATH
+    with _HEALTH_STORE_CACHE_LOCK:
+        _HEALTH_STORE_CACHE = None
+        _HEALTH_STORE_CACHE_PATH = ""
+    with _HEALTH_INTEGRATION_CACHE_LOCK:
+        _HEALTH_INTEGRATION_CACHE = None
+        _HEALTH_INTEGRATION_CACHE_AT = 0.0
+        _HEALTH_INTEGRATION_CACHE_PATH = ""
+
+
+def _integration_component_status(status: object) -> str:
+    value = str(status or "unknown")
+    if value in {"success", "ok", "online", "completed"}:
+        return "online"
+    if value in {"error", "failed", "warning"}:
+        return "degraded"
+    return value if value == "disabled" else "unknown"
+
+
+def _canonical_health_observed_at(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        observed_at = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if observed_at.tzinfo is None:
+        return ""
+    return (
+        observed_at.astimezone(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _health_payload() -> Dict[str, Any]:
+    server_time = _utc_now_iso()
+    components: Dict[str, Dict[str, Any]] = {
+        "backend": {"status": "online", "observed_at": server_time},
+        "sqlite": {"status": "critical", "observed_at": server_time},
+        "job_processor": {
+            "status": "critical"
+            if bool(getattr(_PROCESS_EXECUTOR, "_shutdown", False))
+            else "online",
+            "observed_at": server_time,
+        },
+        "notification_worker": notification_worker_health(),
+    }
+    integrations: Dict[str, Any] = {
+        "ftp": {"status": "unknown", "observed_at": ""},
+        "sql": {"status": "unknown", "observed_at": ""},
+        "sql_profiles": [],
+        "pimcore": {"status": "unknown", "observed_at": ""},
+    }
+    try:
+        store = _cached_health_store()
+        with store.connection() as conn:
+            conn.execute("SELECT 1").fetchone()
+        components["sqlite"] = {"status": "online", "observed_at": server_time}
+        integrations = _cached_last_known_integrations(store)
+    except Exception:
+        pass
+    for name in ("ftp", "sql", "pimcore"):
+        item = integrations[name]
+        components[name] = {
+            "status": _integration_component_status(item.get("status")),
+            "observed_at": item.get("observed_at", ""),
+        }
+    profile_items = integrations["sql_profiles"]
+    profile_statuses = {
+        _integration_component_status(item.get("status")) for item in profile_items
+    }
+    profile_observed_at = max(
+        (
+            _canonical_health_observed_at(item.get("observed_at"))
+            for item in profile_items
+        ),
+        default="",
+    )
+    components["sql_profiles"] = {
+        "status": (
+            "degraded"
+            if "degraded" in profile_statuses
+            else "online"
+            if profile_items and profile_statuses == {"online"}
+            else "unknown"
+        ),
+        "count": len(profile_items),
+        "observed_at": profile_observed_at,
+    }
+    local_ready = all(
+        components[name]["status"] == "online"
+        for name in ("backend", "sqlite", "job_processor", "notification_worker")
+    )
+    return {
+        "ok": local_ready,
+        "version": get_display_version(),
+        "time": server_time,
+        "components": components,
+        "integrations": integrations,
+    }
+
+
+_EMAIL_TEST_ATTEMPT_CODES = frozenset(
+    {
+        "delivery_failed",
+        "message_invalid",
+        "partial_routing_unknown",
+        "processing_failed",
+        "settings_unavailable",
+        "test_failed",
+        "transport_unavailable",
+    }
+)
+
+_EMAIL_TEST_SUITE_KINDS = frozenset(
+    {
+        "pimcore_rejection",
+        "ftp_failure",
+        "photo_location_unavailable",
+        "backend_exception",
+        "entra_secret_expiry",
+    }
+)
+_EMAIL_TEST_SUITE_SEVERITIES = frozenset({"info", "warning", "error", "critical"})
+_EMAIL_TEST_SUITE_STATUSES = frozenset({"sent", "fallback", "skipped", "error"})
+
+
+def _redacted_email_test_attempt(raw: object) -> Dict[str, Any]:
+    """Project one transport attempt without returning provider diagnostics."""
+
+    item = raw if isinstance(raw, dict) else {}
+    channel = str(item.get("channel") or "").strip().lower()
+    if channel not in {"entra", "smtp"}:
+        channel = ""
+    raw_status = str(item.get("status") or "").strip().lower()
+    status = (
+        raw_status
+        if raw_status in {"sent", "partial", "refused"}
+        else "error"
+    )
+    attempt: Dict[str, Any] = {"channel": channel, "status": status}
+    for key in ("status_code", "elapsed_ms"):
+        value = item.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            attempt[key] = max(0, value)
+    if status in {"partial", "refused"}:
+        for key in ("accepted_count", "refused_count"):
+            value = item.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                attempt[key] = max(0, value)
+        raw_codes = item.get("refusal_codes")
+        if isinstance(raw_codes, (list, tuple, set)):
+            attempt["refusal_codes"] = sorted(
+                {
+                    max(0, value)
+                    for value in raw_codes
+                    if isinstance(value, int) and not isinstance(value, bool)
+                }
+            )[:20]
+        return attempt
+    if status == "sent":
+        return attempt
+    category = str(item.get("category") or "delivery").strip().lower()
+    if category not in {"configuration", "transport", "message", "delivery", "internal"}:
+        category = "delivery"
+    code = str(item.get("code") or "delivery_failed").strip().lower()
+    if code not in _EMAIL_TEST_ATTEMPT_CODES:
+        code = "delivery_failed"
+    messages = {
+        "configuration": "Niepoprawna lub niedostepna konfiguracja kanalu.",
+        "transport": "Kanal wysylki jest niedostepny.",
+        "message": "Nie mozna przygotowac wiadomosci.",
+        "internal": "Nie mozna zakonczyc testu wysylki.",
+        "delivery": "Kanal nie wyslal wiadomosci.",
+    }
+    attempt.update({"code": code, "category": category, "message": messages[category]})
+    return attempt
+
+
+def _redacted_email_test_suite_scenario(raw: object) -> Dict[str, Any]:
+    """Project one test-suite result without messages, recipients or IDs."""
+
+    item = raw if isinstance(raw, dict) else {}
+    kind = str(item.get("kind") or "").strip().lower()
+    if kind not in _EMAIL_TEST_SUITE_KINDS:
+        kind = ""
+    severity = str(item.get("severity") or "").strip().lower()
+    if severity not in _EMAIL_TEST_SUITE_SEVERITIES:
+        severity = "critical" if kind == "entra_secret_expiry" else ""
+    status = str(item.get("status") or "").strip().lower()
+    if status not in _EMAIL_TEST_SUITE_STATUSES:
+        status = "error"
+    channel = str(item.get("used_channel") or "").strip().lower()
+    if channel not in {"entra", "smtp"}:
+        channel = ""
+    recipient_count = item.get("recipient_count")
+    if not isinstance(recipient_count, int) or isinstance(recipient_count, bool):
+        recipient_count = 0
+    attempts = item.get("attempts")
+    return {
+        "kind": kind,
+        "severity": severity,
+        "status": status,
+        "used_channel": channel,
+        "recipient_count": max(0, recipient_count),
+        "attempts": [
+            _redacted_email_test_attempt(attempt)
+            for attempt in (attempts if isinstance(attempts, list) else [])[:2]
+        ],
+    }
+
+
+_INCIDENT_DELIVERY_STATUSES = frozenset(
+    {"pending", "sending", "sent", "fallback", "skipped", "error"}
+)
+
+
+def _public_incident_delivery(raw: object) -> Dict[str, Any]:
+    """Return the closed, recipient-free delivery projection used by log cards."""
+
+    item = raw if isinstance(raw, dict) else {}
+    status = str(item.get("status") or "").strip().lower()
+    if status not in _INCIDENT_DELIVERY_STATUSES:
+        status = "error"
+    channel = str(item.get("used_channel") or "").strip().lower()
+    if channel not in {"entra", "smtp"}:
+        channel = ""
+    recipients = item.get("recipients")
+    raw_attempts = item.get("attempts")
+    attempts = raw_attempts if isinstance(raw_attempts, list) else []
+    return {
+        "id": str(item.get("id") or ""),
+        "status": status,
+        "used_channel": channel,
+        "recipient_count": len(recipients) if isinstance(recipients, list) else 0,
+        "created_at": str(item.get("created_at") or ""),
+        "updated_at": str(item.get("updated_at") or ""),
+        "attempts": [_redacted_email_test_attempt(attempt) for attempt in attempts[:2]],
+    }
+
+
 def create_app() -> FastAPI:
     """Create the LAN web backend."""
 
     app = FastAPI(title="PicOrgFTP-SQL Web", version=get_app_version())
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+    @app.exception_handler(Exception)
+    async def _unhandled_application_error(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        correlation_id = f"corr-{secrets.token_hex(12)}"
+        emit_event(
+            severity="critical",
+            event_type="backend.unhandled_error",
+            module="web",
+            stage="request",
+            correlation_id=correlation_id,
+            summary="Unhandled application error.",
+            details={"method": request.method, "path": request.url.path},
+            exception=exc,
+        )
+        log_error(
+            f"[{correlation_id}] WEB {request.method} {request.url.path}: "
+            f"{exc}\n{traceback.format_exc()}"
+        )
+        return JSONResponse(
+            {
+                "detail": "Wystapil nieoczekiwany blad aplikacji.",
+                "correlation_id": correlation_id,
+            },
+            status_code=500,
+        )
 
     def _runtime_info() -> Dict[str, Any]:
         return {
@@ -3638,16 +4684,6 @@ def create_app() -> FastAPI:
             "config_path": config.CONFIG_PATH,
             "warning": settings.BASE_DIR_OVERRIDE_WARNING,
         }
-
-    @app.middleware("http")
-    async def _log_unhandled_web_errors(request: Request, call_next):
-        try:
-            return await call_next(request)
-        except Exception as exc:
-            log_error(
-                f"WEB {request.method} {request.url.path}: {exc}\n{traceback.format_exc()}"
-            )
-            raise
 
     @app.middleware("http")
     async def _guard_mutating_requests(request: Request, call_next):
@@ -3702,21 +4738,23 @@ def create_app() -> FastAPI:
         app.state.runtime_info = runtime_info
         cleanup_web_ftp_cache(force=True)
         cleanup_web_upload_cache(force=True)
+        try:
+            _prune_live_events_if_due(force=True)
+        except Exception as exc:
+            log_error(f"WEB observability pruning failed: {exc}\n{traceback.format_exc()}")
         _start_backup_scheduler()
+        start_notification_worker()
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
+        stop_notification_worker()
         _stop_backup_scheduler()
         with _ACTIVE_CLIENTS_LOCK:
             _flush_active_clients_locked(time.time(), force=True)
 
     @app.get("/api/health")
     def health() -> Dict[str, Any]:
-        return {
-            "ok": True,
-            "version": get_display_version(),
-            "time": datetime.now().isoformat(timespec="seconds"),
-        }
+        return _health_payload()
 
     @app.get("/")
     def index(request: Request) -> Response:
@@ -3867,6 +4905,208 @@ def create_app() -> FastAPI:
         _require_admin(request)
         return _logs_response(limit)
 
+    @app.get("/api/observability/events")
+    def observability_events_api(
+        request: Request,
+        live_seed: bool = False,
+        severity: str = "",
+        cursor: str = "",
+        limit: int = 20,
+        username: str = "",
+        ean: str = "",
+        job_id: str = "",
+        correlation_id: str = "",
+        module: str = "",
+        query: str = "",
+        since: str = "",
+    ) -> Dict[str, Any]:
+        current_user = _require_admin(request)
+        store = observability_store()
+        if live_seed:
+            live_severities = _validated_severities(severity)
+            seed_since = (
+                datetime.now(timezone.utc) - timedelta(hours=24)
+            ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            page = store.snapshot_operational_event_stream(
+                since=seed_since,
+                limit=200,
+                severities=live_severities,
+                username=username,
+                ean=ean,
+                job_id=job_id,
+                module=module,
+                query=query,
+            )
+            response = _observability_api_payload(
+                str(current_user.get("username") or ""), page
+            )
+            response["stream_after_id"] = str(page.get("stream_after_id") or "")
+            response["archive_since"] = str(page.get("archive_since") or seed_since)
+            return response
+        severities = _validated_severities(severity)
+        page = store.query_operational_events(
+            severities=severities,
+            username=username,
+            ean=ean,
+            job_id=job_id,
+            correlation_id=correlation_id,
+            module=module,
+            query=query,
+            cursor=_validate_observability_cursor(cursor),
+            limit=_observability_limit(limit),
+            since=since,
+        )
+        return _observability_api_payload(str(current_user.get("username") or ""), page)
+
+    @app.get("/api/observability/incidents")
+    def observability_incidents_api(
+        request: Request,
+        severity: str = "",
+        cursor: str = "",
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        current_user = _require_admin(request)
+        severities = _validated_severities(severity, multiple=False)
+        store = observability_store()
+        page = store.query_incidents(
+            severity=severities[0] if severities else "",
+            cursor=_validate_observability_cursor(cursor),
+            limit=_observability_limit(limit),
+        )
+        incident_items = [
+            item for item in page.get("items") or [] if isinstance(item, dict)
+        ]
+        incident_ids = [str(item.get("id") or "") for item in incident_items]
+        deliveries_by_incident: Dict[str, List[Dict[str, Any]]] = {}
+        for delivery in store.notification_deliveries_for_incidents(
+            incident_ids, per_incident_limit=5
+        ):
+            incident_id = str(delivery.get("incident_id") or "")
+            if incident_id in incident_ids:
+                deliveries_by_incident.setdefault(incident_id, []).append(
+                    _public_incident_delivery(delivery)
+                )
+        page["items"] = [
+            {
+                **item,
+                "deliveries": deliveries_by_incident.get(str(item.get("id") or ""), []),
+            }
+            for item in incident_items
+        ]
+        return _observability_api_payload(str(current_user.get("username") or ""), page)
+
+    @app.get("/api/observability/incidents/{incident_id}/context")
+    def observability_incident_context_api(
+        incident_id: str,
+        request: Request,
+        cursor: str = "",
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        current_user = _require_admin(request)
+        context = observability_store().query_incident_context(
+            incident_id,
+            problem_cursor=_validate_observability_cursor(cursor),
+            problem_limit=_observability_limit(limit),
+        )
+        if context is None:
+            raise HTTPException(status_code=404, detail="Nie znaleziono incydentu.")
+        safe_context = redact_sensitive_value(context, text_limit=32 * 1024)
+        response = safe_context if isinstance(safe_context, dict) else {}
+        response["unread"] = observability_store().unread_alert_summary(
+            str(current_user.get("username") or "")
+        )
+        response["server_time"] = _utc_now_iso()
+        return response
+
+    @app.get("/api/observability/jobs")
+    def observability_jobs_api(
+        request: Request, cursor: str = "", limit: int = 20
+    ) -> Dict[str, Any]:
+        current_user = _require_admin(request)
+        page = observability_store().query_job_runs(
+            cursor=_validate_observability_cursor(cursor),
+            limit=_observability_limit(limit),
+        )
+        return _observability_api_payload(str(current_user.get("username") or ""), page)
+
+    @app.get("/api/observability/stream")
+    async def observability_stream_api(
+        request: Request, after_id: str = ""
+    ) -> StreamingResponse:
+        _require_admin(request)
+
+        async def generate():
+            store = observability_store()
+            reconnect_id = str(request.headers.get("last-event-id") or "").strip()
+            start = store.start_operational_event_stream(
+                after_id=reconnect_id or str(after_id or "").strip(),
+                initial_limit=100,
+            )
+            position = int(start.get("position") or 0)
+            next_heartbeat = time.monotonic()
+            for item in start.get("items") or []:
+                if await request.is_disconnected():
+                    return
+                safe_item = redact_sensitive_value(item, text_limit=32 * 1024)
+                if not isinstance(safe_item, dict):
+                    continue
+                event_id = str(safe_item.get("id") or "")
+                yield (
+                    f"id: {event_id}\n"
+                    f"data: {json.dumps(safe_item, ensure_ascii=False)}\n\n"
+                )
+            while not await request.is_disconnected():
+                page = store.poll_operational_event_stream(
+                    position=position, limit=100
+                )
+                position = int(page.get("position") or position)
+                for item in page.get("items") or []:
+                    if await request.is_disconnected():
+                        return
+                    safe_item = redact_sensitive_value(item, text_limit=32 * 1024)
+                    if not isinstance(safe_item, dict):
+                        continue
+                    event_id = str(safe_item.get("id") or "")
+                    yield (
+                        f"id: {event_id}\n"
+                        f"data: {json.dumps(safe_item, ensure_ascii=False)}\n\n"
+                    )
+                now = time.monotonic()
+                if now >= next_heartbeat:
+                    if await request.is_disconnected():
+                        return
+                    yield ": heartbeat\n\n"
+                    next_heartbeat = now + 15
+                await asyncio.sleep(1)
+
+        return StreamingResponse(generate(), media_type="text/event-stream")
+
+    @app.post("/api/observability/read")
+    async def observability_read_api(request: Request) -> Dict[str, Any]:
+        username = _require_user(request)
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Niepoprawne dane odczytu.") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Niepoprawne dane odczytu.")
+        severities = _validated_severities(payload.get("severity"), multiple=False)
+        event_id = str(payload.get("event_id") or "").strip()
+        created_at = str(payload.get("created_at") or "").strip()
+        if not severities or not event_id or not created_at:
+            raise HTTPException(status_code=400, detail="Niepoprawne dane odczytu.")
+        try:
+            datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Niepoprawne dane odczytu.") from exc
+        store = observability_store()
+        store.mark_alerts_read(username, severities[0], event_id, created_at)
+        return {
+            "ok": True,
+            "unread": store.unread_alert_summary(username),
+            "server_time": _utc_now_iso(),
+        }
+
     @app.get("/api/server/active-users")
     def active_users_api(request: Request) -> Dict[str, Any]:
         _require_admin(request)
@@ -3892,10 +5132,13 @@ def create_app() -> FastAPI:
         verified = authenticate_user(username, password)
         if not verified or verified.get("role") != "admin":
             raise HTTPException(status_code=403, detail="Niepoprawne haslo administratora.")
+        structured_result = observability_store().clear_operational_data()
+        _invalidate_health_integration_cache()
         clear_result = _clear_log_files()
         response = _logs_response(400)
         response["cleared"] = clear_result["cleared"]
         response["clear_errors"] = clear_result["errors"]
+        response["structured_cleared"] = structured_result
         return JSONResponse(response)
 
     @app.post("/api/file-index/refresh")
@@ -4377,6 +5620,177 @@ def create_app() -> FastAPI:
         snapshot["current_user"] = _current_user_payload(request)
         return JSONResponse(snapshot)
 
+    @app.post("/api/settings/email/test")
+    async def settings_email_test(request: Request) -> JSONResponse:
+        _require_admin(request)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            return JSONResponse(
+                {"ok": False, "status": "invalid", "used_channel": "", "attempts": [], "elapsed_ms": 0},
+                status_code=400,
+            )
+        recipient_value = payload.get("recipient")
+        channel_value = payload.get("channel")
+        use_fallback = payload.get("use_fallback", False)
+        if not isinstance(recipient_value, str) or not recipient_value.strip():
+            return JSONResponse(
+                {"ok": False, "status": "invalid", "used_channel": "", "attempts": [], "elapsed_ms": 0},
+                status_code=400,
+            )
+        if not isinstance(channel_value, str):
+            channel_value = ""
+        selected = channel_value.strip().lower()
+        if selected not in {"entra", "smtp", "primary"} or not isinstance(use_fallback, bool):
+            return JSONResponse(
+                {"ok": False, "status": "invalid", "used_channel": "", "attempts": [], "elapsed_ms": 0},
+                status_code=400,
+            )
+        if selected == "primary":
+            try:
+                email_settings = settings_snapshot().get(EMAIL_SETTINGS_KEY, {})
+                selected = str(
+                    email_settings.get("primary_channel")
+                    if isinstance(email_settings, dict)
+                    else ""
+                ).strip().lower()
+            except Exception:
+                selected = ""
+            if selected not in {"entra", "smtp"}:
+                selected = "entra"
+
+        started = time.perf_counter()
+        try:
+            result = await run_in_threadpool(
+                send_test_message,
+                channel=selected,
+                recipient=recipient_value.strip(),
+                use_fallback=use_fallback,
+            )
+        except ValueError:
+            elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+            return JSONResponse(
+                {"ok": False, "status": "invalid", "used_channel": selected, "attempts": [], "elapsed_ms": elapsed_ms},
+                status_code=400,
+            )
+        except Exception:
+            result = {
+                "status": "error",
+                "used_channel": selected,
+                "attempts": [
+                    {
+                        "channel": selected,
+                        "status": "error",
+                        "code": "test_failed",
+                        "category": "internal",
+                    }
+                ],
+            }
+        elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+        result = result if isinstance(result, dict) else {}
+        status = str(result.get("status") or "error").strip().lower()
+        if status not in {"sent", "fallback", "error"}:
+            status = "error"
+        used_channel = str(result.get("used_channel") or selected).strip().lower()
+        if used_channel not in {"entra", "smtp"}:
+            used_channel = selected
+        raw_attempts = result.get("attempts")
+        attempts = [
+            _redacted_email_test_attempt(item)
+            for item in (raw_attempts if isinstance(raw_attempts, list) else [])[:2]
+        ]
+        response_payload = {
+            "ok": status in {"sent", "fallback"},
+            "status": status,
+            "used_channel": used_channel,
+            "attempts": attempts,
+            "elapsed_ms": elapsed_ms,
+        }
+        if response_payload["ok"] and used_channel == "entra":
+            try:
+                await run_in_threadpool(refresh_entra_secret_status, force=True)
+            except Exception:
+                pass
+        return JSONResponse(
+            response_payload,
+            status_code=200 if response_payload["ok"] else 502,
+        )
+
+    @app.post("/api/settings/email/test-suite")
+    async def settings_email_test_suite(request: Request) -> JSONResponse:
+        _require_admin(request)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            return JSONResponse({"ok": False, "scenarios": [], "elapsed_ms": 0}, status_code=400)
+        channel_value = payload.get("channel")
+        use_fallback = payload.get("use_fallback", False)
+        if not isinstance(channel_value, str):
+            channel_value = ""
+        selected = channel_value.strip().lower()
+        if selected not in {"entra", "smtp", "primary"} or not isinstance(use_fallback, bool):
+            return JSONResponse({"ok": False, "scenarios": [], "elapsed_ms": 0}, status_code=400)
+        if selected == "primary":
+            try:
+                email_settings = settings_snapshot().get(EMAIL_SETTINGS_KEY, {})
+                selected = str(
+                    email_settings.get("primary_channel")
+                    if isinstance(email_settings, dict)
+                    else ""
+                ).strip().lower()
+            except Exception:
+                selected = ""
+            if selected not in {"entra", "smtp"}:
+                selected = "entra"
+
+        started = time.perf_counter()
+        try:
+            result = await run_in_threadpool(
+                send_test_notification_suite,
+                channel=selected,
+                use_fallback=use_fallback,
+            )
+        except ValueError:
+            elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+            return JSONResponse(
+                {"ok": False, "scenarios": [], "elapsed_ms": elapsed_ms},
+                status_code=400,
+            )
+        except Exception:
+            result = {"scenarios": []}
+        elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+        values = result.get("scenarios") if isinstance(result, dict) else []
+        scenarios = [
+            _redacted_email_test_suite_scenario(item)
+            for item in (values if isinstance(values, list) else [])[:5]
+        ]
+        ok = len(scenarios) == 5 and all(
+            item["status"] in {"sent", "fallback", "skipped"}
+            for item in scenarios
+        )
+        return JSONResponse(
+            {"ok": ok, "scenarios": scenarios, "elapsed_ms": elapsed_ms},
+            status_code=200 if ok else 502,
+        )
+
+    @app.get("/api/settings/email/entra-expiry")
+    def settings_entra_expiry_status(request: Request) -> JSONResponse:
+        _require_admin(request)
+        return JSONResponse(entra_secret_status())
+
+    @app.post("/api/settings/email/entra-expiry/refresh")
+    async def settings_entra_expiry_refresh(request: Request) -> JSONResponse:
+        _require_admin(request)
+        try:
+            status = await run_in_threadpool(refresh_entra_secret_status, force=True)
+        except Exception:
+            status = entra_secret_status()
+        return JSONResponse(status)
+
     @app.post("/api/settings/sql-profiles/{profile_id}/test")
     async def settings_sql_profile_test(
         request: Request,
@@ -4630,19 +6044,51 @@ def create_app() -> FastAPI:
 
     @app.post("/api/pimcore/render-templates")
     async def pimcore_render_templates_api(request: Request) -> JSONResponse:
-        _require_user(request)
+        username = _require_user(request)
         payload = await request.json()
         source = payload if isinstance(payload, dict) else {}
+        mode = str(source.get("mode") or "create").strip().lower()
+        object_id = source.get("object_id")
+        if mode not in {"create", "edit"}:
+            raise HTTPException(status_code=400, detail="Niepoprawny tryb Pimcore.")
+        if mode == "edit":
+            try:
+                object_id = int(object_id)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Brak ID obiektu Pimcore.")
+            if object_id <= 0:
+                raise HTTPException(status_code=400, detail="Brak ID obiektu Pimcore.")
+        else:
+            object_id = None
         try:
             result = await run_in_threadpool(
                 render_saved_pimcore_templates,
                 source.get("product_values"),
                 source.get("values"),
                 source.get("targets"),
-                source.get("mode", "create"),
+                mode,
             )
         except (TemplateError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        integrations = result.get("integrations") if isinstance(result, dict) else None
+        profiles = (
+            integrations.get("sql_profiles")
+            if isinstance(integrations, dict)
+            else None
+        )
+        if isinstance(profiles, list) and profiles:
+            try:
+                result["integration_context_id"] = await run_in_threadpool(
+                    observability_store().create_pimcore_integration_context,
+                    username=username,
+                    mode=mode,
+                    object_id=object_id,
+                    results=integrations,
+                )
+            except Exception:
+                # Calculated values remain usable; unavailable audit evidence must
+                # never be replaced by browser-supplied claims.
+                pass
         return JSONResponse(result)
 
     @app.get("/api/pimcore/products/{object_id}")
@@ -4666,16 +6112,39 @@ def create_app() -> FastAPI:
         payload = await request.json()
         values = payload.get("values") if isinstance(payload, dict) else None
         marker = payload.get("marker") if isinstance(payload, dict) else None
+        context_id = payload.get("integration_context_id") if isinstance(payload, dict) else None
         if not isinstance(values, dict) or not str(marker or ""):
             raise HTTPException(status_code=400, detail="Brak danych albo wersji produktu Pimcore.")
+        integration_results = None
+        if isinstance(context_id, str) and 20 <= len(context_id) <= 200:
+            try:
+                integration_results = await run_in_threadpool(
+                    observability_store().consume_pimcore_integration_context,
+                    context_id,
+                    username=username,
+                    mode="edit",
+                    object_id=object_id,
+                )
+            except Exception:
+                integration_results = None
         try:
-            result = await run_in_threadpool(
-                update_pimcore_product,
-                object_id,
-                marker,
-                values,
-                username,
-            )
+            if integration_results is None:
+                result = await run_in_threadpool(
+                    update_pimcore_product,
+                    object_id,
+                    marker,
+                    values,
+                    username,
+                )
+            else:
+                result = await run_in_threadpool(
+                    update_pimcore_product,
+                    object_id,
+                    marker,
+                    values,
+                    username,
+                    integration_results,
+                )
         except PimcoreConflictError as exc:
             raise HTTPException(
                 status_code=409,
@@ -4697,10 +6166,31 @@ def create_app() -> FastAPI:
         username = _require_user(request)
         payload = await request.json()
         values = payload.get("values") if isinstance(payload, dict) else None
+        context_id = payload.get("integration_context_id") if isinstance(payload, dict) else None
         if not isinstance(values, dict):
             raise HTTPException(status_code=400, detail="Brak danych produktu Pimcore.")
+        integration_results = None
+        if isinstance(context_id, str) and 20 <= len(context_id) <= 200:
+            try:
+                integration_results = await run_in_threadpool(
+                    observability_store().consume_pimcore_integration_context,
+                    context_id,
+                    username=username,
+                    mode="create",
+                    object_id=None,
+                )
+            except Exception:
+                integration_results = None
         try:
-            result = await run_in_threadpool(create_pimcore_product, values, username)
+            if integration_results is None:
+                result = await run_in_threadpool(create_pimcore_product, values, username)
+            else:
+                result = await run_in_threadpool(
+                    create_pimcore_product,
+                    values,
+                    username,
+                    integration_results,
+                )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except PimcoreApiError as exc:
@@ -4839,11 +6329,14 @@ def create_app() -> FastAPI:
     async def users_add(request: Request) -> JSONResponse:
         _require_admin(request)
         payload = await request.json()
+        email = payload.get("email", "") if isinstance(payload, dict) else ""
+        email = "" if email is None else str(email)
         try:
             users = add_user(
                 str(payload.get("username") if isinstance(payload, dict) else ""),
                 str(payload.get("password") if isinstance(payload, dict) else ""),
                 str(payload.get("role") if isinstance(payload, dict) else "user"),
+                email,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -4861,6 +6354,7 @@ def create_app() -> FastAPI:
                 enabled=payload.get("enabled") if "enabled" in payload else None,
                 role=payload.get("role") if "role" in payload else None,
                 password=payload.get("password") if "password" in payload else None,
+                email=payload.get("email") if "email" in payload else None,
                 unlock=bool(payload.get("unlock")) if "unlock" in payload else None,
                 revoke_sessions=bool(payload.get("revoke_sessions")) if "revoke_sessions" in payload else None,
                 revoke_extension_token=bool(payload.get("revoke_extension_token"))
@@ -4909,6 +6403,27 @@ def create_app() -> FastAPI:
             return JSONResponse(test_sql_connection())
         raise HTTPException(status_code=404, detail="Nieznany test diagnostyczny.")
 
+    @app.post("/api/observability/client-errors")
+    async def client_errors_api(request: Request) -> Dict[str, bool]:
+        username = _require_user(request)
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Niepoprawne dane bledu klienta.") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Niepoprawne dane bledu klienta.")
+        emit_event(
+            severity="critical",
+            event_type="frontend.unhandled_error",
+            module="web.frontend",
+            stage=str(payload.get("kind") or "client"),
+            username=username,
+            summary=str(payload.get("message") or "Frontend error"),
+            details=payload,
+            recommended_action="Review the browser stack and correlated backend events.",
+        )
+        return {"ok": True}
+
     @app.get("/api/process-jobs")
     def process_jobs_api(request: Request, limit: int = 20) -> Dict[str, Any]:
         username = _require_user(request)
@@ -4956,13 +6471,52 @@ def create_app() -> FastAPI:
         except Exception:
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise
-        payload = await run_in_threadpool(
-            lambda: _process_upload_snapshot(
-                username=username,
-                cache_scope=cache_scope,
-                form=snapshot,
-            )
+        job = _new_process_job(
+            username=username,
+            cache_scope=cache_scope,
+            form=snapshot,
+            status="running",
         )
+        job_id = str(job["id"])
+        _persist_process_job(dict(job))
+
+        def update_progress(
+            percent: int,
+            label: str,
+            stages: List[Dict[str, Any]],
+            current_stage: Optional[Dict[str, Any]],
+        ) -> None:
+            _update_process_job_progress(
+                job, percent, label, stages, current_stage
+            )
+            _persist_process_job(dict(job))
+
+        try:
+            payload = await run_in_threadpool(
+                lambda: _process_upload_snapshot(
+                    username=username,
+                    cache_scope=cache_scope,
+                    form=snapshot,
+                    job_id=job_id,
+                    progress=update_progress,
+                )
+            )
+        except Exception as exc:
+            message, status_code, severity = _finish_process_job_failure(job, exc)
+            durable_job = dict(job)
+            _persist_process_job(durable_job)
+            _emit_process_failed(
+                durable_job,
+                exc,
+                message=message,
+                status_code=status_code,
+                severity=severity,
+            )
+            raise
+        warning_messages = _finish_process_job_success(job, payload)
+        durable_job = dict(job)
+        _persist_process_job(durable_job)
+        _emit_process_completed(durable_job, payload, warning_messages)
         return JSONResponse(payload)
     return app
 

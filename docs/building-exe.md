@@ -19,6 +19,10 @@ pyinstaller PicOrgFTP-SQL.pyw \
 
 Runtime szuka tłumaczeń obok pliku wykonywalnego, w katalogu tymczasowym PyInstaller oraz w zainstalowanym pakiecie. Można więc dołączyć albo zaktualizować katalog `Localization` obok `PicOrgFTP-SQL.exe` bez ponownego budowania. Plik `local_settings.json` nadal jest tworzony obok programu.
 
+Panel webowy używa biblioteki `msal` do uwierzytelniania aplikacji Microsoft Entra i wysyłania przez Microsoft Graph. Zależność jest zadeklarowana w `requirements-web.txt` oraz `requirements-build.txt`; musi być zainstalowana w środowisku, z którego PyInstaller buduje `PicOrgFTP-SQL-WEB.exe`. Workflow instaluje ją przed analizą statyczną i pakowaniem aplikacji. Jeżeli lokalny build korzysta z własnego pliku `.spec` albo zmienionego polecenia PyInstaller, nie należy wyłączać wykrytego statycznie importu MSAL.
+
+Obecność MSAL w EXE zapewnia tylko obsługę protokołu. Sama wysyłka Graph wymaga skonfigurowanej aplikacji Entra z aplikacyjnym uprawnieniem Microsoft Graph `Mail.Send` i udzieloną przez administratora dzierżawy zgodą administracyjną. Dane logowania i adres nadawcy są ustawiane już w panelu webowym, a nie podczas budowania EXE.
+
 ## Workflow CI
 
 Workflow `.github/workflows/ci.yml` działa na `push` i `pull_request` dla gałęzi `main`, `master` i `dev`. Sprawdza składnię Pythona i JavaScriptu, krytyczne testy `pytest`, smoke testy panelu webowego, integralność UI, importy desktopowe i lekkie ścieżki wydajnościowe.
