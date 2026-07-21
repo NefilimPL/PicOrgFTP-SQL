@@ -786,6 +786,38 @@ def test_update_adapter_persists_manual_update_audit():
     assert report["username"] == "operator"
 
 
+def test_update_adapter_emits_failure_diagnostics_for_manual_update_error():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update({"enabled": True, "setup_complete": True})
+    error = RuntimeError("Pimcore connection lost")
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "update_product", side_effect=error),
+        patch.object(web_data, "_persist_pimcore_operation") as persist,
+        patch.object(web_data, "emit_event") as emit_event,
+        pytest.raises(RuntimeError, match="Pimcore connection lost"),
+    ):
+        web_data.update_pimcore_product(
+            91,
+            "100",
+            {"EAN": "5904804578169"},
+            "operator",
+        )
+
+    assert persist.call_args.args[0]["status"] == "failed"
+    event = next(
+        call.kwargs
+        for call in emit_event.call_args_list
+        if call.kwargs["event_type"] == "integration.pimcore.completed"
+    )
+    assert event["severity"] == "error"
+    assert event["exception"] is error
+    assert event["recommended_action"] == (
+        "Otworz historie operacji Pimcore dla tego EAN i sprawdz zredagowany "
+        "zalacznik diagnostyczny."
+    )
+
+
 def test_create_adapter_uses_manual_create_operation_kind():
     cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
     cfg["pimcore"].update({"enabled": True, "setup_complete": True})

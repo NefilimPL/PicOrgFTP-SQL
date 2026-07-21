@@ -2388,10 +2388,20 @@ def _emit_pimcore_integration_event(
     job_id: str,
     ean: object,
     elapsed_ms: int,
+    failure: BaseException | None = None,
 ) -> None:
     change_set = result.get("change_set") if isinstance(result.get("change_set"), dict) else {}
     fields = change_set.get("fields") if isinstance(change_set.get("fields"), list) else []
     result_object = result.get("object") if isinstance(result.get("object"), dict) else {}
+    event_kwargs: dict[str, object] = {}
+    if status == "failed":
+        event_kwargs = {
+            "exception": failure,
+            "recommended_action": (
+                "Otworz historie operacji Pimcore dla tego EAN i sprawdz "
+                "zredagowany zalacznik diagnostyczny."
+            ),
+        }
     emit_event(
         severity="error" if status == "failed" else "info",
         event_type="integration.pimcore.completed",
@@ -2409,6 +2419,7 @@ def _emit_pimcore_integration_event(
             "object_count": 1 if result_object else 0,
             "object_id": result_object.get("id", ""),
         },
+        **event_kwargs,
     )
 
 
@@ -2569,6 +2580,7 @@ def update_pimcore_product(
     events: list[dict[str, object]] = []
     result: dict[str, object] = {}
     status = "failed"
+    failure: BaseException | None = None
 
     def emit(stage: str, severity: str, message: str, **details: object) -> None:
         now = time.time()
@@ -2600,6 +2612,7 @@ def update_pimcore_product(
         status = "conflict"
         raise
     except Exception as exc:
+        failure = exc
         emit("finish", "error", str(exc) or exc.__class__.__name__)
         raise
     finally:
@@ -2633,6 +2646,7 @@ def update_pimcore_product(
             job_id=operation_id,
             ean=submitted.get("EAN"),
             elapsed_ms=int(max(0, finished - started) * 1000),
+            failure=failure,
         )
 
 
