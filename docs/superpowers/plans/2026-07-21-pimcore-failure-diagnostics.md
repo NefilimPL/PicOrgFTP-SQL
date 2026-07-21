@@ -232,4 +232,3 @@ Run:
     git log --oneline -6
 
 Expected: only intended commits plus any pre-existing preserved local database file. Do not push, merge, reset, or discard work.
-
