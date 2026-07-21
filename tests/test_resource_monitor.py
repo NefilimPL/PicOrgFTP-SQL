@@ -1164,3 +1164,119 @@ def test_disk_worker_never_exceeds_total_byte_budget_over_long_deadline(
     assert written == 10
     assert open_calls == 1
     assert unlinks >= 1
+
+
+def test_disk_worker_warmup_allows_baseline_then_two_high_samples(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from picorgftp_sql import resource_monitor
+
+    now = 0.0
+    writes: list[tuple[float, int]] = []
+
+    class StopEvent:
+        def is_set(self) -> bool:
+            return False
+
+    class FakeFile:
+        def open(self, *_args, **_kwargs):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def write(self, chunk: bytes) -> int:
+            writes.append((now, len(chunk)))
+            return len(chunk)
+
+        def unlink(self, *, missing_ok: bool = False) -> None:
+            return None
+
+    class FakeRoot:
+        def __init__(self) -> None:
+            self.file = FakeFile()
+
+        def mkdir(self, **_kwargs) -> None:
+            return None
+
+        def __truediv__(self, _name: str) -> FakeFile:
+            return self.file
+
+    def monotonic() -> float:
+        return now
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += max(0.0001, seconds)
+
+    monkeypatch.setattr(resource_monitor.time, "monotonic", monotonic)
+    monkeypatch.setattr(resource_monitor.time, "sleep", sleep)
+    budget = ResourceMonitor.MAX_TEST_DISK_BYTES
+    rate = ResourceMonitor.MAX_TEST_DISK_RATE_BYTES_PER_SECOND
+
+    resource_monitor._run_disk_test(
+        StopEvent(),
+        ResourceMonitor.REAL_TEST_SECONDS,
+        FakeRoot(),
+        budget,
+        rate,
+        ResourceMonitor.DISK_TEST_WARMUP_SECONDS,
+    )
+
+    def sampled_rate(start: float, end: float) -> float:
+        return sum(size for at, size in writes if start < at <= end) / (end - start)
+
+    assert sum(size for _at, size in writes) == budget
+    assert not [at for at, _size in writes if at <= ResourceMonitor.SAMPLE_SECONDS]
+    assert sampled_rate(5.0, 10.0) > 8 * MIB
+    assert sampled_rate(10.0, 15.0) > 8 * MIB
+    assert writes[-1][0] < ResourceMonitor.REAL_TEST_SECONDS
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native binding contract")
+def test_missing_pdh_binding_keeps_core_metrics_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from picorgftp_sql import resource_monitor
+
+    def fail_pdh(_self) -> None:
+        raise OSError("PDH unavailable")
+
+    monkeypatch.setattr(resource_monitor._WindowsResourceReaders, "_bind_pdh_api", fail_pdh)
+
+    reader = resource_monitor._WindowsResourceReaders()
+    host = reader.read_host()
+    backend = reader.read_backend()
+
+    assert host["memory_total_bytes"] > 0
+    assert host["disk_busy_percent"] == {"available": False}
+    assert backend["memory_working_set_bytes"] > 0
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native binding contract")
+def test_missing_core_binding_keeps_monitor_constructible_with_unavailable_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from picorgftp_sql import resource_monitor
+
+    def fail_core(_self) -> None:
+        raise OSError("core counters unavailable")
+
+    monkeypatch.setattr(
+        resource_monitor._WindowsResourceReaders, "_bind_core_windows_apis", fail_core
+    )
+
+    monitor = ResourceMonitor(
+        settings_provider=lambda: dict(SETTINGS),
+        context_provider=lambda: dict(CONTEXT),
+        event_emitter=lambda *_args: None,
+    )
+    snapshot = monitor.sample_once()
+    monitor.stop()
+
+    assert snapshot["host"]["cpu_percent"] == {"available": False}
+    assert snapshot["host"]["memory_total_bytes"] == {"available": False}
+    assert snapshot["backend"]["available"] is False

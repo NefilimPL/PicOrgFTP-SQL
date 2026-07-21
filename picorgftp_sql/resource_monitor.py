@@ -156,8 +156,12 @@ class ResourceMonitor:
     MAX_TEST_CPU_PERCENT = 25.0
     MAX_TEST_MEMORY_BYTES = 256 * MIB
     MAX_TEST_DISK_BYTES = 128 * MIB
+    DISK_TEST_WARMUP_SECONDS = SAMPLE_SECONDS
+    DISK_TEST_WRITE_SECONDS = (
+        REAL_TEST_SECONDS - DISK_TEST_WARMUP_SECONDS - REAL_TEST_GRACE_SECONDS
+    )
     MAX_TEST_DISK_RATE_BYTES_PER_SECOND = MAX_TEST_DISK_BYTES / (
-        CONFIRMING_SAMPLES * SAMPLE_SECONDS
+        DISK_TEST_WRITE_SECONDS
     )
     REAL_TEST_CPU_MARGIN_PERCENT = 1.0
     REAL_TEST_MEMORY_MARGIN_PERCENT = 0.1
@@ -319,6 +323,7 @@ class ResourceMonitor:
                         self.MAX_TEST_MEMORY_BYTES,
                         self.MAX_TEST_DISK_BYTES,
                         self.MAX_TEST_DISK_RATE_BYTES_PER_SECOND,
+                        self.DISK_TEST_WARMUP_SECONDS,
                         max(1, os.cpu_count() or 1),
                     ),
                     daemon=True,
@@ -628,6 +633,7 @@ def _resource_test_worker(
     memory_bytes: int,
     disk_bytes: int,
     disk_rate_bytes_per_second: float,
+    disk_warmup_seconds: float,
     logical_cpus: int,
 ) -> None:
     deadline = time.monotonic() + max(0.0, seconds)
@@ -643,6 +649,7 @@ def _resource_test_worker(
                 Path(temp_dir),
                 disk_bytes,
                 disk_rate_bytes_per_second,
+                disk_warmup_seconds,
             )
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -697,15 +704,21 @@ def _run_disk_test(
     temp_dir: Path,
     disk_bytes: int,
     rate_bytes_per_second: float,
+    warmup_seconds: float = 0.0,
 ) -> None:
     temp_dir.mkdir(parents=True, exist_ok=True)
     path = temp_dir / "resource-test.bin"
     chunk = bytes(64 * 1024)
     remaining = max(0, disk_bytes)
     written = 0
-    started_at = time.monotonic()
     bounded_rate = max(1.0, float(rate_bytes_per_second))
     try:
+        warmup_until = time.monotonic() + max(0.0, warmup_seconds)
+        while time.monotonic() < warmup_until:
+            if _should_stop(stop_event, deadline):
+                return
+            time.sleep(min(0.05, warmup_until - time.monotonic()))
+        started_at = time.monotonic()
         with path.open("wb", buffering=0) as handle:
             while remaining and not _should_stop(stop_event, deadline):
                 piece = chunk if remaining >= len(chunk) else chunk[:remaining]
@@ -787,69 +800,85 @@ class _WindowsResourceReaders:
         self._psapi = None
         self._pdh = None
         if os.name == "nt":
-            self._bind_windows_apis()
+            try:
+                self._bind_core_windows_apis()
+            except Exception:
+                self._kernel32 = None
+                self._psapi = None
+            try:
+                self._bind_pdh_api()
+            except Exception:
+                self._pdh = None
+                self._pdh_query = wintypes.HANDLE()
+                self._pdh_counter = wintypes.HANDLE()
+                self._pdh_ready = False
 
-    def _bind_windows_apis(self) -> None:
-        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        self._psapi = ctypes.WinDLL("psapi", use_last_error=True)
-        self._pdh = ctypes.WinDLL("pdh", use_last_error=True)
+    def _bind_core_windows_apis(self) -> None:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
 
-        self._kernel32.GetSystemTimes.argtypes = [
+        kernel32.GetSystemTimes.argtypes = [
             ctypes.POINTER(_FILETIME),
             ctypes.POINTER(_FILETIME),
             ctypes.POINTER(_FILETIME),
         ]
-        self._kernel32.GetSystemTimes.restype = wintypes.BOOL
-        self._kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(_MEMORYSTATUSEX)]
-        self._kernel32.GlobalMemoryStatusEx.restype = wintypes.BOOL
-        self._kernel32.GetCurrentProcess.restype = wintypes.HANDLE
-        self._kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        self._kernel32.OpenProcess.restype = wintypes.HANDLE
-        self._kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        self._kernel32.CloseHandle.restype = wintypes.BOOL
-        self._kernel32.GetProcessTimes.argtypes = [
+        kernel32.GetSystemTimes.restype = wintypes.BOOL
+        kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(_MEMORYSTATUSEX)]
+        kernel32.GlobalMemoryStatusEx.restype = wintypes.BOOL
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.GetProcessTimes.argtypes = [
             wintypes.HANDLE,
             ctypes.POINTER(_FILETIME),
             ctypes.POINTER(_FILETIME),
             ctypes.POINTER(_FILETIME),
             ctypes.POINTER(_FILETIME),
         ]
-        self._kernel32.GetProcessTimes.restype = wintypes.BOOL
-        self._kernel32.GetProcessIoCounters.argtypes = [
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
+        kernel32.GetProcessIoCounters.argtypes = [
             wintypes.HANDLE,
             ctypes.POINTER(_IO_COUNTERS),
         ]
-        self._kernel32.GetProcessIoCounters.restype = wintypes.BOOL
-        self._psapi.GetProcessMemoryInfo.argtypes = [
+        kernel32.GetProcessIoCounters.restype = wintypes.BOOL
+        psapi.GetProcessMemoryInfo.argtypes = [
             wintypes.HANDLE,
             ctypes.POINTER(_PROCESS_MEMORY_COUNTERS_EX),
             wintypes.DWORD,
         ]
-        self._psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
-        self._pdh.PdhOpenQueryW.argtypes = [
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+        self._kernel32 = kernel32
+        self._psapi = psapi
+
+    def _bind_pdh_api(self) -> None:
+        pdh = ctypes.WinDLL("pdh", use_last_error=True)
+        pdh.PdhOpenQueryW.argtypes = [
             wintypes.LPCWSTR,
             ctypes.c_size_t,
             ctypes.POINTER(wintypes.HANDLE),
         ]
-        self._pdh.PdhOpenQueryW.restype = wintypes.LONG
-        self._pdh.PdhAddEnglishCounterW.argtypes = [
+        pdh.PdhOpenQueryW.restype = wintypes.LONG
+        pdh.PdhAddEnglishCounterW.argtypes = [
             wintypes.HANDLE,
             wintypes.LPCWSTR,
             ctypes.c_size_t,
             ctypes.POINTER(wintypes.HANDLE),
         ]
-        self._pdh.PdhAddEnglishCounterW.restype = wintypes.LONG
-        self._pdh.PdhCollectQueryData.argtypes = [wintypes.HANDLE]
-        self._pdh.PdhCollectQueryData.restype = wintypes.LONG
-        self._pdh.PdhGetFormattedCounterValue.argtypes = [
+        pdh.PdhAddEnglishCounterW.restype = wintypes.LONG
+        pdh.PdhCollectQueryData.argtypes = [wintypes.HANDLE]
+        pdh.PdhCollectQueryData.restype = wintypes.LONG
+        pdh.PdhGetFormattedCounterValue.argtypes = [
             wintypes.HANDLE,
             wintypes.DWORD,
             ctypes.POINTER(wintypes.DWORD),
             ctypes.POINTER(_PDH_FMT_COUNTERVALUE),
         ]
-        self._pdh.PdhGetFormattedCounterValue.restype = wintypes.LONG
-        self._pdh.PdhCloseQuery.argtypes = [wintypes.HANDLE]
-        self._pdh.PdhCloseQuery.restype = wintypes.LONG
+        pdh.PdhGetFormattedCounterValue.restype = wintypes.LONG
+        pdh.PdhCloseQuery.argtypes = [wintypes.HANDLE]
+        pdh.PdhCloseQuery.restype = wintypes.LONG
+        self._pdh = pdh
 
     def read_host(self) -> dict[str, object]:
         memory = self._read_memory()
