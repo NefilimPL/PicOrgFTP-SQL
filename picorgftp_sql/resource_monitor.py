@@ -279,12 +279,6 @@ class ResourceMonitor:
             "observed_at": observed_at,
         }
         with self._state_lock:
-            self._history.append(copy.deepcopy(sample))
-            try:
-                settings = dict(self._settings_provider())
-            except Exception:
-                settings = {}
-            triggers = self._detector.observe(backend, settings, observed_at)
             (
                 sampled_process,
                 sampled_pid,
@@ -292,17 +286,27 @@ class ResourceMonitor:
                 sampled_generation,
                 detection_event,
             ) = sampled_worker
+            current_worker_matches_sample = (
+                self._worker_process is sampled_process
+                and self._worker_pid == sampled_pid
+                and self._worker_kind == sampled_kind
+                and self._worker_generation is sampled_generation
+                and self._worker_detection_event is detection_event
+            )
+            if not current_worker_matches_sample:
+                return copy.deepcopy(self._latest)
+            self._history.append(copy.deepcopy(sample))
+            try:
+                settings = dict(self._settings_provider())
+            except Exception:
+                settings = {}
+            triggers = self._detector.observe(backend, settings, observed_at)
             expected_metric = _REAL_TEST_TRIGGER_METRICS.get(sampled_kind or "")
             same_worker = (
                 sampled_process is not None
                 and sampled_pid is not None
                 and sampled_generation is not None
                 and detection_event is not None
-                and self._worker_process is sampled_process
-                and self._worker_pid == sampled_pid
-                and self._worker_kind == sampled_kind
-                and self._worker_generation is sampled_generation
-                and self._worker_detection_event is detection_event
             )
             if (
                 same_worker

@@ -226,7 +226,7 @@ def test_unrelated_metric_alert_does_not_ack_registered_real_test() -> None:
     assert ack.is_set() is False
 
 
-def test_sample_for_replaced_worker_cannot_ack_new_worker() -> None:
+def test_sample_for_replaced_worker_cannot_mutate_state_or_ack_new_worker() -> None:
     entered = threading.Event()
     release = threading.Event()
     calls = 0
@@ -257,8 +257,9 @@ def test_sample_for_replaced_worker_cannot_ack_new_worker() -> None:
             if calls == 2:
                 entered.set()
                 assert release.wait(2.0)
+            cpu_values = [0, 30, 31, 32]
             return {
-                "cpu_percent": 30 + calls,
+                "cpu_percent": cpu_values[calls - 1],
                 "memory_percent": 2,
                 "memory_working_set_bytes": 20,
                 "memory_private_bytes": 10,
@@ -290,13 +291,27 @@ def test_sample_for_replaced_worker_cannot_ack_new_worker() -> None:
         monitor._worker_kind = "cpu"
         monitor._worker_generation = object()
         monitor._worker_detection_event = ack_b
+        monitor._set_cached_worker_registration_locked(True)
     release.set()
     sampler.join(2.0)
 
     assert not sampler.is_alive()
-    assert len(events) == 1
     assert ack_a.is_set() is False
     assert ack_b.is_set() is False
+    stale_rejected = monitor.latest_public_snapshot()
+    assert stale_rejected["backend"]["cpu_percent"] == 0
+    assert stale_rejected["backend"]["test_worker_registered"] is True
+    assert stale_rejected["detector"]["pending_metrics"] == []
+    assert events == []
+
+    monitor.sample_once()
+    assert ack_b.is_set() is False
+    assert events == []
+    monitor.sample_once()
+
+    assert ack_b.is_set() is True
+    assert len(events) == 1
+    assert events[0][2]["trigger"]["metric"] == "cpu_percent"
 
 
 def test_latch_resets_only_after_two_consecutive_normal_samples() -> None:
