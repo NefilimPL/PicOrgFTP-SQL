@@ -155,6 +155,9 @@ class ResourceMonitor:
     MAX_TEST_CPU_PERCENT = 25.0
     MAX_TEST_MEMORY_BYTES = 256 * MIB
     MAX_TEST_DISK_BYTES = 128 * MIB
+    REAL_TEST_CPU_MARGIN_PERCENT = 1.0
+    REAL_TEST_MEMORY_MARGIN_PERCENT = 0.1
+    REAL_TEST_IO_MARGIN_MIB = 1.0
 
     def __init__(
         self,
@@ -180,6 +183,8 @@ class ResourceMonitor:
             "observed_at": self._utc_now(),
         }
         self._state_lock = threading.RLock()
+        self._lifecycle_lock = threading.Lock()
+        self._sampling_lock = threading.RLock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._worker_process: object | None = None
@@ -189,42 +194,48 @@ class ResourceMonitor:
         self._worker_temp_dir: str | None = None
 
     def start(self) -> None:
-        with self._state_lock:
-            if self._thread is not None and self._thread.is_alive():
-                return
-            self._stop_event.clear()
-            self._thread = threading.Thread(
-                target=self._sampling_loop,
-                name="ResourceMonitor",
-                daemon=True,
-            )
-            self._thread.start()
+        with self._lifecycle_lock:
+            with self._state_lock:
+                if self._thread is not None and self._thread.is_alive():
+                    return
+                self._stop_event.clear()
+                self._thread = threading.Thread(
+                    target=self._sampling_loop,
+                    name="ResourceMonitor",
+                    daemon=True,
+                )
+                self._thread.start()
 
     def stop(self) -> None:
-        self._stop_event.set()
-        with self._state_lock:
-            thread = self._thread
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=self.SAMPLE_SECONDS + 1.0)
-        with self._state_lock:
-            if self._thread is thread and (thread is None or not thread.is_alive()):
-                self._thread = None
-        self._cleanup_registered_worker()
-        with self._state_lock:
-            sampling_stopped = self._thread is None
-        if sampling_stopped:
-            close = getattr(self._readers, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
+        with self._lifecycle_lock:
+            self._stop_event.set()
+            with self._state_lock:
+                thread = self._thread
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=self.SAMPLE_SECONDS + 1.0)
+            with self._state_lock:
+                if self._thread is thread and (thread is None or not thread.is_alive()):
+                    self._thread = None
+                sampling_stopped = self._thread is None
+            self._cleanup_registered_worker()
+            if sampling_stopped:
+                close = getattr(self._readers, "close", None)
+                if callable(close):
+                    with self._sampling_lock:
+                        try:
+                            close()
+                        except Exception:
+                            pass
 
     def latest_public_snapshot(self) -> dict[str, object]:
         with self._state_lock:
             return copy.deepcopy(self._latest)
 
     def sample_once(self) -> dict[str, object]:
+        with self._sampling_lock:
+            return self._sample_once_locked()
+
+    def _sample_once_locked(self) -> dict[str, object]:
         host = self._read_host()
         backend = self._read_backend_with_registered_worker()
         try:
@@ -282,7 +293,7 @@ class ResourceMonitor:
         temp_dir: str
         launch_failed = False
         with self._state_lock:
-            if self._worker_process is not None:
+            if self._worker_process is not None or self._worker_temp_dir is not None:
                 raise RuntimeError("a real resource test is already running")
             self._validate_real_test_reachable(normalized_kind)
             temp_dir = ""
@@ -303,12 +314,15 @@ class ResourceMonitor:
                     daemon=True,
                 )
             except Exception:
-                if temp_dir:
-                    shutil.rmtree(temp_dir, ignore_errors=True)
+                cleanup_ok = self._remove_worker_temp_dir(temp_dir)
+                if not cleanup_ok:
+                    self._worker_kind = normalized_kind
+                    self._worker_temp_dir = temp_dir
+                    self._set_cached_worker_registration_locked(True)
                 return {
                     "ok": False,
                     "kind": normalized_kind,
-                    "status": "launch_failed",
+                    "status": "launch_failed" if cleanup_ok else "cleanup_failed",
                     "timed_out": False,
                 }
             self._worker_process = process
@@ -316,6 +330,7 @@ class ResourceMonitor:
             self._worker_pid = None
             self._worker_kind = normalized_kind
             self._worker_temp_dir = temp_dir
+            self._set_cached_worker_registration_locked(True)
             try:
                 process.start()
             except Exception:
@@ -323,40 +338,50 @@ class ResourceMonitor:
             else:
                 self._worker_pid = getattr(process, "pid", None)
 
-        if launch_failed:
-            result = {
-                "ok": False,
-                "kind": normalized_kind,
-                "status": "launch_failed",
-                "timed_out": False,
-            }
-        else:
-            try:
+        result: dict[str, object] = {
+            "ok": False,
+            "kind": normalized_kind,
+            "status": "supervision_failed",
+            "timed_out": False,
+        }
+        cleanup_ok = False
+        try:
+            if launch_failed:
+                result = {
+                    "ok": False,
+                    "kind": normalized_kind,
+                    "status": "launch_failed",
+                    "timed_out": False,
+                }
+            else:
                 process.join(
                     timeout=self.REAL_TEST_SECONDS + self.REAL_TEST_GRACE_SECONDS
                 )
                 timed_out = bool(process.is_alive())
-            except (AssertionError, ValueError):
-                timed_out = False
-            if timed_out:
-                result = {
-                    "ok": False,
-                    "kind": normalized_kind,
-                    "status": "timeout",
-                    "timed_out": True,
-                }
-            else:
-                try:
+                if timed_out:
+                    result = {
+                        "ok": False,
+                        "kind": normalized_kind,
+                        "status": "timeout",
+                        "timed_out": True,
+                    }
+                else:
                     exit_code = getattr(process, "exitcode", None)
-                except ValueError:
-                    exit_code = None
-                result = {
-                    "ok": exit_code == 0,
-                    "kind": normalized_kind,
-                    "status": "completed" if exit_code == 0 else "failed",
-                    "timed_out": False,
-                }
-        cleanup_ok = self._cleanup_registered_worker(expected_process=process)
+                    result = {
+                        "ok": exit_code == 0,
+                        "kind": normalized_kind,
+                        "status": "completed" if exit_code == 0 else "failed",
+                        "timed_out": False,
+                    }
+        except Exception:
+            result = {
+                "ok": False,
+                "kind": normalized_kind,
+                "status": "supervision_failed",
+                "timed_out": False,
+            }
+        finally:
+            cleanup_ok = self._cleanup_registered_worker(expected_process=process)
         if not cleanup_ok:
             result.update(ok=False, status="cleanup_failed")
         return result
@@ -379,7 +404,9 @@ class ResourceMonitor:
         with self._state_lock:
             worker_pid = self._worker_pid
             worker_kind = self._worker_kind
-            registered = self._worker_process is not None
+            registered = (
+                self._worker_process is not None or self._worker_temp_dir is not None
+            )
         try:
             backend = _safe_metrics(
                 self._readers.read_backend(worker_pid), _BACKEND_PUBLIC_KEYS
@@ -396,7 +423,10 @@ class ResourceMonitor:
     ) -> dict[str, object]:
         with self._state_lock:
             worker_state = {
-                "registered": self._worker_process is not None,
+                "registered": (
+                    self._worker_process is not None
+                    or self._worker_temp_dir is not None
+                ),
                 "kind": self._worker_kind,
                 "pid": self._worker_pid,
             }
@@ -421,18 +451,29 @@ class ResourceMonitor:
         if kind == "cpu":
             current = _number(backend.get("cpu_percent")) or 0.0
             threshold = _number(settings.get("cpu_percent_threshold"))
-            reachable = threshold is not None and threshold <= current + self.MAX_TEST_CPU_PERCENT
+            reachable = (
+                threshold is not None
+                and threshold + self.REAL_TEST_CPU_MARGIN_PERCENT
+                <= current + self.MAX_TEST_CPU_PERCENT
+            )
         elif kind == "memory":
             current = _number(backend.get("memory_percent")) or 0.0
             total = _number(host.get("memory_total_bytes"))
             threshold = _number(settings.get("memory_percent_threshold"))
             added = (self.MAX_TEST_MEMORY_BYTES / total * 100.0) if total else 0.0
-            reachable = threshold is not None and total is not None and threshold <= current + added
+            reachable = (
+                threshold is not None
+                and total is not None
+                and threshold + self.REAL_TEST_MEMORY_MARGIN_PERCENT <= current + added
+            )
         else:
             current_bytes = _number(backend.get("disk_io_bytes_per_second")) or 0.0
             threshold_mib = _number(settings.get("io_mib_per_second_threshold"))
             maximum_mib = current_bytes / MIB + self.MAX_TEST_DISK_BYTES / MIB / self.SAMPLE_SECONDS
-            reachable = threshold_mib is not None and threshold_mib <= maximum_mib
+            reachable = (
+                threshold_mib is not None
+                and threshold_mib + self.REAL_TEST_IO_MARGIN_MIB <= maximum_mib
+            )
         if not reachable:
             raise ValueError(f"configured {kind} threshold exceeds the real-test hard cap")
 
@@ -448,28 +489,33 @@ class ResourceMonitor:
                     stop_event.set()
                 except Exception:
                     pass
-            alive = False
+            alive: bool | None = False
             if process is not None:
-                try:
-                    alive = bool(process.is_alive())
-                    if alive:
-                        process.join(timeout=1.0)
-                        alive = bool(process.is_alive())
-                    if alive:
+                alive = self._worker_is_alive(process)
+                if alive is not False:
+                    self._worker_join(process)
+                    alive = self._worker_is_alive(process)
+                if alive is not False:
+                    try:
                         process.terminate()
-                        process.join(timeout=1.0)
-                        alive = bool(process.is_alive())
-                    if alive:
-                        kill = getattr(process, "kill", None)
-                        if callable(kill):
+                    except Exception:
+                        pass
+                    self._worker_join(process)
+                    alive = self._worker_is_alive(process)
+                if alive is not False:
+                    kill = getattr(process, "kill", None)
+                    kill_succeeded = False
+                    if callable(kill):
+                        try:
                             kill()
-                            process.join(timeout=1.0)
-                            alive = bool(process.is_alive())
-                except (AssertionError, ValueError):
-                    alive = False
-                except Exception:
-                    alive = True
-            if alive:
+                            kill_succeeded = True
+                        except Exception:
+                            pass
+                    join_succeeded = self._worker_join(process)
+                    alive = self._worker_is_alive(process)
+                    if alive is None and kill_succeeded and join_succeeded:
+                        alive = False
+            if alive is not False:
                 return False
             if process is not None:
                 close = getattr(process, "close", None)
@@ -478,20 +524,60 @@ class ResourceMonitor:
                         close()
                     except (AssertionError, ValueError):
                         pass
+                    except Exception:
+                        return False
+            if not self._remove_worker_temp_dir(temp_dir):
+                return False
             self._worker_process = None
             self._worker_stop_event = None
             self._worker_pid = None
             self._worker_kind = None
             self._worker_temp_dir = None
-            latest_backend = self._latest.get("backend")
-            if isinstance(latest_backend, Mapping):
-                public_backend = copy.deepcopy(dict(latest_backend))
-                public_backend["test_worker_registered"] = False
-                public_backend.pop("test_worker_kind", None)
-                self._latest = {**self._latest, "backend": public_backend}
-            if temp_dir:
-                shutil.rmtree(temp_dir, ignore_errors=True)
+            self._set_cached_worker_registration_locked(False)
             return True
+
+    def _set_cached_worker_registration_locked(self, registered: bool) -> None:
+        latest_backend = self._latest.get("backend")
+        if not isinstance(latest_backend, Mapping):
+            return
+        public_backend = copy.deepcopy(dict(latest_backend))
+        public_backend["test_worker_registered"] = registered
+        if registered:
+            public_backend["test_worker_kind"] = self._worker_kind
+        else:
+            public_backend.pop("test_worker_kind", None)
+        self._latest = {**self._latest, "backend": public_backend}
+
+    @staticmethod
+    def _worker_is_alive(process: object) -> bool | None:
+        try:
+            return bool(process.is_alive())
+        except (AssertionError, ValueError):
+            return False
+        except Exception:
+            return None
+
+    @staticmethod
+    def _worker_join(process: object) -> bool:
+        try:
+            process.join(timeout=1.0)
+            return True
+        except (AssertionError, ValueError):
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _remove_worker_temp_dir(temp_dir: str | None) -> bool:
+        if not temp_dir:
+            return True
+        try:
+            shutil.rmtree(temp_dir)
+            return not Path(temp_dir).exists()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
 
     def _emit(self, severity: str, event_type: str, details: dict[str, object]) -> None:
         try:
@@ -746,17 +832,22 @@ class _WindowsResourceReaders:
         if worker_pid and worker_pid not in pids:
             pids.append(worker_pid)
         now = self._clock()
+        process_values: dict[int, tuple[int, int, int, int, int]] = {}
+        for pid in pids:
+            values = self._read_process(pid)
+            if values is None:
+                return {"available": False}
+            process_values[pid] = values
+        total_memory = _number(self._read_memory().get("memory_total_bytes"))
+        if total_memory is None or total_memory <= 0:
+            return {"available": False}
+
         total_cpu = 0.0
         working_set = 0
         private_bytes = 0
         read_rate = 0.0
         write_rate = 0.0
-        active_pids: set[int] = set()
-        for pid in pids:
-            values = self._read_process(pid)
-            if values is None:
-                continue
-            active_pids.add(pid)
+        for pid, values in process_values.items():
             cpu_time, working, private, read_bytes, write_bytes = values
             working_set += working
             private_bytes += private
@@ -770,10 +861,9 @@ class _WindowsResourceReaders:
                     write_rate += max(0, write_bytes - previous_write) / elapsed
             self._process_previous[pid] = (now, cpu_time, read_bytes, write_bytes)
         self._process_previous = {
-            pid: value for pid, value in self._process_previous.items() if pid in active_pids
+            pid: value for pid, value in self._process_previous.items() if pid in process_values
         }
-        total_memory = _number(self._read_memory().get("memory_total_bytes"))
-        memory_percent = working_set / total_memory * 100.0 if total_memory else 0.0
+        memory_percent = working_set / total_memory * 100.0
         return {
             "cpu_percent": round(total_cpu, 2),
             "memory_working_set_bytes": working_set,

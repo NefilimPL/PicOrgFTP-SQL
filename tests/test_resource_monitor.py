@@ -738,3 +738,320 @@ def test_pdh_setup_failure_closes_and_resets_query() -> None:
     assert not reader._pdh_query
     assert not reader._pdh_counter
     assert reader._pdh_ready is False
+
+
+def test_stop_and_concurrent_restart_are_serialized_until_reader_close() -> None:
+    from picorgftp_sql import resource_monitor
+
+    real_thread = threading.Thread
+    join_entered = threading.Event()
+    allow_join = threading.Event()
+    restart_finished = threading.Event()
+
+    class ClosableReader:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def read_host(self) -> dict[str, object]:
+            return {"cpu_percent": 1, "memory_percent": 1, "disk_busy_percent": 1}
+
+        def read_backend(self, _worker_pid=None) -> dict[str, object]:
+            return {
+                "cpu_percent": 1,
+                "memory_percent": 1,
+                "disk_io_bytes_per_second": 0,
+            }
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FinishingThread:
+        def join(self, timeout: float | None = None) -> None:
+            join_entered.set()
+            assert allow_join.wait(2.0)
+
+        def is_alive(self) -> bool:
+            return not allow_join.is_set()
+
+    readers = ClosableReader()
+    monitor = _monitor(readers, [])
+    monitor._thread = FinishingThread()
+    stop_thread = real_thread(target=monitor.stop)
+    stop_thread.start()
+    assert join_entered.wait(1.0)
+
+    restart_thread = real_thread(
+        target=lambda: (monitor.start(), restart_finished.set())
+    )
+    restart_thread.start()
+
+    restart_finished_early = restart_finished.wait(0.1)
+    allow_join.set()
+    stop_thread.join(2.0)
+    restart_thread.join(2.0)
+
+    assert readers.closed is True
+    assert restart_finished_early is False
+    assert not stop_thread.is_alive()
+    assert not restart_thread.is_alive()
+    monitor.stop()
+
+
+def test_concurrent_samples_serialize_reader_access() -> None:
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+
+    class BlockingReader:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.active = 0
+            self.max_active = 0
+            self.lock = threading.Lock()
+
+        def read_host(self) -> dict[str, object]:
+            with self.lock:
+                self.calls += 1
+                call = self.calls
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            if call == 1:
+                first_entered.set()
+                assert release_first.wait(2.0)
+            else:
+                second_entered.set()
+            with self.lock:
+                self.active -= 1
+            return {"cpu_percent": 1, "memory_percent": 1, "disk_busy_percent": 1}
+
+        def read_backend(self, _worker_pid=None) -> dict[str, object]:
+            return {
+                "cpu_percent": 1,
+                "memory_percent": 1,
+                "disk_io_bytes_per_second": 0,
+            }
+
+    readers = BlockingReader()
+    monitor = _monitor(readers, [])
+    first = threading.Thread(target=monitor.sample_once)
+    second = threading.Thread(target=monitor.sample_once)
+    first.start()
+    assert first_entered.wait(1.0)
+    second.start()
+
+    second_entered_early = second_entered.wait(0.1)
+    release_first.set()
+    first.join(2.0)
+    second.join(2.0)
+
+    assert readers.max_active == 1
+    assert second_entered_early is False
+    assert not first.is_alive()
+    assert not second.is_alive()
+
+
+def test_supervision_exception_still_cleans_and_deregisters_worker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from picorgftp_sql import resource_monitor
+
+    private_dir = tmp_path / "picorg_resource_test_supervision"
+    instances: list[FakeProcess] = []
+
+    class FakeEvent:
+        def set(self) -> None:
+            return None
+
+    class FakeProcess:
+        pid = 7788
+        exitcode = None
+
+        def __init__(self, *, target, args, daemon) -> None:
+            self.alive = False
+            self.join_calls = 0
+            self.closed = False
+            instances.append(self)
+
+        def start(self) -> None:
+            self.alive = True
+            private_dir.mkdir()
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_calls += 1
+            if self.join_calls == 1:
+                raise RuntimeError("injected supervision failure")
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            self.alive = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    monitor = _monitor(
+        _ReaderSequence(cpu=[0]),
+        [],
+        settings={**SETTINGS, "cpu_percent_threshold": 20},
+    )
+    monitor.sample_once()
+    monkeypatch.setattr(resource_monitor.tempfile, "mkdtemp", lambda **_kwargs: str(private_dir))
+    monkeypatch.setattr(resource_monitor.multiprocessing, "Event", FakeEvent)
+    monkeypatch.setattr(resource_monitor.multiprocessing, "Process", FakeProcess)
+
+    result = monitor.start_real_test("cpu")
+
+    assert result["status"] == "supervision_failed"
+    assert instances[0].closed is True
+    assert monitor._worker_process is None
+    assert not private_dir.exists()
+
+
+def test_cleanup_failure_retains_worker_reservation_for_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from picorgftp_sql import resource_monitor
+
+    private_dir = tmp_path / "picorg_resource_test_cleanup_retry"
+    real_rmtree = resource_monitor.shutil.rmtree
+    instances: list[FakeProcess] = []
+
+    class FakeEvent:
+        def set(self) -> None:
+            return None
+
+    class FakeProcess:
+        pid = 8899
+        exitcode = 0
+
+        def __init__(self, *, target, args, daemon) -> None:
+            self.closed = False
+            instances.append(self)
+
+        def start(self) -> None:
+            private_dir.mkdir()
+            (private_dir / "retained.tmp").write_bytes(b"data")
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+        def close(self) -> None:
+            self.closed = True
+
+    def failing_rmtree(_path, *args, **kwargs) -> None:
+        raise OSError("injected cleanup failure")
+
+    monitor = _monitor(
+        _ReaderSequence(cpu=[0]),
+        [],
+        settings={**SETTINGS, "cpu_percent_threshold": 20},
+    )
+    monitor.sample_once()
+    monkeypatch.setattr(resource_monitor.tempfile, "mkdtemp", lambda **_kwargs: str(private_dir))
+    monkeypatch.setattr(resource_monitor.multiprocessing, "Event", FakeEvent)
+    monkeypatch.setattr(resource_monitor.multiprocessing, "Process", FakeProcess)
+    monkeypatch.setattr(resource_monitor.shutil, "rmtree", failing_rmtree)
+
+    result = monitor.start_real_test("cpu")
+
+    assert result["status"] == "cleanup_failed"
+    assert monitor._worker_process is instances[0]
+    assert monitor._worker_temp_dir == str(private_dir)
+    assert private_dir.exists()
+    assert monitor.latest_public_snapshot()["backend"]["test_worker_registered"] is True
+
+    monkeypatch.setattr(resource_monitor.shutil, "rmtree", real_rmtree)
+    monitor.stop()
+    assert monitor._worker_process is None
+    assert monitor._worker_temp_dir is None
+    assert not private_dir.exists()
+
+
+@pytest.mark.parametrize("worker_pid", [None, 998877])
+def test_native_backend_reader_marks_any_requested_process_failure_unavailable(
+    monkeypatch: pytest.MonkeyPatch, worker_pid: int | None
+) -> None:
+    from picorgftp_sql import resource_monitor
+
+    reader = resource_monitor._WindowsResourceReaders()
+    current = os.getpid()
+
+    def process_values(pid: int):
+        if worker_pid is not None and pid == current:
+            return (100, 10, 10, 10, 10)
+        return None
+
+    monkeypatch.setattr(reader, "_read_process", process_values)
+
+    assert reader.read_backend(worker_pid) == {"available": False}
+
+
+def test_real_cpu_test_rejects_threshold_exactly_at_hard_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from picorgftp_sql import resource_monitor
+
+    monitor = _monitor(
+        _ReaderSequence(cpu=[0]),
+        [],
+        settings={**SETTINGS, "cpu_percent_threshold": 25},
+    )
+    monitor.sample_once()
+    monkeypatch.setattr(
+        resource_monitor.tempfile,
+        "mkdtemp",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must reject before setup")),
+    )
+
+    with pytest.raises(ValueError, match="hard cap"):
+        monitor.start_real_test("cpu")
+
+
+@pytest.mark.parametrize("kind", ["memory", "disk"])
+def test_memory_and_disk_real_tests_accept_reachable_thresholds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str
+) -> None:
+    from picorgftp_sql import resource_monitor
+
+    class FakeEvent:
+        def set(self) -> None:
+            return None
+
+    class FakeProcess:
+        pid = 9090
+        exitcode = 0
+
+        def __init__(self, *, target, args, daemon) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+        def close(self) -> None:
+            return None
+
+    monitor = _monitor(_ReaderSequence(cpu=[0]), [])
+    monitor.sample_once()
+    monkeypatch.setattr(
+        resource_monitor.tempfile,
+        "mkdtemp",
+        lambda **_kwargs: str(tmp_path / f"picorg_resource_test_{kind}"),
+    )
+    monkeypatch.setattr(resource_monitor.multiprocessing, "Event", FakeEvent)
+    monkeypatch.setattr(resource_monitor.multiprocessing, "Process", FakeProcess)
+
+    result = monitor.start_real_test(kind)
+
+    assert result["ok"] is True
+    assert result["kind"] == kind
+    assert result["status"] == "completed"
