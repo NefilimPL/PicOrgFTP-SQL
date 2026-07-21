@@ -1001,9 +1001,9 @@ def test_send_test_notification_suite_routes_five_scenarios_without_store_writes
     primary = FakeTransport(error=RuntimeError("down"))
     fallback = FakeTransport()
     settings = _settings()
-    settings["rules"]["info"]["enabled"] = True
-    settings["rules"]["warning"]["enabled"] = False
-    for severity, rule in settings["rules"].items():
+    for severity in ("warning", "error", "critical"):
+        rule = settings["rules"][severity]
+        rule["enabled"] = True
         rule["recipients"] = [f"{severity}@example.com"]
     lookups: list[str] = []
     service = notification_service.NotificationService(
@@ -1017,31 +1017,51 @@ def test_send_test_notification_suite_routes_five_scenarios_without_store_writes
         event_emitter=lambda **_kwargs: pytest.fail("test suite must not emit events"),
         now=lambda: NOW,
     )
+    store_before = repr(store.__dict__)
 
     result = service.send_test_notification_suite(channel="entra", use_fallback=True)
 
     scenarios = result["scenarios"]
+    assert [item["kind"] for item in scenarios] == [
+        "pimcore_rejection",
+        "ftp_failure",
+        "photo_location_unavailable",
+        "backend_exception",
+        "entra_secret_expiry",
+    ]
     assert [item["severity"] for item in scenarios] == [
-        "info",
         "warning",
+        "error",
         "error",
         "critical",
         "critical",
     ]
-    assert [item["status"] for item in scenarios] == [
-        "fallback",
-        "skipped",
-        "fallback",
-        "fallback",
-        "fallback",
+    assert [item["status"] for item in scenarios] == ["fallback"] * 5
+    assert all(item["recipient_count"] == 1 for item in scenarios)
+    assert len(primary.messages) == len(fallback.messages) == 5
+    sent_messages = primary.messages + fallback.messages
+    assert all(
+        message.subject.startswith("[TEST][SYMULACJA]")
+        and message.text_body.startswith("[TEST][SYMULACJA]")
+        and message.html_body.startswith("[TEST][SYMULACJA]")
+        and "bezpieczna symulacja" in message.text_body
+        for message in sent_messages
+    )
+    expected_attachment_counts = [
+        0,
+        1,
+        0,
+        1,
+        0,
     ]
-    assert scenarios[-1]["kind"] == "entra_secret_expiry"
-    assert all(item["recipient_count"] == 1 for item in scenarios if item["status"] != "skipped")
-    assert scenarios[1]["recipient_count"] == 0
-    assert len(primary.messages) == len(fallback.messages) == 4
-    assert all("[TEST]" in message.subject for message in fallback.messages)
-    assert any("Client Secret" in message.text_body for message in fallback.messages)
-    assert store.deliveries == {}
+    assert [len(message.attachments) for message in primary.messages] == (
+        expected_attachment_counts
+    )
+    assert [len(message.attachments) for message in fallback.messages] == (
+        expected_attachment_counts
+    )
+    assert "7 dni" in fallback.messages[-1].text_body
+    assert repr(store.__dict__) == store_before
     assert lookups == []
 
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import html
 import json
 import re
-import secrets
 import threading
 import uuid
 from collections.abc import Callable, Mapping
@@ -42,50 +41,57 @@ _EXCEPTION_SECRET_RE = re.compile(
 
 _TEST_NOTIFICATION_SCENARIOS: tuple[dict[str, object], ...] = (
     {
-        "kind": "information",
-        "severity": "info",
-        "title": "Informacja testowa",
-        "descriptions": (
-            "Symulacja poprawnego zakończenia zadania.",
-            "Symulacja zwykłej informacji operacyjnej.",
-        ),
-    },
-    {
-        "kind": "warning",
+        "kind": "pimcore_rejection",
         "severity": "warning",
-        "title": "Ostrzeżenie testowe",
-        "descriptions": (
-            "Symulacja niepełnych danych przekazanych przez użytkownika.",
-            "Symulacja problemu wymagającego sprawdzenia konfiguracji.",
-        ),
+        "event_type": "pimcore.update_rejected",
+        "summary": "PIMcore odrzucił aktualizację produktu",
+        "recommended_action": "Sprawdź dane produktu i ponów aktualizację.",
     },
     {
-        "kind": "error",
+        "kind": "ftp_failure",
         "severity": "error",
-        "title": "Błąd testowy",
-        "descriptions": (
-            "Symulacja błędu podczas wysyłania danych.",
-            "Symulacja błędu lokalnej aktualizacji danych.",
+        "event_type": "ftp.transfer_failed",
+        "summary": "Transfer plików przez FTP nie powiódł się",
+        "recommended_action": "Sprawdź połączenie FTP i ponów transfer.",
+        "exception_type": "OSError",
+        "traceback_text": (
+            "Traceback (most recent call last):\n"
+            '  File "picorgftp_sql/ftp_transfer.py", line 42, in upload\n'
+            "OSError: Symulowany błąd transferu FTP"
         ),
     },
     {
-        "kind": "critical",
+        "kind": "photo_location_unavailable",
+        "severity": "error",
+        "event_type": "photo.location_unavailable",
+        "summary": "Lokalizacja zdjęć jest niedostępna",
+        "recommended_action": "Sprawdź dostępność lokalizacji źródłowej zdjęć.",
+    },
+    {
+        "kind": "backend_exception",
         "severity": "critical",
-        "title": "Błąd krytyczny testowy",
-        "descriptions": (
-            "Symulacja wyjątku backendu blokującego zadanie.",
-            "Symulacja krytycznej awarii uniemożliwiającej aktualizację danych.",
+        "event_type": "backend.exception",
+        "summary": "Backend zgłosił nieobsłużony wyjątek",
+        "recommended_action": "Sprawdź diagnostykę backendu i stan zadania.",
+        "exception_type": "RuntimeError",
+        "traceback_text": (
+            "Traceback (most recent call last):\n"
+            '  File "picorgftp_sql/backend.py", line 87, in process_job\n'
+            "RuntimeError: Symulowany wyjątek backendu"
         ),
     },
     {
         "kind": "entra_secret_expiry",
         "severity": "critical",
-        "title": "Test wygasania Client Secret Entra",
-        "descriptions": (
-            "Symulacja alertu: Client Secret Microsoft Entra zbliża się do wygaśnięcia.",
-            "Symulacja krytycznego alertu o wygasającym Client Secret Microsoft Entra.",
-        ),
+        "event_type": "entra.client_secret_expiry",
+        "summary": "Client Secret Microsoft Entra wygaśnie za 7 dni",
+        "recommended_action": "Odnów Client Secret Microsoft Entra przed upływem 7 dni.",
     },
+)
+
+_TEST_SIMULATION_NOTICE = (
+    "[TEST][SYMULACJA] To jest bezpieczna symulacja; "
+    "nie utworzono zdarzenia ani incydentu."
 )
 
 
@@ -424,6 +430,49 @@ def _message_payload(
     attachment = _exception_attachment_payload(event)
     if isinstance(attachment, Mapping):
         payload["exception_attachment"] = dict(attachment)
+    return payload
+
+
+def _test_suite_message(
+    scenario: Mapping[str, object], message_id: str, now: datetime
+) -> dict[str, object]:
+    created_at = _iso_utc(now)
+    event: dict[str, object] = {
+        "id": f"test-event-{message_id}",
+        "created_at": created_at,
+        "severity": _text(scenario.get("severity")).lower(),
+        "event_type": _text(scenario.get("event_type")),
+        "module": "notification_test_suite",
+        "stage": "simulation",
+        "username": "",
+        "summary": _text(scenario.get("summary")),
+        "recommended_action": _text(scenario.get("recommended_action")),
+        "details": {"simulation": True},
+    }
+    for key in ("exception_type", "traceback_text"):
+        value = scenario.get(key)
+        if isinstance(value, str) and value.strip():
+            event[key] = value
+    incident = {
+        "id": f"test-incident-{message_id}",
+        "event_type": event["event_type"],
+        "severity": event["severity"],
+        "occurrence_count": 1,
+        "first_seen_at": created_at,
+        "last_seen_at": created_at,
+        "context": {"simulation": True},
+    }
+    payload = _message_payload(event, incident, message_id)
+    payload["subject"] = _header_text(
+        f"{_TEST_SIMULATION_NOTICE} — {_text(payload.get('subject'))}"
+    )
+    payload["text_body"] = (
+        f"{_TEST_SIMULATION_NOTICE}\n{_text(payload.get('text_body'), 10_000)}"
+    )
+    payload["html_body"] = (
+        f"{html.escape(_TEST_SIMULATION_NOTICE)}<br>"
+        f"{_text(payload.get('html_body'), 20_000)}"
+    )
     return payload
 
 
@@ -1241,14 +1290,6 @@ class NotificationService:
         for scenario in _TEST_NOTIFICATION_SCENARIOS:
             kind = _text(scenario.get("kind"))
             severity = _text(scenario.get("severity")).lower()
-            title = _header_text(scenario.get("title"))
-            descriptions = scenario.get("descriptions")
-            choices = (
-                tuple(item for item in descriptions if isinstance(item, str))
-                if isinstance(descriptions, tuple)
-                else ()
-            )
-            description = _text(secrets.choice(choices) if choices else title, 1_000)
             result: dict[str, object] = {
                 "kind": kind,
                 "severity": severity,
@@ -1277,23 +1318,13 @@ class NotificationService:
                 results.append(result)
                 continue
 
-            now = _iso_utc(self.now())
             message_id = f"test-suite-{uuid.uuid4().hex}"
             delivery = {
                 "id": f"test-suite-{uuid.uuid4().hex}",
                 "incident_id": "",
                 "primary_channel": selected,
                 "recipients": recipients,
-                "message": {
-                    "message_id": message_id,
-                    "subject": f"[TEST] PicOrgFTP-SQL — {title}",
-                    "text_body": f"[TEST] {description}\nCzas: {now}",
-                    "html_body": (
-                        "<h2>[TEST] PicOrgFTP-SQL</h2>"
-                        f"<p>{html.escape(description)}</p>"
-                        f"<p>Czas: {html.escape(now)}</p>"
-                    ),
-                },
+                "message": _test_suite_message(scenario, message_id, self.now()),
             }
             try:
                 status, used_channel, attempts = self._deliver_claimed(
