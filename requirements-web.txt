@@ -6,4 +6,3 @@ openpyxl
 mysql-connector-python
 pyodbc
 certifi
-msal>=1.37,<2

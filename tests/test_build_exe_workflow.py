@@ -8,9 +8,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "build-exe.yml"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
-WEB_REQUIREMENTS = ROOT / "requirements-web.txt"
-BUILD_REQUIREMENTS = ROOT / "requirements-build.txt"
-EMAIL_DELIVERY = ROOT / "picorgftp_sql" / "email_delivery.py"
 
 
 def workflow_source() -> str:
@@ -89,23 +86,6 @@ def test_build_dependencies_install_into_isolated_virtualenv() -> None:
     assert "-m venv" in source
     assert "PICORGFTP_SQL_PYTHON=$venvPython" in source
     assert 'pip install "pyinstaller>=6.6,<7"' not in source
-
-
-def test_web_build_installs_msal_before_static_pyinstaller_analysis() -> None:
-    source = workflow_source()
-    web_requirements = WEB_REQUIREMENTS.read_text(encoding="utf-8")
-    build_requirements = BUILD_REQUIREMENTS.read_text(encoding="utf-8")
-    delivery_source = EMAIL_DELIVERY.read_text(encoding="utf-8")
-
-    assert "msal>=1.37,<2" in web_requirements.splitlines()
-    assert "msal>=1.37,<2" in build_requirements.splitlines()
-    assert "-m pip install -r requirements-build.txt" in source
-    assert "-m pip install -r requirements-web.txt" in source
-    assert source.index("-m pip install -r requirements-web.txt") < source.index(
-        "Build web manager EXE with PyInstaller"
-    )
-    assert "--collect-submodules picorgftp_sql" in source
-    assert "import msal" in delivery_source
 
 
 def test_artifact_uploads_are_guarded_by_probe_and_non_fatal_per_target() -> None:

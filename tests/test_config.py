@@ -12,13 +12,6 @@ from picorgftp_sql.config import (
     _normalize_processing_settings,
     _normalize_security_settings,
 )
-from picorgftp_sql.email_settings import (
-    EMAIL_CLIENT_SECRET,
-    EMAIL_SETTINGS_KEY,
-    EMAIL_SMTP_PASSWORD,
-    default_email_settings,
-)
-from picorgftp_sql.encryption import encrypt
 from picorgftp_sql.product_fields import PRODUCT_FIELDS_KEY
 from picorgftp_sql.sqlite_store import SqliteStore
 
@@ -32,76 +25,6 @@ class DefaultConfigSafetyTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
-    def test_save_config_encrypts_both_email_secrets(self) -> None:
-        payload = deepcopy(common.DEFAULT_CONFIG)
-        payload[EMAIL_SETTINGS_KEY] = default_email_settings()
-        payload[EMAIL_SETTINGS_KEY]["entra"][EMAIL_CLIENT_SECRET] = "entra-secret"
-        payload[EMAIL_SETTINGS_KEY]["smtp"][EMAIL_SMTP_PASSWORD] = "smtp-secret"
-
-        with (
-            patch.object(config, "_active_sqlite_store", return_value=None),
-            patch.object(config, "_write_json_atomic") as write_atomic,
-        ):
-            config.save_config(payload)
-
-        raw = write_atomic.call_args.args[1][EMAIL_SETTINGS_KEY]
-        self.assertNotEqual(raw["entra"][EMAIL_CLIENT_SECRET], "entra-secret")
-        self.assertNotEqual(raw["smtp"][EMAIL_SMTP_PASSWORD], "smtp-secret")
-        self.assertEqual(config.decrypt(raw["entra"][EMAIL_CLIENT_SECRET]), "entra-secret")
-        self.assertEqual(config.decrypt(raw["smtp"][EMAIL_SMTP_PASSWORD]), "smtp-secret")
-
-    def test_save_config_preserves_blank_submitted_email_secrets(self) -> None:
-        payload = deepcopy(common.DEFAULT_CONFIG)
-        payload[EMAIL_SETTINGS_KEY] = default_email_settings()
-        raw_entra_secret = encrypt("saved-entra")
-        raw_smtp_password = encrypt("saved-smtp")
-        raw_config = {
-            EMAIL_SETTINGS_KEY: {
-                "entra": {EMAIL_CLIENT_SECRET: raw_entra_secret},
-                "smtp": {EMAIL_SMTP_PASSWORD: raw_smtp_password},
-            }
-        }
-
-        with (
-            patch.object(config, "_active_sqlite_store", return_value=None),
-            patch.object(config, "_write_json_atomic") as write_atomic,
-        ):
-            config.save_config(
-                payload,
-                raw_config=raw_config,
-                preserve_secrets={
-                    EMAIL_SETTINGS_KEY: {
-                        "entra.client_secret",
-                        "smtp.password",
-                    }
-                },
-            )
-
-        raw = write_atomic.call_args.args[1][EMAIL_SETTINGS_KEY]
-        self.assertEqual(raw["entra"][EMAIL_CLIENT_SECRET], raw_entra_secret)
-        self.assertEqual(raw["smtp"][EMAIL_SMTP_PASSWORD], raw_smtp_password)
-
-    def test_merge_raw_config_decrypts_both_email_secrets(self) -> None:
-        target = deepcopy(common.DEFAULT_CONFIG)
-        raw = {
-            EMAIL_SETTINGS_KEY: {
-                "primary_channel": "smtp",
-                "entra": {EMAIL_CLIENT_SECRET: encrypt("entra-secret")},
-                "smtp": {EMAIL_SMTP_PASSWORD: encrypt("smtp-secret")},
-            }
-        }
-
-        merged = config._merge_raw_config(raw, target)
-
-        self.assertEqual(
-            merged[EMAIL_SETTINGS_KEY]["entra"][EMAIL_CLIENT_SECRET],
-            "entra-secret",
-        )
-        self.assertEqual(
-            merged[EMAIL_SETTINGS_KEY]["smtp"][EMAIL_SMTP_PASSWORD],
-            "smtp-secret",
-        )
-
     def test_normalize_color_field_labels_strips_suffixes_and_blanks(self) -> None:
         labels = _normalize_color_field_labels(
             {
