@@ -166,6 +166,64 @@ def test_simultaneous_metric_confirmations_emit_one_event_per_metric() -> None:
     }
 
 
+def test_real_test_ack_is_set_only_by_requested_detector_latch_transition() -> None:
+    events: list[tuple[str, str, dict[str, object]]] = []
+
+    class AckEvent:
+        def __init__(self) -> None:
+            self.ready = False
+
+        def is_set(self) -> bool:
+            return self.ready
+
+        def set(self) -> None:
+            self.ready = True
+
+    monitor = _monitor(_ReaderSequence(cpu=[30, 31]), events)
+    ack = AckEvent()
+    monitor._worker_process = object()
+    monitor._worker_pid = 43210
+    monitor._worker_kind = "cpu"
+    monitor._worker_detection_event = ack
+
+    first = monitor.sample_once()
+    assert ack.is_set() is False
+    assert events == []
+    assert "worker_detection_event" not in json.dumps(first)
+
+    second = monitor.sample_once()
+    assert ack.is_set() is True
+    assert len(events) == 1
+    assert events[0][2]["trigger"]["metric"] == "cpu_percent"
+    assert "worker_detection_event" not in json.dumps(second)
+
+
+def test_unrelated_metric_alert_does_not_ack_registered_real_test() -> None:
+    events: list[tuple[str, str, dict[str, object]]] = []
+
+    class AckEvent:
+        ready = False
+
+        def is_set(self) -> bool:
+            return self.ready
+
+        def set(self) -> None:
+            self.ready = True
+
+    monitor = _monitor(_ReaderSequence(cpu=[30, 31]), events)
+    ack = AckEvent()
+    monitor._worker_process = object()
+    monitor._worker_pid = 43211
+    monitor._worker_kind = "disk"
+    monitor._worker_detection_event = ack
+
+    monitor.sample_once()
+    monitor.sample_once()
+
+    assert events[0][2]["trigger"]["metric"] == "cpu_percent"
+    assert ack.is_set() is False
+
+
 def test_latch_resets_only_after_two_consecutive_normal_samples() -> None:
     events: list[tuple[str, str, dict[str, object]]] = []
     monitor = _monitor(
@@ -483,7 +541,85 @@ def test_stop_during_worker_launch_cannot_leave_unregistered_process(
     assert not private_dir.exists()
 
 
-def test_accepted_cpu_test_uses_supervisor_grace_and_completes(
+@pytest.mark.parametrize("kind", ["cpu", "memory", "disk"])
+def test_stop_interruption_reports_cancelled_even_with_zero_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str
+) -> None:
+    from picorgftp_sql import resource_monitor
+
+    started = threading.Event()
+    cancelled = threading.Event()
+
+    class FakeEvent:
+        def __init__(self) -> None:
+            self.ready = False
+
+        def set(self) -> None:
+            self.ready = True
+            if self is stop_event:
+                cancelled.set()
+
+        def is_set(self) -> bool:
+            return self.ready
+
+    stop_event: FakeEvent
+
+    class FakeProcess:
+        pid = 9753
+        exitcode = 0
+
+        def __init__(self, *, target, args, daemon) -> None:
+            nonlocal stop_event
+            stop_event = args[1]
+            self.alive = False
+
+        def start(self) -> None:
+            self.alive = True
+            started.set()
+
+        def join(self, timeout: float | None = None) -> None:
+            assert cancelled.wait(2.0)
+            self.alive = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            self.alive = False
+
+        def close(self) -> None:
+            return None
+
+    monitor = _monitor(
+        _ReaderSequence(cpu=[0]),
+        [],
+        settings={**SETTINGS, "cpu_percent_threshold": 20},
+    )
+    monitor.sample_once()
+    monkeypatch.setattr(
+        resource_monitor.tempfile,
+        "mkdtemp",
+        lambda **_kwargs: str(tmp_path / f"picorg_resource_test_cancel_{kind}"),
+    )
+    monkeypatch.setattr(resource_monitor.multiprocessing, "Event", FakeEvent)
+    monkeypatch.setattr(resource_monitor.multiprocessing, "Process", FakeProcess)
+    results: list[dict[str, object]] = []
+    launch = threading.Thread(
+        target=lambda: results.append(monitor.start_real_test(kind))
+    )
+    launch.start()
+    assert started.wait(1.0)
+
+    monitor.stop()
+    launch.join(2.0)
+
+    assert not launch.is_alive()
+    assert results == [
+        {"ok": False, "kind": kind, "status": "cancelled", "timed_out": False}
+    ]
+
+
+def test_worker_exit_without_detector_ack_is_not_detected_and_uses_grace(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from picorgftp_sql import resource_monitor
@@ -535,12 +671,74 @@ def test_accepted_cpu_test_uses_supervisor_grace_and_completes(
     result = monitor.start_real_test("cpu")
 
     assert result == {
-        "ok": True,
+        "ok": False,
         "kind": "cpu",
-        "status": "completed",
+        "status": "not_detected",
         "timed_out": False,
     }
     assert joins[0] == pytest.approx(0.75)
+
+
+def test_real_test_succeeds_only_after_normal_detector_ack(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from picorgftp_sql import resource_monitor
+
+    class FakeEvent:
+        def __init__(self) -> None:
+            self.ready = False
+
+        def set(self) -> None:
+            self.ready = True
+
+        def is_set(self) -> bool:
+            return self.ready
+
+    class FakeProcess:
+        pid = 2469
+        exitcode = 0
+
+        def __init__(self, *, target, args, daemon) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        def join(self, timeout: float | None = None) -> None:
+            monitor.sample_once()
+            monitor.sample_once()
+
+        def is_alive(self) -> bool:
+            return False
+
+        def close(self) -> None:
+            return None
+
+    events: list[tuple[str, str, dict[str, object]]] = []
+    monitor = _monitor(
+        _ReaderSequence(cpu=[0, 30, 31]),
+        events,
+        settings={**SETTINGS, "cpu_percent_threshold": 20},
+    )
+    monitor.sample_once()
+    monkeypatch.setattr(
+        resource_monitor.tempfile,
+        "mkdtemp",
+        lambda **_kwargs: str(tmp_path / "picorg_resource_test_detected"),
+    )
+    monkeypatch.setattr(resource_monitor.multiprocessing, "Event", FakeEvent)
+    monkeypatch.setattr(resource_monitor.multiprocessing, "Process", FakeProcess)
+
+    result = monitor.start_real_test("cpu")
+
+    assert result == {
+        "ok": True,
+        "kind": "cpu",
+        "status": "detected",
+        "timed_out": False,
+    }
+    assert len(events) == 1
+    assert events[0][2]["trigger"]["metric"] == "cpu_percent"
 
 
 def test_real_test_constructor_failure_removes_private_directory(
@@ -1011,6 +1209,44 @@ def test_real_cpu_test_rejects_threshold_exactly_at_hard_cap(
         monitor.start_real_test("cpu")
 
 
+@pytest.mark.parametrize("kind", ["cpu", "memory", "disk"])
+def test_transient_ambient_load_cannot_admit_unreachable_real_test(
+    monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    from picorgftp_sql import resource_monitor
+
+    total_memory = 1024 * MIB
+    thresholds: dict[str, object] = {
+        "cpu_percent_threshold": 30,
+        "memory_percent_threshold": 30,
+        "io_mib_per_second_threshold": 12,
+    }
+    readers = _IoReaderSequence(
+        cpu=[90],
+        memory=[90],
+        io=[100 * MIB],
+        host={
+            "cpu_percent": 90,
+            "memory_percent": 90,
+            "memory_used_bytes": int(total_memory * 0.9),
+            "memory_total_bytes": total_memory,
+            "disk_busy_percent": 90,
+        },
+    )
+    monitor = _monitor(readers, [], settings=thresholds)
+    monitor.sample_once()
+    monkeypatch.setattr(
+        resource_monitor.tempfile,
+        "mkdtemp",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("must reject before setup")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="hard cap"):
+        monitor.start_real_test(kind)
+
+
 @pytest.mark.parametrize("kind", ["memory", "disk"])
 def test_memory_and_disk_real_tests_accept_reachable_thresholds(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str
@@ -1052,9 +1288,9 @@ def test_memory_and_disk_real_tests_accept_reachable_thresholds(
 
     result = monitor.start_real_test(kind)
 
-    assert result["ok"] is True
+    assert result["ok"] is False
     assert result["kind"] == kind
-    assert result["status"] == "completed"
+    assert result["status"] == "not_detected"
 
 
 def test_start_reports_stopping_until_slow_sampler_exits_and_closes_reader() -> None:
@@ -1183,6 +1419,10 @@ def test_disk_worker_waits_for_baseline_then_covers_two_high_samples(
         def is_set(self) -> bool:
             return now >= baseline_at
 
+    class DetectionEvent:
+        def is_set(self) -> bool:
+            return now >= baseline_at + 10.0
+
     class FakeFile:
         def open(self, *_args, **_kwargs):
             return self
@@ -1222,20 +1462,22 @@ def test_disk_worker_waits_for_baseline_then_covers_two_high_samples(
     budget = ResourceMonitor.MAX_TEST_DISK_BYTES
     rate = ResourceMonitor.MAX_TEST_DISK_RATE_BYTES_PER_SECOND
 
-    resource_monitor._run_disk_test(
+    detected = resource_monitor._run_disk_test(
         StopEvent(),
         ResourceMonitor.REAL_TEST_SECONDS,
         FakeRoot(),
         budget,
         rate,
         BaselineEvent(),
+        DetectionEvent(),
         ResourceMonitor.DISK_BASELINE_WAIT_SECONDS,
     )
 
     def sampled_rate(start: float, end: float) -> float:
         return sum(size for at, size in writes if start < at <= end) / (end - start)
 
-    assert sum(size for _at, size in writes) == budget
+    assert detected is True
+    assert sum(size for _at, size in writes) <= budget
     assert not [at for at, _size in writes if at <= baseline_at]
     assert sampled_rate(baseline_at, baseline_at + 5.0) > 8 * MIB
     assert sampled_rate(baseline_at + 5.0, baseline_at + 10.0) > 8 * MIB
@@ -1300,6 +1542,7 @@ def test_disk_worker_baseline_timeout_writes_nothing_and_returns_bounded(
         ResourceMonitor.MAX_TEST_DISK_BYTES,
         ResourceMonitor.MAX_TEST_DISK_RATE_BYTES_PER_SECOND,
         BaselineEvent(),
+        BaselineEvent(),
         ResourceMonitor.DISK_BASELINE_WAIT_SECONDS,
     )
 
@@ -1310,6 +1553,73 @@ def test_disk_worker_baseline_timeout_writes_nothing_and_returns_bounded(
         <= now
         < ResourceMonitor.REAL_TEST_SECONDS
     )
+
+
+def test_disk_worker_without_detector_ack_stops_at_cap_and_is_not_detected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from picorgftp_sql import resource_monitor
+
+    now = 0.0
+    written = 0
+
+    class NeverStop:
+        def is_set(self) -> bool:
+            return False
+
+    class Ready:
+        def is_set(self) -> bool:
+            return True
+
+    class FakeFile:
+        def open(self, *_args, **_kwargs):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def write(self, chunk: bytes) -> int:
+            nonlocal written
+            written += len(chunk)
+            return len(chunk)
+
+        def unlink(self, *, missing_ok: bool = False) -> None:
+            return None
+
+    class FakeRoot:
+        def mkdir(self, **_kwargs) -> None:
+            return None
+
+        def __truediv__(self, _name: str) -> FakeFile:
+            return FakeFile()
+
+    def monotonic() -> float:
+        return now
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += max(0.0001, seconds)
+
+    monkeypatch.setattr(resource_monitor.time, "monotonic", monotonic)
+    monkeypatch.setattr(resource_monitor.time, "sleep", sleep)
+
+    detected = resource_monitor._run_disk_test(
+        NeverStop(),
+        ResourceMonitor.REAL_TEST_SECONDS,
+        FakeRoot(),
+        ResourceMonitor.MAX_TEST_DISK_BYTES,
+        ResourceMonitor.MAX_TEST_DISK_RATE_BYTES_PER_SECOND,
+        Ready(),
+        NeverStop(),
+        ResourceMonitor.DISK_BASELINE_WAIT_SECONDS,
+    )
+
+    assert detected is False
+    assert written == ResourceMonitor.MAX_TEST_DISK_BYTES
+    assert now >= ResourceMonitor.REAL_TEST_SECONDS
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows native baseline contract")

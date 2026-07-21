@@ -42,6 +42,11 @@ _BACKEND_PUBLIC_KEYS = {
     "disk_io_bytes_per_second",
 }
 _CONTEXT_PUBLIC_KEYS = {"active_jobs", "queued_jobs", "active_clients"}
+_REAL_TEST_TRIGGER_METRICS = {
+    "cpu": "cpu_percent",
+    "memory": "memory_percent",
+    "disk": "disk_io_bytes_per_second",
+}
 
 
 def _number(value: object) -> float | None:
@@ -199,6 +204,8 @@ class ResourceMonitor:
         self._worker_process: object | None = None
         self._worker_stop_event: object | None = None
         self._worker_baseline_event: object | None = None
+        self._worker_detection_event: object | None = None
+        self._worker_cancel_event: object | None = None
         self._worker_pid: int | None = None
         self._worker_kind: str | None = None
         self._worker_temp_dir: str | None = None
@@ -237,7 +244,7 @@ class ResourceMonitor:
                     self._thread = None
                     self._sampler_manages_reader_cleanup = False
                 sampling_stopped = self._thread is None
-            self._cleanup_registered_worker()
+            self._cleanup_registered_worker(cancelled=True)
             if sampling_stopped and not sampler_manages_cleanup:
                 self._close_readers()
 
@@ -277,6 +284,18 @@ class ResourceMonitor:
             except Exception:
                 settings = {}
             triggers = self._detector.observe(backend, settings, observed_at)
+            expected_metric = _REAL_TEST_TRIGGER_METRICS.get(self._worker_kind or "")
+            detection_event = self._worker_detection_event
+            if (
+                detection_event is not None
+                and self._worker_process is not None
+                and self._worker_pid is not None
+                and any(trigger.get("metric") == expected_metric for trigger in triggers)
+            ):
+                try:
+                    detection_event.set()
+                except Exception:
+                    pass
             details = [self._diagnostic_details(sample, trigger) for trigger in triggers]
             self._latest = {
                 **copy.deepcopy(sample),
@@ -315,6 +334,8 @@ class ResourceMonitor:
                 temp_dir = tempfile.mkdtemp(prefix="picorg_resource_test_")
                 stop_event = multiprocessing.Event()
                 baseline_event = multiprocessing.Event()
+                detection_event = multiprocessing.Event()
+                cancel_event = multiprocessing.Event()
                 process = multiprocessing.Process(
                     target=_resource_test_worker,
                     args=(
@@ -326,6 +347,7 @@ class ResourceMonitor:
                         self.MAX_TEST_DISK_BYTES,
                         self.MAX_TEST_DISK_RATE_BYTES_PER_SECOND,
                         baseline_event,
+                        detection_event,
                         self.DISK_BASELINE_WAIT_SECONDS,
                         max(1, os.cpu_count() or 1),
                     ),
@@ -346,6 +368,8 @@ class ResourceMonitor:
             self._worker_process = process
             self._worker_stop_event = stop_event
             self._worker_baseline_event = baseline_event
+            self._worker_detection_event = detection_event
+            self._worker_cancel_event = cancel_event
             self._worker_pid = None
             self._worker_kind = normalized_kind
             self._worker_temp_dir = temp_dir
@@ -386,12 +410,28 @@ class ResourceMonitor:
                     }
                 else:
                     exit_code = getattr(process, "exitcode", None)
-                    result = {
-                        "ok": exit_code == 0,
-                        "kind": normalized_kind,
-                        "status": "completed" if exit_code == 0 else "failed",
-                        "timed_out": False,
-                    }
+                    detected = _event_is_set(detection_event)
+                    if exit_code == 0 and detected:
+                        result = {
+                            "ok": True,
+                            "kind": normalized_kind,
+                            "status": "detected",
+                            "timed_out": False,
+                        }
+                    elif exit_code == 0:
+                        result = {
+                            "ok": False,
+                            "kind": normalized_kind,
+                            "status": "not_detected",
+                            "timed_out": False,
+                        }
+                    else:
+                        result = {
+                            "ok": False,
+                            "kind": normalized_kind,
+                            "status": "failed",
+                            "timed_out": False,
+                        }
         except Exception:
             result = {
                 "ok": False,
@@ -401,6 +441,13 @@ class ResourceMonitor:
             }
         finally:
             cleanup_ok = self._cleanup_registered_worker(expected_process=process)
+            if _event_is_set(cancel_event):
+                result = {
+                    "ok": False,
+                    "kind": normalized_kind,
+                    "status": "cancelled",
+                    "timed_out": False,
+                }
         if not cleanup_ok:
             result.update(ok=False, status="cleanup_failed")
         return result
@@ -490,37 +537,29 @@ class ResourceMonitor:
     def _validate_real_test_reachable(self, kind: str) -> None:
         settings = dict(self._settings_provider())
         latest = self._latest
-        backend = latest.get("backend", {})
         host = latest.get("host", {})
-        if not isinstance(backend, Mapping):
-            backend = {}
         if not isinstance(host, Mapping):
             host = {}
 
         if kind == "cpu":
-            current = _number(backend.get("cpu_percent")) or 0.0
             threshold = _number(settings.get("cpu_percent_threshold"))
             reachable = (
                 threshold is not None
                 and threshold + self.REAL_TEST_CPU_MARGIN_PERCENT
-                <= current + self.MAX_TEST_CPU_PERCENT
+                <= self.MAX_TEST_CPU_PERCENT
             )
         elif kind == "memory":
-            current = _number(backend.get("memory_percent")) or 0.0
             total = _number(host.get("memory_total_bytes"))
             threshold = _number(settings.get("memory_percent_threshold"))
             added = (self.MAX_TEST_MEMORY_BYTES / total * 100.0) if total else 0.0
             reachable = (
                 threshold is not None
                 and total is not None
-                and threshold + self.REAL_TEST_MEMORY_MARGIN_PERCENT <= current + added
+                and threshold + self.REAL_TEST_MEMORY_MARGIN_PERCENT <= added
             )
         else:
-            current_bytes = _number(backend.get("disk_io_bytes_per_second")) or 0.0
             threshold_mib = _number(settings.get("io_mib_per_second_threshold"))
-            maximum_mib = (
-                current_bytes + self.MAX_TEST_DISK_RATE_BYTES_PER_SECOND
-            ) / MIB
+            maximum_mib = self.MAX_TEST_DISK_RATE_BYTES_PER_SECOND / MIB
             reachable = (
                 threshold_mib is not None
                 and threshold_mib + self.REAL_TEST_IO_MARGIN_MIB <= maximum_mib
@@ -528,13 +567,24 @@ class ResourceMonitor:
         if not reachable:
             raise ValueError(f"configured {kind} threshold exceeds the real-test hard cap")
 
-    def _cleanup_registered_worker(self, expected_process: object | None = None) -> bool:
+    def _cleanup_registered_worker(
+        self,
+        expected_process: object | None = None,
+        *,
+        cancelled: bool = False,
+    ) -> bool:
         with self._state_lock:
             process = self._worker_process
             if expected_process is not None and process is not expected_process:
                 return True
             stop_event = self._worker_stop_event
+            cancel_event = self._worker_cancel_event
             temp_dir = self._worker_temp_dir
+            if cancelled and cancel_event is not None:
+                try:
+                    cancel_event.set()
+                except Exception:
+                    pass
             if stop_event is not None:
                 try:
                     stop_event.set()
@@ -582,6 +632,8 @@ class ResourceMonitor:
             self._worker_process = None
             self._worker_stop_event = None
             self._worker_baseline_event = None
+            self._worker_detection_event = None
+            self._worker_cancel_event = None
             self._worker_pid = None
             self._worker_kind = None
             self._worker_temp_dir = None
@@ -652,27 +704,27 @@ def _resource_test_worker(
     disk_bytes: int,
     disk_rate_bytes_per_second: float,
     disk_baseline_event: object,
+    detection_event: object,
     disk_baseline_wait_seconds: float,
     logical_cpus: int,
 ) -> None:
     deadline = time.monotonic() + max(0.0, seconds)
     try:
         if kind == "cpu":
-            _run_cpu_test(stop_event, deadline, logical_cpus)
+            _run_cpu_test(stop_event, deadline, logical_cpus, detection_event)
         elif kind == "memory":
-            _run_memory_test(stop_event, deadline, memory_bytes)
+            _run_memory_test(stop_event, deadline, memory_bytes, detection_event)
         elif kind == "disk":
-            completed = _run_disk_test(
+            _run_disk_test(
                 stop_event,
                 deadline,
                 Path(temp_dir),
                 disk_bytes,
                 disk_rate_bytes_per_second,
                 disk_baseline_event,
+                detection_event,
                 disk_baseline_wait_seconds,
             )
-            if not completed and not _event_is_set(stop_event):
-                raise SystemExit(2)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -688,16 +740,31 @@ def _should_stop(stop_event: object, deadline: float) -> bool:
     return _event_is_set(stop_event) or time.monotonic() >= deadline
 
 
-def _run_cpu_test(stop_event: object, deadline: float, logical_cpus: int) -> None:
+def _should_finish(
+    stop_event: object, detection_event: object | None, deadline: float
+) -> bool:
+    return _should_stop(stop_event, deadline) or (
+        detection_event is not None and _event_is_set(detection_event)
+    )
+
+
+def _run_cpu_test(
+    stop_event: object,
+    deadline: float,
+    logical_cpus: int,
+    detection_event: object | None = None,
+) -> None:
     target_cores = max(1, math.ceil(logical_cpus * 0.25))
     duty_cycle = min(1.0, logical_cpus * 0.25 / target_cores)
 
     def load() -> None:
         payload = bytes(256 * 1024)
-        while not _should_stop(stop_event, deadline):
+        while not _should_finish(stop_event, detection_event, deadline):
             cycle_start = time.monotonic()
             busy_until = cycle_start + 0.05 * duty_cycle
-            while time.monotonic() < busy_until and not _should_stop(stop_event, deadline):
+            while time.monotonic() < busy_until and not _should_finish(
+                stop_event, detection_event, deadline
+            ):
                 hashlib.sha256(payload).digest()
             remaining = 0.05 - (time.monotonic() - cycle_start)
             if remaining > 0:
@@ -710,15 +777,20 @@ def _run_cpu_test(stop_event: object, deadline: float, logical_cpus: int) -> Non
         thread.join(max(0.0, deadline - time.monotonic()) + 0.1)
 
 
-def _run_memory_test(stop_event: object, deadline: float, memory_bytes: int) -> None:
+def _run_memory_test(
+    stop_event: object,
+    deadline: float,
+    memory_bytes: int,
+    detection_event: object | None = None,
+) -> None:
     allocations: list[bytearray] = []
     remaining = max(0, memory_bytes)
     chunk_size = 8 * MIB
-    while remaining and not _should_stop(stop_event, deadline):
+    while remaining and not _should_finish(stop_event, detection_event, deadline):
         size = min(chunk_size, remaining)
         allocations.append(bytearray(size))
         remaining -= size
-    while allocations and not _should_stop(stop_event, deadline):
+    while allocations and not _should_finish(stop_event, detection_event, deadline):
         time.sleep(0.05)
     allocations.clear()
 
@@ -730,6 +802,7 @@ def _run_disk_test(
     disk_bytes: int,
     rate_bytes_per_second: float,
     baseline_ready_event: object | None = None,
+    detection_event: object | None = None,
     baseline_wait_seconds: float = 0.0,
 ) -> bool:
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -754,16 +827,26 @@ def _run_disk_test(
         started_at = time.monotonic()
         with path.open("wb", buffering=0) as handle:
             while remaining and not _should_stop(stop_event, deadline):
+                if detection_event is not None and _event_is_set(detection_event):
+                    return True
                 piece = chunk if remaining >= len(chunk) else chunk[:remaining]
                 write_at = started_at + (written + len(piece)) / bounded_rate
                 while time.monotonic() < write_at:
                     if _should_stop(stop_event, deadline):
                         return False
+                    if detection_event is not None and _event_is_set(detection_event):
+                        return True
                     time.sleep(min(0.05, write_at - time.monotonic()))
                 handle.write(piece)
                 written += len(piece)
                 remaining -= len(piece)
-        return remaining == 0
+            if detection_event is None:
+                return remaining == 0
+            while not _event_is_set(detection_event):
+                if _should_stop(stop_event, deadline):
+                    return False
+                time.sleep(0.05)
+            return True
     finally:
         path.unlink(missing_ok=True)
 
