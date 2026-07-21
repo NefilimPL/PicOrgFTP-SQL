@@ -359,6 +359,72 @@ def test_incident_message_includes_bounded_redacted_occurrence_context() -> None
     assert len(message["html_body"]) <= 20_000
 
 
+def test_error_exception_is_sent_as_bounded_redacted_text_attachment() -> None:
+    password_sentinel = "PASSWORD_SENTINEL"
+    key_id_sentinel = "KEY_ID_SENTINEL"
+    traceback_text = (
+        "Traceback (most recent call last):\n"
+        f"password={password_sentinel}\n"
+        f"key_id={key_id_sentinel}\n"
+        + "x" * 30_001
+    )
+    store = FakeStore()
+    transport = FakeTransport()
+    service = _service(store, {"entra": transport, "smtp": FakeTransport()})
+
+    queued = service.queue_incident_notification(
+        _event(exception_type="RuntimeError", traceback_text=traceback_text),
+        _incident(),
+    )
+    result = service.process_delivery(str(queued["id"]))
+
+    assert result["status"] == "sent"
+    message = transport.messages[0]
+    assert len(message.attachments) == 1
+    attachment = message.attachments[0]
+    assert attachment.filename == "picorgftp-sql-exception.txt"
+    assert attachment.content_type == "text/plain"
+    assert len(attachment.content.encode("utf-8")) <= 24 * 1024
+    assert password_sentinel not in attachment.content
+    assert key_id_sentinel not in attachment.content
+    persisted_message = store.deliveries[str(queued["id"])]["message"]
+    assert password_sentinel not in str(persisted_message)
+    assert key_id_sentinel not in str(persisted_message)
+    assert "RuntimeError" not in message.subject
+    assert "RuntimeError" not in message.text_body
+    assert "RuntimeError" not in message.html_body
+    assert "Traceback (most recent call last)" not in message.text_body
+    assert "Traceback (most recent call last)" not in message.html_body
+
+
+@pytest.mark.parametrize(
+    ("severity", "exception_data"),
+    [
+        (
+            "warning",
+            {"exception_type": "RuntimeError", "traceback_text": "warning stack"},
+        ),
+        ("error", {}),
+    ],
+    ids=["warning-with-exception", "error-without-exception"],
+)
+def test_non_qualifying_incident_has_no_exception_attachment(
+    severity: str, exception_data: dict[str, object]
+) -> None:
+    store = FakeStore()
+    transport = FakeTransport()
+    service = _service(store, {"entra": transport, "smtp": FakeTransport()})
+
+    queued = service.queue_incident_notification(
+        _event(severity=severity, **exception_data),
+        _incident(severity=severity),
+    )
+    result = service.process_delivery(str(queued["id"]))
+
+    assert result["status"] == "sent"
+    assert transport.messages[0].attachments == ()
+
+
 def test_queue_message_subject_cannot_contain_header_newlines() -> None:
     store = FakeStore()
     service = _service(store)

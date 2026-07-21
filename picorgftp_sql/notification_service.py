@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .email_delivery import MailMessage, MailTransport, build_transport
+from .email_delivery import MailAttachment, MailMessage, MailTransport, build_transport
 from .email_settings import (
     EMAIL_SETTINGS_KEY,
     normalize_email_address,
@@ -30,6 +30,14 @@ OUTBOX_DONE_RETENTION = timedelta(days=7)
 DAILY_SUMMARY_TIME_ZONE = ZoneInfo("Europe/Warsaw")
 DAILY_SUMMARY_RETRY_DELAY = timedelta(minutes=5)
 DAILY_SUMMARY_STALE_CLAIM_AFTER = timedelta(minutes=10)
+_EXCEPTION_ATTACHMENT_FILENAME = "picorgftp-sql-exception.txt"
+_EXCEPTION_ATTACHMENT_LIMIT = 24 * 1024
+_EXCEPTION_SECRET_RE = re.compile(
+    r"(?i)(?P<prefix>(?<![\w-])[\"']?(?:credential[_ -]*key[_ -]*id|"
+    r"client[_ -]*secret|password|token|key[_ -]*id)[\"']?[ \t]*[:=][ \t]*)"
+    r"(?:\[REDACTED\]|\"(?:\\[^\r\n]|[^\"\\\r\n])*\"|"
+    r"'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\s;,)\]}]+)"
+)
 
 
 _TEST_NOTIFICATION_SCENARIOS: tuple[dict[str, object], ...] = (
@@ -346,9 +354,39 @@ def _safe_incident_context(incident: Mapping[str, object]) -> str:
     )[:4_000]
 
 
+def _sanitize_exception_attachment(value: object) -> str:
+    text = value if isinstance(value, str) else str(value or "")
+    safe = _EXCEPTION_SECRET_RE.sub(r"\g<prefix>[REDACTED]", text)
+    encoded = safe.encode("utf-8")
+    if len(encoded) <= _EXCEPTION_ATTACHMENT_LIMIT:
+        return safe
+    return encoded[:_EXCEPTION_ATTACHMENT_LIMIT].decode("utf-8", errors="ignore")
+
+
+def _exception_attachment_payload(
+    event: Mapping[str, object],
+) -> dict[str, str] | None:
+    if _text(event.get("severity")).lower() not in {"error", "critical"}:
+        return None
+    exception_type = str(event.get("exception_type") or "").strip()
+    traceback_text = str(event.get("traceback_text") or "").strip()
+    if not exception_type and not traceback_text:
+        return None
+    lines = ["Diagnostyka wyjątku PicOrgFTP-SQL"]
+    if exception_type:
+        lines.extend(("", f"Typ wyjątku: {exception_type}"))
+    if traceback_text:
+        lines.extend(("", "Ślad stosu:", traceback_text))
+    return {
+        "filename": _EXCEPTION_ATTACHMENT_FILENAME,
+        "content_type": "text/plain",
+        "content": _sanitize_exception_attachment("\n".join(lines)),
+    }
+
+
 def _message_payload(
     event: Mapping[str, object], incident: Mapping[str, object], message_id: str
-) -> dict[str, str]:
+) -> dict[str, object]:
     severity = _text(event.get("severity")).upper()
     summary = _text(event.get("summary")) or "Zdarzenie wymaga uwagi"
     subject = _header_text(f"[PicOrgFTP-SQL][{severity}] {summary}")
@@ -377,12 +415,16 @@ def _message_payload(
         f"{html.escape(label)}</th><td>{html.escape(value)}</td></tr>"
         for label, value in populated
     )
-    return {
+    payload: dict[str, object] = {
         "message_id": message_id,
         "subject": subject,
         "text_body": text_body,
         "html_body": f"<h2>Incydent PicOrgFTP-SQL</h2><table>{html_rows}</table>",
     }
+    attachment = _exception_attachment_payload(event)
+    if isinstance(attachment, Mapping):
+        payload["exception_attachment"] = dict(attachment)
+    return payload
 
 
 def _runtime_context_lines(
@@ -495,13 +537,18 @@ def _text_context_section(label: str, lines: list[str], budget: int) -> str:
 
 def _append_runtime_context(
     message: Mapping[str, object], context: Mapping[str, object]
-) -> dict[str, str]:
-    enriched = {
+) -> dict[str, object]:
+    text_body = _text(message.get("text_body"), 10_000)
+    html_body = _text(message.get("html_body"), 20_000)
+    enriched: dict[str, object] = {
         "message_id": _text(message.get("message_id")),
         "subject": _text(message.get("subject"), 300),
-        "text_body": _text(message.get("text_body"), 10_000),
-        "html_body": _text(message.get("html_body"), 20_000),
+        "text_body": text_body,
+        "html_body": html_body,
     }
+    attachment = message.get("exception_attachment")
+    if isinstance(attachment, Mapping):
+        enriched["exception_attachment"] = dict(attachment)
     sections = _runtime_context_lines(context)
     text_sections = []
     html_sections = []
@@ -521,9 +568,9 @@ def _append_runtime_context(
         + "</div>"
     )
     text_base_budget = max(0, 10_000 - len(text_context))
-    enriched["text_body"] = enriched["text_body"][:text_base_budget] + text_context
+    enriched["text_body"] = text_body[:text_base_budget] + text_context
     html_base_budget = max(0, 20_000 - len(html_context))
-    html_base = enriched["html_body"]
+    html_base = html_body
     if len(html_base) > html_base_budget:
         pre_open, pre_close = "<pre>", "</pre>"
         excerpt_budget = max(0, html_base_budget - len(pre_open) - len(pre_close))
@@ -858,6 +905,24 @@ class NotificationService:
         message = payload if isinstance(payload, Mapping) else {}
         sender_address, sender_name = _channel_sender(channel, settings)
         recipients = delivery.get("recipients")
+        attachments: tuple[MailAttachment, ...] = ()
+        raw_attachment = message.get("exception_attachment")
+        if isinstance(raw_attachment, Mapping):
+            filename = raw_attachment.get("filename")
+            content_type = raw_attachment.get("content_type")
+            content = raw_attachment.get("content")
+            if (
+                filename == _EXCEPTION_ATTACHMENT_FILENAME
+                and content_type == "text/plain"
+                and isinstance(content, str)
+            ):
+                attachments = (
+                    MailAttachment(
+                        filename=_EXCEPTION_ATTACHMENT_FILENAME,
+                        content_type="text/plain",
+                        content=_sanitize_exception_attachment(content),
+                    ),
+                )
         return MailMessage(
             message_id=_text(message.get("message_id")),
             subject=_text(message.get("subject"), 300),
@@ -866,6 +931,7 @@ class NotificationService:
             sender_address=sender_address,
             sender_name=sender_name,
             recipients=list(recipients) if isinstance(recipients, list) else [],
+            attachments=attachments,
         )
 
     def _with_delivery_context(
