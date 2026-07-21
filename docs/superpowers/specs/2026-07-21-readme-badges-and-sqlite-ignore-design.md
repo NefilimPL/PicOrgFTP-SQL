@@ -23,7 +23,8 @@ either dynamic GitHub metadata or verifiable repository facts:
   language;
 - CI Python 3.11 and EXE-build Python 3.11–3.14, matching the workflows;
 - links to the build dependency list and to the build technologies declared
-  there (PyInstaller, PySide6, FastAPI, and pytest).
+  across the repository's requirements files and CI workflow (PyInstaller,
+  PySide6, FastAPI, and pytest).
 
 Every badge links to the matching GitHub view, workflow, documentation, or
 requirements file. Static badges state only facts controlled in this
