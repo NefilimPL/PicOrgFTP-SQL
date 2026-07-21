@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from picorgftp_sql import data_store, web_data
+from picorgftp_sql.resource_monitor import ResourceMonitor
 from picorgftp_sql.sqlite_store import SqliteStore
 from picorgftp_sql.web import app as web_app
 
@@ -46,6 +47,8 @@ def _event(
 def api_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     previous_auth = os.environ.get("PICORG_WEB_AUTH")
     os.environ["PICORG_WEB_AUTH"] = "1"
+    with web_app._RATE_LIMITS_LOCK:
+        web_app._RATE_LIMITS.clear()
     database_path = tmp_path / "app.sqlite"
     monkeypatch.setattr(web_app.settings, "AC", str(tmp_path))
     monkeypatch.setattr(
@@ -57,6 +60,8 @@ def api_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     client = TestClient(web_app.app)
     yield client, store
     client.close()
+    with web_app._RATE_LIMITS_LOCK:
+        web_app._RATE_LIMITS.clear()
     data_store.reset_active_store_cache()
     if previous_auth is None:
         os.environ.pop("PICORG_WEB_AUTH", None)
@@ -72,6 +77,62 @@ def _login(client: TestClient, username: str = "admin", password: str = "admin")
     )
     assert response.status_code == 200
     return str(response.json()["csrf_token"])
+
+
+class _MonitorStub:
+    def __init__(
+        self,
+        snapshot: dict[str, object] | None = None,
+        *,
+        real_result: dict[str, object] | None = None,
+        real_error: Exception | None = None,
+        lifecycle_events: list[str] | None = None,
+    ) -> None:
+        self.snapshot = snapshot or {
+            "host": {"available": True},
+            "backend": {"available": True},
+        }
+        self.real_result = real_result or {
+            "ok": True,
+            "kind": "cpu",
+            "status": "detected",
+            "timed_out": False,
+        }
+        self.real_error = real_error
+        self.lifecycle_events = lifecycle_events
+        self.sample_calls = 0
+        self.safe_calls = 0
+        self.real_calls: list[str] = []
+        self.start_calls = 0
+        self.stop_calls = 0
+
+    def latest_public_snapshot(self) -> dict[str, object]:
+        return self.snapshot
+
+    def sample_once(self) -> dict[str, object]:
+        self.sample_calls += 1
+        return self.snapshot
+
+    def record_safe_simulation(self) -> dict[str, object]:
+        self.safe_calls += 1
+        return {"ok": True, "test_mode": "safe", "resources": self.snapshot}
+
+    def start_real_test(self, kind: str) -> dict[str, object]:
+        self.real_calls.append(kind)
+        if self.real_error is not None:
+            raise self.real_error
+        return dict(self.real_result)
+
+    def start(self) -> bool:
+        self.start_calls += 1
+        if self.lifecycle_events is not None:
+            self.lifecycle_events.append("monitor.start")
+        return True
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+        if self.lifecycle_events is not None:
+            self.lifecycle_events.append("monitor.stop")
 
 
 def test_entra_expiry_endpoints_require_admin_csrf_and_return_only_public_status(
@@ -1138,6 +1199,199 @@ def test_health_reports_local_components_and_last_known_integrations(
     )
     assert "password" not in response.text.lower()
     assert "private" not in response.text.lower()
+
+
+def test_health_returns_cached_resource_projection_without_sampling(
+    api_environment, monkeypatch
+) -> None:
+    client, _store = api_environment
+    _login(client)
+    monitor = _MonitorStub(
+        {"host": {"cpu_percent": 60}, "backend": {"cpu_percent": 4}}
+    )
+    monkeypatch.setattr(web_app, "_RESOURCE_MONITOR", monitor)
+
+    payload = client.get("/api/health").json()
+
+    assert payload["resources"]["backend"]["cpu_percent"] == 4
+    assert monitor.sample_calls == 0
+
+
+def test_health_remains_available_with_cached_unavailable_resource_metrics(
+    api_environment, monkeypatch
+) -> None:
+    client, _store = api_environment
+    monitor = _MonitorStub(
+        {
+            "host": {"available": False, "reason": "counter unavailable"},
+            "backend": {"available": False},
+        }
+    )
+    monkeypatch.setattr(web_app, "_RESOURCE_MONITOR", monitor)
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json()["resources"] == monitor.snapshot
+    assert monitor.sample_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/api/resource-monitor/simulate-safe", {}),
+        ("/api/resource-monitor/real-test", {"kind": "cpu"}),
+    ],
+)
+def test_resource_monitor_endpoints_require_admin_and_csrf(
+    api_environment, monkeypatch, path: str, body: dict[str, object]
+) -> None:
+    client, _store = api_environment
+    monitor = _MonitorStub()
+    monkeypatch.setattr(web_app, "_RESOURCE_MONITOR", monitor)
+
+    assert client.post(path, json=body).status_code == 401
+    admin_csrf = _login(client)
+    assert client.post(path, json=body).status_code == 403
+    client.cookies.clear()
+    web_data.add_user("operator", "secret", "user")
+    operator_csrf = _login(client, "operator", "secret")
+    forbidden = client.post(
+        path,
+        headers={"X-PicOrg-CSRF": operator_csrf},
+        json=body,
+    )
+
+    assert forbidden.status_code == 403
+    assert admin_csrf
+    assert monitor.safe_calls == 0
+    assert monitor.real_calls == []
+
+
+def test_safe_resource_simulation_records_one_labelled_test_event(
+    api_environment, monkeypatch
+) -> None:
+    client, _store = api_environment
+    csrf = _login(client)
+    events: list[tuple[str, str, dict[str, object]]] = []
+    monitor = ResourceMonitor(
+        settings_provider=lambda: {},
+        context_provider=lambda: {},
+        event_emitter=lambda severity, event_type, details: events.append(
+            (severity, event_type, details)
+        ),
+        readers=object(),
+    )
+    monkeypatch.setattr(web_app, "_RESOURCE_MONITOR", monitor)
+
+    response = client.post(
+        "/api/resource-monitor/simulate-safe",
+        headers={"X-PicOrg-CSRF": csrf},
+        json={},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload) == {"ok", "message", "resources", "test"}
+    assert payload["ok"] is True
+    assert payload["test"]["test_mode"] == "safe"
+    assert len(events) == 1
+    assert events[0][0:2] == ("info", "backend.resource_test")
+    assert events[0][2]["test_mode"] == "safe"
+
+
+def test_real_resource_test_returns_monitor_result_without_direct_event(
+    api_environment, monkeypatch
+) -> None:
+    client, _store = api_environment
+    csrf = _login(client)
+    result = {
+        "ok": True,
+        "kind": "memory",
+        "status": "detected",
+        "timed_out": False,
+    }
+    monitor = _MonitorStub(real_result=result)
+    monkeypatch.setattr(web_app, "_RESOURCE_MONITOR", monitor)
+    direct_events: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        web_app, "emit_event", lambda **kwargs: direct_events.append(kwargs)
+    )
+
+    response = client.post(
+        "/api/resource-monitor/real-test",
+        headers={"X-PicOrg-CSRF": csrf},
+        json={"kind": "memory"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload) == {"ok", "message", "resources", "test"}
+    assert payload["ok"] is True
+    assert payload["test"] == result
+    assert payload["resources"] == monitor.snapshot
+    assert monitor.real_calls == ["memory"]
+    assert direct_events == []
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status"),
+    [
+        (ValueError("unsupported real-test kind"), 400),
+        (ValueError("configured cpu threshold exceeds the real-test hard cap"), 400),
+        (RuntimeError("a real resource test is already running"), 409),
+    ],
+)
+def test_real_resource_test_maps_monitor_rejections_to_safe_http_statuses(
+    api_environment, monkeypatch, error: Exception, expected_status: int
+) -> None:
+    client, _store = api_environment
+    csrf = _login(client)
+    monitor = _MonitorStub(real_error=error)
+    monkeypatch.setattr(web_app, "_RESOURCE_MONITOR", monitor)
+
+    response = client.post(
+        "/api/resource-monitor/real-test",
+        headers={"X-PicOrg-CSRF": csrf},
+        json={"kind": "cpu"},
+    )
+
+    assert response.status_code == expected_status
+    assert monitor.real_calls == ["cpu"]
+
+
+def test_resource_monitor_lifecycle_runs_once_and_in_runtime_order(monkeypatch) -> None:
+    lifecycle_events: list[str] = []
+    monitor = _MonitorStub(lifecycle_events=lifecycle_events)
+    monkeypatch.setattr(web_app, "_RESOURCE_MONITOR", monitor)
+    monkeypatch.setattr(
+        web_app,
+        "initialize_application_runtime",
+        lambda **_kwargs: lifecycle_events.append("runtime.initialize") or {},
+    )
+    monkeypatch.setattr(web_app, "cleanup_web_ftp_cache", lambda **_kwargs: None)
+    monkeypatch.setattr(web_app, "cleanup_web_upload_cache", lambda **_kwargs: None)
+    monkeypatch.setattr(web_app, "_prune_live_events_if_due", lambda **_kwargs: None)
+    monkeypatch.setattr(web_app, "_start_backup_scheduler", lambda: None)
+    monkeypatch.setattr(web_app, "_stop_backup_scheduler", lambda: None)
+    monkeypatch.setattr(web_app, "start_notification_worker", lambda: None)
+    monkeypatch.setattr(
+        web_app,
+        "stop_notification_worker",
+        lambda: lifecycle_events.append("notification.stop"),
+    )
+
+    with TestClient(web_app.create_app()):
+        pass
+
+    assert monitor.start_calls == 1
+    assert monitor.stop_calls == 1
+    assert lifecycle_events.index("runtime.initialize") < lifecycle_events.index(
+        "monitor.start"
+    )
+    assert lifecycle_events.index("monitor.stop") < lifecycle_events.index(
+        "notification.stop"
+    )
 
 
 def test_health_is_critical_when_job_processor_is_shutdown_even_if_storage_is_online(

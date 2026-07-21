@@ -45,6 +45,7 @@ from ..common import (
     N,
     P,
     PROCESSING_SETTINGS_KEY,
+    RESOURCE_MONITOR_SETTINGS_KEY,
     SECURITY_SETTINGS_KEY,
     SQL_AVAILABLE_COLUMNS_KEY,
     SQL_COLUMN_MAP_KEY,
@@ -71,6 +72,7 @@ from ..observability import (
     record_job,
 )
 from ..redaction import redact_sensitive_value, sanitize_free_text
+from ..resource_monitor import ResourceMonitor
 from ..notification_service import (
     notification_worker_health,
     send_test_message,
@@ -206,6 +208,13 @@ _HEALTH_INTEGRATION_CACHE: Dict[str, Any] | None = None
 _HEALTH_STORE_CACHE_LOCK = threading.Lock()
 _HEALTH_STORE_CACHE_PATH = ""
 _HEALTH_STORE_CACHE: Any = None
+_RESOURCE_MONITOR = ResourceMonitor(
+    settings_provider=lambda: config.CONFIG.get(RESOURCE_MONITOR_SETTINGS_KEY, {}),
+    context_provider=lambda: _resource_monitor_context(),
+    event_emitter=lambda severity, event_type, details: _emit_resource_event(
+        severity, event_type, details
+    ),
+)
 RATE_LIMIT_LOGIN_ATTEMPTS = 20
 RATE_LIMIT_LOGIN_WINDOW_SECONDS = 10 * 60
 RATE_LIMIT_UPLOAD_ATTEMPTS = 80
@@ -3898,6 +3907,30 @@ def _active_process_jobs_snapshot() -> Dict[str, Any]:
     }
 
 
+def _resource_monitor_context() -> dict[str, int]:
+    active = _active_process_jobs_snapshot()
+    with _ACTIVE_CLIENTS_LOCK:
+        active_clients = len(_ACTIVE_CLIENTS)
+    return {
+        "active_jobs": int(active["active_count"]),
+        "queued_jobs": int(active["queued_count"]),
+        "active_clients": active_clients,
+    }
+
+
+def _emit_resource_event(
+    severity: str, event_type: str, details: dict[str, object]
+) -> None:
+    emit_event(
+        severity=severity,
+        event_type=event_type,
+        module="resource_monitor",
+        stage="threshold",
+        summary="Backend resource threshold exceeded.",
+        details=details,
+    )
+
+
 def _active_clients_log_path() -> Path:
     return Path(settings.LOG_DIR) / "web_active_clients.json"
 
@@ -4502,6 +4535,7 @@ def _health_payload() -> Dict[str, Any]:
         "time": server_time,
         "components": components,
         "integrations": integrations,
+        "resources": _RESOURCE_MONITOR.latest_public_snapshot(),
     }
 
 
@@ -4736,6 +4770,7 @@ def create_app() -> FastAPI:
         os.environ.setdefault("PICORGFTP_SQL_HEADLESS", "1")
         runtime_info = initialize_application_runtime(interactive=False)
         app.state.runtime_info = runtime_info
+        _RESOURCE_MONITOR.start()
         cleanup_web_ftp_cache(force=True)
         cleanup_web_upload_cache(force=True)
         try:
@@ -4747,6 +4782,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
+        _RESOURCE_MONITOR.stop()
         stop_notification_worker()
         _stop_backup_scheduler()
         with _ACTIVE_CLIENTS_LOCK:
@@ -4755,6 +4791,50 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health() -> Dict[str, Any]:
         return _health_payload()
+
+    @app.post("/api/resource-monitor/simulate-safe")
+    def resource_monitor_simulate_safe(request: Request) -> Dict[str, Any]:
+        _require_admin(request)
+        result = dict(_RESOURCE_MONITOR.record_safe_simulation())
+        resources = result.get("resources")
+        if not isinstance(resources, dict):
+            resources = _RESOURCE_MONITOR.latest_public_snapshot()
+        return {
+            "ok": bool(result.get("ok")),
+            "message": "Zapisano bezpieczna symulacje zdarzenia zasobow.",
+            "resources": resources,
+            "test": result,
+        }
+
+    @app.post("/api/resource-monitor/real-test")
+    async def resource_monitor_real_test(request: Request) -> Dict[str, Any]:
+        _require_admin(request)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        kind = str(payload.get("kind") or "") if isinstance(payload, dict) else ""
+        try:
+            result = dict(
+                await run_in_threadpool(_RESOURCE_MONITOR.start_real_test, kind)
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        status = str(result.get("status") or "unknown")
+        if bool(result.get("ok")):
+            message = "Test zasobow zakonczony: przekroczenie progu wykryte."
+        elif status == "not_detected":
+            message = "Test zasobow zakonczony bez wykrycia przekroczenia progu."
+        else:
+            message = f"Test zasobow zakonczony ze statusem: {status}."
+        return {
+            "ok": bool(result.get("ok")),
+            "message": message,
+            "resources": _RESOURCE_MONITOR.latest_public_snapshot(),
+            "test": result,
+        }
 
     @app.get("/")
     def index(request: Request) -> Response:
