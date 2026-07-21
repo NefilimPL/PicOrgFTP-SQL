@@ -156,9 +156,9 @@ class ResourceMonitor:
     MAX_TEST_CPU_PERCENT = 25.0
     MAX_TEST_MEMORY_BYTES = 256 * MIB
     MAX_TEST_DISK_BYTES = 128 * MIB
-    DISK_TEST_WARMUP_SECONDS = SAMPLE_SECONDS
+    DISK_BASELINE_WAIT_SECONDS = SAMPLE_SECONDS + REAL_TEST_GRACE_SECONDS
     DISK_TEST_WRITE_SECONDS = (
-        REAL_TEST_SECONDS - DISK_TEST_WARMUP_SECONDS - REAL_TEST_GRACE_SECONDS
+        REAL_TEST_SECONDS - DISK_BASELINE_WAIT_SECONDS - REAL_TEST_GRACE_SECONDS
     )
     MAX_TEST_DISK_RATE_BYTES_PER_SECOND = MAX_TEST_DISK_BYTES / (
         DISK_TEST_WRITE_SECONDS
@@ -198,6 +198,7 @@ class ResourceMonitor:
         self._sampler_manages_reader_cleanup = False
         self._worker_process: object | None = None
         self._worker_stop_event: object | None = None
+        self._worker_baseline_event: object | None = None
         self._worker_pid: int | None = None
         self._worker_kind: str | None = None
         self._worker_temp_dir: str | None = None
@@ -313,6 +314,7 @@ class ResourceMonitor:
             try:
                 temp_dir = tempfile.mkdtemp(prefix="picorg_resource_test_")
                 stop_event = multiprocessing.Event()
+                baseline_event = multiprocessing.Event()
                 process = multiprocessing.Process(
                     target=_resource_test_worker,
                     args=(
@@ -323,7 +325,8 @@ class ResourceMonitor:
                         self.MAX_TEST_MEMORY_BYTES,
                         self.MAX_TEST_DISK_BYTES,
                         self.MAX_TEST_DISK_RATE_BYTES_PER_SECOND,
-                        self.DISK_TEST_WARMUP_SECONDS,
+                        baseline_event,
+                        self.DISK_BASELINE_WAIT_SECONDS,
                         max(1, os.cpu_count() or 1),
                     ),
                     daemon=True,
@@ -342,6 +345,7 @@ class ResourceMonitor:
                 }
             self._worker_process = process
             self._worker_stop_event = stop_event
+            self._worker_baseline_event = baseline_event
             self._worker_pid = None
             self._worker_kind = normalized_kind
             self._worker_temp_dir = temp_dir
@@ -436,12 +440,25 @@ class ResourceMonitor:
         with self._state_lock:
             worker_pid = self._worker_pid
             worker_kind = self._worker_kind
+            baseline_event = self._worker_baseline_event
             registered = (
                 self._worker_process is not None or self._worker_temp_dir is not None
             )
         try:
+            read_with_baseline = getattr(
+                self._readers, "read_backend_with_worker_baseline", None
+            )
+            if (
+                worker_kind == "disk"
+                and worker_pid is not None
+                and baseline_event is not None
+                and callable(read_with_baseline)
+            ):
+                raw_backend = read_with_baseline(worker_pid, baseline_event)
+            else:
+                raw_backend = self._readers.read_backend(worker_pid)
             backend = _safe_metrics(
-                self._readers.read_backend(worker_pid), _BACKEND_PUBLIC_KEYS
+                raw_backend, _BACKEND_PUBLIC_KEYS
             )
         except Exception:
             backend = {"available": False}
@@ -564,6 +581,7 @@ class ResourceMonitor:
                 return False
             self._worker_process = None
             self._worker_stop_event = None
+            self._worker_baseline_event = None
             self._worker_pid = None
             self._worker_kind = None
             self._worker_temp_dir = None
@@ -633,7 +651,8 @@ def _resource_test_worker(
     memory_bytes: int,
     disk_bytes: int,
     disk_rate_bytes_per_second: float,
-    disk_warmup_seconds: float,
+    disk_baseline_event: object,
+    disk_baseline_wait_seconds: float,
     logical_cpus: int,
 ) -> None:
     deadline = time.monotonic() + max(0.0, seconds)
@@ -643,24 +662,30 @@ def _resource_test_worker(
         elif kind == "memory":
             _run_memory_test(stop_event, deadline, memory_bytes)
         elif kind == "disk":
-            _run_disk_test(
+            completed = _run_disk_test(
                 stop_event,
                 deadline,
                 Path(temp_dir),
                 disk_bytes,
                 disk_rate_bytes_per_second,
-                disk_warmup_seconds,
+                disk_baseline_event,
+                disk_baseline_wait_seconds,
             )
+            if not completed and not _event_is_set(stop_event):
+                raise SystemExit(2)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def _should_stop(stop_event: object, deadline: float) -> bool:
+def _event_is_set(event: object) -> bool:
     try:
-        stopped = bool(stop_event.is_set())
+        return bool(event.is_set())
     except Exception:
-        stopped = False
-    return stopped or time.monotonic() >= deadline
+        return False
+
+
+def _should_stop(stop_event: object, deadline: float) -> bool:
+    return _event_is_set(stop_event) or time.monotonic() >= deadline
 
 
 def _run_cpu_test(stop_event: object, deadline: float, logical_cpus: int) -> None:
@@ -704,8 +729,9 @@ def _run_disk_test(
     temp_dir: Path,
     disk_bytes: int,
     rate_bytes_per_second: float,
-    warmup_seconds: float = 0.0,
-) -> None:
+    baseline_ready_event: object | None = None,
+    baseline_wait_seconds: float = 0.0,
+) -> bool:
     temp_dir.mkdir(parents=True, exist_ok=True)
     path = temp_dir / "resource-test.bin"
     chunk = bytes(64 * 1024)
@@ -713,11 +739,18 @@ def _run_disk_test(
     written = 0
     bounded_rate = max(1.0, float(rate_bytes_per_second))
     try:
-        warmup_until = time.monotonic() + max(0.0, warmup_seconds)
-        while time.monotonic() < warmup_until:
+        baseline_deadline = min(
+            deadline, time.monotonic() + max(0.0, baseline_wait_seconds)
+        )
+        while baseline_ready_event is not None and not _event_is_set(
+            baseline_ready_event
+        ):
             if _should_stop(stop_event, deadline):
-                return
-            time.sleep(min(0.05, warmup_until - time.monotonic()))
+                return False
+            remaining_wait = baseline_deadline - time.monotonic()
+            if remaining_wait <= 0:
+                return False
+            time.sleep(min(0.05, remaining_wait))
         started_at = time.monotonic()
         with path.open("wb", buffering=0) as handle:
             while remaining and not _should_stop(stop_event, deadline):
@@ -725,11 +758,12 @@ def _run_disk_test(
                 write_at = started_at + (written + len(piece)) / bounded_rate
                 while time.monotonic() < write_at:
                     if _should_stop(stop_event, deadline):
-                        return
+                        return False
                     time.sleep(min(0.05, write_at - time.monotonic()))
                 handle.write(piece)
                 written += len(piece)
                 remaining -= len(piece)
+        return remaining == 0
     finally:
         path.unlink(missing_ok=True)
 
@@ -902,6 +936,18 @@ class _WindowsResourceReaders:
         self._pdh_ready = False
 
     def read_backend(self, worker_pid: int | None = None) -> dict[str, object]:
+        return self._read_backend(worker_pid, None)
+
+    def read_backend_with_worker_baseline(
+        self, worker_pid: int, baseline_ready_event: object
+    ) -> dict[str, object]:
+        return self._read_backend(worker_pid, baseline_ready_event)
+
+    def _read_backend(
+        self,
+        worker_pid: int | None,
+        baseline_ready_event: object | None,
+    ) -> dict[str, object]:
         if os.name != "nt":
             return {"available": False}
         pids = [os.getpid()]
@@ -923,11 +969,18 @@ class _WindowsResourceReaders:
         private_bytes = 0
         read_rate = 0.0
         write_rate = 0.0
+        worker_baseline_pending = (
+            worker_pid is not None
+            and baseline_ready_event is not None
+            and not _event_is_set(baseline_ready_event)
+        )
         for pid, values in process_values.items():
             cpu_time, working, private, read_bytes, write_bytes = values
             working_set += working
             private_bytes += private
             previous = self._process_previous.get(pid)
+            if pid == worker_pid and worker_baseline_pending:
+                previous = None
             if previous is not None:
                 previous_at, previous_cpu, previous_read, previous_write = previous
                 elapsed = max(0.0, now - previous_at)
@@ -939,6 +992,11 @@ class _WindowsResourceReaders:
         self._process_previous = {
             pid: value for pid, value in self._process_previous.items() if pid in process_values
         }
+        if worker_baseline_pending:
+            try:
+                baseline_ready_event.set()
+            except Exception:
+                pass
         memory_percent = working_set / total_memory * 100.0
         return {
             "cpu_percent": round(total_cpu, 2),

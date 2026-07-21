@@ -1166,8 +1166,9 @@ def test_disk_worker_never_exceeds_total_byte_budget_over_long_deadline(
     assert unlinks >= 1
 
 
-def test_disk_worker_warmup_allows_baseline_then_two_high_samples(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("baseline_at", [0.0, 0.4, 2.5, 5.0, 6.9])
+def test_disk_worker_waits_for_baseline_then_covers_two_high_samples(
+    monkeypatch: pytest.MonkeyPatch, baseline_at: float
 ) -> None:
     from picorgftp_sql import resource_monitor
 
@@ -1177,6 +1178,10 @@ def test_disk_worker_warmup_allows_baseline_then_two_high_samples(
     class StopEvent:
         def is_set(self) -> bool:
             return False
+
+    class BaselineEvent:
+        def is_set(self) -> bool:
+            return now >= baseline_at
 
     class FakeFile:
         def open(self, *_args, **_kwargs):
@@ -1223,17 +1228,132 @@ def test_disk_worker_warmup_allows_baseline_then_two_high_samples(
         FakeRoot(),
         budget,
         rate,
-        ResourceMonitor.DISK_TEST_WARMUP_SECONDS,
+        BaselineEvent(),
+        ResourceMonitor.DISK_BASELINE_WAIT_SECONDS,
     )
 
     def sampled_rate(start: float, end: float) -> float:
         return sum(size for at, size in writes if start < at <= end) / (end - start)
 
     assert sum(size for _at, size in writes) == budget
-    assert not [at for at, _size in writes if at <= ResourceMonitor.SAMPLE_SECONDS]
-    assert sampled_rate(5.0, 10.0) > 8 * MIB
-    assert sampled_rate(10.0, 15.0) > 8 * MIB
+    assert not [at for at, _size in writes if at <= baseline_at]
+    assert sampled_rate(baseline_at, baseline_at + 5.0) > 8 * MIB
+    assert sampled_rate(baseline_at + 5.0, baseline_at + 10.0) > 8 * MIB
     assert writes[-1][0] < ResourceMonitor.REAL_TEST_SECONDS
+
+
+def test_disk_worker_baseline_timeout_writes_nothing_and_returns_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from picorgftp_sql import resource_monitor
+
+    now = 0.0
+    writes = 0
+
+    class StopEvent:
+        def is_set(self) -> bool:
+            return False
+
+    class BaselineEvent:
+        def is_set(self) -> bool:
+            return False
+
+    class FakeFile:
+        def open(self, *_args, **_kwargs):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def write(self, chunk: bytes) -> int:
+            nonlocal writes
+            writes += len(chunk)
+            return len(chunk)
+
+        def unlink(self, *, missing_ok: bool = False) -> None:
+            return None
+
+    class FakeRoot:
+        def mkdir(self, **_kwargs) -> None:
+            return None
+
+        def __truediv__(self, _name: str) -> FakeFile:
+            return FakeFile()
+
+    def monotonic() -> float:
+        return now
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += max(0.0001, seconds)
+
+    monkeypatch.setattr(resource_monitor.time, "monotonic", monotonic)
+    monkeypatch.setattr(resource_monitor.time, "sleep", sleep)
+
+    completed = resource_monitor._run_disk_test(
+        StopEvent(),
+        ResourceMonitor.REAL_TEST_SECONDS,
+        FakeRoot(),
+        ResourceMonitor.MAX_TEST_DISK_BYTES,
+        ResourceMonitor.MAX_TEST_DISK_RATE_BYTES_PER_SECOND,
+        BaselineEvent(),
+        ResourceMonitor.DISK_BASELINE_WAIT_SECONDS,
+    )
+
+    assert completed is False
+    assert writes == 0
+    assert (
+        ResourceMonitor.DISK_BASELINE_WAIT_SECONDS
+        <= now
+        < ResourceMonitor.REAL_TEST_SECONDS
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native baseline contract")
+def test_native_reader_signals_only_after_successful_worker_io_baseline() -> None:
+    from picorgftp_sql import resource_monitor
+
+    worker_pid = 87654
+    parent_pid = os.getpid()
+    fail_worker = True
+
+    class BaselineEvent:
+        def __init__(self) -> None:
+            self.ready = False
+
+        def is_set(self) -> bool:
+            return self.ready
+
+        def set(self) -> None:
+            self.ready = True
+
+    reader = object.__new__(resource_monitor._WindowsResourceReaders)
+    reader._clock = lambda: 100.0
+    reader._logical_cpus = 1
+    reader._process_previous = {}
+    reader._read_memory = lambda: {"memory_total_bytes": 1_000_000_000}
+
+    def read_process(pid: int) -> tuple[int, int, int, int, int] | None:
+        if pid == worker_pid and fail_worker:
+            return None
+        assert pid in {parent_pid, worker_pid}
+        return (10_000_000, 1000, 900, 2000, 3000)
+
+    reader._read_process = read_process
+    baseline = BaselineEvent()
+
+    failed = reader.read_backend_with_worker_baseline(worker_pid, baseline)
+    assert failed == {"available": False}
+    assert baseline.is_set() is False
+
+    fail_worker = False
+    succeeded = reader.read_backend_with_worker_baseline(worker_pid, baseline)
+    assert succeeded["memory_working_set_bytes"] == 2000
+    assert baseline.is_set() is True
+    assert worker_pid in reader._process_previous
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows native binding contract")
