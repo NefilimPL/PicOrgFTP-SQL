@@ -22,9 +22,9 @@ either dynamic GitHub metadata or verifiable repository facts:
 - Apache-2.0 licence, latest commit, repository size, open issues, and top
   language;
 - CI Python 3.11 and EXE-build Python 3.11–3.14, matching the workflows;
-- links to the build dependency list and to the build technologies declared
-  across the repository's requirements files and CI workflow (PyInstaller,
-  PySide6, FastAPI, and pytest).
+- links to the build dependency list and build technologies: PyInstaller is
+  declared in `requirements-build.txt`; PySide6 in `requirements-qt.txt`;
+  FastAPI in `requirements-web.txt`; and pytest in the CI workflow.
 
 Every badge links to the matching GitHub view, workflow, documentation, or
 requirements file. Static badges state only facts controlled in this
