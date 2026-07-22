@@ -8,7 +8,23 @@ import re
 import unittest
 
 
+WEB_PANEL_DOC = Path(__file__).resolve().parents[1] / "docs" / "web-panel.md"
+
+
 class SourceIntegrityTests(unittest.TestCase):
+    def test_web_panel_documents_global_iana_time_zone_and_warsaw_dst(self) -> None:
+        guide = WEB_PANEL_DOC.read_text(encoding="utf-8")
+        section_match = re.search(
+            r"(?ms)^## Strefa czasu panelu\s+(.*?)(?=^##\s|\Z)", guide
+        )
+        self.assertIsNotNone(section_match)
+        section = section_match.group(1)
+
+        self.assertIn("globalna strefa czasu", section)
+        self.assertIn("IANA", section)
+        self.assertIn("Europe/Warsaw", section)
+        self.assertIn("CET/CEST", section)
+
     def test_bootstrap_exposes_only_the_normalized_web_display_setting(self) -> None:
         root = Path(__file__).resolve().parents[1]
         source = (root / "picorgftp_sql" / "web" / "app.py").read_text(
