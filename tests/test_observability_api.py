@@ -119,6 +119,67 @@ def test_cleanup_process_jobs_preserves_active_and_keeps_newest_completed() -> N
             web_app._PROCESS_JOBS.update(previous)
 
 
+def test_process_job_completion_transitions_bound_resident_terminal_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed_limit = web_app._PROCESS_JOB_MAX_COMPLETED
+    job_count = completed_limit + 4
+    jobs = {
+        f"job-{index}": {
+            "id": f"job-{index}",
+            "status": "queued",
+            "username": "admin",
+            "cache_scope": "scope",
+            "form": index,
+            "created_at": float(index + 1),
+            "started_at": 0.0,
+            "finished_at": 0.0,
+            "progress": 0,
+        }
+        for index in range(job_count)
+    }
+    jobs["still-queued"] = {
+        "id": "still-queued",
+        "status": "queued",
+        "created_at": 0.0,
+    }
+    ticks = iter(float(value) for value in range(10_000, 20_000))
+    monkeypatch.setattr(web_app.time, "time", lambda: next(ticks))
+
+    def process_snapshot(**kwargs):
+        if int(kwargs["form"]) % 2:
+            raise RuntimeError("expected failure")
+        return {}
+
+    monkeypatch.setattr(web_app, "_process_upload_snapshot", process_snapshot)
+    monkeypatch.setattr(web_app, "_persist_process_job", lambda _job: None)
+    monkeypatch.setattr(web_app, "_emit_process_completed", lambda *_args: None)
+    monkeypatch.setattr(web_app, "_emit_process_failed", lambda *_args, **_kwargs: None)
+    with web_app._PROCESS_JOBS_LOCK:
+        previous = dict(web_app._PROCESS_JOBS)
+        web_app._PROCESS_JOBS.clear()
+        web_app._PROCESS_JOBS.update(jobs)
+    try:
+        for index in range(job_count):
+            web_app._run_process_job(f"job-{index}")
+
+        with web_app._PROCESS_JOBS_LOCK:
+            resident = dict(web_app._PROCESS_JOBS)
+        terminal = [
+            job
+            for job in resident.values()
+            if job.get("status") in {"completed", "failed"}
+        ]
+        assert resident["still-queued"]["status"] == "queued"
+        assert len(terminal) <= completed_limit
+        assert len(resident) <= completed_limit + 1
+        assert {job["status"] for job in terminal} == {"completed", "failed"}
+    finally:
+        with web_app._PROCESS_JOBS_LOCK:
+            web_app._PROCESS_JOBS.clear()
+            web_app._PROCESS_JOBS.update(previous)
+
+
 def test_upload_scan_results_prune_missing_and_expired_entries(tmp_path: Path) -> None:
     now = 20_000.0 + web_app.WEB_UPLOAD_CACHE_MAX_AGE_SECONDS
     fresh_path = tmp_path / "fresh.jpg"

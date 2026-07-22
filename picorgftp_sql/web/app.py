@@ -3545,26 +3545,30 @@ def _result_severity(payload: Dict[str, Any]) -> str:
     return "info"
 
 
-def _cleanup_process_jobs(now: Optional[float] = None) -> None:
+def _cleanup_process_jobs_locked(now: Optional[float] = None) -> None:
     cutoff = (time.time() if now is None else now) - _PROCESS_JOB_RETENTION_SECONDS
-    with _PROCESS_JOBS_LOCK:
-        terminal_jobs: List[tuple[str, Dict[str, Any]]] = []
-        for job_id, job in list(_PROCESS_JOBS.items()):
-            if job.get("status") not in {"completed", "failed"}:
-                continue
-            if float(job.get("finished_at") or 0) < cutoff:
-                _PROCESS_JOBS.pop(job_id, None)
-                continue
-            terminal_jobs.append((job_id, job))
-        terminal_jobs.sort(
-            key=lambda item: (
-                float(item[1].get("finished_at") or 0),
-                float(item[1].get("created_at") or 0),
-            ),
-            reverse=True,
-        )
-        for job_id, _job in terminal_jobs[_PROCESS_JOB_MAX_COMPLETED:]:
+    terminal_jobs: List[tuple[str, Dict[str, Any]]] = []
+    for job_id, job in list(_PROCESS_JOBS.items()):
+        if job.get("status") not in {"completed", "failed"}:
+            continue
+        if float(job.get("finished_at") or 0) < cutoff:
             _PROCESS_JOBS.pop(job_id, None)
+            continue
+        terminal_jobs.append((job_id, job))
+    terminal_jobs.sort(
+        key=lambda item: (
+            float(item[1].get("finished_at") or 0),
+            float(item[1].get("created_at") or 0),
+        ),
+        reverse=True,
+    )
+    for job_id, _job in terminal_jobs[_PROCESS_JOB_MAX_COMPLETED:]:
+        _PROCESS_JOBS.pop(job_id, None)
+
+
+def _cleanup_process_jobs(now: Optional[float] = None) -> None:
+    with _PROCESS_JOBS_LOCK:
+        _cleanup_process_jobs_locked(now=now)
 
 
 def _process_job_payload(job: Dict[str, Any], *, include_result: bool = True) -> Dict[str, Any]:
@@ -3885,6 +3889,7 @@ def _run_process_job(job_id: str) -> None:
             if not job:
                 return
             warning_messages = _finish_process_job_success(job, payload)
+            _cleanup_process_jobs_locked(now=float(job["finished_at"]))
             durable_job = dict(job)
         _persist_process_job(durable_job)
         _emit_process_completed(durable_job, payload, warning_messages)
@@ -3894,6 +3899,7 @@ def _run_process_job(job_id: str) -> None:
             if not job:
                 return
             message, status_code, severity = _finish_process_job_failure(job, exc)
+            _cleanup_process_jobs_locked(now=float(job["finished_at"]))
             durable_job = dict(job)
         _persist_process_job(durable_job)
         _emit_process_failed(

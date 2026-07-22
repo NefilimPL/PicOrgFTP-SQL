@@ -66,3 +66,46 @@ This report is included in the commit `fix: bound resource monitoring caches`.
 - Browser cache behavior is guarded by static source-integrity tests rather than
   an executed JavaScript unit test because the repository has no JS test runner
   and Node is unavailable in this environment.
+
+## Review follow-up: pending-state synchronization and lifecycle cleanup
+
+### Scope
+
+- Added one desktop pending-state lock plus per-slot pending tokens. Request
+  enqueue now holds the lock across token publication, non-blocking queue
+  publication, and path/token pending publication. A result-full worker must
+  acquire that same lock before clearing only its own pending token/path.
+- Normal result polling now compares the queued result token with the current
+  pending token before removing pending state. A stale same-path result cannot
+  erase a newer request; a matching result removes both path and token.
+- Added locked path/token clearing to slot clear, fit toggle, and clear-all flows,
+  including compatibility with existing lightweight desktop test harnesses.
+- Extracted `_cleanup_process_jobs_locked()` and invoked it inside the existing
+  process-job lock immediately after both success and failure transitions.
+
+### TDD and regression evidence
+
+- Four coordinated RED cases reproduced all review blockers: worker-before-
+  pending publication, stale result removal, matching result token cleanup, and
+  204 lifecycle transitions retaining more than 200 terminal jobs.
+- A further RED helper test caught paired path/token cleanup, then the first full
+  run caught the existing `_ClearSlotsHarness` compatibility regression after
+  1,004 passes. The exact existing test plus all desktop helpers then passed.
+- Blocker-focused GREEN: 9 passed.
+- Required related suite: 131 passed, 23 subtests passed.
+- Final fresh full suite: 1,005 passed, 52 subtests passed, with the same 13
+  existing FastAPI/Starlette deprecation warnings.
+
+### Deadlock and lifecycle review
+
+- The producer uses only `put_nowait` while holding the pending lock. The worker
+  releases queue internals before acquiring that lock on a result-full path, so
+  there is no queue-lock/pending-lock cycle.
+- Cleanup considers only terminal jobs, runs under `_PROCESS_JOBS_LOCK`, and
+  preserves queued/running jobs throughout completion and failure transitions.
+- A fresh independent read-only review of the corrected working tree reported no
+  Critical, Important, or Minor findings and assessed it ready.
+
+### Follow-up commit
+
+This follow-up is included in `fix: synchronize bounded thumbnail state`.

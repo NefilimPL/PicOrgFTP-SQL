@@ -326,7 +326,9 @@ class App(BU.Tk):
         B._thumb_request_queue = queue.Queue(maxsize=THUMBNAIL_QUEUE_MAXSIZE)
         B._thumb_result_queue = queue.Queue(maxsize=THUMBNAIL_QUEUE_MAXSIZE)
         B._thumb_request_seq = 0
+        B._thumb_pending_lock = threading.Lock()
         B._thumb_pending_paths = {}
+        B._thumb_pending_tokens = {}
         B._thumb_poll_job = I
         B._ui_log_buffer = []
         B._ui_log_flush_job = I
@@ -2436,6 +2438,28 @@ class App(BU.Tk):
         B._thumb_request_seq += 1
         return B._thumb_request_seq
 
+    def _clear_thumbnail_pending(B, idx=I):
+        def clear_state():
+            pending_paths = Aj(B, "_thumb_pending_paths", I)
+            pending_tokens = Aj(B, "_thumb_pending_tokens", I)
+            if idx is I:
+                if isinstance(pending_paths, dict):
+                    pending_paths.clear()
+                if isinstance(pending_tokens, dict):
+                    pending_tokens.clear()
+                return
+            if isinstance(pending_paths, dict):
+                pending_paths.pop(idx, I)
+            if isinstance(pending_tokens, dict):
+                pending_tokens.pop(idx, I)
+
+        pending_lock = Aj(B, "_thumb_pending_lock", I)
+        if pending_lock is I:
+            clear_state()
+            return
+        with pending_lock:
+            clear_state()
+
     def _thumbnail_worker_loop(B):
         while J:
             job = B._thumb_request_queue.get()
@@ -2454,13 +2478,17 @@ class App(BU.Tk):
                     (idx, path, token, thumb, content_fit)
                 )
             except queue.Full:
-                pending_paths = Aj(B, "_thumb_pending_paths", I)
-                if (
-                    isinstance(pending_paths, dict)
-                    and B._thumb_tokens.get(idx) == token
-                    and pending_paths.get(idx) == (path, content_fit)
-                ):
-                    pending_paths.pop(idx, I)
+                with B._thumb_pending_lock:
+                    pending_paths = Aj(B, "_thumb_pending_paths", I)
+                    pending_tokens = Aj(B, "_thumb_pending_tokens", I)
+                    if (
+                        isinstance(pending_paths, dict)
+                        and isinstance(pending_tokens, dict)
+                        and pending_tokens.get(idx) == token
+                        and pending_paths.get(idx) == (path, content_fit)
+                    ):
+                        pending_paths.pop(idx, I)
+                        pending_tokens.pop(idx, I)
 
     def _poll_thumbnail_results(B):
         B._thumb_poll_job = I
@@ -2486,11 +2514,20 @@ class App(BU.Tk):
                 idx, path, token, thumb = result
                 content_fit = h
             processed += 1
-            pending_paths = Aj(B, "_thumb_pending_paths", I)
             pending_key = (path, content_fit)
-            if isinstance(pending_paths, dict) and pending_paths.get(idx) == pending_key:
-                pending_paths.pop(idx, I)
-            if B._thumb_tokens.get(idx) != token:
+            with B._thumb_pending_lock:
+                pending_paths = Aj(B, "_thumb_pending_paths", I)
+                pending_tokens = Aj(B, "_thumb_pending_tokens", I)
+                if (
+                    isinstance(pending_paths, dict)
+                    and isinstance(pending_tokens, dict)
+                    and pending_tokens.get(idx) == token
+                    and pending_paths.get(idx) == pending_key
+                ):
+                    pending_paths.pop(idx, I)
+                    pending_tokens.pop(idx, I)
+                current_token = B._thumb_tokens.get(idx)
+            if current_token != token:
                 continue
             if idx < 0 or idx >= Q(B.slots):
                 continue
@@ -5038,22 +5075,33 @@ class App(BU.Tk):
             return
         content_fit = B._is_slot_content_fit_enabled(idx)
         pending_key = (path, content_fit)
-        if not isinstance(Aj(B, "_thumb_pending_paths", I), dict):
-            B._thumb_pending_paths = {}
-        pending_path = B._thumb_pending_paths.get(idx)
-        if pending_path == pending_key:
-            return
-        token = B._next_thumbnail_token()
-        B._thumb_tokens[idx] = token
+        with B._thumb_pending_lock:
+            if not isinstance(Aj(B, "_thumb_pending_paths", I), dict):
+                B._thumb_pending_paths = {}
+            if not isinstance(Aj(B, "_thumb_pending_tokens", I), dict):
+                B._thumb_pending_tokens = {}
+            if B._thumb_pending_paths.get(idx) == pending_key:
+                return
         _cache_key, thumb = B._get_cached_thumbnail(path, content_fit)
+        with B._thumb_pending_lock:
+            if B._thumb_pending_paths.get(idx) == pending_key:
+                return
+            token = B._next_thumbnail_token()
+            B._thumb_tokens[idx] = token
+            if thumb is not I:
+                B._thumb_pending_paths.pop(idx, I)
+                B._thumb_pending_tokens.pop(idx, I)
+            else:
+                try:
+                    B._thumb_request_queue.put_nowait(
+                        (idx, path, token, content_fit)
+                    )
+                except queue.Full:
+                    return
+                B._thumb_pending_paths[idx] = pending_key
+                B._thumb_pending_tokens[idx] = token
         if thumb is not I:
             B._set_slot_preview(idx, path, thumb, content_fit=content_fit)
-            return
-        try:
-            B._thumb_request_queue.put_nowait((idx, path, token, content_fit))
-        except queue.Full:
-            return
-        B._thumb_pending_paths[idx] = pending_key
 
     def _build_slot_target_filename(
         B,
@@ -5496,9 +5544,7 @@ class App(BU.Tk):
         slot["content_fit"] = bool(C.opt_auto_content_fit.get())
         if slot.get("canvas_items"):
             C._thumb_tokens.pop(idx, I)
-            pending_paths = Aj(C, "_thumb_pending_paths", I)
-            if isinstance(pending_paths, dict):
-                pending_paths.pop(idx, I)
+            App._clear_thumbnail_pending(C, idx)
             slot["sql_presence_unknown"] = h
             C._redraw_canvas_slot(idx)
             C._update_slot_activity(idx, active=h)
@@ -5510,9 +5556,7 @@ class App(BU.Tk):
         if sql_link and sql_link.winfo_manager():
             sql_link.pack_forget()
         C._thumb_tokens.pop(idx, I)
-        pending_paths = Aj(C, "_thumb_pending_paths", I)
-        if isinstance(pending_paths, dict):
-            pending_paths.pop(idx, I)
+        App._clear_thumbnail_pending(C, idx)
         C._refresh_slot_source_icons(idx)
         C._update_slot_activity(idx, active=h)
 
@@ -5543,9 +5587,7 @@ class App(BU.Tk):
             return
         slot["content_fit"] = not bool(slot.get("content_fit", h))
         C._thumb_tokens.pop(idx, I)
-        pending_paths = Aj(C, "_thumb_pending_paths", I)
-        if isinstance(pending_paths, dict):
-            pending_paths.pop(idx, I)
+        App._clear_thumbnail_pending(C, idx)
         C._display_slot_preview(idx)
         source_path = slot.get(f) or slot.get("local_path") or preview_path
         if source_path and A.path.isfile(source_path):
@@ -6841,8 +6883,7 @@ class App(BU.Tk):
         C.pending_deletions.clear()
         C.pending_ftp_deletions.clear()
         C._thumb_tokens.clear()
-        if isinstance(Aj(C, "_thumb_pending_paths", I), dict):
-            C._thumb_pending_paths.clear()
+        App._clear_thumbnail_pending(C)
         C._product_state.original_files.clear()
         C._product_state.ftp_remote_only.clear()
         C._product_state.ftp_presence.clear()

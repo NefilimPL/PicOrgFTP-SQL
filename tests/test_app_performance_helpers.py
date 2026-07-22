@@ -118,7 +118,12 @@ class _ThumbnailHarness:
         self._thumb_result_queue: queue.Queue = queue.Queue(maxsize=maxsize)
         self._thumb_request_seq = 0
         self._thumb_pending_paths: dict[int, tuple[str, bool]] = {}
+        self._thumb_pending_tokens: dict[int, int] = {}
         self._thumb_tokens: dict[int, int] = {}
+        self._thumb_pending_lock = threading.Lock()
+        self._slots_scroll_active = False
+        self._thumb_poll_job = None
+        self.slots = [{}, {}, {"preview_path": "new.png"}]
         self.preview_updates: list[tuple[int, str, object, bool]] = []
 
     def _is_slot_content_fit_enabled(self, _idx: int) -> bool:
@@ -134,6 +139,39 @@ class _ThumbnailHarness:
 
     def _load_slot_thumbnail(self, path: str, *, content_fit: bool):
         return (path, content_fit)
+
+    def _get_slot_preview_path(self, slot: dict[str, object]) -> str:
+        return str(slot.get("preview_path") or "")
+
+    def winfo_exists(self) -> bool:
+        return False
+
+
+class _ObservedLock:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.waiter_started = threading.Event()
+
+    def __enter__(self):
+        if self._lock.locked():
+            self.waiter_started.set()
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb) -> None:
+        self._lock.release()
+
+
+class _PublishedBeforeReturnQueue(queue.Queue):
+    def __init__(self) -> None:
+        super().__init__(maxsize=1)
+        self.published = threading.Event()
+        self.allow_return = threading.Event()
+
+    def put_nowait(self, item) -> None:
+        super().put_nowait(item)
+        self.published.set()
+        self.allow_return.wait(timeout=2)
 
 
 @unittest.skipIf(App is None, f"App import unavailable: {APP_IMPORT_ERROR}")
@@ -160,6 +198,7 @@ class AppPerformanceHelperTests(unittest.TestCase):
 
         self.assertFalse(attempt.is_alive(), "thumbnail enqueue must be non-blocking")
         self.assertEqual(harness._thumb_pending_paths, {})
+        self.assertEqual(harness._thumb_pending_tokens, {})
         self.assertEqual(harness._thumb_tokens[2], 1)
 
         harness._thumb_request_queue.get_nowait()
@@ -170,11 +209,46 @@ class AppPerformanceHelperTests(unittest.TestCase):
             (2, "new.png", 2, False),
         )
         self.assertEqual(harness._thumb_pending_paths, {2: ("new.png", False)})
+        self.assertEqual(harness._thumb_pending_tokens, {2: 2})
+
+    def test_queue_thumbnail_publishes_pending_before_worker_can_drop_result(
+        self,
+    ) -> None:
+        harness = _ThumbnailHarness()
+        harness._thumb_pending_lock = _ObservedLock()
+        harness._thumb_request_queue = _PublishedBeforeReturnQueue()
+        harness._thumb_result_queue = queue.Queue(maxsize=1)
+        harness._thumb_result_queue.put_nowait((0, "old.png", 1, object(), False))
+        producer = threading.Thread(
+            target=App._queue_thumbnail,
+            args=(harness, 2, "new.png"),
+            daemon=True,
+        )
+        worker = threading.Thread(
+            target=App._thumbnail_worker_loop,
+            args=(harness,),
+            daemon=True,
+        )
+        producer.start()
+        self.assertTrue(harness._thumb_request_queue.published.wait(timeout=1))
+        worker.start()
+        worker_synchronized = harness._thumb_pending_lock.waiter_started.wait(timeout=1)
+        harness._thumb_request_queue.allow_return.set()
+        producer.join(timeout=2)
+        harness._thumb_request_queue.put(None, timeout=2)
+        worker.join(timeout=2)
+
+        self.assertTrue(worker_synchronized)
+        self.assertFalse(producer.is_alive())
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(harness._thumb_pending_paths, {})
+        self.assertEqual(harness._thumb_pending_tokens, {})
 
     def test_thumbnail_worker_drops_result_when_result_queue_is_full(self) -> None:
         harness = _ThumbnailHarness(maxsize=1)
         harness._thumb_result_queue.put_nowait((0, "old.png", 1, object(), False))
         harness._thumb_pending_paths[2] = ("new.png", False)
+        harness._thumb_pending_tokens[2] = 2
         harness._thumb_tokens[2] = 2
         harness._thumb_request_queue.put_nowait((2, "new.png", 2, False))
         worker = threading.Thread(
@@ -187,6 +261,7 @@ class AppPerformanceHelperTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(harness._thumb_result_queue.qsize(), 1)
         self.assertEqual(harness._thumb_pending_paths, {})
+        self.assertEqual(harness._thumb_pending_tokens, {})
 
     def test_dropped_stale_thumbnail_result_preserves_newer_pending_request(
         self,
@@ -194,6 +269,7 @@ class AppPerformanceHelperTests(unittest.TestCase):
         harness = _ThumbnailHarness(maxsize=1)
         harness._thumb_result_queue.put_nowait((0, "old.png", 1, object(), False))
         harness._thumb_pending_paths[2] = ("new.png", False)
+        harness._thumb_pending_tokens[2] = 3
         harness._thumb_tokens[2] = 3
         harness._thumb_request_queue.put_nowait((2, "new.png", 2, False))
         worker = threading.Thread(
@@ -205,6 +281,53 @@ class AppPerformanceHelperTests(unittest.TestCase):
 
         self.assertFalse(worker.is_alive())
         self.assertEqual(harness._thumb_pending_paths, {2: ("new.png", False)})
+        self.assertEqual(harness._thumb_pending_tokens, {2: 3})
+
+    def test_poll_stale_thumbnail_result_preserves_newer_same_path_pending(
+        self,
+    ) -> None:
+        harness = _ThumbnailHarness()
+        harness._thumb_pending_paths[2] = ("new.png", False)
+        harness._thumb_pending_tokens[2] = 2
+        harness._thumb_tokens[2] = 2
+        harness._thumb_result_queue.put_nowait((2, "new.png", 1, "old", False))
+
+        App._poll_thumbnail_results(harness)
+
+        self.assertEqual(harness._thumb_pending_paths, {2: ("new.png", False)})
+        self.assertEqual(harness._thumb_pending_tokens, {2: 2})
+        self.assertEqual(harness.preview_updates, [])
+
+    def test_poll_matching_thumbnail_result_clears_pending(self) -> None:
+        harness = _ThumbnailHarness()
+        harness._thumb_pending_paths[2] = ("new.png", False)
+        harness._thumb_pending_tokens[2] = 2
+        harness._thumb_tokens[2] = 2
+        harness._thumb_result_queue.put_nowait((2, "new.png", 2, "current", False))
+
+        App._poll_thumbnail_results(harness)
+
+        self.assertEqual(harness._thumb_pending_paths, {})
+        self.assertEqual(harness._thumb_pending_tokens, {})
+        self.assertEqual(
+            harness.preview_updates,
+            [(2, "new.png", "current", False)],
+        )
+
+    def test_clear_thumbnail_pending_removes_path_and_token_together(self) -> None:
+        harness = _ThumbnailHarness()
+        harness._thumb_pending_paths = {
+            1: ("one.png", False),
+            2: ("two.png", True),
+        }
+        harness._thumb_pending_tokens = {1: 4, 2: 5}
+        clear_pending = getattr(App, "_clear_thumbnail_pending", None)
+
+        self.assertIsNotNone(clear_pending)
+        clear_pending(harness, 1)
+
+        self.assertEqual(harness._thumb_pending_paths, {2: ("two.png", True)})
+        self.assertEqual(harness._thumb_pending_tokens, {2: 5})
 
     def test_set_combobox_values_skips_identical_payload(self) -> None:
         combo = _ComboboxStub()
