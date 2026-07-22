@@ -109,3 +109,37 @@ This report is included in the commit `fix: bound resource monitoring caches`.
 ### Follow-up commit
 
 This follow-up is included in `fix: synchronize bounded thumbnail state`.
+
+## Follow-up: race-safe upload scan metadata handoff
+
+### Scope
+
+- Added a locked snapshot step before cached-upload preprocessing can replace or
+  remove the scanned source file.
+- Added a locked publication step after preprocessing creates the target, with
+  the same refreshed `_cached_at` semantics as the previous copy operation.
+- Routed both the normal upload-cache and browser-extension upload-cache host
+  preprocessing paths through the race-safe handoff helper.
+- Kept `_cached_at` internal: public scan-result reads continue to omit it.
+
+### TDD and regression evidence
+
+- Two deterministic RED tests first failed because the handoff helper did not
+  exist and neither route used it.
+- The interleaving test removes the source during preprocessing, prunes its scan
+  record before preprocessing returns, and proves the captured record is still
+  published for the target with a refreshed timestamp.
+- Focused GREEN: 3 passed.
+- Related web/observability suite: 114 passed, 20 subtests passed, with 9
+  existing warnings.
+- Final fresh full suite: 1,007 passed, 52 subtests passed, with the same 13
+  existing FastAPI/Starlette deprecation warnings.
+
+### Review
+
+- A fresh independent read-only review reported no Critical, Important, or
+  Minor findings and assessed the follow-up ready.
+
+### Follow-up commit
+
+This follow-up is included in `fix: preserve upload scan metadata handoff`.

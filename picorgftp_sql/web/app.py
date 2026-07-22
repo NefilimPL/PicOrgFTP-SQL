@@ -1158,16 +1158,43 @@ def _remember_upload_scan_result(path: str, result: Dict[str, Any]) -> None:
         _UPLOAD_SCAN_RESULTS[os.path.abspath(path)] = cached_result
 
 
+def _snapshot_upload_scan_result(path: str) -> Dict[str, Any]:
+    if not path:
+        return {}
+    with _UPLOAD_SCAN_RESULTS_LOCK:
+        return dict(_UPLOAD_SCAN_RESULTS.get(os.path.abspath(path)) or {})
+
+
+def _publish_upload_scan_result(path: str, result: Dict[str, Any]) -> None:
+    if path and result:
+        cached_result = dict(result)
+        cached_result["_cached_at"] = time.time()
+        with _UPLOAD_SCAN_RESULTS_LOCK:
+            _UPLOAD_SCAN_RESULTS[os.path.abspath(path)] = cached_result
+    _prune_upload_scan_results()
+
+
 def _copy_upload_scan_result(source_path: str, target_path: str) -> None:
     if not source_path or not target_path:
         return
-    with _UPLOAD_SCAN_RESULTS_LOCK:
-        result = _UPLOAD_SCAN_RESULTS.get(os.path.abspath(source_path))
-        if result:
-            copied_result = dict(result)
-            copied_result["_cached_at"] = time.time()
-            _UPLOAD_SCAN_RESULTS[os.path.abspath(target_path)] = copied_result
-    _prune_upload_scan_results()
+    result = _snapshot_upload_scan_result(source_path)
+    _publish_upload_scan_result(target_path, result)
+
+
+async def _preprocess_cached_upload_with_scan_result(
+    path: str,
+    display_name: str,
+    options: Any,
+) -> tuple[str, str, bool]:
+    scan_result = _snapshot_upload_scan_result(path)
+    target_path, target_name, preprocessed = await run_in_threadpool(
+        preprocess_cached_upload,
+        path,
+        display_name,
+        options,
+    )
+    _publish_upload_scan_result(target_path, scan_result)
+    return target_path, target_name, preprocessed
 
 
 def _upload_scan_result(path: str) -> Dict[str, Any]:
@@ -5365,14 +5392,11 @@ def create_app() -> FastAPI:
         display_name = _safe_upload_name(saved_cache.name or original_name, os.path.basename(path))
         if _upload_processing_mode() == "host":
             preprocess_started = time.perf_counter()
-            original_scan_path = path
-            path, display_name, preprocessed = await run_in_threadpool(
-                preprocess_cached_upload,
+            path, display_name, preprocessed = await _preprocess_cached_upload_with_scan_result(
                 path,
                 display_name,
                 processing_options_from_config(config.CONFIG),
             )
-            _copy_upload_scan_result(original_scan_path, path)
             preprocess_ms = _elapsed_ms(preprocess_started)
             try:
                 size = os.path.getsize(path)
@@ -5460,14 +5484,11 @@ def create_app() -> FastAPI:
         display_name = _safe_upload_name(saved_cache.name or original_name, os.path.basename(path))
         if _upload_processing_mode() == "host":
             preprocess_started = time.perf_counter()
-            original_scan_path = path
-            path, display_name, preprocessed = await run_in_threadpool(
-                preprocess_cached_upload,
+            path, display_name, preprocessed = await _preprocess_cached_upload_with_scan_result(
                 path,
                 display_name,
                 processing_options_from_config(config.CONFIG),
             )
-            _copy_upload_scan_result(original_scan_path, path)
             preprocess_ms = _elapsed_ms(preprocess_started)
             try:
                 size = os.path.getsize(path)

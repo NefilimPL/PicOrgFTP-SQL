@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 import os
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -235,6 +237,90 @@ def test_upload_scan_result_copy_survives_source_replacement(tmp_path: Path) -> 
         with web_app._UPLOAD_SCAN_RESULTS_LOCK:
             web_app._UPLOAD_SCAN_RESULTS.clear()
             web_app._UPLOAD_SCAN_RESULTS.update(previous)
+
+
+def test_preprocess_upload_scan_handoff_survives_prune_between_source_and_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handoff = getattr(web_app, "_preprocess_cached_upload_with_scan_result", None)
+    assert callable(handoff)
+    source_path = tmp_path / "source.jpg"
+    target_path = tmp_path / "source_processed.jpg"
+    source_path.write_bytes(b"source")
+    source_removed = threading.Event()
+    source_pruned = threading.Event()
+
+    def preprocess(path: str, display_name: str, _options):
+        assert os.path.abspath(path) == os.path.abspath(source_path)
+        target_path.write_bytes(b"processed")
+        source_path.unlink()
+        source_removed.set()
+        assert source_pruned.wait(timeout=2)
+        return str(target_path), display_name, True
+
+    monkeypatch.setattr(web_app, "preprocess_cached_upload", preprocess)
+    with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+        previous = dict(web_app._UPLOAD_SCAN_RESULTS)
+        web_app._UPLOAD_SCAN_RESULTS.clear()
+        web_app._UPLOAD_SCAN_RESULTS[str(source_path.resolve())] = {
+            "enabled": True,
+            "scanned": True,
+            "scanner": "Microsoft Defender",
+            "_cached_at": 1.0,
+        }
+
+    def prune_removed_source() -> None:
+        assert source_removed.wait(timeout=2)
+        web_app._prune_upload_scan_results()
+        with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+            assert str(source_path.resolve()) not in web_app._UPLOAD_SCAN_RESULTS
+        source_pruned.set()
+
+    pruner = threading.Thread(target=prune_removed_source, daemon=True)
+    try:
+        pruner.start()
+        result_path, result_name, preprocessed = asyncio.run(
+            handoff(str(source_path), "source.jpg", object())
+        )
+        pruner.join(timeout=2)
+
+        assert not pruner.is_alive()
+        assert (result_path, result_name, preprocessed) == (
+            str(target_path),
+            "source.jpg",
+            True,
+        )
+        assert web_app._upload_scan_result(str(target_path)) == {
+            "enabled": True,
+            "scanned": True,
+            "scanner": "Microsoft Defender",
+        }
+        with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+            cached = dict(web_app._UPLOAD_SCAN_RESULTS[str(target_path.resolve())])
+        assert float(cached["_cached_at"]) > 1.0
+    finally:
+        source_pruned.set()
+        pruner.join(timeout=2)
+        with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+            web_app._UPLOAD_SCAN_RESULTS.clear()
+            web_app._UPLOAD_SCAN_RESULTS.update(previous)
+
+
+def test_upload_routes_use_preprocess_scan_handoff_for_both_path_families() -> None:
+    source = inspect.getsource(web_app.create_app)
+    normal_start = source.index("async def upload_cache_api")
+    normal_end = source.index("def browser_extension_ping_api", normal_start)
+    extension_start = source.index("async def browser_extension_upload_cache_api")
+    extension_end = source.index("async def web_images_scan_api", extension_start)
+
+    for body in (
+        source[normal_start:normal_end],
+        source[extension_start:extension_end],
+    ):
+        assert "await _preprocess_cached_upload_with_scan_result(" in body
+        assert "preprocess_cached_upload," not in body
+        assert "_copy_upload_scan_result(" not in body
 
 
 def test_rate_limit_cleanup_prunes_only_expired_key_lists() -> None:
