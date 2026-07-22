@@ -94,8 +94,15 @@ def test_time_zone_catalog_requires_admin(api_environment) -> None:
     response = client.get("/api/settings/time-zones")
 
     assert response.status_code == 200
-    assert response.json()["time_zones"][0] == "UTC"
-    assert "Europe/Warsaw" in response.json()["time_zones"]
+    payload = response.json()
+    assert set(payload) == {"time_zones"}
+    time_zones = payload["time_zones"]
+    assert time_zones[0] == "UTC"
+    assert time_zones.count("UTC") == 1
+    assert time_zones[1:] == sorted(time_zones[1:])
+    assert len(time_zones) == len(set(time_zones))
+    assert all(isinstance(value, str) and value for value in time_zones)
+    assert "Europe/Warsaw" in time_zones
 
 
 def test_cleanup_process_jobs_preserves_active_and_keeps_newest_completed() -> None:

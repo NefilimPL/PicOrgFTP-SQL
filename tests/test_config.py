@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+import shutil
 import unittest
 from copy import deepcopy
 from unittest.mock import patch
@@ -22,6 +25,14 @@ from picorgftp_sql.email_settings import (
 from picorgftp_sql.encryption import encrypt
 from picorgftp_sql.product_fields import PRODUCT_FIELDS_KEY
 from picorgftp_sql.sqlite_store import SqliteStore
+
+
+def _workspace_temp(name: str) -> Path:
+    root = Path(__file__).resolve().parents[1] / "tmp_test" / name
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+    return root
 
 
 class DefaultConfigSafetyTests(unittest.TestCase):
@@ -75,6 +86,123 @@ class ConfigTests(unittest.TestCase):
             write_atomic.call_args.args[1][common.WEB_DISPLAY_SETTINGS_KEY],
             {"time_zone": "UTC"},
         )
+
+    def test_web_display_settings_roundtrip_through_sqlite(self) -> None:
+        temp_dir = _workspace_temp("config-web-display-sqlite")
+        try:
+            store = SqliteStore(temp_dir / "settings.sqlite")
+            store.save_config(
+                {common.WEB_DISPLAY_SETTINGS_KEY: {"time_zone": "CEST"}}
+            )
+
+            with (
+                patch.object(config, "_active_sqlite_store", return_value=store),
+                patch.object(
+                    config,
+                    "available_display_time_zones",
+                    return_value=["UTC", "Europe/Warsaw"],
+                ),
+            ):
+                loaded = config.load_config(interactive=False)
+                self.assertEqual(
+                    loaded[common.WEB_DISPLAY_SETTINGS_KEY],
+                    {"time_zone": "UTC"},
+                )
+
+                loaded[common.WEB_DISPLAY_SETTINGS_KEY] = {
+                    "time_zone": "Europe/Warsaw"
+                }
+                config.save_config(loaded)
+                reloaded = config.load_config(interactive=False)
+
+            self.assertEqual(
+                store.load_config()[common.WEB_DISPLAY_SETTINGS_KEY],
+                {"time_zone": "Europe/Warsaw"},
+            )
+            self.assertEqual(
+                reloaded[common.WEB_DISPLAY_SETTINGS_KEY],
+                {"time_zone": "Europe/Warsaw"},
+            )
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_web_display_settings_normalize_and_write_back_legacy_json(self) -> None:
+        temp_dir = _workspace_temp("config-web-display-legacy")
+        config_path = temp_dir / "config.json"
+        try:
+            raw = deepcopy(common.DEFAULT_CONFIG)
+            raw[common.WEB_DISPLAY_SETTINGS_KEY] = {"time_zone": "CEST"}
+            config_path.write_text(json.dumps(raw), encoding="utf-8")
+
+            with (
+                patch.object(config, "_active_sqlite_store", return_value=None),
+                patch.object(config.settings, "AC", str(temp_dir)),
+                patch.object(config, "CONFIG_PATH", str(config_path)),
+                patch.object(
+                    config,
+                    "available_display_time_zones",
+                    return_value=["UTC", "Europe/Warsaw"],
+                ),
+            ):
+                loaded = config.load_config(interactive=False)
+                persisted_after_invalid = json.loads(
+                    config_path.read_text(encoding="utf-8")
+                )
+
+                persisted_valid = deepcopy(persisted_after_invalid)
+                persisted_valid[common.WEB_DISPLAY_SETTINGS_KEY] = {
+                    "time_zone": "Europe/Warsaw"
+                }
+                config_path.write_text(json.dumps(persisted_valid), encoding="utf-8")
+                reloaded = config.load_config(interactive=False)
+                persisted_again = json.loads(config_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(
+                loaded[common.WEB_DISPLAY_SETTINGS_KEY],
+                {"time_zone": "UTC"},
+            )
+            self.assertEqual(
+                persisted_after_invalid[common.WEB_DISPLAY_SETTINGS_KEY],
+                {"time_zone": "UTC"},
+            )
+            self.assertEqual(
+                reloaded[common.WEB_DISPLAY_SETTINGS_KEY],
+                {"time_zone": "Europe/Warsaw"},
+            )
+            self.assertEqual(
+                persisted_again[common.WEB_DISPLAY_SETTINGS_KEY],
+                {"time_zone": "Europe/Warsaw"},
+            )
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_web_display_settings_first_write_uses_utc_default(self) -> None:
+        temp_dir = _workspace_temp("config-web-display-first-write")
+        config_path = temp_dir / "config.json"
+        try:
+            with (
+                patch.object(config, "_active_sqlite_store", return_value=None),
+                patch.object(config.settings, "AC", str(temp_dir)),
+                patch.object(config, "CONFIG_PATH", str(config_path)),
+                patch.object(
+                    config,
+                    "available_display_time_zones",
+                    return_value=["UTC", "Europe/Warsaw"],
+                ),
+            ):
+                loaded = config.load_config(interactive=False)
+
+            persisted = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                loaded[common.WEB_DISPLAY_SETTINGS_KEY],
+                {"time_zone": "UTC"},
+            )
+            self.assertEqual(
+                persisted[common.WEB_DISPLAY_SETTINGS_KEY],
+                {"time_zone": "UTC"},
+            )
+        finally:
+            shutil.rmtree(temp_dir)
 
     def test_save_config_encrypts_both_email_secrets(self) -> None:
         payload = deepcopy(common.DEFAULT_CONFIG)
@@ -259,9 +387,6 @@ class ConfigTests(unittest.TestCase):
         )
 
     def test_save_config_roundtrips_product_fields_through_sqlite(self) -> None:
-        from pathlib import Path
-        import shutil
-
         temp_dir = Path(__file__).resolve().parents[1] / "tmp_test" / "config-product-fields"
         if temp_dir.exists():
             shutil.rmtree(temp_dir)
