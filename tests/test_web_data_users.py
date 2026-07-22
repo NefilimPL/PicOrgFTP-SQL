@@ -41,21 +41,33 @@ class WebDataUserTests(unittest.TestCase):
         self.assertEqual(user["role"], "admin")
 
     def test_user_snapshot_keeps_raw_epoch_for_auth_times(self) -> None:
-        temp_dir = _workspace_temp("web_data_users_raw_epoch")
-        try:
-            with patch.object(web_data.settings, "AC", str(temp_dir)):
-                snapshot = web_data.find_user("admin")
-        finally:
-            shutil.rmtree(temp_dir)
+        record = web_data._default_admin()
+        expected = {
+            "extension_token_issued_ts": 946_684_800.125,
+            "extension_token_last_used_ts": 978_307_200.25,
+            "lock_expires_ts": 1_893_456_000.5,
+            "last_failed_login_ts": 1_609_459_200.75,
+        }
+        record.update(
+            {
+                "extension_token_issued_at": expected["extension_token_issued_ts"],
+                "extension_token_last_used_at": expected[
+                    "extension_token_last_used_ts"
+                ],
+                "last_failed_login_at": expected["last_failed_login_ts"],
+            }
+        )
+        record["login_locked_until"] = expected["lock_expires_ts"]
+        record["login_lock_manual"] = False
+        with (
+            patch.object(web_data, "load_user_records", return_value=[record]),
+            patch.object(web_data.time, "time", return_value=1_800_000_000.0),
+        ):
+            snapshot = web_data.find_user("admin")
 
         self.assertIsNotNone(snapshot)
-        for key in (
-            "extension_token_issued_ts",
-            "extension_token_last_used_ts",
-            "lock_expires_ts",
-            "last_failed_login_ts",
-        ):
-            self.assertIsInstance(snapshot[key], (int, float))
+        for key, value in expected.items():
+            self.assertEqual(snapshot[key], value)
 
     def test_existing_user_without_email_normalizes_to_empty_string(self) -> None:
         record = web_data._normalized_user_record(

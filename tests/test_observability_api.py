@@ -105,6 +105,27 @@ def test_time_zone_catalog_requires_admin(api_environment) -> None:
     assert "Europe/Warsaw" in time_zones
 
 
+def test_bootstrap_exposes_only_normalized_web_display_shape(api_environment) -> None:
+    client, _store = api_environment
+    _login(client)
+    untrusted_display = {
+        "time_zone": " Europe/Warsaw ",
+        "password": "must-not-leak",
+        "api_token": "must-not-leak",
+    }
+
+    with patch.dict(
+        web_app.config.CONFIG,
+        {"web_display": untrusted_display},
+        clear=False,
+    ):
+        response = client.get("/api/bootstrap")
+
+    assert response.status_code == 200
+    assert response.json()["web_display"] == {"time_zone": "Europe/Warsaw"}
+    assert "must-not-leak" not in json.dumps(response.json())
+
+
 def test_cleanup_process_jobs_preserves_active_and_keeps_newest_completed() -> None:
     now = 10_000.0
     completed_limit = web_app._PROCESS_JOB_MAX_COMPLETED

@@ -4186,7 +4186,6 @@ def _active_presence_payload(
             continue
         by_username[username] = {
             "username": username,
-            "last_seen": str(client.get("last_seen") or ""),
             "last_seen_epoch": last_seen_epoch,
         }
     users = sorted(

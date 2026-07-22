@@ -2124,8 +2124,8 @@ class WebAppFileTests(unittest.TestCase):
         self.assertEqual(
             payload["users"],
             [
-                {"username": "admin", "last_seen": "new", "last_seen_epoch": 40.0},
-                {"username": "operator", "last_seen": "now", "last_seen_epoch": 30.0},
+                {"username": "admin", "last_seen_epoch": 40.0},
+                {"username": "operator", "last_seen_epoch": 30.0},
             ],
         )
 
@@ -2155,7 +2155,6 @@ class WebAppFileTests(unittest.TestCase):
             [
                 {
                     "username": "operator",
-                    "last_seen": "browser poll",
                     "last_seen_epoch": 100.0,
                 }
             ],
@@ -2254,7 +2253,7 @@ class WebAppFileTests(unittest.TestCase):
 
         self.assertEqual(
             payload["users"],
-            [{"username": "operator", "last_seen": "fresh", "last_seen_epoch": now}],
+            [{"username": "operator", "last_seen_epoch": now}],
         )
 
     def test_existing_photo_conflicts_detect_unloaded_replacement(self) -> None:

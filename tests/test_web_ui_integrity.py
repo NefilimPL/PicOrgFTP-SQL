@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from html.parser import HTMLParser
+import json
 from pathlib import Path
 import re
+import subprocess
 import unittest
 
 
@@ -69,14 +71,69 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertNotIn("new Date(eventTime).toLocaleTimeString()", source)
         self.assertNotIn("new Date(Number(item.started_at) * 1000).toLocaleString()", source)
 
+    def test_panel_timestamp_formatter_runtime_contract(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        formatter = source[
+            source.index("function selectedPanelTimeZone") : source.index(
+                "const SQLITE_BACKUP_DAYS"
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the browser formatter contract test")
+        script = f"""
+const state = {{ settings: {{ web_display: {{ time_zone: "Europe/Warsaw" }} }} }};
+{formatter}
+const winter = formatPanelTimestamp("2026-01-15T12:00:00Z");
+const summer = formatPanelTimestamp("2026-07-15T12:00:00Z");
+state.settings.web_display.time_zone = "Invalid/Time_Zone";
+const fallback = formatPanelTimestamp("2026-01-15T12:00:00Z");
+const impossible = formatPanelTimestamp("2026-02-31T12:00:00Z");
+const ambiguousNumber = coercePanelDate(946684800);
+const seconds = coercePanelDate(946684800, {{ epochUnit: "seconds" }})?.toISOString();
+const historicalMilliseconds = coercePanelDate(946684800000, {{ epochUnit: "milliseconds" }})?.toISOString();
+state.settings.web_display.time_zone = "UTC";
+const historySeconds = formatPanelTimestamp(1773576000, {{ epochUnit: "seconds" }});
+console.log(JSON.stringify({{
+  winter,
+  summer,
+  fallback,
+  impossible,
+  ambiguousNumber,
+  seconds,
+  historicalMilliseconds,
+  historySeconds,
+}}));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertRegex(result["winter"], r"13:00:00.*CET")
+        self.assertRegex(result["summer"], r"14:00:00.*CEST")
+        self.assertRegex(result["fallback"], r"12:00:00.*UTC")
+        self.assertEqual(result["impossible"], "Brak danych")
+        self.assertIsNone(result["ambiguousNumber"])
+        self.assertEqual(result["seconds"], "2000-01-01T00:00:00.000Z")
+        self.assertEqual(
+            result["historicalMilliseconds"], "2000-01-01T00:00:00.000Z"
+        )
+        self.assertNotEqual(result["historySeconds"], "Brak danych")
+        self.assertRegex(result["historySeconds"], r"12:00:00.*UTC")
+
     def test_all_visible_panel_timestamps_use_the_central_formatter(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
+        compact_source = re.sub(r"\s+", " ", source)
 
-        expected_calls = [
+        iso_calls = [
             "formatPanelTimestamp(payload.checked_at)",
             "formatPanelTimestamp(release.published_at)",
             "formatPanelTimestamp(state.fileIndex?.generated_at)",
-            "formatPanelTimestamp(item.ts || item.created_at)",
             "formatPanelTimestamp(event.created_at)",
             "formatPanelTimestamp(delivery.updated_at || delivery.created_at)",
             "formatPanelTimestamp(incident.last_seen_at || incident.first_seen_at)",
@@ -87,20 +144,69 @@ class WebUiIntegrityTests(unittest.TestCase):
             "formatPanelTimestamp(detector.last_trigger_at)",
             "formatPanelTimestamp(resources.observed_at)",
             "formatPanelTimestamp(item.created_at)",
-            "formatPanelTimestamp(event.timestamp, { date: false })",
-            "formatPanelTimestamp(item.started_at)",
             "formatPanelTimestamp(status.expires_at)",
             "formatPanelTimestamp(status.last_checked_at)",
             "formatPanelTimestamp(status.last_success_at)",
-            "formatPanelTimestamp(user.lock_expires_ts)",
-            "formatPanelTimestamp(user.last_failed_login_ts)",
-            "formatPanelTimestamp(user.extension_token_last_used_ts)",
         ]
-        for call in expected_calls:
+        for call in iso_calls:
             self.assertIn(call, source)
+
+        epoch_second_calls = [
+            "formatPanelTimestamp(user.last_seen_epoch, { epochUnit: \"seconds\" })",
+            "formatPanelTimestamp(item.started_at, { epochUnit: \"seconds\" })",
+            'formatPanelTimestamp(event.timestamp, { date: false, epochUnit: "seconds", })',
+            "formatPanelTimestamp(user.lock_expires_ts, { epochUnit: \"seconds\" })",
+            'formatPanelTimestamp(user.last_failed_login_ts, { epochUnit: "seconds", })',
+            'formatPanelTimestamp(user.extension_token_last_used_ts, { epochUnit: "seconds", })',
+        ]
+        for call in epoch_second_calls:
+            self.assertIn(call, compact_source)
+        self.assertGreaterEqual(
+            compact_source.count(
+                'formatPanelTimestamp(item.ts || item.created_at, { epochUnit: "seconds", })'
+            ),
+            3,
+        )
+        self.assertIn(
+            'formatPanelTimestamp( group.items?.[0]?.ts || group.items?.[0]?.created_at, { epochUnit: "seconds" } )',
+            compact_source,
+        )
 
         self.assertIn("formatDuration(payload.total_ms || 0)", source)
         self.assertIn("formatHistoryDuration(file.elapsed_ms)", source)
+        self.assertNotRegex(source, r"\buser\.last_seen(?!_epoch)\b")
+        self.assertNotRegex(source, r"\.toLocale(?:Date|Time)?String\(")
+        for legacy_field in (
+            "user.lock_expires_at",
+            "user.last_failed_login_at",
+            "user.extension_token_last_used_at",
+        ):
+            self.assertNotIn(legacy_field, source)
+
+        visible_renderers = (
+            "activeUserLastSeenLabel",
+            "renderGithubStatus",
+            "renderHistoryTiming",
+            "renderHistoryChanges",
+            "renderHistoryDetails",
+            "renderHistory",
+            "renderLogEvent",
+            "renderResourceDetails",
+            "renderPimcoreLiveEvents",
+            "renderPimcoreHistory",
+            "renderEntraExpiryStatus",
+            "renderSettingsUsers",
+        )
+        for name in visible_renderers:
+            start = source.index(f"function {name}(")
+            match = re.search(r"\n(?:async )?function ", source[start + 1 :])
+            end = len(source) if match is None else start + 1 + match.start()
+            renderer = source[start:end]
+            self.assertIn(
+                "formatPanelTimestamp(",
+                renderer,
+                f"{name} must route visible instants through the central formatter",
+            )
 
     def test_global_time_zone_field_uses_the_server_catalog_and_rerenders(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -112,6 +218,26 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("web_display: {", source)
         self.assertIn('time_zone: data.get("web_display_time_zone")', source)
         self.assertIn("rerenderPanelTimestampViews()", source)
+
+        rerender_start = source.index("function rerenderPanelTimestampViews")
+        rerender_end = source.index("function settingsSaveButton", rerender_start)
+        rerender = source[rerender_start:rerender_end]
+        for call in (
+            "renderActiveUsersPresence(",
+            "renderHistoryTiming(state.historyTimingItem, { open: false })",
+            "renderHistoryChanges(state.historyChangesItem, { open: false })",
+            "rerenderHistoryDetailTimestamps()",
+            "renderPimcoreLiveEvents()",
+        ):
+            self.assertIn(call, rerender)
+        self.assertNotIn("renderHistoryDetails(", rerender)
+        detail_refresh_start = source.index("function rerenderHistoryDetailTimestamps")
+        detail_refresh_end = source.index("function renderHistoryDetails", detail_refresh_start)
+        detail_refresh = source[detail_refresh_start:detail_refresh_end]
+        self.assertIn('querySelectorAll("[data-history-item-index]")', detail_refresh)
+        self.assertIn("meta.textContent =", detail_refresh)
+        self.assertNotIn("historyDetailOutput.textContent", detail_refresh)
+        self.assertNotIn("replaceChildren", detail_refresh)
 
     def test_mail_settings_tab_has_safe_secrets_and_responsive_channel_cards(self) -> None:
         html = _parse(INDEX_HTML)

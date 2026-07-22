@@ -21,10 +21,13 @@ const state = {
   activeSettingsTab: "app",
   history: null,
   historyDetailGroup: null,
+  historyTimingItem: null,
+  historyChangesItem: null,
   historyPage: 1,
   historyPageSize: 50,
   historySearchTimer: 0,
   pimcoreTestOperation: null,
+  pimcoreLiveEvents: [],
   pimcoreLookupTimer: 0,
   pimcoreLookupRequestId: 0,
   pimcoreLastCheckedEan: "",
@@ -185,27 +188,56 @@ function selectedPanelTimeZone() {
   return String(state.settings?.web_display?.time_zone || "UTC");
 }
 
-function coercePanelDate(value) {
+function coercePanelDate(value, { epochUnit = null } = {}) {
   if (value instanceof Date) {
     return Number.isNaN(value.getTime()) ? null : value;
   }
   if (typeof value === "number" && Number.isFinite(value)) {
-    if (value === 0) return null;
-    const milliseconds = Math.abs(value) < 1e12 ? value * 1000 : value;
+    if (!new Set(["seconds", "milliseconds"]).has(epochUnit)) return null;
+    const milliseconds = epochUnit === "seconds" ? value * 1000 : value;
     const date = new Date(milliseconds);
     return Number.isNaN(date.getTime()) ? null : date;
   }
   if (typeof value !== "string") return null;
   const text = value.trim();
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(text)) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/.exec(
+    text
+  );
+  if (!match) {
+    return null;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  const offsetHour = match[8] === undefined ? 0 : Number(match[8]);
+  const offsetMinute = match[9] === undefined ? 0 : Number(match[9]);
+  if (
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > daysInMonth[month - 1] ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59 ||
+    offsetHour > 23 ||
+    offsetMinute > 59
+  ) {
     return null;
   }
   const date = new Date(text);
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-function formatPanelTimestamp(value, { date = true, time = true } = {}) {
-  const panelDate = coercePanelDate(value);
+function formatPanelTimestamp(
+  value,
+  { date = true, time = true, epochUnit = null } = {}
+) {
+  const panelDate = coercePanelDate(value, { epochUnit });
   if (!panelDate || (!date && !time)) return "Brak danych";
   const formatterOptions = {
     ...(date ? { year: "numeric", month: "short", day: "2-digit" } : {}),
@@ -782,8 +814,8 @@ function closeModals() {
 }
 
 function activeUserLastSeenLabel(user = {}) {
-  const text = String(user.last_seen || "").trim();
-  return text ? `Ostatnio: ${text}` : "Aktywny";
+  const text = formatPanelTimestamp(user.last_seen_epoch, { epochUnit: "seconds" });
+  return text === "Brak danych" ? "Aktywny" : `Ostatnio: ${text}`;
 }
 
 function toggleActiveUsersPopover(force) {
@@ -4690,12 +4722,15 @@ function trapHistoryChangesFocus(event) {
   }
 }
 
-function renderHistoryTiming(item = {}) {
+function renderHistoryTiming(item = {}, { open = true } = {}) {
+  state.historyTimingItem = item;
   if (!historyTimingTitle || !historyTimingOutput) {
     return;
   }
   const timing = item.details?.timing || {};
-  historyTimingTitle.textContent = `Czasy: ${formatPanelTimestamp(item.ts || item.created_at)}`;
+  historyTimingTitle.textContent = `Czasy: ${formatPanelTimestamp(item.ts || item.created_at, {
+    epochUnit: "seconds",
+  })}`;
   historyTimingOutput.textContent = "";
   const stages = timing.stages || [];
   historyTimingOutput.appendChild(processMetricRow("Razem", timingMs(timing.total_ms)));
@@ -4716,10 +4751,11 @@ function renderHistoryTiming(item = {}) {
   } else {
     historyTimingOutput.className = "timing-list";
   }
-  document.querySelector("#historyTimingModal")?.classList.add("active");
+  if (open) document.querySelector("#historyTimingModal")?.classList.add("active");
 }
 
-function renderHistoryChanges(item = {}) {
+function renderHistoryChanges(item = {}, { open = true } = {}) {
+  state.historyChangesItem = item;
   if (!historyChangesModal || !historyChangesTitle || !historyChangesOutput) {
     return;
   }
@@ -4727,7 +4763,9 @@ function renderHistoryChanges(item = {}) {
   const changeSet = details.change_set && typeof details.change_set === "object"
     ? details.change_set
     : null;
-  historyChangesTitle.textContent = `Zmiany: ${formatPanelTimestamp(item.ts || item.created_at)}`;
+  historyChangesTitle.textContent = `Zmiany: ${formatPanelTimestamp(item.ts || item.created_at, {
+    epochUnit: "seconds",
+  })}`;
   historyChangesOutput.textContent = "";
 
   if (!changeSet) {
@@ -4742,7 +4780,7 @@ function renderHistoryChanges(item = {}) {
       }
       historyChangesOutput.appendChild(legacy.details);
     }
-    openHistoryChangesModal();
+    if (open) openHistoryChangesModal();
     return;
   }
 
@@ -4818,14 +4856,27 @@ function renderHistoryChanges(item = {}) {
     historyChangesOutput.appendChild(section.details);
   }
 
-  openHistoryChangesModal();
+  if (open) openHistoryChangesModal();
 }
 
-function renderHistoryDetails(group) {
+function rerenderHistoryDetailTimestamps() {
+  const items = Array.isArray(state.historyDetailGroup?.items)
+    ? state.historyDetailGroup.items
+    : [];
+  historyDetailOutput?.querySelectorAll("[data-history-item-index]").forEach((meta) => {
+    const item = items[Number(meta.dataset.historyItemIndex)];
+    if (!item) return;
+    meta.textContent = `${formatPanelTimestamp(item.ts || item.created_at, {
+      epochUnit: "seconds",
+    })} | ${item.user || ""}`;
+  });
+}
+
+function renderHistoryDetails(group, { open = true } = {}) {
   state.historyDetailGroup = group;
   historyDetailTitle.textContent = `Historia EAN ${group.ean}`;
   historyDetailOutput.textContent = "";
-  for (const item of group.items || []) {
+  for (const [itemIndex, item] of (group.items || []).entries()) {
     const row = document.createElement("article");
     const meta = document.createElement("div");
     const summary = document.createElement("strong");
@@ -4835,7 +4886,10 @@ function renderHistoryDetails(group) {
     const timingButton = document.createElement("button");
     row.className = "history-item";
     meta.className = "history-meta";
-    meta.textContent = `${formatPanelTimestamp(item.ts || item.created_at)} | ${item.user || ""}`;
+    meta.dataset.historyItemIndex = String(itemIndex);
+    meta.textContent = `${formatPanelTimestamp(item.ts || item.created_at, {
+      epochUnit: "seconds",
+    })} | ${item.user || ""}`;
     summary.textContent = item.summary || item.action || "Zmiana";
     const saved = item.details?.saved_files?.length || 0;
     const deleted = item.details?.deleted_slots?.length || 0;
@@ -4870,7 +4924,7 @@ function renderHistoryDetails(group) {
     row.append(meta, summary, details, actions);
     historyDetailOutput.appendChild(row);
   }
-  document.querySelector("#historyDetailModal").classList.add("active");
+  if (open) document.querySelector("#historyDetailModal").classList.add("active");
 }
 
 function updateHistoryPagination(payload) {
@@ -4926,7 +4980,8 @@ function renderHistory(payload) {
     const readableFields = historyEntryLabel(entry);
     fields.textContent = readableFields || "Brak danych pol tekstowych";
     meta.textContent = `${(group.items || []).length} zmian | ostatnio: ${formatPanelTimestamp(
-      group.items?.[0]?.ts || group.items?.[0]?.created_at
+      group.items?.[0]?.ts || group.items?.[0]?.created_at,
+      { epochUnit: "seconds" }
     )}`;
     row.append(title, fields, meta);
     row.addEventListener("click", () => renderHistoryDetails(group));
@@ -8018,12 +8073,22 @@ function ensureSqlColumnsDatalist() {
 function rerenderPanelTimestampViews() {
   updateRuntimeMetrics();
   if (state.githubStatus) renderGithubStatus(state.githubStatus);
+  renderActiveUsersPresence({ enabled: state.activeUsersEnabled, users: state.activeUsers });
   if (state.history) renderHistory(state.history);
   if (
     state.historyDetailGroup &&
     document.querySelector("#historyDetailModal")?.classList.contains("active")
   ) {
-    renderHistoryDetails(state.historyDetailGroup);
+    rerenderHistoryDetailTimestamps();
+  }
+  if (
+    state.historyTimingItem &&
+    document.querySelector("#historyTimingModal")?.classList.contains("active")
+  ) {
+    renderHistoryTiming(state.historyTimingItem, { open: false });
+  }
+  if (state.historyChangesItem && historyChangesModal?.classList.contains("active")) {
+    renderHistoryChanges(state.historyChangesItem, { open: false });
   }
   if (
     Object.values(state.observability.tabs).some((tab) => Array.isArray(tab.items) && tab.items.length)
@@ -8042,6 +8107,7 @@ function rerenderPanelTimestampViews() {
   }
   if (state.backupHistoryItems.length) renderBackupHistory(state.backupHistoryItems);
   if (state.pimcoreHistoryItems.length) renderPimcoreHistory(state.pimcoreHistoryItems);
+  renderPimcoreLiveEvents();
   const entraContainer = document.querySelector(".entra-expiry-status");
   if (entraContainer && state.entraExpiryStatus) {
     renderEntraExpiryStatus(entraContainer, state.entraExpiryStatus);
@@ -10484,6 +10550,7 @@ function collectPimcoreTestValues() {
 }
 
 function clearPimcoreLiveLog() {
+  state.pimcoreLiveEvents = [];
   if (!pimcoreLiveLog || !pimcoreTestElapsed || !pimcoreTestStatus) return;
   pimcoreLiveLog.textContent = "Brak operacji.";
   pimcoreLiveLog.className = "pimcore-live-log empty-state";
@@ -10491,24 +10558,28 @@ function clearPimcoreLiveLog() {
   pimcoreTestStatus.textContent = "";
 }
 
-function appendPimcoreLiveEvents(events) {
+function renderPimcoreLiveEvents() {
   if (!pimcoreLiveLog) return;
   const wasAtBottom =
     pimcoreLiveLog.scrollHeight - pimcoreLiveLog.scrollTop - pimcoreLiveLog.clientHeight < 24;
-  if (pimcoreLiveLog.classList.contains("empty-state")) {
-    pimcoreLiveLog.textContent = "";
-    pimcoreLiveLog.className = "pimcore-live-log";
+  pimcoreLiveLog.textContent = "";
+  if (!state.pimcoreLiveEvents.length) {
+    pimcoreLiveLog.textContent = "Brak operacji.";
+    pimcoreLiveLog.className = "pimcore-live-log empty-state";
+    return;
   }
-  for (const event of events || []) {
+  pimcoreLiveLog.className = "pimcore-live-log";
+  for (const event of state.pimcoreLiveEvents) {
     const row = document.createElement("div");
     const heading = document.createElement("strong");
     const detail = document.createElement("span");
     const diagnostic = document.createElement("pre");
     row.className = `pimcore-live-event ${event.severity || "info"}`;
     heading.textContent =
-      `[${formatPanelTimestamp(event.timestamp, { date: false })}] ${event.stage || "etap"}: ${
-        event.message || ""
-      }`;
+      `[${formatPanelTimestamp(event.timestamp, {
+        date: false,
+        epochUnit: "seconds",
+      })}] ${event.stage || "etap"}: ${event.message || ""}`;
     detail.textContent = [
       event.method,
       event.endpoint,
@@ -10530,6 +10601,13 @@ function appendPimcoreLiveEvents(events) {
     pimcoreLiveLog.appendChild(row);
   }
   if (wasAtBottom) pimcoreLiveLog.scrollTop = pimcoreLiveLog.scrollHeight;
+}
+
+function appendPimcoreLiveEvents(events) {
+  const rows = Array.isArray(events) ? events : [];
+  if (!rows.length) return;
+  state.pimcoreLiveEvents.push(...rows);
+  renderPimcoreLiveEvents();
 }
 
 function pimcoreTestObjectKey(template, values) {
@@ -10642,7 +10720,7 @@ function renderPimcoreHistory(items) {
       item.operation_id || ""
     }`;
     meta.textContent = [
-      formatPanelTimestamp(item.started_at),
+      formatPanelTimestamp(item.started_at, { epochUnit: "seconds" }),
       item.username,
       `${Number(item.total_ms || 0)} ms`,
       `klasa ${resultPayload.className || "brak"}`,
@@ -11960,7 +12038,7 @@ function renderSettingsUsers() {
       loginMeta.push(
         user.lock_manual
           ? "Zablokowane do recznego odblokowania"
-          : `Zablokowane do ${formatPanelTimestamp(user.lock_expires_ts)}`
+          : `Zablokowane do ${formatPanelTimestamp(user.lock_expires_ts, { epochUnit: "seconds" })}`
       );
     }
     if (user.failed_login_count) {
@@ -11968,13 +12046,19 @@ function renderSettingsUsers() {
     }
     if (user.last_failed_login_ts) {
       const ip = user.last_failed_login_ip ? `, ${user.last_failed_login_ip}` : "";
-      loginMeta.push(`Ostatnia bledna: ${formatPanelTimestamp(user.last_failed_login_ts)}${ip}`);
+      loginMeta.push(
+        `Ostatnia bledna: ${formatPanelTimestamp(user.last_failed_login_ts, {
+          epochUnit: "seconds",
+        })}${ip}`
+      );
     }
     loginMeta.push(`Sesje v${Number(user.session_version || 0)}`);
     loginMeta.push(
       `Token rozszerzenia v${Number(user.extension_token_version || 0)}${
         user.extension_token_last_used_ts
-          ? `, ostatnio ${formatPanelTimestamp(user.extension_token_last_used_ts)}`
+          ? `, ostatnio ${formatPanelTimestamp(user.extension_token_last_used_ts, {
+              epochUnit: "seconds",
+            })}`
           : ""
       }`
     );
