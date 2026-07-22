@@ -81,6 +81,23 @@ def _login(client: TestClient, username: str = "admin", password: str = "admin")
     return str(response.json()["csrf_token"])
 
 
+def test_time_zone_catalog_requires_admin(api_environment) -> None:
+    client, _store = api_environment
+
+    assert client.get("/api/settings/time-zones").status_code == 401
+
+    web_data.add_user("operator", "secret", "user")
+    _login(client, "operator", "secret")
+    assert client.get("/api/settings/time-zones").status_code == 403
+
+    _login(client)
+    response = client.get("/api/settings/time-zones")
+
+    assert response.status_code == 200
+    assert response.json()["time_zones"][0] == "UTC"
+    assert "Europe/Warsaw" in response.json()["time_zones"]
+
+
 def test_cleanup_process_jobs_preserves_active_and_keeps_newest_completed() -> None:
     now = 10_000.0
     completed_limit = web_app._PROCESS_JOB_MAX_COMPLETED

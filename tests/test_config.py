@@ -33,6 +33,49 @@ class DefaultConfigSafetyTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_normalize_web_display_settings_accepts_iana_and_falls_back(self) -> None:
+        with patch.object(
+            config,
+            "available_display_time_zones",
+            return_value=["UTC", "Europe/Warsaw"],
+        ):
+            self.assertEqual(
+                config.normalize_web_display_settings({"time_zone": "Europe/Warsaw"}),
+                {"time_zone": "Europe/Warsaw"},
+            )
+            self.assertEqual(
+                config.normalize_web_display_settings({"time_zone": "CEST"}),
+                {"time_zone": "UTC"},
+            )
+
+    def test_web_display_settings_are_normalized_at_merge_and_save_boundaries(self) -> None:
+        payload = deepcopy(common.DEFAULT_CONFIG)
+        payload[common.WEB_DISPLAY_SETTINGS_KEY] = {"time_zone": "CEST"}
+
+        with (
+            patch.object(
+                config,
+                "available_display_time_zones",
+                return_value=["UTC", "Europe/Warsaw"],
+            ),
+            patch.object(config, "_active_sqlite_store", return_value=None),
+            patch.object(config, "_write_json_atomic") as write_atomic,
+        ):
+            merged = config._merge_raw_config(
+                {common.WEB_DISPLAY_SETTINGS_KEY: {"time_zone": "Europe/Warsaw"}},
+                deepcopy(common.DEFAULT_CONFIG),
+            )
+            config.save_config(payload)
+
+        self.assertEqual(
+            merged[common.WEB_DISPLAY_SETTINGS_KEY],
+            {"time_zone": "Europe/Warsaw"},
+        )
+        self.assertEqual(
+            write_atomic.call_args.args[1][common.WEB_DISPLAY_SETTINGS_KEY],
+            {"time_zone": "UTC"},
+        )
+
     def test_save_config_encrypts_both_email_secrets(self) -> None:
         payload = deepcopy(common.DEFAULT_CONFIG)
         payload[EMAIL_SETTINGS_KEY] = default_email_settings()

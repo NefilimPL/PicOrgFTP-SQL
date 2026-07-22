@@ -37,6 +37,7 @@ from .common import (
     PROCESSING_SETTINGS_KEY,
     RESOURCE_MONITOR_SETTINGS_KEY,
     SECURITY_SETTINGS_KEY,
+    WEB_DISPLAY_SETTINGS_KEY,
     SQL_AVAILABLE_COLUMNS_KEY,
     SQL_COLUMN_MAP_KEY,
     SLOT_DEFS_KEY,
@@ -2906,6 +2907,7 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
         else {}
     )
     security_payload = payload.get("security") if isinstance(payload.get("security"), dict) else {}
+    web_display_payload = payload.get(WEB_DISPLAY_SETTINGS_KEY)
     pimcore_payload = payload.get(PIMCORE_SETTINGS_KEY)
     email_payload = payload.get(EMAIL_SETTINGS_KEY)
     previous_entra_identity = ("", "")
@@ -2978,6 +2980,15 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
         merged_security = dict(cfg.get(SECURITY_SETTINGS_KEY, {}) or {})
         merged_security.update(security_payload)
         cfg[SECURITY_SETTINGS_KEY] = config._normalize_security_settings(merged_security)
+
+    if isinstance(web_display_payload, dict):
+        merged_web_display = config.normalize_web_display_settings(
+            cfg.get(WEB_DISPLAY_SETTINGS_KEY, {})
+        )
+        merged_web_display.update(web_display_payload)
+        cfg[WEB_DISPLAY_SETTINGS_KEY] = config.normalize_web_display_settings(
+            merged_web_display
+        )
 
     if isinstance(pimcore_payload, dict):
         if "field_mappings" in pimcore_payload:
@@ -3159,6 +3170,9 @@ def settings_snapshot() -> dict[str, object]:
         ),
         "security": config._normalize_security_settings(
             cfg.get(SECURITY_SETTINGS_KEY, {})
+        ),
+        WEB_DISPLAY_SETTINGS_KEY: config.normalize_web_display_settings(
+            cfg.get(WEB_DISPLAY_SETTINGS_KEY, {})
         ),
         "processing_formats": available_convert_formats(),
         "ftp": {

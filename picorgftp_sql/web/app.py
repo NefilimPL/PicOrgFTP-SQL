@@ -5764,6 +5764,11 @@ def create_app() -> FastAPI:
         payload["current_user"] = user
         return payload
 
+    @app.get("/api/settings/time-zones")
+    def settings_time_zones(request: Request) -> Dict[str, List[str]]:
+        _require_admin(request)
+        return {"time_zones": config.available_display_time_zones()}
+
     @app.post("/api/settings")
     async def settings_save(request: Request) -> JSONResponse:
         _require_admin(request)

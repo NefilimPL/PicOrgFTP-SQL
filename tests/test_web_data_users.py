@@ -701,6 +701,39 @@ class WebDataUserTests(unittest.TestCase):
         self.assertTrue(saved_config["target_only"])
         self.assertTrue(saved_config[web_data.LOCAL_FILE_INDEX_KEY])
 
+    def test_settings_snapshot_and_partial_update_expose_web_display_time_zone(self) -> None:
+        cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+        saved_configs = []
+
+        with (
+            patch.object(web_data.config, "CONFIG", cfg),
+            patch.object(
+                web_data.config,
+                "available_display_time_zones",
+                return_value=["UTC", "Europe/Warsaw"],
+            ),
+            patch.object(
+                web_data,
+                "save_config",
+                side_effect=lambda payload, **_kwargs: saved_configs.append(
+                    json.loads(json.dumps(payload))
+                ),
+            ),
+            patch.object(web_data.config, "initialize_config", return_value=cfg),
+            patch.object(web_data, "load_users", return_value=[]),
+        ):
+            initial = web_data.settings_snapshot()
+            updated = web_data.update_settings(
+                {"web_display": {"time_zone": "Europe/Warsaw"}}
+            )
+
+        self.assertEqual(initial["web_display"], {"time_zone": "UTC"})
+        self.assertEqual(
+            saved_configs[0]["web_display"],
+            {"time_zone": "Europe/Warsaw"},
+        )
+        self.assertEqual(updated["web_display"], {"time_zone": "Europe/Warsaw"})
+
     def test_update_settings_persists_storage_bootstrap(self) -> None:
         temp_dir = _workspace_temp("web_data_storage_update")
         try:
