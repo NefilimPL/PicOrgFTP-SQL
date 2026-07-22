@@ -184,6 +184,8 @@ _UPLOAD_CACHE_LAST_CLEANUP = 0.0
 _BROWSER_EXTENSION_IMPORTS: Dict[str, List[Dict[str, Any]]] = {}
 _BROWSER_EXTENSION_IMPORTS_LOCK = threading.Lock()
 _PROCESS_JOB_RETENTION_SECONDS = 6 * 60 * 60
+# Active work is never discarded; only the newest terminal jobs stay in memory.
+_PROCESS_JOB_MAX_COMPLETED = 200
 _PROCESS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="picorg-process")
 _PROCESS_JOBS: Dict[str, Dict[str, Any]] = {}
 _PROCESS_JOBS_LOCK = threading.Lock()
@@ -681,6 +683,7 @@ def _check_rate_limit(request: Request) -> None:
     remote = _request_remote_address(request) or "unknown"
     key = f"{scope}|{remote}"
     cutoff = now - window
+    _prune_rate_limits(now=now)
     with _RATE_LIMITS_LOCK:
         attempts = [item for item in _RATE_LIMITS.get(key, []) if item >= cutoff]
         if len(attempts) >= limit:
@@ -692,6 +695,24 @@ def _check_rate_limit(request: Request) -> None:
             )
         attempts.append(now)
         _RATE_LIMITS[key] = attempts
+
+
+def _prune_rate_limits(now: Optional[float] = None) -> None:
+    current = time.time() if now is None else float(now)
+    windows = {
+        "login": RATE_LIMIT_LOGIN_WINDOW_SECONDS,
+        "upload": RATE_LIMIT_UPLOAD_WINDOW_SECONDS,
+    }
+    fallback_window = max(windows.values())
+    with _RATE_LIMITS_LOCK:
+        for key, timestamps in list(_RATE_LIMITS.items()):
+            scope = str(key).split("|", 1)[0]
+            cutoff = current - windows.get(scope, fallback_window)
+            retained = [timestamp for timestamp in timestamps if timestamp >= cutoff]
+            if retained:
+                _RATE_LIMITS[key] = retained
+            else:
+                _RATE_LIMITS.pop(key, None)
 
 
 def _extension_bearer_token(request: Request) -> str:
@@ -1113,11 +1134,28 @@ def _defender_scan_executable() -> str:
     return ""
 
 
+def _prune_upload_scan_results(now: Optional[float] = None) -> None:
+    cutoff = (
+        time.time() if now is None else float(now)
+    ) - WEB_UPLOAD_CACHE_MAX_AGE_SECONDS
+    with _UPLOAD_SCAN_RESULTS_LOCK:
+        for path, result in list(_UPLOAD_SCAN_RESULTS.items()):
+            try:
+                cached_at = float(result.get("_cached_at") or 0)
+            except (TypeError, ValueError):
+                cached_at = 0
+            if not os.path.isfile(path) or cached_at < cutoff:
+                _UPLOAD_SCAN_RESULTS.pop(path, None)
+
+
 def _remember_upload_scan_result(path: str, result: Dict[str, Any]) -> None:
     if not path:
         return
+    _prune_upload_scan_results()
+    cached_result = dict(result)
+    cached_result["_cached_at"] = time.time()
     with _UPLOAD_SCAN_RESULTS_LOCK:
-        _UPLOAD_SCAN_RESULTS[os.path.abspath(path)] = dict(result)
+        _UPLOAD_SCAN_RESULTS[os.path.abspath(path)] = cached_result
 
 
 def _copy_upload_scan_result(source_path: str, target_path: str) -> None:
@@ -1126,12 +1164,18 @@ def _copy_upload_scan_result(source_path: str, target_path: str) -> None:
     with _UPLOAD_SCAN_RESULTS_LOCK:
         result = _UPLOAD_SCAN_RESULTS.get(os.path.abspath(source_path))
         if result:
-            _UPLOAD_SCAN_RESULTS[os.path.abspath(target_path)] = dict(result)
+            copied_result = dict(result)
+            copied_result["_cached_at"] = time.time()
+            _UPLOAD_SCAN_RESULTS[os.path.abspath(target_path)] = copied_result
+    _prune_upload_scan_results()
 
 
 def _upload_scan_result(path: str) -> Dict[str, Any]:
+    _prune_upload_scan_results()
     with _UPLOAD_SCAN_RESULTS_LOCK:
-        return dict(_UPLOAD_SCAN_RESULTS.get(os.path.abspath(path)) or {})
+        result = dict(_UPLOAD_SCAN_RESULTS.get(os.path.abspath(path)) or {})
+    result.pop("_cached_at", None)
+    return result
 
 
 def _uploaded_scan_summary(uploaded_slots: List[WebUploadedSlot]) -> Dict[str, Any]:
@@ -3504,11 +3548,23 @@ def _result_severity(payload: Dict[str, Any]) -> str:
 def _cleanup_process_jobs(now: Optional[float] = None) -> None:
     cutoff = (time.time() if now is None else now) - _PROCESS_JOB_RETENTION_SECONDS
     with _PROCESS_JOBS_LOCK:
+        terminal_jobs: List[tuple[str, Dict[str, Any]]] = []
         for job_id, job in list(_PROCESS_JOBS.items()):
             if job.get("status") not in {"completed", "failed"}:
                 continue
             if float(job.get("finished_at") or 0) < cutoff:
                 _PROCESS_JOBS.pop(job_id, None)
+                continue
+            terminal_jobs.append((job_id, job))
+        terminal_jobs.sort(
+            key=lambda item: (
+                float(item[1].get("finished_at") or 0),
+                float(item[1].get("created_at") or 0),
+            ),
+            reverse=True,
+        )
+        for job_id, _job in terminal_jobs[_PROCESS_JOB_MAX_COMPLETED:]:
+            _PROCESS_JOBS.pop(job_id, None)
 
 
 def _process_job_payload(job: Dict[str, Any], *, include_result: bool = True) -> Dict[str, Any]:

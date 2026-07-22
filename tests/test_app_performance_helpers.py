@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import queue
+import threading
 import unittest
 
 try:
-    from picorgftp_sql.app import App
+    from picorgftp_sql import app as app_module
+    from picorgftp_sql.app import App, SLOT_GRID_COLUMNS, THUMBNAIL_MEMORY_ROWS
     from picorgftp_sql.common import d, n
 except ModuleNotFoundError as exc:  # pragma: no cover - depends on local test env
     App = None
     APP_IMPORT_ERROR = exc
 else:
     APP_IMPORT_ERROR = None
+    THUMBNAIL_QUEUE_MAXSIZE = getattr(app_module, "THUMBNAIL_QUEUE_MAXSIZE", None)
 
 
 class _ComboboxStub:
@@ -106,8 +110,102 @@ class _ScrollHarness:
         return None
 
 
+class _ThumbnailHarness:
+    _next_thumbnail_token = App._next_thumbnail_token if App is not None else None
+
+    def __init__(self, maxsize: int = 0) -> None:
+        self._thumb_request_queue: queue.Queue = queue.Queue(maxsize=maxsize)
+        self._thumb_result_queue: queue.Queue = queue.Queue(maxsize=maxsize)
+        self._thumb_request_seq = 0
+        self._thumb_pending_paths: dict[int, tuple[str, bool]] = {}
+        self._thumb_tokens: dict[int, int] = {}
+        self.preview_updates: list[tuple[int, str, object, bool]] = []
+
+    def _is_slot_content_fit_enabled(self, _idx: int) -> bool:
+        return False
+
+    def _get_cached_thumbnail(self, _path: str, _content_fit: bool):
+        return None, None
+
+    def _set_slot_preview(
+        self, idx: int, path: str, thumb: object, *, content_fit: bool
+    ) -> None:
+        self.preview_updates.append((idx, path, thumb, content_fit))
+
+    def _load_slot_thumbnail(self, path: str, *, content_fit: bool):
+        return (path, content_fit)
+
+
 @unittest.skipIf(App is None, f"App import unavailable: {APP_IMPORT_ERROR}")
 class AppPerformanceHelperTests(unittest.TestCase):
+    def test_thumbnail_queue_capacity_covers_two_visible_memory_windows(self) -> None:
+        self.assertEqual(
+            THUMBNAIL_QUEUE_MAXSIZE,
+            SLOT_GRID_COLUMNS * THUMBNAIL_MEMORY_ROWS * 2,
+        )
+
+    def test_queue_thumbnail_retries_after_full_queue_without_stale_pending_state(
+        self,
+    ) -> None:
+        harness = _ThumbnailHarness(maxsize=1)
+        harness._thumb_request_queue.put_nowait((0, "old.png", 1, False))
+
+        attempt = threading.Thread(
+            target=App._queue_thumbnail,
+            args=(harness, 2, "new.png"),
+            daemon=True,
+        )
+        attempt.start()
+        attempt.join(timeout=1)
+
+        self.assertFalse(attempt.is_alive(), "thumbnail enqueue must be non-blocking")
+        self.assertEqual(harness._thumb_pending_paths, {})
+        self.assertEqual(harness._thumb_tokens[2], 1)
+
+        harness._thumb_request_queue.get_nowait()
+        App._queue_thumbnail(harness, 2, "new.png")
+
+        self.assertEqual(
+            harness._thumb_request_queue.get_nowait(),
+            (2, "new.png", 2, False),
+        )
+        self.assertEqual(harness._thumb_pending_paths, {2: ("new.png", False)})
+
+    def test_thumbnail_worker_drops_result_when_result_queue_is_full(self) -> None:
+        harness = _ThumbnailHarness(maxsize=1)
+        harness._thumb_result_queue.put_nowait((0, "old.png", 1, object(), False))
+        harness._thumb_pending_paths[2] = ("new.png", False)
+        harness._thumb_tokens[2] = 2
+        harness._thumb_request_queue.put_nowait((2, "new.png", 2, False))
+        worker = threading.Thread(
+            target=App._thumbnail_worker_loop, args=(harness,), daemon=True
+        )
+        worker.start()
+        harness._thumb_request_queue.put(None, timeout=2)
+        worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(harness._thumb_result_queue.qsize(), 1)
+        self.assertEqual(harness._thumb_pending_paths, {})
+
+    def test_dropped_stale_thumbnail_result_preserves_newer_pending_request(
+        self,
+    ) -> None:
+        harness = _ThumbnailHarness(maxsize=1)
+        harness._thumb_result_queue.put_nowait((0, "old.png", 1, object(), False))
+        harness._thumb_pending_paths[2] = ("new.png", False)
+        harness._thumb_tokens[2] = 3
+        harness._thumb_request_queue.put_nowait((2, "new.png", 2, False))
+        worker = threading.Thread(
+            target=App._thumbnail_worker_loop, args=(harness,), daemon=True
+        )
+        worker.start()
+        harness._thumb_request_queue.put(None, timeout=2)
+        worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(harness._thumb_pending_paths, {2: ("new.png", False)})
+
     def test_set_combobox_values_skips_identical_payload(self) -> None:
         combo = _ComboboxStub()
 

@@ -79,6 +79,127 @@ def _login(client: TestClient, username: str = "admin", password: str = "admin")
     return str(response.json()["csrf_token"])
 
 
+def test_cleanup_process_jobs_preserves_active_and_keeps_newest_completed() -> None:
+    now = 10_000.0
+    completed_limit = web_app._PROCESS_JOB_MAX_COMPLETED
+    jobs = {
+        f"completed-{index}": {
+            "id": f"completed-{index}",
+            "status": "completed",
+            "finished_at": now - index,
+        }
+        for index in range(completed_limit + 2)
+    }
+    jobs["expired"] = {
+        "id": "expired",
+        "status": "failed",
+        "finished_at": now - web_app._PROCESS_JOB_RETENTION_SECONDS - 1,
+    }
+    jobs["queued"] = {"id": "queued", "status": "queued", "created_at": 1.0}
+    with web_app._PROCESS_JOBS_LOCK:
+        previous = dict(web_app._PROCESS_JOBS)
+        web_app._PROCESS_JOBS.clear()
+        web_app._PROCESS_JOBS.update(jobs)
+    try:
+        web_app._cleanup_process_jobs(now=now)
+
+        with web_app._PROCESS_JOBS_LOCK:
+            retained = dict(web_app._PROCESS_JOBS)
+        completed_ids = {
+            job_id for job_id, job in retained.items() if job.get("status") == "completed"
+        }
+        assert retained["queued"]["status"] == "queued"
+        assert "expired" not in retained
+        assert len(completed_ids) == completed_limit
+        assert "completed-0" in completed_ids
+        assert f"completed-{completed_limit + 1}" not in completed_ids
+    finally:
+        with web_app._PROCESS_JOBS_LOCK:
+            web_app._PROCESS_JOBS.clear()
+            web_app._PROCESS_JOBS.update(previous)
+
+
+def test_upload_scan_results_prune_missing_and_expired_entries(tmp_path: Path) -> None:
+    now = 20_000.0 + web_app.WEB_UPLOAD_CACHE_MAX_AGE_SECONDS
+    fresh_path = tmp_path / "fresh.jpg"
+    expired_path = tmp_path / "expired.jpg"
+    missing_path = tmp_path / "missing.jpg"
+    fresh_path.write_bytes(b"fresh")
+    expired_path.write_bytes(b"expired")
+    with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+        previous = dict(web_app._UPLOAD_SCAN_RESULTS)
+        web_app._UPLOAD_SCAN_RESULTS.clear()
+        web_app._UPLOAD_SCAN_RESULTS.update(
+            {
+                str(fresh_path.resolve()): {"scanned": True, "_cached_at": now},
+                str(expired_path.resolve()): {
+                    "scanned": True,
+                    "_cached_at": now - web_app.WEB_UPLOAD_CACHE_MAX_AGE_SECONDS - 1,
+                },
+                str(missing_path.resolve()): {"scanned": True, "_cached_at": now},
+            }
+        )
+    try:
+        web_app._prune_upload_scan_results(now=now)
+
+        with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+            retained = dict(web_app._UPLOAD_SCAN_RESULTS)
+        assert set(retained) == {str(fresh_path.resolve())}
+    finally:
+        with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+            web_app._UPLOAD_SCAN_RESULTS.clear()
+            web_app._UPLOAD_SCAN_RESULTS.update(previous)
+
+
+def test_upload_scan_result_copy_survives_source_replacement(tmp_path: Path) -> None:
+    source_path = tmp_path / "source.jpg"
+    target_path = tmp_path / "source_processed.jpg"
+    target_path.write_bytes(b"processed")
+    with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+        previous = dict(web_app._UPLOAD_SCAN_RESULTS)
+        web_app._UPLOAD_SCAN_RESULTS.clear()
+        web_app._UPLOAD_SCAN_RESULTS[str(source_path.resolve())] = {
+            "enabled": True,
+            "scanned": True,
+            "_cached_at": 1.0,
+        }
+    try:
+        web_app._copy_upload_scan_result(str(source_path), str(target_path))
+
+        result = web_app._upload_scan_result(str(target_path))
+        assert result == {"enabled": True, "scanned": True}
+        with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+            assert str(source_path.resolve()) not in web_app._UPLOAD_SCAN_RESULTS
+    finally:
+        with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+            web_app._UPLOAD_SCAN_RESULTS.clear()
+            web_app._UPLOAD_SCAN_RESULTS.update(previous)
+
+
+def test_rate_limit_cleanup_prunes_only_expired_key_lists() -> None:
+    now = 30_000.0
+    with web_app._RATE_LIMITS_LOCK:
+        previous = dict(web_app._RATE_LIMITS)
+        web_app._RATE_LIMITS.clear()
+        web_app._RATE_LIMITS.update(
+            {
+                "login|expired": [now - web_app.RATE_LIMIT_LOGIN_WINDOW_SECONDS - 1],
+                "login|fresh": [now - 1],
+                "upload|expired": [now - web_app.RATE_LIMIT_UPLOAD_WINDOW_SECONDS - 1],
+            }
+        )
+    try:
+        web_app._prune_rate_limits(now=now)
+
+        with web_app._RATE_LIMITS_LOCK:
+            retained = dict(web_app._RATE_LIMITS)
+        assert retained == {"login|fresh": [now - 1]}
+    finally:
+        with web_app._RATE_LIMITS_LOCK:
+            web_app._RATE_LIMITS.clear()
+            web_app._RATE_LIMITS.update(previous)
+
+
 class _MonitorStub:
     def __init__(
         self,

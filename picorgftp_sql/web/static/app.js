@@ -142,6 +142,7 @@ const state = {
 };
 
 const WEB_IMAGE_CACHE_LIMIT = 2;
+const FTP_PREVIEW_CACHE_LIMIT = 120;
 const MAX_AUTOCOMPLETE_OPTIONS = 80;
 const ACTIVE_USERS_VISIBLE_LIMIT = 5;
 const CSRF_HEADER = "X-PicOrg-CSRF";
@@ -2920,6 +2921,15 @@ function ftpPreviewCacheKey(photo, fallbackEan = "") {
   return filename && ean ? `${ean}|${filename}` : "";
 }
 
+function setFtpPreviewCache(key, value) {
+  if (!key) return;
+  state.ftpPreviewCache.delete(key);
+  state.ftpPreviewCache.set(key, value);
+  while (state.ftpPreviewCache.size > FTP_PREVIEW_CACHE_LIMIT) {
+    state.ftpPreviewCache.delete(state.ftpPreviewCache.keys().next().value);
+  }
+}
+
 function clearFtpPreviewCacheForPrefixes(prefixes, fallbackEan = "") {
   const prefixSet = new Set(
     [...(prefixes || [])].map((prefix) => String(prefix || "").trim()).filter(Boolean)
@@ -2967,6 +2977,7 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
   const explicitSourceBefore = state.slotSources.get(prefix);
   const cached = cacheKey ? state.ftpPreviewCache.get(cacheKey) : null;
   if (cached) {
+    setFtpPreviewCache(cacheKey, cached);
     const currentPhoto = state.loadedPhotos.get(prefix);
     if (
       requestId !== state.photoLoadRequestId ||
@@ -3012,7 +3023,7 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
       body: JSON.stringify({ ean: photo.ean || formValue("ean") || "", filename: photo.ftp_filename }),
     });
     if (cacheKey) {
-      state.ftpPreviewCache.set(cacheKey, {
+      setFtpPreviewCache(cacheKey, {
         token: payload.token || "",
         url: payload.url || "",
         thumb_url: payload.thumb_url || "",
@@ -6741,10 +6752,13 @@ function mergePhotoRecord(existing = {}, incoming = {}) {
     merged.sql_value = incoming.sql_value || "";
   }
   merged.prefix = incoming.prefix || existing.prefix || "";
-  const cachedFtp = state.ftpPreviewCache.get(
-    ftpPreviewCacheKey(merged, formValue("ean") || state.loadedEntryOriginal?.ean || "")
+  const cachedFtpKey = ftpPreviewCacheKey(
+    merged,
+    formValue("ean") || state.loadedEntryOriginal?.ean || ""
   );
+  const cachedFtp = state.ftpPreviewCache.get(cachedFtpKey);
   if (cachedFtp) {
+    setFtpPreviewCache(cachedFtpKey, cachedFtp);
     return applyCachedFtpPreview(merged, merged.prefix, cachedFtp);
   }
   return merged;

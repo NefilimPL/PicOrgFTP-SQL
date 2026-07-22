@@ -235,13 +235,35 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("resourceMonitorTestState.message", monitor_source)
         self.assertIn("await pollBackendHealth()", monitor_source)
 
-        if "function setFtpPreviewCache" in source:
-            direct_writes = [
-                line
-                for line in source.splitlines()
-                if "ftpPreviewCache.set(" in line and "function setFtpPreviewCache" not in line
-            ]
-            self.assertEqual(direct_writes, [])
+        self.assertIn("const FTP_PREVIEW_CACHE_LIMIT = 120;", source)
+        helper_start = source.index("function setFtpPreviewCache")
+        helper_end = source.index("function clearFtpPreviewCacheForPrefixes", helper_start)
+        helper_source = source[helper_start:helper_end]
+        self.assertIn("state.ftpPreviewCache.delete(key);", helper_source)
+        self.assertIn("state.ftpPreviewCache.set(key, value);", helper_source)
+        self.assertIn("state.ftpPreviewCache.size > FTP_PREVIEW_CACHE_LIMIT", helper_source)
+        self.assertIn(
+            "state.ftpPreviewCache.delete(state.ftpPreviewCache.keys().next().value);",
+            helper_source,
+        )
+        self.assertLess(
+            helper_source.index("state.ftpPreviewCache.delete(key);"),
+            helper_source.index("state.ftpPreviewCache.set(key, value);"),
+        )
+        self.assertEqual(source.count("state.ftpPreviewCache.set("), 1)
+        self.assertGreaterEqual(source.count("setFtpPreviewCache("), 4)
+        preview_loader = source[
+            source.index("async function loadFtpPreview") : source.index(
+                "function nextBackgroundFtpPreviewCandidate"
+            )
+        ]
+        merge_photo = source[
+            source.index("function mergePhotoRecord") : source.index(
+                "function photoLoadingText"
+            )
+        ]
+        self.assertGreaterEqual(preview_loader.count("setFtpPreviewCache("), 2)
+        self.assertIn("setFtpPreviewCache(cachedFtpKey, cachedFtp);", merge_photo)
 
     def test_logs_use_tabs_live_stream_and_cursor_loading(self) -> None:
         html_source = INDEX_HTML.read_text(encoding="utf-8")

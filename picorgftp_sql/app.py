@@ -164,6 +164,7 @@ THUMBNAIL_POLL_MS = 28
 THUMBNAIL_IDLE_POLL_MS = 140
 THUMBNAIL_SCROLL_DEFER_MS = 90
 THUMBNAIL_MEMORY_ROWS = 10
+THUMBNAIL_QUEUE_MAXSIZE = SLOT_GRID_COLUMNS * THUMBNAIL_MEMORY_ROWS * 2
 PERF_MONITOR_MS = 16
 PERF_SAMPLE_WINDOW = 90
 SLOT_SCROLL_FLUSH_MS = 16
@@ -322,8 +323,8 @@ class App(BU.Tk):
         B._thumb_photo_cache = OrderedDict()
         B._thumb_photo_cache_limit = SLOT_GRID_COLUMNS * THUMBNAIL_MEMORY_ROWS
         B._thumb_cache_lock = threading.Lock()
-        B._thumb_request_queue = queue.Queue()
-        B._thumb_result_queue = queue.Queue()
+        B._thumb_request_queue = queue.Queue(maxsize=THUMBNAIL_QUEUE_MAXSIZE)
+        B._thumb_result_queue = queue.Queue(maxsize=THUMBNAIL_QUEUE_MAXSIZE)
         B._thumb_request_seq = 0
         B._thumb_pending_paths = {}
         B._thumb_poll_job = I
@@ -2448,7 +2449,18 @@ class App(BU.Tk):
             thumb = I
             if path and A.path.isfile(path):
                 thumb = B._load_slot_thumbnail(path, content_fit=content_fit)
-            B._thumb_result_queue.put((idx, path, token, thumb, content_fit))
+            try:
+                B._thumb_result_queue.put_nowait(
+                    (idx, path, token, thumb, content_fit)
+                )
+            except queue.Full:
+                pending_paths = Aj(B, "_thumb_pending_paths", I)
+                if (
+                    isinstance(pending_paths, dict)
+                    and B._thumb_tokens.get(idx) == token
+                    and pending_paths.get(idx) == (path, content_fit)
+                ):
+                    pending_paths.pop(idx, I)
 
     def _poll_thumbnail_results(B):
         B._thumb_poll_job = I
@@ -5037,8 +5049,11 @@ class App(BU.Tk):
         if thumb is not I:
             B._set_slot_preview(idx, path, thumb, content_fit=content_fit)
             return
+        try:
+            B._thumb_request_queue.put_nowait((idx, path, token, content_fit))
+        except queue.Full:
+            return
         B._thumb_pending_paths[idx] = pending_key
-        B._thumb_request_queue.put((idx, path, token, content_fit))
 
     def _build_slot_target_filename(
         B,
