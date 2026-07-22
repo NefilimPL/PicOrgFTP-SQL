@@ -138,6 +138,8 @@ const state = {
   pollers: [],
   githubStatus: null,
   githubStatusLoading: false,
+  resources: {},
+  resourceMonitorTestPending: false,
 };
 
 const WEB_IMAGE_CACHE_LIMIT = 2;
@@ -166,6 +168,8 @@ let healthPollController = null;
 let lastSuccessfulHealthComponents = {};
 let healthDetailsPinned = false;
 let healthDetailsPointerInside = false;
+let resourceDetailsPinned = false;
+let resourceDetailsPointerInside = false;
 const SQLITE_BACKUP_DAYS = [
   ["mon", "Pon"],
   ["tue", "Wt"],
@@ -233,6 +237,11 @@ const backendHealthStatus = document.querySelector("#backendHealthStatus");
 const backendHealthText = document.querySelector("#backendHealthText");
 const backendHealthDetails = document.querySelector("#backendHealthDetails");
 const backendHealthDetailsList = document.querySelector("#backendHealthDetailsList");
+const resourceStatusIndicator = document.querySelector(".resource-status-indicator");
+const resourceStatus = document.querySelector("#resourceStatus");
+const resourceStatusText = document.querySelector("#resourceStatusText");
+const resourceDetails = document.querySelector("#resourceDetails");
+const resourceDetailsList = document.querySelector("#resourceDetailsList");
 const githubStatusButton = document.querySelector("#githubStatusButton");
 const githubStatusModal = document.querySelector("#githubStatusModal");
 const githubStatusOutput = document.querySelector("#githubStatusOutput");
@@ -883,6 +892,35 @@ function formatFileSize(bytes) {
   if (value < 1024) return `${Math.round(value)} B`;
   if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function resourceNumber(value) {
+  if (value === null || value === undefined || value === "" || typeof value === "boolean") {
+    return null;
+  }
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function formatPercent(value) {
+  const number = resourceNumber(value);
+  return number === null ? "brak danych" : `${Math.round(number)}%`;
+}
+
+function formatMib(bytes) {
+  const number = resourceNumber(bytes);
+  return number === null ? "brak danych" : `${(number / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatResourceBytes(bytes) {
+  const number = resourceNumber(bytes);
+  return number === null ? "brak danych" : formatFileSize(number);
+}
+
+function resourceLevel(detector = {}) {
+  return Array.isArray(detector.latched_metrics) && detector.latched_metrics.length
+    ? "critical"
+    : "normal";
 }
 
 function webImageDimensions(image) {
@@ -5497,6 +5535,82 @@ function updateBackendHealthStatus(
   renderBackendHealthDetails(components, { serverTime, currentLatencyMs, medianLatencyMs });
 }
 
+function resourceUnavailableText(value, parent = {}) {
+  for (const candidate of [value, parent]) {
+    if (!candidate || typeof candidate !== "object" || candidate.available !== false) continue;
+    const reason = String(candidate.reason || "").trim();
+    return reason ? `brak danych (${reason})` : "brak danych";
+  }
+  return "brak danych";
+}
+
+function formatResourceDetail(value, formatter, parent = {}) {
+  const number = resourceNumber(value);
+  return number === null ? resourceUnavailableText(value, parent) : formatter(number);
+}
+
+function renderResourceDetails(resources = {}) {
+  if (!resourceDetailsList) return;
+  const host = resources.host || {};
+  const backend = resources.backend || {};
+  const detector = resources.detector || {};
+  const monitorSettings = state.settings?.resource_monitor || {};
+  const latched = Array.isArray(detector.latched_metrics) ? detector.latched_metrics : [];
+  const pending = Array.isArray(detector.pending_metrics) ? detector.pending_metrics : [];
+  const ioDetail = (value) => `${value} B/s (${formatMib(value)}/s)`;
+  const rows = [
+    ["System CPU", formatResourceDetail(host.cpu_percent, (value) => `${value}%`, host)],
+    ["System RAM", formatResourceDetail(host.memory_percent, (value) => `${value}%`, host)],
+    ["System RAM uzyty", formatResourceDetail(host.memory_used_bytes, formatResourceBytes, host)],
+    ["System RAM lacznie", formatResourceDetail(host.memory_total_bytes, formatResourceBytes, host)],
+    ["System dysk zajety", formatResourceDetail(host.disk_busy_percent, (value) => `${value}%`, host)],
+    ["Backend CPU", formatResourceDetail(backend.cpu_percent, (value) => `${value}%`, backend)],
+    ["Backend RAM", formatResourceDetail(backend.memory_percent, (value) => `${value}%`, backend)],
+    ["Backend working set", formatResourceDetail(backend.memory_working_set_bytes, formatResourceBytes, backend)],
+    ["Backend private bytes", formatResourceDetail(backend.memory_private_bytes, formatResourceBytes, backend)],
+    ["Backend odczyt dysku", formatResourceDetail(backend.disk_read_bytes_per_second, ioDetail, backend)],
+    ["Backend zapis dysku", formatResourceDetail(backend.disk_write_bytes_per_second, ioDetail, backend)],
+    ["Backend I/O", formatResourceDetail(backend.disk_io_bytes_per_second, ioDetail, backend)],
+    ["Aktywne zadania", formatResourceDetail(backend.active_jobs, String, backend)],
+    ["Zadania w kolejce", formatResourceDetail(backend.queued_jobs, String, backend)],
+    ["Aktywni klienci", formatResourceDetail(backend.active_clients, String, backend)],
+    ["Prog CPU backendu", formatPercent(monitorSettings.cpu_percent_threshold)],
+    ["Prog RAM backendu", formatPercent(monitorSettings.memory_percent_threshold)],
+    [
+      "Prog I/O backendu",
+      resourceNumber(monitorSettings.io_mib_per_second_threshold) === null
+        ? "brak danych"
+        : `${monitorSettings.io_mib_per_second_threshold} MB/s`,
+    ],
+    ["Alarm aktywny", latched.length ? latched.join(", ") : "nie"],
+    ["Alarm oczekujacy", pending.length ? pending.join(", ") : "nie"],
+    ["Ostatni alarm", String(detector.last_trigger_at || "brak danych")],
+    ["Probka UTC", String(resources.observed_at || "brak danych")],
+  ].map(([label, value]) => {
+    const item = document.createElement("li");
+    const name = document.createElement("span");
+    const detail = document.createElement("strong");
+    name.textContent = label;
+    detail.textContent = value;
+    item.append(name, detail);
+    return item;
+  });
+  resourceDetailsList.replaceChildren(...rows);
+}
+
+function renderResourceStatus(resources = {}) {
+  if (!resourceStatus || !resourceStatusText) return;
+  state.resources = resources && typeof resources === "object" ? resources : {};
+  const host = state.resources.host || {};
+  const backend = state.resources.backend || {};
+  resourceStatus.hidden = state.settings?.resource_monitor?.show_status === false;
+  resourceStatusText.textContent =
+    `System: CPU ${formatPercent(host.cpu_percent)} · RAM ${formatPercent(host.memory_percent)} · DYSK ${formatPercent(host.disk_busy_percent)}\n` +
+    `Backend: CPU ${formatPercent(backend.cpu_percent)} · RAM ${formatPercent(backend.memory_percent)} · I/O ${formatMib(backend.disk_io_bytes_per_second)}/s`;
+  resourceStatus.dataset.level = resourceLevel(state.resources.detector || {});
+  renderResourceDetails(state.resources);
+}
+
 function healthLevel(ms, components = {}, payloadOk = true) {
   if (
     payloadOk === false ||
@@ -5545,6 +5659,7 @@ async function pollBackendHealth() {
       return;
     }
     const components = normalizedHealthComponents(payload.components || {});
+    renderResourceStatus(payload.resources || {});
     lastSuccessfulHealthComponents = components;
     healthFailures = 0;
     healthSamples.push(elapsedMs);
@@ -5630,9 +5745,66 @@ backendHealthStatus?.addEventListener("keydown", (event) => {
   backendHealthStatus.focus();
 });
 
+function setResourceDetailsExpanded(expanded, { pinned = resourceDetailsPinned } = {}) {
+  resourceDetailsPinned = pinned;
+  resourceStatusIndicator?.classList.toggle("details-open", expanded);
+  if (resourceDetails) resourceDetails.hidden = !expanded;
+  resourceStatus?.setAttribute("aria-expanded", expanded ? "true" : "false");
+}
+
+function refreshResourceDetailsExpanded() {
+  const expanded = Boolean(
+    resourceDetailsPinned ||
+      resourceDetailsPointerInside ||
+      resourceStatusIndicator?.contains(document.activeElement)
+  );
+  setResourceDetailsExpanded(expanded);
+}
+
+resourceStatusIndicator?.addEventListener("pointerenter", () => {
+  resourceDetailsPointerInside = true;
+  setResourceDetailsExpanded(true);
+});
+
+resourceStatusIndicator?.addEventListener("pointerleave", () => {
+  resourceDetailsPointerInside = false;
+  refreshResourceDetailsExpanded();
+});
+
+resourceStatusIndicator?.addEventListener("focusin", () => {
+  setResourceDetailsExpanded(true);
+});
+
+resourceStatusIndicator?.addEventListener("focusout", () => {
+  window.setTimeout(refreshResourceDetailsExpanded, 0);
+});
+
+resourceStatus?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  const pinned = !resourceDetailsPinned;
+  setResourceDetailsExpanded(
+    Boolean(
+      pinned ||
+        resourceDetailsPointerInside ||
+        resourceStatusIndicator?.contains(document.activeElement)
+    ),
+    { pinned }
+  );
+});
+
+resourceStatus?.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  setResourceDetailsExpanded(false, { pinned: false });
+  resourceStatus.focus();
+});
+
 document.addEventListener("click", (event) => {
-  if (backendHealthIndicator?.contains(event.target)) return;
-  setBackendHealthDetailsExpanded(false, { pinned: false });
+  if (!backendHealthIndicator?.contains(event.target)) {
+    setBackendHealthDetailsExpanded(false, { pinned: false });
+  }
+  if (!resourceStatusIndicator?.contains(event.target)) {
+    setResourceDetailsExpanded(false, { pinned: false });
+  }
 });
 
 function showLogsError(error) {
@@ -7756,6 +7928,7 @@ function settingsSaveButton(form, buildPayload) {
       state.processing = state.settings.processing || state.processing || {};
       state.security = state.settings.security || state.security || {};
       state.productFields = state.settings.product_fields || state.productFields || {};
+      renderResourceStatus(state.resources);
       refreshActiveUsersPresence().catch(() => {
         renderActiveUsersPresence({ enabled: false, users: [] });
       });
@@ -11758,6 +11931,142 @@ function renderSettingsUsers() {
   settingsOutput.appendChild(wrapper);
 }
 
+function renderSettingsResourceMonitor() {
+  const monitor = state.settings.resource_monitor || {};
+  const form = document.createElement("form");
+  form.className = "settings-form";
+  const note = document.createElement("p");
+  note.className = "settings-note wide-field";
+  note.textContent =
+    "Progi dotycza procesu backendu. Alarm jest zatwierdzany po kolejnych probkach, aby ograniczyc falszywe ostrzezenia.";
+  const testNote = document.createElement("p");
+  testNote.className = "settings-note wide-field";
+  testNote.textContent =
+    "Bezpieczna symulacja tylko zapisuje zdarzenie testowe. Testy rzeczywiste tworza kontrolowane obciazenie CPU, RAM albo dysku i moga trwac okolo 20 sekund.";
+  const testResult = document.createElement("p");
+  testResult.id = "resourceMonitorTestResult";
+  testResult.className = "resource-monitor-test-result wide-field";
+  testResult.setAttribute("role", "status");
+  testResult.textContent = "Nie uruchomiono testu monitora.";
+
+  const safeButton = document.createElement("button");
+  safeButton.type = "button";
+  safeButton.className = "secondary-button";
+  safeButton.dataset.resourceMonitorTest = "safe";
+  safeButton.textContent = "Bezpieczna symulacja";
+  safeButton.addEventListener("click", () => runResourceMonitorTest("safe"));
+
+  const cpuButton = document.createElement("button");
+  cpuButton.type = "button";
+  cpuButton.className = "secondary-button";
+  cpuButton.dataset.resourceMonitorRealTest = "cpu";
+  cpuButton.textContent = "Rzeczywisty test CPU";
+  cpuButton.addEventListener("click", () => runResourceMonitorTest("cpu"));
+
+  const memoryButton = document.createElement("button");
+  memoryButton.type = "button";
+  memoryButton.className = "secondary-button";
+  memoryButton.dataset.resourceMonitorRealTest = "memory";
+  memoryButton.textContent = "Rzeczywisty test RAM";
+  memoryButton.addEventListener("click", () => runResourceMonitorTest("memory"));
+
+  const diskButton = document.createElement("button");
+  diskButton.type = "button";
+  diskButton.className = "secondary-button";
+  diskButton.dataset.resourceMonitorRealTest = "disk";
+  diskButton.textContent = "Rzeczywisty test dysku";
+  diskButton.addEventListener("click", () => runResourceMonitorTest("disk"));
+
+  for (const button of [cpuButton, memoryButton, diskButton]) {
+    button.disabled = state.resourceMonitorTestPending;
+  }
+
+  form.append(
+    settingsFieldGroup(
+      "Wskaznik zasobow",
+      checkField(
+        "show_status",
+        "Pokazuj status zasobow w naglowku",
+        monitor.show_status !== false,
+        "Ukrywa tylko wskaznik zasobow; glowny status backendu pozostaje widoczny."
+      )
+    ),
+    settingsFieldGroup(
+      "Progi alarmow backendu",
+      note,
+      inputField(
+        "cpu_percent_threshold",
+        "CPU (%)",
+        monitor.cpu_percent_threshold ?? 25,
+        { type: "number", min: 10, max: 90, step: 1 }
+      ),
+      inputField(
+        "memory_percent_threshold",
+        "RAM (%)",
+        monitor.memory_percent_threshold ?? 20,
+        { type: "number", min: 1, max: 90, step: 1 }
+      ),
+      inputField(
+        "io_mib_per_second_threshold",
+        "Dysk I/O (MB/s)",
+        monitor.io_mib_per_second_threshold ?? 8,
+        { type: "number", min: 1, max: 256, step: 1 }
+      )
+    ),
+    settingsFieldGroup(
+      "Test monitora",
+      testNote,
+      actionRow(safeButton, cpuButton, memoryButton, diskButton),
+      testResult
+    )
+  );
+  settingsSaveButton(form, (data) => ({
+    resource_monitor: {
+      show_status: data.has("show_status"),
+      cpu_percent_threshold: data.get("cpu_percent_threshold"),
+      memory_percent_threshold: data.get("memory_percent_threshold"),
+      io_mib_per_second_threshold: data.get("io_mib_per_second_threshold"),
+    },
+  }));
+  settingsOutput.appendChild(form);
+}
+
+async function runResourceMonitorTest(mode) {
+  if (state.resourceMonitorTestPending) return;
+  const result = document.querySelector("#resourceMonitorTestResult");
+  const realButtons = Array.from(
+    settingsOutput.querySelectorAll("[data-resource-monitor-real-test]")
+  );
+  state.resourceMonitorTestPending = true;
+  for (const button of realButtons) button.disabled = true;
+  if (result) result.textContent = "Uruchamianie testu monitora...";
+  try {
+    let payload;
+    if (mode === "safe") {
+      payload = await requestJson("/api/resource-monitor/simulate-safe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+    } else {
+      payload = await requestJson("/api/resource-monitor/real-test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: mode }),
+        timeoutMs: 60000,
+      });
+    }
+    if (result) result.textContent = String(payload.message || JSON.stringify(payload));
+    if (payload.resources) renderResourceStatus(payload.resources);
+    await pollBackendHealth();
+  } catch (error) {
+    if (result) result.textContent = error.message || String(error);
+  } finally {
+    state.resourceMonitorTestPending = false;
+    for (const button of realButtons) button.disabled = false;
+  }
+}
+
 function renderSettings() {
   if (!state.settings) {
     return;
@@ -11776,6 +12085,7 @@ function renderSettings() {
   if (state.activeSettingsTab === "sql") renderSettingsSql();
   if (state.activeSettingsTab === "pimcore") renderSettingsPimcore();
   if (state.activeSettingsTab === "mail") renderSettingsMail();
+  if (state.activeSettingsTab === "monitor") renderSettingsResourceMonitor();
   if (state.activeSettingsTab === "slots") renderSettingsSlots();
   if (state.activeSettingsTab === "users") renderSettingsUsers();
 }
@@ -11790,6 +12100,7 @@ async function loadSettings() {
   state.security = state.settings.security || state.security || {};
   state.productFields = state.settings.product_fields || state.productFields || {};
   updateAdminUi();
+  renderResourceStatus(state.resources);
   applyTimingDetailsVisibility();
   applyProductFieldLabels();
   renderSettings();
@@ -12444,6 +12755,7 @@ setupAutocomplete();
 setupFieldChangeTracking();
 setupPageExitGuards();
 applyTheme();
+renderResourceStatus();
 loadBootstrap().catch(showError);
 startBackgroundPollers();
 pollBackendHealth().catch(() => {});

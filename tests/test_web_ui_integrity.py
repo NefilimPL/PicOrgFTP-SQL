@@ -180,6 +180,69 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertNotIn(".backend-health-indicator:hover .backend-health-details", css_source)
         self.assertNotIn(".backend-health-indicator:focus-within .backend-health-details", css_source)
 
+    def test_resource_indicator_has_compact_and_accessible_detail_contract(self) -> None:
+        html_source = INDEX_HTML.read_text(encoding="utf-8")
+        js_source = APP_JS.read_text(encoding="utf-8")
+        css_source = (
+            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('id="resourceStatus"', html_source)
+        self.assertIn('id="resourceStatusText"', html_source)
+        self.assertIn('id="resourceDetails"', html_source)
+        self.assertIn('id="resourceDetailsList"', html_source)
+        self.assertIn('data-settings-tab="monitor"', html_source)
+        self.assertIn('aria-controls="resourceDetails"', html_source)
+        self.assertIn('aria-expanded="false"', html_source)
+
+        self.assertIn("function renderResourceStatus", js_source)
+        self.assertIn("function renderSettingsResourceMonitor", js_source)
+        self.assertIn("function runResourceMonitorTest", js_source)
+        self.assertIn('requestJson("/api/resource-monitor/simulate-safe"', js_source)
+        self.assertIn('requestJson("/api/resource-monitor/real-test"', js_source)
+        self.assertIn("resourceDetailsList.replaceChildren", js_source)
+        self.assertIn('setAttribute("aria-expanded", expanded ? "true" : "false")', js_source)
+        self.assertIn("renderResourceStatus(payload.resources || {})", js_source)
+        self.assertIn("formatPercent", js_source)
+        self.assertIn("formatMib", js_source)
+        self.assertIn('"brak danych"', js_source)
+        self.assertIn(".resource-status", css_source)
+
+    def test_resource_visibility_settings_tests_and_ftp_cache_use_safe_state_paths(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        resource_start = source.index("function renderResourceStatus")
+        resource_end = source.index("function scheduleBackendHealthPoll", resource_start)
+        resource_source = source[resource_start:resource_end]
+        monitor_start = source.index("function renderSettingsResourceMonitor")
+        monitor_end = source.index("function renderSettings()", monitor_start)
+        monitor_source = source[monitor_start:monitor_end]
+
+        self.assertIn("state.settings?.resource_monitor?.show_status === false", resource_source)
+        self.assertIn("resourceStatus.hidden", resource_source)
+        self.assertNotIn("backendHealthIndicator.hidden", resource_source)
+        for setting in (
+            "show_status",
+            "cpu_percent_threshold",
+            "memory_percent_threshold",
+            "io_mib_per_second_threshold",
+        ):
+            self.assertIn(setting, monitor_source)
+        for kind in ("cpu", "memory", "disk"):
+            self.assertIn(f'runResourceMonitorTest("{kind}")', monitor_source)
+        self.assertIn('runResourceMonitorTest("safe")', monitor_source)
+        self.assertIn("button.disabled = true", monitor_source)
+        self.assertIn("button.disabled = false", monitor_source)
+        self.assertIn("result.textContent", monitor_source)
+        self.assertIn("await pollBackendHealth()", monitor_source)
+
+        if "function setFtpPreviewCache" in source:
+            direct_writes = [
+                line
+                for line in source.splitlines()
+                if "ftpPreviewCache.set(" in line and "function setFtpPreviewCache" not in line
+            ]
+            self.assertEqual(direct_writes, [])
+
     def test_logs_use_tabs_live_stream_and_cursor_loading(self) -> None:
         html_source = INDEX_HTML.read_text(encoding="utf-8")
         js_source = APP_JS.read_text(encoding="utf-8")
