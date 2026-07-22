@@ -40,6 +40,23 @@ class WebDataUserTests(unittest.TestCase):
         self.assertIsNotNone(user)
         self.assertEqual(user["role"], "admin")
 
+    def test_user_snapshot_keeps_raw_epoch_for_auth_times(self) -> None:
+        temp_dir = _workspace_temp("web_data_users_raw_epoch")
+        try:
+            with patch.object(web_data.settings, "AC", str(temp_dir)):
+                snapshot = web_data.find_user("admin")
+        finally:
+            shutil.rmtree(temp_dir)
+
+        self.assertIsNotNone(snapshot)
+        for key in (
+            "extension_token_issued_ts",
+            "extension_token_last_used_ts",
+            "lock_expires_ts",
+            "last_failed_login_ts",
+        ):
+            self.assertIsInstance(snapshot[key], (int, float))
+
     def test_existing_user_without_email_normalizes_to_empty_string(self) -> None:
         record = web_data._normalized_user_record(
             {"username": "operator", "password_hash": "hash"}
@@ -1201,7 +1218,7 @@ class WebDataUserTests(unittest.TestCase):
             status = web_data.file_index_status()
 
         self.assertEqual(status["generated_at"], "2026-06-25T13:02:34.300Z")
-        self.assertIn("2026-06-25", status["label"])
+        self.assertEqual(status["label"], "Indeks lokalny")
 
     def test_settings_snapshot_exposes_storage_locations(self) -> None:
         temp_dir = _workspace_temp("web_data_storage_snapshot")

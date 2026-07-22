@@ -20,6 +20,7 @@ const state = {
   lastLookupMs: null,
   activeSettingsTab: "app",
   history: null,
+  historyDetailGroup: null,
   historyPage: 1,
   historyPageSize: 50,
   historySearchTimer: 0,
@@ -139,6 +140,11 @@ const state = {
   githubStatus: null,
   githubStatusLoading: false,
   resources: {},
+  panelTimeZones: [],
+  backupHistoryItems: [],
+  pimcoreHistoryItems: [],
+  entraExpiryStatus: null,
+  lastHealthPayload: null,
 };
 
 const WEB_IMAGE_CACHE_LIMIT = 2;
@@ -174,6 +180,47 @@ const resourceMonitorTestState = {
   pending: false,
   message: "Nie uruchomiono testu monitora.",
 };
+
+function selectedPanelTimeZone() {
+  return String(state.settings?.web_display?.time_zone || "UTC");
+}
+
+function coercePanelDate(value) {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (value === 0) return null;
+    const milliseconds = Math.abs(value) < 1e12 ? value * 1000 : value;
+    const date = new Date(milliseconds);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(text)) {
+    return null;
+  }
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function formatPanelTimestamp(value, { date = true, time = true } = {}) {
+  const panelDate = coercePanelDate(value);
+  if (!panelDate || (!date && !time)) return "Brak danych";
+  const formatterOptions = {
+    ...(date ? { year: "numeric", month: "short", day: "2-digit" } : {}),
+    ...(time ? { hour: "2-digit", minute: "2-digit", second: "2-digit" } : {}),
+    timeZone: selectedPanelTimeZone(),
+    timeZoneName: "short",
+  };
+  try {
+    return new Intl.DateTimeFormat("pl-PL", formatterOptions).format(panelDate);
+  } catch (_error) {
+    return new Intl.DateTimeFormat("pl-PL", { ...formatterOptions, timeZone: "UTC" }).format(
+      panelDate
+    );
+  }
+}
 const SQLITE_BACKUP_DAYS = [
   ["mon", "Pon"],
   ["tue", "Wt"],
@@ -670,7 +717,9 @@ function renderGithubStatus(payload = {}) {
       githubRow(
         payload.update_available ? "Aktualizacja" : "Najnowszy release",
         release.tag_name
-          ? `${release.tag_name}${release.published_at ? ` (${release.published_at})` : ""}`
+          ? `${release.tag_name}${
+              release.published_at ? ` (${formatPanelTimestamp(release.published_at)})` : ""
+            }`
           : "Brak publicznego release",
         release.html_url || ""
       ),
@@ -685,7 +734,9 @@ function renderGithubStatus(payload = {}) {
     );
   }
   if (githubStatusCheckedAt) {
-    githubStatusCheckedAt.textContent = payload.checked_at ? `Sprawdzono: ${payload.checked_at}` : "";
+    githubStatusCheckedAt.textContent = payload.checked_at
+      ? `Sprawdzono: ${formatPanelTimestamp(payload.checked_at)}`
+      : "";
   }
 }
 
@@ -1601,7 +1652,10 @@ function applyTimingDetailsVisibility() {
 
 function updateRuntimeMetrics() {
   if (fileIndexInfo) {
-    fileIndexInfo.textContent = state.fileIndex?.label || "";
+    const generatedAt = formatPanelTimestamp(state.fileIndex?.generated_at);
+    fileIndexInfo.textContent = state.fileIndex?.generated_at
+      ? `${state.fileIndex.label || "Indeks lokalny"}: ${generatedAt}`
+      : state.fileIndex?.label || "";
     fileIndexInfo.title = state.fileIndex?.error || "";
   }
   if (latencyInfo) {
@@ -4641,7 +4695,7 @@ function renderHistoryTiming(item = {}) {
     return;
   }
   const timing = item.details?.timing || {};
-  historyTimingTitle.textContent = `Czasy: ${item.time || item.summary || "zmiana"}`;
+  historyTimingTitle.textContent = `Czasy: ${formatPanelTimestamp(item.ts || item.created_at)}`;
   historyTimingOutput.textContent = "";
   const stages = timing.stages || [];
   historyTimingOutput.appendChild(processMetricRow("Razem", timingMs(timing.total_ms)));
@@ -4673,7 +4727,7 @@ function renderHistoryChanges(item = {}) {
   const changeSet = details.change_set && typeof details.change_set === "object"
     ? details.change_set
     : null;
-  historyChangesTitle.textContent = `Zmiany: ${item.time || item.summary || "operacja"}`;
+  historyChangesTitle.textContent = `Zmiany: ${formatPanelTimestamp(item.ts || item.created_at)}`;
   historyChangesOutput.textContent = "";
 
   if (!changeSet) {
@@ -4768,6 +4822,7 @@ function renderHistoryChanges(item = {}) {
 }
 
 function renderHistoryDetails(group) {
+  state.historyDetailGroup = group;
   historyDetailTitle.textContent = `Historia EAN ${group.ean}`;
   historyDetailOutput.textContent = "";
   for (const item of group.items || []) {
@@ -4780,7 +4835,7 @@ function renderHistoryDetails(group) {
     const timingButton = document.createElement("button");
     row.className = "history-item";
     meta.className = "history-meta";
-    meta.textContent = `${item.time || ""} | ${item.user || ""}`;
+    meta.textContent = `${formatPanelTimestamp(item.ts || item.created_at)} | ${item.user || ""}`;
     summary.textContent = item.summary || item.action || "Zmiana";
     const saved = item.details?.saved_files?.length || 0;
     const deleted = item.details?.deleted_slots?.length || 0;
@@ -4870,7 +4925,9 @@ function renderHistory(payload) {
     title.textContent = `EAN ${group.ean}`;
     const readableFields = historyEntryLabel(entry);
     fields.textContent = readableFields || "Brak danych pol tekstowych";
-    meta.textContent = `${(group.items || []).length} zmian | ostatnio: ${group.items?.[0]?.time || ""}`;
+    meta.textContent = `${(group.items || []).length} zmian | ostatnio: ${formatPanelTimestamp(
+      group.items?.[0]?.ts || group.items?.[0]?.created_at
+    )}`;
     row.append(title, fields, meta);
     row.addEventListener("click", () => renderHistoryDetails(group));
     historyOutput.appendChild(row);
@@ -4966,7 +5023,7 @@ function renderLogEvent(event) {
   block.className = `log-event log-event-compact log-event-${severity}`;
   block.dataset.observabilityId = event.id || "";
   meta.className = "log-event-meta log-event-time";
-  meta.textContent = event.created_at || "";
+  meta.textContent = formatPanelTimestamp(event.created_at);
   severityBadge.className = `log-event-severity log-event-severity-${severity}`;
   severityBadge.textContent = logSeverityLabel(severity);
   title.textContent = event.summary || "Zdarzenie";
@@ -5048,7 +5105,7 @@ function renderIncidentDeliveries(incident) {
     meta.textContent = [
       deliveryStatusLabel(delivery.status),
       deliveryChannelLabel(delivery.used_channel),
-      delivery.updated_at || delivery.created_at || "",
+      formatPanelTimestamp(delivery.updated_at || delivery.created_at),
     ]
       .filter(Boolean)
       .join(" | ");
@@ -5195,7 +5252,7 @@ function renderIncidentCard(incident) {
   card.className = `log-incident log-event-${severity}`;
   meta.className = "log-event-meta";
   meta.textContent = [
-    incident.last_seen_at || incident.first_seen_at || "",
+    formatPanelTimestamp(incident.last_seen_at || incident.first_seen_at),
     logSeverityLabel(severity),
     `wystapienia: ${Number(incident.occurrence_count || 1)}`,
   ]
@@ -5256,7 +5313,11 @@ function renderJobCard(job) {
   card.dataset.observabilityId = jobId;
   card.tabIndex = -1;
   meta.className = "log-event-meta";
-  meta.textContent = [job.started_at || "", job.finished_at || "", job.status || ""]
+  meta.textContent = [
+    formatPanelTimestamp(job.started_at),
+    job.finished_at ? formatPanelTimestamp(job.finished_at) : "",
+    job.status || "",
+  ]
     .filter(Boolean)
     .join(" | ");
   title.textContent = job.summary || jobId || "Zadanie";
@@ -5497,7 +5558,7 @@ function renderBackendHealthDetails(
     name.textContent = label;
     const observedAt = canonicalHealthTimestamp(components[key]?.observed_at);
     status.textContent = observedAt
-      ? `${HEALTH_STATUS_LABELS[normalized]} · ${observedAt}`
+      ? `${HEALTH_STATUS_LABELS[normalized]} · ${formatPanelTimestamp(observedAt)}`
       : HEALTH_STATUS_LABELS[normalized];
     item.dataset.level = normalized;
     item.append(name, status);
@@ -5506,7 +5567,7 @@ function renderBackendHealthDetails(
   const metrics = [
     ["Biezace opoznienie", `${Math.round(currentLatencyMs)} ms`],
     ["Mediana opoznienia", `${Math.round(medianLatencyMs)} ms`],
-    ["Czas serwera UTC", canonicalHealthTimestamp(serverTime) || "Brak danych"],
+    ["Czas serwera", formatPanelTimestamp(serverTime)],
   ].map(([label, value]) => {
     const item = document.createElement("li");
     const name = document.createElement("span");
@@ -5598,8 +5659,8 @@ function renderResourceDetails(resources = {}) {
     ],
     ["Alarm aktywny", latched.length ? latched.join(", ") : "nie"],
     ["Alarm oczekujacy", pending.length ? pending.join(", ") : "nie"],
-    ["Ostatni alarm", String(detector.last_trigger_at || "brak danych")],
-    ["Probka UTC", String(resources.observed_at || "brak danych")],
+    ["Ostatni alarm", formatPanelTimestamp(detector.last_trigger_at)],
+    ["Probka", formatPanelTimestamp(resources.observed_at)],
   ].map(([label, value]) => {
     const item = document.createElement("li");
     const name = document.createElement("span");
@@ -5679,6 +5740,13 @@ async function pollBackendHealth() {
     healthSamples.push(elapsedMs);
     if (healthSamples.length > 5) healthSamples.shift();
     const medianMs = medianHealthLatency();
+    state.lastHealthPayload = {
+      components,
+      elapsedMs,
+      medianMs,
+      ok: payload.ok,
+      serverTime: payload.time,
+    };
     updateBackendHealthStatus(
       healthLevel(medianMs, components, payload.ok),
       elapsedMs,
@@ -7082,6 +7150,11 @@ async function refreshData() {
 
 async function loadBootstrap(options = {}) {
   const payload = await requestJson("/api/bootstrap", options);
+  state.settings = {
+    ...(state.settings || {}),
+    web_display: payload.web_display || state.settings?.web_display || { time_zone: "UTC" },
+  };
+  rerenderPanelTimestampViews();
   state.csrfToken = payload.csrf_token || state.csrfToken || "";
   state.defaultSlotFit = Boolean(payload.auto_content_fit);
   state.processing = payload.processing || state.processing || {};
@@ -7254,6 +7327,39 @@ function inputField(name, label, value = "", attrs = {}) {
     small.textContent = attrs.description;
     wrapper.appendChild(small);
   }
+  return wrapper;
+}
+
+function panelTimeZoneField(value = "UTC") {
+  const wrapper = document.createElement("label");
+  const input = document.createElement("input");
+  const datalist = document.createElement("datalist");
+  const description = document.createElement("small");
+  wrapper.textContent = "Globalna strefa czasu";
+  input.type = "search";
+  input.name = "web_display_time_zone";
+  input.value = value || "UTC";
+  input.required = true;
+  input.setAttribute("list", "panelTimeZoneCatalog");
+  datalist.id = "panelTimeZoneCatalog";
+  for (const timeZone of state.panelTimeZones) {
+    const option = document.createElement("option");
+    option.value = timeZone;
+    datalist.appendChild(option);
+  }
+  const validate = () => {
+    input.setCustomValidity(
+      state.panelTimeZones.includes(input.value)
+        ? ""
+        : "Wybierz strefe czasu z listy IANA."
+    );
+  };
+  input.addEventListener("input", validate);
+  input.addEventListener("change", validate);
+  validate();
+  description.textContent =
+    "Wyszukaj i wybierz pelna nazwe IANA. Ustawienie obowiazuje wszystkich uzytkownikow.";
+  wrapper.append(input, datalist, description);
   return wrapper;
 }
 
@@ -7772,7 +7878,7 @@ function collectSqliteBackupSchedule(form) {
 }
 
 function backupItemLabel(item) {
-  const parts = [item.created_at || "bez daty"];
+  const parts = [formatPanelTimestamp(item.created_at)];
   if (item.reason) parts.push(item.reason);
   if (item.schema_version !== undefined && item.schema_version !== null) {
     parts.push(`schema ${item.schema_version}`);
@@ -7782,6 +7888,7 @@ function backupItemLabel(item) {
 }
 
 function renderBackupHistory(items = []) {
+  state.backupHistoryItems = Array.isArray(items) ? items : [];
   if (!backupHistoryOutput) {
     return;
   }
@@ -7908,6 +8015,39 @@ function ensureSqlColumnsDatalist() {
   }
 }
 
+function rerenderPanelTimestampViews() {
+  updateRuntimeMetrics();
+  if (state.githubStatus) renderGithubStatus(state.githubStatus);
+  if (state.history) renderHistory(state.history);
+  if (
+    state.historyDetailGroup &&
+    document.querySelector("#historyDetailModal")?.classList.contains("active")
+  ) {
+    renderHistoryDetails(state.historyDetailGroup);
+  }
+  if (
+    Object.values(state.observability.tabs).some((tab) => Array.isArray(tab.items) && tab.items.length)
+  ) {
+    renderLogs();
+  }
+  renderResourceStatus(state.resources);
+  if (state.lastHealthPayload) {
+    const health = state.lastHealthPayload;
+    updateBackendHealthStatus(
+      healthLevel(health.medianMs, health.components, health.ok),
+      health.elapsedMs,
+      health.components,
+      { medianLatencyMs: health.medianMs, serverTime: health.serverTime }
+    );
+  }
+  if (state.backupHistoryItems.length) renderBackupHistory(state.backupHistoryItems);
+  if (state.pimcoreHistoryItems.length) renderPimcoreHistory(state.pimcoreHistoryItems);
+  const entraContainer = document.querySelector(".entra-expiry-status");
+  if (entraContainer && state.entraExpiryStatus) {
+    renderEntraExpiryStatus(entraContainer, state.entraExpiryStatus);
+  }
+}
+
 function settingsSaveButton(form, buildPayload) {
   const actions = document.createElement("div");
   actions.className = "settings-actions";
@@ -7945,6 +8085,7 @@ function settingsSaveButton(form, buildPayload) {
       state.processing = state.settings.processing || state.processing || {};
       state.security = state.settings.security || state.security || {};
       state.productFields = state.settings.product_fields || state.productFields || {};
+      rerenderPanelTimestampViews();
       renderResourceStatus(state.resources);
       refreshActiveUsersPresence().catch(() => {
         renderActiveUsersPresence({ enabled: false, users: [] });
@@ -8044,6 +8185,7 @@ function renderSettingsApp() {
       actionRow(diagnosticButton("local", "Test folderow backendu"), fileIndexRefreshButton())
     ),
     settingsFieldGroup("Widok panelu",
+      panelTimeZoneField(s.web_display?.time_zone || "UTC"),
       checkField(
         "user_show_timing_details",
         "Pokazuj blok Pomiary",
@@ -8066,6 +8208,9 @@ function renderSettingsApp() {
       product_fields: collectProductFieldSettings(data),
     },
     sqlite_backup: collectSqliteBackupSchedule(form),
+    web_display: {
+      time_zone: data.get("web_display_time_zone"),
+    },
   }));
   form.addEventListener("submit", () => {
     const data = new FormData(form);
@@ -10360,9 +10505,10 @@ function appendPimcoreLiveEvents(events) {
     const detail = document.createElement("span");
     const diagnostic = document.createElement("pre");
     row.className = `pimcore-live-event ${event.severity || "info"}`;
-    const eventTime = Number(event.timestamp || 0) * 1000 || Date.now();
     heading.textContent =
-      `[${new Date(eventTime).toLocaleTimeString()}] ${event.stage || "etap"}: ${event.message || ""}`;
+      `[${formatPanelTimestamp(event.timestamp, { date: false })}] ${event.stage || "etap"}: ${
+        event.message || ""
+      }`;
     detail.textContent = [
       event.method,
       event.endpoint,
@@ -10475,6 +10621,7 @@ async function pollPimcoreTestOperation() {
 function renderPimcoreHistory(items) {
   if (!pimcoreHistoryOutput) return;
   const rows = Array.isArray(items) ? items : [];
+  state.pimcoreHistoryItems = rows;
   pimcoreHistoryOutput.textContent = "";
   pimcoreHistoryOutput.className = rows.length ? "history-output" : "history-output empty-state";
   if (!rows.length) {
@@ -10495,7 +10642,7 @@ function renderPimcoreHistory(items) {
       item.operation_id || ""
     }`;
     meta.textContent = [
-      item.started_at ? new Date(Number(item.started_at) * 1000).toLocaleString() : "",
+      formatPanelTimestamp(item.started_at),
       item.username,
       `${Number(item.total_ms || 0)} ms`,
       `klasa ${resultPayload.className || "brak"}`,
@@ -11230,17 +11377,6 @@ function renderMailTestSuiteResult(container, result) {
   container.appendChild(list);
 }
 
-function entraExpiryDateTime(value) {
-  const date = new Date(value || "");
-  if (Number.isNaN(date.getTime())) {
-    return { text: "Brak danych", title: "" };
-  }
-  return {
-    text: date.toLocaleString(),
-    title: date.toISOString(),
-  };
-}
-
 function entraExpiryRemainingDays(value) {
   const date = new Date(value || "");
   if (Number.isNaN(date.getTime())) return null;
@@ -11262,14 +11398,15 @@ function entraExpiryMetadata(label, value, title = "") {
 }
 
 function renderEntraExpiryStatus(container, status = {}) {
+  state.entraExpiryStatus = status;
   container.textContent = "";
   const panel = document.createElement("section");
   const heading = document.createElement("strong");
   const details = document.createElement("dl");
   const source = String(status.source || "saved");
-  const expiresAt = entraExpiryDateTime(status.expires_at);
-  const checkedAt = entraExpiryDateTime(status.last_checked_at);
-  const successfulAt = entraExpiryDateTime(status.last_success_at);
+  const expiresAt = formatPanelTimestamp(status.expires_at);
+  const checkedAt = formatPanelTimestamp(status.last_checked_at);
+  const successfulAt = formatPanelTimestamp(status.last_success_at);
   const remainingDays = entraExpiryRemainingDays(status.expires_at);
   const permissionRequired = status.error_code === "permission_required";
   const expirySeverity = remainingDays === null
@@ -11295,13 +11432,13 @@ function renderEntraExpiryStatus(container, status = {}) {
   details.append(
     entraExpiryMetadata("Aplikacja", String(status.application_name || "Brak danych")),
     entraExpiryMetadata("Credential", String(status.credential_name || "Brak danych")),
-    entraExpiryMetadata("Wygasa", expiresAt.text, expiresAt.title),
+    entraExpiryMetadata("Wygasa", expiresAt),
     entraExpiryMetadata(
       "Pozostalo",
       remainingDays === null ? "Brak danych" : remainingDays < 0 ? `${Math.abs(remainingDays)} dni po terminie` : `${remainingDays} dni`
     ),
-    entraExpiryMetadata("Ostatnia kontrola", checkedAt.text, checkedAt.title),
-    entraExpiryMetadata("Ostatni sukces", successfulAt.text, successfulAt.title),
+    entraExpiryMetadata("Ostatnia kontrola", checkedAt),
+    entraExpiryMetadata("Ostatni sukces", successfulAt),
     entraExpiryMetadata(
       "W cache",
       source === "microsoft_graph" ? "Nie - odswiezono teraz" : "Tak - zapisany bezpieczny stan"
@@ -11823,20 +11960,22 @@ function renderSettingsUsers() {
       loginMeta.push(
         user.lock_manual
           ? "Zablokowane do recznego odblokowania"
-          : `Zablokowane do ${user.lock_expires_at || "-"}`
+          : `Zablokowane do ${formatPanelTimestamp(user.lock_expires_ts)}`
       );
     }
     if (user.failed_login_count) {
       loginMeta.push(`Bledne proby: ${user.failed_login_count}`);
     }
-    if (user.last_failed_login_at) {
+    if (user.last_failed_login_ts) {
       const ip = user.last_failed_login_ip ? `, ${user.last_failed_login_ip}` : "";
-      loginMeta.push(`Ostatnia bledna: ${user.last_failed_login_at}${ip}`);
+      loginMeta.push(`Ostatnia bledna: ${formatPanelTimestamp(user.last_failed_login_ts)}${ip}`);
     }
     loginMeta.push(`Sesje v${Number(user.session_version || 0)}`);
     loginMeta.push(
       `Token rozszerzenia v${Number(user.extension_token_version || 0)}${
-        user.extension_token_last_used_at ? `, ostatnio ${user.extension_token_last_used_at}` : ""
+        user.extension_token_last_used_ts
+          ? `, ostatnio ${formatPanelTimestamp(user.extension_token_last_used_ts)}`
+          : ""
       }`
     );
     nameMeta.textContent = loginMeta.join(" | ") || "Brak blednych prob logowania.";
@@ -12112,7 +12251,16 @@ function renderSettings() {
 }
 
 async function loadSettings() {
-  state.settings = await requestJson("/api/settings");
+  const [settingsPayload, catalogPayload] = await Promise.all([
+    requestJson("/api/settings"),
+    requestJson("/api/settings/time-zones"),
+  ]);
+  state.settings = settingsPayload;
+  state.panelTimeZones = [...new Set(
+    (Array.isArray(catalogPayload.time_zones) ? catalogPayload.time_zones : [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+  )];
   state.settingsSecrets = null;
   state.currentUser = state.settings.current_user || state.currentUser;
   state.defaultSlotFit = Boolean(state.settings.auto_content_fit);

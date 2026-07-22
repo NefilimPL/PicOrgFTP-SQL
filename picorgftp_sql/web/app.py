@@ -5034,6 +5034,9 @@ def create_app() -> FastAPI:
             "auto_content_fit": bool(config.CONFIG.get(AUTO_CONTENT_FIT_KEY, False)),
             "processing": _processing_settings(),
             "security": _security_settings(),
+            "web_display": config.normalize_web_display_settings(
+                config.CONFIG.get("web_display", {})
+            ),
             "runtime_warning": runtime_info.get("warning"),
             "slots": slots,
             "admin_user": _admin_username(),

@@ -440,11 +440,7 @@ def file_index_status(*, start: bool = False) -> dict[str, object]:
     if state == "refreshing":
         label = "Indeksowanie lokalnych plikow..."
     elif generated_at:
-        if generated_ts is not None:
-            readable = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(generated_ts))
-        else:
-            readable = generated_at
-        label = f"Indeks lokalny: {readable}"
+        label = "Indeks lokalny"
     elif status.get("cache_loaded"):
         label = "Indeks lokalny: cache wczytany."
     else:

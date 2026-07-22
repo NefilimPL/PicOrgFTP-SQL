@@ -9,6 +9,18 @@ import unittest
 
 
 class SourceIntegrityTests(unittest.TestCase):
+    def test_bootstrap_exposes_only_the_normalized_web_display_setting(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "picorgftp_sql" / "web" / "app.py").read_text(
+            encoding="utf-8"
+        )
+        bootstrap_start = source.index("def bootstrap(request: Request)")
+        bootstrap_end = source.index('@app.get("/api/github/repository")', bootstrap_start)
+        bootstrap_source = source[bootstrap_start:bootstrap_end]
+
+        self.assertIn('"web_display": config.normalize_web_display_settings(', bootstrap_source)
+        self.assertNotIn("settings_snapshot()", bootstrap_source)
+
     def test_web_panel_documents_backend_only_resource_alerts(self) -> None:
         root = Path(__file__).resolve().parents[1]
         docs = (root / "docs" / "web-panel.md").read_text(encoding="utf-8").lower()

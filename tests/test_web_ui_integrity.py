@@ -58,6 +58,61 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
+    def test_web_ui_uses_the_central_panel_timestamp_formatter(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("function selectedPanelTimeZone", source)
+        self.assertIn("function coercePanelDate", source)
+        self.assertIn("function formatPanelTimestamp", source)
+        self.assertIn("timeZone: selectedPanelTimeZone()", source)
+        self.assertIn('timeZone: "UTC"', source)
+        self.assertNotIn("new Date(eventTime).toLocaleTimeString()", source)
+        self.assertNotIn("new Date(Number(item.started_at) * 1000).toLocaleString()", source)
+
+    def test_all_visible_panel_timestamps_use_the_central_formatter(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        expected_calls = [
+            "formatPanelTimestamp(payload.checked_at)",
+            "formatPanelTimestamp(release.published_at)",
+            "formatPanelTimestamp(state.fileIndex?.generated_at)",
+            "formatPanelTimestamp(item.ts || item.created_at)",
+            "formatPanelTimestamp(event.created_at)",
+            "formatPanelTimestamp(delivery.updated_at || delivery.created_at)",
+            "formatPanelTimestamp(incident.last_seen_at || incident.first_seen_at)",
+            "formatPanelTimestamp(job.started_at)",
+            "formatPanelTimestamp(job.finished_at)",
+            "formatPanelTimestamp(observedAt)",
+            "formatPanelTimestamp(serverTime)",
+            "formatPanelTimestamp(detector.last_trigger_at)",
+            "formatPanelTimestamp(resources.observed_at)",
+            "formatPanelTimestamp(item.created_at)",
+            "formatPanelTimestamp(event.timestamp, { date: false })",
+            "formatPanelTimestamp(item.started_at)",
+            "formatPanelTimestamp(status.expires_at)",
+            "formatPanelTimestamp(status.last_checked_at)",
+            "formatPanelTimestamp(status.last_success_at)",
+            "formatPanelTimestamp(user.lock_expires_ts)",
+            "formatPanelTimestamp(user.last_failed_login_ts)",
+            "formatPanelTimestamp(user.extension_token_last_used_ts)",
+        ]
+        for call in expected_calls:
+            self.assertIn(call, source)
+
+        self.assertIn("formatDuration(payload.total_ms || 0)", source)
+        self.assertIn("formatHistoryDuration(file.elapsed_ms)", source)
+
+    def test_global_time_zone_field_uses_the_server_catalog_and_rerenders(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn('requestJson("/api/settings/time-zones")', source)
+        self.assertIn('input.type = "search"', source)
+        self.assertIn('datalist.id = "panelTimeZoneCatalog"', source)
+        self.assertIn("state.panelTimeZones.includes(input.value)", source)
+        self.assertIn("web_display: {", source)
+        self.assertIn('time_zone: data.get("web_display_time_zone")', source)
+        self.assertIn("rerenderPanelTimestampViews()", source)
+
     def test_mail_settings_tab_has_safe_secrets_and_responsive_channel_cards(self) -> None:
         html = _parse(INDEX_HTML)
         source = APP_JS.read_text(encoding="utf-8")
