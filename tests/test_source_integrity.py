@@ -9,6 +9,15 @@ import unittest
 
 
 class SourceIntegrityTests(unittest.TestCase):
+    def test_web_panel_documents_backend_only_resource_alerts(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        docs = (root / "docs" / "web-panel.md").read_text(encoding="utf-8").lower()
+
+        self.assertIn("zasoby systemu", docs)
+        self.assertIn("backendu", docs)
+        self.assertIn("dwie kolejne próbki", docs)
+        self.assertIn("test rzeczywisty", docs)
+
     def test_web_static_asset_cache_key_matches_current_resource_bundle(self) -> None:
         root = Path(__file__).resolve().parents[1]
         html_source = (

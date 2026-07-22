@@ -87,6 +87,21 @@ Obok nazwy aplikacji widoczny jest tekstowy stan backendu z kropką i medianą c
 
 Pomiar jest wykonywany co pięć sekund. Przeglądarka wstrzymuje go w ukrytej karcie i odświeża stan natychmiast po powrocie.
 
+## Zasoby backendu
+
+Pod stanem backendu znajduje się kompaktowy wskaźnik odświeżany co pięć sekund. Pierwszy wiersz, **Zasoby systemu**, pokazuje użycie CPU, RAM i zajętość dysku całego hosta. Drugi wiersz pokazuje CPU, RAM i transfer dyskowy I/O drzewa procesów backendu, w tym kontrolowanego procesu testowego, oraz szczegóły takie jak liczba aktywnych i oczekujących zadań i klientów. Te dwie grupy nie są zamienne: metryki hosta służą wyłącznie do diagnozy, natomiast progi i alerty dotyczą wyłącznie backendu.
+
+Administrator może w **Ustawienia -> Monitor** ukryć sam wskaźnik oraz ustawić progi CPU, RAM i I/O backendu. Domyślne progi to odpowiednio 25%, 20% i 8 MB/s; dopuszczalne zakresy to 10–90%, 1–90% i 1–256 MB/s. Przekroczenie oznacza wartość większą od progu. Alarm zostaje zatrzaśnięty i tworzy incydent `backend.resource_high` dopiero wtedy, gdy zwykły monitor zobaczy przekroczenie w dwie kolejne próbki. Pojedynczy skok nie tworzy incydentu. Zatrzask zapobiega powtarzaniu tego samego alertu podczas ciągłego przeciążenia i jest zwalniany po dwóch kolejnych próbkach na poziomie nieprzekraczającym progu.
+
+Wartość **brak danych** oznacza, że dany licznik nie jest dostępny; dotyczy to w szczególności licznika zajętości dysku podczas jego rozgrzewania albo gdy Windows nie udostępnia poprawnego odczytu. Brak wartości nie jest zerem i sam nie wyzwala alertu. API udostępnia tylko dozwolone, znormalizowane metryki i krótki powód niedostępności. Nie zwraca ścieżek katalogów tymczasowych, sekretów ani treści wyjątków.
+
+Testy monitora wymagają autoryzacji administracyjnej:
+
+- **Bezpieczna symulacja** nie obciąża zasobów i nie tworzy incydentu o wysokim zużyciu. Zapisuje wyłącznie informacyjne zdarzenie testowe z bezpiecznym, bieżącym obrazem metryk i zwraca wynik trybu `safe`.
+- **Test rzeczywisty** uruchamia osobno kontrolowane obciążenie CPU, RAM albo dysku. W danej chwili może działać tylko jeden test. Trwa najwyżej około 20 sekund, używa procesu roboczego z twardymi limitami 25% CPU, 256 MiB RAM i 128 MiB danych dyskowych, a po zakończeniu, błędzie lub przekroczeniu czasu proces i katalog `picorg_resource_test_*` są automatycznie zatrzymywane i usuwane. Test jest odrzucany, jeżeli skonfigurowanego progu nie można bezpiecznie osiągnąć w tych limitach.
+
+Wynik testu rzeczywistego rozróżnia wykryte przekroczenie, brak wykrycia, błąd uruchomienia lub wykonania, przekroczenie czasu, anulowanie i błąd sprzątania. Wynik **wykryto** oraz alert pojawiają się tylko wtedy, gdy normalny, pięciosekundowy próbnik sam zarejestruje rzeczywiste przekroczenie progu backendu w dwie kolejne próbki; sam endpoint testowy nie tworzy incydentu.
+
 ## Bezpieczeństwo LAN
 
 Panel jest przeznaczony do zaufanej sieci LAN albo VPN. Nie wystawiaj tego panelu bezpośrednio do publicznego internetu bez dodatkowej warstwy zabezpieczeń, aktualizacji haseł, kontroli dostępu i przeglądu konfiguracji serwera.
