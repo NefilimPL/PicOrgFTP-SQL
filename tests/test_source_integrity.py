@@ -12,11 +12,43 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_web_panel_documents_backend_only_resource_alerts(self) -> None:
         root = Path(__file__).resolve().parents[1]
         docs = (root / "docs" / "web-panel.md").read_text(encoding="utf-8").lower()
+        section_match = re.search(
+            r"(?ms)^## zasoby backendu\s+(.*?)(?=^##\s|\Z)", docs
+        )
+        self.assertIsNotNone(section_match)
+        section = section_match.group(1)
 
-        self.assertIn("zasoby systemu", docs)
-        self.assertIn("backendu", docs)
-        self.assertIn("dwie kolejne próbki", docs)
-        self.assertIn("test rzeczywisty", docs)
+        def paragraph(start: str) -> str:
+            match = re.search(
+                rf"(?ms)^{re.escape(start)}.*?(?=\n\n|\Z)", section
+            )
+            self.assertIsNotNone(match, f"missing contextual paragraph: {start}")
+            return match.group(0)
+
+        metrics = paragraph("pod stanem backendu")
+        self.assertIn("bieżącego procesu backendu", metrics)
+        self.assertIn("zarejestrowanego pomocniczego procesu testowego", metrics)
+        self.assertIn("nie obejmuje dowolnego drzewa procesów potomnych", metrics)
+        self.assertIn("nie stopień zapełnienia", metrics)
+
+        alerts = paragraph("administrator może")
+        self.assertIn("progi i alerty dotyczą wyłącznie metryk backendu", alerts)
+        self.assertIn("dwie kolejne próbki", alerts)
+
+        unavailable = paragraph("wartość **brak danych**")
+        self.assertIn("brak wartości nie jest zerem", unavailable)
+        self.assertIn("nie tworzy ani nie zwalnia zatrzaśniętego alertu", unavailable)
+
+        safe_test = paragraph("- **bezpieczna symulacja**")
+        self.assertIn("nie tworzy incydentu", safe_test)
+
+        real_test = paragraph("- **test rzeczywisty**")
+        self.assertIn("normalny, pięciosekundowy próbnik", real_test)
+        self.assertIn("ten sam detektor", real_test)
+        self.assertIn("sam endpoint testowy nie tworzy incydentu", real_test)
+        self.assertIn("`cleanup_failed`", real_test)
+        self.assertIn("blokuje następny test rzeczywisty", real_test)
+        self.assertIn("sprzątanie nie jest więc gwarantowane", real_test)
 
     def test_web_static_asset_cache_key_matches_current_resource_bundle(self) -> None:
         root = Path(__file__).resolve().parents[1]
