@@ -139,7 +139,6 @@ const state = {
   githubStatus: null,
   githubStatusLoading: false,
   resources: {},
-  resourceMonitorTestPending: false,
 };
 
 const WEB_IMAGE_CACHE_LIMIT = 2;
@@ -170,6 +169,10 @@ let healthDetailsPinned = false;
 let healthDetailsPointerInside = false;
 let resourceDetailsPinned = false;
 let resourceDetailsPointerInside = false;
+const resourceMonitorTestState = {
+  pending: false,
+  message: "Nie uruchomiono testu monitora.",
+};
 const SQLITE_BACKUP_DAYS = [
   ["mon", "Pon"],
   ["tue", "Wt"],
@@ -11947,7 +11950,6 @@ function renderSettingsResourceMonitor() {
   testResult.id = "resourceMonitorTestResult";
   testResult.className = "resource-monitor-test-result wide-field";
   testResult.setAttribute("role", "status");
-  testResult.textContent = "Nie uruchomiono testu monitora.";
 
   const safeButton = document.createElement("button");
   safeButton.type = "button";
@@ -11959,6 +11961,7 @@ function renderSettingsResourceMonitor() {
   const cpuButton = document.createElement("button");
   cpuButton.type = "button";
   cpuButton.className = "secondary-button";
+  cpuButton.dataset.resourceMonitorTest = "cpu";
   cpuButton.dataset.resourceMonitorRealTest = "cpu";
   cpuButton.textContent = "Rzeczywisty test CPU";
   cpuButton.addEventListener("click", () => runResourceMonitorTest("cpu"));
@@ -11966,6 +11969,7 @@ function renderSettingsResourceMonitor() {
   const memoryButton = document.createElement("button");
   memoryButton.type = "button";
   memoryButton.className = "secondary-button";
+  memoryButton.dataset.resourceMonitorTest = "memory";
   memoryButton.dataset.resourceMonitorRealTest = "memory";
   memoryButton.textContent = "Rzeczywisty test RAM";
   memoryButton.addEventListener("click", () => runResourceMonitorTest("memory"));
@@ -11973,13 +11977,10 @@ function renderSettingsResourceMonitor() {
   const diskButton = document.createElement("button");
   diskButton.type = "button";
   diskButton.className = "secondary-button";
+  diskButton.dataset.resourceMonitorTest = "disk";
   diskButton.dataset.resourceMonitorRealTest = "disk";
   diskButton.textContent = "Rzeczywisty test dysku";
   diskButton.addEventListener("click", () => runResourceMonitorTest("disk"));
-
-  for (const button of [cpuButton, memoryButton, diskButton]) {
-    button.disabled = state.resourceMonitorTestPending;
-  }
 
   form.append(
     settingsFieldGroup(
@@ -12029,17 +12030,21 @@ function renderSettingsResourceMonitor() {
     },
   }));
   settingsOutput.appendChild(form);
+  updateResourceMonitorTestUi();
+}
+
+function updateResourceMonitorTestUi() {
+  const result = document.querySelector("#resourceMonitorTestResult");
+  const buttons = Array.from(settingsOutput.querySelectorAll("[data-resource-monitor-test]"));
+  if (result) result.textContent = resourceMonitorTestState.message;
+  for (const button of buttons) button.disabled = resourceMonitorTestState.pending;
 }
 
 async function runResourceMonitorTest(mode) {
-  if (state.resourceMonitorTestPending) return;
-  const result = document.querySelector("#resourceMonitorTestResult");
-  const realButtons = Array.from(
-    settingsOutput.querySelectorAll("[data-resource-monitor-real-test]")
-  );
-  state.resourceMonitorTestPending = true;
-  for (const button of realButtons) button.disabled = true;
-  if (result) result.textContent = "Uruchamianie testu monitora...";
+  if (resourceMonitorTestState.pending) return;
+  resourceMonitorTestState.pending = true;
+  resourceMonitorTestState.message = "Uruchamianie testu monitora...";
+  updateResourceMonitorTestUi();
   try {
     let payload;
     if (mode === "safe") {
@@ -12056,14 +12061,16 @@ async function runResourceMonitorTest(mode) {
         timeoutMs: 60000,
       });
     }
-    if (result) result.textContent = String(payload.message || JSON.stringify(payload));
+    resourceMonitorTestState.message = String(payload.message || JSON.stringify(payload));
+    updateResourceMonitorTestUi();
     if (payload.resources) renderResourceStatus(payload.resources);
     await pollBackendHealth();
   } catch (error) {
-    if (result) result.textContent = error.message || String(error);
+    resourceMonitorTestState.message = error.message || String(error);
+    updateResourceMonitorTestUi();
   } finally {
-    state.resourceMonitorTestPending = false;
-    for (const button of realButtons) button.disabled = false;
+    resourceMonitorTestState.pending = false;
+    updateResourceMonitorTestUi();
   }
 }
 

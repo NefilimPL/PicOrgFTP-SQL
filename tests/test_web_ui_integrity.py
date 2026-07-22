@@ -230,9 +230,9 @@ class WebUiIntegrityTests(unittest.TestCase):
         for kind in ("cpu", "memory", "disk"):
             self.assertIn(f'runResourceMonitorTest("{kind}")', monitor_source)
         self.assertIn('runResourceMonitorTest("safe")', monitor_source)
-        self.assertIn("button.disabled = true", monitor_source)
-        self.assertIn("button.disabled = false", monitor_source)
-        self.assertIn("result.textContent", monitor_source)
+        self.assertIn("function updateResourceMonitorTestUi", monitor_source)
+        self.assertIn("resourceMonitorTestState.pending", monitor_source)
+        self.assertIn("resourceMonitorTestState.message", monitor_source)
         self.assertIn("await pollBackendHealth()", monitor_source)
 
         if "function setFtpPreviewCache" in source:
@@ -709,7 +709,6 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertNotIn("row.appendChild(pimcoreSqlMappingControls", source)
         self.assertIn(".sql-profile-card", css)
         self.assertIn(".sql-profile-card + .sql-profile-card", css)
-        self.assertIn("20260706-sql-profiles", html)
 
     def test_pimcore_mapping_layout_controls_and_runtime_sections_exist(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -921,7 +920,6 @@ class WebUiIntegrityTests(unittest.TestCase):
 
         self.assertNotIn("http://10.10.0.5", source)
         self.assertIn("http://twoj-adres-pimcore.example", source)
-        self.assertIn("20260706-sql-profiles", html_source)
         self.assertIn("flex-wrap: wrap", css[css.index(".lookup-actions"):])
         self.assertNotIn(".lookup-actions #pimcoreEditButton {\n  min-width", css)
 

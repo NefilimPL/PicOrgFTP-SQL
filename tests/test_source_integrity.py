@@ -9,6 +9,60 @@ import unittest
 
 
 class SourceIntegrityTests(unittest.TestCase):
+    def test_web_static_asset_cache_key_matches_current_resource_bundle(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        html_source = (
+            root / "picorgftp_sql" / "web" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+
+        css_match = re.search(r'/static/app\.css\?v=([^"\s]+)', html_source)
+        js_match = re.search(r'/static/app\.js\?v=([^"\s]+)', html_source)
+        self.assertIsNotNone(css_match)
+        self.assertIsNotNone(js_match)
+        self.assertEqual(css_match.group(1), js_match.group(1))
+        self.assertEqual(css_match.group(1), "20260722-resource-monitor-rerender1")
+
+    def test_resource_monitor_test_state_survives_settings_rerender(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+        renderer_start = source.index("function renderSettingsResourceMonitor")
+        updater_start = source.index("function updateResourceMonitorTestUi", renderer_start)
+        runner_start = source.index("async function runResourceMonitorTest", updater_start)
+        settings_start = source.index("function renderSettings()", runner_start)
+        renderer_source = source[renderer_start:updater_start]
+        updater_source = source[updater_start:runner_start]
+        runner_source = source[runner_start:settings_start]
+
+        self.assertIn("const resourceMonitorTestState", source[:renderer_start])
+        self.assertLess(
+            renderer_source.index("settingsOutput.appendChild(form)"),
+            renderer_source.index("updateResourceMonitorTestUi()"),
+        )
+        self.assertEqual(renderer_source.count("dataset.resourceMonitorTest ="), 4)
+        self.assertIn('document.querySelector("#resourceMonitorTestResult")', updater_source)
+        self.assertIn(
+            'settingsOutput.querySelectorAll("[data-resource-monitor-test]")',
+            updater_source,
+        )
+        self.assertIn("result.textContent = resourceMonitorTestState.message", updater_source)
+        self.assertIn("button.disabled = resourceMonitorTestState.pending", updater_source)
+        self.assertIn("resourceMonitorTestState.pending = true", runner_source)
+        self.assertIn("resourceMonitorTestState.pending = false", runner_source)
+        self.assertGreaterEqual(runner_source.count("resourceMonitorTestState.message ="), 3)
+        self.assertGreaterEqual(runner_source.count("updateResourceMonitorTestUi()"), 4)
+        self.assertNotIn("const result =", runner_source)
+        self.assertNotIn("const realButtons =", runner_source)
+        self.assertNotIn("querySelector", runner_source)
+        pending_start = runner_source.index("resourceMonitorTestState.pending = true")
+        first_update = runner_source.index("updateResourceMonitorTestUi()", pending_start)
+        finally_start = runner_source.index("finally")
+        pending_end = runner_source.index("resourceMonitorTestState.pending = false", finally_start)
+        final_update = runner_source.index("updateResourceMonitorTestUi()", pending_end)
+        self.assertLess(pending_start, first_update)
+        self.assertLess(pending_end, final_update)
+
     def test_runtime_http_client_dependency_is_declared(self) -> None:
         root = Path(__file__).resolve().parents[1]
         web_requirements = (root / "requirements-web.txt").read_text(encoding="utf-8")
