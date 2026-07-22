@@ -60,6 +60,13 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
+    def test_compact_header_keeps_health_and_resource_indicators_in_one_right_group(self) -> None:
+        markup = INDEX_HTML.read_text(encoding="utf-8")
+
+        self.assertIn('class="header-meta"', markup)
+        self.assertIn('class="header-observability"', markup)
+        self.assertLess(markup.index('id="backendHealthStatus"'), markup.index('id="resourceStatus"'))
+
     def test_web_ui_uses_the_central_panel_timestamp_formatter(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
 

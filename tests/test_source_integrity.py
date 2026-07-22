@@ -73,7 +73,17 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIsNotNone(css_match)
         self.assertIsNotNone(js_match)
         self.assertEqual(css_match.group(1), js_match.group(1))
-        self.assertEqual(css_match.group(1), "20260722-release-hardening1")
+        self.assertEqual(css_match.group(1), "20260722-compact-header1")
+
+    def test_resource_detail_copy_explains_clients_and_latch_stages(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Aktywni w ostatnich 3 min", source)
+        self.assertIn("Alarm oczekujacy (1. probka)", source)
+        self.assertIn("Alarm aktywny (2 probki)", source)
 
     def test_resource_monitor_test_state_survives_settings_rerender(self) -> None:
         root = Path(__file__).resolve().parents[1]

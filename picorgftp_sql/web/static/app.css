@@ -165,25 +165,38 @@ h2 {
 }
 
 .topbar-brand {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(150px, max-content) minmax(0, 1fr);
   align-items: center;
   gap: 12px;
   min-width: 0;
 }
 
 .topbar-brand-info {
+  display: grid;
+  gap: 1px;
   min-width: 0;
 }
 
-.topbar-title-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
+.header-meta {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
 }
 
-.header-status-stack {
-  display: grid;
-  gap: 4px;
+.header-meta span {
+  min-width: 0;
+  margin-top: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.header-observability {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -316,10 +329,10 @@ h2 {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  max-width: min(390px, calc(100vw - 96px));
-  min-height: 34px;
+  max-width: min(440px, calc(100vw - 96px));
+  min-height: 26px;
   border-color: var(--line);
-  border-radius: 8px;
+  border-radius: 999px;
   background: var(--surface-2);
   color: var(--text);
   padding: 3px 9px;
@@ -346,7 +359,8 @@ h2 {
   min-width: 0;
   overflow: hidden;
   line-height: 1.25;
-  white-space: pre-line;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .resource-status-dot {
@@ -3581,6 +3595,23 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
 }
 
 @media (max-width: 1180px) {
+  .topbar {
+    flex-wrap: wrap;
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+
+  .topbar-brand {
+    grid-template-columns: auto minmax(0, 1fr);
+    width: 100%;
+  }
+
+  .header-observability {
+    grid-column: 2;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
   .process-queue-panel {
     max-height: none;
   }
@@ -3637,12 +3668,6 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
     align-items: flex-start;
     flex-direction: column;
     padding: 12px 14px;
-  }
-
-  .topbar-title-row {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 6px;
   }
 
   .topnav {

@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicOrgFTP-SQL Web</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260722-release-hardening1">
+    <link rel="stylesheet" href="/static/app.css?v=20260722-compact-header1">
   </head>
   <body class="app-screen">
     <header class="topbar">
@@ -15,44 +15,44 @@
           </svg>
         </button>
         <div class="topbar-brand-info">
-          <div class="topbar-title-row">
-            <strong>PicOrgFTP-SQL Web</strong>
-            <div class="header-status-stack">
-              <div class="backend-health-indicator">
-                <button id="backendHealthStatus" type="button" class="backend-health-status" data-level="checking" aria-live="polite" aria-controls="backendHealthDetails" aria-describedby="backendHealthDetails" aria-expanded="false">
-                  <span class="backend-health-dot" aria-hidden="true"></span>
-                  <span id="backendHealthText">Sprawdzanie...</span>
-                </button>
-                <div id="backendHealthDetails" class="backend-health-details" role="tooltip" hidden>
-                  <strong>Stan komponentow</strong>
-                  <ul id="backendHealthDetailsList">
-                    <li><span>Backend</span><strong>Sprawdzanie...</strong></li>
-                    <li><span>SQLite</span><strong>Sprawdzanie...</strong></li>
-                    <li><span>Proces zadan</span><strong>Sprawdzanie...</strong></li>
-                    <li><span>Powiadomienia</span><strong>Sprawdzanie...</strong></li>
-                    <li><span>FTP</span><strong>Brak danych</strong></li>
-                    <li><span>SQL</span><strong>Brak danych</strong></li>
-                    <li><span>Profile SQL</span><strong>Brak danych</strong></li>
-                    <li><span>Pimcore</span><strong>Brak danych</strong></li>
-                  </ul>
-                </div>
-              </div>
-              <div class="resource-status-indicator">
-                <button id="resourceStatus" type="button" class="resource-status" data-level="normal" aria-live="polite" aria-controls="resourceDetails" aria-describedby="resourceDetails" aria-expanded="false">
-                  <span class="resource-status-dot" aria-hidden="true"></span>
-                  <span id="resourceStatusText">System: CPU brak danych · RAM brak danych · DYSK brak danych&#10;Backend: CPU brak danych · RAM brak danych · I/O brak danych</span>
-                </button>
-                <div id="resourceDetails" class="resource-details" role="tooltip" hidden>
-                  <strong>Szczegoly zasobow</strong>
-                  <ul id="resourceDetailsList">
-                    <li><span>Probka</span><strong>Brak danych</strong></li>
-                  </ul>
-                </div>
-              </div>
+          <div class="header-meta">
+            <span id="versionInfo"></span>
+            <span id="serverInfo"></span>
+          </div>
+          <strong>PicOrgFTP-SQL Web</strong>
+        </div>
+        <div class="header-observability">
+          <div class="backend-health-indicator">
+            <button id="backendHealthStatus" type="button" class="backend-health-status" data-level="checking" aria-live="polite" aria-controls="backendHealthDetails" aria-describedby="backendHealthDetails" aria-expanded="false">
+              <span class="backend-health-dot" aria-hidden="true"></span>
+              <span id="backendHealthText">Sprawdzanie...</span>
+            </button>
+            <div id="backendHealthDetails" class="backend-health-details" role="tooltip" hidden>
+              <strong>Stan komponentow</strong>
+              <ul id="backendHealthDetailsList">
+                <li><span>Backend</span><strong>Sprawdzanie...</strong></li>
+                <li><span>SQLite</span><strong>Sprawdzanie...</strong></li>
+                <li><span>Proces zadan</span><strong>Sprawdzanie...</strong></li>
+                <li><span>Powiadomienia</span><strong>Sprawdzanie...</strong></li>
+                <li><span>FTP</span><strong>Brak danych</strong></li>
+                <li><span>SQL</span><strong>Brak danych</strong></li>
+                <li><span>Profile SQL</span><strong>Brak danych</strong></li>
+                <li><span>Pimcore</span><strong>Brak danych</strong></li>
+              </ul>
             </div>
           </div>
-          <span id="versionInfo"></span>
-          <span id="serverInfo"></span>
+          <div class="resource-status-indicator">
+            <button id="resourceStatus" type="button" class="resource-status" data-level="normal" aria-live="polite" aria-controls="resourceDetails" aria-describedby="resourceDetails" aria-expanded="false">
+              <span class="resource-status-dot" aria-hidden="true"></span>
+              <span id="resourceStatusText">System: CPU brak danych · RAM brak danych · DYSK brak danych · Backend: CPU brak danych · RAM brak danych · I/O brak danych</span>
+            </button>
+            <div id="resourceDetails" class="resource-details" role="tooltip" hidden>
+              <strong>Szczegoly zasobow</strong>
+              <ul id="resourceDetailsList">
+                <li><span>Probka</span><strong>Brak danych</strong></li>
+              </ul>
+            </div>
+          </div>
         </div>
       </div>
       <nav class="topnav" aria-label="Widoki">
@@ -700,6 +700,6 @@
       </article>
     </template>
 
-    <script src="/static/app.js?v=20260722-release-hardening1"></script>
+    <script src="/static/app.js?v=20260722-compact-header1"></script>
   </body>
 </html>

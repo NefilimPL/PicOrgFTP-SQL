@@ -5703,7 +5703,7 @@ function renderResourceDetails(resources = {}) {
     ["Backend I/O", formatResourceDetail(backend.disk_io_bytes_per_second, ioDetail, backend)],
     ["Aktywne zadania", formatResourceDetail(backend.active_jobs, String, backend)],
     ["Zadania w kolejce", formatResourceDetail(backend.queued_jobs, String, backend)],
-    ["Aktywni klienci", formatResourceDetail(backend.active_clients, String, backend)],
+    ["Aktywni w ostatnich 3 min", formatResourceDetail(backend.active_clients, String, backend)],
     ["Prog CPU backendu", formatPercent(monitorSettings.cpu_percent_threshold)],
     ["Prog RAM backendu", formatPercent(monitorSettings.memory_percent_threshold)],
     [
@@ -5712,8 +5712,8 @@ function renderResourceDetails(resources = {}) {
         ? "brak danych"
         : `${monitorSettings.io_mib_per_second_threshold} MB/s`,
     ],
-    ["Alarm aktywny", latched.length ? latched.join(", ") : "nie"],
-    ["Alarm oczekujacy", pending.length ? pending.join(", ") : "nie"],
+    ["Alarm aktywny (2 probki)", latched.length ? latched.join(", ") : "nie"],
+    ["Alarm oczekujacy (1. probka)", pending.length ? pending.join(", ") : "nie"],
     ["Ostatni alarm", formatPanelTimestamp(detector.last_trigger_at)],
     ["Probka", formatPanelTimestamp(resources.observed_at)],
   ].map(([label, value]) => {
@@ -5735,7 +5735,7 @@ function renderResourceStatus(resources = {}) {
   const backend = state.resources.backend || {};
   resourceStatus.hidden = state.settings?.resource_monitor?.show_status === false;
   resourceStatusText.textContent =
-    `System: CPU ${formatPercent(host.cpu_percent)} · RAM ${formatPercent(host.memory_percent)} · DYSK ${formatPercent(host.disk_busy_percent)}\n` +
+    `System: CPU ${formatPercent(host.cpu_percent)} · RAM ${formatPercent(host.memory_percent)} · DYSK ${formatPercent(host.disk_busy_percent)} · ` +
     `Backend: CPU ${formatPercent(backend.cpu_percent)} · RAM ${formatPercent(backend.memory_percent)} · I/O ${formatMib(backend.disk_io_bytes_per_second)}/s`;
   resourceStatus.dataset.level = resourceLevel(state.resources.detector || {});
   renderResourceDetails(state.resources);
