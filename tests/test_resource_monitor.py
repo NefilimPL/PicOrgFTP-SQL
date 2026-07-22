@@ -64,6 +64,16 @@ class _IoReaderSequence(_ReaderSequence):
         return sample
 
 
+def _record_event(
+    events: list[tuple[str, str, dict[str, object]]],
+    severity: str,
+    event_type: str,
+    details: dict[str, object],
+) -> bool:
+    events.append((severity, event_type, details))
+    return True
+
+
 def _monitor(
     readers: object,
     events: list[tuple[str, str, dict[str, object]]],
@@ -73,8 +83,8 @@ def _monitor(
     return ResourceMonitor(
         settings_provider=lambda: dict(settings or SETTINGS),
         context_provider=lambda: dict(CONTEXT),
-        event_emitter=lambda severity, event_type, details: events.append(
-            (severity, event_type, details)
+        event_emitter=lambda severity, event_type, details: _record_event(
+            events, severity, event_type, details
         ),
         wall_clock=lambda: 1_700_000_000.0,
         readers=readers,
@@ -387,6 +397,65 @@ def test_safe_simulation_emits_labelled_serializable_diagnostic() -> None:
     json.dumps(events[-1][2])
 
 
+@pytest.mark.parametrize(
+    "failure_mode", ["returns_false", "returns_none", "returns_zero", "raises"]
+)
+def test_safe_simulation_reports_event_persistence_failure(
+    failure_mode: str,
+) -> None:
+    def failing_emitter(
+        _severity: str, _event_type: str, _details: dict[str, object]
+    ) -> object:
+        if failure_mode == "raises":
+            raise OSError("observability unavailable")
+        if failure_mode == "returns_none":
+            return None
+        if failure_mode == "returns_zero":
+            return 0
+        return False
+
+    monitor = ResourceMonitor(
+        settings_provider=lambda: dict(SETTINGS),
+        context_provider=lambda: dict(CONTEXT),
+        event_emitter=failing_emitter,
+        readers=_ReaderSequence(cpu=[1]),
+    )
+
+    result = monitor.record_safe_simulation()
+
+    assert result == {
+        "ok": False,
+        "test_mode": "safe",
+        "status": "persistence_failed",
+        "resources": monitor.latest_public_snapshot(),
+    }
+
+
+@pytest.mark.parametrize("failure_mode", ["returns_false", "raises"])
+def test_ordinary_resource_sampling_remains_nonfatal_when_event_emission_fails(
+    failure_mode: str,
+) -> None:
+    def failing_emitter(
+        _severity: str, _event_type: str, _details: dict[str, object]
+    ) -> bool:
+        if failure_mode == "raises":
+            raise OSError("observability unavailable")
+        return False
+
+    monitor = ResourceMonitor(
+        settings_provider=lambda: dict(SETTINGS),
+        context_provider=lambda: dict(CONTEXT),
+        event_emitter=failing_emitter,
+        readers=_ReaderSequence(cpu=[24, 28, 31]),
+    )
+
+    monitor.sample_once()
+    monitor.sample_once()
+    snapshot = monitor.sample_once()
+
+    assert snapshot["detector"]["latched_metrics"] == ["cpu_percent"]
+
+
 def test_real_cpu_test_rejects_threshold_beyond_hard_cap() -> None:
     events: list[tuple[str, str, dict[str, object]]] = []
     monitor = _monitor(
@@ -495,8 +564,8 @@ def test_native_reader_reports_current_backend_process_memory() -> None:
     monitor = ResourceMonitor(
         settings_provider=lambda: dict(SETTINGS),
         context_provider=lambda: dict(CONTEXT),
-        event_emitter=lambda severity, event_type, details: events.append(
-            (severity, event_type, details)
+        event_emitter=lambda severity, event_type, details: _record_event(
+            events, severity, event_type, details
         ),
     )
 
@@ -519,8 +588,8 @@ def test_public_and_event_payloads_drop_undeclared_provider_values() -> None:
     monitor = ResourceMonitor(
         settings_provider=lambda: dict(SETTINGS),
         context_provider=lambda: {**CONTEXT, "secret": object()},
-        event_emitter=lambda severity, event_type, details: events.append(
-            (severity, event_type, details)
+        event_emitter=lambda severity, event_type, details: _record_event(
+            events, severity, event_type, details
         ),
         readers=UnsafeReader(cpu=[30, 31]),
     )
@@ -829,6 +898,79 @@ def test_real_test_succeeds_only_after_normal_detector_ack(
     }
     assert len(events) == 1
     assert events[0][2]["trigger"]["metric"] == "cpu_percent"
+
+
+@pytest.mark.parametrize("failure_mode", ["returns_false", "raises"])
+def test_real_test_is_not_detected_when_trigger_event_is_not_persisted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure_mode: str
+) -> None:
+    from picorgftp_sql import resource_monitor
+
+    class FakeEvent:
+        def __init__(self) -> None:
+            self.ready = False
+
+        def set(self) -> None:
+            self.ready = True
+
+        def is_set(self) -> bool:
+            return self.ready
+
+    class FakeProcess:
+        pid = 2470
+        exitcode = 0
+
+        def __init__(self, *, target, args, daemon) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        def join(self, timeout: float | None = None) -> None:
+            monitor.sample_once()
+            monitor.sample_once()
+
+        def is_alive(self) -> bool:
+            return False
+
+        def close(self) -> None:
+            return None
+
+    attempted_events: list[tuple[str, str, dict[str, object]]] = []
+
+    def failing_emitter(
+        severity: str, event_type: str, details: dict[str, object]
+    ) -> bool:
+        attempted_events.append((severity, event_type, details))
+        if failure_mode == "raises":
+            raise OSError("observability unavailable")
+        return False
+
+    monitor = ResourceMonitor(
+        settings_provider=lambda: {**SETTINGS, "cpu_percent_threshold": 20},
+        context_provider=lambda: dict(CONTEXT),
+        event_emitter=failing_emitter,
+        readers=_ReaderSequence(cpu=[0, 30, 31]),
+    )
+    monitor.sample_once()
+    monkeypatch.setattr(
+        resource_monitor.tempfile,
+        "mkdtemp",
+        lambda **_kwargs: str(tmp_path / "picorg_resource_test_persistence_failure"),
+    )
+    monkeypatch.setattr(resource_monitor.multiprocessing, "Event", FakeEvent)
+    monkeypatch.setattr(resource_monitor.multiprocessing, "Process", FakeProcess)
+
+    result = monitor.start_real_test("cpu")
+
+    assert result == {
+        "ok": False,
+        "kind": "cpu",
+        "status": "persistence_failed",
+        "timed_out": False,
+    }
+    assert len(attempted_events) == 1
+    assert attempted_events[0][0:2] == ("warning", "backend.resource_high")
 
 
 def test_real_test_constructor_failure_removes_private_directory(

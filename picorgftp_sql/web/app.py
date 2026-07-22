@@ -4009,15 +4009,17 @@ def _resource_monitor_context() -> dict[str, int]:
 
 def _emit_resource_event(
     severity: str, event_type: str, details: dict[str, object]
-) -> None:
-    emit_event(
+) -> bool:
+    event = emit_event(
         severity=severity,
         event_type=event_type,
         module="resource_monitor",
         stage="threshold",
         summary="Backend resource threshold exceeded.",
         details=details,
+        strict=True,
     )
+    return bool(event)
 
 
 def _active_clients_log_path() -> Path:
@@ -4888,9 +4890,13 @@ def create_app() -> FastAPI:
         resources = result.get("resources")
         if not isinstance(resources, dict):
             resources = _RESOURCE_MONITOR.latest_public_snapshot()
+        if bool(result.get("ok")):
+            message = "Zapisano bezpieczna symulacje zdarzenia zasobow."
+        else:
+            message = "Nie udalo sie trwale zapisac bezpiecznej symulacji zdarzenia zasobow."
         return {
             "ok": bool(result.get("ok")),
-            "message": "Zapisano bezpieczna symulacje zdarzenia zasobow.",
+            "message": message,
             "resources": resources,
             "test": result,
         }
@@ -4914,6 +4920,8 @@ def create_app() -> FastAPI:
         status = str(result.get("status") or "unknown")
         if bool(result.get("ok")):
             message = "Test zasobow zakonczony: przekroczenie progu wykryte."
+        elif status == "persistence_failed":
+            message = "Test zasobow nie potwierdzil alertu: nie udalo sie trwale zapisac zdarzenia progu."
         elif status == "not_detected":
             message = "Test zasobow zakonczony bez wykrycia przekroczenia progu."
         else:

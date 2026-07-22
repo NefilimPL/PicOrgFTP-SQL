@@ -11959,7 +11959,7 @@ function renderSettingsResourceMonitor() {
   const testNote = document.createElement("p");
   testNote.className = "settings-note wide-field";
   testNote.textContent =
-    "Bezpieczna symulacja tylko zapisuje zdarzenie testowe. Testy rzeczywiste tworza kontrolowane obciazenie CPU, RAM albo dysku i moga trwac okolo 20 sekund.";
+    "Bezpieczna symulacja zapisuje trwale zdarzenie testowe; brak zapisu jest wynikiem niepowodzenia. Testy rzeczywiste tworza kontrolowane obciazenie CPU, RAM albo dysku i moga trwac okolo 20 sekund.";
   const testResult = document.createElement("p");
   testResult.id = "resourceMonitorTestResult";
   testResult.className = "resource-monitor-test-result wide-field";

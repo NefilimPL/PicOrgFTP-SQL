@@ -352,6 +352,7 @@ class _MonitorStub:
         self,
         snapshot: dict[str, object] | None = None,
         *,
+        safe_result: dict[str, object] | None = None,
         real_result: dict[str, object] | None = None,
         real_error: Exception | None = None,
         lifecycle_events: list[str] | None = None,
@@ -359,6 +360,11 @@ class _MonitorStub:
         self.snapshot = snapshot or {
             "host": {"available": True},
             "backend": {"available": True},
+        }
+        self.safe_result = safe_result or {
+            "ok": True,
+            "test_mode": "safe",
+            "resources": self.snapshot,
         }
         self.real_result = real_result or {
             "ok": True,
@@ -383,7 +389,7 @@ class _MonitorStub:
 
     def record_safe_simulation(self) -> dict[str, object]:
         self.safe_calls += 1
-        return {"ok": True, "test_mode": "safe", "resources": self.snapshot}
+        return dict(self.safe_result)
 
     def start_real_test(self, kind: str) -> dict[str, object]:
         self.real_calls.append(kind)
@@ -1545,8 +1551,8 @@ def test_safe_resource_simulation_records_one_labelled_test_event(
     monitor = ResourceMonitor(
         settings_provider=lambda: {},
         context_provider=lambda: {},
-        event_emitter=lambda severity, event_type, details: events.append(
-            (severity, event_type, details)
+        event_emitter=lambda severity, event_type, details: (
+            events.append((severity, event_type, details)) or True
         ),
         readers=object(),
     )
@@ -1566,6 +1572,41 @@ def test_safe_resource_simulation_records_one_labelled_test_event(
     assert len(events) == 1
     assert events[0][0:2] == ("info", "backend.resource_test")
     assert events[0][2]["test_mode"] == "safe"
+
+
+def test_safe_resource_simulation_reports_web_event_persistence_failure(
+    api_environment, monkeypatch
+) -> None:
+    client, _store = api_environment
+    csrf = _login(client)
+    emitted: list[dict[str, object]] = []
+    monitor = ResourceMonitor(
+        settings_provider=lambda: {},
+        context_provider=lambda: {},
+        event_emitter=web_app._emit_resource_event,
+        readers=object(),
+    )
+    monkeypatch.setattr(web_app, "_RESOURCE_MONITOR", monitor)
+
+    def failing_emit_event(**kwargs: object) -> dict[str, object]:
+        emitted.append(dict(kwargs))
+        raise OSError("observability store unavailable")
+
+    monkeypatch.setattr(web_app, "emit_event", failing_emit_event)
+
+    response = client.post(
+        "/api/resource-monitor/simulate-safe",
+        headers={"X-PicOrg-CSRF": csrf},
+        json={},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["test"]["status"] == "persistence_failed"
+    assert "trwale zapisac" in payload["message"].lower()
+    assert len(emitted) == 1
+    assert emitted[0]["strict"] is True
 
 
 def test_real_resource_test_returns_monitor_result_without_direct_event(
@@ -1600,6 +1641,33 @@ def test_real_resource_test_returns_monitor_result_without_direct_event(
     assert payload["resources"] == monitor.snapshot
     assert monitor.real_calls == ["memory"]
     assert direct_events == []
+
+
+def test_real_resource_test_reports_trigger_event_persistence_failure(
+    api_environment, monkeypatch
+) -> None:
+    client, _store = api_environment
+    csrf = _login(client)
+    result = {
+        "ok": False,
+        "kind": "memory",
+        "status": "persistence_failed",
+        "timed_out": False,
+    }
+    monitor = _MonitorStub(real_result=result)
+    monkeypatch.setattr(web_app, "_RESOURCE_MONITOR", monitor)
+
+    response = client.post(
+        "/api/resource-monitor/real-test",
+        headers={"X-PicOrg-CSRF": csrf},
+        json={"kind": "memory"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["test"] == result
+    assert "trwale zapisac" in payload["message"].lower()
 
 
 @pytest.mark.parametrize(

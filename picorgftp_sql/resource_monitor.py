@@ -176,7 +176,7 @@ class ResourceMonitor:
         self,
         settings_provider: Callable[[], Mapping[str, object]],
         context_provider: Callable[[], Mapping[str, object]],
-        event_emitter: Callable[[str, str, dict[str, object]], None],
+        event_emitter: Callable[[str, str, dict[str, object]], bool],
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
         readers: object | None = None,
@@ -205,6 +205,7 @@ class ResourceMonitor:
         self._worker_stop_event: object | None = None
         self._worker_baseline_event: object | None = None
         self._worker_detection_event: object | None = None
+        self._worker_persistence_failed_event: object | None = None
         self._worker_cancel_event: object | None = None
         self._worker_generation: object | None = None
         self._worker_pid: int | None = None
@@ -285,6 +286,7 @@ class ResourceMonitor:
                 sampled_kind,
                 sampled_generation,
                 detection_event,
+                persistence_failed_event,
             ) = sampled_worker
             current_worker_matches_sample = (
                 self._worker_process is sampled_process
@@ -292,6 +294,7 @@ class ResourceMonitor:
                 and self._worker_kind == sampled_kind
                 and self._worker_generation is sampled_generation
                 and self._worker_detection_event is detection_event
+                and self._worker_persistence_failed_event is persistence_failed_event
             )
             if not current_worker_matches_sample:
                 return copy.deepcopy(self._latest)
@@ -308,22 +311,30 @@ class ResourceMonitor:
                 and sampled_generation is not None
                 and detection_event is not None
             )
-            if (
-                same_worker
-                and any(trigger.get("metric") == expected_metric for trigger in triggers)
-            ):
-                try:
-                    detection_event.set()
-                except Exception:
-                    pass
-            details = [self._diagnostic_details(sample, trigger) for trigger in triggers]
+            details = [
+                (
+                    self._diagnostic_details(sample, trigger),
+                    same_worker and trigger.get("metric") == expected_metric,
+                )
+                for trigger in triggers
+            ]
             self._latest = {
                 **copy.deepcopy(sample),
                 "detector": self._detector.public_state(),
             }
             public = copy.deepcopy(self._latest)
-        for diagnostic in details:
-            self._emit("warning", "backend.resource_high", diagnostic)
+        for diagnostic, confirms_real_test in details:
+            persisted = self._emit("warning", "backend.resource_high", diagnostic)
+            if confirms_real_test:
+                self._record_real_test_trigger_persistence(
+                    sampled_process,
+                    sampled_pid,
+                    sampled_kind,
+                    sampled_generation,
+                    detection_event,
+                    persistence_failed_event,
+                    persisted,
+                )
         return public
 
     def record_safe_simulation(self) -> dict[str, object]:
@@ -334,7 +345,13 @@ class ResourceMonitor:
             "observed_at": self._utc_now(),
             "snapshot": snapshot,
         }
-        self._emit("info", "backend.resource_test", details)
+        if not self._emit("info", "backend.resource_test", details):
+            return {
+                "ok": False,
+                "test_mode": "safe",
+                "status": "persistence_failed",
+                "resources": snapshot,
+            }
         return {"ok": True, "test_mode": "safe", "resources": snapshot}
 
     def start_real_test(self, kind: str) -> dict[str, object]:
@@ -355,6 +372,7 @@ class ResourceMonitor:
                 stop_event = multiprocessing.Event()
                 baseline_event = multiprocessing.Event()
                 detection_event = multiprocessing.Event()
+                persistence_failed_event = multiprocessing.Event()
                 cancel_event = multiprocessing.Event()
                 process = multiprocessing.Process(
                     target=_resource_test_worker,
@@ -389,6 +407,7 @@ class ResourceMonitor:
             self._worker_stop_event = stop_event
             self._worker_baseline_event = baseline_event
             self._worker_detection_event = detection_event
+            self._worker_persistence_failed_event = persistence_failed_event
             self._worker_cancel_event = cancel_event
             self._worker_generation = object()
             self._worker_pid = None
@@ -432,7 +451,15 @@ class ResourceMonitor:
                 else:
                     exit_code = getattr(process, "exitcode", None)
                     detected = _event_is_set(detection_event)
-                    if exit_code == 0 and detected:
+                    persistence_failed = _event_is_set(persistence_failed_event)
+                    if exit_code == 0 and persistence_failed:
+                        result = {
+                            "ok": False,
+                            "kind": normalized_kind,
+                            "status": "persistence_failed",
+                            "timed_out": False,
+                        }
+                    elif exit_code == 0 and detected:
                         result = {
                             "ok": True,
                             "kind": normalized_kind,
@@ -508,7 +535,14 @@ class ResourceMonitor:
         self,
     ) -> tuple[
         dict[str, object],
-        tuple[object | None, int | None, str | None, object | None, object | None],
+        tuple[
+            object | None,
+            int | None,
+            str | None,
+            object | None,
+            object | None,
+            object | None,
+        ],
     ]:
         with self._state_lock:
             worker_process = self._worker_process
@@ -517,6 +551,7 @@ class ResourceMonitor:
             worker_generation = self._worker_generation
             baseline_event = self._worker_baseline_event
             detection_event = self._worker_detection_event
+            persistence_failed_event = self._worker_persistence_failed_event
             registered = (
                 worker_process is not None or self._worker_temp_dir is not None
             )
@@ -526,6 +561,7 @@ class ResourceMonitor:
                 worker_kind,
                 worker_generation,
                 detection_event,
+                persistence_failed_event,
             )
         try:
             read_with_baseline = getattr(
@@ -549,6 +585,35 @@ class ResourceMonitor:
         if registered:
             backend["test_worker_kind"] = worker_kind
         return backend, sampled_worker
+
+    def _record_real_test_trigger_persistence(
+        self,
+        sampled_process: object | None,
+        sampled_pid: int | None,
+        sampled_kind: str | None,
+        sampled_generation: object | None,
+        detection_event: object | None,
+        persistence_failed_event: object | None,
+        persisted: bool,
+    ) -> None:
+        with self._state_lock:
+            current_worker_matches_sample = (
+                self._worker_process is sampled_process
+                and self._worker_pid == sampled_pid
+                and self._worker_kind == sampled_kind
+                and self._worker_generation is sampled_generation
+                and self._worker_detection_event is detection_event
+                and self._worker_persistence_failed_event is persistence_failed_event
+            )
+            if not current_worker_matches_sample:
+                return
+            outcome_event = detection_event if persisted else persistence_failed_event
+            if outcome_event is None:
+                return
+            try:
+                outcome_event.set()
+            except Exception:
+                pass
 
     def _diagnostic_details(
         self, sample: Mapping[str, object], trigger: Mapping[str, object]
@@ -669,6 +734,7 @@ class ResourceMonitor:
             self._worker_stop_event = None
             self._worker_baseline_event = None
             self._worker_detection_event = None
+            self._worker_persistence_failed_event = None
             self._worker_cancel_event = None
             self._worker_generation = None
             self._worker_pid = None
@@ -720,11 +786,13 @@ class ResourceMonitor:
         except OSError:
             return False
 
-    def _emit(self, severity: str, event_type: str, details: dict[str, object]) -> None:
+    def _emit(self, severity: str, event_type: str, details: dict[str, object]) -> bool:
         try:
-            self._event_emitter(severity, event_type, copy.deepcopy(details))
+            return self._event_emitter(
+                severity, event_type, copy.deepcopy(details)
+            ) is True
         except Exception:
-            pass
+            return False
 
     def _utc_now(self) -> str:
         return datetime.fromtimestamp(self._wall_clock(), timezone.utc).isoformat().replace(

@@ -97,10 +97,10 @@ Wartość **brak danych** oznacza, że dany licznik nie jest dostępny; dotyczy 
 
 Testy monitora wymagają autoryzacji administracyjnej:
 
-- **Bezpieczna symulacja** nie obciąża zasobów i nie tworzy incydentu. Zapisuje wyłącznie informacyjne zdarzenie testowe z bezpiecznym, bieżącym obrazem metryk i zwraca wynik trybu `safe`.
+- **Bezpieczna symulacja** nie obciąża zasobów i nie tworzy incydentu. Zapisuje wyłącznie informacyjne zdarzenie testowe z bezpiecznym, bieżącym obrazem metryk i zwraca pomyślny wynik trybu `safe` tylko po trwałym zapisie tego zdarzenia. Brak zapisu zwraca `persistence_failed`.
 - **Test rzeczywisty** uruchamia osobno kontrolowane obciążenie CPU, RAM albo dysku. W danej chwili może działać tylko jeden test. Trwa najwyżej około 20 sekund i używa procesu roboczego z twardymi limitami 25% CPU, 256 MiB RAM i 128 MiB danych dyskowych. Wytworzone obciążenie obserwuje normalny, pięciosekundowy próbnik i ocenia ten sam detektor progów co podczas zwykłej pracy. Sam endpoint testowy nie tworzy incydentu. Po każdym wyniku monitor próbuje zatrzymać proces i usunąć katalog `picorg_resource_test_*`; gdy sprzątanie się powiedzie, rejestracja testu jest zwalniana. Wynik `cleanup_failed` oznacza, że monitor zachowuje rezerwację procesu lub katalogu i blokuje następny test rzeczywisty, dopóki późniejsze zatrzymanie lub ponowiona próba sprzątania nie zakończy się powodzeniem. Sprzątanie nie jest więc gwarantowane przy każdym wyniku. Test jest odrzucany, jeżeli skonfigurowanego progu nie można bezpiecznie osiągnąć w tych limitach.
 
-Wynik testu rzeczywistego rozróżnia wykryte przekroczenie, brak wykrycia, błąd uruchomienia lub wykonania, przekroczenie czasu, anulowanie i błąd sprzątania. Wynik **wykryto** oraz alert pojawiają się tylko wtedy, gdy detektor zwykłego próbnika sam zarejestruje rzeczywiste przekroczenie progu backendu w dwie kolejne próbki.
+Wynik testu rzeczywistego rozróżnia wykryte przekroczenie, brak wykrycia, błąd trwałego zapisu zdarzenia (`persistence_failed`), błąd uruchomienia lub wykonania, przekroczenie czasu, anulowanie i błąd sprzątania. Wynik **wykryto** oraz alert pojawiają się tylko wtedy, gdy detektor zwykłego próbnika sam zarejestruje rzeczywiste przekroczenie progu backendu w dwie kolejne próbki i trwale zapisze normalne zdarzenie `backend.resource_high`.
 
 ## Bezpieczeństwo LAN
 

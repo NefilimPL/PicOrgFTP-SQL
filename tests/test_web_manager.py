@@ -2,9 +2,69 @@
 
 from __future__ import annotations
 
+import ast
+import builtins
+import multiprocessing
+from pathlib import Path
+import runpy
+import sys
+import types
 from unittest.mock import patch
 
 from picorgftp_sql import web_manager
+
+
+ROOT = Path(__file__).resolve().parents[1]
+WEB_ENTRYPOINT = ROOT / "PicOrgFTP-SQL-WEB.pyw"
+
+
+def test_web_entrypoint_calls_freeze_support_before_importing_manager() -> None:
+    tree = ast.parse(WEB_ENTRYPOINT.read_text(encoding="utf-8"))
+    freeze_guard = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.If)
+        and any(
+            isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Attribute)
+            and isinstance(child.func.value, ast.Name)
+            and child.func.value.id == "multiprocessing"
+            and child.func.attr == "freeze_support"
+            for child in ast.walk(node)
+        )
+    )
+    manager_import = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "picorgftp_sql.web_manager"
+    )
+
+    assert tree.body.index(freeze_guard) < tree.body.index(manager_import)
+
+
+def test_web_entrypoint_runs_freeze_support_before_loading_manager(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+    fake_manager = types.ModuleType("picorgftp_sql.web_manager")
+    fake_manager.main = lambda: calls.append("main")
+    monkeypatch.setitem(sys.modules, "picorgftp_sql.web_manager", fake_manager)
+    original_import = builtins.__import__
+
+    def track_manager_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "picorgftp_sql.web_manager":
+            calls.append("web_manager_import")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", track_manager_import)
+    monkeypatch.setattr(
+        multiprocessing, "freeze_support", lambda: calls.append("freeze_support")
+    )
+
+    runpy.run_path(str(WEB_ENTRYPOINT), run_name="__main__")
+
+    assert calls == ["freeze_support", "web_manager_import", "main"]
 
 
 class _FakeRoot:
