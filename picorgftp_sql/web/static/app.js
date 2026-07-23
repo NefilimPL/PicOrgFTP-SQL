@@ -5742,11 +5742,9 @@ function renderResourceStatus(resources = {}) {
   if (!resourceStatus || !resourceStatusText) return;
   state.resources = resources && typeof resources === "object" ? resources : {};
   const host = state.resources.host || {};
-  const backend = state.resources.backend || {};
   resourceStatus.hidden = state.settings?.resource_monitor?.show_status === false;
   resourceStatusText.textContent =
-    `System: CPU ${formatPercent(host.cpu_percent)} · RAM ${formatPercent(host.memory_percent)} · DYSK ${formatPercent(host.disk_busy_percent)} · ` +
-    `Backend: CPU ${formatPercent(backend.cpu_percent)} · RAM ${formatPercent(backend.memory_percent)} · I/O ${formatMib(backend.disk_io_bytes_per_second)}/s`;
+    `System: ${formatPercent(host.cpu_percent)}/${formatPercent(host.memory_percent)}/${formatPercent(host.disk_busy_percent)}`;
   resourceStatus.dataset.level = resourceLevel(state.resources.detector || {});
   renderResourceDetails(state.resources);
 }
