@@ -60,23 +60,30 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
-    def test_header_places_program_and_statuses_above_the_photo_location(self) -> None:
+    def test_header_stacks_latency_above_compact_system_status(self) -> None:
         markup = INDEX_HTML.read_text(encoding="utf-8")
         css = (ROOT / "picorgftp_sql" / "web" / "static" / "app.css").read_text(
             encoding="utf-8"
         )
+        source = APP_JS.read_text(encoding="utf-8")
 
-        title_start = markup.index('class="topbar-title-row"')
+        stack_start = markup.index('class="header-status-stack"')
         location_start = markup.index('class="header-location"')
-        self.assertLess(title_start, location_start)
-        self.assertLess(markup.index("PicOrgFTP-SQL Web"), location_start)
-        self.assertLess(markup.index('id="backendHealthStatus"'), location_start)
-        self.assertLess(markup.index('id="resourceStatus"'), location_start)
-        self.assertIn('class="header-observability"', markup)
-        self.assertLess(markup.index('id="backendHealthStatus"'), markup.index('id="resourceStatus"'))
-        self.assertIn(".topbar-title-row", css)
+        stack_source = markup[stack_start:location_start]
+
+        self.assertLess(markup.index("PicOrgFTP-SQL Web"), stack_start)
+        self.assertLess(stack_start, location_start)
+        self.assertLess(
+            stack_source.index('id="backendHealthStatus"'),
+            stack_source.index('id="resourceStatus"'),
+        )
+        self.assertIn(".header-status-stack", css)
         self.assertIn(".header-location #serverInfo", css)
-        self.assertIn("text-overflow: ellipsis", css)
+        self.assertIn("grid-template-columns: minmax(150px, max-content) auto", css)
+        self.assertIn(
+            "`System: ${formatPercent(host.cpu_percent)}/${formatPercent(host.memory_percent)}/${formatPercent(host.disk_busy_percent)}`",
+            source,
+        )
 
     def test_web_ui_uses_the_central_panel_timestamp_formatter(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
