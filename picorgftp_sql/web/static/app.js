@@ -5665,6 +5665,16 @@ function updateBackendHealthStatus(
   renderBackendHealthDetails(components, { serverTime, currentLatencyMs, medianLatencyMs });
 }
 
+function rerenderCachedHealthDetails() {
+  if (!state.lastHealthPayload) return;
+  const health = state.lastHealthPayload;
+  renderBackendHealthDetails(health.components, {
+    currentLatencyMs: health.elapsedMs,
+    medianLatencyMs: health.medianMs,
+    serverTime: health.serverTime,
+  });
+}
+
 function resourceUnavailableText(value, parent = {}) {
   for (const candidate of [value, parent]) {
     if (!candidate || typeof candidate !== "object" || candidate.available !== false) continue;
@@ -8096,15 +8106,7 @@ function rerenderPanelTimestampViews() {
     renderLogs();
   }
   renderResourceStatus(state.resources);
-  if (state.lastHealthPayload) {
-    const health = state.lastHealthPayload;
-    updateBackendHealthStatus(
-      healthLevel(health.medianMs, health.components, health.ok),
-      health.elapsedMs,
-      health.components,
-      { medianLatencyMs: health.medianMs, serverTime: health.serverTime }
-    );
-  }
+  rerenderCachedHealthDetails();
   if (state.backupHistoryItems.length) renderBackupHistory(state.backupHistoryItems);
   if (state.pimcoreHistoryItems.length) renderPimcoreHistory(state.pimcoreHistoryItems);
   renderPimcoreLiveEvents();

@@ -2909,6 +2909,10 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
     previous_entra_identity = ("", "")
     updated_entra_identity = ("", "")
     entra_configuration_changed = False
+    if isinstance(web_display_payload, dict) and "time_zone" in web_display_payload:
+        submitted_time_zone = _text(web_display_payload.get("time_zone"))
+        if submitted_time_zone not in config.available_display_time_zones():
+            raise ValueError("Nieprawidlowa strefa czasowa.")
     if isinstance(email_payload, dict):
         validate_email_rule_recipients(email_payload)
     backup_payload = payload.get("sqlite_backup") if isinstance(payload.get("sqlite_backup"), dict) else None

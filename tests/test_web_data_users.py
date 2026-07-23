@@ -763,6 +763,45 @@ class WebDataUserTests(unittest.TestCase):
         )
         self.assertEqual(updated["web_display"], {"time_zone": "Europe/Warsaw"})
 
+    def test_update_settings_rejects_invalid_time_zone_without_overwriting_saved_value(self) -> None:
+        cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+        cfg["web_display"] = {"time_zone": "Europe/Warsaw"}
+        saved_configs = []
+
+        with (
+            patch.object(web_data.config, "CONFIG", cfg),
+            patch.object(
+                web_data.config,
+                "available_display_time_zones",
+                return_value=["UTC", "Europe/Warsaw"],
+            ),
+            patch.object(
+                web_data,
+                "save_config",
+                side_effect=lambda payload, **_kwargs: saved_configs.append(
+                    json.loads(json.dumps(payload))
+                ),
+            ),
+            patch.object(web_data.config, "initialize_config", return_value=cfg),
+            patch.object(
+                web_data,
+                "settings_snapshot",
+                side_effect=lambda: {"web_display": dict(cfg["web_display"])},
+            ),
+        ):
+            for invalid in ("CEST", "Invalid/Time_Zone"):
+                with self.assertRaisesRegex(ValueError, "strefa czasowa"):
+                    web_data.update_settings({"web_display": {"time_zone": invalid}})
+                self.assertEqual(cfg["web_display"], {"time_zone": "Europe/Warsaw"})
+                self.assertEqual(saved_configs, [])
+
+            updated = web_data.update_settings({"web_display": {"time_zone": "UTC"}})
+
+        self.assertEqual(cfg["web_display"], {"time_zone": "UTC"})
+        self.assertEqual(len(saved_configs), 1)
+        self.assertEqual(saved_configs[0]["web_display"], {"time_zone": "UTC"})
+        self.assertEqual(updated["web_display"], {"time_zone": "UTC"})
+
     def test_update_settings_persists_storage_bootstrap(self) -> None:
         temp_dir = _workspace_temp("web_data_storage_update")
         try:

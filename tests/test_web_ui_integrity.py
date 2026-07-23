@@ -133,6 +133,117 @@ console.log(JSON.stringify({{
         self.assertNotEqual(result["historySeconds"], "Brak danych")
         self.assertRegex(result["historySeconds"], r"12:00:00.*UTC")
 
+    def test_time_zone_rerender_preserves_offline_health_status_and_reformats_details(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        formatter = source[
+            source.index("function selectedPanelTimeZone") : source.index(
+                "const SQLITE_BACKUP_DAYS"
+            )
+        ]
+        normalized_health = source[
+            source.index("const HEALTH_COMPONENT_LABELS") : source.index(
+                "function canonicalHealthTimestamp"
+            )
+        ]
+        health_rendering = source[
+            source.index("function canonicalHealthTimestamp") : source.index(
+                "function resourceUnavailableText"
+            )
+        ]
+        health_level = source[
+            source.index("function healthLevel") : source.index(
+                "function scheduleBackendHealthPoll"
+            )
+        ]
+        health_poll = source[
+            source.index("async function pollBackendHealth") : source.index(
+                "function setBackendHealthDetailsExpanded"
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the browser health rerender contract test")
+        script = f"""
+const state = {{ settings: {{ web_display: {{ time_zone: "UTC" }} }}, lastHealthPayload: null }};
+const backendHealthStatus = {{ dataset: {{}}, textContent: "" }};
+const backendHealthText = {{ textContent: "" }};
+function makeNode() {{
+  return {{
+    dataset: {{}},
+    textContent: "",
+    children: [],
+    append(...items) {{ this.children.push(...items); }},
+  }};
+}}
+const backendHealthDetailsList = {{
+  children: [],
+  replaceChildren(...items) {{ this.children = items; }},
+}};
+const document = {{ hidden: false, createElement: () => makeNode() }};
+const window = {{ clearTimeout: () => {{}}, setTimeout: () => 0 }};
+let healthNow = 0;
+const performance = {{ now: () => (healthNow += 25) }};
+const HEALTH_OFFLINE_FAILURES = 3;
+const HEALTH_CRITICAL_MS = 1000;
+const HEALTH_SLOW_MS = 300;
+let healthFailures = 0;
+let healthPollTimer = 0;
+let healthPollGeneration = 0;
+let healthPollController = null;
+let lastSuccessfulHealthComponents = {{}};
+const healthSamples = [];
+const renderResourceStatus = () => {{}};
+const scheduleBackendHealthPoll = () => {{}};
+{formatter}
+{normalized_health}
+{health_rendering}
+{health_level}
+{health_poll}
+const successfulComponents = {{
+  backend: {{ status: "online", observed_at: "2026-01-15T12:00:00Z" }},
+  sqlite: {{ status: "online", observed_at: "2026-01-15T12:00:00Z" }},
+}};
+const healthResponses = [
+  {{ ok: true, components: successfulComponents, resources: {{}}, time: "2026-01-15T12:00:00Z" }},
+  new Error("offline"),
+  new Error("offline"),
+  new Error("offline"),
+];
+async function requestJson() {{
+  const next = healthResponses.shift();
+  if (next instanceof Error) throw next;
+  return next;
+}}
+(async () => {{
+  await pollBackendHealth();
+  await pollBackendHealth();
+  await pollBackendHealth();
+  await pollBackendHealth();
+  state.settings.web_display.time_zone = "Europe/Warsaw";
+  rerenderCachedHealthDetails();
+  const detailText = backendHealthDetailsList.children
+    .map((item) => item.children.map((child) => child.textContent).join(":"))
+    .join("|");
+  console.log(JSON.stringify({{
+    level: backendHealthStatus.dataset.level,
+    label: backendHealthText.textContent,
+    detailText,
+  }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(result["level"], "offline")
+        self.assertEqual(result["label"], "Offline")
+        self.assertRegex(result["detailText"], r"13:00:00.*CET")
+
     def test_all_visible_panel_timestamps_use_the_central_formatter(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         compact_source = re.sub(r"\s+", " ", source)

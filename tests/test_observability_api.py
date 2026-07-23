@@ -126,6 +126,50 @@ def test_bootstrap_exposes_only_normalized_web_display_shape(api_environment) ->
     assert "must-not-leak" not in json.dumps(response.json())
 
 
+def test_settings_api_rejects_invalid_time_zone_without_replacing_saved_value(
+    api_environment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _store = api_environment
+    config_payload = json.loads(json.dumps(web_app.config.DEFAULT_CONFIG))
+    config_payload["web_display"] = {"time_zone": "Europe/Warsaw"}
+    saved_configs: list[dict[str, object]] = []
+    monkeypatch.setattr(web_app.config, "CONFIG", config_payload)
+    monkeypatch.setattr(
+        web_data,
+        "save_config",
+        lambda payload, **_kwargs: saved_configs.append(json.loads(json.dumps(payload))),
+    )
+    monkeypatch.setattr(web_data.config, "initialize_config", lambda **_kwargs: config_payload)
+    monkeypatch.setattr(
+        web_data,
+        "settings_snapshot",
+        lambda: {"web_display": config_payload["web_display"]},
+    )
+    monkeypatch.setattr(
+        web_app.config,
+        "available_display_time_zones",
+        lambda: ["UTC", "Europe/Warsaw"],
+    )
+    csrf = _login(client)
+
+    valid = client.post(
+        "/api/settings",
+        headers={"X-PicOrg-CSRF": csrf},
+        json={"web_display": {"time_zone": "Europe/Warsaw"}},
+    )
+    invalid = client.post(
+        "/api/settings",
+        headers={"X-PicOrg-CSRF": csrf},
+        json={"web_display": {"time_zone": "CEST"}},
+    )
+
+    assert valid.status_code == 200, valid.text
+    assert invalid.status_code == 400
+    assert config_payload["web_display"] == {"time_zone": "Europe/Warsaw"}
+    assert len(saved_configs) == 1
+    assert saved_configs[0]["web_display"] == {"time_zone": "Europe/Warsaw"}
+
+
 def test_cleanup_process_jobs_preserves_active_and_keeps_newest_completed() -> None:
     now = 10_000.0
     completed_limit = web_app._PROCESS_JOB_MAX_COMPLETED
