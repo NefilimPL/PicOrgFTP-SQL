@@ -14,7 +14,10 @@ import shutil
 import tempfile
 import threading
 import time
+import traceback
 from typing import Callable, Mapping
+
+from .redaction import sanitize_free_text
 
 
 MIB = 1024 * 1024
@@ -99,6 +102,8 @@ class _ResourceAlertDetector:
         backend: Mapping[str, object],
         settings: Mapping[str, object],
         observed_at: str,
+        *,
+        effective_thresholds: Mapping[str, object] | None = None,
     ) -> list[dict[str, object]]:
         triggers: list[dict[str, object]] = []
         for metric, setting, scale in _METRICS:
@@ -108,7 +113,17 @@ class _ResourceAlertDetector:
                 self._high[metric] = 0
                 self._normal[metric] = 0
                 continue
-            threshold = configured * scale
+            configured_threshold = configured * scale
+            effective_threshold = (
+                _number(effective_thresholds.get(metric))
+                if effective_thresholds is not None
+                else None
+            )
+            threshold = (
+                effective_threshold
+                if effective_threshold is not None
+                else configured_threshold
+            )
             if value > threshold:
                 self._normal[metric] = 0
                 self._high[metric] += 1
@@ -118,14 +133,18 @@ class _ResourceAlertDetector:
                 ):
                     self._latched.add(metric)
                     self._last_trigger_at = observed_at
-                    triggers.append(
-                        {
-                            "metric": metric,
-                            "value": value,
-                            "threshold": threshold,
-                            "configured_threshold": configured,
-                        }
-                    )
+                    trigger: dict[str, object] = {
+                        "metric": metric,
+                        "value": value,
+                        "threshold": threshold,
+                        "configured_threshold": configured,
+                    }
+                    if effective_threshold is not None:
+                        trigger.update(
+                            effective_threshold=effective_threshold,
+                            test_mode="real",
+                        )
+                    triggers.append(trigger)
             else:
                 self._high[metric] = 0
                 if metric in self._latched:
@@ -168,9 +187,7 @@ class ResourceMonitor:
     MAX_TEST_DISK_RATE_BYTES_PER_SECOND = MAX_TEST_DISK_BYTES / (
         DISK_TEST_WRITE_SECONDS
     )
-    REAL_TEST_CPU_MARGIN_PERCENT = 1.0
-    REAL_TEST_MEMORY_MARGIN_PERCENT = 0.1
-    REAL_TEST_IO_MARGIN_MIB = 1.0
+    REAL_TEST_TARGET_FRACTION = 0.75
 
     def __init__(
         self,
@@ -180,6 +197,7 @@ class ResourceMonitor:
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
         readers: object | None = None,
+        real_test_failure_reporter: Callable[[str, str], None] | None = None,
     ) -> None:
         self._settings_provider = settings_provider
         self._context_provider = context_provider
@@ -187,6 +205,7 @@ class ResourceMonitor:
         self._clock = clock
         self._wall_clock = wall_clock
         self._readers = readers or _WindowsResourceReaders(clock=clock)
+        self._real_test_failure_reporter = real_test_failure_reporter
         self._detector = _ResourceAlertDetector(self.CONFIRMING_SAMPLES)
         self._history: deque[dict[str, object]] = deque(maxlen=self.HISTORY_SIZE)
         self._latest: dict[str, object] = {
@@ -211,6 +230,8 @@ class ResourceMonitor:
         self._worker_pid: int | None = None
         self._worker_kind: str | None = None
         self._worker_temp_dir: str | None = None
+        self._worker_effective_thresholds: dict[str, float] = {}
+        self._worker_failure_receiver: object | None = None
 
     def start(self) -> bool:
         with self._lifecycle_lock:
@@ -287,6 +308,7 @@ class ResourceMonitor:
                 sampled_generation,
                 detection_event,
                 persistence_failed_event,
+                effective_thresholds,
             ) = sampled_worker
             current_worker_matches_sample = (
                 self._worker_process is sampled_process
@@ -303,13 +325,18 @@ class ResourceMonitor:
                 settings = dict(self._settings_provider())
             except Exception:
                 settings = {}
-            triggers = self._detector.observe(backend, settings, observed_at)
             expected_metric = _REAL_TEST_TRIGGER_METRICS.get(sampled_kind or "")
             same_worker = (
                 sampled_process is not None
                 and sampled_pid is not None
                 and sampled_generation is not None
                 and detection_event is not None
+            )
+            triggers = self._detector.observe(
+                backend,
+                settings,
+                observed_at,
+                effective_thresholds=effective_thresholds if same_worker else None,
             )
             details = [
                 (
@@ -362,10 +389,14 @@ class ResourceMonitor:
         process: object
         temp_dir: str
         launch_failed = False
+        failure_receiver: object | None = None
+        failure_sender: object | None = None
         with self._state_lock:
             if self._worker_process is not None or self._worker_temp_dir is not None:
                 raise RuntimeError("a real resource test is already running")
-            self._validate_real_test_reachable(normalized_kind)
+            effective_thresholds = self._effective_real_test_thresholds(
+                normalized_kind
+            )
             temp_dir = ""
             try:
                 temp_dir = tempfile.mkdtemp(prefix="picorg_resource_test_")
@@ -374,6 +405,7 @@ class ResourceMonitor:
                 detection_event = multiprocessing.Event()
                 persistence_failed_event = multiprocessing.Event()
                 cancel_event = multiprocessing.Event()
+                failure_receiver, failure_sender = multiprocessing.Pipe(duplex=False)
                 process = multiprocessing.Process(
                     target=_resource_test_worker,
                     args=(
@@ -388,10 +420,13 @@ class ResourceMonitor:
                         detection_event,
                         self.DISK_BASELINE_WAIT_SECONDS,
                         max(1, os.cpu_count() or 1),
+                        failure_sender,
                     ),
                     daemon=True,
                 )
             except Exception:
+                _close_worker_connection(failure_receiver)
+                _close_worker_connection(failure_sender)
                 cleanup_ok = self._remove_worker_temp_dir(temp_dir)
                 if not cleanup_ok:
                     self._worker_kind = normalized_kind
@@ -413,6 +448,8 @@ class ResourceMonitor:
             self._worker_pid = None
             self._worker_kind = normalized_kind
             self._worker_temp_dir = temp_dir
+            self._worker_effective_thresholds = effective_thresholds
+            self._worker_failure_receiver = failure_receiver
             self._set_cached_worker_registration_locked(True)
             try:
                 process.start()
@@ -420,6 +457,7 @@ class ResourceMonitor:
                 launch_failed = True
             else:
                 self._worker_pid = getattr(process, "pid", None)
+            _close_worker_connection(failure_sender)
 
         result: dict[str, object] = {
             "ok": False,
@@ -452,7 +490,18 @@ class ResourceMonitor:
                     exit_code = getattr(process, "exitcode", None)
                     detected = _event_is_set(detection_event)
                     persistence_failed = _event_is_set(persistence_failed_event)
-                    if exit_code == 0 and persistence_failed:
+                    failure_report = self._take_worker_failure(process)
+                    if failure_report:
+                        self._report_real_test_worker_failure(
+                            normalized_kind, failure_report
+                        )
+                        result = {
+                            "ok": False,
+                            "kind": normalized_kind,
+                            "status": "failed",
+                            "timed_out": False,
+                        }
+                    elif exit_code == 0 and persistence_failed:
                         result = {
                             "ok": False,
                             "kind": normalized_kind,
@@ -542,6 +591,7 @@ class ResourceMonitor:
             object | None,
             object | None,
             object | None,
+            dict[str, float],
         ],
     ]:
         with self._state_lock:
@@ -552,6 +602,7 @@ class ResourceMonitor:
             baseline_event = self._worker_baseline_event
             detection_event = self._worker_detection_event
             persistence_failed_event = self._worker_persistence_failed_event
+            effective_thresholds = dict(self._worker_effective_thresholds)
             registered = (
                 worker_process is not None or self._worker_temp_dir is not None
             )
@@ -562,6 +613,7 @@ class ResourceMonitor:
                 worker_generation,
                 detection_event,
                 persistence_failed_event,
+                effective_thresholds,
             )
         try:
             read_with_baseline = getattr(
@@ -635,38 +687,56 @@ class ResourceMonitor:
             "test_worker": worker_state,
         }
 
-    def _validate_real_test_reachable(self, kind: str) -> None:
-        settings = dict(self._settings_provider())
+    def _effective_real_test_thresholds(self, kind: str) -> dict[str, float]:
         latest = self._latest
+        backend = latest.get("backend", {})
+        if not isinstance(backend, Mapping):
+            backend = {}
         host = latest.get("host", {})
         if not isinstance(host, Mapping):
             host = {}
-
+        metric = _REAL_TEST_TRIGGER_METRICS[kind]
+        baseline = max(0.0, _number(backend.get(metric)) or 0.0)
         if kind == "cpu":
-            threshold = _number(settings.get("cpu_percent_threshold"))
-            reachable = (
-                threshold is not None
-                and threshold + self.REAL_TEST_CPU_MARGIN_PERCENT
-                <= self.MAX_TEST_CPU_PERCENT
-            )
+            capacity = max(0.0, self.MAX_TEST_CPU_PERCENT - baseline)
         elif kind == "memory":
             total = _number(host.get("memory_total_bytes"))
-            threshold = _number(settings.get("memory_percent_threshold"))
-            added = (self.MAX_TEST_MEMORY_BYTES / total * 100.0) if total else 0.0
-            reachable = (
-                threshold is not None
-                and total is not None
-                and threshold + self.REAL_TEST_MEMORY_MARGIN_PERCENT <= added
-            )
+            if total is None or total <= 0:
+                raise RuntimeError(
+                    "cannot determine system memory for the real memory test"
+                )
+            capacity = self.MAX_TEST_MEMORY_BYTES / total * 100.0
         else:
-            threshold_mib = _number(settings.get("io_mib_per_second_threshold"))
-            maximum_mib = self.MAX_TEST_DISK_RATE_BYTES_PER_SECOND / MIB
-            reachable = (
-                threshold_mib is not None
-                and threshold_mib + self.REAL_TEST_IO_MARGIN_MIB <= maximum_mib
-            )
-        if not reachable:
-            raise ValueError(f"configured {kind} threshold exceeds the real-test hard cap")
+            capacity = self.MAX_TEST_DISK_RATE_BYTES_PER_SECOND
+        return {
+            metric: baseline + capacity * self.REAL_TEST_TARGET_FRACTION,
+        }
+
+    def _take_worker_failure(self, expected_process: object) -> str:
+        with self._state_lock:
+            if self._worker_process is not expected_process:
+                return ""
+            receiver = self._worker_failure_receiver
+        if receiver is None:
+            return ""
+        try:
+            if not bool(receiver.poll()):
+                return ""
+            report = receiver.recv()
+        except Exception:
+            return ""
+        if isinstance(report, Mapping):
+            report = report.get("traceback", "")
+        return sanitize_free_text(report, limit=32 * 1024)
+
+    def _report_real_test_worker_failure(self, kind: str, report: str) -> None:
+        reporter = self._real_test_failure_reporter
+        if reporter is None:
+            return
+        try:
+            reporter(kind, report)
+        except Exception:
+            pass
 
     def _cleanup_registered_worker(
         self,
@@ -680,6 +750,7 @@ class ResourceMonitor:
                 return True
             stop_event = self._worker_stop_event
             cancel_event = self._worker_cancel_event
+            failure_receiver = self._worker_failure_receiver
             temp_dir = self._worker_temp_dir
             if cancelled and cancel_event is not None:
                 try:
@@ -730,6 +801,7 @@ class ResourceMonitor:
                         return False
             if not self._remove_worker_temp_dir(temp_dir):
                 return False
+            _close_worker_connection(failure_receiver)
             self._worker_process = None
             self._worker_stop_event = None
             self._worker_baseline_event = None
@@ -740,6 +812,8 @@ class ResourceMonitor:
             self._worker_pid = None
             self._worker_kind = None
             self._worker_temp_dir = None
+            self._worker_effective_thresholds = {}
+            self._worker_failure_receiver = None
             self._set_cached_worker_registration_locked(False)
             return True
 
@@ -812,6 +886,7 @@ def _resource_test_worker(
     detection_event: object,
     disk_baseline_wait_seconds: float,
     logical_cpus: int,
+    failure_sender: object | None = None,
 ) -> None:
     deadline = time.monotonic() + max(0.0, seconds)
     try:
@@ -830,8 +905,43 @@ def _resource_test_worker(
                 detection_event,
                 disk_baseline_wait_seconds,
             )
+    except Exception as exc:
+        _send_worker_failure(failure_sender, kind, exc)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+        _close_worker_connection(failure_sender)
+
+
+def _send_worker_failure(
+    sender: object | None, kind: str, exc: BaseException
+) -> None:
+    if sender is None:
+        return
+    report = sanitize_free_text(
+        "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        limit=32 * 1024,
+    )
+    try:
+        sender.send(
+            {
+                "kind": str(kind),
+                "exception_type": type(exc).__name__,
+                "traceback": report,
+            }
+        )
+    except Exception:
+        pass
+
+
+def _close_worker_connection(connection: object | None) -> None:
+    if connection is None:
+        return
+    close = getattr(connection, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
 
 
 def _event_is_set(event: object) -> bool:
@@ -936,12 +1046,15 @@ def _run_disk_test(
                     return True
                 piece = chunk if remaining >= len(chunk) else chunk[:remaining]
                 write_at = started_at + (written + len(piece)) / bounded_rate
-                while time.monotonic() < write_at:
+                while True:
+                    remaining_wait = write_at - time.monotonic()
+                    if remaining_wait <= 0:
+                        break
                     if _should_stop(stop_event, deadline):
                         return False
                     if detection_event is not None and _event_is_set(detection_event):
                         return True
-                    time.sleep(min(0.05, write_at - time.monotonic()))
+                    time.sleep(min(0.05, remaining_wait))
                 handle.write(piece)
                 written += len(piece)
                 remaining -= len(piece)

@@ -1698,6 +1698,32 @@ def test_safe_resource_simulation_reports_web_event_persistence_failure(
     assert emitted[0]["strict"] is True
 
 
+def test_real_resource_worker_failure_is_persisted_and_redacted(monkeypatch) -> None:
+    emitted: list[dict[str, object]] = []
+    logged: list[str] = []
+    monkeypatch.setattr(
+        web_app, "emit_event", lambda **kwargs: emitted.append(dict(kwargs)) or {"id": "evt-1"}
+    )
+    monkeypatch.setattr(web_app, "log_error", lambda message: logged.append(message))
+
+    web_app._report_real_test_worker_failure(
+        "disk", "ValueError: password=do-not-leak"
+    )
+
+    assert len(emitted) == 1
+    event = emitted[0]
+    assert event["severity"] == "error"
+    assert event["event_type"] == "backend.resource_test_failed"
+    assert event["module"] == "resource_monitor"
+    assert event["stage"] == "real_test"
+    assert event["details"] == {"test_mode": "real", "kind": "disk"}
+    assert event["strict"] is True
+    assert "do-not-leak" not in str(event["exception"])
+    assert "[REDACTED]" in str(event["exception"])
+    assert len(logged) == 1
+    assert "do-not-leak" not in logged[0]
+
+
 def test_real_resource_test_returns_monitor_result_without_direct_event(
     api_environment, monkeypatch
 ) -> None:
@@ -1763,7 +1789,6 @@ def test_real_resource_test_reports_trigger_event_persistence_failure(
     ("error", "expected_status"),
     [
         (ValueError("unsupported real-test kind"), 400),
-        (ValueError("configured cpu threshold exceeds the real-test hard cap"), 400),
         (RuntimeError("a real resource test is already running"), 409),
     ],
 )

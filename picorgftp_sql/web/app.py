@@ -216,6 +216,9 @@ _RESOURCE_MONITOR = ResourceMonitor(
     event_emitter=lambda severity, event_type, details: _emit_resource_event(
         severity, event_type, details
     ),
+    real_test_failure_reporter=lambda kind, report: _report_real_test_worker_failure(
+        kind, report
+    ),
 )
 RATE_LIMIT_LOGIN_ATTEMPTS = 20
 RATE_LIMIT_LOGIN_WINDOW_SECONDS = 10 * 60
@@ -4020,6 +4023,26 @@ def _emit_resource_event(
         strict=True,
     )
     return bool(event)
+
+
+def _report_real_test_worker_failure(kind: str, report: str) -> None:
+    safe_kind = sanitize_free_text(kind, limit=40)
+    safe_report = sanitize_free_text(report, limit=32 * 1024)
+    error = RuntimeError(safe_report)
+    try:
+        emit_event(
+            severity="error",
+            event_type="backend.resource_test_failed",
+            module="resource_monitor",
+            stage="real_test",
+            summary="Real resource test worker failed.",
+            details={"test_mode": "real", "kind": safe_kind},
+            exception=error,
+            strict=True,
+        )
+    except Exception:
+        pass
+    log_error(f"Real resource test worker failed ({safe_kind}): {safe_report}")
 
 
 def _active_clients_log_path() -> Path:

@@ -456,7 +456,7 @@ def test_ordinary_resource_sampling_remains_nonfatal_when_event_emission_fails(
     assert snapshot["detector"]["latched_metrics"] == ["cpu_percent"]
 
 
-def test_real_cpu_test_rejects_threshold_beyond_hard_cap() -> None:
+def test_real_cpu_test_uses_temporary_threshold_when_production_threshold_exceeds_cap() -> None:
     events: list[tuple[str, str, dict[str, object]]] = []
     monitor = _monitor(
         _ReaderSequence(cpu=[0, 0]),
@@ -465,10 +465,238 @@ def test_real_cpu_test_rejects_threshold_beyond_hard_cap() -> None:
     )
     monitor.sample_once()
 
-    with pytest.raises(ValueError, match="hard cap"):
-        monitor.start_real_test("cpu")
+    assert monitor._effective_real_test_thresholds("cpu") == {
+        "cpu_percent": 18.75,
+    }
+    assert monitor._settings_provider()["cpu_percent_threshold"] == 26
 
-    assert monitor.latest_public_snapshot()["backend"]["test_worker_registered"] is False
+
+@pytest.mark.parametrize("kind", ["cpu", "memory"])
+def test_real_tests_accept_default_production_thresholds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str
+) -> None:
+    from picorgftp_sql import resource_monitor
+
+    class FakeEvent:
+        def is_set(self) -> bool:
+            return False
+
+        def set(self) -> None:
+            return None
+
+    class FakeProcess:
+        pid = 4242
+        exitcode = 0
+
+        def __init__(self, *, target, args, daemon) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+        def close(self) -> None:
+            return None
+
+    monitor = _monitor(
+        _ReaderSequence(
+            cpu=[0],
+            host={
+                "cpu_percent": 15.0,
+                "memory_percent": 84.0,
+                "memory_used_bytes": 13_606 * MIB,
+                "memory_total_bytes": 16_168 * MIB,
+                "disk_busy_percent": 100.0,
+            },
+        ),
+        [],
+    )
+    monitor.sample_once()
+    monkeypatch.setattr(resource_monitor.tempfile, "mkdtemp", lambda **_: str(tmp_path / kind))
+    monkeypatch.setattr(resource_monitor.multiprocessing, "Event", FakeEvent)
+    monkeypatch.setattr(resource_monitor.multiprocessing, "Process", FakeProcess)
+
+    result = monitor.start_real_test(kind)
+
+    assert result == {
+        "ok": False,
+        "kind": kind,
+        "status": "not_detected",
+        "timed_out": False,
+    }
+
+
+def test_real_test_threshold_marks_trigger_without_changing_production_setting() -> None:
+    from picorgftp_sql.resource_monitor import _ResourceAlertDetector
+
+    detector = _ResourceAlertDetector(confirming_samples=2)
+    backend = {"memory_percent": 2.0}
+    settings = {"memory_percent_threshold": 20}
+
+    assert detector.observe(
+        backend,
+        settings,
+        "2026-07-23T08:36:50Z",
+        effective_thresholds={"memory_percent": 1.5},
+    ) == []
+    triggers = detector.observe(
+        backend,
+        settings,
+        "2026-07-23T08:36:55Z",
+        effective_thresholds={"memory_percent": 1.5},
+    )
+
+    assert triggers == [
+        {
+            "metric": "memory_percent",
+            "value": 2.0,
+            "threshold": 1.5,
+            "configured_threshold": 20.0,
+            "effective_threshold": 1.5,
+            "test_mode": "real",
+        }
+    ]
+
+
+def test_disk_worker_skips_sleep_when_clock_passes_write_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from picorgftp_sql import resource_monitor
+
+    class StopEvent:
+        def is_set(self) -> bool:
+            return False
+
+    class FakeFile:
+        def open(self, *_args, **_kwargs):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def write(self, chunk: bytes) -> int:
+            return len(chunk)
+
+        def unlink(self, *, missing_ok: bool = False) -> None:
+            return None
+
+    class FakeRoot:
+        def mkdir(self, **_kwargs) -> None:
+            return None
+
+        def __truediv__(self, _name: str) -> FakeFile:
+            return FakeFile()
+
+    moments = iter((0.0, 0.0, 0.0, 0.0, 0.11))
+    sleeps: list[float] = []
+    monkeypatch.setattr(resource_monitor.time, "monotonic", lambda: next(moments, 0.11))
+    monkeypatch.setattr(resource_monitor.time, "sleep", sleeps.append)
+
+    resource_monitor._run_disk_test(StopEvent(), 1.0, FakeRoot(), 1, 10.0)
+
+    assert not [value for value in sleeps if value <= 0]
+
+
+def test_failed_real_worker_reports_redacted_diagnostics_and_keeps_public_result_safe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from picorgftp_sql import resource_monitor
+
+    class FakeEvent:
+        def is_set(self) -> bool:
+            return False
+
+        def set(self) -> None:
+            return None
+
+    class Receiver:
+        message: object | None = None
+
+        def poll(self) -> bool:
+            return self.message is not None
+
+        def recv(self) -> object:
+            assert self.message is not None
+            return self.message
+
+        def close(self) -> None:
+            return None
+
+    class Sender:
+        def __init__(self, receiver: Receiver) -> None:
+            self.receiver = receiver
+
+        def send(self, message: object) -> None:
+            self.receiver.message = message
+
+        def close(self) -> None:
+            return None
+
+    class FakeProcess:
+        pid = 4243
+        exitcode = 0
+
+        def __init__(self, *, target, args, daemon) -> None:
+            self.target = target
+            self.args = args
+
+        def start(self) -> None:
+            self.target(*self.args)
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+        def close(self) -> None:
+            return None
+
+    receiver = Receiver()
+    reported: list[tuple[str, str]] = []
+    monitor = ResourceMonitor(
+        settings_provider=lambda: dict(SETTINGS),
+        context_provider=lambda: dict(CONTEXT),
+        event_emitter=lambda *_args: True,
+        readers=_ReaderSequence(cpu=[0]),
+        real_test_failure_reporter=lambda kind, report: reported.append((kind, report)),
+    )
+    monitor.sample_once()
+    monkeypatch.setattr(resource_monitor.tempfile, "mkdtemp", lambda **_: str(tmp_path))
+    monkeypatch.setattr(resource_monitor.multiprocessing, "Event", FakeEvent)
+    monkeypatch.setattr(
+        resource_monitor.multiprocessing,
+        "Pipe",
+        lambda **_: (receiver, Sender(receiver)),
+    )
+    monkeypatch.setattr(resource_monitor.multiprocessing, "Process", FakeProcess)
+    monkeypatch.setattr(
+        resource_monitor,
+        "_run_cpu_test",
+        lambda *_args: (_ for _ in ()).throw(ValueError("password=do-not-leak")),
+    )
+
+    result = monitor.start_real_test("cpu")
+
+    assert result == {
+        "ok": False,
+        "kind": "cpu",
+        "status": "failed",
+        "timed_out": False,
+    }
+    assert len(reported) == 1
+    assert reported[0][0] == "cpu"
+    assert "ValueError" in reported[0][1]
+    assert "do-not-leak" not in reported[0][1]
+    assert "[REDACTED]" in reported[0][1]
 
 
 def test_worker_timeout_removes_registration_and_private_directory(
@@ -1418,65 +1646,6 @@ def test_native_backend_reader_marks_any_requested_process_failure_unavailable(
     monkeypatch.setattr(reader, "_read_process", process_values)
 
     assert reader.read_backend(worker_pid) == {"available": False}
-
-
-def test_real_cpu_test_rejects_threshold_exactly_at_hard_cap(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from picorgftp_sql import resource_monitor
-
-    monitor = _monitor(
-        _ReaderSequence(cpu=[0]),
-        [],
-        settings={**SETTINGS, "cpu_percent_threshold": 25},
-    )
-    monitor.sample_once()
-    monkeypatch.setattr(
-        resource_monitor.tempfile,
-        "mkdtemp",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must reject before setup")),
-    )
-
-    with pytest.raises(ValueError, match="hard cap"):
-        monitor.start_real_test("cpu")
-
-
-@pytest.mark.parametrize("kind", ["cpu", "memory", "disk"])
-def test_transient_ambient_load_cannot_admit_unreachable_real_test(
-    monkeypatch: pytest.MonkeyPatch, kind: str
-) -> None:
-    from picorgftp_sql import resource_monitor
-
-    total_memory = 1024 * MIB
-    thresholds: dict[str, object] = {
-        "cpu_percent_threshold": 30,
-        "memory_percent_threshold": 30,
-        "io_mib_per_second_threshold": 12,
-    }
-    readers = _IoReaderSequence(
-        cpu=[90],
-        memory=[90],
-        io=[100 * MIB],
-        host={
-            "cpu_percent": 90,
-            "memory_percent": 90,
-            "memory_used_bytes": int(total_memory * 0.9),
-            "memory_total_bytes": total_memory,
-            "disk_busy_percent": 90,
-        },
-    )
-    monitor = _monitor(readers, [], settings=thresholds)
-    monitor.sample_once()
-    monkeypatch.setattr(
-        resource_monitor.tempfile,
-        "mkdtemp",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("must reject before setup")
-        ),
-    )
-
-    with pytest.raises(ValueError, match="hard cap"):
-        monitor.start_real_test(kind)
 
 
 @pytest.mark.parametrize("kind", ["memory", "disk"])
