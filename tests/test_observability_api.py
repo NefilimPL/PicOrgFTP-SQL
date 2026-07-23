@@ -81,6 +81,35 @@ def _login(client: TestClient, username: str = "admin", password: str = "admin")
     return str(response.json()["csrf_token"])
 
 
+def test_history_details_requires_login(api_environment) -> None:
+    client, _store = api_environment
+
+    assert client.get("/api/history/details?ean=5901").status_code == 401
+
+
+def test_history_details_returns_one_filtered_group(api_environment) -> None:
+    client, _store = api_environment
+    _login(client)
+    web_data.record_history(
+        username="alice",
+        action="save",
+        ean="5901",
+        details={},
+    )
+    web_data.record_history(
+        username="bob",
+        action="save",
+        ean="5901",
+        details={},
+    )
+
+    response = client.get("/api/history/details?ean=5901&user=alice")
+
+    assert response.status_code == 200
+    assert [item["user"] for item in response.json()["items"]] == ["alice"]
+    assert client.get("/api/history/details?ean=missing").status_code == 404
+
+
 def test_time_zone_catalog_requires_admin(api_environment) -> None:
     client, _store = api_environment
 

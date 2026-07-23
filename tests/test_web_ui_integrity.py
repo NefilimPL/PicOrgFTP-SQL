@@ -304,7 +304,7 @@ async function requestJson() {{
             3,
         )
         self.assertIn(
-            'formatPanelTimestamp( group.items?.[0]?.ts || group.items?.[0]?.created_at, { epochUnit: "seconds" } )',
+            'formatPanelTimestamp( group.latest_ts, { epochUnit: "seconds" } )',
             compact_source,
         )
 
@@ -1386,6 +1386,35 @@ async function requestJson() {{
 
         self.assertIn("nested-modal", modal_classes["backupHistoryModal"])
         self.assertIn("nested-modal", modal_classes["backupDiffModal"])
+
+    def test_history_ui_uses_abortable_summary_and_lazy_detail_requests(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        history_start = source.index("async function loadHistory")
+        history_end = source.index("function showHistoryLoadError", history_start)
+        history_source = source[history_start:history_end]
+
+        self.assertIn("historyLoadController?.abort()", history_source)
+        self.assertIn("new AbortController()", history_source)
+        self.assertIn("signal: controller.signal", history_source)
+        self.assertNotIn('limit: "1000"', history_source)
+        self.assertIn("async function loadHistoryDetails", source)
+        self.assertIn("/api/history/details?", source)
+        self.assertIn("group.change_count", source)
+        self.assertIn("group.entry", source)
+        detail_error_start = source.index("function showHistoryDetailLoadError")
+        detail_error_end = source.index("function showHistoryLoadError", detail_error_start)
+        detail_error_handler = source[detail_error_start:detail_error_end]
+        self.assertIn('if (error?.name === "AbortError") return;', detail_error_handler)
+        detail_close_start = source.index("function closeHistoryDetail")
+        detail_close_end = source.index("async function loadHistoryDetails", detail_close_start)
+        detail_close_handler = source[detail_close_start:detail_close_end]
+        self.assertIn("historyDetailsController?.abort()", detail_close_handler)
+        self.assertIn("historyDetailsController = null", detail_close_handler)
+        self.assertIn('classList.remove("active")', detail_close_handler)
+        self.assertIn('button.addEventListener("click", closeHistoryDetail)', source)
+        close_modals_start = source.index("function closeModals()")
+        close_modals_end = source.index("function activeUserLastSeenLabel", close_modals_start)
+        self.assertIn("closeHistoryDetail();", source[close_modals_start:close_modals_end])
 
     def test_history_changes_modal_is_safe_detailed_and_responsive(self) -> None:
         html = _parse(INDEX_HTML)

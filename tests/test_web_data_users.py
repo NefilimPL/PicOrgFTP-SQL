@@ -292,8 +292,8 @@ class WebDataUserTests(unittest.TestCase):
             )
 
         with patch.object(web_data, "_load_history_records", return_value=records):
-            search_payload = web_data.history_snapshot(query="target", page_size=50, limit=1000)
-            page_payload = web_data.history_snapshot(page=2, page_size=80, limit=1000)
+            search_payload = web_data.history_snapshot(query="target", page_size=50)
+            page_payload = web_data.history_snapshot(page=2, page_size=80)
 
         self.assertEqual(search_payload["total_groups"], 1)
         self.assertEqual(search_payload["groups"][0]["ean"], "590000000010")
@@ -301,6 +301,51 @@ class WebDataUserTests(unittest.TestCase):
         self.assertEqual(page_payload["page"], 2)
         self.assertEqual(page_payload["total_pages"], 2)
         self.assertEqual(len(page_payload["groups"]), 10)
+
+    def test_history_snapshot_returns_paged_summaries_after_one_load(self) -> None:
+        records = [
+            {
+                "ts": 1000 - index,
+                "ean": f"5900000000{index:02}",
+                "user": "alice" if index % 2 else "bob",
+                "details": {
+                    "entry": {"NAZWA": f"Name {index}"},
+                    "timing": {"stages": ["large"]},
+                },
+            }
+            for index in range(60)
+        ]
+        loader = Mock(return_value=records)
+
+        with patch.object(web_data, "_load_history_records", loader):
+            payload = web_data.history_snapshot(page=2, page_size=50)
+
+        self.assertEqual(loader.call_count, 1)
+        self.assertEqual(payload["page"], 2)
+        self.assertEqual(len(payload["groups"]), 10)
+        self.assertEqual(
+            set(payload["groups"][0]),
+            {"ean", "latest_ts", "change_count", "entry"},
+        )
+        self.assertNotIn("items", payload["groups"][0])
+
+    def test_history_group_snapshot_returns_only_filtered_ean_items(self) -> None:
+        records = [
+            {
+                "ean": "5901",
+                "user": "alice",
+                "ts": 2,
+                "details": {"entry": {"NAZWA": "A"}},
+            },
+            {"ean": "5901", "user": "bob", "ts": 1, "details": {}},
+            {"ean": "5902", "user": "alice", "ts": 3, "details": {}},
+        ]
+
+        with patch.object(web_data, "_load_history_records", return_value=records):
+            payload = web_data.history_group_snapshot(ean="5901", user="alice")
+
+        self.assertEqual(payload["ean"], "5901")
+        self.assertEqual([item["user"] for item in payload["items"]], ["alice"])
 
     def test_ftp_cache_dir_can_be_scoped_per_user_session(self) -> None:
         temp_dir = _workspace_temp("web_data_ftp_cache_scope")

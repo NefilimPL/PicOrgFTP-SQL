@@ -179,6 +179,8 @@ let healthDetailsPinned = false;
 let healthDetailsPointerInside = false;
 let resourceDetailsPinned = false;
 let resourceDetailsPointerInside = false;
+let historyLoadController = null;
+let historyDetailsController = null;
 const resourceMonitorTestState = {
   pending: false,
   message: "Nie uruchomiono testu monitora.",
@@ -805,6 +807,7 @@ function openGithubStatusModal() {
 function closeModals() {
   stopObservabilityStream();
   closeHistoryChangesModal({ restoreFocus: false });
+  closeHistoryDetail();
   document.querySelectorAll(".modal-view").forEach((modal) => modal.classList.remove("active"));
   if (logsClearPassword) logsClearPassword.value = "";
   if (logsClearStatus) logsClearStatus.textContent = "";
@@ -4367,6 +4370,9 @@ async function loadRecentProcessJobs() {
 }
 
 function entryFromHistoryGroup(group) {
+  if (group.entry && typeof group.entry === "object") {
+    return group.entry;
+  }
   for (const item of group.items || []) {
     if (item.details?.entry) return item.details.entry;
   }
@@ -4979,17 +4985,52 @@ function renderHistory(payload) {
     title.textContent = `EAN ${group.ean}`;
     const readableFields = historyEntryLabel(entry);
     fields.textContent = readableFields || "Brak danych pol tekstowych";
-    meta.textContent = `${(group.items || []).length} zmian | ostatnio: ${formatPanelTimestamp(
-      group.items?.[0]?.ts || group.items?.[0]?.created_at,
+    meta.textContent = `${Number(group.change_count || 0)} zmian | ostatnio: ${formatPanelTimestamp(
+      group.latest_ts,
       { epochUnit: "seconds" }
     )}`;
     row.append(title, fields, meta);
-    row.addEventListener("click", () => renderHistoryDetails(group));
+    row.addEventListener("click", () => {
+      loadHistoryDetails(group).catch(showHistoryDetailLoadError);
+    });
     historyOutput.appendChild(row);
   }
 }
 
+function closeHistoryDetail() {
+  historyDetailsController?.abort();
+  historyDetailsController = null;
+  document.querySelector("#historyDetailModal")?.classList.remove("active");
+}
+
+async function loadHistoryDetails(group) {
+  historyDetailsController?.abort();
+  const controller = new AbortController();
+  historyDetailsController = controller;
+  historyDetailTitle.textContent = `Historia EAN ${group.ean}`;
+  historyDetailOutput.className = "history-detail-output empty-state";
+  historyDetailOutput.textContent = "Wczytywanie szczegolow historii...";
+  document.querySelector("#historyDetailModal")?.classList.add("active");
+  const params = new URLSearchParams({
+    ean: group.ean || "",
+    user: historyUserFilter?.value || "",
+    query: historySearchInput?.value || "",
+  });
+  try {
+    const payload = await requestJson(`/api/history/details?${params.toString()}`, {
+      signal: controller.signal,
+    });
+    if (controller.signal.aborted || historyDetailsController !== controller) return;
+    renderHistoryDetails(payload);
+  } finally {
+    if (historyDetailsController === controller) historyDetailsController = null;
+  }
+}
+
 async function loadHistory(options = {}) {
+  historyLoadController?.abort();
+  const controller = new AbortController();
+  historyLoadController = controller;
   const page = Math.max(1, Number(options.page || state.historyPage || 1));
   state.historyPage = page;
   const params = new URLSearchParams({
@@ -4997,13 +5038,31 @@ async function loadHistory(options = {}) {
     query: historySearchInput?.value || "",
     page: String(page),
     page_size: String(state.historyPageSize || 50),
-    limit: "1000",
   });
-  const payload = await requestJson(`/api/history?${params.toString()}`);
-  renderHistory(payload);
+  try {
+    const payload = await requestJson(`/api/history?${params.toString()}`, {
+      signal: controller.signal,
+    });
+    if (controller.signal.aborted || historyLoadController !== controller) return;
+    renderHistory(payload);
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    throw error;
+  } finally {
+    if (historyLoadController === controller) historyLoadController = null;
+  }
+}
+
+function showHistoryDetailLoadError(error) {
+  if (error?.name === "AbortError") return;
+  if (historyDetailOutput) {
+    historyDetailOutput.className = "history-detail-output empty-state";
+    historyDetailOutput.textContent = error.message;
+  }
 }
 
 function showHistoryLoadError(error) {
+  if (error?.name === "AbortError") return;
   if (historyOutput) {
     historyOutput.className = "history-output empty-state";
     historyOutput.textContent = error.message;
@@ -12378,9 +12437,7 @@ document.querySelectorAll("[data-close-github-status]").forEach((button) => {
 });
 
 document.querySelectorAll("[data-close-history-detail]").forEach((button) => {
-  button.addEventListener("click", () => {
-    document.querySelector("#historyDetailModal")?.classList.remove("active");
-  });
+  button.addEventListener("click", closeHistoryDetail);
 });
 
 document.querySelectorAll("[data-close-history-timing]").forEach((button) => {
