@@ -166,27 +166,50 @@ h2 {
 
 .topbar-brand {
   display: grid;
-  grid-template-columns: auto minmax(150px, max-content) minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-items: center;
+  gap: 3px 12px;
+  flex: 1 1 520px;
+  min-width: 0;
+}
+
+.github-status-button {
+  grid-row: 1 / span 2;
+}
+
+.topbar-title-row {
+  display: grid;
+  grid-template-columns: minmax(150px, max-content) minmax(0, 1fr);
   align-items: center;
   gap: 12px;
   min-width: 0;
 }
 
 .topbar-brand-info {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 1px;
   min-width: 0;
 }
 
-.header-meta {
-  display: grid;
-  min-width: 0;
-  gap: 1px;
+.topbar-brand-info strong {
+  white-space: nowrap;
 }
 
-.header-meta span {
+.topbar-brand-info #versionInfo {
+  color: var(--accent-strong);
+  font-size: 12px;
+}
+
+.header-location {
+  grid-column: 2;
   min-width: 0;
-  margin-top: 0;
+}
+
+.header-location #serverInfo {
+  display: block;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3606,8 +3629,12 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
     width: 100%;
   }
 
+  .topbar-title-row {
+    grid-template-columns: minmax(150px, max-content) minmax(0, 1fr);
+  }
+
   .header-observability {
-    grid-column: 2;
+    grid-column: auto;
     flex-wrap: wrap;
     justify-content: flex-start;
   }
@@ -3675,6 +3702,23 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
     grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
     width: 100%;
     margin-left: 0;
+  }
+
+  .topbar-brand,
+  .topbar-title-row {
+    width: 100%;
+  }
+
+  .topbar-title-row {
+    grid-template-columns: 1fr;
+  }
+
+  .header-observability {
+    justify-content: flex-start;
+  }
+
+  .resource-status {
+    max-width: 100%;
   }
 
   .active-users-presence {

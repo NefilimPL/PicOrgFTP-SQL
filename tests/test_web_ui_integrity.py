@@ -60,12 +60,23 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
-    def test_compact_header_keeps_health_and_resource_indicators_in_one_right_group(self) -> None:
+    def test_header_places_program_and_statuses_above_the_photo_location(self) -> None:
         markup = INDEX_HTML.read_text(encoding="utf-8")
+        css = (ROOT / "picorgftp_sql" / "web" / "static" / "app.css").read_text(
+            encoding="utf-8"
+        )
 
-        self.assertIn('class="header-meta"', markup)
+        title_start = markup.index('class="topbar-title-row"')
+        location_start = markup.index('class="header-location"')
+        self.assertLess(title_start, location_start)
+        self.assertLess(markup.index("PicOrgFTP-SQL Web"), location_start)
+        self.assertLess(markup.index('id="backendHealthStatus"'), location_start)
+        self.assertLess(markup.index('id="resourceStatus"'), location_start)
         self.assertIn('class="header-observability"', markup)
         self.assertLess(markup.index('id="backendHealthStatus"'), markup.index('id="resourceStatus"'))
+        self.assertIn(".topbar-title-row", css)
+        self.assertIn(".header-location #serverInfo", css)
+        self.assertIn("text-overflow: ellipsis", css)
 
     def test_web_ui_uses_the_central_panel_timestamp_formatter(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
