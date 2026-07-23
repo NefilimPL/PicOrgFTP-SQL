@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 import os
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -15,6 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from picorgftp_sql import data_store, web_data
+from picorgftp_sql.resource_monitor import ResourceMonitor
 from picorgftp_sql.sqlite_store import SqliteStore
 from picorgftp_sql.web import app as web_app
 
@@ -46,6 +49,8 @@ def _event(
 def api_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     previous_auth = os.environ.get("PICORG_WEB_AUTH")
     os.environ["PICORG_WEB_AUTH"] = "1"
+    with web_app._RATE_LIMITS_LOCK:
+        web_app._RATE_LIMITS.clear()
     database_path = tmp_path / "app.sqlite"
     monkeypatch.setattr(web_app.settings, "AC", str(tmp_path))
     monkeypatch.setattr(
@@ -57,6 +62,8 @@ def api_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     client = TestClient(web_app.app)
     yield client, store
     client.close()
+    with web_app._RATE_LIMITS_LOCK:
+        web_app._RATE_LIMITS.clear()
     data_store.reset_active_store_cache()
     if previous_auth is None:
         os.environ.pop("PICORG_WEB_AUTH", None)
@@ -72,6 +79,423 @@ def _login(client: TestClient, username: str = "admin", password: str = "admin")
     )
     assert response.status_code == 200
     return str(response.json()["csrf_token"])
+
+
+def test_time_zone_catalog_requires_admin(api_environment) -> None:
+    client, _store = api_environment
+
+    assert client.get("/api/settings/time-zones").status_code == 401
+
+    web_data.add_user("operator", "secret", "user")
+    _login(client, "operator", "secret")
+    assert client.get("/api/settings/time-zones").status_code == 403
+
+    _login(client)
+    response = client.get("/api/settings/time-zones")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload) == {"time_zones"}
+    time_zones = payload["time_zones"]
+    assert time_zones[0] == "UTC"
+    assert time_zones.count("UTC") == 1
+    assert time_zones[1:] == sorted(time_zones[1:])
+    assert len(time_zones) == len(set(time_zones))
+    assert all(isinstance(value, str) and value for value in time_zones)
+    assert "Europe/Warsaw" in time_zones
+
+
+def test_bootstrap_exposes_only_normalized_web_display_shape(api_environment) -> None:
+    client, _store = api_environment
+    _login(client)
+    untrusted_display = {
+        "time_zone": " Europe/Warsaw ",
+        "password": "must-not-leak",
+        "api_token": "must-not-leak",
+    }
+
+    with patch.dict(
+        web_app.config.CONFIG,
+        {"web_display": untrusted_display},
+        clear=False,
+    ):
+        response = client.get("/api/bootstrap")
+
+    assert response.status_code == 200
+    assert response.json()["web_display"] == {"time_zone": "Europe/Warsaw"}
+    assert "must-not-leak" not in json.dumps(response.json())
+
+
+def test_settings_api_rejects_invalid_time_zone_without_replacing_saved_value(
+    api_environment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _store = api_environment
+    config_payload = json.loads(json.dumps(web_app.config.DEFAULT_CONFIG))
+    config_payload["web_display"] = {"time_zone": "Europe/Warsaw"}
+    saved_configs: list[dict[str, object]] = []
+    monkeypatch.setattr(web_app.config, "CONFIG", config_payload)
+    monkeypatch.setattr(
+        web_data,
+        "save_config",
+        lambda payload, **_kwargs: saved_configs.append(json.loads(json.dumps(payload))),
+    )
+    monkeypatch.setattr(web_data.config, "initialize_config", lambda **_kwargs: config_payload)
+    monkeypatch.setattr(
+        web_data,
+        "settings_snapshot",
+        lambda: {"web_display": config_payload["web_display"]},
+    )
+    monkeypatch.setattr(
+        web_app.config,
+        "available_display_time_zones",
+        lambda: ["UTC", "Europe/Warsaw"],
+    )
+    csrf = _login(client)
+
+    valid = client.post(
+        "/api/settings",
+        headers={"X-PicOrg-CSRF": csrf},
+        json={"web_display": {"time_zone": "Europe/Warsaw"}},
+    )
+    invalid = client.post(
+        "/api/settings",
+        headers={"X-PicOrg-CSRF": csrf},
+        json={"web_display": {"time_zone": "CEST"}},
+    )
+
+    assert valid.status_code == 200, valid.text
+    assert invalid.status_code == 400
+    assert config_payload["web_display"] == {"time_zone": "Europe/Warsaw"}
+    assert len(saved_configs) == 1
+    assert saved_configs[0]["web_display"] == {"time_zone": "Europe/Warsaw"}
+
+
+def test_cleanup_process_jobs_preserves_active_and_keeps_newest_completed() -> None:
+    now = 10_000.0
+    completed_limit = web_app._PROCESS_JOB_MAX_COMPLETED
+    jobs = {
+        f"completed-{index}": {
+            "id": f"completed-{index}",
+            "status": "completed",
+            "finished_at": now - index,
+        }
+        for index in range(completed_limit + 2)
+    }
+    jobs["expired"] = {
+        "id": "expired",
+        "status": "failed",
+        "finished_at": now - web_app._PROCESS_JOB_RETENTION_SECONDS - 1,
+    }
+    jobs["queued"] = {"id": "queued", "status": "queued", "created_at": 1.0}
+    with web_app._PROCESS_JOBS_LOCK:
+        previous = dict(web_app._PROCESS_JOBS)
+        web_app._PROCESS_JOBS.clear()
+        web_app._PROCESS_JOBS.update(jobs)
+    try:
+        web_app._cleanup_process_jobs(now=now)
+
+        with web_app._PROCESS_JOBS_LOCK:
+            retained = dict(web_app._PROCESS_JOBS)
+        completed_ids = {
+            job_id for job_id, job in retained.items() if job.get("status") == "completed"
+        }
+        assert retained["queued"]["status"] == "queued"
+        assert "expired" not in retained
+        assert len(completed_ids) == completed_limit
+        assert "completed-0" in completed_ids
+        assert f"completed-{completed_limit + 1}" not in completed_ids
+    finally:
+        with web_app._PROCESS_JOBS_LOCK:
+            web_app._PROCESS_JOBS.clear()
+            web_app._PROCESS_JOBS.update(previous)
+
+
+def test_process_job_completion_transitions_bound_resident_terminal_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed_limit = web_app._PROCESS_JOB_MAX_COMPLETED
+    job_count = completed_limit + 4
+    jobs = {
+        f"job-{index}": {
+            "id": f"job-{index}",
+            "status": "queued",
+            "username": "admin",
+            "cache_scope": "scope",
+            "form": index,
+            "created_at": float(index + 1),
+            "started_at": 0.0,
+            "finished_at": 0.0,
+            "progress": 0,
+        }
+        for index in range(job_count)
+    }
+    jobs["still-queued"] = {
+        "id": "still-queued",
+        "status": "queued",
+        "created_at": 0.0,
+    }
+    ticks = iter(float(value) for value in range(10_000, 20_000))
+    monkeypatch.setattr(web_app.time, "time", lambda: next(ticks))
+
+    def process_snapshot(**kwargs):
+        if int(kwargs["form"]) % 2:
+            raise RuntimeError("expected failure")
+        return {}
+
+    monkeypatch.setattr(web_app, "_process_upload_snapshot", process_snapshot)
+    monkeypatch.setattr(web_app, "_persist_process_job", lambda _job: None)
+    monkeypatch.setattr(web_app, "_emit_process_completed", lambda *_args: None)
+    monkeypatch.setattr(web_app, "_emit_process_failed", lambda *_args, **_kwargs: None)
+    with web_app._PROCESS_JOBS_LOCK:
+        previous = dict(web_app._PROCESS_JOBS)
+        web_app._PROCESS_JOBS.clear()
+        web_app._PROCESS_JOBS.update(jobs)
+    try:
+        for index in range(job_count):
+            web_app._run_process_job(f"job-{index}")
+
+        with web_app._PROCESS_JOBS_LOCK:
+            resident = dict(web_app._PROCESS_JOBS)
+        terminal = [
+            job
+            for job in resident.values()
+            if job.get("status") in {"completed", "failed"}
+        ]
+        assert resident["still-queued"]["status"] == "queued"
+        assert len(terminal) <= completed_limit
+        assert len(resident) <= completed_limit + 1
+        assert {job["status"] for job in terminal} == {"completed", "failed"}
+    finally:
+        with web_app._PROCESS_JOBS_LOCK:
+            web_app._PROCESS_JOBS.clear()
+            web_app._PROCESS_JOBS.update(previous)
+
+
+def test_upload_scan_results_prune_missing_and_expired_entries(tmp_path: Path) -> None:
+    now = 20_000.0 + web_app.WEB_UPLOAD_CACHE_MAX_AGE_SECONDS
+    fresh_path = tmp_path / "fresh.jpg"
+    expired_path = tmp_path / "expired.jpg"
+    missing_path = tmp_path / "missing.jpg"
+    fresh_path.write_bytes(b"fresh")
+    expired_path.write_bytes(b"expired")
+    with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+        previous = dict(web_app._UPLOAD_SCAN_RESULTS)
+        web_app._UPLOAD_SCAN_RESULTS.clear()
+        web_app._UPLOAD_SCAN_RESULTS.update(
+            {
+                str(fresh_path.resolve()): {"scanned": True, "_cached_at": now},
+                str(expired_path.resolve()): {
+                    "scanned": True,
+                    "_cached_at": now - web_app.WEB_UPLOAD_CACHE_MAX_AGE_SECONDS - 1,
+                },
+                str(missing_path.resolve()): {"scanned": True, "_cached_at": now},
+            }
+        )
+    try:
+        web_app._prune_upload_scan_results(now=now)
+
+        with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+            retained = dict(web_app._UPLOAD_SCAN_RESULTS)
+        assert set(retained) == {str(fresh_path.resolve())}
+    finally:
+        with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+            web_app._UPLOAD_SCAN_RESULTS.clear()
+            web_app._UPLOAD_SCAN_RESULTS.update(previous)
+
+
+def test_upload_scan_result_copy_survives_source_replacement(tmp_path: Path) -> None:
+    source_path = tmp_path / "source.jpg"
+    target_path = tmp_path / "source_processed.jpg"
+    target_path.write_bytes(b"processed")
+    with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+        previous = dict(web_app._UPLOAD_SCAN_RESULTS)
+        web_app._UPLOAD_SCAN_RESULTS.clear()
+        web_app._UPLOAD_SCAN_RESULTS[str(source_path.resolve())] = {
+            "enabled": True,
+            "scanned": True,
+            "_cached_at": 1.0,
+        }
+    try:
+        web_app._copy_upload_scan_result(str(source_path), str(target_path))
+
+        result = web_app._upload_scan_result(str(target_path))
+        assert result == {"enabled": True, "scanned": True}
+        with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+            assert str(source_path.resolve()) not in web_app._UPLOAD_SCAN_RESULTS
+    finally:
+        with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+            web_app._UPLOAD_SCAN_RESULTS.clear()
+            web_app._UPLOAD_SCAN_RESULTS.update(previous)
+
+
+def test_preprocess_upload_scan_handoff_survives_prune_between_source_and_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handoff = getattr(web_app, "_preprocess_cached_upload_with_scan_result", None)
+    assert callable(handoff)
+    source_path = tmp_path / "source.jpg"
+    target_path = tmp_path / "source_processed.jpg"
+    source_path.write_bytes(b"source")
+    source_removed = threading.Event()
+    source_pruned = threading.Event()
+
+    def preprocess(path: str, display_name: str, _options):
+        assert os.path.abspath(path) == os.path.abspath(source_path)
+        target_path.write_bytes(b"processed")
+        source_path.unlink()
+        source_removed.set()
+        assert source_pruned.wait(timeout=2)
+        return str(target_path), display_name, True
+
+    monkeypatch.setattr(web_app, "preprocess_cached_upload", preprocess)
+    with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+        previous = dict(web_app._UPLOAD_SCAN_RESULTS)
+        web_app._UPLOAD_SCAN_RESULTS.clear()
+        web_app._UPLOAD_SCAN_RESULTS[str(source_path.resolve())] = {
+            "enabled": True,
+            "scanned": True,
+            "scanner": "Microsoft Defender",
+            "_cached_at": 1.0,
+        }
+
+    def prune_removed_source() -> None:
+        assert source_removed.wait(timeout=2)
+        web_app._prune_upload_scan_results()
+        with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+            assert str(source_path.resolve()) not in web_app._UPLOAD_SCAN_RESULTS
+        source_pruned.set()
+
+    pruner = threading.Thread(target=prune_removed_source, daemon=True)
+    try:
+        pruner.start()
+        result_path, result_name, preprocessed = asyncio.run(
+            handoff(str(source_path), "source.jpg", object())
+        )
+        pruner.join(timeout=2)
+
+        assert not pruner.is_alive()
+        assert (result_path, result_name, preprocessed) == (
+            str(target_path),
+            "source.jpg",
+            True,
+        )
+        assert web_app._upload_scan_result(str(target_path)) == {
+            "enabled": True,
+            "scanned": True,
+            "scanner": "Microsoft Defender",
+        }
+        with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+            cached = dict(web_app._UPLOAD_SCAN_RESULTS[str(target_path.resolve())])
+        assert float(cached["_cached_at"]) > 1.0
+    finally:
+        source_pruned.set()
+        pruner.join(timeout=2)
+        with web_app._UPLOAD_SCAN_RESULTS_LOCK:
+            web_app._UPLOAD_SCAN_RESULTS.clear()
+            web_app._UPLOAD_SCAN_RESULTS.update(previous)
+
+
+def test_upload_routes_use_preprocess_scan_handoff_for_both_path_families() -> None:
+    source = inspect.getsource(web_app.create_app)
+    normal_start = source.index("async def upload_cache_api")
+    normal_end = source.index("def browser_extension_ping_api", normal_start)
+    extension_start = source.index("async def browser_extension_upload_cache_api")
+    extension_end = source.index("async def web_images_scan_api", extension_start)
+
+    for body in (
+        source[normal_start:normal_end],
+        source[extension_start:extension_end],
+    ):
+        assert "await _preprocess_cached_upload_with_scan_result(" in body
+        assert "preprocess_cached_upload," not in body
+        assert "_copy_upload_scan_result(" not in body
+
+
+def test_rate_limit_cleanup_prunes_only_expired_key_lists() -> None:
+    now = 30_000.0
+    with web_app._RATE_LIMITS_LOCK:
+        previous = dict(web_app._RATE_LIMITS)
+        web_app._RATE_LIMITS.clear()
+        web_app._RATE_LIMITS.update(
+            {
+                "login|expired": [now - web_app.RATE_LIMIT_LOGIN_WINDOW_SECONDS - 1],
+                "login|fresh": [now - 1],
+                "upload|expired": [now - web_app.RATE_LIMIT_UPLOAD_WINDOW_SECONDS - 1],
+            }
+        )
+    try:
+        web_app._prune_rate_limits(now=now)
+
+        with web_app._RATE_LIMITS_LOCK:
+            retained = dict(web_app._RATE_LIMITS)
+        assert retained == {"login|fresh": [now - 1]}
+    finally:
+        with web_app._RATE_LIMITS_LOCK:
+            web_app._RATE_LIMITS.clear()
+            web_app._RATE_LIMITS.update(previous)
+
+
+class _MonitorStub:
+    def __init__(
+        self,
+        snapshot: dict[str, object] | None = None,
+        *,
+        safe_result: dict[str, object] | None = None,
+        real_result: dict[str, object] | None = None,
+        real_error: Exception | None = None,
+        lifecycle_events: list[str] | None = None,
+    ) -> None:
+        self.snapshot = snapshot or {
+            "host": {"available": True},
+            "backend": {"available": True},
+        }
+        self.safe_result = safe_result or {
+            "ok": True,
+            "test_mode": "safe",
+            "resources": self.snapshot,
+        }
+        self.real_result = real_result or {
+            "ok": True,
+            "kind": "cpu",
+            "status": "detected",
+            "timed_out": False,
+        }
+        self.real_error = real_error
+        self.lifecycle_events = lifecycle_events
+        self.sample_calls = 0
+        self.safe_calls = 0
+        self.real_calls: list[str] = []
+        self.start_calls = 0
+        self.stop_calls = 0
+
+    def latest_public_snapshot(self) -> dict[str, object]:
+        return self.snapshot
+
+    def sample_once(self) -> dict[str, object]:
+        self.sample_calls += 1
+        return self.snapshot
+
+    def record_safe_simulation(self) -> dict[str, object]:
+        self.safe_calls += 1
+        return dict(self.safe_result)
+
+    def start_real_test(self, kind: str) -> dict[str, object]:
+        self.real_calls.append(kind)
+        if self.real_error is not None:
+            raise self.real_error
+        return dict(self.real_result)
+
+    def start(self) -> bool:
+        self.start_calls += 1
+        if self.lifecycle_events is not None:
+            self.lifecycle_events.append("monitor.start")
+        return True
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+        if self.lifecycle_events is not None:
+            self.lifecycle_events.append("monitor.stop")
 
 
 def test_entra_expiry_endpoints_require_admin_csrf_and_return_only_public_status(
@@ -1138,6 +1562,286 @@ def test_health_reports_local_components_and_last_known_integrations(
     )
     assert "password" not in response.text.lower()
     assert "private" not in response.text.lower()
+
+
+def test_health_returns_cached_resource_projection_without_sampling(
+    api_environment, monkeypatch
+) -> None:
+    client, _store = api_environment
+    _login(client)
+    monitor = _MonitorStub(
+        {"host": {"cpu_percent": 60}, "backend": {"cpu_percent": 4}}
+    )
+    monkeypatch.setattr(web_app, "_RESOURCE_MONITOR", monitor)
+
+    payload = client.get("/api/health").json()
+
+    assert payload["resources"]["backend"]["cpu_percent"] == 4
+    assert monitor.sample_calls == 0
+
+
+def test_health_remains_available_with_cached_unavailable_resource_metrics(
+    api_environment, monkeypatch
+) -> None:
+    client, _store = api_environment
+    monitor = _MonitorStub(
+        {
+            "host": {"available": False, "reason": "counter unavailable"},
+            "backend": {"available": False},
+        }
+    )
+    monkeypatch.setattr(web_app, "_RESOURCE_MONITOR", monitor)
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json()["resources"] == monitor.snapshot
+    assert monitor.sample_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/api/resource-monitor/simulate-safe", {}),
+        ("/api/resource-monitor/real-test", {"kind": "cpu"}),
+    ],
+)
+def test_resource_monitor_endpoints_require_admin_and_csrf(
+    api_environment, monkeypatch, path: str, body: dict[str, object]
+) -> None:
+    client, _store = api_environment
+    monitor = _MonitorStub()
+    monkeypatch.setattr(web_app, "_RESOURCE_MONITOR", monitor)
+
+    assert client.post(path, json=body).status_code == 401
+    admin_csrf = _login(client)
+    assert client.post(path, json=body).status_code == 403
+    client.cookies.clear()
+    web_data.add_user("operator", "secret", "user")
+    operator_csrf = _login(client, "operator", "secret")
+    forbidden = client.post(
+        path,
+        headers={"X-PicOrg-CSRF": operator_csrf},
+        json=body,
+    )
+
+    assert forbidden.status_code == 403
+    assert admin_csrf
+    assert monitor.safe_calls == 0
+    assert monitor.real_calls == []
+
+
+def test_safe_resource_simulation_records_one_labelled_test_event(
+    api_environment, monkeypatch
+) -> None:
+    client, _store = api_environment
+    csrf = _login(client)
+    events: list[tuple[str, str, dict[str, object]]] = []
+    monitor = ResourceMonitor(
+        settings_provider=lambda: {},
+        context_provider=lambda: {},
+        event_emitter=lambda severity, event_type, details: (
+            events.append((severity, event_type, details)) or True
+        ),
+        readers=object(),
+    )
+    monkeypatch.setattr(web_app, "_RESOURCE_MONITOR", monitor)
+
+    response = client.post(
+        "/api/resource-monitor/simulate-safe",
+        headers={"X-PicOrg-CSRF": csrf},
+        json={},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload) == {"ok", "message", "resources", "test"}
+    assert payload["ok"] is True
+    assert payload["test"]["test_mode"] == "safe"
+    assert len(events) == 1
+    assert events[0][0:2] == ("info", "backend.resource_test")
+    assert events[0][2]["test_mode"] == "safe"
+
+
+def test_safe_resource_simulation_reports_web_event_persistence_failure(
+    api_environment, monkeypatch
+) -> None:
+    client, _store = api_environment
+    csrf = _login(client)
+    emitted: list[dict[str, object]] = []
+    monitor = ResourceMonitor(
+        settings_provider=lambda: {},
+        context_provider=lambda: {},
+        event_emitter=web_app._emit_resource_event,
+        readers=object(),
+    )
+    monkeypatch.setattr(web_app, "_RESOURCE_MONITOR", monitor)
+
+    def failing_emit_event(**kwargs: object) -> dict[str, object]:
+        emitted.append(dict(kwargs))
+        raise OSError("observability store unavailable")
+
+    monkeypatch.setattr(web_app, "emit_event", failing_emit_event)
+
+    response = client.post(
+        "/api/resource-monitor/simulate-safe",
+        headers={"X-PicOrg-CSRF": csrf},
+        json={},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["test"]["status"] == "persistence_failed"
+    assert "trwale zapisac" in payload["message"].lower()
+    assert len(emitted) == 1
+    assert emitted[0]["strict"] is True
+
+
+def test_real_resource_worker_failure_is_persisted_and_redacted(monkeypatch) -> None:
+    emitted: list[dict[str, object]] = []
+    logged: list[str] = []
+    monkeypatch.setattr(
+        web_app, "emit_event", lambda **kwargs: emitted.append(dict(kwargs)) or {"id": "evt-1"}
+    )
+    monkeypatch.setattr(web_app, "log_error", lambda message: logged.append(message))
+
+    web_app._report_real_test_worker_failure(
+        "disk", "ValueError: password=do-not-leak"
+    )
+
+    assert len(emitted) == 1
+    event = emitted[0]
+    assert event["severity"] == "error"
+    assert event["event_type"] == "backend.resource_test_failed"
+    assert event["module"] == "resource_monitor"
+    assert event["stage"] == "real_test"
+    assert event["details"] == {"test_mode": "real", "kind": "disk"}
+    assert event["strict"] is True
+    assert "do-not-leak" not in str(event["exception"])
+    assert "[REDACTED]" in str(event["exception"])
+    assert len(logged) == 1
+    assert "do-not-leak" not in logged[0]
+
+
+def test_real_resource_test_returns_monitor_result_without_direct_event(
+    api_environment, monkeypatch
+) -> None:
+    client, _store = api_environment
+    csrf = _login(client)
+    result = {
+        "ok": True,
+        "kind": "memory",
+        "status": "detected",
+        "timed_out": False,
+    }
+    monitor = _MonitorStub(real_result=result)
+    monkeypatch.setattr(web_app, "_RESOURCE_MONITOR", monitor)
+    direct_events: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        web_app, "emit_event", lambda **kwargs: direct_events.append(kwargs)
+    )
+
+    response = client.post(
+        "/api/resource-monitor/real-test",
+        headers={"X-PicOrg-CSRF": csrf},
+        json={"kind": "memory"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload) == {"ok", "message", "resources", "test"}
+    assert payload["ok"] is True
+    assert payload["test"] == result
+    assert payload["resources"] == monitor.snapshot
+    assert monitor.real_calls == ["memory"]
+    assert direct_events == []
+
+
+def test_real_resource_test_reports_trigger_event_persistence_failure(
+    api_environment, monkeypatch
+) -> None:
+    client, _store = api_environment
+    csrf = _login(client)
+    result = {
+        "ok": False,
+        "kind": "memory",
+        "status": "persistence_failed",
+        "timed_out": False,
+    }
+    monitor = _MonitorStub(real_result=result)
+    monkeypatch.setattr(web_app, "_RESOURCE_MONITOR", monitor)
+
+    response = client.post(
+        "/api/resource-monitor/real-test",
+        headers={"X-PicOrg-CSRF": csrf},
+        json={"kind": "memory"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["test"] == result
+    assert "trwale zapisac" in payload["message"].lower()
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status"),
+    [
+        (ValueError("unsupported real-test kind"), 400),
+        (RuntimeError("a real resource test is already running"), 409),
+    ],
+)
+def test_real_resource_test_maps_monitor_rejections_to_safe_http_statuses(
+    api_environment, monkeypatch, error: Exception, expected_status: int
+) -> None:
+    client, _store = api_environment
+    csrf = _login(client)
+    monitor = _MonitorStub(real_error=error)
+    monkeypatch.setattr(web_app, "_RESOURCE_MONITOR", monitor)
+
+    response = client.post(
+        "/api/resource-monitor/real-test",
+        headers={"X-PicOrg-CSRF": csrf},
+        json={"kind": "cpu"},
+    )
+
+    assert response.status_code == expected_status
+    assert monitor.real_calls == ["cpu"]
+
+
+def test_resource_monitor_lifecycle_runs_once_and_in_runtime_order(monkeypatch) -> None:
+    lifecycle_events: list[str] = []
+    monitor = _MonitorStub(lifecycle_events=lifecycle_events)
+    monkeypatch.setattr(web_app, "_RESOURCE_MONITOR", monitor)
+    monkeypatch.setattr(
+        web_app,
+        "initialize_application_runtime",
+        lambda **_kwargs: lifecycle_events.append("runtime.initialize") or {},
+    )
+    monkeypatch.setattr(web_app, "cleanup_web_ftp_cache", lambda **_kwargs: None)
+    monkeypatch.setattr(web_app, "cleanup_web_upload_cache", lambda **_kwargs: None)
+    monkeypatch.setattr(web_app, "_prune_live_events_if_due", lambda **_kwargs: None)
+    monkeypatch.setattr(web_app, "_start_backup_scheduler", lambda: None)
+    monkeypatch.setattr(web_app, "_stop_backup_scheduler", lambda: None)
+    monkeypatch.setattr(web_app, "start_notification_worker", lambda: None)
+    monkeypatch.setattr(
+        web_app,
+        "stop_notification_worker",
+        lambda: lifecycle_events.append("notification.stop"),
+    )
+
+    with TestClient(web_app.create_app()):
+        pass
+
+    assert monitor.start_calls == 1
+    assert monitor.stop_calls == 1
+    assert lifecycle_events.index("runtime.initialize") < lifecycle_events.index(
+        "monitor.start"
+    )
+    assert lifecycle_events.index("monitor.stop") < lifecycle_events.index(
+        "notification.stop"
+    )
 
 
 def test_health_is_critical_when_job_processor_is_shutdown_even_if_storage_is_online(

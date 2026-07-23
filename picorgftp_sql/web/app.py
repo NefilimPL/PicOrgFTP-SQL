@@ -45,6 +45,7 @@ from ..common import (
     N,
     P,
     PROCESSING_SETTINGS_KEY,
+    RESOURCE_MONITOR_SETTINGS_KEY,
     SECURITY_SETTINGS_KEY,
     SQL_AVAILABLE_COLUMNS_KEY,
     SQL_COLUMN_MAP_KEY,
@@ -71,6 +72,7 @@ from ..observability import (
     record_job,
 )
 from ..redaction import redact_sensitive_value, sanitize_free_text
+from ..resource_monitor import ResourceMonitor
 from ..notification_service import (
     notification_worker_health,
     send_test_message,
@@ -182,6 +184,8 @@ _UPLOAD_CACHE_LAST_CLEANUP = 0.0
 _BROWSER_EXTENSION_IMPORTS: Dict[str, List[Dict[str, Any]]] = {}
 _BROWSER_EXTENSION_IMPORTS_LOCK = threading.Lock()
 _PROCESS_JOB_RETENTION_SECONDS = 6 * 60 * 60
+# Active work is never discarded; only the newest terminal jobs stay in memory.
+_PROCESS_JOB_MAX_COMPLETED = 200
 _PROCESS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="picorg-process")
 _PROCESS_JOBS: Dict[str, Dict[str, Any]] = {}
 _PROCESS_JOBS_LOCK = threading.Lock()
@@ -206,6 +210,16 @@ _HEALTH_INTEGRATION_CACHE: Dict[str, Any] | None = None
 _HEALTH_STORE_CACHE_LOCK = threading.Lock()
 _HEALTH_STORE_CACHE_PATH = ""
 _HEALTH_STORE_CACHE: Any = None
+_RESOURCE_MONITOR = ResourceMonitor(
+    settings_provider=lambda: config.CONFIG.get(RESOURCE_MONITOR_SETTINGS_KEY, {}),
+    context_provider=lambda: _resource_monitor_context(),
+    event_emitter=lambda severity, event_type, details: _emit_resource_event(
+        severity, event_type, details
+    ),
+    real_test_failure_reporter=lambda kind, report: _report_real_test_worker_failure(
+        kind, report
+    ),
+)
 RATE_LIMIT_LOGIN_ATTEMPTS = 20
 RATE_LIMIT_LOGIN_WINDOW_SECONDS = 10 * 60
 RATE_LIMIT_UPLOAD_ATTEMPTS = 80
@@ -672,6 +686,7 @@ def _check_rate_limit(request: Request) -> None:
     remote = _request_remote_address(request) or "unknown"
     key = f"{scope}|{remote}"
     cutoff = now - window
+    _prune_rate_limits(now=now)
     with _RATE_LIMITS_LOCK:
         attempts = [item for item in _RATE_LIMITS.get(key, []) if item >= cutoff]
         if len(attempts) >= limit:
@@ -683,6 +698,24 @@ def _check_rate_limit(request: Request) -> None:
             )
         attempts.append(now)
         _RATE_LIMITS[key] = attempts
+
+
+def _prune_rate_limits(now: Optional[float] = None) -> None:
+    current = time.time() if now is None else float(now)
+    windows = {
+        "login": RATE_LIMIT_LOGIN_WINDOW_SECONDS,
+        "upload": RATE_LIMIT_UPLOAD_WINDOW_SECONDS,
+    }
+    fallback_window = max(windows.values())
+    with _RATE_LIMITS_LOCK:
+        for key, timestamps in list(_RATE_LIMITS.items()):
+            scope = str(key).split("|", 1)[0]
+            cutoff = current - windows.get(scope, fallback_window)
+            retained = [timestamp for timestamp in timestamps if timestamp >= cutoff]
+            if retained:
+                _RATE_LIMITS[key] = retained
+            else:
+                _RATE_LIMITS.pop(key, None)
 
 
 def _extension_bearer_token(request: Request) -> str:
@@ -1104,25 +1137,75 @@ def _defender_scan_executable() -> str:
     return ""
 
 
+def _prune_upload_scan_results(now: Optional[float] = None) -> None:
+    cutoff = (
+        time.time() if now is None else float(now)
+    ) - WEB_UPLOAD_CACHE_MAX_AGE_SECONDS
+    with _UPLOAD_SCAN_RESULTS_LOCK:
+        for path, result in list(_UPLOAD_SCAN_RESULTS.items()):
+            try:
+                cached_at = float(result.get("_cached_at") or 0)
+            except (TypeError, ValueError):
+                cached_at = 0
+            if not os.path.isfile(path) or cached_at < cutoff:
+                _UPLOAD_SCAN_RESULTS.pop(path, None)
+
+
 def _remember_upload_scan_result(path: str, result: Dict[str, Any]) -> None:
     if not path:
         return
+    _prune_upload_scan_results()
+    cached_result = dict(result)
+    cached_result["_cached_at"] = time.time()
     with _UPLOAD_SCAN_RESULTS_LOCK:
-        _UPLOAD_SCAN_RESULTS[os.path.abspath(path)] = dict(result)
+        _UPLOAD_SCAN_RESULTS[os.path.abspath(path)] = cached_result
+
+
+def _snapshot_upload_scan_result(path: str) -> Dict[str, Any]:
+    if not path:
+        return {}
+    with _UPLOAD_SCAN_RESULTS_LOCK:
+        return dict(_UPLOAD_SCAN_RESULTS.get(os.path.abspath(path)) or {})
+
+
+def _publish_upload_scan_result(path: str, result: Dict[str, Any]) -> None:
+    if path and result:
+        cached_result = dict(result)
+        cached_result["_cached_at"] = time.time()
+        with _UPLOAD_SCAN_RESULTS_LOCK:
+            _UPLOAD_SCAN_RESULTS[os.path.abspath(path)] = cached_result
+    _prune_upload_scan_results()
 
 
 def _copy_upload_scan_result(source_path: str, target_path: str) -> None:
     if not source_path or not target_path:
         return
-    with _UPLOAD_SCAN_RESULTS_LOCK:
-        result = _UPLOAD_SCAN_RESULTS.get(os.path.abspath(source_path))
-        if result:
-            _UPLOAD_SCAN_RESULTS[os.path.abspath(target_path)] = dict(result)
+    result = _snapshot_upload_scan_result(source_path)
+    _publish_upload_scan_result(target_path, result)
+
+
+async def _preprocess_cached_upload_with_scan_result(
+    path: str,
+    display_name: str,
+    options: Any,
+) -> tuple[str, str, bool]:
+    scan_result = _snapshot_upload_scan_result(path)
+    target_path, target_name, preprocessed = await run_in_threadpool(
+        preprocess_cached_upload,
+        path,
+        display_name,
+        options,
+    )
+    _publish_upload_scan_result(target_path, scan_result)
+    return target_path, target_name, preprocessed
 
 
 def _upload_scan_result(path: str) -> Dict[str, Any]:
+    _prune_upload_scan_results()
     with _UPLOAD_SCAN_RESULTS_LOCK:
-        return dict(_UPLOAD_SCAN_RESULTS.get(os.path.abspath(path)) or {})
+        result = dict(_UPLOAD_SCAN_RESULTS.get(os.path.abspath(path)) or {})
+    result.pop("_cached_at", None)
+    return result
 
 
 def _uploaded_scan_summary(uploaded_slots: List[WebUploadedSlot]) -> Dict[str, Any]:
@@ -3492,14 +3575,30 @@ def _result_severity(payload: Dict[str, Any]) -> str:
     return "info"
 
 
-def _cleanup_process_jobs(now: Optional[float] = None) -> None:
+def _cleanup_process_jobs_locked(now: Optional[float] = None) -> None:
     cutoff = (time.time() if now is None else now) - _PROCESS_JOB_RETENTION_SECONDS
+    terminal_jobs: List[tuple[str, Dict[str, Any]]] = []
+    for job_id, job in list(_PROCESS_JOBS.items()):
+        if job.get("status") not in {"completed", "failed"}:
+            continue
+        if float(job.get("finished_at") or 0) < cutoff:
+            _PROCESS_JOBS.pop(job_id, None)
+            continue
+        terminal_jobs.append((job_id, job))
+    terminal_jobs.sort(
+        key=lambda item: (
+            float(item[1].get("finished_at") or 0),
+            float(item[1].get("created_at") or 0),
+        ),
+        reverse=True,
+    )
+    for job_id, _job in terminal_jobs[_PROCESS_JOB_MAX_COMPLETED:]:
+        _PROCESS_JOBS.pop(job_id, None)
+
+
+def _cleanup_process_jobs(now: Optional[float] = None) -> None:
     with _PROCESS_JOBS_LOCK:
-        for job_id, job in list(_PROCESS_JOBS.items()):
-            if job.get("status") not in {"completed", "failed"}:
-                continue
-            if float(job.get("finished_at") or 0) < cutoff:
-                _PROCESS_JOBS.pop(job_id, None)
+        _cleanup_process_jobs_locked(now=now)
 
 
 def _process_job_payload(job: Dict[str, Any], *, include_result: bool = True) -> Dict[str, Any]:
@@ -3820,6 +3919,7 @@ def _run_process_job(job_id: str) -> None:
             if not job:
                 return
             warning_messages = _finish_process_job_success(job, payload)
+            _cleanup_process_jobs_locked(now=float(job["finished_at"]))
             durable_job = dict(job)
         _persist_process_job(durable_job)
         _emit_process_completed(durable_job, payload, warning_messages)
@@ -3829,6 +3929,7 @@ def _run_process_job(job_id: str) -> None:
             if not job:
                 return
             message, status_code, severity = _finish_process_job_failure(job, exc)
+            _cleanup_process_jobs_locked(now=float(job["finished_at"]))
             durable_job = dict(job)
         _persist_process_job(durable_job)
         _emit_process_failed(
@@ -3896,6 +3997,52 @@ def _active_process_jobs_snapshot() -> Dict[str, Any]:
         "queued_count": len(queued),
         "server_time": now,
     }
+
+
+def _resource_monitor_context() -> dict[str, int]:
+    active = _active_process_jobs_snapshot()
+    with _ACTIVE_CLIENTS_LOCK:
+        active_clients = len(_ACTIVE_CLIENTS)
+    return {
+        "active_jobs": int(active["active_count"]),
+        "queued_jobs": int(active["queued_count"]),
+        "active_clients": active_clients,
+    }
+
+
+def _emit_resource_event(
+    severity: str, event_type: str, details: dict[str, object]
+) -> bool:
+    event = emit_event(
+        severity=severity,
+        event_type=event_type,
+        module="resource_monitor",
+        stage="threshold",
+        summary="Backend resource threshold exceeded.",
+        details=details,
+        strict=True,
+    )
+    return bool(event)
+
+
+def _report_real_test_worker_failure(kind: str, report: str) -> None:
+    safe_kind = sanitize_free_text(kind, limit=40)
+    safe_report = sanitize_free_text(report, limit=32 * 1024)
+    error = RuntimeError(safe_report)
+    try:
+        emit_event(
+            severity="error",
+            event_type="backend.resource_test_failed",
+            module="resource_monitor",
+            stage="real_test",
+            summary="Real resource test worker failed.",
+            details={"test_mode": "real", "kind": safe_kind},
+            exception=error,
+            strict=True,
+        )
+    except Exception:
+        pass
+    log_error(f"Real resource test worker failed ({safe_kind}): {safe_report}")
 
 
 def _active_clients_log_path() -> Path:
@@ -4062,7 +4209,6 @@ def _active_presence_payload(
             continue
         by_username[username] = {
             "username": username,
-            "last_seen": str(client.get("last_seen") or ""),
             "last_seen_epoch": last_seen_epoch,
         }
     users = sorted(
@@ -4502,6 +4648,7 @@ def _health_payload() -> Dict[str, Any]:
         "time": server_time,
         "components": components,
         "integrations": integrations,
+        "resources": _RESOURCE_MONITOR.latest_public_snapshot(),
     }
 
 
@@ -4736,6 +4883,7 @@ def create_app() -> FastAPI:
         os.environ.setdefault("PICORGFTP_SQL_HEADLESS", "1")
         runtime_info = initialize_application_runtime(interactive=False)
         app.state.runtime_info = runtime_info
+        _RESOURCE_MONITOR.start()
         cleanup_web_ftp_cache(force=True)
         cleanup_web_upload_cache(force=True)
         try:
@@ -4747,6 +4895,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
+        _RESOURCE_MONITOR.stop()
         stop_notification_worker()
         _stop_backup_scheduler()
         with _ACTIVE_CLIENTS_LOCK:
@@ -4755,6 +4904,56 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health() -> Dict[str, Any]:
         return _health_payload()
+
+    @app.post("/api/resource-monitor/simulate-safe")
+    def resource_monitor_simulate_safe(request: Request) -> Dict[str, Any]:
+        _require_admin(request)
+        result = dict(_RESOURCE_MONITOR.record_safe_simulation())
+        resources = result.get("resources")
+        if not isinstance(resources, dict):
+            resources = _RESOURCE_MONITOR.latest_public_snapshot()
+        if bool(result.get("ok")):
+            message = "Zapisano bezpieczna symulacje zdarzenia zasobow."
+        else:
+            message = "Nie udalo sie trwale zapisac bezpiecznej symulacji zdarzenia zasobow."
+        return {
+            "ok": bool(result.get("ok")),
+            "message": message,
+            "resources": resources,
+            "test": result,
+        }
+
+    @app.post("/api/resource-monitor/real-test")
+    async def resource_monitor_real_test(request: Request) -> Dict[str, Any]:
+        _require_admin(request)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        kind = str(payload.get("kind") or "") if isinstance(payload, dict) else ""
+        try:
+            result = dict(
+                await run_in_threadpool(_RESOURCE_MONITOR.start_real_test, kind)
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        status = str(result.get("status") or "unknown")
+        if bool(result.get("ok")):
+            message = "Test zasobow zakonczony: przekroczenie progu wykryte."
+        elif status == "persistence_failed":
+            message = "Test zasobow nie potwierdzil alertu: nie udalo sie trwale zapisac zdarzenia progu."
+        elif status == "not_detected":
+            message = "Test zasobow zakonczony bez wykrycia przekroczenia progu."
+        else:
+            message = f"Test zasobow zakonczony ze statusem: {status}."
+        return {
+            "ok": bool(result.get("ok")),
+            "message": message,
+            "resources": _RESOURCE_MONITOR.latest_public_snapshot(),
+            "test": result,
+        }
 
     @app.get("/")
     def index(request: Request) -> Response:
@@ -4857,6 +5056,9 @@ def create_app() -> FastAPI:
             "auto_content_fit": bool(config.CONFIG.get(AUTO_CONTENT_FIT_KEY, False)),
             "processing": _processing_settings(),
             "security": _security_settings(),
+            "web_display": config.normalize_web_display_settings(
+                config.CONFIG.get("web_display", {})
+            ),
             "runtime_warning": runtime_info.get("warning"),
             "slots": slots,
             "admin_user": _admin_username(),
@@ -5223,14 +5425,11 @@ def create_app() -> FastAPI:
         display_name = _safe_upload_name(saved_cache.name or original_name, os.path.basename(path))
         if _upload_processing_mode() == "host":
             preprocess_started = time.perf_counter()
-            original_scan_path = path
-            path, display_name, preprocessed = await run_in_threadpool(
-                preprocess_cached_upload,
+            path, display_name, preprocessed = await _preprocess_cached_upload_with_scan_result(
                 path,
                 display_name,
                 processing_options_from_config(config.CONFIG),
             )
-            _copy_upload_scan_result(original_scan_path, path)
             preprocess_ms = _elapsed_ms(preprocess_started)
             try:
                 size = os.path.getsize(path)
@@ -5318,14 +5517,11 @@ def create_app() -> FastAPI:
         display_name = _safe_upload_name(saved_cache.name or original_name, os.path.basename(path))
         if _upload_processing_mode() == "host":
             preprocess_started = time.perf_counter()
-            original_scan_path = path
-            path, display_name, preprocessed = await run_in_threadpool(
-                preprocess_cached_upload,
+            path, display_name, preprocessed = await _preprocess_cached_upload_with_scan_result(
                 path,
                 display_name,
                 processing_options_from_config(config.CONFIG),
             )
-            _copy_upload_scan_result(original_scan_path, path)
             preprocess_ms = _elapsed_ms(preprocess_started)
             try:
                 size = os.path.getsize(path)
@@ -5592,6 +5788,11 @@ def create_app() -> FastAPI:
         payload = settings_snapshot()
         payload["current_user"] = user
         return payload
+
+    @app.get("/api/settings/time-zones")
+    def settings_time_zones(request: Request) -> Dict[str, List[str]]:
+        _require_admin(request)
+        return {"time_zones": config.available_display_time_zones()}
 
     @app.post("/api/settings")
     async def settings_save(request: Request) -> JSONResponse:

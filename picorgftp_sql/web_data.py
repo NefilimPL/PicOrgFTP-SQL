@@ -35,7 +35,9 @@ from .common import (
     N,
     P,
     PROCESSING_SETTINGS_KEY,
+    RESOURCE_MONITOR_SETTINGS_KEY,
     SECURITY_SETTINGS_KEY,
+    WEB_DISPLAY_SETTINGS_KEY,
     SQL_AVAILABLE_COLUMNS_KEY,
     SQL_COLUMN_MAP_KEY,
     SLOT_DEFS_KEY,
@@ -438,11 +440,7 @@ def file_index_status(*, start: bool = False) -> dict[str, object]:
     if state == "refreshing":
         label = "Indeksowanie lokalnych plikow..."
     elif generated_at:
-        if generated_ts is not None:
-            readable = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(generated_ts))
-        else:
-            readable = generated_at
-        label = f"Indeks lokalny: {readable}"
+        label = "Indeks lokalny"
     elif status.get("cache_loaded"):
         label = "Indeks lokalny: cache wczytany."
     else:
@@ -2899,12 +2897,22 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
     ftp_payload = payload.get("ftp") if isinstance(payload.get("ftp"), dict) else {}
     db_payload = payload.get("database") if isinstance(payload.get("database"), dict) else {}
     processing_payload = payload.get("processing") if isinstance(payload.get("processing"), dict) else {}
+    resource_monitor_payload = (
+        payload.get(RESOURCE_MONITOR_SETTINGS_KEY)
+        if isinstance(payload.get(RESOURCE_MONITOR_SETTINGS_KEY), dict)
+        else {}
+    )
     security_payload = payload.get("security") if isinstance(payload.get("security"), dict) else {}
+    web_display_payload = payload.get(WEB_DISPLAY_SETTINGS_KEY)
     pimcore_payload = payload.get(PIMCORE_SETTINGS_KEY)
     email_payload = payload.get(EMAIL_SETTINGS_KEY)
     previous_entra_identity = ("", "")
     updated_entra_identity = ("", "")
     entra_configuration_changed = False
+    if isinstance(web_display_payload, dict) and "time_zone" in web_display_payload:
+        submitted_time_zone = _text(web_display_payload.get("time_zone"))
+        if submitted_time_zone not in config.available_display_time_zones():
+            raise ValueError("Nieprawidlowa strefa czasowa.")
     if isinstance(email_payload, dict):
         validate_email_rule_recipients(email_payload)
     backup_payload = payload.get("sqlite_backup") if isinstance(payload.get("sqlite_backup"), dict) else None
@@ -2959,10 +2967,28 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
         merged_processing.update(processing_payload)
         cfg[PROCESSING_SETTINGS_KEY] = config._normalize_processing_settings(merged_processing)
 
+    if resource_monitor_payload:
+        merged_resource_monitor = config._normalize_resource_monitor_settings(
+            cfg.get(RESOURCE_MONITOR_SETTINGS_KEY, {})
+        )
+        merged_resource_monitor.update(resource_monitor_payload)
+        cfg[RESOURCE_MONITOR_SETTINGS_KEY] = config._normalize_resource_monitor_settings(
+            merged_resource_monitor
+        )
+
     if security_payload:
         merged_security = dict(cfg.get(SECURITY_SETTINGS_KEY, {}) or {})
         merged_security.update(security_payload)
         cfg[SECURITY_SETTINGS_KEY] = config._normalize_security_settings(merged_security)
+
+    if isinstance(web_display_payload, dict):
+        merged_web_display = config.normalize_web_display_settings(
+            cfg.get(WEB_DISPLAY_SETTINGS_KEY, {})
+        )
+        merged_web_display.update(web_display_payload)
+        cfg[WEB_DISPLAY_SETTINGS_KEY] = config.normalize_web_display_settings(
+            merged_web_display
+        )
 
     if isinstance(pimcore_payload, dict):
         if "field_mappings" in pimcore_payload:
@@ -3139,8 +3165,14 @@ def settings_snapshot() -> dict[str, object]:
         "processing": config._normalize_processing_settings(
             cfg.get(PROCESSING_SETTINGS_KEY, {})
         ),
+        RESOURCE_MONITOR_SETTINGS_KEY: config._normalize_resource_monitor_settings(
+            cfg.get(RESOURCE_MONITOR_SETTINGS_KEY, {})
+        ),
         "security": config._normalize_security_settings(
             cfg.get(SECURITY_SETTINGS_KEY, {})
+        ),
+        WEB_DISPLAY_SETTINGS_KEY: config.normalize_web_display_settings(
+            cfg.get(WEB_DISPLAY_SETTINGS_KEY, {})
         ),
         "processing_formats": available_convert_formats(),
         "ftp": {

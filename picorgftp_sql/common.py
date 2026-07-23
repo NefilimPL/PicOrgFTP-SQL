@@ -210,7 +210,9 @@ SQL_PROFILES_KEY = "sql_profiles"
 LOCAL_FILE_INDEX_KEY = "enable_local_file_index"
 AUTO_CONTENT_FIT_KEY = "auto_content_fit"
 PROCESSING_SETTINGS_KEY = "processing"
+RESOURCE_MONITOR_SETTINGS_KEY = "resource_monitor"
 SECURITY_SETTINGS_KEY = "security"
+WEB_DISPLAY_SETTINGS_KEY = "web_display"
 COLOR_FIELD_LABELS_KEY = "color_field_labels"
 TRANSLATION_SETTINGS_KEY = "translation"
 TRANSLATION_PROVIDER_KEY = "provider"
@@ -267,6 +269,7 @@ DEFAULT_CONFIG.setdefault(SQL_AVAILABLE_COLUMNS_KEY, [])
 DEFAULT_CONFIG.setdefault(SQL_PROFILES_KEY, [])
 DEFAULT_CONFIG.setdefault(LOCAL_FILE_INDEX_KEY, True)
 DEFAULT_CONFIG.setdefault(AUTO_CONTENT_FIT_KEY, False)
+DEFAULT_CONFIG.setdefault(WEB_DISPLAY_SETTINGS_KEY, {"time_zone": "UTC"})
 DEFAULT_CONFIG.setdefault(
     PROCESSING_SETTINGS_KEY,
     {
@@ -280,6 +283,15 @@ DEFAULT_CONFIG.setdefault(
         "target_format": "PNG",
         "upload_processing_mode": "save",
         "show_timing_details": False,
+    },
+)
+DEFAULT_CONFIG.setdefault(
+    RESOURCE_MONITOR_SETTINGS_KEY,
+    {
+        "show_status": True,
+        "cpu_percent_threshold": 25,
+        "memory_percent_threshold": 20,
+        "io_mib_per_second_threshold": 8,
     },
 )
 DEFAULT_CONFIG.setdefault(

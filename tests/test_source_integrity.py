@@ -8,7 +8,140 @@ import re
 import unittest
 
 
+WEB_PANEL_DOC = Path(__file__).resolve().parents[1] / "docs" / "web-panel.md"
+
+
 class SourceIntegrityTests(unittest.TestCase):
+    def test_web_panel_documents_global_iana_time_zone_and_warsaw_dst(self) -> None:
+        guide = WEB_PANEL_DOC.read_text(encoding="utf-8")
+        section_match = re.search(
+            r"(?ms)^## Strefa czasu panelu\s+(.*?)(?=^##\s|\Z)", guide
+        )
+        self.assertIsNotNone(section_match)
+        section = section_match.group(1)
+
+        self.assertIn("globalna strefa czasu", section)
+        self.assertIn("IANA", section)
+        self.assertIn("Europe/Warsaw", section)
+        self.assertIn("CET/CEST", section)
+
+    def test_bootstrap_exposes_only_the_normalized_web_display_setting(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "picorgftp_sql" / "web" / "app.py").read_text(
+            encoding="utf-8"
+        )
+        bootstrap_start = source.index("def bootstrap(request: Request)")
+        bootstrap_end = source.index('@app.get("/api/github/repository")', bootstrap_start)
+        bootstrap_source = source[bootstrap_start:bootstrap_end]
+
+        self.assertIn('"web_display": config.normalize_web_display_settings(', bootstrap_source)
+        self.assertNotIn("settings_snapshot()", bootstrap_source)
+
+    def test_web_panel_documents_backend_only_resource_alerts(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        docs = (root / "docs" / "web-panel.md").read_text(encoding="utf-8").lower()
+        section_match = re.search(
+            r"(?ms)^## zasoby backendu\s+(.*?)(?=^##\s|\Z)", docs
+        )
+        self.assertIsNotNone(section_match)
+        section = section_match.group(1)
+
+        def paragraph(start: str) -> str:
+            match = re.search(
+                rf"(?ms)^{re.escape(start)}.*?(?=\n\n|\Z)", section
+            )
+            self.assertIsNotNone(match, f"missing contextual paragraph: {start}")
+            return match.group(0)
+
+        metrics = paragraph("pod stanem backendu")
+        self.assertIn("bieżącego procesu backendu", metrics)
+        self.assertIn("zarejestrowanego pomocniczego procesu testowego", metrics)
+        self.assertIn("nie obejmuje dowolnego drzewa procesów potomnych", metrics)
+        self.assertIn("nie stopień zapełnienia", metrics)
+
+        alerts = paragraph("administrator może")
+        self.assertIn("progi i alerty dotyczą wyłącznie metryk backendu", alerts)
+        self.assertIn("dwie kolejne próbki", alerts)
+
+        unavailable = paragraph("wartość **brak danych**")
+        self.assertIn("brak wartości nie jest zerem", unavailable)
+        self.assertIn("nie tworzy ani nie zwalnia zatrzaśniętego alertu", unavailable)
+
+        safe_test = paragraph("- **bezpieczna symulacja**")
+        self.assertIn("nie tworzy incydentu", safe_test)
+
+        real_test = paragraph("- **test rzeczywisty**")
+        self.assertIn("normalny, pięciosekundowy próbnik", real_test)
+        self.assertIn("ten sam detektor", real_test)
+        self.assertIn("sam endpoint testowy nie tworzy incydentu", real_test)
+        self.assertIn("`cleanup_failed`", real_test)
+        self.assertIn("blokuje następny test rzeczywisty", real_test)
+        self.assertIn("sprzątanie nie jest więc gwarantowane", real_test)
+
+    def test_web_static_asset_cache_key_matches_current_resource_bundle(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        html_source = (
+            root / "picorgftp_sql" / "web" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+
+        css_match = re.search(r'/static/app\.css\?v=([^"\s]+)', html_source)
+        js_match = re.search(r'/static/app\.js\?v=([^"\s]+)', html_source)
+        self.assertIsNotNone(css_match)
+        self.assertIsNotNone(js_match)
+        self.assertEqual(css_match.group(1), js_match.group(1))
+        self.assertEqual(css_match.group(1), "20260723-status-stack3")
+
+    def test_resource_detail_copy_explains_clients_and_latch_stages(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Aktywni w ostatnich 3 min", source)
+        self.assertIn("Alarm oczekujacy (1. probka)", source)
+        self.assertIn("Alarm aktywny (2 probki)", source)
+
+    def test_resource_monitor_test_state_survives_settings_rerender(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (
+            root / "picorgftp_sql" / "web" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+        renderer_start = source.index("function renderSettingsResourceMonitor")
+        updater_start = source.index("function updateResourceMonitorTestUi", renderer_start)
+        runner_start = source.index("async function runResourceMonitorTest", updater_start)
+        settings_start = source.index("function renderSettings()", runner_start)
+        renderer_source = source[renderer_start:updater_start]
+        updater_source = source[updater_start:runner_start]
+        runner_source = source[runner_start:settings_start]
+
+        self.assertIn("const resourceMonitorTestState", source[:renderer_start])
+        self.assertLess(
+            renderer_source.index("settingsOutput.appendChild(form)"),
+            renderer_source.index("updateResourceMonitorTestUi()"),
+        )
+        self.assertEqual(renderer_source.count("dataset.resourceMonitorTest ="), 4)
+        self.assertIn('document.querySelector("#resourceMonitorTestResult")', updater_source)
+        self.assertIn(
+            'settingsOutput.querySelectorAll("[data-resource-monitor-test]")',
+            updater_source,
+        )
+        self.assertIn("result.textContent = resourceMonitorTestState.message", updater_source)
+        self.assertIn("button.disabled = resourceMonitorTestState.pending", updater_source)
+        self.assertIn("resourceMonitorTestState.pending = true", runner_source)
+        self.assertIn("resourceMonitorTestState.pending = false", runner_source)
+        self.assertGreaterEqual(runner_source.count("resourceMonitorTestState.message ="), 3)
+        self.assertGreaterEqual(runner_source.count("updateResourceMonitorTestUi()"), 4)
+        self.assertNotIn("const result =", runner_source)
+        self.assertNotIn("const realButtons =", runner_source)
+        self.assertNotIn("querySelector", runner_source)
+        pending_start = runner_source.index("resourceMonitorTestState.pending = true")
+        first_update = runner_source.index("updateResourceMonitorTestUi()", pending_start)
+        finally_start = runner_source.index("finally")
+        pending_end = runner_source.index("resourceMonitorTestState.pending = false", finally_start)
+        final_update = runner_source.index("updateResourceMonitorTestUi()", pending_end)
+        self.assertLess(pending_start, first_update)
+        self.assertLess(pending_end, final_update)
+
     def test_runtime_http_client_dependency_is_declared(self) -> None:
         root = Path(__file__).resolve().parents[1]
         web_requirements = (root / "requirements-web.txt").read_text(encoding="utf-8")

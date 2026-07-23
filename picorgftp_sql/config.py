@@ -2,6 +2,7 @@
 
 import copy
 import tempfile
+from zoneinfo import available_timezones
 
 from .redaction import sanitize_free_text
 
@@ -32,7 +33,9 @@ from .common import (
     LOCAL_FILE_INDEX_KEY,
     AUTO_CONTENT_FIT_KEY,
     PROCESSING_SETTINGS_KEY,
+    RESOURCE_MONITOR_SETTINGS_KEY,
     SECURITY_SETTINGS_KEY,
+    WEB_DISPLAY_SETTINGS_KEY,
     COLOR_FIELD_LABELS_KEY,
     PRODUCT_FIELDS_KEY,
     AK,
@@ -74,6 +77,23 @@ from . import settings
 CONFIG_PATH = A.path.join(settings.AC, "config.json")
 CONFIG_SAVE_FAILED_MSG = "Nie udało się zapisać pliku konfiguracyjnego:\n{error}"
 CONFIG = Ar.loads(Ar.dumps(DEFAULT_CONFIG))
+
+
+def available_display_time_zones() -> list[str]:
+    """Return available IANA time zones with UTC first."""
+
+    zones = available_timezones()
+    return ["UTC", *sorted(zone for zone in zones if zone != "UTC")]
+
+
+def normalize_web_display_settings(value: object) -> dict[str, str]:
+    """Return the supported global web display settings."""
+
+    candidate = value.get("time_zone") if isinstance(value, dict) else None
+    name = str(candidate or "UTC").strip()
+    return {
+        "time_zone": name if name in available_display_time_zones() else "UTC"
+    }
 
 
 def _active_sqlite_store():
@@ -249,6 +269,25 @@ def _normalize_processing_settings(raw_settings):
     }
 
 
+def _normalize_resource_monitor_settings(raw_settings):
+    raw = raw_settings if Aq(raw_settings, dict) else {}
+    defaults = DEFAULT_CONFIG[RESOURCE_MONITOR_SETTINGS_KEY]
+
+    def bounded_int(key, minimum, maximum):
+        try:
+            value = int(raw.get(key, defaults[key]))
+        except (TypeError, ValueError):
+            value = int(defaults[key])
+        return max(minimum, min(maximum, value))
+
+    return {
+        "show_status": bool(raw.get("show_status", defaults["show_status"])),
+        "cpu_percent_threshold": bounded_int("cpu_percent_threshold", 10, 90),
+        "memory_percent_threshold": bounded_int("memory_percent_threshold", 1, 90),
+        "io_mib_per_second_threshold": bounded_int("io_mib_per_second_threshold", 1, 256),
+    }
+
+
 def _normalize_security_settings(raw_settings):
     defaults = DEFAULT_CONFIG.get(SECURITY_SETTINGS_KEY, {})
     raw = raw_settings if Aq(raw_settings, dict) else {}
@@ -330,6 +369,18 @@ def _merge_raw_config(raw_config, config_copy):
         raw_config.get(
             PROCESSING_SETTINGS_KEY,
             config_copy.get(PROCESSING_SETTINGS_KEY, {}),
+        )
+    )
+    config_copy[RESOURCE_MONITOR_SETTINGS_KEY] = _normalize_resource_monitor_settings(
+        raw_config.get(
+            RESOURCE_MONITOR_SETTINGS_KEY,
+            config_copy.get(RESOURCE_MONITOR_SETTINGS_KEY, {}),
+        )
+    )
+    config_copy[WEB_DISPLAY_SETTINGS_KEY] = normalize_web_display_settings(
+        raw_config.get(
+            WEB_DISPLAY_SETTINGS_KEY,
+            config_copy.get(WEB_DISPLAY_SETTINGS_KEY, {}),
         )
     )
     raw_security = raw_config.get(
@@ -497,6 +548,12 @@ def load_config(interactive=I):
                 PROCESSING_SETTINGS_KEY: _normalize_processing_settings(
                     config_copy.get(PROCESSING_SETTINGS_KEY)
                 ),
+                RESOURCE_MONITOR_SETTINGS_KEY: _normalize_resource_monitor_settings(
+                    config_copy.get(RESOURCE_MONITOR_SETTINGS_KEY)
+                ),
+                WEB_DISPLAY_SETTINGS_KEY: normalize_web_display_settings(
+                    config_copy.get(WEB_DISPLAY_SETTINGS_KEY)
+                ),
                 SECURITY_SETTINGS_KEY: _normalize_security_settings(
                     config_copy.get(SECURITY_SETTINGS_KEY)
                 ),
@@ -557,6 +614,18 @@ def load_config(interactive=I):
             raw_config.get(
                 PROCESSING_SETTINGS_KEY,
                 config_copy.get(PROCESSING_SETTINGS_KEY, {}),
+            )
+        )
+        config_copy[RESOURCE_MONITOR_SETTINGS_KEY] = _normalize_resource_monitor_settings(
+            raw_config.get(
+                RESOURCE_MONITOR_SETTINGS_KEY,
+                config_copy.get(RESOURCE_MONITOR_SETTINGS_KEY, {}),
+            )
+        )
+        config_copy[WEB_DISPLAY_SETTINGS_KEY] = normalize_web_display_settings(
+            raw_config.get(
+                WEB_DISPLAY_SETTINGS_KEY,
+                config_copy.get(WEB_DISPLAY_SETTINGS_KEY, {}),
             )
         )
         raw_security = raw_config.get(
@@ -774,6 +843,12 @@ def save_config(config, raw_config=None, preserve_secrets=None):
         AUTO_CONTENT_FIT_KEY: bool(config.get(AUTO_CONTENT_FIT_KEY, False)),
         PROCESSING_SETTINGS_KEY: _normalize_processing_settings(
             config.get(PROCESSING_SETTINGS_KEY, {})
+        ),
+        RESOURCE_MONITOR_SETTINGS_KEY: _normalize_resource_monitor_settings(
+            config.get(RESOURCE_MONITOR_SETTINGS_KEY, {})
+        ),
+        WEB_DISPLAY_SETTINGS_KEY: normalize_web_display_settings(
+            config.get(WEB_DISPLAY_SETTINGS_KEY, {})
         ),
         SECURITY_SETTINGS_KEY: _normalize_security_settings(
             config.get(SECURITY_SETTINGS_KEY, {})

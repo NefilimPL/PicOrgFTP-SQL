@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from html.parser import HTMLParser
+import json
 from pathlib import Path
 import re
+import subprocess
 import unittest
 
 
@@ -58,6 +60,321 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
+    def test_header_stacks_latency_above_compact_system_status(self) -> None:
+        markup = INDEX_HTML.read_text(encoding="utf-8")
+        css = (ROOT / "picorgftp_sql" / "web" / "static" / "app.css").read_text(
+            encoding="utf-8"
+        )
+        source = APP_JS.read_text(encoding="utf-8")
+
+        stack_start = markup.index('class="header-status-stack"')
+        location_start = markup.index('class="header-location"')
+        stack_source = markup[stack_start:location_start]
+
+        self.assertLess(markup.index("PicOrgFTP-SQL Web"), stack_start)
+        self.assertLess(stack_start, location_start)
+        self.assertLess(
+            stack_source.index('id="backendHealthStatus"'),
+            stack_source.index('id="resourceStatus"'),
+        )
+        self.assertIn(".header-status-stack", css)
+        self.assertIn(".header-location #serverInfo", css)
+        self.assertIn("grid-template-columns: minmax(150px, max-content) auto", css)
+        self.assertIn(
+            "`System: ${formatPercent(host.cpu_percent)}/${formatPercent(host.memory_percent)}/${formatPercent(host.disk_busy_percent)}`",
+            source,
+        )
+
+    def test_web_ui_uses_the_central_panel_timestamp_formatter(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("function selectedPanelTimeZone", source)
+        self.assertIn("function coercePanelDate", source)
+        self.assertIn("function formatPanelTimestamp", source)
+        self.assertIn("timeZone: selectedPanelTimeZone()", source)
+        self.assertIn('timeZone: "UTC"', source)
+        self.assertNotIn("new Date(eventTime).toLocaleTimeString()", source)
+        self.assertNotIn("new Date(Number(item.started_at) * 1000).toLocaleString()", source)
+
+    def test_panel_timestamp_formatter_runtime_contract(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        formatter = source[
+            source.index("function selectedPanelTimeZone") : source.index(
+                "const SQLITE_BACKUP_DAYS"
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the browser formatter contract test")
+        script = f"""
+const state = {{ settings: {{ web_display: {{ time_zone: "Europe/Warsaw" }} }} }};
+{formatter}
+const winter = formatPanelTimestamp("2026-01-15T12:00:00Z");
+const summer = formatPanelTimestamp("2026-07-15T12:00:00Z");
+state.settings.web_display.time_zone = "Invalid/Time_Zone";
+const fallback = formatPanelTimestamp("2026-01-15T12:00:00Z");
+const impossible = formatPanelTimestamp("2026-02-31T12:00:00Z");
+const ambiguousNumber = coercePanelDate(946684800);
+const seconds = coercePanelDate(946684800, {{ epochUnit: "seconds" }})?.toISOString();
+const historicalMilliseconds = coercePanelDate(946684800000, {{ epochUnit: "milliseconds" }})?.toISOString();
+state.settings.web_display.time_zone = "UTC";
+const historySeconds = formatPanelTimestamp(1773576000, {{ epochUnit: "seconds" }});
+console.log(JSON.stringify({{
+  winter,
+  summer,
+  fallback,
+  impossible,
+  ambiguousNumber,
+  seconds,
+  historicalMilliseconds,
+  historySeconds,
+}}));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertRegex(result["winter"], r"13:00:00.*CET")
+        self.assertRegex(result["summer"], r"14:00:00.*CEST")
+        self.assertRegex(result["fallback"], r"12:00:00.*UTC")
+        self.assertEqual(result["impossible"], "Brak danych")
+        self.assertIsNone(result["ambiguousNumber"])
+        self.assertEqual(result["seconds"], "2000-01-01T00:00:00.000Z")
+        self.assertEqual(
+            result["historicalMilliseconds"], "2000-01-01T00:00:00.000Z"
+        )
+        self.assertNotEqual(result["historySeconds"], "Brak danych")
+        self.assertRegex(result["historySeconds"], r"12:00:00.*UTC")
+
+    def test_time_zone_rerender_preserves_offline_health_status_and_reformats_details(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        formatter = source[
+            source.index("function selectedPanelTimeZone") : source.index(
+                "const SQLITE_BACKUP_DAYS"
+            )
+        ]
+        normalized_health = source[
+            source.index("const HEALTH_COMPONENT_LABELS") : source.index(
+                "function canonicalHealthTimestamp"
+            )
+        ]
+        health_rendering = source[
+            source.index("function canonicalHealthTimestamp") : source.index(
+                "function resourceUnavailableText"
+            )
+        ]
+        health_level = source[
+            source.index("function healthLevel") : source.index(
+                "function scheduleBackendHealthPoll"
+            )
+        ]
+        health_poll = source[
+            source.index("async function pollBackendHealth") : source.index(
+                "function setBackendHealthDetailsExpanded"
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the browser health rerender contract test")
+        script = f"""
+const state = {{ settings: {{ web_display: {{ time_zone: "UTC" }} }}, lastHealthPayload: null }};
+const backendHealthStatus = {{ dataset: {{}}, textContent: "" }};
+const backendHealthText = {{ textContent: "" }};
+function makeNode() {{
+  return {{
+    dataset: {{}},
+    textContent: "",
+    children: [],
+    append(...items) {{ this.children.push(...items); }},
+  }};
+}}
+const backendHealthDetailsList = {{
+  children: [],
+  replaceChildren(...items) {{ this.children = items; }},
+}};
+const document = {{ hidden: false, createElement: () => makeNode() }};
+const window = {{ clearTimeout: () => {{}}, setTimeout: () => 0 }};
+let healthNow = 0;
+const performance = {{ now: () => (healthNow += 25) }};
+const HEALTH_OFFLINE_FAILURES = 3;
+const HEALTH_CRITICAL_MS = 1000;
+const HEALTH_SLOW_MS = 300;
+let healthFailures = 0;
+let healthPollTimer = 0;
+let healthPollGeneration = 0;
+let healthPollController = null;
+let lastSuccessfulHealthComponents = {{}};
+const healthSamples = [];
+const renderResourceStatus = () => {{}};
+const scheduleBackendHealthPoll = () => {{}};
+{formatter}
+{normalized_health}
+{health_rendering}
+{health_level}
+{health_poll}
+const successfulComponents = {{
+  backend: {{ status: "online", observed_at: "2026-01-15T12:00:00Z" }},
+  sqlite: {{ status: "online", observed_at: "2026-01-15T12:00:00Z" }},
+}};
+const healthResponses = [
+  {{ ok: true, components: successfulComponents, resources: {{}}, time: "2026-01-15T12:00:00Z" }},
+  new Error("offline"),
+  new Error("offline"),
+  new Error("offline"),
+];
+async function requestJson() {{
+  const next = healthResponses.shift();
+  if (next instanceof Error) throw next;
+  return next;
+}}
+(async () => {{
+  await pollBackendHealth();
+  await pollBackendHealth();
+  await pollBackendHealth();
+  await pollBackendHealth();
+  state.settings.web_display.time_zone = "Europe/Warsaw";
+  rerenderCachedHealthDetails();
+  const detailText = backendHealthDetailsList.children
+    .map((item) => item.children.map((child) => child.textContent).join(":"))
+    .join("|");
+  console.log(JSON.stringify({{
+    level: backendHealthStatus.dataset.level,
+    label: backendHealthText.textContent,
+    detailText,
+  }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(result["level"], "offline")
+        self.assertEqual(result["label"], "Offline")
+        self.assertRegex(result["detailText"], r"13:00:00.*CET")
+
+    def test_all_visible_panel_timestamps_use_the_central_formatter(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        compact_source = re.sub(r"\s+", " ", source)
+
+        iso_calls = [
+            "formatPanelTimestamp(payload.checked_at)",
+            "formatPanelTimestamp(release.published_at)",
+            "formatPanelTimestamp(state.fileIndex?.generated_at)",
+            "formatPanelTimestamp(event.created_at)",
+            "formatPanelTimestamp(delivery.updated_at || delivery.created_at)",
+            "formatPanelTimestamp(incident.last_seen_at || incident.first_seen_at)",
+            "formatPanelTimestamp(job.started_at)",
+            "formatPanelTimestamp(job.finished_at)",
+            "formatPanelTimestamp(observedAt)",
+            "formatPanelTimestamp(serverTime)",
+            "formatPanelTimestamp(detector.last_trigger_at)",
+            "formatPanelTimestamp(resources.observed_at)",
+            "formatPanelTimestamp(item.created_at)",
+            "formatPanelTimestamp(status.expires_at)",
+            "formatPanelTimestamp(status.last_checked_at)",
+            "formatPanelTimestamp(status.last_success_at)",
+        ]
+        for call in iso_calls:
+            self.assertIn(call, source)
+
+        epoch_second_calls = [
+            "formatPanelTimestamp(user.last_seen_epoch, { epochUnit: \"seconds\" })",
+            "formatPanelTimestamp(item.started_at, { epochUnit: \"seconds\" })",
+            'formatPanelTimestamp(event.timestamp, { date: false, epochUnit: "seconds", })',
+            "formatPanelTimestamp(user.lock_expires_ts, { epochUnit: \"seconds\" })",
+            'formatPanelTimestamp(user.last_failed_login_ts, { epochUnit: "seconds", })',
+            'formatPanelTimestamp(user.extension_token_last_used_ts, { epochUnit: "seconds", })',
+        ]
+        for call in epoch_second_calls:
+            self.assertIn(call, compact_source)
+        self.assertGreaterEqual(
+            compact_source.count(
+                'formatPanelTimestamp(item.ts || item.created_at, { epochUnit: "seconds", })'
+            ),
+            3,
+        )
+        self.assertIn(
+            'formatPanelTimestamp( group.items?.[0]?.ts || group.items?.[0]?.created_at, { epochUnit: "seconds" } )',
+            compact_source,
+        )
+
+        self.assertIn("formatDuration(payload.total_ms || 0)", source)
+        self.assertIn("formatHistoryDuration(file.elapsed_ms)", source)
+        self.assertNotRegex(source, r"\buser\.last_seen(?!_epoch)\b")
+        self.assertNotRegex(source, r"\.toLocale(?:Date|Time)?String\(")
+        for legacy_field in (
+            "user.lock_expires_at",
+            "user.last_failed_login_at",
+            "user.extension_token_last_used_at",
+        ):
+            self.assertNotIn(legacy_field, source)
+
+        visible_renderers = (
+            "activeUserLastSeenLabel",
+            "renderGithubStatus",
+            "renderHistoryTiming",
+            "renderHistoryChanges",
+            "renderHistoryDetails",
+            "renderHistory",
+            "renderLogEvent",
+            "renderResourceDetails",
+            "renderPimcoreLiveEvents",
+            "renderPimcoreHistory",
+            "renderEntraExpiryStatus",
+            "renderSettingsUsers",
+        )
+        for name in visible_renderers:
+            start = source.index(f"function {name}(")
+            match = re.search(r"\n(?:async )?function ", source[start + 1 :])
+            end = len(source) if match is None else start + 1 + match.start()
+            renderer = source[start:end]
+            self.assertIn(
+                "formatPanelTimestamp(",
+                renderer,
+                f"{name} must route visible instants through the central formatter",
+            )
+
+    def test_global_time_zone_field_uses_the_server_catalog_and_rerenders(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn('requestJson("/api/settings/time-zones")', source)
+        self.assertIn('input.type = "search"', source)
+        self.assertIn('datalist.id = "panelTimeZoneCatalog"', source)
+        self.assertIn("state.panelTimeZones.includes(input.value)", source)
+        self.assertIn("web_display: {", source)
+        self.assertIn('time_zone: data.get("web_display_time_zone")', source)
+        self.assertIn("rerenderPanelTimestampViews()", source)
+
+        rerender_start = source.index("function rerenderPanelTimestampViews")
+        rerender_end = source.index("function settingsSaveButton", rerender_start)
+        rerender = source[rerender_start:rerender_end]
+        for call in (
+            "renderActiveUsersPresence(",
+            "renderHistoryTiming(state.historyTimingItem, { open: false })",
+            "renderHistoryChanges(state.historyChangesItem, { open: false })",
+            "rerenderHistoryDetailTimestamps()",
+            "renderPimcoreLiveEvents()",
+        ):
+            self.assertIn(call, rerender)
+        self.assertNotIn("renderHistoryDetails(", rerender)
+        detail_refresh_start = source.index("function rerenderHistoryDetailTimestamps")
+        detail_refresh_end = source.index("function renderHistoryDetails", detail_refresh_start)
+        detail_refresh = source[detail_refresh_start:detail_refresh_end]
+        self.assertIn('querySelectorAll("[data-history-item-index]")', detail_refresh)
+        self.assertIn("meta.textContent =", detail_refresh)
+        self.assertNotIn("historyDetailOutput.textContent", detail_refresh)
+        self.assertNotIn("replaceChildren", detail_refresh)
+
     def test_mail_settings_tab_has_safe_secrets_and_responsive_channel_cards(self) -> None:
         html = _parse(INDEX_HTML)
         source = APP_JS.read_text(encoding="utf-8")
@@ -179,6 +496,91 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn('[data-level="offline"]', css_source)
         self.assertNotIn(".backend-health-indicator:hover .backend-health-details", css_source)
         self.assertNotIn(".backend-health-indicator:focus-within .backend-health-details", css_source)
+
+    def test_resource_indicator_has_compact_and_accessible_detail_contract(self) -> None:
+        html_source = INDEX_HTML.read_text(encoding="utf-8")
+        js_source = APP_JS.read_text(encoding="utf-8")
+        css_source = (
+            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('id="resourceStatus"', html_source)
+        self.assertIn('id="resourceStatusText"', html_source)
+        self.assertIn('id="resourceDetails"', html_source)
+        self.assertIn('id="resourceDetailsList"', html_source)
+        self.assertIn('data-settings-tab="monitor"', html_source)
+        self.assertIn('aria-controls="resourceDetails"', html_source)
+        self.assertIn('aria-expanded="false"', html_source)
+
+        self.assertIn("function renderResourceStatus", js_source)
+        self.assertIn("function renderSettingsResourceMonitor", js_source)
+        self.assertIn("function runResourceMonitorTest", js_source)
+        self.assertIn('requestJson("/api/resource-monitor/simulate-safe"', js_source)
+        self.assertIn('requestJson("/api/resource-monitor/real-test"', js_source)
+        self.assertIn("resourceDetailsList.replaceChildren", js_source)
+        self.assertIn('setAttribute("aria-expanded", expanded ? "true" : "false")', js_source)
+        self.assertIn("renderResourceStatus(payload.resources || {})", js_source)
+        self.assertIn("formatPercent", js_source)
+        self.assertIn("formatMib", js_source)
+        self.assertIn('"brak danych"', js_source)
+        self.assertIn(".resource-status", css_source)
+
+    def test_resource_visibility_settings_tests_and_ftp_cache_use_safe_state_paths(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        resource_start = source.index("function renderResourceStatus")
+        resource_end = source.index("function scheduleBackendHealthPoll", resource_start)
+        resource_source = source[resource_start:resource_end]
+        monitor_start = source.index("function renderSettingsResourceMonitor")
+        monitor_end = source.index("function renderSettings()", monitor_start)
+        monitor_source = source[monitor_start:monitor_end]
+
+        self.assertIn("state.settings?.resource_monitor?.show_status === false", resource_source)
+        self.assertIn("resourceStatus.hidden", resource_source)
+        self.assertNotIn("backendHealthIndicator.hidden", resource_source)
+        for setting in (
+            "show_status",
+            "cpu_percent_threshold",
+            "memory_percent_threshold",
+            "io_mib_per_second_threshold",
+        ):
+            self.assertIn(setting, monitor_source)
+        for kind in ("cpu", "memory", "disk"):
+            self.assertIn(f'runResourceMonitorTest("{kind}")', monitor_source)
+        self.assertIn('runResourceMonitorTest("safe")', monitor_source)
+        self.assertIn("function updateResourceMonitorTestUi", monitor_source)
+        self.assertIn("resourceMonitorTestState.pending", monitor_source)
+        self.assertIn("resourceMonitorTestState.message", monitor_source)
+        self.assertIn("await pollBackendHealth()", monitor_source)
+
+        self.assertIn("const FTP_PREVIEW_CACHE_LIMIT = 120;", source)
+        helper_start = source.index("function setFtpPreviewCache")
+        helper_end = source.index("function clearFtpPreviewCacheForPrefixes", helper_start)
+        helper_source = source[helper_start:helper_end]
+        self.assertIn("state.ftpPreviewCache.delete(key);", helper_source)
+        self.assertIn("state.ftpPreviewCache.set(key, value);", helper_source)
+        self.assertIn("state.ftpPreviewCache.size > FTP_PREVIEW_CACHE_LIMIT", helper_source)
+        self.assertIn(
+            "state.ftpPreviewCache.delete(state.ftpPreviewCache.keys().next().value);",
+            helper_source,
+        )
+        self.assertLess(
+            helper_source.index("state.ftpPreviewCache.delete(key);"),
+            helper_source.index("state.ftpPreviewCache.set(key, value);"),
+        )
+        self.assertEqual(source.count("state.ftpPreviewCache.set("), 1)
+        self.assertGreaterEqual(source.count("setFtpPreviewCache("), 4)
+        preview_loader = source[
+            source.index("async function loadFtpPreview") : source.index(
+                "function nextBackgroundFtpPreviewCandidate"
+            )
+        ]
+        merge_photo = source[
+            source.index("function mergePhotoRecord") : source.index(
+                "function photoLoadingText"
+            )
+        ]
+        self.assertGreaterEqual(preview_loader.count("setFtpPreviewCache("), 2)
+        self.assertIn("setFtpPreviewCache(cachedFtpKey, cachedFtp);", merge_photo)
 
     def test_logs_use_tabs_live_stream_and_cursor_loading(self) -> None:
         html_source = INDEX_HTML.read_text(encoding="utf-8")
@@ -646,7 +1048,6 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertNotIn("row.appendChild(pimcoreSqlMappingControls", source)
         self.assertIn(".sql-profile-card", css)
         self.assertIn(".sql-profile-card + .sql-profile-card", css)
-        self.assertIn("20260706-sql-profiles", html)
 
     def test_pimcore_mapping_layout_controls_and_runtime_sections_exist(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -858,7 +1259,6 @@ class WebUiIntegrityTests(unittest.TestCase):
 
         self.assertNotIn("http://10.10.0.5", source)
         self.assertIn("http://twoj-adres-pimcore.example", source)
-        self.assertIn("20260706-sql-profiles", html_source)
         self.assertIn("flex-wrap: wrap", css[css.index(".lookup-actions"):])
         self.assertNotIn(".lookup-actions #pimcoreEditButton {\n  min-width", css)
 

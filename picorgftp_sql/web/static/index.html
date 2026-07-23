@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicOrgFTP-SQL Web</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260706-sql-profiles-health2">
+    <link rel="stylesheet" href="/static/app.css?v=20260723-status-stack3">
   </head>
   <body class="app-screen">
     <header class="topbar">
@@ -14,30 +14,46 @@
             <path fill="currentColor" d="M8 .2a8 8 0 0 0-2.5 15.6c.4.1.5-.2.5-.4v-1.4c-2.1.5-2.5-.9-2.5-.9-.3-.8-.8-1-.8-1-.7-.5.1-.5.1-.5.7.1 1.1.8 1.1.8.7 1.1 1.7.8 2.1.6.1-.5.3-.8.5-1-1.7-.2-3.4-.8-3.4-3.6 0-.8.3-1.5.8-2-.1-.2-.3-1 .1-2 0 0 .6-.2 2.1.8a7 7 0 0 1 3.8 0c1.5-1 2.1-.8 2.1-.8.4 1 .2 1.8.1 2 .5.5.8 1.2.8 2 0 2.8-1.7 3.4-3.4 3.6.3.2.5.7.5 1.4v2.1c0 .2.1.5.5.4A8 8 0 0 0 8 .2Z"/>
           </svg>
         </button>
-        <div class="topbar-brand-info">
-          <div class="topbar-title-row">
+        <div class="topbar-title-row">
+          <div class="topbar-brand-info">
             <strong>PicOrgFTP-SQL Web</strong>
+            <span id="versionInfo"></span>
+          </div>
+          <div class="header-status-stack">
             <div class="backend-health-indicator">
-              <button id="backendHealthStatus" type="button" class="backend-health-status" data-level="checking" aria-live="polite" aria-controls="backendHealthDetails" aria-describedby="backendHealthDetails" aria-expanded="false">
-                <span class="backend-health-dot" aria-hidden="true"></span>
-                <span id="backendHealthText">Sprawdzanie...</span>
-              </button>
-              <div id="backendHealthDetails" class="backend-health-details" role="tooltip" hidden>
-                <strong>Stan komponentow</strong>
-                <ul id="backendHealthDetailsList">
-                  <li><span>Backend</span><strong>Sprawdzanie...</strong></li>
-                  <li><span>SQLite</span><strong>Sprawdzanie...</strong></li>
-                  <li><span>Proces zadan</span><strong>Sprawdzanie...</strong></li>
-                  <li><span>Powiadomienia</span><strong>Sprawdzanie...</strong></li>
-                  <li><span>FTP</span><strong>Brak danych</strong></li>
-                  <li><span>SQL</span><strong>Brak danych</strong></li>
-                  <li><span>Profile SQL</span><strong>Brak danych</strong></li>
-                  <li><span>Pimcore</span><strong>Brak danych</strong></li>
-                </ul>
-              </div>
+            <button id="backendHealthStatus" type="button" class="backend-health-status" data-level="checking" aria-live="polite" aria-controls="backendHealthDetails" aria-describedby="backendHealthDetails" aria-expanded="false">
+              <span class="backend-health-dot" aria-hidden="true"></span>
+              <span id="backendHealthText">Sprawdzanie...</span>
+            </button>
+            <div id="backendHealthDetails" class="backend-health-details" role="tooltip" hidden>
+              <strong>Stan komponentow</strong>
+              <ul id="backendHealthDetailsList">
+                <li><span>Backend</span><strong>Sprawdzanie...</strong></li>
+                <li><span>SQLite</span><strong>Sprawdzanie...</strong></li>
+                <li><span>Proces zadan</span><strong>Sprawdzanie...</strong></li>
+                <li><span>Powiadomienia</span><strong>Sprawdzanie...</strong></li>
+                <li><span>FTP</span><strong>Brak danych</strong></li>
+                <li><span>SQL</span><strong>Brak danych</strong></li>
+                <li><span>Profile SQL</span><strong>Brak danych</strong></li>
+                <li><span>Pimcore</span><strong>Brak danych</strong></li>
+              </ul>
             </div>
           </div>
-          <span id="versionInfo"></span>
+            <div class="resource-status-indicator">
+            <button id="resourceStatus" type="button" class="resource-status" data-level="normal" aria-live="polite" aria-controls="resourceDetails" aria-describedby="resourceDetails" aria-expanded="false">
+              <span class="resource-status-dot" aria-hidden="true"></span>
+              <span id="resourceStatusText">System: brak danych/brak danych/brak danych</span>
+            </button>
+            <div id="resourceDetails" class="resource-details" role="tooltip" hidden>
+              <strong>Szczegoly zasobow</strong>
+              <ul id="resourceDetailsList">
+                <li><span>Probka</span><strong>Brak danych</strong></li>
+              </ul>
+            </div>
+            </div>
+          </div>
+        </div>
+        <div class="header-location">
           <span id="serverInfo"></span>
         </div>
       </div>
@@ -440,6 +456,7 @@
           <button type="button" class="settings-tab" data-settings-tab="sql">SQL</button>
           <button type="button" class="settings-tab" data-settings-tab="pimcore">Pimcore</button>
           <button type="button" class="settings-tab" data-settings-tab="mail">Poczta</button>
+          <button type="button" class="settings-tab" data-settings-tab="monitor">Monitor</button>
           <button type="button" class="settings-tab" data-settings-tab="slots">Sloty</button>
           <button type="button" class="settings-tab" data-settings-tab="users">Uzytkownicy</button>
         </div>
@@ -685,6 +702,6 @@
       </article>
     </template>
 
-    <script src="/static/app.js?v=20260706-sql-profiles-health2"></script>
+    <script src="/static/app.js?v=20260723-status-stack3"></script>
   </body>
 </html>

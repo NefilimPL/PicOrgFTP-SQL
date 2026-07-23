@@ -87,6 +87,27 @@ Obok nazwy aplikacji widoczny jest tekstowy stan backendu z kropką i medianą c
 
 Pomiar jest wykonywany co pięć sekund. Przeglądarka wstrzymuje go w ukrytej karcie i odświeża stan natychmiast po powrocie.
 
+## Strefa czasu panelu
+
+Administrator wybiera w **Ustawienia -> Aplikacja** jedną strefę czasu IANA wspólną dla całej instalacji. Wybrana globalna strefa czasu obowiązuje wszystkich użytkowników panelu, a bezpieczną wartością domyślną jest `UTC`. Przykładowa strefa `Europe/Warsaw` automatycznie stosuje czas standardowy i letni CET/CEST zgodnie z regułami IANA; administrator nie przełącza jej ręcznie przy zmianie czasu.
+
+To ustawienie zmienia wyłącznie sposób prezentowania dat i godzin w panelu. Nie modyfikuje znaczników czasu przechowywanych w UTC, progów monitorowania ani kolejności zdarzeń.
+
+## Zasoby backendu
+
+Pod stanem backendu znajduje się kompaktowy wskaźnik odświeżany co pięć sekund. Pierwszy wiersz, **Zasoby systemu**, pokazuje CPU, RAM i aktywność dysku całego hosta: procent czasu obsługi operacji I/O, nie stopień zapełnienia przestrzeni dyskowej. Drugi wiersz pokazuje łączne CPU, RAM i transfer dyskowy I/O bieżącego procesu backendu oraz, wyłącznie podczas ograniczonego testu rzeczywistego, zarejestrowanego pomocniczego procesu testowego. Nie obejmuje dowolnego drzewa procesów potomnych. Szczegóły zawierają też liczbę aktywnych i oczekujących zadań i klientów. **Aktywni w ostatnich 3 min** to liczba rozpoznanych klientów panelu, którzy w tym okresie wykonali obsłużone żądanie HTTP; nie oznacza liczby jednocześnie otwartych połączeń ani obecnie zalogowanych osób.
+
+Administrator może w **Ustawienia -> Monitor** ukryć sam wskaźnik oraz ustawić progi CPU, RAM i I/O backendu. Metryki hosta służą wyłącznie do diagnozy; progi i alerty dotyczą wyłącznie metryk backendu. Domyślne progi to odpowiednio 25%, 20% i 8 MiB/s; dopuszczalne zakresy to 10–90%, 1–90% i 1–256 MiB/s. Przekroczenie oznacza wartość większą od progu. Pierwsze przekroczenie jest widoczne jako **Alarm oczekujący (1. próbka)**. Dopiero gdy monitor zobaczy przekroczenie w dwie kolejne próbki, etap zmienia się na **Alarm aktywny (2 próbki)**, alarm zostaje zatrzaśnięty i powstaje incydent `backend.resource_high`; pojedynczy skok nie tworzy incydentu. Zatrzask zapobiega powtarzaniu tego samego alertu podczas ciągłego przeciążenia i jest zwalniany po dwóch kolejnych próbkach na poziomie nieprzekraczającym progu.
+
+Wartość **brak danych** oznacza, że dany licznik nie jest dostępny; dotyczy to w szczególności licznika aktywności dysku podczas jego rozgrzewania albo gdy Windows nie udostępnia poprawnego odczytu. Brak wartości nie jest zerem ani informacją o wolnej przestrzeni. Przerywa rozpoczętą serię wysokich albo normalnych próbek, ale sama nie tworzy ani nie zwalnia zatrzaśniętego alertu. API udostępnia tylko dozwolone, znormalizowane metryki i krótki powód niedostępności. Nie zwraca ścieżek katalogów tymczasowych, sekretów ani treści wyjątków.
+
+Testy monitora wymagają autoryzacji administracyjnej:
+
+- **Bezpieczna symulacja** nie obciąża zasobów i nie tworzy incydentu. Zapisuje wyłącznie informacyjne zdarzenie testowe z bezpiecznym, bieżącym obrazem metryk i zwraca pomyślny wynik trybu `safe` tylko po trwałym zapisie tego zdarzenia. Brak zapisu zwraca `persistence_failed`.
+- **Test rzeczywisty** uruchamia osobno kontrolowane obciążenie CPU, RAM albo dysku. W danej chwili może działać tylko jeden test. Trwa najwyżej około 20 sekund i używa procesu roboczego z twardymi limitami 25% CPU, 256 MiB RAM i 128 MiB danych dyskowych. Na czas testu monitor wyznacza osobny, osiągalny próg z bieżącej wartości i bezpiecznego limitu testu; nie zmienia zapisanego progu produkcyjnego, więc jego normalna wartość nie blokuje CPU ani RAM. Wytworzone obciążenie obserwuje normalny, pięciosekundowy próbnik i ocenia ten sam detektor progów co podczas zwykłej pracy. Sam endpoint testowy nie tworzy incydentu. Błąd procesu roboczego jest zapisywany jako zdarzenie `backend.resource_test_failed` i przekazywany do mechanizmu powiadomień, ale odpowiedź API nie zawiera ścieżki, sekretu ani tracebacku. Po każdym wyniku monitor próbuje zatrzymać proces i usunąć katalog `picorg_resource_test_*`; gdy sprzątanie się powiedzie, rejestracja testu jest zwalniana. Wynik `cleanup_failed` oznacza, że monitor zachowuje rezerwację procesu lub katalogu i blokuje następny test rzeczywisty, dopóki późniejsze zatrzymanie lub ponowiona próba sprzątania nie zakończy się powodzeniem. Sprzątanie nie jest więc gwarantowane przy każdym wyniku.
+
+Wynik testu rzeczywistego rozróżnia wykryte przekroczenie, brak wykrycia, błąd trwałego zapisu zdarzenia (`persistence_failed`), błąd uruchomienia lub wykonania, przekroczenie czasu, anulowanie i błąd sprzątania. Wynik **wykryto** oraz alert pojawiają się tylko wtedy, gdy detektor zwykłego próbnika sam zarejestruje rzeczywiste przekroczenie progu backendu w dwie kolejne próbki i trwale zapisze normalne zdarzenie `backend.resource_high`.
+
 ## Bezpieczeństwo LAN
 
 Panel jest przeznaczony do zaufanej sieci LAN albo VPN. Nie wystawiaj tego panelu bezpośrednio do publicznego internetu bez dodatkowej warstwy zabezpieczeń, aktualizacji haseł, kontroli dostępu i przeglądu konfiguracji serwera.

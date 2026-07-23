@@ -20,10 +20,14 @@ const state = {
   lastLookupMs: null,
   activeSettingsTab: "app",
   history: null,
+  historyDetailGroup: null,
+  historyTimingItem: null,
+  historyChangesItem: null,
   historyPage: 1,
   historyPageSize: 50,
   historySearchTimer: 0,
   pimcoreTestOperation: null,
+  pimcoreLiveEvents: [],
   pimcoreLookupTimer: 0,
   pimcoreLookupRequestId: 0,
   pimcoreLastCheckedEan: "",
@@ -138,9 +142,16 @@ const state = {
   pollers: [],
   githubStatus: null,
   githubStatusLoading: false,
+  resources: {},
+  panelTimeZones: [],
+  backupHistoryItems: [],
+  pimcoreHistoryItems: [],
+  entraExpiryStatus: null,
+  lastHealthPayload: null,
 };
 
 const WEB_IMAGE_CACHE_LIMIT = 2;
+const FTP_PREVIEW_CACHE_LIMIT = 120;
 const MAX_AUTOCOMPLETE_OPTIONS = 80;
 const ACTIVE_USERS_VISIBLE_LIMIT = 5;
 const CSRF_HEADER = "X-PicOrg-CSRF";
@@ -166,6 +177,82 @@ let healthPollController = null;
 let lastSuccessfulHealthComponents = {};
 let healthDetailsPinned = false;
 let healthDetailsPointerInside = false;
+let resourceDetailsPinned = false;
+let resourceDetailsPointerInside = false;
+const resourceMonitorTestState = {
+  pending: false,
+  message: "Nie uruchomiono testu monitora.",
+};
+
+function selectedPanelTimeZone() {
+  return String(state.settings?.web_display?.time_zone || "UTC");
+}
+
+function coercePanelDate(value, { epochUnit = null } = {}) {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (!new Set(["seconds", "milliseconds"]).has(epochUnit)) return null;
+    const milliseconds = epochUnit === "seconds" ? value * 1000 : value;
+    const date = new Date(milliseconds);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/.exec(
+    text
+  );
+  if (!match) {
+    return null;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  const offsetHour = match[8] === undefined ? 0 : Number(match[8]);
+  const offsetMinute = match[9] === undefined ? 0 : Number(match[9]);
+  if (
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > daysInMonth[month - 1] ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59 ||
+    offsetHour > 23 ||
+    offsetMinute > 59
+  ) {
+    return null;
+  }
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function formatPanelTimestamp(
+  value,
+  { date = true, time = true, epochUnit = null } = {}
+) {
+  const panelDate = coercePanelDate(value, { epochUnit });
+  if (!panelDate || (!date && !time)) return "Brak danych";
+  const formatterOptions = {
+    ...(date ? { year: "numeric", month: "short", day: "2-digit" } : {}),
+    ...(time ? { hour: "2-digit", minute: "2-digit", second: "2-digit" } : {}),
+    timeZone: selectedPanelTimeZone(),
+    timeZoneName: "short",
+  };
+  try {
+    return new Intl.DateTimeFormat("pl-PL", formatterOptions).format(panelDate);
+  } catch (_error) {
+    return new Intl.DateTimeFormat("pl-PL", { ...formatterOptions, timeZone: "UTC" }).format(
+      panelDate
+    );
+  }
+}
 const SQLITE_BACKUP_DAYS = [
   ["mon", "Pon"],
   ["tue", "Wt"],
@@ -233,6 +320,11 @@ const backendHealthStatus = document.querySelector("#backendHealthStatus");
 const backendHealthText = document.querySelector("#backendHealthText");
 const backendHealthDetails = document.querySelector("#backendHealthDetails");
 const backendHealthDetailsList = document.querySelector("#backendHealthDetailsList");
+const resourceStatusIndicator = document.querySelector(".resource-status-indicator");
+const resourceStatus = document.querySelector("#resourceStatus");
+const resourceStatusText = document.querySelector("#resourceStatusText");
+const resourceDetails = document.querySelector("#resourceDetails");
+const resourceDetailsList = document.querySelector("#resourceDetailsList");
 const githubStatusButton = document.querySelector("#githubStatusButton");
 const githubStatusModal = document.querySelector("#githubStatusModal");
 const githubStatusOutput = document.querySelector("#githubStatusOutput");
@@ -657,7 +749,9 @@ function renderGithubStatus(payload = {}) {
       githubRow(
         payload.update_available ? "Aktualizacja" : "Najnowszy release",
         release.tag_name
-          ? `${release.tag_name}${release.published_at ? ` (${release.published_at})` : ""}`
+          ? `${release.tag_name}${
+              release.published_at ? ` (${formatPanelTimestamp(release.published_at)})` : ""
+            }`
           : "Brak publicznego release",
         release.html_url || ""
       ),
@@ -672,7 +766,9 @@ function renderGithubStatus(payload = {}) {
     );
   }
   if (githubStatusCheckedAt) {
-    githubStatusCheckedAt.textContent = payload.checked_at ? `Sprawdzono: ${payload.checked_at}` : "";
+    githubStatusCheckedAt.textContent = payload.checked_at
+      ? `Sprawdzono: ${formatPanelTimestamp(payload.checked_at)}`
+      : "";
   }
 }
 
@@ -718,8 +814,8 @@ function closeModals() {
 }
 
 function activeUserLastSeenLabel(user = {}) {
-  const text = String(user.last_seen || "").trim();
-  return text ? `Ostatnio: ${text}` : "Aktywny";
+  const text = formatPanelTimestamp(user.last_seen_epoch, { epochUnit: "seconds" });
+  return text === "Brak danych" ? "Aktywny" : `Ostatnio: ${text}`;
 }
 
 function toggleActiveUsersPopover(force) {
@@ -883,6 +979,35 @@ function formatFileSize(bytes) {
   if (value < 1024) return `${Math.round(value)} B`;
   if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function resourceNumber(value) {
+  if (value === null || value === undefined || value === "" || typeof value === "boolean") {
+    return null;
+  }
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function formatPercent(value) {
+  const number = resourceNumber(value);
+  return number === null ? "brak danych" : `${Math.round(number)}%`;
+}
+
+function formatMib(bytes) {
+  const number = resourceNumber(bytes);
+  return number === null ? "brak danych" : `${(number / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatResourceBytes(bytes) {
+  const number = resourceNumber(bytes);
+  return number === null ? "brak danych" : formatFileSize(number);
+}
+
+function resourceLevel(detector = {}) {
+  return Array.isArray(detector.latched_metrics) && detector.latched_metrics.length
+    ? "critical"
+    : "normal";
 }
 
 function webImageDimensions(image) {
@@ -1559,7 +1684,10 @@ function applyTimingDetailsVisibility() {
 
 function updateRuntimeMetrics() {
   if (fileIndexInfo) {
-    fileIndexInfo.textContent = state.fileIndex?.label || "";
+    const generatedAt = formatPanelTimestamp(state.fileIndex?.generated_at);
+    fileIndexInfo.textContent = state.fileIndex?.generated_at
+      ? `${state.fileIndex.label || "Indeks lokalny"}: ${generatedAt}`
+      : state.fileIndex?.label || "";
     fileIndexInfo.title = state.fileIndex?.error || "";
   }
   if (latencyInfo) {
@@ -2879,6 +3007,15 @@ function ftpPreviewCacheKey(photo, fallbackEan = "") {
   return filename && ean ? `${ean}|${filename}` : "";
 }
 
+function setFtpPreviewCache(key, value) {
+  if (!key) return;
+  state.ftpPreviewCache.delete(key);
+  state.ftpPreviewCache.set(key, value);
+  while (state.ftpPreviewCache.size > FTP_PREVIEW_CACHE_LIMIT) {
+    state.ftpPreviewCache.delete(state.ftpPreviewCache.keys().next().value);
+  }
+}
+
 function clearFtpPreviewCacheForPrefixes(prefixes, fallbackEan = "") {
   const prefixSet = new Set(
     [...(prefixes || [])].map((prefix) => String(prefix || "").trim()).filter(Boolean)
@@ -2926,6 +3063,7 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
   const explicitSourceBefore = state.slotSources.get(prefix);
   const cached = cacheKey ? state.ftpPreviewCache.get(cacheKey) : null;
   if (cached) {
+    setFtpPreviewCache(cacheKey, cached);
     const currentPhoto = state.loadedPhotos.get(prefix);
     if (
       requestId !== state.photoLoadRequestId ||
@@ -2971,7 +3109,7 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
       body: JSON.stringify({ ean: photo.ean || formValue("ean") || "", filename: photo.ftp_filename }),
     });
     if (cacheKey) {
-      state.ftpPreviewCache.set(cacheKey, {
+      setFtpPreviewCache(cacheKey, {
         token: payload.token || "",
         url: payload.url || "",
         thumb_url: payload.thumb_url || "",
@@ -4584,12 +4722,15 @@ function trapHistoryChangesFocus(event) {
   }
 }
 
-function renderHistoryTiming(item = {}) {
+function renderHistoryTiming(item = {}, { open = true } = {}) {
+  state.historyTimingItem = item;
   if (!historyTimingTitle || !historyTimingOutput) {
     return;
   }
   const timing = item.details?.timing || {};
-  historyTimingTitle.textContent = `Czasy: ${item.time || item.summary || "zmiana"}`;
+  historyTimingTitle.textContent = `Czasy: ${formatPanelTimestamp(item.ts || item.created_at, {
+    epochUnit: "seconds",
+  })}`;
   historyTimingOutput.textContent = "";
   const stages = timing.stages || [];
   historyTimingOutput.appendChild(processMetricRow("Razem", timingMs(timing.total_ms)));
@@ -4610,10 +4751,11 @@ function renderHistoryTiming(item = {}) {
   } else {
     historyTimingOutput.className = "timing-list";
   }
-  document.querySelector("#historyTimingModal")?.classList.add("active");
+  if (open) document.querySelector("#historyTimingModal")?.classList.add("active");
 }
 
-function renderHistoryChanges(item = {}) {
+function renderHistoryChanges(item = {}, { open = true } = {}) {
+  state.historyChangesItem = item;
   if (!historyChangesModal || !historyChangesTitle || !historyChangesOutput) {
     return;
   }
@@ -4621,7 +4763,9 @@ function renderHistoryChanges(item = {}) {
   const changeSet = details.change_set && typeof details.change_set === "object"
     ? details.change_set
     : null;
-  historyChangesTitle.textContent = `Zmiany: ${item.time || item.summary || "operacja"}`;
+  historyChangesTitle.textContent = `Zmiany: ${formatPanelTimestamp(item.ts || item.created_at, {
+    epochUnit: "seconds",
+  })}`;
   historyChangesOutput.textContent = "";
 
   if (!changeSet) {
@@ -4636,7 +4780,7 @@ function renderHistoryChanges(item = {}) {
       }
       historyChangesOutput.appendChild(legacy.details);
     }
-    openHistoryChangesModal();
+    if (open) openHistoryChangesModal();
     return;
   }
 
@@ -4712,13 +4856,27 @@ function renderHistoryChanges(item = {}) {
     historyChangesOutput.appendChild(section.details);
   }
 
-  openHistoryChangesModal();
+  if (open) openHistoryChangesModal();
 }
 
-function renderHistoryDetails(group) {
+function rerenderHistoryDetailTimestamps() {
+  const items = Array.isArray(state.historyDetailGroup?.items)
+    ? state.historyDetailGroup.items
+    : [];
+  historyDetailOutput?.querySelectorAll("[data-history-item-index]").forEach((meta) => {
+    const item = items[Number(meta.dataset.historyItemIndex)];
+    if (!item) return;
+    meta.textContent = `${formatPanelTimestamp(item.ts || item.created_at, {
+      epochUnit: "seconds",
+    })} | ${item.user || ""}`;
+  });
+}
+
+function renderHistoryDetails(group, { open = true } = {}) {
+  state.historyDetailGroup = group;
   historyDetailTitle.textContent = `Historia EAN ${group.ean}`;
   historyDetailOutput.textContent = "";
-  for (const item of group.items || []) {
+  for (const [itemIndex, item] of (group.items || []).entries()) {
     const row = document.createElement("article");
     const meta = document.createElement("div");
     const summary = document.createElement("strong");
@@ -4728,7 +4886,10 @@ function renderHistoryDetails(group) {
     const timingButton = document.createElement("button");
     row.className = "history-item";
     meta.className = "history-meta";
-    meta.textContent = `${item.time || ""} | ${item.user || ""}`;
+    meta.dataset.historyItemIndex = String(itemIndex);
+    meta.textContent = `${formatPanelTimestamp(item.ts || item.created_at, {
+      epochUnit: "seconds",
+    })} | ${item.user || ""}`;
     summary.textContent = item.summary || item.action || "Zmiana";
     const saved = item.details?.saved_files?.length || 0;
     const deleted = item.details?.deleted_slots?.length || 0;
@@ -4763,7 +4924,7 @@ function renderHistoryDetails(group) {
     row.append(meta, summary, details, actions);
     historyDetailOutput.appendChild(row);
   }
-  document.querySelector("#historyDetailModal").classList.add("active");
+  if (open) document.querySelector("#historyDetailModal").classList.add("active");
 }
 
 function updateHistoryPagination(payload) {
@@ -4818,7 +4979,10 @@ function renderHistory(payload) {
     title.textContent = `EAN ${group.ean}`;
     const readableFields = historyEntryLabel(entry);
     fields.textContent = readableFields || "Brak danych pol tekstowych";
-    meta.textContent = `${(group.items || []).length} zmian | ostatnio: ${group.items?.[0]?.time || ""}`;
+    meta.textContent = `${(group.items || []).length} zmian | ostatnio: ${formatPanelTimestamp(
+      group.items?.[0]?.ts || group.items?.[0]?.created_at,
+      { epochUnit: "seconds" }
+    )}`;
     row.append(title, fields, meta);
     row.addEventListener("click", () => renderHistoryDetails(group));
     historyOutput.appendChild(row);
@@ -4914,7 +5078,7 @@ function renderLogEvent(event) {
   block.className = `log-event log-event-compact log-event-${severity}`;
   block.dataset.observabilityId = event.id || "";
   meta.className = "log-event-meta log-event-time";
-  meta.textContent = event.created_at || "";
+  meta.textContent = formatPanelTimestamp(event.created_at);
   severityBadge.className = `log-event-severity log-event-severity-${severity}`;
   severityBadge.textContent = logSeverityLabel(severity);
   title.textContent = event.summary || "Zdarzenie";
@@ -4996,7 +5160,7 @@ function renderIncidentDeliveries(incident) {
     meta.textContent = [
       deliveryStatusLabel(delivery.status),
       deliveryChannelLabel(delivery.used_channel),
-      delivery.updated_at || delivery.created_at || "",
+      formatPanelTimestamp(delivery.updated_at || delivery.created_at),
     ]
       .filter(Boolean)
       .join(" | ");
@@ -5143,7 +5307,7 @@ function renderIncidentCard(incident) {
   card.className = `log-incident log-event-${severity}`;
   meta.className = "log-event-meta";
   meta.textContent = [
-    incident.last_seen_at || incident.first_seen_at || "",
+    formatPanelTimestamp(incident.last_seen_at || incident.first_seen_at),
     logSeverityLabel(severity),
     `wystapienia: ${Number(incident.occurrence_count || 1)}`,
   ]
@@ -5204,7 +5368,11 @@ function renderJobCard(job) {
   card.dataset.observabilityId = jobId;
   card.tabIndex = -1;
   meta.className = "log-event-meta";
-  meta.textContent = [job.started_at || "", job.finished_at || "", job.status || ""]
+  meta.textContent = [
+    formatPanelTimestamp(job.started_at),
+    job.finished_at ? formatPanelTimestamp(job.finished_at) : "",
+    job.status || "",
+  ]
     .filter(Boolean)
     .join(" | ");
   title.textContent = job.summary || jobId || "Zadanie";
@@ -5445,7 +5613,7 @@ function renderBackendHealthDetails(
     name.textContent = label;
     const observedAt = canonicalHealthTimestamp(components[key]?.observed_at);
     status.textContent = observedAt
-      ? `${HEALTH_STATUS_LABELS[normalized]} · ${observedAt}`
+      ? `${HEALTH_STATUS_LABELS[normalized]} · ${formatPanelTimestamp(observedAt)}`
       : HEALTH_STATUS_LABELS[normalized];
     item.dataset.level = normalized;
     item.append(name, status);
@@ -5454,7 +5622,7 @@ function renderBackendHealthDetails(
   const metrics = [
     ["Biezace opoznienie", `${Math.round(currentLatencyMs)} ms`],
     ["Mediana opoznienia", `${Math.round(medianLatencyMs)} ms`],
-    ["Czas serwera UTC", canonicalHealthTimestamp(serverTime) || "Brak danych"],
+    ["Czas serwera", formatPanelTimestamp(serverTime)],
   ].map(([label, value]) => {
     const item = document.createElement("li");
     const name = document.createElement("span");
@@ -5495,6 +5663,90 @@ function updateBackendHealthStatus(
       ? labels[safeLevel]
       : `${labels[safeLevel]} · ${Math.round(currentLatencyMs)} ms`;
   renderBackendHealthDetails(components, { serverTime, currentLatencyMs, medianLatencyMs });
+}
+
+function rerenderCachedHealthDetails() {
+  if (!state.lastHealthPayload) return;
+  const health = state.lastHealthPayload;
+  renderBackendHealthDetails(health.components, {
+    currentLatencyMs: health.elapsedMs,
+    medianLatencyMs: health.medianMs,
+    serverTime: health.serverTime,
+  });
+}
+
+function resourceUnavailableText(value, parent = {}) {
+  for (const candidate of [value, parent]) {
+    if (!candidate || typeof candidate !== "object" || candidate.available !== false) continue;
+    const reason = String(candidate.reason || "").trim();
+    return reason ? `brak danych (${reason})` : "brak danych";
+  }
+  return "brak danych";
+}
+
+function formatResourceDetail(value, formatter, parent = {}) {
+  const number = resourceNumber(value);
+  return number === null ? resourceUnavailableText(value, parent) : formatter(number);
+}
+
+function renderResourceDetails(resources = {}) {
+  if (!resourceDetailsList) return;
+  const host = resources.host || {};
+  const backend = resources.backend || {};
+  const detector = resources.detector || {};
+  const monitorSettings = state.settings?.resource_monitor || {};
+  const latched = Array.isArray(detector.latched_metrics) ? detector.latched_metrics : [];
+  const pending = Array.isArray(detector.pending_metrics) ? detector.pending_metrics : [];
+  const ioDetail = (value) => `${value} B/s (${formatMib(value)}/s)`;
+  const rows = [
+    ["System CPU", formatResourceDetail(host.cpu_percent, (value) => `${value}%`, host)],
+    ["System RAM", formatResourceDetail(host.memory_percent, (value) => `${value}%`, host)],
+    ["System RAM uzyty", formatResourceDetail(host.memory_used_bytes, formatResourceBytes, host)],
+    ["System RAM lacznie", formatResourceDetail(host.memory_total_bytes, formatResourceBytes, host)],
+    ["System dysk zajety", formatResourceDetail(host.disk_busy_percent, (value) => `${value}%`, host)],
+    ["Backend CPU", formatResourceDetail(backend.cpu_percent, (value) => `${value}%`, backend)],
+    ["Backend RAM", formatResourceDetail(backend.memory_percent, (value) => `${value}%`, backend)],
+    ["Backend working set", formatResourceDetail(backend.memory_working_set_bytes, formatResourceBytes, backend)],
+    ["Backend private bytes", formatResourceDetail(backend.memory_private_bytes, formatResourceBytes, backend)],
+    ["Backend odczyt dysku", formatResourceDetail(backend.disk_read_bytes_per_second, ioDetail, backend)],
+    ["Backend zapis dysku", formatResourceDetail(backend.disk_write_bytes_per_second, ioDetail, backend)],
+    ["Backend I/O", formatResourceDetail(backend.disk_io_bytes_per_second, ioDetail, backend)],
+    ["Aktywne zadania", formatResourceDetail(backend.active_jobs, String, backend)],
+    ["Zadania w kolejce", formatResourceDetail(backend.queued_jobs, String, backend)],
+    ["Aktywni w ostatnich 3 min", formatResourceDetail(backend.active_clients, String, backend)],
+    ["Prog CPU backendu", formatPercent(monitorSettings.cpu_percent_threshold)],
+    ["Prog RAM backendu", formatPercent(monitorSettings.memory_percent_threshold)],
+    [
+      "Prog I/O backendu",
+      resourceNumber(monitorSettings.io_mib_per_second_threshold) === null
+        ? "brak danych"
+        : `${monitorSettings.io_mib_per_second_threshold} MB/s`,
+    ],
+    ["Alarm aktywny (2 probki)", latched.length ? latched.join(", ") : "nie"],
+    ["Alarm oczekujacy (1. probka)", pending.length ? pending.join(", ") : "nie"],
+    ["Ostatni alarm", formatPanelTimestamp(detector.last_trigger_at)],
+    ["Probka", formatPanelTimestamp(resources.observed_at)],
+  ].map(([label, value]) => {
+    const item = document.createElement("li");
+    const name = document.createElement("span");
+    const detail = document.createElement("strong");
+    name.textContent = label;
+    detail.textContent = value;
+    item.append(name, detail);
+    return item;
+  });
+  resourceDetailsList.replaceChildren(...rows);
+}
+
+function renderResourceStatus(resources = {}) {
+  if (!resourceStatus || !resourceStatusText) return;
+  state.resources = resources && typeof resources === "object" ? resources : {};
+  const host = state.resources.host || {};
+  resourceStatus.hidden = state.settings?.resource_monitor?.show_status === false;
+  resourceStatusText.textContent =
+    `System: ${formatPercent(host.cpu_percent)}/${formatPercent(host.memory_percent)}/${formatPercent(host.disk_busy_percent)}`;
+  resourceStatus.dataset.level = resourceLevel(state.resources.detector || {});
+  renderResourceDetails(state.resources);
 }
 
 function healthLevel(ms, components = {}, payloadOk = true) {
@@ -5545,11 +5797,19 @@ async function pollBackendHealth() {
       return;
     }
     const components = normalizedHealthComponents(payload.components || {});
+    renderResourceStatus(payload.resources || {});
     lastSuccessfulHealthComponents = components;
     healthFailures = 0;
     healthSamples.push(elapsedMs);
     if (healthSamples.length > 5) healthSamples.shift();
     const medianMs = medianHealthLatency();
+    state.lastHealthPayload = {
+      components,
+      elapsedMs,
+      medianMs,
+      ok: payload.ok,
+      serverTime: payload.time,
+    };
     updateBackendHealthStatus(
       healthLevel(medianMs, components, payload.ok),
       elapsedMs,
@@ -5630,9 +5890,66 @@ backendHealthStatus?.addEventListener("keydown", (event) => {
   backendHealthStatus.focus();
 });
 
+function setResourceDetailsExpanded(expanded, { pinned = resourceDetailsPinned } = {}) {
+  resourceDetailsPinned = pinned;
+  resourceStatusIndicator?.classList.toggle("details-open", expanded);
+  if (resourceDetails) resourceDetails.hidden = !expanded;
+  resourceStatus?.setAttribute("aria-expanded", expanded ? "true" : "false");
+}
+
+function refreshResourceDetailsExpanded() {
+  const expanded = Boolean(
+    resourceDetailsPinned ||
+      resourceDetailsPointerInside ||
+      resourceStatusIndicator?.contains(document.activeElement)
+  );
+  setResourceDetailsExpanded(expanded);
+}
+
+resourceStatusIndicator?.addEventListener("pointerenter", () => {
+  resourceDetailsPointerInside = true;
+  setResourceDetailsExpanded(true);
+});
+
+resourceStatusIndicator?.addEventListener("pointerleave", () => {
+  resourceDetailsPointerInside = false;
+  refreshResourceDetailsExpanded();
+});
+
+resourceStatusIndicator?.addEventListener("focusin", () => {
+  setResourceDetailsExpanded(true);
+});
+
+resourceStatusIndicator?.addEventListener("focusout", () => {
+  window.setTimeout(refreshResourceDetailsExpanded, 0);
+});
+
+resourceStatus?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  const pinned = !resourceDetailsPinned;
+  setResourceDetailsExpanded(
+    Boolean(
+      pinned ||
+        resourceDetailsPointerInside ||
+        resourceStatusIndicator?.contains(document.activeElement)
+    ),
+    { pinned }
+  );
+});
+
+resourceStatus?.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  setResourceDetailsExpanded(false, { pinned: false });
+  resourceStatus.focus();
+});
+
 document.addEventListener("click", (event) => {
-  if (backendHealthIndicator?.contains(event.target)) return;
-  setBackendHealthDetailsExpanded(false, { pinned: false });
+  if (!backendHealthIndicator?.contains(event.target)) {
+    setBackendHealthDetailsExpanded(false, { pinned: false });
+  }
+  if (!resourceStatusIndicator?.contains(event.target)) {
+    setResourceDetailsExpanded(false, { pinned: false });
+  }
 });
 
 function showLogsError(error) {
@@ -6566,10 +6883,13 @@ function mergePhotoRecord(existing = {}, incoming = {}) {
     merged.sql_value = incoming.sql_value || "";
   }
   merged.prefix = incoming.prefix || existing.prefix || "";
-  const cachedFtp = state.ftpPreviewCache.get(
-    ftpPreviewCacheKey(merged, formValue("ean") || state.loadedEntryOriginal?.ean || "")
+  const cachedFtpKey = ftpPreviewCacheKey(
+    merged,
+    formValue("ean") || state.loadedEntryOriginal?.ean || ""
   );
+  const cachedFtp = state.ftpPreviewCache.get(cachedFtpKey);
   if (cachedFtp) {
+    setFtpPreviewCache(cachedFtpKey, cachedFtp);
     return applyCachedFtpPreview(merged, merged.prefix, cachedFtp);
   }
   return merged;
@@ -6893,6 +7213,11 @@ async function refreshData() {
 
 async function loadBootstrap(options = {}) {
   const payload = await requestJson("/api/bootstrap", options);
+  state.settings = {
+    ...(state.settings || {}),
+    web_display: payload.web_display || state.settings?.web_display || { time_zone: "UTC" },
+  };
+  rerenderPanelTimestampViews();
   state.csrfToken = payload.csrf_token || state.csrfToken || "";
   state.defaultSlotFit = Boolean(payload.auto_content_fit);
   state.processing = payload.processing || state.processing || {};
@@ -7065,6 +7390,39 @@ function inputField(name, label, value = "", attrs = {}) {
     small.textContent = attrs.description;
     wrapper.appendChild(small);
   }
+  return wrapper;
+}
+
+function panelTimeZoneField(value = "UTC") {
+  const wrapper = document.createElement("label");
+  const input = document.createElement("input");
+  const datalist = document.createElement("datalist");
+  const description = document.createElement("small");
+  wrapper.textContent = "Globalna strefa czasu";
+  input.type = "search";
+  input.name = "web_display_time_zone";
+  input.value = value || "UTC";
+  input.required = true;
+  input.setAttribute("list", "panelTimeZoneCatalog");
+  datalist.id = "panelTimeZoneCatalog";
+  for (const timeZone of state.panelTimeZones) {
+    const option = document.createElement("option");
+    option.value = timeZone;
+    datalist.appendChild(option);
+  }
+  const validate = () => {
+    input.setCustomValidity(
+      state.panelTimeZones.includes(input.value)
+        ? ""
+        : "Wybierz strefe czasu z listy IANA."
+    );
+  };
+  input.addEventListener("input", validate);
+  input.addEventListener("change", validate);
+  validate();
+  description.textContent =
+    "Wyszukaj i wybierz pelna nazwe IANA. Ustawienie obowiazuje wszystkich uzytkownikow.";
+  wrapper.append(input, datalist, description);
   return wrapper;
 }
 
@@ -7583,7 +7941,7 @@ function collectSqliteBackupSchedule(form) {
 }
 
 function backupItemLabel(item) {
-  const parts = [item.created_at || "bez daty"];
+  const parts = [formatPanelTimestamp(item.created_at)];
   if (item.reason) parts.push(item.reason);
   if (item.schema_version !== undefined && item.schema_version !== null) {
     parts.push(`schema ${item.schema_version}`);
@@ -7593,6 +7951,7 @@ function backupItemLabel(item) {
 }
 
 function renderBackupHistory(items = []) {
+  state.backupHistoryItems = Array.isArray(items) ? items : [];
   if (!backupHistoryOutput) {
     return;
   }
@@ -7719,6 +8078,42 @@ function ensureSqlColumnsDatalist() {
   }
 }
 
+function rerenderPanelTimestampViews() {
+  updateRuntimeMetrics();
+  if (state.githubStatus) renderGithubStatus(state.githubStatus);
+  renderActiveUsersPresence({ enabled: state.activeUsersEnabled, users: state.activeUsers });
+  if (state.history) renderHistory(state.history);
+  if (
+    state.historyDetailGroup &&
+    document.querySelector("#historyDetailModal")?.classList.contains("active")
+  ) {
+    rerenderHistoryDetailTimestamps();
+  }
+  if (
+    state.historyTimingItem &&
+    document.querySelector("#historyTimingModal")?.classList.contains("active")
+  ) {
+    renderHistoryTiming(state.historyTimingItem, { open: false });
+  }
+  if (state.historyChangesItem && historyChangesModal?.classList.contains("active")) {
+    renderHistoryChanges(state.historyChangesItem, { open: false });
+  }
+  if (
+    Object.values(state.observability.tabs).some((tab) => Array.isArray(tab.items) && tab.items.length)
+  ) {
+    renderLogs();
+  }
+  renderResourceStatus(state.resources);
+  rerenderCachedHealthDetails();
+  if (state.backupHistoryItems.length) renderBackupHistory(state.backupHistoryItems);
+  if (state.pimcoreHistoryItems.length) renderPimcoreHistory(state.pimcoreHistoryItems);
+  renderPimcoreLiveEvents();
+  const entraContainer = document.querySelector(".entra-expiry-status");
+  if (entraContainer && state.entraExpiryStatus) {
+    renderEntraExpiryStatus(entraContainer, state.entraExpiryStatus);
+  }
+}
+
 function settingsSaveButton(form, buildPayload) {
   const actions = document.createElement("div");
   actions.className = "settings-actions";
@@ -7756,6 +8151,8 @@ function settingsSaveButton(form, buildPayload) {
       state.processing = state.settings.processing || state.processing || {};
       state.security = state.settings.security || state.security || {};
       state.productFields = state.settings.product_fields || state.productFields || {};
+      rerenderPanelTimestampViews();
+      renderResourceStatus(state.resources);
       refreshActiveUsersPresence().catch(() => {
         renderActiveUsersPresence({ enabled: false, users: [] });
       });
@@ -7854,6 +8251,7 @@ function renderSettingsApp() {
       actionRow(diagnosticButton("local", "Test folderow backendu"), fileIndexRefreshButton())
     ),
     settingsFieldGroup("Widok panelu",
+      panelTimeZoneField(s.web_display?.time_zone || "UTC"),
       checkField(
         "user_show_timing_details",
         "Pokazuj blok Pomiary",
@@ -7876,6 +8274,9 @@ function renderSettingsApp() {
       product_fields: collectProductFieldSettings(data),
     },
     sqlite_backup: collectSqliteBackupSchedule(form),
+    web_display: {
+      time_zone: data.get("web_display_time_zone"),
+    },
   }));
   form.addEventListener("submit", () => {
     const data = new FormData(form);
@@ -10149,6 +10550,7 @@ function collectPimcoreTestValues() {
 }
 
 function clearPimcoreLiveLog() {
+  state.pimcoreLiveEvents = [];
   if (!pimcoreLiveLog || !pimcoreTestElapsed || !pimcoreTestStatus) return;
   pimcoreLiveLog.textContent = "Brak operacji.";
   pimcoreLiveLog.className = "pimcore-live-log empty-state";
@@ -10156,23 +10558,28 @@ function clearPimcoreLiveLog() {
   pimcoreTestStatus.textContent = "";
 }
 
-function appendPimcoreLiveEvents(events) {
+function renderPimcoreLiveEvents() {
   if (!pimcoreLiveLog) return;
   const wasAtBottom =
     pimcoreLiveLog.scrollHeight - pimcoreLiveLog.scrollTop - pimcoreLiveLog.clientHeight < 24;
-  if (pimcoreLiveLog.classList.contains("empty-state")) {
-    pimcoreLiveLog.textContent = "";
-    pimcoreLiveLog.className = "pimcore-live-log";
+  pimcoreLiveLog.textContent = "";
+  if (!state.pimcoreLiveEvents.length) {
+    pimcoreLiveLog.textContent = "Brak operacji.";
+    pimcoreLiveLog.className = "pimcore-live-log empty-state";
+    return;
   }
-  for (const event of events || []) {
+  pimcoreLiveLog.className = "pimcore-live-log";
+  for (const event of state.pimcoreLiveEvents) {
     const row = document.createElement("div");
     const heading = document.createElement("strong");
     const detail = document.createElement("span");
     const diagnostic = document.createElement("pre");
     row.className = `pimcore-live-event ${event.severity || "info"}`;
-    const eventTime = Number(event.timestamp || 0) * 1000 || Date.now();
     heading.textContent =
-      `[${new Date(eventTime).toLocaleTimeString()}] ${event.stage || "etap"}: ${event.message || ""}`;
+      `[${formatPanelTimestamp(event.timestamp, {
+        date: false,
+        epochUnit: "seconds",
+      })}] ${event.stage || "etap"}: ${event.message || ""}`;
     detail.textContent = [
       event.method,
       event.endpoint,
@@ -10194,6 +10601,13 @@ function appendPimcoreLiveEvents(events) {
     pimcoreLiveLog.appendChild(row);
   }
   if (wasAtBottom) pimcoreLiveLog.scrollTop = pimcoreLiveLog.scrollHeight;
+}
+
+function appendPimcoreLiveEvents(events) {
+  const rows = Array.isArray(events) ? events : [];
+  if (!rows.length) return;
+  state.pimcoreLiveEvents.push(...rows);
+  renderPimcoreLiveEvents();
 }
 
 function pimcoreTestObjectKey(template, values) {
@@ -10285,6 +10699,7 @@ async function pollPimcoreTestOperation() {
 function renderPimcoreHistory(items) {
   if (!pimcoreHistoryOutput) return;
   const rows = Array.isArray(items) ? items : [];
+  state.pimcoreHistoryItems = rows;
   pimcoreHistoryOutput.textContent = "";
   pimcoreHistoryOutput.className = rows.length ? "history-output" : "history-output empty-state";
   if (!rows.length) {
@@ -10305,7 +10720,7 @@ function renderPimcoreHistory(items) {
       item.operation_id || ""
     }`;
     meta.textContent = [
-      item.started_at ? new Date(Number(item.started_at) * 1000).toLocaleString() : "",
+      formatPanelTimestamp(item.started_at, { epochUnit: "seconds" }),
       item.username,
       `${Number(item.total_ms || 0)} ms`,
       `klasa ${resultPayload.className || "brak"}`,
@@ -11040,17 +11455,6 @@ function renderMailTestSuiteResult(container, result) {
   container.appendChild(list);
 }
 
-function entraExpiryDateTime(value) {
-  const date = new Date(value || "");
-  if (Number.isNaN(date.getTime())) {
-    return { text: "Brak danych", title: "" };
-  }
-  return {
-    text: date.toLocaleString(),
-    title: date.toISOString(),
-  };
-}
-
 function entraExpiryRemainingDays(value) {
   const date = new Date(value || "");
   if (Number.isNaN(date.getTime())) return null;
@@ -11072,14 +11476,15 @@ function entraExpiryMetadata(label, value, title = "") {
 }
 
 function renderEntraExpiryStatus(container, status = {}) {
+  state.entraExpiryStatus = status;
   container.textContent = "";
   const panel = document.createElement("section");
   const heading = document.createElement("strong");
   const details = document.createElement("dl");
   const source = String(status.source || "saved");
-  const expiresAt = entraExpiryDateTime(status.expires_at);
-  const checkedAt = entraExpiryDateTime(status.last_checked_at);
-  const successfulAt = entraExpiryDateTime(status.last_success_at);
+  const expiresAt = formatPanelTimestamp(status.expires_at);
+  const checkedAt = formatPanelTimestamp(status.last_checked_at);
+  const successfulAt = formatPanelTimestamp(status.last_success_at);
   const remainingDays = entraExpiryRemainingDays(status.expires_at);
   const permissionRequired = status.error_code === "permission_required";
   const expirySeverity = remainingDays === null
@@ -11105,13 +11510,13 @@ function renderEntraExpiryStatus(container, status = {}) {
   details.append(
     entraExpiryMetadata("Aplikacja", String(status.application_name || "Brak danych")),
     entraExpiryMetadata("Credential", String(status.credential_name || "Brak danych")),
-    entraExpiryMetadata("Wygasa", expiresAt.text, expiresAt.title),
+    entraExpiryMetadata("Wygasa", expiresAt),
     entraExpiryMetadata(
       "Pozostalo",
       remainingDays === null ? "Brak danych" : remainingDays < 0 ? `${Math.abs(remainingDays)} dni po terminie` : `${remainingDays} dni`
     ),
-    entraExpiryMetadata("Ostatnia kontrola", checkedAt.text, checkedAt.title),
-    entraExpiryMetadata("Ostatni sukces", successfulAt.text, successfulAt.title),
+    entraExpiryMetadata("Ostatnia kontrola", checkedAt),
+    entraExpiryMetadata("Ostatni sukces", successfulAt),
     entraExpiryMetadata(
       "W cache",
       source === "microsoft_graph" ? "Nie - odswiezono teraz" : "Tak - zapisany bezpieczny stan"
@@ -11633,20 +12038,28 @@ function renderSettingsUsers() {
       loginMeta.push(
         user.lock_manual
           ? "Zablokowane do recznego odblokowania"
-          : `Zablokowane do ${user.lock_expires_at || "-"}`
+          : `Zablokowane do ${formatPanelTimestamp(user.lock_expires_ts, { epochUnit: "seconds" })}`
       );
     }
     if (user.failed_login_count) {
       loginMeta.push(`Bledne proby: ${user.failed_login_count}`);
     }
-    if (user.last_failed_login_at) {
+    if (user.last_failed_login_ts) {
       const ip = user.last_failed_login_ip ? `, ${user.last_failed_login_ip}` : "";
-      loginMeta.push(`Ostatnia bledna: ${user.last_failed_login_at}${ip}`);
+      loginMeta.push(
+        `Ostatnia bledna: ${formatPanelTimestamp(user.last_failed_login_ts, {
+          epochUnit: "seconds",
+        })}${ip}`
+      );
     }
     loginMeta.push(`Sesje v${Number(user.session_version || 0)}`);
     loginMeta.push(
       `Token rozszerzenia v${Number(user.extension_token_version || 0)}${
-        user.extension_token_last_used_at ? `, ostatnio ${user.extension_token_last_used_at}` : ""
+        user.extension_token_last_used_ts
+          ? `, ostatnio ${formatPanelTimestamp(user.extension_token_last_used_ts, {
+              epochUnit: "seconds",
+            })}`
+          : ""
       }`
     );
     nameMeta.textContent = loginMeta.join(" | ") || "Brak blednych prob logowania.";
@@ -11758,6 +12171,146 @@ function renderSettingsUsers() {
   settingsOutput.appendChild(wrapper);
 }
 
+function renderSettingsResourceMonitor() {
+  const monitor = state.settings.resource_monitor || {};
+  const form = document.createElement("form");
+  form.className = "settings-form";
+  const note = document.createElement("p");
+  note.className = "settings-note wide-field";
+  note.textContent =
+    "Progi dotycza procesu backendu. Alarm jest zatwierdzany po kolejnych probkach, aby ograniczyc falszywe ostrzezenia.";
+  const testNote = document.createElement("p");
+  testNote.className = "settings-note wide-field";
+  testNote.textContent =
+    "Bezpieczna symulacja zapisuje trwale zdarzenie testowe; brak zapisu jest wynikiem niepowodzenia. Testy rzeczywiste tworza kontrolowane obciazenie CPU, RAM albo dysku i moga trwac okolo 20 sekund.";
+  const testResult = document.createElement("p");
+  testResult.id = "resourceMonitorTestResult";
+  testResult.className = "resource-monitor-test-result wide-field";
+  testResult.setAttribute("role", "status");
+
+  const safeButton = document.createElement("button");
+  safeButton.type = "button";
+  safeButton.className = "secondary-button";
+  safeButton.dataset.resourceMonitorTest = "safe";
+  safeButton.textContent = "Bezpieczna symulacja";
+  safeButton.addEventListener("click", () => runResourceMonitorTest("safe"));
+
+  const cpuButton = document.createElement("button");
+  cpuButton.type = "button";
+  cpuButton.className = "secondary-button";
+  cpuButton.dataset.resourceMonitorTest = "cpu";
+  cpuButton.dataset.resourceMonitorRealTest = "cpu";
+  cpuButton.textContent = "Rzeczywisty test CPU";
+  cpuButton.addEventListener("click", () => runResourceMonitorTest("cpu"));
+
+  const memoryButton = document.createElement("button");
+  memoryButton.type = "button";
+  memoryButton.className = "secondary-button";
+  memoryButton.dataset.resourceMonitorTest = "memory";
+  memoryButton.dataset.resourceMonitorRealTest = "memory";
+  memoryButton.textContent = "Rzeczywisty test RAM";
+  memoryButton.addEventListener("click", () => runResourceMonitorTest("memory"));
+
+  const diskButton = document.createElement("button");
+  diskButton.type = "button";
+  diskButton.className = "secondary-button";
+  diskButton.dataset.resourceMonitorTest = "disk";
+  diskButton.dataset.resourceMonitorRealTest = "disk";
+  diskButton.textContent = "Rzeczywisty test dysku";
+  diskButton.addEventListener("click", () => runResourceMonitorTest("disk"));
+
+  form.append(
+    settingsFieldGroup(
+      "Wskaznik zasobow",
+      checkField(
+        "show_status",
+        "Pokazuj status zasobow w naglowku",
+        monitor.show_status !== false,
+        "Ukrywa tylko wskaznik zasobow; glowny status backendu pozostaje widoczny."
+      )
+    ),
+    settingsFieldGroup(
+      "Progi alarmow backendu",
+      note,
+      inputField(
+        "cpu_percent_threshold",
+        "CPU (%)",
+        monitor.cpu_percent_threshold ?? 25,
+        { type: "number", min: 10, max: 90, step: 1 }
+      ),
+      inputField(
+        "memory_percent_threshold",
+        "RAM (%)",
+        monitor.memory_percent_threshold ?? 20,
+        { type: "number", min: 1, max: 90, step: 1 }
+      ),
+      inputField(
+        "io_mib_per_second_threshold",
+        "Dysk I/O (MB/s)",
+        monitor.io_mib_per_second_threshold ?? 8,
+        { type: "number", min: 1, max: 256, step: 1 }
+      )
+    ),
+    settingsFieldGroup(
+      "Test monitora",
+      testNote,
+      actionRow(safeButton, cpuButton, memoryButton, diskButton),
+      testResult
+    )
+  );
+  settingsSaveButton(form, (data) => ({
+    resource_monitor: {
+      show_status: data.has("show_status"),
+      cpu_percent_threshold: data.get("cpu_percent_threshold"),
+      memory_percent_threshold: data.get("memory_percent_threshold"),
+      io_mib_per_second_threshold: data.get("io_mib_per_second_threshold"),
+    },
+  }));
+  settingsOutput.appendChild(form);
+  updateResourceMonitorTestUi();
+}
+
+function updateResourceMonitorTestUi() {
+  const result = document.querySelector("#resourceMonitorTestResult");
+  const buttons = Array.from(settingsOutput.querySelectorAll("[data-resource-monitor-test]"));
+  if (result) result.textContent = resourceMonitorTestState.message;
+  for (const button of buttons) button.disabled = resourceMonitorTestState.pending;
+}
+
+async function runResourceMonitorTest(mode) {
+  if (resourceMonitorTestState.pending) return;
+  resourceMonitorTestState.pending = true;
+  resourceMonitorTestState.message = "Uruchamianie testu monitora...";
+  updateResourceMonitorTestUi();
+  try {
+    let payload;
+    if (mode === "safe") {
+      payload = await requestJson("/api/resource-monitor/simulate-safe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+    } else {
+      payload = await requestJson("/api/resource-monitor/real-test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: mode }),
+        timeoutMs: 60000,
+      });
+    }
+    resourceMonitorTestState.message = String(payload.message || JSON.stringify(payload));
+    updateResourceMonitorTestUi();
+    if (payload.resources) renderResourceStatus(payload.resources);
+    await pollBackendHealth();
+  } catch (error) {
+    resourceMonitorTestState.message = error.message || String(error);
+    updateResourceMonitorTestUi();
+  } finally {
+    resourceMonitorTestState.pending = false;
+    updateResourceMonitorTestUi();
+  }
+}
+
 function renderSettings() {
   if (!state.settings) {
     return;
@@ -11776,12 +12329,22 @@ function renderSettings() {
   if (state.activeSettingsTab === "sql") renderSettingsSql();
   if (state.activeSettingsTab === "pimcore") renderSettingsPimcore();
   if (state.activeSettingsTab === "mail") renderSettingsMail();
+  if (state.activeSettingsTab === "monitor") renderSettingsResourceMonitor();
   if (state.activeSettingsTab === "slots") renderSettingsSlots();
   if (state.activeSettingsTab === "users") renderSettingsUsers();
 }
 
 async function loadSettings() {
-  state.settings = await requestJson("/api/settings");
+  const [settingsPayload, catalogPayload] = await Promise.all([
+    requestJson("/api/settings"),
+    requestJson("/api/settings/time-zones"),
+  ]);
+  state.settings = settingsPayload;
+  state.panelTimeZones = [...new Set(
+    (Array.isArray(catalogPayload.time_zones) ? catalogPayload.time_zones : [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+  )];
   state.settingsSecrets = null;
   state.currentUser = state.settings.current_user || state.currentUser;
   state.defaultSlotFit = Boolean(state.settings.auto_content_fit);
@@ -11790,6 +12353,7 @@ async function loadSettings() {
   state.security = state.settings.security || state.security || {};
   state.productFields = state.settings.product_fields || state.productFields || {};
   updateAdminUi();
+  renderResourceStatus(state.resources);
   applyTimingDetailsVisibility();
   applyProductFieldLabels();
   renderSettings();
@@ -12444,6 +13008,7 @@ setupAutocomplete();
 setupFieldChangeTracking();
 setupPageExitGuards();
 applyTheme();
+renderResourceStatus();
 loadBootstrap().catch(showError);
 startBackgroundPollers();
 pollBackendHealth().catch(() => {});

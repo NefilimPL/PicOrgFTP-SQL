@@ -40,6 +40,35 @@ class WebDataUserTests(unittest.TestCase):
         self.assertIsNotNone(user)
         self.assertEqual(user["role"], "admin")
 
+    def test_user_snapshot_keeps_raw_epoch_for_auth_times(self) -> None:
+        record = web_data._default_admin()
+        expected = {
+            "extension_token_issued_ts": 946_684_800.125,
+            "extension_token_last_used_ts": 978_307_200.25,
+            "lock_expires_ts": 1_893_456_000.5,
+            "last_failed_login_ts": 1_609_459_200.75,
+        }
+        record.update(
+            {
+                "extension_token_issued_at": expected["extension_token_issued_ts"],
+                "extension_token_last_used_at": expected[
+                    "extension_token_last_used_ts"
+                ],
+                "last_failed_login_at": expected["last_failed_login_ts"],
+            }
+        )
+        record["login_locked_until"] = expected["lock_expires_ts"]
+        record["login_lock_manual"] = False
+        with (
+            patch.object(web_data, "load_user_records", return_value=[record]),
+            patch.object(web_data.time, "time", return_value=1_800_000_000.0),
+        ):
+            snapshot = web_data.find_user("admin")
+
+        self.assertIsNotNone(snapshot)
+        for key, value in expected.items():
+            self.assertEqual(snapshot[key], value)
+
     def test_existing_user_without_email_normalizes_to_empty_string(self) -> None:
         record = web_data._normalized_user_record(
             {"username": "operator", "password_hash": "hash"}
@@ -701,6 +730,78 @@ class WebDataUserTests(unittest.TestCase):
         self.assertTrue(saved_config["target_only"])
         self.assertTrue(saved_config[web_data.LOCAL_FILE_INDEX_KEY])
 
+    def test_settings_snapshot_and_partial_update_expose_web_display_time_zone(self) -> None:
+        cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+        saved_configs = []
+
+        with (
+            patch.object(web_data.config, "CONFIG", cfg),
+            patch.object(
+                web_data.config,
+                "available_display_time_zones",
+                return_value=["UTC", "Europe/Warsaw"],
+            ),
+            patch.object(
+                web_data,
+                "save_config",
+                side_effect=lambda payload, **_kwargs: saved_configs.append(
+                    json.loads(json.dumps(payload))
+                ),
+            ),
+            patch.object(web_data.config, "initialize_config", return_value=cfg),
+            patch.object(web_data, "load_users", return_value=[]),
+        ):
+            initial = web_data.settings_snapshot()
+            updated = web_data.update_settings(
+                {"web_display": {"time_zone": "Europe/Warsaw"}}
+            )
+
+        self.assertEqual(initial["web_display"], {"time_zone": "UTC"})
+        self.assertEqual(
+            saved_configs[0]["web_display"],
+            {"time_zone": "Europe/Warsaw"},
+        )
+        self.assertEqual(updated["web_display"], {"time_zone": "Europe/Warsaw"})
+
+    def test_update_settings_rejects_invalid_time_zone_without_overwriting_saved_value(self) -> None:
+        cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+        cfg["web_display"] = {"time_zone": "Europe/Warsaw"}
+        saved_configs = []
+
+        with (
+            patch.object(web_data.config, "CONFIG", cfg),
+            patch.object(
+                web_data.config,
+                "available_display_time_zones",
+                return_value=["UTC", "Europe/Warsaw"],
+            ),
+            patch.object(
+                web_data,
+                "save_config",
+                side_effect=lambda payload, **_kwargs: saved_configs.append(
+                    json.loads(json.dumps(payload))
+                ),
+            ),
+            patch.object(web_data.config, "initialize_config", return_value=cfg),
+            patch.object(
+                web_data,
+                "settings_snapshot",
+                side_effect=lambda: {"web_display": dict(cfg["web_display"])},
+            ),
+        ):
+            for invalid in ("CEST", "Invalid/Time_Zone"):
+                with self.assertRaisesRegex(ValueError, "strefa czasowa"):
+                    web_data.update_settings({"web_display": {"time_zone": invalid}})
+                self.assertEqual(cfg["web_display"], {"time_zone": "Europe/Warsaw"})
+                self.assertEqual(saved_configs, [])
+
+            updated = web_data.update_settings({"web_display": {"time_zone": "UTC"}})
+
+        self.assertEqual(cfg["web_display"], {"time_zone": "UTC"})
+        self.assertEqual(len(saved_configs), 1)
+        self.assertEqual(saved_configs[0]["web_display"], {"time_zone": "UTC"})
+        self.assertEqual(updated["web_display"], {"time_zone": "UTC"})
+
     def test_update_settings_persists_storage_bootstrap(self) -> None:
         temp_dir = _workspace_temp("web_data_storage_update")
         try:
@@ -870,6 +971,36 @@ class WebDataUserTests(unittest.TestCase):
             ["jpg", "png"],
         )
         self.assertTrue(saved_config[web_data.SECURITY_SETTINGS_KEY]["antivirus_scan_uploads"])
+
+    def test_update_settings_returns_normalized_resource_monitor_settings(self) -> None:
+        cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+
+        with (
+            patch.object(web_data.config, "CONFIG", cfg),
+            patch.object(web_data, "save_config"),
+            patch.object(web_data.config, "initialize_config", return_value=cfg),
+            patch.object(web_data, "load_users", return_value=[]),
+        ):
+            snapshot = web_data.update_settings(
+                {
+                    "resource_monitor": {
+                        "show_status": False,
+                        "cpu_percent_threshold": 35,
+                        "memory_percent_threshold": 25,
+                        "io_mib_per_second_threshold": 8,
+                    }
+                }
+            )
+
+        self.assertEqual(
+            snapshot["resource_monitor"],
+            {
+                "show_status": False,
+                "cpu_percent_threshold": 35,
+                "memory_percent_threshold": 25,
+                "io_mib_per_second_threshold": 8,
+            },
+        )
 
     def test_security_settings_default_hide_active_web_users(self) -> None:
         normalized = web_data.config._normalize_security_settings({})
@@ -1138,7 +1269,7 @@ class WebDataUserTests(unittest.TestCase):
             status = web_data.file_index_status()
 
         self.assertEqual(status["generated_at"], "2026-06-25T13:02:34.300Z")
-        self.assertIn("2026-06-25", status["label"])
+        self.assertEqual(status["label"], "Indeks lokalny")
 
     def test_settings_snapshot_exposes_storage_locations(self) -> None:
         temp_dir = _workspace_temp("web_data_storage_snapshot")

@@ -74,6 +74,7 @@ class WebSmokeCiTests(unittest.TestCase):
         self.assertEqual(
             payload["components"]["notification_worker"]["status"], "online"
         )
+        self.assertIn("resources", payload)
 
     def test_add_user_route_forwards_email(self) -> None:
         client = TestClient(web_app.app)
@@ -352,6 +353,8 @@ class WebSmokeCiTests(unittest.TestCase):
             "/",
             "/login",
             "/api/health",
+            "/api/resource-monitor/simulate-safe",
+            "/api/resource-monitor/real-test",
             "/api/login",
             "/api/logout",
             "/api/bootstrap",
