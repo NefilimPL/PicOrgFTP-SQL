@@ -110,6 +110,19 @@ def test_history_details_returns_one_filtered_group(api_environment) -> None:
     assert client.get("/api/history/details?ean=missing").status_code == 404
 
 
+def test_history_details_api_pages_one_ean(api_environment) -> None:
+    client, _store = api_environment
+    _login(client)
+    for _ in range(30):
+        web_data.record_history(username="alice", action="save", ean="5901")
+
+    response = client.get("/api/history/details?ean=5901&page=2&page_size=25")
+
+    assert response.status_code == 200
+    assert len(response.json()["items"]) == 5
+    assert response.json()["total_pages"] == 2
+
+
 def test_time_zone_catalog_requires_admin(api_environment) -> None:
     client, _store = api_environment
 

@@ -5107,9 +5107,17 @@ def create_app() -> FastAPI:
         ean: str,
         user: str = "",
         query: str = "",
+        page: int = 1,
+        page_size: int = 25,
     ) -> Dict[str, Any]:
         _require_user(request)
-        payload = history_group_snapshot(ean=ean, user=user, query=query)
+        payload = history_group_snapshot(
+            ean=ean,
+            user=user,
+            query=query,
+            page=page,
+            page_size=page_size,
+        )
         if payload is None:
             raise HTTPException(
                 status_code=404,

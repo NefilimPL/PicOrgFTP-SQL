@@ -633,6 +633,16 @@ def history_snapshot(
 ) -> dict[str, object]:
     """Return a page of lightweight web history groups."""
 
+    sqlite_store = _active_sqlite_store()
+    if sqlite_store is not None:
+        history_store = getattr(sqlite_store, "store", sqlite_store)
+        return history_store.history_summary_snapshot(
+            user=user,
+            query=query,
+            page=page,
+            page_size=page_size,
+        )
+
     all_records = sorted(
         _load_history_records(), key=_history_timestamp_value, reverse=True
     )
@@ -670,9 +680,20 @@ def history_snapshot(
 
 
 def history_group_snapshot(
-    *, ean: str, user: str = "", query: str = ""
+    *, ean: str, user: str = "", query: str = "", page: int = 1, page_size: int = 25
 ) -> dict[str, object] | None:
-    """Return full history details for one filtered EAN group."""
+    """Return one bounded page of filtered history details for an EAN group."""
+
+    sqlite_store = _active_sqlite_store()
+    if sqlite_store is not None:
+        history_store = getattr(sqlite_store, "store", sqlite_store)
+        return history_store.history_group_snapshot(
+            ean=ean,
+            user=user,
+            query=query,
+            page=page,
+            page_size=page_size,
+        )
 
     normalized_ean = _text(ean) or "BRAK-EAN"
     records = sorted(
@@ -686,10 +707,26 @@ def history_group_snapshot(
     ]
     if not items:
         return None
+    try:
+        bounded_page_size = max(1, min(25, int(page_size or 25)))
+    except (TypeError, ValueError):
+        bounded_page_size = 25
+    try:
+        requested_page = max(1, int(page or 1))
+    except (TypeError, ValueError):
+        requested_page = 1
+    total_items = len(items)
+    total_pages = max(1, (total_items + bounded_page_size - 1) // bounded_page_size)
+    current_page = min(requested_page, total_pages)
+    start = (current_page - 1) * bounded_page_size
     return {
         "ean": normalized_ean,
         "latest_ts": _history_timestamp_value(items[0]),
-        "items": items,
+        "items": items[start : start + bounded_page_size],
+        "total_items": total_items,
+        "page": current_page,
+        "page_size": bounded_page_size,
+        "total_pages": total_pages,
     }
 
 

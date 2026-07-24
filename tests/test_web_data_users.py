@@ -347,6 +347,54 @@ class WebDataUserTests(unittest.TestCase):
         self.assertEqual(payload["ean"], "5901")
         self.assertEqual([item["user"] for item in payload["items"]], ["alice"])
 
+    def test_history_group_snapshot_pages_legacy_records(self) -> None:
+        records = [
+            {"ean": "5901", "ts": 1000 - index, "details": {}}
+            for index in range(60)
+        ]
+
+        with patch.object(web_data, "_load_history_records", return_value=records):
+            payload = web_data.history_group_snapshot(ean="5901", page=2, page_size=25)
+
+        self.assertEqual(len(payload["items"]), 25)
+        self.assertEqual(
+            (payload["page"], payload["total_items"], payload["total_pages"]),
+            (2, 60, 3),
+        )
+
+    def test_history_snapshots_delegate_to_sqlite_store_without_full_load(self) -> None:
+        store = Mock(spec=["history_summary_snapshot", "history_group_snapshot"])
+        summary_payload = {"groups": [], "page": 2}
+        details_payload = {"ean": "5901", "items": [], "page": 2}
+        store.history_summary_snapshot.return_value = summary_payload
+        store.history_group_snapshot.return_value = details_payload
+
+        with (
+            patch.object(web_data, "_active_sqlite_store", return_value=store),
+            patch.object(
+                web_data,
+                "_load_history_records",
+                side_effect=AssertionError("SQLite snapshots must not load all history"),
+            ),
+        ):
+            self.assertIs(
+                web_data.history_snapshot(user="alice", query="lamp", page=2, page_size=30),
+                summary_payload,
+            )
+            self.assertIs(
+                web_data.history_group_snapshot(
+                    ean="5901", user="alice", query="lamp", page=2, page_size=20
+                ),
+                details_payload,
+            )
+
+        store.history_summary_snapshot.assert_called_once_with(
+            user="alice", query="lamp", page=2, page_size=30
+        )
+        store.history_group_snapshot.assert_called_once_with(
+            ean="5901", user="alice", query="lamp", page=2, page_size=20
+        )
+
     def test_ftp_cache_dir_can_be_scoped_per_user_session(self) -> None:
         temp_dir = _workspace_temp("web_data_ftp_cache_scope")
         try:
