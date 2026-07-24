@@ -60,7 +60,7 @@ def test_schema_creates_expected_tables(tmp_path: Path) -> None:
             "PRAGMA foreign_key_list(operational_event_stream)"
         ).fetchall()
 
-    assert version == 10
+    assert version == 11
     assert stream_columns == ["sequence", "event_id"]
     assert stream_foreign_keys == []
 
