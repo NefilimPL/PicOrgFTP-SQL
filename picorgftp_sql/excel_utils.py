@@ -219,7 +219,8 @@ def _normalize_extra_value(extra: str) -> str:
 def _normalize_list_usage_value(sheet_name: str, value: object) -> str:
     """Normalize a list value for usage checks in the entries sheet."""
 
-    text = unicodedata.normalize("NFKD", _normalize_cell(value)).casefold()
+    raw = _normalize_cell(value).replace("\u0141", "L").replace("\u0142", "l")
+    text = unicodedata.normalize("NFKD", raw).casefold()
     text = "".join(ch for ch in text if not unicodedata.combining(ch)).upper()
     if sheet_name == _excel_sheets().get(EXTRAS_SHEET, EXTRAS_SHEET):
         text = text.replace(UNDERSCORE, HYPHEN)
@@ -394,6 +395,10 @@ def find_list_value_usage(
     limit: int = 100,
 ) -> list[dict[str, str]]:
     """Return product entries from Excel that use ``value`` from a list sheet."""
+
+    sqlite_store = _active_sqlite_store()
+    if sqlite_store is not None:
+        return sqlite_store.find_list_value_usage(sheet_name, value, limit=limit)
 
     field_map = {
         _excel_sheets().get("NAZWY", "NAZWY"): [NAME_HEADER],
