@@ -74,6 +74,11 @@ limit 2000 wpisów przez usunięcie najstarszych rekordów i odpowiadających im
 indeksu. `save_history()` odbuduje oba zbiory atomowo. `record_history()` w trybie
 SQLite użyje `append_history()` bez poprzedniego pełnego odczytu historii.
 
+Każdy wspierany zapis historii aktualizuje indeks w tej samej transakcji; kontrola
+liczby wierszy podczas startu jest wyłącznie mechanizmem odzyskania indeksu
+brakującego lub przerwanego. Projekcja wyszukiwania używa `casefold()`, zgodnie z
+dotychczasowym filtrem historii, a nie słabszego `lower()`.
+
 ## Obsługa błędów i zgodność
 
 - Redakcja jest wykonywana przed zapisem payloadu i projekcji indeksu.
