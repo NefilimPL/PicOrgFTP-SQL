@@ -340,6 +340,18 @@ class ProductFieldSettingsTests(unittest.TestCase):
 
         self.assertEqual(harness.var_type.get(), "")
 
+    def test_record_from_list_usage_prefers_cached_product_id_and_has_fallback(self) -> None:
+        cached = {"PRODUCT_ID": "PRD-1", "EAN": "5901234567890", "NAZWA": "MAGGIORE"}
+        harness = type("Harness", (), {"entries_by_id": {"PRD-1": cached}, "entries": {}})()
+        self.assertEqual(App._record_from_list_usage(harness, {"product_id": "prd-1"}), cached)
+        fallback = App._record_from_list_usage(harness, {
+            "product_id": "PRD-2", "ean": "5900000000000", "name": "LUNA",
+            "type_name": "STOL", "model": "L-01", "color1": "BIALY",
+            "color2": "", "color3": "", "extra": "NO-LED",
+        })
+        self.assertEqual(fallback["PRODUCT_ID"], "PRD-2")
+        self.assertEqual(fallback["NAZWA"], "LUNA")
+
 
 if __name__ == "__main__":
     unittest.main()
