@@ -1261,6 +1261,21 @@ class WebDataUserTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_record_history_appends_to_sqlite_without_full_history_load(self) -> None:
+        store = Mock()
+
+        with (
+            patch.object(web_data, "_active_sqlite_store", return_value=store),
+            patch.object(
+                web_data,
+                "_load_history_records",
+                side_effect=AssertionError("full load"),
+            ),
+        ):
+            web_data.record_history(username="alice", action="save", ean="5901")
+
+        store.append_history.assert_called_once()
+
     def test_sqlite_mode_file_index_uses_database_cache_without_json_file(self) -> None:
         temp_dir = _workspace_temp("web_data_sqlite_file_index")
         try:

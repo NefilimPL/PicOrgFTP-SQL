@@ -391,6 +391,27 @@ def _upsert_web_history_index(
     )
 
 
+def _prune_web_history(conn: sqlite3.Connection) -> None:
+    """Keep the payload and read index limited to the newest history records."""
+
+    conn.execute(
+        """
+        DELETE FROM web_history_index
+        WHERE id NOT IN (
+            SELECT id FROM web_history_index
+            ORDER BY created_at DESC, id DESC
+            LIMIT 2000
+        )
+        """
+    )
+    conn.execute(
+        """
+        DELETE FROM web_history
+        WHERE id NOT IN (SELECT id FROM web_history_index)
+        """
+    )
+
+
 def _rebuild_web_history_index_if_needed(conn: sqlite3.Connection) -> None:
     """Backfill the read index when a pre-index payload table is detected."""
 
@@ -3666,6 +3687,7 @@ class SqliteStore:
                     record_id=record_id,
                     created_at=created_at,
                 )
+            _prune_web_history(conn)
 
     def append_history(self, record: dict[str, object]) -> None:
         """Append or replace one web history record."""
@@ -3697,6 +3719,7 @@ class SqliteStore:
                 record_id=record_id,
                 created_at=created_at,
             )
+            _prune_web_history(conn)
 
     def claim_daily_change_summary(
         self, window_end: str, *, claimed_at: str

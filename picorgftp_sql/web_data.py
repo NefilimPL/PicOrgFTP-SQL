@@ -534,6 +534,10 @@ def record_history(
     }
     safe_record = redact_sensitive_value(record)
     record = safe_record if isinstance(safe_record, dict) else {}
+    sqlite_store = _active_sqlite_store()
+    if sqlite_store is not None:
+        sqlite_store.append_history(record)
+        return record
     records = _load_history_records()
     records.append(record)
     _save_history_records(records)

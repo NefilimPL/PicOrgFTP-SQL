@@ -115,6 +115,36 @@ def test_save_history_replaces_same_count_index_rows_in_one_transaction(
     assert [item["ean"] for item in detail["items"]] == ["new-ean"]
 
 
+def test_append_history_keeps_payload_and_index_at_retention_limit(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+
+    for index in range(2001):
+        store.append_history(_history_record(index, ean=f"590{index:010d}"))
+
+    with store.connection() as conn:
+        payload_count = conn.execute("SELECT COUNT(*) FROM web_history").fetchone()[0]
+        index_count = conn.execute(
+            "SELECT COUNT(*) FROM web_history_index"
+        ).fetchone()[0]
+    assert payload_count == index_count == 2000
+
+
+def test_save_history_keeps_payload_and_index_at_retention_limit(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.save_history([_history_record(index) for index in range(2001)])
+
+    with store.connection() as conn:
+        payload_count = conn.execute("SELECT COUNT(*) FROM web_history").fetchone()[0]
+        index_count = conn.execute(
+            "SELECT COUNT(*) FROM web_history_index"
+        ).fetchone()[0]
+    assert payload_count == index_count == 2000
+
+
 def test_history_index_search_uses_unicode_casefold(
     tmp_path: Path,
 ) -> None:
