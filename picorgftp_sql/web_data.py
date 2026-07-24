@@ -534,6 +534,10 @@ def record_history(
     }
     safe_record = redact_sensitive_value(record)
     record = safe_record if isinstance(safe_record, dict) else {}
+    sqlite_store = _active_sqlite_store()
+    if sqlite_store is not None:
+        sqlite_store.append_history(record)
+        return record
     records = _load_history_records()
     records.append(record)
     _save_history_records(records)
@@ -568,25 +572,42 @@ def _history_timestamp_value(item: dict[str, object]) -> float:
     return 0.0
 
 
-def history_snapshot(
-    *,
-    user: str = "",
-    limit: int = 200,
-    query: str = "",
-    page: int = 1,
-    page_size: int = 50,
-) -> dict[str, object]:
-    """Return recent web history grouped by EAN."""
+def _filter_history_records(
+    records: list[dict[str, object]], *, user: str = "", query: str = ""
+) -> list[dict[str, object]]:
+    """Apply the history filters to an already loaded record collection."""
 
     user_filter = _text(user).lower()
     query_filter = _text(query).casefold()
-    records = sorted(_load_history_records(), key=_history_timestamp_value, reverse=True)
     if user_filter:
-        records = [item for item in records if _text(item.get("user")).lower() == user_filter]
+        records = [
+            item for item in records if _text(item.get("user")).lower() == user_filter
+        ]
     if query_filter:
-        records = [item for item in records if query_filter in _history_record_search_text(item)]
-    limit = max(1, min(1000, int(limit or 200)))
-    records = records[:limit]
+        records = [
+            item
+            for item in records
+            if query_filter in _history_record_search_text(item)
+        ]
+    return records
+
+
+def _history_group_entry(items: list[dict[str, object]]) -> dict[str, object]:
+    """Return the first display-safe product entry available in a group."""
+
+    for item in items:
+        details = item.get("details")
+        if not isinstance(details, dict):
+            continue
+        entry = details.get("entry")
+        if isinstance(entry, dict):
+            return entry
+    return {}
+
+
+def _group_history_records(
+    records: list[dict[str, object]],
+) -> list[dict[str, object]]:
     grouped: dict[str, dict[str, object]] = {}
     for item in records:
         ean = _text(item.get("ean")) or "BRAK-EAN"
@@ -596,7 +617,40 @@ def history_snapshot(
             float(group.get("latest_ts") or 0),
             _history_timestamp_value(item),
         )
-    groups = sorted(grouped.values(), key=lambda item: float(item.get("latest_ts") or 0), reverse=True)
+    return sorted(
+        grouped.values(),
+        key=lambda item: float(item.get("latest_ts") or 0),
+        reverse=True,
+    )
+
+
+def history_snapshot(
+    *,
+    user: str = "",
+    query: str = "",
+    page: int = 1,
+    page_size: int = 50,
+) -> dict[str, object]:
+    """Return a page of lightweight web history groups."""
+
+    sqlite_store = _active_sqlite_store()
+    if sqlite_store is not None:
+        history_store = getattr(sqlite_store, "store", sqlite_store)
+        return history_store.history_summary_snapshot(
+            user=user,
+            query=query,
+            page=page,
+            page_size=page_size,
+        )
+
+    all_records = sorted(
+        _load_history_records(), key=_history_timestamp_value, reverse=True
+    )
+    users = sorted(
+        {_text(item.get("user")) for item in all_records if _text(item.get("user"))}
+    )
+    records = _filter_history_records(all_records, user=user, query=query)
+    groups = _group_history_records(records)
     page_size = max(1, min(50, int(page_size or 50)))
     page = max(1, int(page or 1))
     total_groups = len(groups)
@@ -604,8 +658,15 @@ def history_snapshot(
     if page > total_pages:
         page = total_pages
     start = (page - 1) * page_size
-    groups_page = groups[start : start + page_size]
-    users = sorted({_text(item.get("user")) for item in _load_history_records() if _text(item.get("user"))})
+    groups_page = [
+        {
+            "ean": _text(group.get("ean")) or "BRAK-EAN",
+            "latest_ts": float(group.get("latest_ts") or 0),
+            "change_count": len(group.get("items") or []),
+            "entry": _history_group_entry(group.get("items") or []),
+        }
+        for group in groups[start : start + page_size]
+    ]
     return {
         "groups": groups_page,
         "users": users,
@@ -615,6 +676,57 @@ def history_snapshot(
         "page_size": page_size,
         "total_pages": total_pages,
         "query": _text(query),
+    }
+
+
+def history_group_snapshot(
+    *, ean: str, user: str = "", query: str = "", page: int = 1, page_size: int = 25
+) -> dict[str, object] | None:
+    """Return one bounded page of filtered history details for an EAN group."""
+
+    sqlite_store = _active_sqlite_store()
+    if sqlite_store is not None:
+        history_store = getattr(sqlite_store, "store", sqlite_store)
+        return history_store.history_group_snapshot(
+            ean=ean,
+            user=user,
+            query=query,
+            page=page,
+            page_size=page_size,
+        )
+
+    normalized_ean = _text(ean) or "BRAK-EAN"
+    records = sorted(
+        _load_history_records(), key=_history_timestamp_value, reverse=True
+    )
+    filtered = _filter_history_records(records, user=user, query=query)
+    items = [
+        item
+        for item in filtered
+        if (_text(item.get("ean")) or "BRAK-EAN") == normalized_ean
+    ]
+    if not items:
+        return None
+    try:
+        bounded_page_size = max(1, min(25, int(page_size or 25)))
+    except (TypeError, ValueError):
+        bounded_page_size = 25
+    try:
+        requested_page = max(1, int(page or 1))
+    except (TypeError, ValueError):
+        requested_page = 1
+    total_items = len(items)
+    total_pages = max(1, (total_items + bounded_page_size - 1) // bounded_page_size)
+    current_page = min(requested_page, total_pages)
+    start = (current_page - 1) * bounded_page_size
+    return {
+        "ean": normalized_ean,
+        "latest_ts": _history_timestamp_value(items[0]),
+        "items": items[start : start + bounded_page_size],
+        "total_items": total_items,
+        "page": current_page,
+        "page_size": bounded_page_size,
+        "total_pages": total_pages,
     }
 
 

@@ -292,8 +292,8 @@ class WebDataUserTests(unittest.TestCase):
             )
 
         with patch.object(web_data, "_load_history_records", return_value=records):
-            search_payload = web_data.history_snapshot(query="target", page_size=50, limit=1000)
-            page_payload = web_data.history_snapshot(page=2, page_size=80, limit=1000)
+            search_payload = web_data.history_snapshot(query="target", page_size=50)
+            page_payload = web_data.history_snapshot(page=2, page_size=80)
 
         self.assertEqual(search_payload["total_groups"], 1)
         self.assertEqual(search_payload["groups"][0]["ean"], "590000000010")
@@ -301,6 +301,99 @@ class WebDataUserTests(unittest.TestCase):
         self.assertEqual(page_payload["page"], 2)
         self.assertEqual(page_payload["total_pages"], 2)
         self.assertEqual(len(page_payload["groups"]), 10)
+
+    def test_history_snapshot_returns_paged_summaries_after_one_load(self) -> None:
+        records = [
+            {
+                "ts": 1000 - index,
+                "ean": f"5900000000{index:02}",
+                "user": "alice" if index % 2 else "bob",
+                "details": {
+                    "entry": {"NAZWA": f"Name {index}"},
+                    "timing": {"stages": ["large"]},
+                },
+            }
+            for index in range(60)
+        ]
+        loader = Mock(return_value=records)
+
+        with patch.object(web_data, "_load_history_records", loader):
+            payload = web_data.history_snapshot(page=2, page_size=50)
+
+        self.assertEqual(loader.call_count, 1)
+        self.assertEqual(payload["page"], 2)
+        self.assertEqual(len(payload["groups"]), 10)
+        self.assertEqual(
+            set(payload["groups"][0]),
+            {"ean", "latest_ts", "change_count", "entry"},
+        )
+        self.assertNotIn("items", payload["groups"][0])
+
+    def test_history_group_snapshot_returns_only_filtered_ean_items(self) -> None:
+        records = [
+            {
+                "ean": "5901",
+                "user": "alice",
+                "ts": 2,
+                "details": {"entry": {"NAZWA": "A"}},
+            },
+            {"ean": "5901", "user": "bob", "ts": 1, "details": {}},
+            {"ean": "5902", "user": "alice", "ts": 3, "details": {}},
+        ]
+
+        with patch.object(web_data, "_load_history_records", return_value=records):
+            payload = web_data.history_group_snapshot(ean="5901", user="alice")
+
+        self.assertEqual(payload["ean"], "5901")
+        self.assertEqual([item["user"] for item in payload["items"]], ["alice"])
+
+    def test_history_group_snapshot_pages_legacy_records(self) -> None:
+        records = [
+            {"ean": "5901", "ts": 1000 - index, "details": {}}
+            for index in range(60)
+        ]
+
+        with patch.object(web_data, "_load_history_records", return_value=records):
+            payload = web_data.history_group_snapshot(ean="5901", page=2, page_size=25)
+
+        self.assertEqual(len(payload["items"]), 25)
+        self.assertEqual(
+            (payload["page"], payload["total_items"], payload["total_pages"]),
+            (2, 60, 3),
+        )
+
+    def test_history_snapshots_delegate_to_sqlite_store_without_full_load(self) -> None:
+        store = Mock(spec=["history_summary_snapshot", "history_group_snapshot"])
+        summary_payload = {"groups": [], "page": 2}
+        details_payload = {"ean": "5901", "items": [], "page": 2}
+        store.history_summary_snapshot.return_value = summary_payload
+        store.history_group_snapshot.return_value = details_payload
+
+        with (
+            patch.object(web_data, "_active_sqlite_store", return_value=store),
+            patch.object(
+                web_data,
+                "_load_history_records",
+                side_effect=AssertionError("SQLite snapshots must not load all history"),
+            ),
+        ):
+            self.assertIs(
+                web_data.history_snapshot(user="alice", query="lamp", page=2, page_size=30),
+                summary_payload,
+            )
+            self.assertIs(
+                web_data.history_group_snapshot(
+                    ean="5901", user="alice", query="lamp", page=2, page_size=20
+                ),
+                details_payload,
+            )
+
+        store.history_summary_snapshot.assert_called_once_with(
+            user="alice", query="lamp", page=2, page_size=30
+        )
+        store.history_group_snapshot.assert_called_once_with(
+            ean="5901", user="alice", query="lamp", page=2, page_size=20
+        )
 
     def test_ftp_cache_dir_can_be_scoped_per_user_session(self) -> None:
         temp_dir = _workspace_temp("web_data_ftp_cache_scope")
@@ -1215,6 +1308,21 @@ class WebDataUserTests(unittest.TestCase):
             self.assertFalse((temp_dir / web_data.WEB_HISTORY_PATH).exists())
         finally:
             shutil.rmtree(temp_dir)
+
+    def test_record_history_appends_to_sqlite_without_full_history_load(self) -> None:
+        store = Mock()
+
+        with (
+            patch.object(web_data, "_active_sqlite_store", return_value=store),
+            patch.object(
+                web_data,
+                "_load_history_records",
+                side_effect=AssertionError("full load"),
+            ),
+        ):
+            web_data.record_history(username="alice", action="save", ean="5901")
+
+        store.append_history.assert_called_once()
 
     def test_sqlite_mode_file_index_uses_database_cache_without_json_file(self) -> None:
         temp_dir = _workspace_temp("web_data_sqlite_file_index")

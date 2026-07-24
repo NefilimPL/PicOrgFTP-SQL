@@ -124,6 +124,7 @@ from ..web_data import (
     find_product_photos,
     file_index_status,
     get_pimcore_product_for_edit,
+    history_group_snapshot,
     invalidate_ftp_preview_cache,
     load_web_data,
     load_users,
@@ -5088,7 +5089,6 @@ def create_app() -> FastAPI:
     def history_api(
         request: Request,
         user: str = "",
-        limit: int = 1000,
         query: str = "",
         page: int = 1,
         page_size: int = 50,
@@ -5096,11 +5096,34 @@ def create_app() -> FastAPI:
         _require_user(request)
         return history_snapshot(
             user=user,
-            limit=limit,
             query=query,
             page=page,
             page_size=page_size,
         )
+
+    @app.get("/api/history/details")
+    def history_details_api(
+        request: Request,
+        ean: str,
+        user: str = "",
+        query: str = "",
+        page: int = 1,
+        page_size: int = 25,
+    ) -> Dict[str, Any]:
+        _require_user(request)
+        payload = history_group_snapshot(
+            ean=ean,
+            user=user,
+            query=query,
+            page=page,
+            page_size=page_size,
+        )
+        if payload is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Nie znaleziono historii dla wybranego EAN.",
+            )
+        return payload
 
     @app.get("/api/logs")
     def logs_api(request: Request, limit: int = 300) -> Dict[str, Any]:

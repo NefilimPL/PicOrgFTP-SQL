@@ -43,6 +43,312 @@ def _event(
     return event
 
 
+def _history_record(index: int, *, ean: str | None = None) -> dict[str, object]:
+    created_at = datetime(2026, 7, 16, 10, tzinfo=timezone.utc) + timedelta(
+        seconds=index
+    )
+    return {
+        "id": f"history-{index:03d}",
+        "created_at": created_at.isoformat(timespec="milliseconds").replace(
+            "+00:00", "Z"
+        ),
+        "user": "alice",
+        "action": "save",
+        "ean": ean or f"590{index:010d}",
+        "product_id": f"product-{index}",
+        "summary": f"Saved product {index}",
+        "details": {"entry": {"name": f"Product {index}"}},
+    }
+
+
+def _append_history_before_query(
+    store: SqliteStore,
+    writer: SqliteStore,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    query_prefix: str,
+    record: dict[str, object],
+) -> tuple[list[bool], list[BaseException]]:
+    original_connect = store.connect
+    appended = [False]
+    errors: list[BaseException] = []
+
+    def connect_with_append_hook() -> sqlite3.Connection:
+        conn = original_connect()
+
+        def append_before_query(statement: str) -> None:
+            normalized = " ".join(statement.split()).lower()
+            if appended[0] or not normalized.startswith(query_prefix):
+                return
+            appended[0] = True
+            try:
+                writer.append_history(record)
+            except BaseException as exc:  # pragma: no cover - asserted by caller
+                errors.append(exc)
+
+        conn.set_trace_callback(append_before_query)
+        return conn
+
+    monkeypatch.setattr(store, "connect", connect_with_append_hook)
+    return appended, errors
+
+
+def test_history_summary_snapshot_uses_index_without_payload_decode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "app.sqlite"
+    records = [_history_record(index) for index in range(60)]
+    migration_secret = "migration-secret-must-not-leak"
+    first_details = records[0]["details"]
+    assert isinstance(first_details, dict)
+    first_entry = first_details["entry"]
+    assert isinstance(first_entry, dict)
+    first_entry["api_token"] = migration_secret
+    with sqlite3.connect(database) as conn:
+        conn.executescript(
+            """
+            PRAGMA user_version = 10;
+            CREATE TABLE web_history (
+                id TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO web_history (id, payload_json, created_at)
+            VALUES (?, ?, ?)
+            """,
+            [
+                (record["id"], json.dumps(record), record["created_at"])
+                for record in records
+            ],
+        )
+
+    store = SqliteStore(str(database))
+    store.initialize()
+    with store.connection() as conn:
+        index_rows = conn.execute(
+            """
+            SELECT id, ean, username, product_id, action, summary, entry_json,
+                search_text, created_at
+            FROM web_history_index
+            ORDER BY id
+            """
+        ).fetchall()
+    expected_rows = []
+    for index, record in enumerate(records):
+        entry = {"name": f"Product {index}"}
+        search_entry_values = [f"Product {index}"]
+        if index == 0:
+            entry["api_token"] = "[REDACTED]"
+            search_entry_values.append("[REDACTED]")
+        expected_rows.append(
+            (
+                record["id"],
+                record["ean"],
+                "alice",
+                record["product_id"],
+                "save",
+                record["summary"],
+                json.dumps(entry, ensure_ascii=False, sort_keys=True),
+                " ".join(
+                    [
+                        str(record["ean"]),
+                        str(record["product_id"]),
+                        str(record["summary"]),
+                        "save",
+                        "alice",
+                        *search_entry_values,
+                    ]
+                ).casefold(),
+                record["created_at"],
+            )
+        )
+    assert [tuple(row) for row in index_rows] == expected_rows
+    assert migration_secret not in "\n".join(
+        str(value) for row in index_rows for value in row
+    )
+    monkeypatch.setattr(
+        sqlite_store,
+        "_json_loads",
+        lambda *_: (_ for _ in ()).throw(AssertionError("payload decode")),
+    )
+
+    payload = store.history_summary_snapshot(page=2, page_size=50)
+
+    assert payload["page"] == 2
+    assert len(payload["groups"]) == 10
+
+
+def test_history_summary_snapshot_is_stable_during_concurrent_append(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "app.sqlite"
+    store = SqliteStore(str(database))
+    writer = SqliteStore(str(database))
+    initial = _history_record(0, ean="old-ean")
+    incoming = _history_record(1, ean="new-ean")
+    incoming["user"] = "bob"
+    store.save_history([initial])
+    with sqlite3.connect(database) as conn:
+        conn.execute("PRAGMA journal_mode = WAL")
+    appended, errors = _append_history_before_query(
+        store,
+        writer,
+        monkeypatch,
+        query_prefix="with filtered as",
+        record=incoming,
+    )
+
+    payload = store.history_summary_snapshot()
+
+    assert appended == [True]
+    assert errors == []
+    assert payload["count"] == payload["total_groups"] == 1
+    assert [group["ean"] for group in payload["groups"]] == ["old-ean"]
+    assert payload["users"] == ["alice"]
+
+
+def test_history_group_snapshot_decodes_only_requested_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.save_history([_history_record(index, ean="5901") for index in range(60)])
+    store.initialize()  # one-time index backfill before measuring hot reads
+    calls = 0
+    original = sqlite_store._json_loads
+
+    def counted(value: object, fallback: object) -> object:
+        nonlocal calls
+        calls += 1
+        return original(value, fallback)
+
+    monkeypatch.setattr(sqlite_store, "_json_loads", counted)
+
+    payload = store.history_group_snapshot(ean="5901", page=2, page_size=25)
+
+    assert payload is not None
+    assert len(payload["items"]) == calls == 25
+    assert payload["total_items"] == 60
+    assert payload["total_pages"] == 3
+
+
+def test_history_group_snapshot_is_stable_during_concurrent_append(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "app.sqlite"
+    store = SqliteStore(str(database))
+    writer = SqliteStore(str(database))
+    initial = _history_record(0, ean="5901")
+    incoming = _history_record(1, ean="5901")
+    store.save_history([initial])
+    with sqlite3.connect(database) as conn:
+        conn.execute("PRAGMA journal_mode = WAL")
+    appended, errors = _append_history_before_query(
+        store,
+        writer,
+        monkeypatch,
+        query_prefix="with page_ids as",
+        record=incoming,
+    )
+
+    payload = store.history_group_snapshot(ean="5901")
+
+    assert appended == [True]
+    assert errors == []
+    assert payload is not None
+    assert payload["total_items"] == 1
+    assert [item["id"] for item in payload["items"]] == [initial["id"]]
+    assert payload["latest_ts"] == pytest.approx(
+        datetime.fromisoformat(
+            str(initial["created_at"]).replace("Z", "+00:00")
+        ).timestamp()
+    )
+
+
+def test_save_history_replaces_same_count_index_rows_in_one_transaction(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.save_history([_history_record(0, ean="old-ean")])
+    store.initialize()
+
+    store.save_history([_history_record(0, ean="new-ean")])
+
+    summary = store.history_summary_snapshot()
+    detail = store.history_group_snapshot(ean="new-ean")
+    assert [group["ean"] for group in summary["groups"]] == ["new-ean"]
+    assert store.history_group_snapshot(ean="old-ean") is None
+    assert detail is not None
+    assert [item["ean"] for item in detail["items"]] == ["new-ean"]
+
+
+def test_append_history_keeps_payload_and_index_at_retention_limit(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+
+    for index in range(2001):
+        store.append_history(_history_record(index, ean=f"590{index:010d}"))
+
+    with store.connection() as conn:
+        payload_count = conn.execute("SELECT COUNT(*) FROM web_history").fetchone()[0]
+        index_count = conn.execute(
+            "SELECT COUNT(*) FROM web_history_index"
+        ).fetchone()[0]
+        payload_ids = {
+            row[0] for row in conn.execute("SELECT id FROM web_history").fetchall()
+        }
+        index_ids = {
+            row[0]
+            for row in conn.execute("SELECT id FROM web_history_index").fetchall()
+        }
+    assert payload_count == index_count == 2000
+    expected_ids = {f"history-{index:03d}" for index in range(1, 2001)}
+    assert payload_ids == index_ids == expected_ids
+
+
+def test_save_history_keeps_payload_and_index_at_retention_limit(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.save_history([_history_record(index) for index in range(2001)])
+
+    with store.connection() as conn:
+        payload_count = conn.execute("SELECT COUNT(*) FROM web_history").fetchone()[0]
+        index_count = conn.execute(
+            "SELECT COUNT(*) FROM web_history_index"
+        ).fetchone()[0]
+        payload_ids = {
+            row[0] for row in conn.execute("SELECT id FROM web_history").fetchall()
+        }
+        index_ids = {
+            row[0]
+            for row in conn.execute("SELECT id FROM web_history_index").fetchall()
+        }
+    assert payload_count == index_count == 2000
+    expected_ids = {f"history-{index:03d}" for index in range(1, 2001)}
+    assert payload_ids == index_ids == expected_ids
+
+
+def test_history_index_search_uses_unicode_casefold(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    record = _history_record(0, ean="5901")
+    record["summary"] = "Straße"
+    store.save_history([record])
+
+    summary = store.history_summary_snapshot(query="STRASSE")
+    detail = store.history_group_snapshot(ean="5901", query="strasse")
+
+    assert [group["ean"] for group in summary["groups"]] == ["5901"]
+    assert detail is not None
+    assert [item["summary"] for item in detail["items"]] == ["Straße"]
+
+
 def _delivery(identity: str, created_at: str, **overrides: object) -> dict[str, object]:
     delivery: dict[str, object] = {
         "id": identity,
