@@ -1028,6 +1028,8 @@ class SqliteStore:
                     ON web_history_index(ean, created_at DESC, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_web_history_index_username_created_at_id
                     ON web_history_index(username, created_at DESC, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_web_history_index_created_at_id
+                    ON web_history_index(created_at DESC, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_product_entries_ean
                     ON product_entries(ean);
                 CREATE INDEX IF NOT EXISTS idx_product_entries_identity
@@ -3482,6 +3484,7 @@ class SqliteStore:
         _append_history_index_filters(clauses, params, user=user, query=query)
         where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self.connection() as conn:
+            conn.execute("BEGIN")
             counts = conn.execute(
                 f"""
                 SELECT COUNT(*) AS record_count, COUNT(DISTINCT ean) AS group_count
@@ -3586,6 +3589,7 @@ class SqliteStore:
         _append_history_index_filters(clauses, params, user=user, query=query)
         where_clause = f"WHERE {' AND '.join(clauses)}"
         with self.connection() as conn:
+            conn.execute("BEGIN")
             count_row = conn.execute(
                 f"SELECT COUNT(*) AS item_count FROM web_history_index {where_clause}",
                 params,

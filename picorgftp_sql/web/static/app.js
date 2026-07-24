@@ -5024,6 +5024,11 @@ function renderHistory(payload) {
 function closeHistoryDetail() {
   historyDetailsController?.abort();
   historyDetailsController = null;
+  state.historyDetailGroup = null;
+  state.historyDetailPage = 1;
+  if (historyDetailPrevButton) historyDetailPrevButton.disabled = true;
+  if (historyDetailNextButton) historyDetailNextButton.disabled = true;
+  if (historyDetailPageInfo) historyDetailPageInfo.textContent = "Strona 1";
   document.querySelector("#historyDetailModal")?.classList.remove("active");
 }
 
@@ -5031,7 +5036,11 @@ async function loadHistoryDetails(group, { page = 1 } = {}) {
   historyDetailsController?.abort();
   const controller = new AbortController();
   historyDetailsController = controller;
+  state.historyDetailGroup = group;
   state.historyDetailPage = page;
+  if (historyDetailPrevButton) historyDetailPrevButton.disabled = true;
+  if (historyDetailNextButton) historyDetailNextButton.disabled = true;
+  if (historyDetailPageInfo) historyDetailPageInfo.textContent = "Wczytywanie...";
   historyDetailTitle.textContent = `Historia EAN ${group.ean}`;
   historyDetailOutput.className = "history-detail-output empty-state";
   historyDetailOutput.textContent = "Wczytywanie szczegolow historii...";

@@ -1429,6 +1429,23 @@ async function requestJson() {{
         self.assertIn('const fragment = document.createDocumentFragment();', source)
         self.assertIn('historyDetailOutput.appendChild(fragment);', source)
 
+    def test_history_detail_loading_replaces_stale_pagination_context(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        load_start = source.index("async function loadHistoryDetails")
+        load_end = source.index("async function loadHistory(", load_start)
+        load_source = source[load_start:load_end]
+        request_index = load_source.index("await requestJson")
+
+        self.assertIn("state.historyDetailGroup = group;", load_source[:request_index])
+        self.assertIn("historyDetailPrevButton.disabled = true;", load_source[:request_index])
+        self.assertIn("historyDetailNextButton.disabled = true;", load_source[:request_index])
+
+        close_start = source.index("function closeHistoryDetail")
+        close_end = source.index("async function loadHistoryDetails", close_start)
+        close_source = source[close_start:close_end]
+        self.assertIn("state.historyDetailGroup = null;", close_source)
+        self.assertIn("state.historyDetailPage = 1;", close_source)
+
     def test_history_changes_modal_is_safe_detailed_and_responsive(self) -> None:
         html = _parse(INDEX_HTML)
         html_source = INDEX_HTML.read_text(encoding="utf-8")
