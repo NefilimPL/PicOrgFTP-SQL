@@ -921,6 +921,39 @@ def test_add_and_remove_list_value(tmp_path: Path) -> None:
     assert store.load_lists()["NAZWY"] == []
 
 
+def _usage_entry() -> dict[str, str]:
+    return {
+        "EAN": "5901234567890", "NAZWA": "ŻYRANDOL", "TYP": "STÓŁ",
+        "MODEL": "MA-03", "KOLOR1": "BIAŁY", "KOLOR2": "DĄB",
+        "KOLOR3": "BIAŁY", "DODATKI": "LED-RGB", "PRODUCT_ID": "PRD-USAGE-1",
+    }
+
+
+def test_find_list_value_usage_matches_every_sqlite_list_field(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.initialize()
+    store.save_product_entry(_usage_entry())
+    expected = {
+        "NAZWY": ("zyrandol", "NAZWA"), "TYPY": ("stol", "TYP"),
+        "MODELE": ("ma-03", "MODEL"), "KOLORY": ("bialy", "KOLOR1, KOLOR3"),
+        "DODATKI": ("led_rgb", "DODATKI"),
+    }
+    for sheet, (value, fields) in expected.items():
+        usage = store.find_list_value_usage(sheet, value)
+        assert len(usage) == 1
+        assert usage[0]["product_id"] == "PRD-USAGE-1"
+        assert usage[0]["fields"] == fields
+        assert usage[0]["label"].startswith("ŻYRANDOL | STÓŁ | MA-03")
+
+
+def test_find_list_value_usage_rejects_unknown_or_blank_list_lookups(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.initialize()
+    store.save_product_entry(_usage_entry())
+    assert store.find_list_value_usage("NIEZNANA", "ŻYRANDOL") == []
+    assert store.find_list_value_usage("NAZWY", "") == []
+
+
 def test_save_product_entry_updates_by_product_id(tmp_path: Path) -> None:
     store = SqliteStore(str(tmp_path / "data.sqlite"))
     store.initialize()
