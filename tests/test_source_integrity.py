@@ -12,6 +12,13 @@ WEB_PANEL_DOC = Path(__file__).resolve().parents[1] / "docs" / "web-panel.md"
 
 
 class SourceIntegrityTests(unittest.TestCase):
+    def test_desktop_list_usage_dialog_loads_the_selected_product(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "picorgftp_sql" / "app.py").read_text(encoding="utf-8")
+        self.assertIn("def _record_from_list_usage", source)
+        self.assertIn("def _show_list_usage_dialog", source)
+        self.assertIn('text="Wczytaj zaznaczony"', source)
+        self.assertIn("A._load_entry_record(record)", source)
+
     def test_web_panel_documents_global_iana_time_zone_and_warsaw_dst(self) -> None:
         guide = WEB_PANEL_DOC.read_text(encoding="utf-8")
         section_match = re.search(
