@@ -43,6 +43,61 @@ def _event(
     return event
 
 
+def _history_record(index: int, *, ean: str | None = None) -> dict[str, object]:
+    return {
+        "id": f"history-{index:03d}",
+        "created_at": f"2026-07-16T10:{index:02d}:00.000Z",
+        "user": "alice",
+        "action": "save",
+        "ean": ean or f"590{index:010d}",
+        "product_id": f"product-{index}",
+        "summary": f"Saved product {index}",
+        "details": {"entry": {"name": f"Product {index}"}},
+    }
+
+
+def test_history_summary_snapshot_uses_index_without_payload_decode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.save_history([_history_record(index) for index in range(60)])
+    store.initialize()  # one-time index backfill before measuring hot reads
+    monkeypatch.setattr(
+        sqlite_store,
+        "_json_loads",
+        lambda *_: (_ for _ in ()).throw(AssertionError("payload decode")),
+    )
+
+    payload = store.history_summary_snapshot(page=2, page_size=50)
+
+    assert payload["page"] == 2
+    assert len(payload["groups"]) == 10
+
+
+def test_history_group_snapshot_decodes_only_requested_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.save_history([_history_record(index, ean="5901") for index in range(60)])
+    store.initialize()  # one-time index backfill before measuring hot reads
+    calls = 0
+    original = sqlite_store._json_loads
+
+    def counted(value: object, fallback: object) -> object:
+        nonlocal calls
+        calls += 1
+        return original(value, fallback)
+
+    monkeypatch.setattr(sqlite_store, "_json_loads", counted)
+
+    payload = store.history_group_snapshot(ean="5901", page=2, page_size=25)
+
+    assert payload is not None
+    assert len(payload["items"]) == calls == 25
+    assert payload["total_items"] == 60
+    assert payload["total_pages"] == 3
+
+
 def _delivery(identity: str, created_at: str, **overrides: object) -> dict[str, object]:
     delivery: dict[str, object] = {
         "id": identity,

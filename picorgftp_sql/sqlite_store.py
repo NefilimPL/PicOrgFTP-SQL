@@ -27,7 +27,7 @@ from .excel_utils import (
 )
 from .redaction import redact_sensitive_value, sanitize_free_text
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 _NOTIFICATION_DELIVERY_STATUSES = frozenset(
     {"pending", "sending", "sent", "fallback", "skipped", "error"}
 )
@@ -325,6 +325,91 @@ def _history_created_at(payload: dict[str, object]) -> str:
     return _iso_from_timestamp(
         payload.get("created_at") or payload.get("ts") or payload.get("time")
     )
+
+
+def _history_index_projection(
+    payload: dict[str, object], *, record_id: object, created_at: object
+) -> tuple[str, str, str, str, str, str, str, str, str]:
+    """Return the redacted, queryable fields kept beside a history payload."""
+
+    redacted = redact_sensitive_value(payload)
+    record = dict(redacted) if isinstance(redacted, dict) else {}
+    ean = _text(record.get("ean")) or "BRAK-EAN"
+    username = _text(record.get("user"))
+    product_id = _text(record.get("product_id"))
+    action = _text(record.get("action"))
+    summary = _text(record.get("summary"))
+    details = record.get("details")
+    entry = details.get("entry") if isinstance(details, dict) else None
+    safe_entry = redact_sensitive_value(entry) if isinstance(entry, dict) else {}
+    entry = dict(safe_entry) if isinstance(safe_entry, dict) else {}
+    search_parts = [ean, product_id, summary, action, username]
+    search_parts.extend(
+        _text(value)
+        for value in entry.values()
+        if isinstance(value, (str, int, float, bool)) and _text(value)
+    )
+    return (
+        _text(record_id),
+        ean,
+        username,
+        product_id,
+        action,
+        summary,
+        _json_dumps(entry),
+        " ".join(search_parts).lower(),
+        _text(created_at),
+    )
+
+
+def _rebuild_web_history_index_if_needed(conn: sqlite3.Connection) -> None:
+    """Backfill the read index when a pre-index payload table is detected."""
+
+    history_count = int(
+        conn.execute("SELECT COUNT(*) FROM web_history").fetchone()[0] or 0
+    )
+    index_count = int(
+        conn.execute("SELECT COUNT(*) FROM web_history_index").fetchone()[0] or 0
+    )
+    if history_count == index_count:
+        return
+    conn.execute("DELETE FROM web_history_index")
+    rows = conn.execute(
+        "SELECT id, payload_json, created_at FROM web_history"
+    ).fetchall()
+    for row in rows:
+        payload = _json_loads(row["payload_json"], {})
+        if not isinstance(payload, dict):
+            continue
+        conn.execute(
+            """
+            INSERT INTO web_history_index (
+                id, ean, username, product_id, action, summary, entry_json,
+                search_text, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            _history_index_projection(
+                payload, record_id=row["id"], created_at=row["created_at"]
+            ),
+        )
+
+
+def _append_history_index_filters(
+    clauses: list[str], params: list[object], *, user: str = "", query: str = ""
+) -> None:
+    if _text(user):
+        clauses.append("picorg_lower(username) = picorg_lower(?)")
+        params.append(_text(user))
+    if _text(query):
+        clauses.append("search_text LIKE picorg_lower(?) ESCAPE '\\'")
+        params.append(_literal_like_pattern(query))
+
+
+def _history_timestamp_from_created_at(value: object) -> float:
+    try:
+        return datetime.fromisoformat(_text(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
 
 
 def _segment_key(value: object) -> str:
@@ -672,6 +757,18 @@ class SqliteStore:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS web_history_index (
+                    id TEXT PRIMARY KEY,
+                    ean TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    entry_json TEXT NOT NULL,
+                    search_text TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS file_index_cache (
                     cache_key TEXT PRIMARY KEY,
                     payload_json TEXT NOT NULL,
@@ -848,6 +945,7 @@ class SqliteStore:
             )
             _migrate_web_history_created_at(conn)
             _migrate_daily_change_summary_reports(conn)
+            _rebuild_web_history_index_if_needed(conn)
             _reconcile_duplicate_open_incidents(conn)
             conn.execute(
                 """
@@ -881,6 +979,10 @@ class SqliteStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_web_history_created_at
                     ON web_history(created_at);
+                CREATE INDEX IF NOT EXISTS idx_web_history_index_ean_created_at_id
+                    ON web_history_index(ean, created_at DESC, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_web_history_index_username_created_at_id
+                    ON web_history_index(username, created_at DESC, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_product_entries_ean
                     ON product_entries(ean);
                 CREATE INDEX IF NOT EXISTS idx_product_entries_identity
@@ -3315,6 +3417,180 @@ class SqliteStore:
                     """,
                     (username, _json_dumps(item), _now_iso()),
                 )
+
+    def history_summary_snapshot(
+        self, *, user: str = "", query: str = "", page: int = 1, page_size: int = 50
+    ) -> dict[str, Any]:
+        """Return a paged history-group summary without loading full payloads."""
+
+        self.initialize()
+        try:
+            bounded_page_size = max(1, min(50, int(page_size or 50)))
+        except (TypeError, ValueError):
+            bounded_page_size = 50
+        try:
+            requested_page = max(1, int(page or 1))
+        except (TypeError, ValueError):
+            requested_page = 1
+        clauses: list[str] = []
+        params: list[object] = []
+        _append_history_index_filters(clauses, params, user=user, query=query)
+        where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self.connection() as conn:
+            counts = conn.execute(
+                f"""
+                SELECT COUNT(*) AS record_count, COUNT(DISTINCT ean) AS group_count
+                FROM web_history_index {where_clause}
+                """,
+                params,
+            ).fetchone()
+            total_records = int(counts["record_count"] or 0) if counts else 0
+            total_groups = int(counts["group_count"] or 0) if counts else 0
+            total_pages = max(1, (total_groups + bounded_page_size - 1) // bounded_page_size)
+            current_page = min(requested_page, total_pages)
+            rows = conn.execute(
+                f"""
+                WITH filtered AS (
+                    SELECT id, ean, entry_json, created_at
+                    FROM web_history_index {where_clause}
+                ), grouped AS (
+                    SELECT ean, COUNT(*) AS change_count, MAX(created_at) AS latest_created_at
+                    FROM filtered
+                    GROUP BY ean
+                ), page_groups AS (
+                    SELECT grouped.ean, grouped.change_count, grouped.latest_created_at,
+                        (
+                            SELECT latest.id
+                            FROM filtered AS latest
+                            WHERE latest.ean = grouped.ean
+                              AND latest.created_at = grouped.latest_created_at
+                            ORDER BY latest.id DESC
+                            LIMIT 1
+                        ) AS latest_id
+                    FROM grouped
+                    ORDER BY grouped.latest_created_at DESC, latest_id DESC
+                    LIMIT ? OFFSET ?
+                )
+                SELECT page_groups.ean, page_groups.change_count,
+                    page_groups.latest_created_at, filtered.entry_json
+                FROM page_groups
+                JOIN filtered ON filtered.id = page_groups.latest_id
+                ORDER BY page_groups.latest_created_at DESC, page_groups.latest_id DESC
+                """,
+                [*params, bounded_page_size, (current_page - 1) * bounded_page_size],
+            ).fetchall()
+            users = [
+                _text(row["username"])
+                for row in conn.execute(
+                    """
+                    SELECT DISTINCT username FROM web_history_index
+                    WHERE username <> '' ORDER BY username
+                    """
+                ).fetchall()
+            ]
+        groups = []
+        for row in rows:
+            try:
+                entry = json.loads(_text(row["entry_json"]))
+            except (TypeError, ValueError):
+                entry = {}
+            groups.append(
+                {
+                    "ean": _text(row["ean"]) or "BRAK-EAN",
+                    "latest_ts": _history_timestamp_from_created_at(
+                        row["latest_created_at"]
+                    ),
+                    "change_count": int(row["change_count"] or 0),
+                    "entry": entry if isinstance(entry, dict) else {},
+                }
+            )
+        return {
+            "groups": groups,
+            "users": users,
+            "count": total_records,
+            "total_groups": total_groups,
+            "page": current_page,
+            "page_size": bounded_page_size,
+            "total_pages": total_pages,
+            "query": _text(query),
+        }
+
+    def history_group_snapshot(
+        self,
+        *,
+        ean: str,
+        user: str = "",
+        query: str = "",
+        page: int = 1,
+        page_size: int = 25,
+    ) -> dict[str, Any] | None:
+        """Return one bounded, filtered history group from the payload table."""
+
+        self.initialize()
+        try:
+            bounded_page_size = max(1, min(25, int(page_size or 25)))
+        except (TypeError, ValueError):
+            bounded_page_size = 25
+        try:
+            requested_page = max(1, int(page or 1))
+        except (TypeError, ValueError):
+            requested_page = 1
+        normalized_ean = _text(ean) or "BRAK-EAN"
+        clauses = ["ean = ?"]
+        params: list[object] = [normalized_ean]
+        _append_history_index_filters(clauses, params, user=user, query=query)
+        where_clause = f"WHERE {' AND '.join(clauses)}"
+        with self.connection() as conn:
+            count_row = conn.execute(
+                f"SELECT COUNT(*) AS item_count FROM web_history_index {where_clause}",
+                params,
+            ).fetchone()
+            total_items = int(count_row["item_count"] or 0) if count_row else 0
+            if not total_items:
+                return None
+            total_pages = max(1, (total_items + bounded_page_size - 1) // bounded_page_size)
+            current_page = min(requested_page, total_pages)
+            rows = conn.execute(
+                f"""
+                WITH page_ids AS (
+                    SELECT id, created_at
+                    FROM web_history_index {where_clause}
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ? OFFSET ?
+                )
+                SELECT web_history.payload_json, page_ids.created_at
+                FROM page_ids
+                JOIN web_history ON web_history.id = page_ids.id
+                ORDER BY page_ids.created_at DESC, page_ids.id DESC
+                """,
+                [*params, bounded_page_size, (current_page - 1) * bounded_page_size],
+            ).fetchall()
+            latest_row = conn.execute(
+                f"""
+                SELECT created_at FROM web_history_index {where_clause}
+                ORDER BY created_at DESC, id DESC LIMIT 1
+                """,
+                params,
+            ).fetchone()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            payload = _json_loads(row["payload_json"], {})
+            if not isinstance(payload, dict):
+                continue
+            redacted = redact_sensitive_value(payload)
+            if isinstance(redacted, dict):
+                items.append(redacted)
+        return {
+            "ean": normalized_ean,
+            "latest_ts": _history_timestamp_from_created_at(
+                latest_row["created_at"] if latest_row else ""
+            ),
+            "items": items,
+            "total_items": total_items,
+            "page": current_page,
+            "page_size": bounded_page_size,
+            "total_pages": total_pages,
+        }
 
     def load_history(self) -> list[dict[str, Any]]:
         """Return stored web history records."""
