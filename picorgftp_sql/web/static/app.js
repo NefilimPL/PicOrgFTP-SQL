@@ -2187,13 +2187,20 @@ function renderListUsageModal(value, usedBy = []) {
     const text = document.createElement("div");
     const title = document.createElement("strong");
     const details = document.createElement("span");
+    const button = document.createElement("button");
     row.className = "entry-match";
     title.textContent = item.label || `${item.name || ""} ${item.type_name || ""} ${item.model || ""}`.trim();
     details.textContent = `${item.product_id || "BRAK-ID"} | EAN ${item.ean || "BRAK-EAN"} | ${
       item.fields || "pole"
     }`;
+    button.type = "button";
+    button.textContent = "Wczytaj";
+    button.addEventListener("click", () => {
+      fillForm(item, { loadPhotos: true });
+      closeModals();
+    });
     text.append(title, details);
-    row.appendChild(text);
+    row.append(text, button);
     listUsageOutput.appendChild(row);
   }
   document.querySelector("#listUsageModal")?.classList.add("active");
