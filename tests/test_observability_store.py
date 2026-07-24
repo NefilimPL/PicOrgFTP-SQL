@@ -98,6 +98,12 @@ def test_history_summary_snapshot_uses_index_without_payload_decode(
 ) -> None:
     database = tmp_path / "app.sqlite"
     records = [_history_record(index) for index in range(60)]
+    migration_secret = "migration-secret-must-not-leak"
+    first_details = records[0]["details"]
+    assert isinstance(first_details, dict)
+    first_entry = first_details["entry"]
+    assert isinstance(first_entry, dict)
+    first_entry["api_token"] = migration_secret
     with sqlite3.connect(database) as conn:
         conn.executescript(
             """
@@ -123,7 +129,47 @@ def test_history_summary_snapshot_uses_index_without_payload_decode(
     store = SqliteStore(str(database))
     store.initialize()
     with store.connection() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM web_history_index").fetchone()[0] == 60
+        index_rows = conn.execute(
+            """
+            SELECT id, ean, username, product_id, action, summary, entry_json,
+                search_text, created_at
+            FROM web_history_index
+            ORDER BY id
+            """
+        ).fetchall()
+    expected_rows = []
+    for index, record in enumerate(records):
+        entry = {"name": f"Product {index}"}
+        search_entry_values = [f"Product {index}"]
+        if index == 0:
+            entry["api_token"] = "[REDACTED]"
+            search_entry_values.append("[REDACTED]")
+        expected_rows.append(
+            (
+                record["id"],
+                record["ean"],
+                "alice",
+                record["product_id"],
+                "save",
+                record["summary"],
+                json.dumps(entry, ensure_ascii=False, sort_keys=True),
+                " ".join(
+                    [
+                        str(record["ean"]),
+                        str(record["product_id"]),
+                        str(record["summary"]),
+                        "save",
+                        "alice",
+                        *search_entry_values,
+                    ]
+                ).casefold(),
+                record["created_at"],
+            )
+        )
+    assert [tuple(row) for row in index_rows] == expected_rows
+    assert migration_secret not in "\n".join(
+        str(value) for row in index_rows for value in row
+    )
     monkeypatch.setattr(
         sqlite_store,
         "_json_loads",

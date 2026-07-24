@@ -4887,6 +4887,7 @@ function renderHistoryDetails(group, { open = true } = {}) {
   state.historyDetailGroup = group;
   state.historyDetailPage = Number(group.page || state.historyDetailPage || 1);
   historyDetailTitle.textContent = `Historia EAN ${group.ean}`;
+  historyDetailOutput.className = "history-detail-output";
   historyDetailOutput.textContent = "";
   const fragment = document.createDocumentFragment();
   for (const [itemIndex, item] of (group.items || []).entries()) {

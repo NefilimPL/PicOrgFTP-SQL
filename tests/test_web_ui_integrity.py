@@ -1428,6 +1428,12 @@ async function requestJson() {{
         self.assertIn('historyDetailNextButton.disabled = page >= totalPages', source)
         self.assertIn('const fragment = document.createDocumentFragment();', source)
         self.assertIn('historyDetailOutput.appendChild(fragment);', source)
+        render_start = source.index("function renderHistoryDetails")
+        render_end = source.index("function updateHistoryDetailPagination", render_start)
+        self.assertIn(
+            'historyDetailOutput.className = "history-detail-output";',
+            source[render_start:render_end],
+        )
 
     def test_history_detail_loading_replaces_stale_pagination_context(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
