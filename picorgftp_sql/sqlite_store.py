@@ -357,8 +357,37 @@ def _history_index_projection(
         action,
         summary,
         _json_dumps(entry),
-        " ".join(search_parts).lower(),
+        " ".join(search_parts).casefold(),
         _text(created_at),
+    )
+
+
+def _upsert_web_history_index(
+    conn: sqlite3.Connection,
+    payload: dict[str, object],
+    *,
+    record_id: object,
+    created_at: object,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO web_history_index (
+            id, ean, username, product_id, action, summary, entry_json,
+            search_text, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            ean = excluded.ean,
+            username = excluded.username,
+            product_id = excluded.product_id,
+            action = excluded.action,
+            summary = excluded.summary,
+            entry_json = excluded.entry_json,
+            search_text = excluded.search_text,
+            created_at = excluded.created_at
+        """,
+        _history_index_projection(
+            payload, record_id=record_id, created_at=created_at
+        ),
     )
 
 
@@ -381,16 +410,11 @@ def _rebuild_web_history_index_if_needed(conn: sqlite3.Connection) -> None:
         payload = _json_loads(row["payload_json"], {})
         if not isinstance(payload, dict):
             continue
-        conn.execute(
-            """
-            INSERT INTO web_history_index (
-                id, ean, username, product_id, action, summary, entry_json,
-                search_text, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            _history_index_projection(
-                payload, record_id=row["id"], created_at=row["created_at"]
-            ),
+        _upsert_web_history_index(
+            conn,
+            payload,
+            record_id=row["id"],
+            created_at=row["created_at"],
         )
 
 
@@ -401,8 +425,8 @@ def _append_history_index_filters(
         clauses.append("picorg_lower(username) = picorg_lower(?)")
         params.append(_text(user))
     if _text(query):
-        clauses.append("search_text LIKE picorg_lower(?) ESCAPE '\\'")
-        params.append(_literal_like_pattern(query))
+        clauses.append("search_text LIKE ? ESCAPE '\\'")
+        params.append(_literal_like_pattern(_text(query).casefold()))
 
 
 def _history_timestamp_from_created_at(value: object) -> float:
@@ -3615,6 +3639,7 @@ class SqliteStore:
         self.initialize()
         with self.connection() as conn:
             conn.execute("DELETE FROM web_history")
+            conn.execute("DELETE FROM web_history_index")
             for item in records or []:
                 if not isinstance(item, dict):
                     continue
@@ -3634,6 +3659,12 @@ class SqliteStore:
                         created_at = excluded.created_at
                     """,
                     (record_id, _json_dumps(payload), created_at),
+                )
+                _upsert_web_history_index(
+                    conn,
+                    payload,
+                    record_id=record_id,
+                    created_at=created_at,
                 )
 
     def append_history(self, record: dict[str, object]) -> None:
@@ -3659,6 +3690,12 @@ class SqliteStore:
                     created_at = excluded.created_at
                 """,
                 (record_id, _json_dumps(payload), created_at),
+            )
+            _upsert_web_history_index(
+                conn,
+                payload,
+                record_id=record_id,
+                created_at=created_at,
             )
 
     def claim_daily_change_summary(

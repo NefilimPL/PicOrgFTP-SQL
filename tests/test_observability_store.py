@@ -98,6 +98,39 @@ def test_history_group_snapshot_decodes_only_requested_page(
     assert payload["total_pages"] == 3
 
 
+def test_save_history_replaces_same_count_index_rows_in_one_transaction(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    store.save_history([_history_record(0, ean="old-ean")])
+    store.initialize()
+
+    store.save_history([_history_record(0, ean="new-ean")])
+
+    summary = store.history_summary_snapshot()
+    detail = store.history_group_snapshot(ean="new-ean")
+    assert [group["ean"] for group in summary["groups"]] == ["new-ean"]
+    assert store.history_group_snapshot(ean="old-ean") is None
+    assert detail is not None
+    assert [item["ean"] for item in detail["items"]] == ["new-ean"]
+
+
+def test_history_index_search_uses_unicode_casefold(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    record = _history_record(0, ean="5901")
+    record["summary"] = "Straße"
+    store.save_history([record])
+
+    summary = store.history_summary_snapshot(query="STRASSE")
+    detail = store.history_group_snapshot(ean="5901", query="strasse")
+
+    assert [group["ean"] for group in summary["groups"]] == ["5901"]
+    assert detail is not None
+    assert [item["summary"] for item in detail["items"]] == ["Straße"]
+
+
 def _delivery(identity: str, created_at: str, **overrides: object) -> dict[str, object]:
     delivery: dict[str, object] = {
         "id": identity,
