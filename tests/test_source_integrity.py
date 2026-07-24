@@ -89,7 +89,7 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIsNotNone(css_match)
         self.assertIsNotNone(js_match)
         self.assertEqual(css_match.group(1), js_match.group(1))
-        self.assertEqual(css_match.group(1), "20260723-history-lazy1")
+        self.assertEqual(css_match.group(1), "20260724-history-detail-pages1")
 
     def test_resource_detail_copy_explains_clients_and_latch_stages(self) -> None:
         root = Path(__file__).resolve().parents[1]

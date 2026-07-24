@@ -21,6 +21,8 @@ const state = {
   activeSettingsTab: "app",
   history: null,
   historyDetailGroup: null,
+  historyDetailPage: 1,
+  historyDetailPageSize: 25,
   historyTimingItem: null,
   historyChangesItem: null,
   historyPage: 1,
@@ -382,6 +384,9 @@ const historyPageInfo = document.querySelector("#historyPageInfo");
 const historyOutput = document.querySelector("#historyOutput");
 const historyDetailTitle = document.querySelector("#historyDetailTitle");
 const historyDetailOutput = document.querySelector("#historyDetailOutput");
+const historyDetailPrevButton = document.querySelector("#historyDetailPrevButton");
+const historyDetailNextButton = document.querySelector("#historyDetailNextButton");
+const historyDetailPageInfo = document.querySelector("#historyDetailPageInfo");
 const historyTimingTitle = document.querySelector("#historyTimingTitle");
 const historyTimingOutput = document.querySelector("#historyTimingOutput");
 const historyChangesModal = document.querySelector("#historyChangesModal");
@@ -4880,8 +4885,10 @@ function rerenderHistoryDetailTimestamps() {
 
 function renderHistoryDetails(group, { open = true } = {}) {
   state.historyDetailGroup = group;
+  state.historyDetailPage = Number(group.page || state.historyDetailPage || 1);
   historyDetailTitle.textContent = `Historia EAN ${group.ean}`;
   historyDetailOutput.textContent = "";
+  const fragment = document.createDocumentFragment();
   for (const [itemIndex, item] of (group.items || []).entries()) {
     const row = document.createElement("article");
     const meta = document.createElement("div");
@@ -4928,9 +4935,26 @@ function renderHistoryDetails(group, { open = true } = {}) {
     timingButton.addEventListener("click", () => renderHistoryTiming(item));
     actions.append(changesButton, timingButton);
     row.append(meta, summary, details, actions);
-    historyDetailOutput.appendChild(row);
+    fragment.appendChild(row);
   }
+  historyDetailOutput.appendChild(fragment);
+  updateHistoryDetailPagination(group);
   if (open) document.querySelector("#historyDetailModal").classList.add("active");
+}
+
+function updateHistoryDetailPagination(payload) {
+  const page = Number(payload.page || state.historyDetailPage || 1);
+  const totalPages = Number(payload.total_pages || 1);
+  const totalItems = Number(payload.total_items || 0);
+  if (historyDetailPageInfo) {
+    historyDetailPageInfo.textContent = `Strona ${page}/${totalPages} | wpisy: ${totalItems}`;
+  }
+  if (historyDetailPrevButton) {
+    historyDetailPrevButton.disabled = page <= 1;
+  }
+  if (historyDetailNextButton) {
+    historyDetailNextButton.disabled = page >= totalPages;
+  }
 }
 
 function updateHistoryPagination(payload) {
@@ -5003,10 +5027,11 @@ function closeHistoryDetail() {
   document.querySelector("#historyDetailModal")?.classList.remove("active");
 }
 
-async function loadHistoryDetails(group) {
+async function loadHistoryDetails(group, { page = 1 } = {}) {
   historyDetailsController?.abort();
   const controller = new AbortController();
   historyDetailsController = controller;
+  state.historyDetailPage = page;
   historyDetailTitle.textContent = `Historia EAN ${group.ean}`;
   historyDetailOutput.className = "history-detail-output empty-state";
   historyDetailOutput.textContent = "Wczytywanie szczegolow historii...";
@@ -5015,6 +5040,8 @@ async function loadHistoryDetails(group) {
     ean: group.ean || "",
     user: historyUserFilter?.value || "",
     query: historySearchInput?.value || "",
+    page: String(page),
+    page_size: String(state.historyDetailPageSize),
   });
   try {
     const payload = await requestJson(`/api/history/details?${params.toString()}`, {
@@ -12683,6 +12710,20 @@ historyPrevButton?.addEventListener("click", () => {
 historyNextButton?.addEventListener("click", () => {
   const page = Math.max(1, Number(state.historyPage || 1) + 1);
   loadHistory({ page }).catch(showHistoryLoadError);
+});
+
+historyDetailPrevButton?.addEventListener("click", () => {
+  const group = state.historyDetailGroup;
+  if (!group) return;
+  const page = Math.max(1, Number(state.historyDetailPage || 1) - 1);
+  loadHistoryDetails(group, { page }).catch(showHistoryDetailLoadError);
+});
+
+historyDetailNextButton?.addEventListener("click", () => {
+  const group = state.historyDetailGroup;
+  if (!group) return;
+  const page = Math.max(1, Number(state.historyDetailPage || 1) + 1);
+  loadHistoryDetails(group, { page }).catch(showHistoryDetailLoadError);
 });
 
 document.querySelectorAll("[data-log-tab]").forEach((button) => {

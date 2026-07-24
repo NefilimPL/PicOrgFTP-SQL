@@ -1416,6 +1416,19 @@ async function requestJson() {{
         close_modals_end = source.index("function activeUserLastSeenLabel", close_modals_start)
         self.assertIn("closeHistoryDetail();", source[close_modals_start:close_modals_end])
 
+    def test_history_detail_ui_pages_and_aborts_stale_requests(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        html = INDEX_HTML.read_text(encoding="utf-8")
+
+        self.assertIn('id="historyDetailPrevButton"', html)
+        self.assertIn('id="historyDetailNextButton"', html)
+        self.assertIn('page: String(page)', source)
+        self.assertIn('page_size: String(state.historyDetailPageSize)', source)
+        self.assertIn('historyDetailPrevButton.disabled = page <= 1', source)
+        self.assertIn('historyDetailNextButton.disabled = page >= totalPages', source)
+        self.assertIn('const fragment = document.createDocumentFragment();', source)
+        self.assertIn('historyDetailOutput.appendChild(fragment);', source)
+
     def test_history_changes_modal_is_safe_detailed_and_responsive(self) -> None:
         html = _parse(INDEX_HTML)
         html_source = INDEX_HTML.read_text(encoding="utf-8")

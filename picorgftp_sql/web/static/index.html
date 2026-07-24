@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicOrgFTP-SQL Web</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260723-history-lazy1">
+    <link rel="stylesheet" href="/static/app.css?v=20260724-history-detail-pages1">
   </head>
   <body class="app-screen">
     <header class="topbar">
@@ -317,6 +317,11 @@
           <button type="button" class="ghost-button modal-close" data-close-history-detail>Zamknij</button>
         </div>
         <div id="historyDetailOutput" class="history-detail-output"></div>
+        <div class="history-pagination">
+          <button id="historyDetailPrevButton" type="button" class="secondary-button">Poprzednia</button>
+          <span id="historyDetailPageInfo" role="status" aria-live="polite">Strona 1</span>
+          <button id="historyDetailNextButton" type="button" class="secondary-button">Nastepna</button>
+        </div>
       </section>
     </div>
 
@@ -702,6 +707,6 @@
       </article>
     </template>
 
-    <script src="/static/app.js?v=20260723-history-lazy1"></script>
+    <script src="/static/app.js?v=20260724-history-detail-pages1"></script>
   </body>
 </html>
