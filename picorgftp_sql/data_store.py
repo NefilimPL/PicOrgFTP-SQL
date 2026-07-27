@@ -11,7 +11,7 @@ from .sqlite_store import SqliteStore
 
 _ACTIVE_STORE = None
 _ACTIVE_STORE_KEY: tuple[str, str] | None = None
-_STORE_REGISTRY_LOCK = threading.Lock()
+_STORE_REGISTRY_LOCK = threading.RLock()
 _SQLITE_STORES: dict[str, SqliteStore] = {}
 
 
@@ -336,14 +336,15 @@ def get_active_store():
     if mode == storage_settings.DATA_MODE_SQLITE:
         database_path = storage_settings.resolve_sqlite_path(bootstrap)
     key = (mode, database_path)
-    if _ACTIVE_STORE is not None and _ACTIVE_STORE_KEY == key:
+    with _STORE_REGISTRY_LOCK:
+        if _ACTIVE_STORE is not None and _ACTIVE_STORE_KEY == key:
+            return _ACTIVE_STORE
+        if mode == storage_settings.DATA_MODE_SQLITE:
+            _ACTIVE_STORE = SqliteDataStoreAdapter(database_path)
+        else:
+            _ACTIVE_STORE = LegacyDataStore()
+        _ACTIVE_STORE_KEY = key
         return _ACTIVE_STORE
-    if mode == storage_settings.DATA_MODE_SQLITE:
-        _ACTIVE_STORE = SqliteDataStoreAdapter(database_path)
-    else:
-        _ACTIVE_STORE = LegacyDataStore()
-    _ACTIVE_STORE_KEY = key
-    return _ACTIVE_STORE
 
 
 def is_sqlite_mode() -> bool:
