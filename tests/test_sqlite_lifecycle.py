@@ -1,7 +1,9 @@
+import json
 import logging
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from threading import Lock
 
 import pytest
@@ -11,6 +13,7 @@ from picorgftp_sql import data_store
 from picorgftp_sql.data_store import (
     get_active_store,
     get_sqlite_store,
+    invalidate_sqlite_store,
     reset_active_store_cache,
 )
 from picorgftp_sql.observability import observability_store
@@ -140,6 +143,81 @@ def test_get_sqlite_store_is_thread_safe(tmp_path):
         stores = list(pool.map(lambda _index: get_sqlite_store(path), range(40)))
 
     assert len({id(store) for store in stores}) == 1
+
+
+def test_invalidate_sqlite_store_replaces_only_target(tmp_path):
+    first_path = str(tmp_path / "first.sqlite")
+    second_path = str(tmp_path / "second.sqlite")
+    first = get_sqlite_store(first_path)
+    second = get_sqlite_store(second_path)
+
+    invalidate_sqlite_store(first_path)
+
+    assert get_sqlite_store(first_path) is not first
+    assert get_sqlite_store(second_path) is second
+
+
+def test_successful_storage_settings_change_resets_store_cache(tmp_path, monkeypatch):
+    settings_path = tmp_path / "local_settings.json"
+    first_path = tmp_path / "first.sqlite"
+    second_path = tmp_path / "second.sqlite"
+    settings_path.write_text(
+        json.dumps(
+            {
+                storage_settings.DATA_MODE_KEY: storage_settings.DATA_MODE_SQLITE,
+                storage_settings.DATABASE_LOCATION_MODE_KEY: storage_settings.DATABASE_LOCATION_CUSTOM,
+                storage_settings.DATABASE_PATH_KEY: str(first_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(storage_settings.settings, "BASE_DIR_SETTINGS_PATH", str(settings_path))
+    reset_active_store_cache()
+
+    try:
+        first = get_active_store().store
+
+        storage_settings.save_bootstrap_settings(
+            {storage_settings.DATABASE_PATH_KEY: str(second_path)}
+        )
+
+        assert get_sqlite_store(str(first_path)) is not first
+    finally:
+        reset_active_store_cache()
+
+
+def test_failed_storage_settings_write_preserves_store_cache(tmp_path, monkeypatch):
+    settings_path = tmp_path / "local_settings.json"
+    first_path = tmp_path / "first.sqlite"
+    settings_path.write_text(
+        json.dumps(
+            {
+                storage_settings.DATA_MODE_KEY: storage_settings.DATA_MODE_SQLITE,
+                storage_settings.DATABASE_LOCATION_MODE_KEY: storage_settings.DATABASE_LOCATION_CUSTOM,
+                storage_settings.DATABASE_PATH_KEY: str(first_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(storage_settings.settings, "BASE_DIR_SETTINGS_PATH", str(settings_path))
+    reset_active_store_cache()
+    original_write_text = Path.write_text
+
+    def fail_settings_write(path, *args, **kwargs):
+        if path == settings_path:
+            raise OSError("disk full")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_settings_write)
+    try:
+        active_store = get_active_store().store
+
+        with pytest.raises(OSError, match="disk full"):
+            storage_settings.save_bootstrap_settings({"language": "pl"})
+
+        assert get_sqlite_store(str(first_path)) is active_store
+    finally:
+        reset_active_store_cache()
 
 
 def test_observability_store_and_active_adapter_share_instance(tmp_path, monkeypatch):

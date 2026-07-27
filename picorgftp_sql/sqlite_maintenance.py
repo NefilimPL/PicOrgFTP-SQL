@@ -145,6 +145,9 @@ def repair_sqlite_database(database_path: str, backup_dir: str) -> dict[str, Any
         conn.execute("ANALYZE")
     with sqlite3.connect(str(db_path)) as conn:
         conn.execute("VACUUM")
+    from .data_store import invalidate_sqlite_store
+
+    invalidate_sqlite_store(str(db_path))
     return {
         "ok": True,
         "backup": backup,

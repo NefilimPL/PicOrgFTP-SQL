@@ -324,6 +324,23 @@ def reset_active_store_cache() -> None:
         _SQLITE_STORES.clear()
 
 
+def invalidate_sqlite_store(database_path: str | None = None) -> None:
+    """Discard a replaced SQLite store while preserving unrelated stores."""
+
+    global _ACTIVE_STORE, _ACTIVE_STORE_KEY
+    with _STORE_REGISTRY_LOCK:
+        if database_path is None:
+            _SQLITE_STORES.clear()
+        else:
+            _SQLITE_STORES.pop(str(Path(database_path).resolve()), None)
+        if database_path is None or (
+            _ACTIVE_STORE_KEY
+            and _ACTIVE_STORE_KEY[1] == str(Path(database_path).resolve())
+        ):
+            _ACTIVE_STORE = None
+            _ACTIVE_STORE_KEY = None
+
+
 def get_active_store():
     """Return the data store selected by bootstrap settings."""
 

@@ -4901,6 +4901,7 @@ def create_app() -> FastAPI:
         _stop_backup_scheduler()
         with _ACTIVE_CLIENTS_LOCK:
             _flush_active_clients_locked(time.time(), force=True)
+        data_store.reset_active_store_cache()
 
     @app.get("/api/health")
     def health() -> Dict[str, Any]:
@@ -6459,7 +6460,6 @@ def create_app() -> FastAPI:
             database_path,
             backup_dir,
         )
-        data_store.reset_active_store_cache()
         config.initialize_config(interactive=False)
         result["settings"] = settings_snapshot()
         return JSONResponse(result)
@@ -6507,7 +6507,6 @@ def create_app() -> FastAPI:
             backup_path,
             storage_settings.resolve_backup_dir(),
         )
-        data_store.reset_active_store_cache()
         config.initialize_config(interactive=False)
         result["settings"] = settings_snapshot()
         return JSONResponse(result)

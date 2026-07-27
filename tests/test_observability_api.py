@@ -212,6 +212,54 @@ def test_settings_api_rejects_invalid_time_zone_without_replacing_saved_value(
     assert saved_configs[0]["web_display"] == {"time_zone": "Europe/Warsaw"}
 
 
+def test_failed_sqlite_repair_api_preserves_the_cached_store(
+    api_environment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, store = api_environment
+    cached_store = data_store.get_sqlite_store(store.path)
+    monkeypatch.setattr(
+        web_app.storage_settings, "resolve_sqlite_path", lambda _payload=None: store.path
+    )
+    monkeypatch.setattr(
+        web_app,
+        "repair_sqlite_database",
+        lambda *_args: {"ok": False, "warnings": ["integrity_check_failed"]},
+    )
+    csrf = _login(client)
+
+    response = client.post(
+        "/api/settings/sqlite/repair", headers={"X-PicOrg-CSRF": csrf}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["ok"] is False
+    assert data_store.get_sqlite_store(store.path) is cached_store
+
+
+def test_successful_sqlite_repair_api_invalidates_the_cached_store(
+    api_environment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, store = api_environment
+    cached_store = data_store.get_sqlite_store(store.path)
+    monkeypatch.setattr(
+        web_app.storage_settings, "resolve_sqlite_path", lambda _payload=None: store.path
+    )
+    monkeypatch.setattr(
+        web_app.storage_settings,
+        "resolve_backup_dir",
+        lambda: str(Path(store.path).parent / "BACKUP"),
+    )
+    csrf = _login(client)
+
+    response = client.post(
+        "/api/settings/sqlite/repair", headers={"X-PicOrg-CSRF": csrf}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["ok"] is True
+    assert data_store.get_sqlite_store(store.path) is not cached_store
+
+
 def test_cleanup_process_jobs_preserves_active_and_keeps_newest_completed() -> None:
     now = 10_000.0
     completed_limit = web_app._PROCESS_JOB_MAX_COMPLETED
@@ -1852,7 +1900,9 @@ def test_real_resource_test_maps_monitor_rejections_to_safe_http_statuses(
     assert monitor.real_calls == ["cpu"]
 
 
-def test_resource_monitor_lifecycle_runs_once_and_in_runtime_order(monkeypatch) -> None:
+def test_resource_monitor_lifecycle_runs_once_and_in_runtime_order(
+    tmp_path: Path, monkeypatch
+) -> None:
     lifecycle_events: list[str] = []
     monitor = _MonitorStub(lifecycle_events=lifecycle_events)
     monkeypatch.setattr(web_app, "_RESOURCE_MONITOR", monitor)
@@ -1872,6 +1922,8 @@ def test_resource_monitor_lifecycle_runs_once_and_in_runtime_order(monkeypatch) 
         "stop_notification_worker",
         lambda: lifecycle_events.append("notification.stop"),
     )
+    database_path = str(tmp_path / "shutdown.sqlite")
+    cached_store = data_store.get_sqlite_store(database_path)
 
     with TestClient(web_app.create_app()):
         pass
@@ -1884,6 +1936,7 @@ def test_resource_monitor_lifecycle_runs_once_and_in_runtime_order(monkeypatch) 
     assert lifecycle_events.index("monitor.stop") < lifecycle_events.index(
         "notification.stop"
     )
+    assert data_store.get_sqlite_store(database_path) is not cached_store
 
 
 def test_health_is_critical_when_job_processor_is_shutdown_even_if_storage_is_online(
