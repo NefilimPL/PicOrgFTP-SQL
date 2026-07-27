@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 import secrets
 import sqlite3
 import threading
@@ -27,7 +28,6 @@ from .excel_utils import (
     PRODUCT_ID_HEADER,
     TYPE_HEADER,
 )
-from .logging_utils import log_info
 from .redaction import redact_sensitive_value, sanitize_free_text
 from .sqlite_connection import (
     SQLiteConnectionSettings,
@@ -36,6 +36,15 @@ from .sqlite_connection import (
 )
 
 SCHEMA_VERSION = 11
+_WAL_FALLBACK_LOGGER = logging.getLogger("picorgftp_sql.sqlite.wal")
+_WAL_FALLBACK_LOGGER.setLevel(logging.WARNING)
+_WAL_FALLBACK_LOGGER.propagate = False
+if not _WAL_FALLBACK_LOGGER.handlers:
+    _wal_fallback_handler = logging.StreamHandler()
+    _wal_fallback_handler.setFormatter(
+        logging.Formatter("%(levelname)s: %(message)s")
+    )
+    _WAL_FALLBACK_LOGGER.addHandler(_wal_fallback_handler)
 _NOTIFICATION_DELIVERY_STATUSES = frozenset(
     {"pending", "sending", "sent", "fallback", "skipped", "error"}
 )
@@ -797,9 +806,9 @@ class SqliteStore:
                     self._wal_fallback_reason = (
                         f"journal_mode_{self._journal_mode or 'unknown'}"
                     )
-                log_info(
-                    f"SQLite WAL fallback warning: {self._wal_fallback_reason}.",
-                    ui_message="SQLite WAL fallback warning is active.",
+                _WAL_FALLBACK_LOGGER.warning(
+                    "SQLite WAL fallback warning: %s.",
+                    self._wal_fallback_reason,
                 )
             configure_connection(
                 conn,

@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -5,7 +6,7 @@ from threading import Lock
 
 import pytest
 
-from picorgftp_sql import storage_settings
+from picorgftp_sql import logging_utils, storage_settings
 from picorgftp_sql import data_store
 from picorgftp_sql.data_store import (
     get_active_store,
@@ -79,26 +80,50 @@ def test_initialize_uses_wal_or_records_the_active_journal_mode(tmp_path):
 def test_wal_fallback_initializes_and_logs_one_redacted_warning(tmp_path, monkeypatch):
     private_path = tmp_path / "private-user-record.sqlite"
     store = SqliteStore(str(private_path))
-    warnings = []
+    legacy_log_path = tmp_path / "fallback-info.log"
+    logger = logging.getLogger("picorgftp_sql.sqlite.wal")
+    records = []
+
+    class RecordCapture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
 
     def fail_wal(_conn):
         raise sqlite3.OperationalError("private-user-record")
 
     monkeypatch.setattr(sqlite_store, "try_enable_wal", fail_wal)
-    monkeypatch.setattr(
-        sqlite_store,
-        "log_info",
-        lambda message, ui_message=None: warnings.append((message, ui_message)),
-    )
+    monkeypatch.setattr(logging_utils.settings, "BM", str(legacy_log_path))
+    monkeypatch.setattr(logging_utils, "AO", "private-user")
+    monkeypatch.setattr(logging_utils, "AF", "private-host")
+    capture = RecordCapture()
+    logger.addHandler(capture)
 
-    store.initialize()
+    try:
+        store.initialize()
+    finally:
+        logger.removeHandler(capture)
+
+    legacy_entry = (
+        legacy_log_path.read_text(encoding="utf-8")
+        if legacy_log_path.exists()
+        else ""
+    )
+    configured_entry = "\n".join(
+        handler.format(record)
+        for handler in logger.handlers
+        for record in records
+    )
+    observable_entry = "\n".join((legacy_entry, configured_entry))
 
     assert store._initialized is True
     assert store._journal_mode != "wal"
     assert store._wal_fallback_reason == "OperationalError"
-    assert len(warnings) == 1
-    assert str(private_path) not in warnings[0][0]
-    assert "private-user-record" not in warnings[0][0]
+    assert len(records) == 1, observable_entry
+    assert records[0].levelno == logging.WARNING
+    assert str(private_path) not in observable_entry
+    assert "private-user-record" not in observable_entry
+    assert "private-user" not in observable_entry
+    assert "private-host" not in observable_entry
 
 
 def test_get_sqlite_store_reuses_instance_for_canonical_path(tmp_path):
