@@ -60,6 +60,18 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
+    def test_list_usage_modal_opens_the_selected_blocking_product(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function renderListUsageModal")
+        end = source.index("const trackedProductFields", start)
+        renderer = source[start:end]
+
+        self.assertIn('button.textContent = "Wczytaj"', renderer)
+        self.assertIn("fillForm(item, { loadPhotos: true });", renderer)
+        self.assertIn("closeModals();", renderer)
+        self.assertIn("row.append(text, button);", renderer)
+        self.assertNotIn("innerHTML", renderer)
+
     def test_header_stacks_latency_above_compact_system_status(self) -> None:
         markup = INDEX_HTML.read_text(encoding="utf-8")
         css = (ROOT / "picorgftp_sql" / "web" / "static" / "app.css").read_text(

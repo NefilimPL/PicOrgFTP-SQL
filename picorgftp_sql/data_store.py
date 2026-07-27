@@ -53,6 +53,11 @@ class SqliteDataStoreAdapter:
     def remove_list_value(self, sheet: str, value: object) -> None:
         self.store.remove_list_value(sheet, value)
 
+    def find_list_value_usage(
+        self, sheet: str, value: object, *, limit: int = 100
+    ) -> list[dict[str, str]]:
+        return self.store.find_list_value_usage(sheet, value, limit=limit)
+
     def save_product_entry(self, payload: dict[str, object]) -> dict[str, Any]:
         return self.store.save_product_entry(payload)
 

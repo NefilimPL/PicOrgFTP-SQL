@@ -1938,6 +1938,81 @@ class App(BU.Tk):
         A._restore_focus()
         return selected["record"]
 
+    def _record_from_list_usage(A, item):
+        product_id = G(item.get("product_id") or B).strip().upper()
+        if product_id and product_id in A.entries_by_id:
+            return dict(A.entries_by_id[product_id])
+        ean = G(item.get("ean") or B).strip().upper()
+        if ean and ean in A.entries:
+            record = dict(A.entries[ean])
+            record[EAN_HEADER] = ean
+            return record
+        return {
+            PRODUCT_ID_HEADER: product_id,
+            EAN_HEADER: ean,
+            NAME_HEADER: G(item.get("name") or B).strip().upper(),
+            TYPE_HEADER: G(item.get("type_name") or B).strip().upper(),
+            MODEL_HEADER: G(item.get("model") or B).strip().upper(),
+            COLOR1_HEADER: G(item.get("color1") or B).strip().upper(),
+            COLOR2_HEADER: G(item.get("color2") or B).strip().upper(),
+            COLOR3_HEADER: G(item.get("color3") or B).strip().upper(),
+            EXTRA_HEADER: G(item.get("extra") or B).strip().upper(),
+        }
+
+    def _show_list_usage_dialog(A, value, list_label, usage):
+        if not usage:
+            return
+        A._last_focus_widget = A.focus_get()
+        win = F.Toplevel(A)
+        win.title(LIST_REMOVE_DIALOG_TITLE)
+        win.transient(A)
+        win.grab_set()
+        C.Label(
+            win,
+            text=f"Nie usunieto '{value}' z listy {list_label}, bo wpis jest uzywany.",
+        ).pack(padx=10, pady=(10, 6), anchor="w")
+        body = C.Frame(win)
+        body.pack(fill=z, expand=J, padx=10, pady=(0, 8))
+        listbox = F.Listbox(body, height=min(8, Q(usage)), exportselection=0)
+        scroll = C.Scrollbar(body, orient=An, command=listbox.yview)
+        listbox.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=AV, fill="y")
+        listbox.pack(side=Am, fill=z, expand=J)
+        for item in usage:
+            product_id = G(item.get("product_id") or B).strip() or "BRAK-ID"
+            ean = G(item.get("ean") or B).strip() or q
+            fields = G(item.get("fields") or B).strip() or "-"
+            label = G(item.get("label") or B).strip() or "-"
+            listbox.insert(F.END, f"{product_id} | EAN: {ean} | {fields} | {label}")
+        listbox.selection_set(0)
+
+        def _cancel():
+            win.destroy()
+
+        def _choose():
+            selection = listbox.curselection()
+            if not selection:
+                return
+            record = A._record_from_list_usage(usage[selection[0]])
+            win.destroy()
+            A._load_entry_record(record)
+            editor = Aj(A, "_list_editor_window", I)
+            close_editor = getattr(editor, "_close_window", I)
+            if callable(close_editor):
+                close_editor()
+            A.deiconify()
+            A.lift()
+            A.focus_force()
+
+        buttons = C.Frame(win)
+        buttons.pack(fill="x", padx=10, pady=(0, 10))
+        C.Button(buttons, text="Wczytaj zaznaczony", command=_choose).pack(side=Am)
+        C.Button(buttons, text=CANCEL_LABEL, command=_cancel).pack(side=AV)
+        listbox.bind("<Double-Button-1>", lambda _event: _choose())
+        win.protocol("WM_DELETE_WINDOW", _cancel)
+        A.wait_window(win)
+        A._restore_focus()
+
     def _load_entry_record(A, record):
         """Populate the form from a saved entry record and refresh slot state."""
 
@@ -7060,23 +7135,7 @@ class App(BU.Tk):
         G_ = LIST_EDITOR_TAB_LABELS.get(B_, B_)
         usage = find_list_value_usage(EXCEL_SHEETS[B_], C_)
         if usage:
-            lines = []
-            for item in usage[:30]:
-                product_id = item.get("product_id") or "BRAK-ID"
-                ean = item.get("ean") or "BRAK-EAN"
-                label = item.get("label") or "-"
-                fields = item.get("fields") or "-"
-                lines.append(f"{product_id} | EAN: {ean} | {fields} | {label}")
-            if len(usage) > 30:
-                lines.append(f"... oraz {len(usage) - 30} kolejnych wpisow")
-            O.showwarning(
-                LIST_REMOVE_DIALOG_TITLE,
-                (
-                    f"Nie usunieto '{C_}' z listy {G_}, bo wpis jest uzywany "
-                    "przez produkty z arkusza ENTRIES:\n\n"
-                    + "\n".join(lines)
-                ),
-            )
+            A._show_list_usage_dialog(C_, G_, usage)
             return
         if O.askyesno(
             LIST_REMOVE_DIALOG_TITLE,

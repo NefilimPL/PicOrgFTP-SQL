@@ -30,6 +30,29 @@ from picorgftp_sql.web import app as web_app
     f"FastAPI TestClient unavailable: {TEST_CLIENT_IMPORT_ERROR}",
 )
 class WebSmokeCiTests(unittest.TestCase):
+    def test_list_remove_route_serializes_blocking_products(self) -> None:
+        client = TestClient(web_app.app)
+        usage = [{"product_id": "PRD-1", "ean": "5901234567890", "fields": "NAZWA"}]
+        error = web_data.ListValueInUseError("names", "MAGGIORE", usage)
+        with (
+            patch.object(web_app, "_require_user", return_value={"username": "operator"}),
+            patch.object(web_app, "remove_list_value", side_effect=error),
+        ):
+            response = client.request(
+                "DELETE", "/api/lists/names", json={"value": "MAGGIORE"}
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["detail"],
+            {
+                "message": str(error),
+                "list_key": "names",
+                "value": "MAGGIORE",
+                "used_by": usage,
+            },
+        )
+
     def setUp(self) -> None:
         os.environ["PICORG_WEB_AUTH"] = "0"
         web_app._RATE_LIMITS.clear()

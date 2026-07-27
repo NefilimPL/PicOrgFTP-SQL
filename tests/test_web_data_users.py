@@ -269,6 +269,8 @@ class WebDataUserTests(unittest.TestCase):
                 web_data.remove_list_value("names", "MAGGIORE")
 
         self.assertEqual(caught.exception.used_by, used_by)
+        self.assertEqual(caught.exception.list_key, "names")
+        self.assertEqual(caught.exception.value, "MAGGIORE")
         remove_from_list.assert_not_called()
 
     def test_history_snapshot_filters_search_and_limits_page_size(self) -> None:

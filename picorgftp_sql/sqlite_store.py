@@ -7,6 +7,7 @@ import binascii
 import json
 import secrets
 import sqlite3
+import unicodedata
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -673,6 +674,35 @@ def _list_value(sheet: str, value: object) -> str:
     if sheet == "DODATKI":
         text = text.replace("_", "-")
     return text
+
+
+_LIST_USAGE_FIELDS = {
+    "NAZWY": (("name", NAME_HEADER),),
+    "TYPY": (("type_name", TYPE_HEADER),),
+    "MODELE": (("model", MODEL_HEADER),),
+    "KOLORY": (
+        ("color1", COLOR1_HEADER), ("color2", COLOR2_HEADER), ("color3", COLOR3_HEADER),
+    ),
+    "DODATKI": (("extra", EXTRA_HEADER),),
+}
+
+
+def _list_usage_value(sheet: str, value: object) -> str:
+    text = unicodedata.normalize("NFKD", _text(value)).casefold().replace("ł", "l")
+    text = "".join(char for char in text if not unicodedata.combining(char)).upper()
+    return text.replace("_", "-") if sheet == "DODATKI" else text
+
+
+def _usage_label(entry: dict[str, str]) -> str:
+    parts = [entry["name"], entry["type_name"], entry["model"]]
+    colors = " / ".join(value for value in (entry["color1"], entry["color2"], entry["color3"]) if value)
+    if colors:
+        parts.append(colors)
+    if entry["extra"]:
+        parts.append(entry["extra"])
+    label = " | ".join(value for value in parts if value)
+    suffix = entry["ean"] or entry["product_id"]
+    return f"{label} - {suffix}" if label and suffix else label or suffix
 
 
 def _entry_payload(payload: dict[str, object]) -> dict[str, str]:
@@ -3364,6 +3394,35 @@ class SqliteStore:
                 (sheet, cleaned, int(max_order) + 1),
             )
         return True
+
+    def find_list_value_usage(
+        self, sheet: str, value: object, *, limit: int = 100
+    ) -> list[dict[str, str]]:
+        fields = _LIST_USAGE_FIELDS.get(sheet)
+        needle = _list_usage_value(sheet, value)
+        if not fields or not needle:
+            return []
+        self.initialize()
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT product_id, ean, name, type_name, model, color1, color2, color3, extra "
+                "FROM product_entries ORDER BY rowid"
+            ).fetchall()
+        usage = []
+        for row in rows:
+            entry = {key: _text(row[key]) for key in row.keys()}
+            matched = [
+                header
+                for column, header in fields
+                if _list_usage_value(sheet, entry[column]) == needle
+            ]
+            if matched:
+                usage.append(
+                    {**entry, "fields": ", ".join(matched), "label": _usage_label(entry)}
+                )
+            if len(usage) >= max(1, int(limit or 100)):
+                break
+        return usage
 
     def remove_list_value(self, sheet: str, value: object) -> None:
         """Remove a normalized value from one list."""
