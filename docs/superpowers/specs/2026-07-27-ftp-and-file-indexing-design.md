@@ -1,6 +1,6 @@
 # FTP i indeks plików — specyfikacja
 
-Status: do przeglądu
+Status: zatwierdzona
 
 Priorytet: P0/P1
 

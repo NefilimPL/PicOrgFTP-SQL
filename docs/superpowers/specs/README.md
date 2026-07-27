@@ -2,9 +2,9 @@
 
 Data programu: 2026-07-27
 
-Ten katalog zawiera wyłącznie aktywne specyfikacje zatwierdzonego zakresu
-optymalizacji. Każdy pakiet ma stan „do przeglądu” do czasu akceptacji
-specyfikacji przez właściciela projektu.
+Ten katalog zawiera wyłącznie aktywne, zatwierdzone specyfikacje programu
+optymalizacji. Odpowiadające im plany implementacyjne znajdują się w
+`../plans/`.
 
 ## Pakiety
 
@@ -52,4 +52,5 @@ specyfikacji przez właściciela projektu.
 - Publiczne API, formaty danych oraz zachowanie UI pozostają kompatybilne.
 - Każdy pakiet wymaga testów regresji, benchmarku przed/po i możliwości
   etapowego wycofania.
-- Plany implementacyjne powstają po akceptacji tych specyfikacji.
+- Każda implementacja ma być prowadzona według odpowiadającego jej planu z
+  `../plans/`.

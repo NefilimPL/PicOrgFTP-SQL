@@ -1,6 +1,6 @@
 # Integracje SQL, Pimcore i tłumaczenia — specyfikacja
 
-Status: do przeglądu
+Status: zatwierdzona
 
 Priorytet: P1
 
@@ -137,7 +137,7 @@ Standardowa konfiguracja aktualizacji zdjęć generuje jedną instrukcję:
 UPDATE <table>
 SET <slot_1_column> = ?,
     <slot_2_column> = ?,
-    ...
+    <slot_n_column> = ?
 WHERE <existing configured predicate>
 ```
 

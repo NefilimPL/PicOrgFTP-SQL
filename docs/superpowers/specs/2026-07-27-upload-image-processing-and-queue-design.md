@@ -1,6 +1,6 @@
 # Upload, przetwarzanie obrazów i kolejka — specyfikacja
 
-Status: do przeglądu
+Status: zatwierdzona
 
 Priorytet: P0
 

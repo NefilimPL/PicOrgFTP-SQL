@@ -1,6 +1,6 @@
 # Podział dużych modułów — specyfikacja
 
-Status: do przeglądu
+Status: zatwierdzona
 
 Priorytet: P2
 

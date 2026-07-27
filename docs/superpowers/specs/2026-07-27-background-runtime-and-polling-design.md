@@ -1,6 +1,6 @@
 # Procesy w tle, polling i aktywni klienci — specyfikacja
 
-Status: do przeglądu
+Status: zatwierdzona
 
 Priorytet: P1/P2
 
