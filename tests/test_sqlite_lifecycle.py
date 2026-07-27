@@ -1,3 +1,4 @@
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
@@ -12,6 +13,7 @@ from picorgftp_sql.data_store import (
     reset_active_store_cache,
 )
 from picorgftp_sql.observability import observability_store
+from picorgftp_sql import sqlite_store
 from picorgftp_sql.sqlite_store import SqliteStore
 
 
@@ -52,6 +54,51 @@ def test_initialize_retries_after_schema_failure(tmp_path, monkeypatch):
     store.initialize()
 
     assert attempts == 2
+
+
+def test_connection_policy_sets_foreign_keys_and_busy_timeout(tmp_path):
+    store = SqliteStore(str(tmp_path / "policy.sqlite"))
+    store.initialize()
+
+    with store.connection() as conn:
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+
+def test_initialize_uses_wal_or_records_the_active_journal_mode(tmp_path):
+    store = SqliteStore(str(tmp_path / "journal.sqlite"))
+    store.initialize()
+
+    with store.connection() as conn:
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0].lower()
+
+    assert store._journal_mode == journal_mode
+    assert journal_mode == "wal" or store._wal_fallback_reason
+
+
+def test_wal_fallback_initializes_and_logs_one_redacted_warning(tmp_path, monkeypatch):
+    private_path = tmp_path / "private-user-record.sqlite"
+    store = SqliteStore(str(private_path))
+    warnings = []
+
+    def fail_wal(_conn):
+        raise sqlite3.OperationalError("private-user-record")
+
+    monkeypatch.setattr(sqlite_store, "try_enable_wal", fail_wal)
+    monkeypatch.setattr(
+        sqlite_store,
+        "log_info",
+        lambda message, ui_message=None: warnings.append((message, ui_message)),
+    )
+
+    store.initialize()
+
+    assert store._initialized is True
+    assert store._journal_mode != "wal"
+    assert store._wal_fallback_reason == "OperationalError"
+    assert len(warnings) == 1
+    assert str(private_path) not in warnings[0][0]
+    assert "private-user-record" not in warnings[0][0]
 
 
 def test_get_sqlite_store_reuses_instance_for_canonical_path(tmp_path):
