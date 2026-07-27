@@ -7,6 +7,7 @@ import binascii
 import json
 import secrets
 import sqlite3
+import threading
 import unicodedata
 import uuid
 from contextlib import contextmanager
@@ -723,6 +724,8 @@ class SqliteStore:
 
     def __init__(self, path: str):
         self.path = str(Path(path))
+        self._initialize_lock = threading.Lock()
+        self._initialized = False
 
     def connect(self) -> sqlite3.Connection:
         directory = Path(self.path).parent
@@ -750,6 +753,17 @@ class SqliteStore:
             conn.close()
 
     def initialize(self) -> None:
+        """Create schema tables when the database is first used."""
+
+        if self._initialized:
+            return
+        with self._initialize_lock:
+            if self._initialized:
+                return
+            self._initialize_schema()
+            self._initialized = True
+
+    def _initialize_schema(self) -> None:
         """Create schema tables when the database is first used."""
 
         with self.connection() as conn:
