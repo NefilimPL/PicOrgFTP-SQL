@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+from pathlib import Path
 from typing import Any
 
 from . import storage_settings
@@ -9,6 +11,21 @@ from .sqlite_store import SqliteStore
 
 _ACTIVE_STORE = None
 _ACTIVE_STORE_KEY: tuple[str, str] | None = None
+_STORE_REGISTRY_LOCK = threading.Lock()
+_SQLITE_STORES: dict[str, SqliteStore] = {}
+
+
+def get_sqlite_store(database_path: str) -> SqliteStore:
+    """Return the initialized SQLite store registered for a canonical path."""
+
+    key = str(Path(database_path).resolve())
+    with _STORE_REGISTRY_LOCK:
+        store = _SQLITE_STORES.get(key)
+        if store is None:
+            store = SqliteStore(key)
+            store.initialize()
+            _SQLITE_STORES[key] = store
+        return store
 
 
 class LegacyDataStore:
@@ -32,8 +49,7 @@ class SqliteDataStoreAdapter:
 
     def __init__(self, database_path: str):
         self.database_path = database_path
-        self.store = SqliteStore(database_path)
-        self.store.initialize()
+        self.store = get_sqlite_store(database_path)
 
     def load_config(self) -> dict[str, Any]:
         return self.store.load_config()
@@ -302,8 +318,10 @@ def reset_active_store_cache() -> None:
     """Clear the cached active store, mainly for tests and runtime switches."""
 
     global _ACTIVE_STORE, _ACTIVE_STORE_KEY
-    _ACTIVE_STORE = None
-    _ACTIVE_STORE_KEY = None
+    with _STORE_REGISTRY_LOCK:
+        _ACTIVE_STORE = None
+        _ACTIVE_STORE_KEY = None
+        _SQLITE_STORES.clear()
 
 
 def get_active_store():
