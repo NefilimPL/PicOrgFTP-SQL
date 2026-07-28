@@ -2538,6 +2538,35 @@ class WebAppFileTests(unittest.TestCase):
             {"later-user", "prior-user"},
         )
 
+    def test_active_client_record_lazily_renews_closed_registry_without_startup(self) -> None:
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/api/bootstrap"),
+            client=SimpleNamespace(host="127.0.0.1", port=12345),
+            headers={"user-agent": "test", web_app.PRESENCE_CLIENT_ID_HEADER: "client-a"},
+            method="GET",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "active.json"
+            closed_registry = web_app.ActiveClientRegistry(path)
+            closed_registry.close(timeout=5.0)
+            renewed_registry = closed_registry
+            try:
+                with (
+                    patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", closed_registry),
+                    patch.object(web_app, "_active_clients_log_path", return_value=path),
+                    patch.object(web_app, "_current_user", return_value="admin"),
+                ):
+                    web_app._record_active_client(request, 200)
+                    renewed_registry = web_app._ACTIVE_CLIENT_REGISTRY
+                    renewed_registry.flush(force=True)
+            finally:
+                renewed_registry.close(timeout=5.0)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertIsNot(renewed_registry, closed_registry)
+        self.assertEqual(payload[0]["username"], "admin")
+
     def test_active_presence_payload_hides_stale_browser_clients_quickly(self) -> None:
         now = 200.0
         clients = [

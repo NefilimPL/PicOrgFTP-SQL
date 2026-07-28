@@ -4090,7 +4090,8 @@ def _runtime_process_queue_summary() -> Dict[str, Any]:
 
 def _resource_monitor_context() -> dict[str, int]:
     active = _active_process_jobs_snapshot()
-    active_clients = len(_ACTIVE_CLIENT_REGISTRY.snapshot())
+    with _ACTIVE_CLIENT_REGISTRY_LIFECYCLE_LOCK:
+        active_clients = len(_active_client_registry_locked().snapshot())
     return {
         "active_jobs": int(active["active_count"]),
         "queued_jobs": int(active["queued_count"]),
@@ -4137,17 +4138,21 @@ def _active_clients_log_path() -> Path:
     return Path(settings.LOG_DIR) / "web_active_clients.json"
 
 
-def _ensure_active_client_registry() -> ActiveClientRegistry:
+def _active_client_registry_locked() -> ActiveClientRegistry:
     global _ACTIVE_CLIENT_REGISTRY
+    if _ACTIVE_CLIENT_REGISTRY.closed:
+        _ACTIVE_CLIENT_REGISTRY.wait_until_idle()
+        _ACTIVE_CLIENT_REGISTRY = ActiveClientRegistry(
+            _active_clients_log_path(),
+            max_age_seconds=ACTIVE_CLIENT_MAX_AGE_SECONDS,
+            flush_interval_seconds=ACTIVE_CLIENT_FLUSH_INTERVAL_SECONDS,
+        )
+    return _ACTIVE_CLIENT_REGISTRY
+
+
+def _ensure_active_client_registry() -> ActiveClientRegistry:
     with _ACTIVE_CLIENT_REGISTRY_LIFECYCLE_LOCK:
-        if _ACTIVE_CLIENT_REGISTRY.closed:
-            _ACTIVE_CLIENT_REGISTRY.wait_until_idle()
-            _ACTIVE_CLIENT_REGISTRY = ActiveClientRegistry(
-                _active_clients_log_path(),
-                max_age_seconds=ACTIVE_CLIENT_MAX_AGE_SECONDS,
-                flush_interval_seconds=ACTIVE_CLIENT_FLUSH_INTERVAL_SECONDS,
-            )
-        return _ACTIVE_CLIENT_REGISTRY
+        return _active_client_registry_locked()
 
 
 def _clean_presence_client_id(value: object) -> str:
@@ -4184,16 +4189,20 @@ def _active_client_key(item: Dict[str, Any]) -> str:
 
 
 def _active_clients_snapshot(now: Optional[float] = None) -> List[Dict[str, Any]]:
-    clients = _ACTIVE_CLIENT_REGISTRY.snapshot(now=now)
-    _ACTIVE_CLIENT_REGISTRY.schedule_flush()
-    return clients
+    with _ACTIVE_CLIENT_REGISTRY_LIFECYCLE_LOCK:
+        registry = _active_client_registry_locked()
+        clients = registry.snapshot(now=now)
+        registry.schedule_flush()
+        return clients
 
 
 def _remove_active_client(username: str, client_id: str, now: Optional[float] = None) -> int:
-    removed = _ACTIVE_CLIENT_REGISTRY.remove(username, client_id, now=now)
-    if removed:
-        _ACTIVE_CLIENT_REGISTRY.flush(force=True)
-    return removed
+    with _ACTIVE_CLIENT_REGISTRY_LIFECYCLE_LOCK:
+        registry = _active_client_registry_locked()
+        removed = registry.remove(username, client_id, now=now)
+        if removed:
+            registry.flush(force=True)
+        return removed
 
 
 def _active_presence_enabled() -> bool:
@@ -4236,12 +4245,14 @@ def _active_presence_payload(
 
 
 def _runtime_active_clients_summary() -> Dict[str, Any]:
-    summary = _ACTIVE_CLIENT_REGISTRY.runtime_summary()
-    _ACTIVE_CLIENT_REGISTRY.schedule_flush()
-    return {
-        "generation": summary["generation"],
-        "count": summary["active_user_count"],
-    }
+    with _ACTIVE_CLIENT_REGISTRY_LIFECYCLE_LOCK:
+        registry = _active_client_registry_locked()
+        summary = registry.runtime_summary()
+        registry.schedule_flush()
+        return {
+            "generation": summary["generation"],
+            "count": summary["active_user_count"],
+        }
 
 
 def _record_active_client(request: Request, status_code: int) -> None:
@@ -4272,8 +4283,10 @@ def _record_active_client(request: Request, status_code: int) -> None:
         "last_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "last_seen_epoch": now_value,
     }
-    _ACTIVE_CLIENT_REGISTRY.record(item, now=now_value)
-    _ACTIVE_CLIENT_REGISTRY.schedule_flush()
+    with _ACTIVE_CLIENT_REGISTRY_LIFECYCLE_LOCK:
+        registry = _active_client_registry_locked()
+        registry.record(item, now=now_value)
+        registry.schedule_flush()
 
 
 def _optional_form_bool(form: Any, key: str) -> Optional[bool]:
