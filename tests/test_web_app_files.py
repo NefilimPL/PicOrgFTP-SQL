@@ -53,6 +53,26 @@ class _MemoryUpload:
 
 
 class WebAppFileTests(unittest.TestCase):
+    def test_runtime_status_asset_precedes_app_and_replaces_named_runtime_pollers(
+        self,
+    ) -> None:
+        workspace = Path(__file__).resolve().parents[1]
+        index_source = (
+            workspace / "picorgftp_sql" / "web" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+        app_source = (
+            workspace / "picorgftp_sql" / "web" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+
+        runtime_asset = '<script src="/static/runtime-status.js'
+        app_asset = '<script src="/static/app.js'
+        self.assertIn(runtime_asset, index_source)
+        self.assertLess(index_source.index(runtime_asset), index_source.index(app_asset))
+        self.assertEqual(app_source.count("new PicOrg.RuntimeStatusPoller("), 1)
+        self.assertNotIn('createPoller("fileIndex"', app_source)
+        self.assertNotIn('createPoller("processQueue"', app_source)
+        self.assertNotIn('createPoller("activeUsers"', app_source)
+
     def test_product_query_endpoints_clamp_limit_before_store_delegation(self) -> None:
         """Requests above 100 must not widen the delegated product queries."""
 
