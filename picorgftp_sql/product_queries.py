@@ -1,0 +1,54 @@
+"""Shared product-record query types and in-memory fallback filtering."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from picorgftp_sql.excel_utils import (
+    EAN_HEADER,
+    MODEL_HEADER,
+    NAME_HEADER,
+    PRODUCT_ID_HEADER,
+    TYPE_HEADER,
+)
+
+
+@dataclass(frozen=True)
+class ProductSearchCriteria:
+    """Exact-match fields accepted by product record lookups."""
+
+    product_id: str = ""
+    ean: str = ""
+    name: str = ""
+    type_name: str = ""
+    model: str = ""
+
+
+def _key(value: object) -> str:
+    return str(value or "").strip().casefold()
+
+
+def filter_product_records(records, criteria: ProductSearchCriteria, limit: int):
+    """Return bounded, exact matches while preserving record field shapes."""
+
+    bounded_limit = max(1, min(int(limit), 100))
+    result = []
+    for record in records:
+        if criteria.product_id and _key(record.get(PRODUCT_ID_HEADER)) != _key(
+            criteria.product_id
+        ):
+            continue
+        if criteria.ean and _key(record.get(EAN_HEADER)) != _key(criteria.ean):
+            continue
+        if criteria.name and _key(record.get(NAME_HEADER)) != _key(criteria.name):
+            continue
+        if criteria.type_name and _key(record.get(TYPE_HEADER)) != _key(
+            criteria.type_name
+        ):
+            continue
+        if criteria.model and _key(record.get(MODEL_HEADER)) != _key(criteria.model):
+            continue
+        result.append(dict(record))
+        if len(result) == bounded_limit:
+            break
+    return result

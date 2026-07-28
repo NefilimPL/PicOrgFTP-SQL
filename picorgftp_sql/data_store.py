@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from . import storage_settings
+from .product_queries import ProductSearchCriteria, filter_product_records
 from .sqlite_store import SqliteStore
 
 _ACTIVE_STORE = None
@@ -39,6 +40,82 @@ class LegacyDataStore:
     def save_config(self, _payload: dict[str, object]) -> None:
         return None
 
+    @staticmethod
+    def _product_records() -> list[dict[str, str]]:
+        """Read the Excel record cache without retaining a workbook handle."""
+
+        from .excel_utils import ENTRY_RECORDS_KEY, prepare_excel_lists
+
+        payload = prepare_excel_lists()
+        records = payload.get(ENTRY_RECORDS_KEY, [])
+        return records if isinstance(records, list) else []
+
+    def get_product_by_ean(self, ean: str):
+        matches = self.search_product_entries(ProductSearchCriteria(ean=ean), limit=1)
+        return matches[0] if matches else None
+
+    def get_product_by_id(self, product_id: str):
+        matches = self.search_product_entries(
+            ProductSearchCriteria(product_id=product_id), limit=1
+        )
+        return matches[0] if matches else None
+
+    def search_product_entries(
+        self, criteria: ProductSearchCriteria, limit: int = 50
+    ) -> list[dict[str, str]]:
+        return filter_product_records(self._product_records(), criteria, limit=limit)
+
+    def suggest_product_field(
+        self,
+        field: str,
+        prefix: str,
+        context: dict[str, str],
+        limit: int = 20,
+    ) -> list[str]:
+        from .excel_utils import (
+            EAN_HEADER,
+            MODEL_HEADER,
+            NAME_HEADER,
+            PRODUCT_ID_HEADER,
+            TYPE_HEADER,
+        )
+
+        headers = {
+            "product_id": PRODUCT_ID_HEADER,
+            "ean": EAN_HEADER,
+            "name": NAME_HEADER,
+            "type_name": TYPE_HEADER,
+            "model": MODEL_HEADER,
+        }
+        header = headers.get(field)
+        if header is None:
+            return []
+        criteria = ProductSearchCriteria(
+            product_id=str(context.get("product_id") or ""),
+            ean=str(context.get("ean") or ""),
+            name=str(context.get("name") or ""),
+            type_name=str(context.get("type_name") or ""),
+            model=str(context.get("model") or ""),
+        )
+        values = []
+        seen = set()
+        normalized_prefix = str(prefix or "").strip().casefold()
+        bounded_limit = max(1, min(int(limit), 100))
+        for record in filter_product_records(self._product_records(), criteria, limit=100):
+            value = str(record.get(header) or "").strip()
+            normalized_value = value.casefold()
+            if (
+                not value
+                or not normalized_value.startswith(normalized_prefix)
+                or normalized_value in seen
+            ):
+                continue
+            seen.add(normalized_value)
+            values.append(value)
+            if len(values) == bounded_limit:
+                break
+        return values
+
 
 class SqliteDataStoreAdapter:
     """Adapter exposing SQLite persistence through the active store API."""
@@ -59,6 +136,31 @@ class SqliteDataStoreAdapter:
 
     def load_lists(self) -> dict[str, Any]:
         return self.store.load_lists()
+
+    def get_product_by_ean(self, ean: str):
+        return self.store.get_product_by_ean(ean)
+
+    def get_product_by_id(self, product_id: str):
+        return self.store.get_product_by_id(product_id)
+
+    def search_product_entries(
+        self, criteria: ProductSearchCriteria, limit: int = 50
+    ):
+        return self.store.search_product_entries(criteria, limit=limit)
+
+    def suggest_product_field(
+        self,
+        field: str,
+        prefix: str,
+        context: dict[str, str],
+        limit: int = 20,
+    ):
+        return self.store.suggest_product_field(
+            field,
+            prefix,
+            context,
+            limit=limit,
+        )
 
     def save_lists(self, payload: dict[str, object]) -> None:
         self.store.save_lists(payload)
