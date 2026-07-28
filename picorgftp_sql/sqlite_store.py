@@ -2818,14 +2818,15 @@ class SqliteStore:
         with self.connection() as conn:
             row = conn.execute(
                 """
-                SELECT MIN(
-                    COALESCE(NULLIF(next_attempt_at, ''), created_at)
-                ) AS due_at
+                SELECT MIN(next_attempt_at) AS due_at
                 FROM notification_deliveries
                 WHERE status = 'pending'
                 """
             ).fetchone()
-        return _text(row["due_at"]) if row is not None else ""
+        if row is None or row["due_at"] is None:
+            return ""
+        due_at = _text(row["due_at"])
+        return due_at or _now_iso()
 
     def update_notification_delivery(
         self,

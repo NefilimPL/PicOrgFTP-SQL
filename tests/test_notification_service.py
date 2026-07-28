@@ -51,7 +51,16 @@ def test_worker_runs_entra_expiry_monitor_at_most_once_each_24_hours(monkeypatch
     calls = []
     service = type("Service", (), {"process_pending_batch": lambda self, limit: None})()
     stop_event = type("Stop", (), {"is_set": lambda self: False, "wait": lambda self, value: True})()
-    scheduler = type("Scheduler", (), {"wait": lambda self, stop, delay: "stop"})()
+    scheduler = type(
+        "Scheduler",
+        (),
+        {
+            "capture_generation": lambda self: 0,
+            "wait": (
+                lambda self, stop, delay, *, since_generation=None: "stop"
+            ),
+        },
+    )()
     monkeypatch.setattr(notification_service, "process_due_entra_secret_reminders", lambda: calls.append(True))
     monkeypatch.setattr(notification_service, "_WORKER_SCHEDULER", scheduler)
     monkeypatch.setattr(notification_service, "_WORKER_LAST_ENTRA_MONITOR_AT", None)
@@ -66,7 +75,16 @@ def test_worker_isolates_entra_expiry_monitor_errors(monkeypatch):
     calls = []
     service = type("Service", (), {"process_pending_batch": lambda self, limit: calls.append("delivery")})()
     stop_event = type("Stop", (), {"is_set": lambda self: False, "wait": lambda self, value: True})()
-    scheduler = type("Scheduler", (), {"wait": lambda self, stop, delay: "stop"})()
+    scheduler = type(
+        "Scheduler",
+        (),
+        {
+            "capture_generation": lambda self: 0,
+            "wait": (
+                lambda self, stop, delay, *, since_generation=None: "stop"
+            ),
+        },
+    )()
     monkeypatch.setattr(notification_service, "process_due_entra_secret_reminders", lambda: (_ for _ in ()).throw(RuntimeError("monitor failed")))
     monkeypatch.setattr(notification_service, "_WORKER_SCHEDULER", scheduler)
     monkeypatch.setattr(notification_service, "_WORKER_LAST_ENTRA_MONITOR_AT", None)
@@ -82,7 +100,13 @@ def test_worker_waits_for_nearest_persistent_delivery_deadline(monkeypatch):
     stop = threading.Event()
 
     class Scheduler:
-        def wait(self, stop_event, delay_seconds):
+        def capture_generation(self):
+            return 0
+
+        def wait(
+            self, stop_event, delay_seconds, *, since_generation=None
+        ):
+            del since_generation
             waits.append(delay_seconds)
             stop_event.set()
             return "stop"
@@ -110,13 +134,64 @@ def test_worker_waits_for_nearest_persistent_delivery_deadline(monkeypatch):
     assert waits == [30.0]
 
 
+def test_worker_latches_wake_between_deadline_read_and_wait(monkeypatch):
+    stop = threading.Event()
+    waits = []
+
+    class Scheduler:
+        def __init__(self):
+            self.generation = 0
+
+        def capture_generation(self):
+            return self.generation
+
+        def wake(self):
+            self.generation += 1
+
+        def wait(self, stop_event, delay_seconds, *, since_generation=None):
+            del delay_seconds
+            waits.append((since_generation, self.generation))
+            stop_event.set()
+            return "stop"
+
+    scheduler = Scheduler()
+
+    class Store:
+        def next_notification_due_at(self):
+            scheduler.wake()
+            return ""
+
+    service = type(
+        "Service",
+        (),
+        {
+            "store": Store(),
+            "process_pending_batch": lambda self, limit: None,
+            "_settings": lambda self: {"daily_summary_time": "16:00"},
+        },
+    )()
+    monkeypatch.setattr(notification_service, "_WORKER_SCHEDULER", scheduler)
+    monkeypatch.setattr(notification_service, "_WORKER_LAST_ENTRA_MONITOR_AT", NOW)
+    monkeypatch.setattr(notification_service, "_utc_now", lambda: NOW)
+
+    notification_service._worker_loop(service, stop)
+
+    assert waits == [(0, 1)]
+
+
 def test_worker_waits_until_daily_summary_when_it_is_nearest(monkeypatch):
     waits = []
     stop = threading.Event()
     now = datetime(2026, 7, 17, 13, 59, 30, tzinfo=UTC)
 
     class Scheduler:
-        def wait(self, stop_event, delay_seconds):
+        def capture_generation(self):
+            return 0
+
+        def wait(
+            self, stop_event, delay_seconds, *, since_generation=None
+        ):
+            del since_generation
             waits.append(delay_seconds)
             stop_event.set()
             return "stop"
@@ -1405,8 +1480,17 @@ def test_worker_restart_processes_overdue_delivery_without_prior_wake(
             self.delegate = WakeableDeadlineScheduler(max_idle_seconds=60)
             self.wakes = 0
 
-        def wait(self, stop_event, delay_seconds):
-            return self.delegate.wait(stop_event, delay_seconds)
+        def capture_generation(self):
+            return self.delegate.capture_generation()
+
+        def wait(
+            self, stop_event, delay_seconds, *, since_generation=None
+        ):
+            return self.delegate.wait(
+                stop_event,
+                delay_seconds,
+                since_generation=since_generation,
+            )
 
         def wake(self):
             self.wakes += 1

@@ -1473,13 +1473,21 @@ def _worker_loop(service: NotificationService, stop_event: threading.Event) -> N
         except Exception:
             # Queue processing is isolated from the web/product request paths.
             pass
+        wait_generation = _WORKER_SCHEDULER.capture_generation()
         cycle_finished_at = _utc_now()
         delay = _worker_delay_seconds(
             service,
             now=cycle_finished_at,
             next_prune_at=cycle_finished_at + WORKER_PRUNE_INTERVAL,
         )
-        if _WORKER_SCHEDULER.wait(stop_event, delay) == "stop":
+        if (
+            _WORKER_SCHEDULER.wait(
+                stop_event,
+                delay,
+                since_generation=wait_generation,
+            )
+            == "stop"
+        ):
             break
 
 
