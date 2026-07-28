@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from picorgftp_sql import sqlite_store
 from picorgftp_sql.excel_utils import ENTRY_RECORDS_KEY
 from picorgftp_sql.product_queries import ProductSearchCriteria
 from picorgftp_sql.sqlite_store import SCHEMA_VERSION, SqliteStore
@@ -1155,3 +1156,17 @@ def test_product_query_indexes_work_with_raw_sqlite_maintenance_connections(
         conn.execute("ANALYZE")
     with sqlite3.connect(store.path) as conn:
         conn.execute("VACUUM")
+
+
+def test_product_query_key_backfill_skips_current_schema_database(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "data.sqlite"
+    SqliteStore(str(db_path)).initialize()
+    monkeypatch.setattr(
+        sqlite_store,
+        "_migrate_product_entry_search_keys",
+        lambda _conn: (_ for _ in ()).throw(AssertionError("unexpected backfill")),
+    )
+
+    SqliteStore(str(db_path)).initialize()

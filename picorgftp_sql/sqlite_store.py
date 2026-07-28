@@ -1178,7 +1178,8 @@ class SqliteStore:
             )
             _migrate_web_history_created_at(conn)
             _migrate_daily_change_summary_reports(conn)
-            _migrate_product_entry_search_keys(conn)
+            if previous_user_version < SCHEMA_VERSION:
+                _migrate_product_entry_search_keys(conn)
             _rebuild_web_history_index_if_needed(conn)
             _reconcile_duplicate_open_incidents(conn)
             conn.execute(
