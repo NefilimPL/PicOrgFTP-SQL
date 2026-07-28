@@ -179,6 +179,14 @@ Benchmark raportuje:
 - czas oczekiwania na blokadę aktywnych klientów;
 - liczbę i czas zapisów JSON.
 
+Automatyczny benchmark w `tests/test_background_runtime_performance.py`
+symuluje minutę pracy bez oczekiwania w czasie rzeczywistym. Sprawdza limit
+dwóch cykli workera, wake przed kolejnym terminem awaryjnym, stop poniżej
+sekundy, pięć instancji produkcyjnego pollera JavaScript (maksymalnie 12
+requestów aktywnych i 2 ukryte na klienta) oraz 100 aktualizacji rejestru
+podczas zablokowanej serializacji. Niezmienione wersje runtime nie wywołują
+odświeżeń endpointów szczegółowych.
+
 ## Główne miejsca w kodzie
 
 - `picorgftp_sql/notification_service.py`
