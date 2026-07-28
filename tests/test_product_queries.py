@@ -49,11 +49,11 @@ def test_sqlite_product_queries_do_not_load_all_lists(tmp_path, monkeypatch):
     adapter = data_store.SqliteDataStoreAdapter(str(tmp_path / "products.sqlite"))
     adapter.save_product_entry(
         {
-            "product_id": "P-1",
-            "ean": "5901234567890",
-            "name": "ALFA",
-            "type_name": "STÓŁ",
-            "model": "A1",
+            "PRODUCT_ID": "P-1",
+            "EAN": "5901234567890",
+            "NAZWA": "ALFA",
+            "TYP": "STÓŁ",
+            "MODEL": "A1",
         }
     )
     monkeypatch.setattr(
@@ -62,9 +62,27 @@ def test_sqlite_product_queries_do_not_load_all_lists(tmp_path, monkeypatch):
         lambda: (_ for _ in ()).throw(AssertionError("full load")),
     )
 
-    assert adapter.get_product_by_ean("5901234567890")["product_id"] == "P-1"
-    assert adapter.get_product_by_id("p-1")["ean"] == "5901234567890"
-    assert adapter.search_product_entries(
-        ProductSearchCriteria(name="alfa"), limit=1
-    )[0]["name"] == "ALFA"
-    assert adapter.suggest_product_field("model", "a", {"name": "ALFA"}) == ["A1"]
+    expected = {
+        "PRODUCT_ID": "P-1",
+        "EAN": "5901234567890",
+        "NAZWA": "ALFA",
+        "TYP": "STÓŁ",
+        "MODEL": "A1",
+        "KOLOR1": "",
+        "KOLOR2": "",
+        "KOLOR3": "",
+        "DODATKI": "NO-LED",
+    }
+    legacy = data_store.LegacyDataStore()
+    monkeypatch.setattr(legacy, "_product_records", lambda: [expected])
+    assert adapter.get_product_by_ean("5901234567890") == legacy.get_product_by_ean(
+        "5901234567890"
+    )
+    assert adapter.get_product_by_id("p-1") == legacy.get_product_by_id("p-1")
+    criteria = ProductSearchCriteria(name="alfa")
+    assert adapter.search_product_entries(criteria, limit=1) == legacy.search_product_entries(
+        criteria, limit=1
+    )
+    assert adapter.suggest_product_field(
+        "model", "a", {"name": "ALFA"}
+    ) == legacy.suggest_product_field("model", "a", {"name": "ALFA"})

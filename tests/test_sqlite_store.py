@@ -13,7 +13,7 @@ import pytest
 
 from picorgftp_sql.excel_utils import ENTRY_RECORDS_KEY
 from picorgftp_sql.product_queries import ProductSearchCriteria
-from picorgftp_sql.sqlite_store import SqliteStore
+from picorgftp_sql.sqlite_store import SCHEMA_VERSION, SqliteStore
 
 
 def test_schema_creates_expected_tables(tmp_path: Path) -> None:
@@ -61,7 +61,7 @@ def test_schema_creates_expected_tables(tmp_path: Path) -> None:
             "PRAGMA foreign_key_list(operational_event_stream)"
         ).fetchall()
 
-    assert version == 11
+    assert version == SCHEMA_VERSION
     assert stream_columns == ["sequence", "event_id"]
     assert stream_foreign_keys == []
 
@@ -1025,30 +1025,31 @@ def test_product_queries_use_indexed_exact_identity_and_form_criteria(
         }
     )
 
-    assert store.get_product_by_ean(" 5901234567890 ")["product_id"] == "PRD-1"
-    assert store.get_product_by_id("prd-2")["model"] == "MA04"
+    assert store.get_product_by_ean(" 5901234567890 ")["PRODUCT_ID"] == "PRD-1"
+    assert store.get_product_by_id("prd-2")["MODEL"] == "MA04"
     assert store.search_product_entries(
         ProductSearchCriteria(name="maggiore", type_name="komoda"), limit=1
     ) == [
         {
-            "product_id": "PRD-1",
-            "ean": "5901234567890",
-            "name": "MAGGIORE",
-            "type_name": "KOMODA",
-            "model": "MA03",
-            "color1": "BIALY",
-            "color2": "",
-            "color3": "",
-            "extra": "NO-LED",
+            "PRODUCT_ID": "PRD-1",
+            "EAN": "5901234567890",
+            "NAZWA": "MAGGIORE",
+            "TYP": "KOMODA",
+            "MODEL": "MA03",
+            "KOLOR1": "BIALY",
+            "KOLOR2": "",
+            "KOLOR3": "",
+            "DODATKI": "NO-LED",
         }
     ]
     assert store.search_product_entries(
         ProductSearchCriteria(product_id="PRD-2", name="not-a-match"), limit=10
-    )[0]["product_id"] == "PRD-2"
+    )[0]["PRODUCT_ID"] == "PRD-2"
 
     with sqlite3.connect(store.path) as conn:
         plan = conn.execute(
-            "EXPLAIN QUERY PLAN SELECT * FROM product_entries WHERE ean = ? LIMIT 1",
+            "EXPLAIN QUERY PLAN "
+            "SELECT * FROM product_entries WHERE ean_key = ? LIMIT 1",
             ("5901234567890",),
         ).fetchall()
     assert any("INDEX" in str(row).upper() for row in plan)
@@ -1080,3 +1081,77 @@ def test_product_field_suggestions_validate_context_and_limit_results(tmp_path: 
         "A1"
     ]
     assert store.suggest_product_field("unknown", "", {}, limit=20) == []
+
+
+def test_product_query_key_migration_normalizes_legacy_whitespace_and_casefold(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "legacy.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE product_entries (
+                product_id TEXT PRIMARY KEY,
+                ean TEXT NOT NULL DEFAULT '',
+                name TEXT NOT NULL DEFAULT '',
+                type_name TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                color1 TEXT NOT NULL DEFAULT '',
+                color2 TEXT NOT NULL DEFAULT '',
+                color3 TEXT NOT NULL DEFAULT '',
+                extra TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO product_entries (
+                product_id, ean, name, type_name, model,
+                color1, color2, color3, extra, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                " P-ß ",
+                " 5901234567890 ",
+                " Straße ",
+                " STÓŁ ",
+                " A1 ",
+                "",
+                "",
+                "",
+                "NO-LED",
+                "2026-07-28T00:00:00.000Z",
+            ),
+        )
+
+    store = SqliteStore(str(db_path))
+
+    assert store.get_product_by_ean("5901234567890") == {
+        "PRODUCT_ID": " P-ß ",
+        "EAN": " 5901234567890 ",
+        "NAZWA": " Straße ",
+        "TYP": " STÓŁ ",
+        "MODEL": " A1 ",
+        "KOLOR1": "",
+        "KOLOR2": "",
+        "KOLOR3": "",
+        "DODATKI": "NO-LED",
+    }
+    assert store.search_product_entries(ProductSearchCriteria(name="strasse"))[0][
+        "PRODUCT_ID"
+    ] == " P-ß "
+
+
+def test_product_query_indexes_work_with_raw_sqlite_maintenance_connections(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.initialize()
+
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("ANALYZE")
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("VACUUM")

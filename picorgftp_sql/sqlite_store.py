@@ -36,7 +36,7 @@ from .sqlite_connection import (
     try_enable_wal,
 )
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 _WAL_FALLBACK_LOGGER = logging.getLogger("picorgftp_sql.sqlite.wal")
 _WAL_FALLBACK_LOGGER.setLevel(logging.WARNING)
 _WAL_FALLBACK_LOGGER.propagate = False
@@ -89,28 +89,20 @@ _PRODUCT_SEARCH_COLUMNS = {
     "type_name": "type_name",
     "model": "model",
 }
-_PRODUCT_ENTRY_COLUMNS = (
-    "product_id",
-    "ean",
-    "name",
-    "type_name",
-    "model",
-    "color1",
-    "color2",
-    "color3",
-    "extra",
-)
-_PRODUCT_ENTRY_INPUT_FIELDS = {
-    EAN_HEADER: "ean",
-    NAME_HEADER: "name",
-    TYPE_HEADER: "type_name",
-    MODEL_HEADER: "model",
-    COLOR1_HEADER: "color1",
-    COLOR2_HEADER: "color2",
-    COLOR3_HEADER: "color3",
-    EXTRA_HEADER: "extra",
-    PRODUCT_ID_HEADER: "product_id",
+_PRODUCT_SEARCH_KEY_COLUMNS = {
+    field: f"{column}_key" for field, column in _PRODUCT_SEARCH_COLUMNS.items()
 }
+_PRODUCT_ENTRY_COLUMNS = (
+    ("product_id", PRODUCT_ID_HEADER),
+    ("ean", EAN_HEADER),
+    ("name", NAME_HEADER),
+    ("type_name", TYPE_HEADER),
+    ("model", MODEL_HEADER),
+    ("color1", COLOR1_HEADER),
+    ("color2", COLOR2_HEADER),
+    ("color3", COLOR3_HEADER),
+    ("extra", EXTRA_HEADER),
+)
 
 _INCIDENT_CONTEXT_BEFORE_SQL = """
     SELECT * FROM operational_events
@@ -192,12 +184,6 @@ def _unicode_lower(value: object) -> str:
     """Normalize SQLite text with Python's Unicode-aware case mapping."""
 
     return str(value or "").lower()
-
-
-def _unicode_casefold(value: object) -> str:
-    """Match the shared product-query normalization in SQLite expressions."""
-
-    return str(value or "").casefold()
 
 
 def _upper(value: object) -> str:
@@ -758,17 +744,14 @@ def _usage_label(entry: dict[str, str]) -> str:
 
 
 def _entry_payload(payload: dict[str, object]) -> dict[str, str]:
-    def value_for(header: str) -> object:
-        return payload.get(header, payload.get(_PRODUCT_ENTRY_INPUT_FIELDS[header]))
-
-    entry = {header: _upper(value_for(header)) for header in ENTRY_HEADERS}
-    color2 = value_for(COLOR2_HEADER)
-    color3 = value_for(COLOR3_HEADER)
+    entry = {header: _upper(payload.get(header)) for header in ENTRY_HEADERS}
+    color2 = payload.get(COLOR2_HEADER)
+    color3 = payload.get(COLOR3_HEADER)
     entry[COLOR2_HEADER] = _upper(color2) if color2 else ""
     entry[COLOR3_HEADER] = _upper(color3) if color3 else ""
-    extra = _upper(value_for(EXTRA_HEADER)).replace("_", "-")
+    extra = _upper(payload.get(EXTRA_HEADER)).replace("_", "-")
     entry[EXTRA_HEADER] = extra or "NO-LED"
-    entry[PRODUCT_ID_HEADER] = _upper(value_for(PRODUCT_ID_HEADER))
+    entry[PRODUCT_ID_HEADER] = _upper(payload.get(PRODUCT_ID_HEADER))
     return entry
 
 
@@ -782,16 +765,61 @@ def _bounded_product_query_limit(value: object, default: int) -> int:
     return max(1, min(parsed, 100))
 
 
-def _prefix_like_pattern(value: object) -> str:
-    """Return a literal prefix pattern for a parameterized SQLite LIKE."""
+def _product_search_key(value: object) -> str:
+    """Return the shared stripped, Unicode-casefold product comparison key."""
 
-    needle = _text(value)
-    escaped = (
-        needle.replace("\\", "\\\\")
-        .replace("%", "\\%")
-        .replace("_", "\\_")
+    return _text(value).casefold()
+
+
+def _product_prefix_bounds(value: object) -> tuple[str, str]:
+    """Return an indexed half-open range covering all casefolded prefixes."""
+
+    prefix = _product_search_key(value)
+    return prefix, f"{prefix}\U0010ffff"
+
+
+def _migrate_product_entry_search_keys(conn: sqlite3.Connection) -> None:
+    """Backfill persisted query keys without storing connection-local SQL code."""
+
+    conn.executescript(
+        """
+        DROP INDEX IF EXISTS idx_product_entries_product_id_fold;
+        DROP INDEX IF EXISTS idx_product_entries_ean_fold;
+        DROP INDEX IF EXISTS idx_product_entries_name_fold;
+        DROP INDEX IF EXISTS idx_product_entries_type_name_fold;
+        DROP INDEX IF EXISTS idx_product_entries_model_fold;
+        DROP INDEX IF EXISTS idx_product_entries_identity_fold;
+        """
     )
-    return f"{escaped}%"
+    columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(product_entries)")
+    }
+    for key_column in _PRODUCT_SEARCH_KEY_COLUMNS.values():
+        if key_column not in columns:
+            conn.execute(
+                f"ALTER TABLE product_entries ADD COLUMN {key_column} "
+                "TEXT NOT NULL DEFAULT ''"
+            )
+    rows = conn.execute(
+        "SELECT rowid, product_id, ean, name, type_name, model FROM product_entries"
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            """
+            UPDATE product_entries
+            SET product_id_key = ?, ean_key = ?, name_key = ?,
+                type_name_key = ?, model_key = ?
+            WHERE rowid = ?
+            """,
+            (
+                _product_search_key(row["product_id"]),
+                _product_search_key(row["ean"]),
+                _product_search_key(row["name"]),
+                _product_search_key(row["type_name"]),
+                _product_search_key(row["model"]),
+                row["rowid"],
+            ),
+        )
 
 
 class SqliteStore:
@@ -820,12 +848,6 @@ class SqliteStore:
             "picorg_lower",
             1,
             _unicode_lower,
-            deterministic=True,
-        )
-        conn.create_function(
-            "picorg_casefold",
-            1,
-            _unicode_casefold,
             deterministic=True,
         )
         configure_connection(
@@ -944,6 +966,11 @@ class SqliteStore:
                     name TEXT NOT NULL DEFAULT '',
                     type_name TEXT NOT NULL DEFAULT '',
                     model TEXT NOT NULL DEFAULT '',
+                    product_id_key TEXT NOT NULL DEFAULT '',
+                    ean_key TEXT NOT NULL DEFAULT '',
+                    name_key TEXT NOT NULL DEFAULT '',
+                    type_name_key TEXT NOT NULL DEFAULT '',
+                    model_key TEXT NOT NULL DEFAULT '',
                     color1 TEXT NOT NULL DEFAULT '',
                     color2 TEXT NOT NULL DEFAULT '',
                     color3 TEXT NOT NULL DEFAULT '',
@@ -1151,6 +1178,7 @@ class SqliteStore:
             )
             _migrate_web_history_created_at(conn)
             _migrate_daily_change_summary_reports(conn)
+            _migrate_product_entry_search_keys(conn)
             _rebuild_web_history_index_if_needed(conn)
             _reconcile_duplicate_open_incidents(conn)
             conn.execute(
@@ -1195,22 +1223,18 @@ class SqliteStore:
                     ON product_entries(ean);
                 CREATE INDEX IF NOT EXISTS idx_product_entries_identity
                     ON product_entries(name, type_name, model);
-                CREATE INDEX IF NOT EXISTS idx_product_entries_product_id_fold
-                    ON product_entries(picorg_casefold(product_id));
-                CREATE INDEX IF NOT EXISTS idx_product_entries_ean_fold
-                    ON product_entries(picorg_casefold(ean));
-                CREATE INDEX IF NOT EXISTS idx_product_entries_name_fold
-                    ON product_entries(picorg_casefold(name));
-                CREATE INDEX IF NOT EXISTS idx_product_entries_type_name_fold
-                    ON product_entries(picorg_casefold(type_name));
-                CREATE INDEX IF NOT EXISTS idx_product_entries_model_fold
-                    ON product_entries(picorg_casefold(model));
-                CREATE INDEX IF NOT EXISTS idx_product_entries_identity_fold
-                    ON product_entries(
-                        picorg_casefold(name),
-                        picorg_casefold(type_name),
-                        picorg_casefold(model)
-                    );
+                CREATE INDEX IF NOT EXISTS idx_product_entries_product_id_key
+                    ON product_entries(product_id_key);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_ean_key
+                    ON product_entries(ean_key);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_name_key
+                    ON product_entries(name_key);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_type_name_key
+                    ON product_entries(type_name_key);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_model_key
+                    ON product_entries(model_key);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_identity_key
+                    ON product_entries(name_key, type_name_key, model_key);
                 CREATE INDEX IF NOT EXISTS idx_app_config_values_updated_at
                     ON app_config_values(updated_at);
                 CREATE INDEX IF NOT EXISTS idx_file_index_segments_lookup
@@ -3441,7 +3465,10 @@ class SqliteStore:
     def _product_entry_from_row(row: sqlite3.Row) -> dict[str, str]:
         """Convert one selective product row to the store query payload shape."""
 
-        return {column: _text(row[column]) for column in _PRODUCT_ENTRY_COLUMNS}
+        return {
+            header: str(row[column] or "")
+            for column, header in _PRODUCT_ENTRY_COLUMNS
+        }
 
     def get_product_by_ean(self, ean: str) -> dict[str, str] | None:
         """Return one product by its normalized EAN without materializing lists."""
@@ -3453,11 +3480,11 @@ class SqliteStore:
                 SELECT product_id, ean, name, type_name, model,
                        color1, color2, color3, extra
                 FROM product_entries
-                WHERE picorg_casefold(ean) = picorg_casefold(?)
+                WHERE ean_key = ?
                 ORDER BY rowid
                 LIMIT 1
                 """,
-                (_text(ean),),
+                (_product_search_key(ean),),
             ).fetchone()
         return self._product_entry_from_row(row) if row else None
 
@@ -3471,11 +3498,11 @@ class SqliteStore:
                 SELECT product_id, ean, name, type_name, model,
                        color1, color2, color3, extra
                 FROM product_entries
-                WHERE picorg_casefold(product_id) = picorg_casefold(?)
+                WHERE product_id_key = ?
                 ORDER BY rowid
                 LIMIT 1
                 """,
-                (_text(product_id),),
+                (_product_search_key(product_id),),
             ).fetchone()
         return self._product_entry_from_row(row) if row else None
 
@@ -3488,18 +3515,18 @@ class SqliteStore:
         clauses: list[str] = []
         params: list[object] = []
         values = {
-            field: _text(getattr(criteria, field, ""))
+            field: _product_search_key(getattr(criteria, field, ""))
             for field in _PRODUCT_SEARCH_COLUMNS
         }
         identity_field = "product_id" if values["product_id"] else "ean"
         if values[identity_field]:
-            column = _PRODUCT_SEARCH_COLUMNS[identity_field]
-            clauses.append(f"picorg_casefold({column}) = picorg_casefold(?)")
+            key_column = _PRODUCT_SEARCH_KEY_COLUMNS[identity_field]
+            clauses.append(f"{key_column} = ?")
             params.append(values[identity_field])
         else:
-            for field, column in _PRODUCT_SEARCH_COLUMNS.items():
+            for field, key_column in _PRODUCT_SEARCH_KEY_COLUMNS.items():
                 if values[field]:
-                    clauses.append(f"picorg_casefold({column}) = picorg_casefold(?)")
+                    clauses.append(f"{key_column} = ?")
                     params.append(values[field])
         where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(_bounded_product_query_limit(limit, 50))
@@ -3526,22 +3553,21 @@ class SqliteStore:
     ) -> list[str]:
         """Suggest bounded, distinct values for one whitelisted product field."""
 
-        column = _PRODUCT_SEARCH_COLUMNS.get(_text(field))
-        if column is None:
+        field_name = _text(field)
+        column = _PRODUCT_SEARCH_COLUMNS.get(field_name)
+        key_column = _PRODUCT_SEARCH_KEY_COLUMNS.get(field_name)
+        if column is None or key_column is None:
             return []
         self.initialize()
         clauses = [f"{column} <> ''"]
-        params: list[object] = [_prefix_like_pattern(prefix)]
-        clauses.append(
-            f"picorg_casefold({column}) LIKE picorg_casefold(?) ESCAPE '\\'"
-        )
+        prefix_start, prefix_end = _product_prefix_bounds(prefix)
+        params: list[object] = [prefix_start, prefix_end]
+        clauses.append(f"{key_column} >= ? AND {key_column} < ?")
         context_values = context if isinstance(context, dict) else {}
-        for context_field, context_column in _PRODUCT_SEARCH_COLUMNS.items():
-            value = _text(context_values.get(context_field))
+        for context_field, context_key_column in _PRODUCT_SEARCH_KEY_COLUMNS.items():
+            value = _product_search_key(context_values.get(context_field))
             if value:
-                clauses.append(
-                    f"picorg_casefold({context_column}) = picorg_casefold(?)"
-                )
+                clauses.append(f"{context_key_column} = ?")
                 params.append(value)
         params.append(_bounded_product_query_limit(limit, 20))
         with self.connection() as conn:
@@ -3550,7 +3576,7 @@ class SqliteStore:
                 SELECT DISTINCT {column} AS value
                 FROM product_entries
                 WHERE {' AND '.join(clauses)}
-                ORDER BY picorg_casefold({column}), {column}
+                ORDER BY {key_column}, {column}
                 LIMIT ?
                 """,
                 params,
@@ -3717,14 +3743,20 @@ class SqliteStore:
             """
             INSERT INTO product_entries (
                 product_id, ean, name, type_name, model,
+                product_id_key, ean_key, name_key, type_name_key, model_key,
                 color1, color2, color3, extra, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(product_id) DO UPDATE SET
                 ean = excluded.ean,
                 name = excluded.name,
                 type_name = excluded.type_name,
                 model = excluded.model,
+                product_id_key = excluded.product_id_key,
+                ean_key = excluded.ean_key,
+                name_key = excluded.name_key,
+                type_name_key = excluded.type_name_key,
+                model_key = excluded.model_key,
                 color1 = excluded.color1,
                 color2 = excluded.color2,
                 color3 = excluded.color3,
@@ -3737,6 +3769,11 @@ class SqliteStore:
                 entry[NAME_HEADER],
                 entry[TYPE_HEADER],
                 entry[MODEL_HEADER],
+                _product_search_key(entry[PRODUCT_ID_HEADER]),
+                _product_search_key(entry[EAN_HEADER]),
+                _product_search_key(entry[NAME_HEADER]),
+                _product_search_key(entry[TYPE_HEADER]),
+                _product_search_key(entry[MODEL_HEADER]),
                 entry[COLOR1_HEADER],
                 entry[COLOR2_HEADER],
                 entry[COLOR3_HEADER],
