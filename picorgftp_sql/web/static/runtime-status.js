@@ -18,10 +18,16 @@
       this.previousVersions = null;
       this.timer = null;
       this.started = false;
+      this.pollImmediatelyAfterFlight = false;
       this.handleVisibilityChange = () => {
         this.clearScheduledPoll();
         if (this.isHidden()) {
+          this.pollImmediatelyAfterFlight = false;
           if (this.started) this.schedule(this.hiddenIntervalMs);
+          return;
+        }
+        if (this.inFlight) {
+          this.pollImmediatelyAfterFlight = true;
           return;
         }
         this.pollNow().catch(() => {});
@@ -37,21 +43,29 @@
         request = Promise.reject(error);
       }
       this.inFlight = request
-        .then(
-          (payload) => {
-            const versions =
-              payload?.versions && typeof payload.versions === "object"
-                ? payload.versions
-                : {};
-            if (this.previousVersions) {
-              for (const [name, current] of Object.entries(versions)) {
-                const previous = this.previousVersions[name];
-                if (!Object.is(current, previous)) {
-                  this.onVersionChanged(name, current, previous, payload);
-                }
+        .then(async (payload) => {
+          const versions =
+            payload?.versions && typeof payload.versions === "object"
+              ? payload.versions
+              : {};
+          if (this.previousVersions) {
+            for (const [name, current] of Object.entries(versions)) {
+              const previous = this.previousVersions[name];
+              if (!Object.is(current, previous)) {
+                await this.onVersionChanged(
+                  name,
+                  current,
+                  previous,
+                  payload
+                );
               }
             }
-            this.previousVersions = { ...versions };
+          }
+          this.previousVersions = { ...versions };
+          return payload;
+        })
+        .then(
+          (payload) => {
             this.failures = 0;
             return payload;
           },
@@ -62,7 +76,13 @@
         )
         .finally(() => {
           this.inFlight = null;
-          if (this.started) this.schedule(this.nextDelayMs());
+          if (!this.started) return;
+          if (this.pollImmediatelyAfterFlight && !this.isHidden()) {
+            this.pollImmediatelyAfterFlight = false;
+            this.schedule(0);
+            return;
+          }
+          this.schedule(this.nextDelayMs());
         });
       return this.inFlight;
     }

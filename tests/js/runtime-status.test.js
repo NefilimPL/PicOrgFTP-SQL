@@ -103,6 +103,33 @@ test("poller reports only runtime versions that change after the baseline", asyn
   ]);
 });
 
+test("failed version refresh is retried for the same version", async () => {
+  const payloads = [
+    { versions: { file_index: "index-1" } },
+    { versions: { file_index: "index-2" } },
+    { versions: { file_index: "index-2" } },
+  ];
+  let refreshAttempts = 0;
+  const poller = new window.PicOrg.RuntimeStatusPoller({
+    fetchStatus: async () => payloads.shift(),
+    onVersionChanged: () => {
+      refreshAttempts += 1;
+      if (refreshAttempts === 1) {
+        const failedRefresh = Promise.reject(new Error("detail refresh failed"));
+        failedRefresh.catch(() => {});
+        return failedRefresh;
+      }
+      return Promise.resolve();
+    },
+  });
+
+  await poller.pollNow();
+  await assert.rejects(poller.pollNow(), /detail refresh failed/);
+  await poller.pollNow();
+
+  assert.equal(refreshAttempts, 2);
+});
+
 test("becoming visible cancels the hidden timer and polls immediately", async () => {
   let hidden = true;
   let visibilityHandler;
@@ -183,4 +210,45 @@ test("becoming hidden replaces the active timer without fetching", async () => {
 
   assert.deepEqual(cleared, [activeTimerId]);
   assert.equal(scheduled.at(-1).delay, 30000);
+});
+
+test("becoming visible during a hidden request queues an immediate follow-up", async () => {
+  let hidden = true;
+  let visibilityHandler;
+  const firstRequest = deferred();
+  const scheduled = [];
+  let calls = 0;
+  const poller = new window.PicOrg.RuntimeStatusPoller({
+    fetchStatus: () => {
+      calls += 1;
+      return calls === 1
+        ? firstRequest.promise
+        : Promise.resolve({ versions: {} });
+    },
+    isHidden: () => hidden,
+    timerApi: {
+      setTimeout(callback, delay) {
+        scheduled.push({ callback, delay });
+        return scheduled.length;
+      },
+      clearTimeout() {},
+    },
+    visibilityTarget: {
+      addEventListener(_name, callback) {
+        visibilityHandler = callback;
+      },
+    },
+  });
+
+  const hiddenPoll = poller.start();
+  hidden = false;
+  visibilityHandler();
+  assert.equal(calls, 1);
+
+  firstRequest.resolve({ versions: {} });
+  await hiddenPoll;
+  assert.equal(scheduled.at(-1).delay, 0);
+
+  scheduled.at(-1).callback();
+  assert.equal(calls, 2);
 });

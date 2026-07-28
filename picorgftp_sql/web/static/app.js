@@ -6608,7 +6608,7 @@ async function pollLogStatus() {
     updateLogAlert({});
     return;
   }
-  if (state.observability.stream) {
+  if (state.observability.stream && state.observability.streamConnected) {
     return;
   }
   await requestObservabilityPayload("/api/observability/events?limit=1");
@@ -7400,7 +7400,7 @@ function refreshRuntimeDetailForVersion(name) {
     active_clients: refreshActiveUsersPresence,
   };
   const refresh = refreshers[name];
-  if (refresh) refresh().catch(() => {});
+  return refresh ? refresh() : Promise.resolve();
 }
 
 function refreshRuntimeDetailViews() {

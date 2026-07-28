@@ -72,6 +72,10 @@ class WebAppFileTests(unittest.TestCase):
         self.assertNotIn('createPoller("fileIndex"', app_source)
         self.assertNotIn('createPoller("processQueue"', app_source)
         self.assertNotIn('createPoller("activeUsers"', app_source)
+        self.assertIn(
+            "if (state.observability.stream && state.observability.streamConnected)",
+            app_source,
+        )
 
     def test_product_query_endpoints_clamp_limit_before_store_delegation(self) -> None:
         """Requests above 100 must not widen the delegated product queries."""
