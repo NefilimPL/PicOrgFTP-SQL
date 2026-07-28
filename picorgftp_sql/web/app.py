@@ -87,6 +87,7 @@ from ..services.pimcore_service import PimcoreApiError, PimcoreConflictError
 from ..services.sql_service import detect_available_columns, extract_presence_context
 from ..sqlite_maintenance import repair_sqlite_database
 from ..workflow_utils import build_product_directory, parse_slot_filename, sanitize_path_segment
+from .active_clients import ActiveClientRegistry
 from .process_progress import ProcessProgressGate
 from ..web_image_import import (
     ImageImportError,
@@ -192,11 +193,11 @@ _PROCESS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="picorg
 _PROCESS_JOBS: Dict[str, Dict[str, Any]] = {}
 _PROCESS_JOBS_LOCK = threading.Lock()
 _PROCESS_PROGRESS_GATE = ProcessProgressGate()
-_ACTIVE_CLIENTS: Dict[str, Dict[str, Any]] = {}
-_ACTIVE_CLIENTS_LOCK = threading.Lock()
-_ACTIVE_CLIENTS_LOADED = False
-_ACTIVE_CLIENTS_DIRTY = False
-_ACTIVE_CLIENTS_LAST_FLUSH = 0.0
+_ACTIVE_CLIENT_REGISTRY = ActiveClientRegistry(
+    Path(settings.LOG_DIR) / "web_active_clients.json",
+    max_age_seconds=ACTIVE_CLIENT_MAX_AGE_SECONDS,
+    flush_interval_seconds=ACTIVE_CLIENT_FLUSH_INTERVAL_SECONDS,
+)
 _RATE_LIMITS: Dict[str, List[float]] = {}
 _RATE_LIMITS_LOCK = threading.Lock()
 _UPLOAD_SCAN_RESULTS: Dict[str, Dict[str, Any]] = {}
@@ -4057,8 +4058,7 @@ def _active_process_jobs_snapshot() -> Dict[str, Any]:
 
 def _resource_monitor_context() -> dict[str, int]:
     active = _active_process_jobs_snapshot()
-    with _ACTIVE_CLIENTS_LOCK:
-        active_clients = len(_ACTIVE_CLIENTS)
+    active_clients = len(_ACTIVE_CLIENT_REGISTRY.snapshot())
     return {
         "active_jobs": int(active["active_count"]),
         "queued_jobs": int(active["queued_count"]),
@@ -4138,101 +4138,16 @@ def _active_client_key(item: Dict[str, Any]) -> str:
     )
 
 
-def _load_active_clients_from_disk_locked(now_value: float) -> None:
-    global _ACTIVE_CLIENTS_LOADED
-    if _ACTIVE_CLIENTS_LOADED:
-        return
-    _ACTIVE_CLIENTS_LOADED = True
-    path = _active_clients_log_path()
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    if not isinstance(payload, list):
-        return
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
-        try:
-            last_seen = float(item.get("last_seen_epoch") or 0)
-        except (TypeError, ValueError):
-            continue
-        if last_seen and now_value - last_seen <= ACTIVE_CLIENT_MAX_AGE_SECONDS:
-            _ACTIVE_CLIENTS[_active_client_key(item)] = item
-
-
-def _prune_active_clients_locked(now_value: float) -> None:
-    global _ACTIVE_CLIENTS_DIRTY
-    expired = [
-        key
-        for key, item in _ACTIVE_CLIENTS.items()
-        if now_value - float(item.get("last_seen_epoch") or 0) > ACTIVE_CLIENT_MAX_AGE_SECONDS
-    ]
-    for key in expired:
-        _ACTIVE_CLIENTS.pop(key, None)
-    if expired:
-        _ACTIVE_CLIENTS_DIRTY = True
-
-
-def _active_client_payload_locked(now_value: float) -> List[Dict[str, Any]]:
-    _load_active_clients_from_disk_locked(now_value)
-    _prune_active_clients_locked(now_value)
-    clients = sorted(
-        _ACTIVE_CLIENTS.values(),
-        key=lambda item: float(item.get("last_seen_epoch") or 0),
-        reverse=True,
-    )[:100]
-    return [dict(item) for item in clients]
-
-
-def _flush_active_clients_locked(now_value: float, *, force: bool = False) -> None:
-    global _ACTIVE_CLIENTS_DIRTY, _ACTIVE_CLIENTS_LAST_FLUSH
-    if not _ACTIVE_CLIENTS_DIRTY and not force:
-        return
-    if not force and now_value - _ACTIVE_CLIENTS_LAST_FLUSH < ACTIVE_CLIENT_FLUSH_INTERVAL_SECONDS:
-        return
-    payload = _active_client_payload_locked(now_value)
-    try:
-        path = _active_clients_log_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = path.with_suffix(".json.tmp")
-        temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temp_path, path)
-        _ACTIVE_CLIENTS_DIRTY = False
-        _ACTIVE_CLIENTS_LAST_FLUSH = now_value
-    except OSError:
-        pass
-
-
 def _active_clients_snapshot(now: Optional[float] = None) -> List[Dict[str, Any]]:
-    now_value = time.time() if now is None else float(now)
-    with _ACTIVE_CLIENTS_LOCK:
-        clients = _active_client_payload_locked(now_value)
-        _flush_active_clients_locked(now_value)
-        return clients
+    clients = _ACTIVE_CLIENT_REGISTRY.snapshot(now=now)
+    _ACTIVE_CLIENT_REGISTRY.schedule_flush()
+    return clients
 
 
 def _remove_active_client(username: str, client_id: str, now: Optional[float] = None) -> int:
-    global _ACTIVE_CLIENTS_DIRTY
-    clean_username = str(username or "").strip()
-    clean_client_id = _clean_presence_client_id(client_id)
-    if not clean_username or not clean_client_id:
-        return 0
-    now_value = time.time() if now is None else float(now)
-    removed = 0
-    with _ACTIVE_CLIENTS_LOCK:
-        _load_active_clients_from_disk_locked(now_value)
-        _prune_active_clients_locked(now_value)
-        for key, item in list(_ACTIVE_CLIENTS.items()):
-            if (
-                str(item.get("username") or "").strip() == clean_username
-                and _clean_presence_client_id(item.get("client_id")) == clean_client_id
-            ):
-                _ACTIVE_CLIENTS.pop(key, None)
-                removed += 1
-        if removed:
-            _ACTIVE_CLIENTS_DIRTY = True
-            _flush_active_clients_locked(now_value, force=True)
+    removed = _ACTIVE_CLIENT_REGISTRY.remove(username, client_id, now=now)
+    if removed:
+        _ACTIVE_CLIENT_REGISTRY.flush(force=True)
     return removed
 
 
@@ -4276,7 +4191,6 @@ def _active_presence_payload(
 
 
 def _record_active_client(request: Request, status_code: int) -> None:
-    global _ACTIVE_CLIENTS_DIRTY
     path_text = str(request.url.path or "")
     if path_text.startswith("/static/") or path_text in {
         "/api/health",
@@ -4303,12 +4217,8 @@ def _record_active_client(request: Request, status_code: int) -> None:
         "last_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "last_seen_epoch": now_value,
     }
-    with _ACTIVE_CLIENTS_LOCK:
-        _load_active_clients_from_disk_locked(now_value)
-        _prune_active_clients_locked(now_value)
-        _ACTIVE_CLIENTS[_active_client_key(item)] = item
-        _ACTIVE_CLIENTS_DIRTY = True
-        _flush_active_clients_locked(now_value)
+    _ACTIVE_CLIENT_REGISTRY.record(item, now=now_value)
+    _ACTIVE_CLIENT_REGISTRY.schedule_flush()
 
 
 def _optional_form_bool(form: Any, key: str) -> Optional[bool]:
@@ -4954,8 +4864,7 @@ def create_app() -> FastAPI:
         _RESOURCE_MONITOR.stop()
         stop_notification_worker()
         _stop_backup_scheduler()
-        with _ACTIVE_CLIENTS_LOCK:
-            _flush_active_clients_locked(time.time(), force=True)
+        _ACTIVE_CLIENT_REGISTRY.close(timeout=5.0)
         data_store.reset_active_store_cache()
 
     @app.get("/api/health")

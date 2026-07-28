@@ -8,6 +8,7 @@ import io
 from pathlib import Path
 import shutil
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -2286,11 +2287,8 @@ class WebAppFileTests(unittest.TestCase):
         )
 
     def test_remove_active_client_removes_only_matching_browser_client(self) -> None:
-        with web_app._ACTIVE_CLIENTS_LOCK:
-            original = dict(web_app._ACTIVE_CLIENTS)
-            original_loaded = web_app._ACTIVE_CLIENTS_LOADED
-            web_app._ACTIVE_CLIENTS.clear()
-            web_app._ACTIVE_CLIENTS_LOADED = True
+        with tempfile.TemporaryDirectory() as temp_dir:
+            registry = web_app.ActiveClientRegistry(Path(temp_dir) / "active.json")
             first = {
                 "username": "admin",
                 "client_id": "client-a",
@@ -2306,23 +2304,71 @@ class WebAppFileTests(unittest.TestCase):
                 "client_id": "client-a",
                 "last_seen_epoch": 100.0,
             }
-            web_app._ACTIVE_CLIENTS[web_app._active_client_key(first)] = first
-            web_app._ACTIVE_CLIENTS[web_app._active_client_key(second)] = second
-            web_app._ACTIVE_CLIENTS[web_app._active_client_key(other_user)] = other_user
-        try:
-            removed = web_app._remove_active_client("admin", "client-a", now=100.0)
-            snapshot = web_app._active_clients_snapshot(now=100.0)
-        finally:
-            with web_app._ACTIVE_CLIENTS_LOCK:
-                web_app._ACTIVE_CLIENTS.clear()
-                web_app._ACTIVE_CLIENTS.update(original)
-                web_app._ACTIVE_CLIENTS_LOADED = original_loaded
+            registry.record(first)
+            registry.record(second)
+            registry.record(other_user)
+            try:
+                with patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", registry):
+                    removed = web_app._remove_active_client("admin", "client-a", now=100.0)
+                    snapshot = web_app._active_clients_snapshot(now=100.0)
+            finally:
+                registry.close(timeout=5.0)
 
         self.assertEqual(removed, 1)
         self.assertEqual(
             {(item.get("username"), item.get("client_id")) for item in snapshot},
             {("admin", "client-b"), ("operator", "client-a")},
         )
+
+    def test_record_active_client_only_records_and_schedules_writer(self) -> None:
+        write_started = threading.Event()
+        release_write = threading.Event()
+
+        def serializer(payload):
+            write_started.set()
+            self.assertTrue(release_write.wait(timeout=5.0))
+            return "[]"
+
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/api/bootstrap"),
+            client=SimpleNamespace(host="127.0.0.1", port=12345),
+            headers={"user-agent": "test", web_app.PRESENCE_CLIENT_ID_HEADER: "client-a"},
+            method="GET",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            registry = web_app.ActiveClientRegistry(
+                Path(temp_dir) / "active.json",
+                serializer=serializer,
+            )
+            try:
+                with (
+                    patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", registry),
+                    patch.object(web_app, "_current_user", return_value="admin"),
+                ):
+                    web_app._record_active_client(request, 200)
+                    self.assertTrue(write_started.wait(timeout=5.0))
+                    self.assertEqual(registry.generation, 1)
+            finally:
+                release_write.set()
+                registry.close(timeout=5.0)
+
+    def test_shutdown_closes_active_client_registry_with_five_second_bound(self) -> None:
+        shutdown = next(
+            handler
+            for handler in web_app.app.router.on_shutdown
+            if handler.__name__ == "_shutdown"
+        )
+        registry = Mock()
+        with (
+            patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", registry),
+            patch.object(web_app._RESOURCE_MONITOR, "stop"),
+            patch.object(web_app, "stop_notification_worker"),
+            patch.object(web_app, "_stop_backup_scheduler"),
+            patch.object(web_app.data_store, "reset_active_store_cache"),
+        ):
+            shutdown()
+
+        registry.close.assert_called_once_with(timeout=5.0)
 
     def test_active_presence_payload_hides_stale_browser_clients_quickly(self) -> None:
         now = 200.0
