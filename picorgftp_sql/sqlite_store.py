@@ -5,8 +5,10 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 import secrets
 import sqlite3
+import threading
 import unicodedata
 import uuid
 from contextlib import contextmanager
@@ -27,8 +29,22 @@ from .excel_utils import (
     TYPE_HEADER,
 )
 from .redaction import redact_sensitive_value, sanitize_free_text
+from .sqlite_connection import (
+    SQLiteConnectionSettings,
+    configure_connection,
+    try_enable_wal,
+)
 
 SCHEMA_VERSION = 11
+_WAL_FALLBACK_LOGGER = logging.getLogger("picorgftp_sql.sqlite.wal")
+_WAL_FALLBACK_LOGGER.setLevel(logging.WARNING)
+_WAL_FALLBACK_LOGGER.propagate = False
+if not _WAL_FALLBACK_LOGGER.handlers:
+    _wal_fallback_handler = logging.StreamHandler()
+    _wal_fallback_handler.setFormatter(
+        logging.Formatter("%(levelname)s: %(message)s")
+    )
+    _WAL_FALLBACK_LOGGER.addHandler(_wal_fallback_handler)
 _NOTIFICATION_DELIVERY_STATUSES = frozenset(
     {"pending", "sending", "sent", "fallback", "skipped", "error"}
 )
@@ -723,11 +739,19 @@ class SqliteStore:
 
     def __init__(self, path: str):
         self.path = str(Path(path))
+        self._initialize_lock = threading.Lock()
+        self._initialized = False
+        self._connection_settings = SQLiteConnectionSettings()
+        self._journal_mode = ""
+        self._wal_fallback_reason = ""
 
     def connect(self) -> sqlite3.Connection:
         directory = Path(self.path).parent
         directory.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(
+            self.path,
+            timeout=self._connection_settings.connect_timeout_seconds,
+        )
         conn.row_factory = sqlite3.Row
         conn.create_function(
             "picorg_lower",
@@ -735,7 +759,11 @@ class SqliteStore:
             _unicode_lower,
             deterministic=True,
         )
-        conn.execute("PRAGMA foreign_keys = ON")
+        configure_connection(
+            conn,
+            self._connection_settings,
+            wal_active=self._journal_mode == "wal",
+        )
         return conn
 
     @contextmanager
@@ -752,7 +780,41 @@ class SqliteStore:
     def initialize(self) -> None:
         """Create schema tables when the database is first used."""
 
+        if self._initialized:
+            return
+        with self._initialize_lock:
+            if self._initialized:
+                return
+            self._initialize_schema()
+            self._initialized = True
+
+    def _initialize_schema(self) -> None:
+        """Create schema tables when the database is first used."""
+
         with self.connection() as conn:
+            try:
+                self._journal_mode = try_enable_wal(conn)
+            except sqlite3.DatabaseError as exc:
+                self._wal_fallback_reason = type(exc).__name__
+                try:
+                    row = conn.execute("PRAGMA journal_mode").fetchone()
+                    self._journal_mode = str(row[0] if row else "").lower()
+                except sqlite3.DatabaseError:
+                    self._journal_mode = ""
+            if self._journal_mode != "wal":
+                if not self._wal_fallback_reason:
+                    self._wal_fallback_reason = (
+                        f"journal_mode_{self._journal_mode or 'unknown'}"
+                    )
+                _WAL_FALLBACK_LOGGER.warning(
+                    "SQLite WAL fallback warning: %s.",
+                    self._wal_fallback_reason,
+                )
+            configure_connection(
+                conn,
+                self._connection_settings,
+                wal_active=self._journal_mode == "wal",
+            )
             previous_user_version_row = conn.execute("PRAGMA user_version").fetchone()
             previous_user_version = (
                 int(previous_user_version_row[0] or 0)

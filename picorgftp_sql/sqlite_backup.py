@@ -217,6 +217,9 @@ def restore_backup(active_path: str, backup_path: str, backup_dir: str) -> dict[
         temp.write_bytes(source.read_bytes())
         gc.collect()
         os.replace(str(temp), str(active))
+        from .data_store import invalidate_sqlite_store
+
+        invalidate_sqlite_store(str(active))
     finally:
         if temp.exists():
             temp.unlink()

@@ -20,6 +20,7 @@ else:
     TEST_CLIENT_IMPORT_ERROR = None
 
 from picorgftp_sql.web import app as web_app
+from picorgftp_sql.web.process_progress import ProcessProgressGate
 from picorgftp_sql.web_workflow import (
     WebProductForm,
     normalized_product_payload,
@@ -38,6 +39,21 @@ def _budget(seconds: float) -> float:
 
 
 class CiPerformanceSmokeTests(unittest.TestCase):
+    def test_process_progress_gate_stays_within_persistence_budget(self) -> None:
+        gate = ProcessProgressGate(min_interval_seconds=0.5)
+
+        persist_calls = sum(
+            gate.should_persist(
+                "ci-progress-job",
+                stage="images",
+                status="running",
+                now=index / 100,
+            )
+            for index in range(100)
+        )
+
+        self.assertLessEqual(persist_calls, 3)
+
     def test_product_helpers_handle_repeated_work_within_budget(self) -> None:
         product = WebProductForm(
             name="MAGGIORE",

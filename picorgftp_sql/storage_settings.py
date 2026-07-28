@@ -94,6 +94,9 @@ def save_bootstrap_settings(updates: dict[str, object]) -> dict[str, Any]:
     path = _settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=4, ensure_ascii=False), encoding="utf-8")
+    from .data_store import reset_active_store_cache
+
+    reset_active_store_cache()
     return data
 
 

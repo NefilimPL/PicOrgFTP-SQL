@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from picorgftp_sql import data_store, sqlite_maintenance
 from picorgftp_sql.sqlite_maintenance import (
     TIMESTAMP_COLUMNS,
     normalize_timestamp_columns,
@@ -47,6 +48,31 @@ def test_repair_preserves_config_and_user_data(tmp_path: Path) -> None:
     assert result["ok"] is True
     assert repaired.load_config()["sql_query"] == "UPDATE product SET img = {filename}"
     assert repaired.load_users()[0]["username"] == "admin"
+
+
+def test_repair_invalidates_the_mutated_store(tmp_path: Path) -> None:
+    db_path = tmp_path / "data.sqlite"
+    store = SqliteStore(str(db_path))
+    store.initialize()
+    stale_store = data_store.get_sqlite_store(str(db_path))
+
+    result = repair_sqlite_database(str(db_path), str(tmp_path / "BACKUP"))
+
+    assert result["ok"] is True
+    assert data_store.get_sqlite_store(str(db_path)) is not stale_store
+
+
+def test_failed_repair_preserves_the_active_store(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "data.sqlite"
+    store = SqliteStore(str(db_path))
+    store.initialize()
+    active_store = data_store.get_sqlite_store(str(db_path))
+    monkeypatch.setattr(sqlite_maintenance, "integrity_check", lambda _path: "corrupt")
+
+    result = repair_sqlite_database(str(db_path), str(tmp_path / "BACKUP"))
+
+    assert result["ok"] is False
+    assert data_store.get_sqlite_store(str(db_path)) is active_store
 
 
 def test_repair_converts_legacy_numeric_updated_at_and_drops_empty_app_settings(

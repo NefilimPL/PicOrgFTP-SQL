@@ -48,6 +48,48 @@ class _MemoryUpload:
 
 
 class WebAppFileTests(unittest.TestCase):
+    def test_process_job_progress_coalesces_percent_only_snapshots(self) -> None:
+        """Persisting every progress tick would make this test exceed three writes."""
+        job_id = "progress-gate-100-updates"
+        job = web_app._new_process_job(
+            username="alice",
+            cache_scope="scope",
+            form=web_app._ProcessFormSnapshot(),
+            status="running",
+        )
+        job["id"] = job_id
+        with web_app._PROCESS_JOBS_LOCK:
+            web_app._PROCESS_JOBS[job_id] = job
+
+        try:
+            with (
+                patch.object(web_app, "_persist_process_job") as persist,
+                patch.object(
+                    web_app.time,
+                    "monotonic",
+                    side_effect=[index / 100 for index in range(100)],
+                ),
+            ):
+                for percent in range(1, 101):
+                    web_app._set_process_job_progress(
+                        job_id,
+                        percent,
+                        "Przetwarzanie obrazow",
+                        current_stage={"key": "images", "label": "Obrazy"},
+                    )
+
+            with web_app._PROCESS_JOBS_LOCK:
+                current = dict(web_app._PROCESS_JOBS[job_id])
+            self.assertEqual(current["progress"], 100)
+            self.assertEqual(current["progress_label"], "Przetwarzanie obrazow")
+            self.assertLessEqual(persist.call_count, 3)
+        finally:
+            with web_app._PROCESS_JOBS_LOCK:
+                web_app._PROCESS_JOBS.pop(job_id, None)
+            gate = getattr(web_app, "_PROCESS_PROGRESS_GATE", None)
+            if gate is not None:
+                gate.forget(job_id)
+
     def test_application_lifecycle_starts_and_stops_notification_worker(self) -> None:
         source = inspect.getsource(web_app.create_app)
 
@@ -210,6 +252,34 @@ class WebAppFileTests(unittest.TestCase):
                 for call in emit_event.call_args_list
             )
         )
+        stage_events = [
+            call.kwargs
+            for call in emit_event.call_args_list
+            if call.kwargs["event_type"] == "process.stage_started"
+        ]
+        stage_keys = [
+            (event["job_id"], event["stage"]) for event in stage_events
+        ]
+        self.assertEqual(len(stage_keys), len(set(stage_keys)))
+
+    def test_process_stage_started_once_for_repeated_stage(self) -> None:
+        emitted_stages: set[str] = set()
+
+        with patch.object(web_app, "emit_event") as emit_event:
+            for percent in (4, 8):
+                web_app._emit_process_stage_started_once(
+                    emitted_stages,
+                    current_key="prepare",
+                    current_label="Przygotowanie",
+                    percent=percent,
+                    label="Przygotowanie danych",
+                    username="alice",
+                    job_id="job-repeat",
+                )
+
+        emit_event.assert_called_once()
+        self.assertEqual(emit_event.call_args.kwargs["job_id"], "job-repeat")
+        self.assertEqual(emit_event.call_args.kwargs["stage"], "prepare")
 
     def test_existing_photo_snapshot_captures_size_before_local_mutation(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]
