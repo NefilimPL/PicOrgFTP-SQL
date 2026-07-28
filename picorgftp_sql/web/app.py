@@ -89,6 +89,7 @@ from ..sqlite_maintenance import repair_sqlite_database
 from ..workflow_utils import build_product_directory, parse_slot_filename, sanitize_path_segment
 from .active_clients import ActiveClientRegistry
 from .process_progress import ProcessProgressGate
+from .runtime_status import RuntimeStatusService
 from ..web_image_import import (
     ImageImportError,
     discover_image_candidates,
@@ -192,6 +193,7 @@ _PROCESS_JOB_MAX_COMPLETED = 200
 _PROCESS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="picorg-process")
 _PROCESS_JOBS: Dict[str, Dict[str, Any]] = {}
 _PROCESS_JOBS_LOCK = threading.Lock()
+_PROCESS_QUEUE_GENERATION = 0
 _PROCESS_PROGRESS_GATE = ProcessProgressGate()
 _ACTIVE_CLIENT_REGISTRY = ActiveClientRegistry(
     Path(settings.LOG_DIR) / "web_active_clients.json",
@@ -3606,6 +3608,7 @@ def _result_severity(payload: Dict[str, Any]) -> str:
 
 
 def _cleanup_process_jobs_locked(now: Optional[float] = None) -> None:
+    removed = False
     cutoff = (time.time() if now is None else now) - _PROCESS_JOB_RETENTION_SECONDS
     terminal_jobs: List[tuple[str, Dict[str, Any]]] = []
     for job_id, job in list(_PROCESS_JOBS.items()):
@@ -3613,6 +3616,7 @@ def _cleanup_process_jobs_locked(now: Optional[float] = None) -> None:
             continue
         if float(job.get("finished_at") or 0) < cutoff:
             _PROCESS_JOBS.pop(job_id, None)
+            removed = True
             continue
         terminal_jobs.append((job_id, job))
     terminal_jobs.sort(
@@ -3624,11 +3628,19 @@ def _cleanup_process_jobs_locked(now: Optional[float] = None) -> None:
     )
     for job_id, _job in terminal_jobs[_PROCESS_JOB_MAX_COMPLETED:]:
         _PROCESS_JOBS.pop(job_id, None)
+        removed = True
+    if removed:
+        _advance_process_queue_generation_locked()
 
 
 def _cleanup_process_jobs(now: Optional[float] = None) -> None:
     with _PROCESS_JOBS_LOCK:
         _cleanup_process_jobs_locked(now=now)
+
+
+def _advance_process_queue_generation_locked() -> None:
+    global _PROCESS_QUEUE_GENERATION
+    _PROCESS_QUEUE_GENERATION += 1
 
 
 def _process_job_payload(job: Dict[str, Any], *, include_result: bool = True) -> Dict[str, Any]:
@@ -3764,6 +3776,7 @@ def _set_process_job_progress(
         if not job:
             return
         _update_process_job_progress(job, percent, label, stages, current_stage)
+        _advance_process_queue_generation_locked()
         durable_job = dict(job)
     _persist_process_job_snapshot(durable_job)
 
@@ -3939,6 +3952,7 @@ def _queue_process_job(
     job_id = str(job["id"])
     with _PROCESS_JOBS_LOCK:
         _PROCESS_JOBS[job_id] = job
+        _advance_process_queue_generation_locked()
     _persist_process_job(dict(job))
     _PROCESS_EXECUTOR.submit(_run_process_job, job_id)
     return _process_job_payload(job, include_result=False)
@@ -3953,6 +3967,7 @@ def _run_process_job(job_id: str) -> None:
         job["started_at"] = time.time()
         job["progress"] = max(1, int(job.get("progress") or 0))
         job["progress_label"] = "Start zadania"
+        _advance_process_queue_generation_locked()
         username = str(job.get("username") or "")
         cache_scope = str(job.get("cache_scope") or "")
         form = job.get("form")
@@ -3977,6 +3992,7 @@ def _run_process_job(job_id: str) -> None:
             if not job:
                 return
             warning_messages = _finish_process_job_success(job, payload)
+            _advance_process_queue_generation_locked()
             _cleanup_process_jobs_locked(now=float(job["finished_at"]))
             durable_job = dict(job)
         _persist_process_job_snapshot(durable_job, force=True, forget=True)
@@ -3987,6 +4003,7 @@ def _run_process_job(job_id: str) -> None:
             if not job:
                 return
             message, status_code, severity = _finish_process_job_failure(job, exc)
+            _advance_process_queue_generation_locked()
             _cleanup_process_jobs_locked(now=float(job["finished_at"]))
             durable_job = dict(job)
         _persist_process_job_snapshot(durable_job, force=True, forget=True)
@@ -4029,6 +4046,7 @@ def _active_process_jobs_snapshot() -> Dict[str, Any]:
             for job in _PROCESS_JOBS.values()
             if job.get("status") in {"queued", "running"}
         ]
+        queue_generation = _PROCESS_QUEUE_GENERATION
     running = sorted(
         [job for job in active_jobs if job.get("status") == "running"],
         key=lambda item: float(item.get("started_at") or item.get("created_at") or 0),
@@ -4053,7 +4071,16 @@ def _active_process_jobs_snapshot() -> Dict[str, Any]:
         "current": payload_jobs[0] if payload_jobs and payload_jobs[0].get("status") == "running" else None,
         "active_count": len(payload_jobs),
         "queued_count": len(queued),
+        "generation": queue_generation,
         "server_time": now,
+    }
+
+
+def _runtime_process_queue_summary() -> Dict[str, Any]:
+    snapshot = _active_process_jobs_snapshot()
+    return {
+        "generation": snapshot["generation"],
+        "active_count": snapshot["active_count"],
     }
 
 
@@ -4204,11 +4231,20 @@ def _active_presence_payload(
     return {"enabled": True, "users": users}
 
 
+def _runtime_active_clients_summary() -> Dict[str, Any]:
+    clients = _active_clients_snapshot()
+    return {
+        "generation": _ACTIVE_CLIENT_REGISTRY.generation,
+        "count": len(clients),
+    }
+
+
 def _record_active_client(request: Request, status_code: int) -> None:
     path_text = str(request.url.path or "")
     if path_text.startswith("/static/") or path_text in {
         "/api/health",
         "/api/logout",
+        "/api/runtime-status",
         "/api/server/presence/leave",
     }:
         return
@@ -4776,6 +4812,13 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="PicOrgFTP-SQL Web", version=get_app_version())
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    runtime_status_service = RuntimeStatusService(
+        health_provider=lambda: _health_payload(),
+        file_index_provider=lambda: file_index_status(start=True),
+        process_queue_provider=lambda: _runtime_process_queue_summary(),
+        active_clients_provider=lambda: _runtime_active_clients_summary(),
+        clock=lambda: _utc_now_iso(),
+    )
 
     @app.exception_handler(Exception)
     async def _unhandled_application_error(
@@ -4886,6 +4929,10 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health() -> Dict[str, Any]:
         return _health_payload()
+
+    @app.get("/api/runtime-status")
+    def runtime_status(request: Request) -> Dict[str, Any]:
+        return runtime_status_service.snapshot(_current_user_payload(request))
 
     @app.post("/api/resource-monitor/simulate-safe")
     def resource_monitor_simulate_safe(request: Request) -> Dict[str, Any]:
