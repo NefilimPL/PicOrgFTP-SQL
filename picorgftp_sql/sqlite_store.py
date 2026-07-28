@@ -97,6 +97,7 @@ _PRODUCT_SEARCH_KEY_COLUMNS = {
     field: f"{column}_key" for field, column in _PRODUCT_SEARCH_COLUMNS.items()
 }
 _PRODUCT_SEARCH_TEXT_KEY_COLUMN = "search_text_key"
+_PRODUCT_SEARCH_KEY_MIGRATION_BATCH_SIZE = 500
 _PRODUCT_ENTRY_COLUMNS = (
     ("product_id", PRODUCT_ID_HEADER),
     ("ean", EAN_HEADER),
@@ -811,20 +812,23 @@ def _migrate_product_entry_search_keys(conn: sqlite3.Connection) -> None:
             "TEXT NOT NULL DEFAULT ''"
         )
     product_columns = tuple(_PRODUCT_SEARCH_COLUMNS.values())
-    rows = conn.execute(
+    cursor = conn.execute(
         f"SELECT rowid, {', '.join(product_columns)} FROM product_entries"
-    ).fetchall()
-    assignments = [f"{key_column} = ?" for key_column in _PRODUCT_SEARCH_KEY_COLUMNS.values()]
+    )
+    assignments = [
+        f"{key_column} = ?" for key_column in _PRODUCT_SEARCH_KEY_COLUMNS.values()
+    ]
     assignments.append(f"{_PRODUCT_SEARCH_TEXT_KEY_COLUMN} = ?")
-    for row in rows:
-        conn.execute(
-            f"UPDATE product_entries SET {', '.join(assignments)} WHERE rowid = ?",
-            (
-                *(_product_search_key(row[column]) for column in product_columns),
-                " ".join(_product_search_key(row[column]) for column in product_columns),
-                row["rowid"],
-            ),
-        )
+    while rows := cursor.fetchmany(_PRODUCT_SEARCH_KEY_MIGRATION_BATCH_SIZE):
+        for row in rows:
+            conn.execute(
+                f"UPDATE product_entries SET {', '.join(assignments)} WHERE rowid = ?",
+                (
+                    *(_product_search_key(row[column]) for column in product_columns),
+                    " ".join(_product_search_key(row[column]) for column in product_columns),
+                    row["rowid"],
+                ),
+            )
 
 
 class SqliteStore:

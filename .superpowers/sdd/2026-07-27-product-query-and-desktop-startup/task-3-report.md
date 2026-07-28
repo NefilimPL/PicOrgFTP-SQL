@@ -101,3 +101,38 @@ import `encodings`. No test-pass claim is made.
   unchanged.
 - New migration columns, insert/update values, and SQL placeholders were
   checked against the product-entry field order; `git diff --check` is clean.
+
+## Fix round 2
+
+### Status
+
+DONE_WITH_TEST_LIMITATION
+
+### Correction
+
+The v13 product-key migration previously called `fetchall()` for its complete
+product-row selection. It now consumes the cursor in fixed 500-row batches and
+updates each row before requesting the next batch, so an upgrade never holds
+the full product table in Python memory.
+
+### Regression coverage
+
+A migration regression test wraps the SQLite connection’s product cursor so
+that `fetchall()` raises, then verifies the streamed migration backfills the
+new colour, extra, and combined search keys.
+
+### Commit
+
+- `perf: stream product key migration`
+
+### Test limitation
+
+Tests were not run because the user-authorized Python environment limitation
+remains: Python cannot import `encodings`. No test-pass claim is made.
+
+### Self-review
+
+- The migration only retains at most 500 selected rows at once.
+- The migration still updates every normalized key and the combined search key
+  through the same trusted column mapping.
+- `git diff --check` is clean.

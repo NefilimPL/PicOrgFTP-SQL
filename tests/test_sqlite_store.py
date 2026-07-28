@@ -1209,3 +1209,84 @@ def test_product_query_key_backfill_skips_current_schema_database(
     )
 
     SqliteStore(str(db_path)).initialize()
+
+
+def test_product_query_key_migration_streams_rows_without_fetchall(tmp_path: Path) -> None:
+    """Large v12 upgrades must backfill product keys in bounded cursor batches."""
+
+    db_path = tmp_path / "legacy.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE product_entries (
+                product_id TEXT PRIMARY KEY,
+                ean TEXT NOT NULL DEFAULT '',
+                name TEXT NOT NULL DEFAULT '',
+                type_name TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                color1 TEXT NOT NULL DEFAULT '',
+                color2 TEXT NOT NULL DEFAULT '',
+                color3 TEXT NOT NULL DEFAULT '',
+                extra TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO product_entries (
+                product_id, ean, name, type_name, model,
+                color1, color2, color3, extra, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    f"P-{index}",
+                    str(index),
+                    "ALFA",
+                    "STOL",
+                    "A1",
+                    "BIALY",
+                    "",
+                    "",
+                    "NO-LED",
+                    "now",
+                )
+                for index in range(3)
+            ],
+        )
+
+    class _CursorWithoutFetchall:
+        def __init__(self, cursor):
+            self._cursor = cursor
+
+        def fetchmany(self, size):
+            return self._cursor.fetchmany(size)
+
+        def fetchall(self):
+            raise AssertionError("migration must not materialize all product rows")
+
+    class _StreamingConnection:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def executescript(self, script):
+            return self._connection.executescript(script)
+
+        def execute(self, sql, parameters=()):
+            cursor = self._connection.execute(sql, parameters)
+            if sql.startswith("SELECT rowid,"):
+                return _CursorWithoutFetchall(cursor)
+            return cursor
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        sqlite_store._migrate_product_entry_search_keys(_StreamingConnection(conn))
+        rows = conn.execute(
+            "SELECT color1_key, extra_key, search_text_key FROM product_entries ORDER BY rowid"
+        ).fetchall()
+
+    assert [tuple(row) for row in rows] == [
+        ("bialy", "no-led", f"p-{index} {index} alfa stol a1 bialy   no-led")
+        for index in range(3)
+    ]
