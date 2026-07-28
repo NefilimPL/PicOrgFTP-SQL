@@ -59,12 +59,20 @@ class ActiveClientRegistry:
         max_age_seconds: float = 180.0,
         flush_interval_seconds: float = 15.0,
         clock: Callable[[], float] = time.time,
+        retry_delay_seconds: float = 1.0,
+        deferred_flush_delay_seconds: float | None = None,
     ) -> None:
         self._path = Path(path)
         self._serializer = serializer
         self._max_age_seconds = float(max_age_seconds)
         self._flush_interval_seconds = max(15.0, float(flush_interval_seconds))
         self._clock = clock
+        self._retry_delay_seconds = max(0.0, float(retry_delay_seconds))
+        self._deferred_flush_delay_seconds = (
+            None
+            if deferred_flush_delay_seconds is None
+            else max(0.0, float(deferred_flush_delay_seconds))
+        )
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
         self._executor = ThreadPoolExecutor(
@@ -75,6 +83,7 @@ class ActiveClientRegistry:
         self._generation = 0
         self._persisted_generation = 0
         self._write_scheduled = False
+        self._flush_timer: threading.Timer | None = None
         self._last_flush = float("-inf")
         self._accepting_mutations = True
         self._closed = False
@@ -158,9 +167,23 @@ class ActiveClientRegistry:
             if self._write_scheduled:
                 return True
             if self._generation <= self._persisted_generation:
+                self._cancel_flush_timer_locked()
                 return False
-            if not force and self._clock() - self._last_flush < self._flush_interval_seconds:
-                return False
+            if not force:
+                remaining = self._flush_interval_seconds - (
+                    self._clock() - self._last_flush
+                )
+                if remaining > 0:
+                    self._schedule_flush_timer_locked(
+                        delay=(
+                            remaining
+                            if self._deferred_flush_delay_seconds is None
+                            else self._deferred_flush_delay_seconds
+                        ),
+                        force=False,
+                    )
+                    return False
+            self._cancel_flush_timer_locked()
             payload = self._snapshot_locked()
             generation = self._generation
             self._write_scheduled = True
@@ -193,7 +216,7 @@ class ActiveClientRegistry:
     def wait_until_idle(self, *, timeout: float | None = None) -> bool:
         deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
         with self._condition:
-            while self._write_scheduled:
+            while self._write_scheduled or self._flush_timer is not None:
                 if deadline is None:
                     self._condition.wait()
                     continue
@@ -208,9 +231,11 @@ class ActiveClientRegistry:
             if self._closed:
                 return not self._write_scheduled
             self._accepting_mutations = False
+            self._cancel_flush_timer_locked()
         flushed = self.flush(force=True, timeout=timeout)
         with self._condition:
             self._closed = True
+            self._cancel_flush_timer_locked()
         self._executor.shutdown(wait=False, cancel_futures=False)
         return flushed
 
@@ -265,6 +290,34 @@ class ActiveClientRegistry:
         ordered = sorted(self._clients.values(), key=_last_seen, reverse=True)[:100]
         return [dict(item) for item in ordered]
 
+    def _cancel_flush_timer_locked(self) -> None:
+        timer = self._flush_timer
+        self._flush_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _schedule_flush_timer_locked(self, *, delay: float, force: bool) -> None:
+        if self._flush_timer is not None:
+            return
+
+        def run_scheduled_flush() -> None:
+            with self._condition:
+                if self._flush_timer is not timer:
+                    return
+                self._flush_timer = None
+                if self._closed:
+                    self._condition.notify_all()
+                    return
+            try:
+                self.schedule_flush(force=force)
+            except RuntimeError:
+                pass
+
+        timer = threading.Timer(max(0.0, delay), run_scheduled_flush)
+        timer.daemon = True
+        self._flush_timer = timer
+        timer.start()
+
     def _write_snapshots(
         self,
         payload: list[ClientRecord],
@@ -281,6 +334,11 @@ class ActiveClientRegistry:
                 with self._condition:
                     self._last_write_error = exc
                     self._write_scheduled = False
+                    if self._accepting_mutations and self._generation > self._persisted_generation:
+                        self._schedule_flush_timer_locked(
+                            delay=self._retry_delay_seconds,
+                            force=True,
+                        )
                     self._condition.notify_all()
                 return
 

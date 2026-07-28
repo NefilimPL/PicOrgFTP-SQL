@@ -202,6 +202,67 @@ def test_runtime_summary_prunes_before_capturing_count_and_generation(tmp_path):
     assert summary == {"generation": 3, "active_user_count": 1}
 
 
+def test_temporary_write_error_retries_persistence_without_a_request(tmp_path):
+    attempts = []
+    path = tmp_path / "active.json"
+
+    def serializer(payload):
+        attempts.append(payload)
+        if len(attempts) == 1:
+            raise OSError("temporary write failure")
+        return json.dumps(payload)
+
+    registry = ActiveClientRegistry(
+        path,
+        serializer=serializer,
+        retry_delay_seconds=0.01,
+    )
+    try:
+        registry.record(client_record("alice", generation=1))
+        assert registry.schedule_flush(force=True)
+        assert registry.wait_until_idle(timeout=1.0)
+
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    finally:
+        registry.close(timeout=5.0)
+
+    assert len(attempts) == 2
+    assert [item["username"] for item in payload] == ["alice"]
+
+
+def test_dirty_state_flushes_after_interval_without_another_request(tmp_path):
+    now = [0.0]
+    serialized_payloads = []
+    path = tmp_path / "active.json"
+
+    def serializer(payload):
+        serialized_payloads.append(payload)
+        return json.dumps(payload)
+
+    registry = ActiveClientRegistry(
+        path,
+        serializer=serializer,
+        flush_interval_seconds=15.0,
+        deferred_flush_delay_seconds=0.01,
+        clock=lambda: now[0],
+    )
+    try:
+        registry.record(client_record("alice", generation=1))
+        assert registry.flush(force=True)
+
+        registry.record(client_record("bob", generation=2))
+        assert not registry.schedule_flush()
+        now[0] = 15.0
+        assert registry.wait_until_idle(timeout=1.0)
+
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    finally:
+        registry.close(timeout=5.0)
+
+    assert len(serialized_payloads) == 2
+    assert {item["username"] for item in payload} == {"alice", "bob"}
+
+
 def test_close_seals_mutations_before_flushing(tmp_path, monkeypatch):
     flush_finished = threading.Event()
     allow_close_to_finish = threading.Event()
