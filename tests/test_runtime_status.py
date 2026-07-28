@@ -237,6 +237,7 @@ def test_process_queue_runtime_summary_does_not_build_detailed_snapshot() -> Non
 
 def test_runtime_active_client_summary_uses_atomic_registry_projection() -> None:
     registry = Mock()
+    registry.closed = False
     registry.runtime_summary.return_value = {
         "generation": 41,
         "active_user_count": 131,
