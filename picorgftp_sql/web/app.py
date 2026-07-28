@@ -4110,6 +4110,7 @@ def _ensure_active_client_registry() -> ActiveClientRegistry:
     global _ACTIVE_CLIENT_REGISTRY
     with _ACTIVE_CLIENT_REGISTRY_LIFECYCLE_LOCK:
         if _ACTIVE_CLIENT_REGISTRY.closed:
+            _ACTIVE_CLIENT_REGISTRY.wait_until_idle()
             _ACTIVE_CLIENT_REGISTRY = ActiveClientRegistry(
                 _active_clients_log_path(),
                 max_age_seconds=ACTIVE_CLIENT_MAX_AGE_SECONDS,

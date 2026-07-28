@@ -172,6 +172,19 @@ class ActiveClientRegistry:
                 self._condition.wait(remaining)
             return self._persisted_generation >= target_generation
 
+    def wait_until_idle(self, *, timeout: float | None = None) -> bool:
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        with self._condition:
+            while self._write_scheduled:
+                if deadline is None:
+                    self._condition.wait()
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(remaining)
+            return True
+
     def close(self, *, timeout: float = 5.0) -> bool:
         with self._condition:
             if self._closed:

@@ -19,6 +19,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from picorgftp_sql import web_data
+from picorgftp_sql.web import active_clients
 from picorgftp_sql.web import app as web_app
 
 try:
@@ -2430,6 +2431,87 @@ class WebAppFileTests(unittest.TestCase):
         self.assertEqual(
             {item["username"] for item in payload},
             {"admin", "prior-user"},
+        )
+
+    def test_startup_waits_for_timed_out_active_client_writer_handoff(self) -> None:
+        old_write_started = threading.Event()
+        release_old_write = threading.Event()
+        old_replace_finished = threading.Event()
+        replacement_ready = threading.Event()
+        replacement_holder = {}
+        renewal_errors = []
+        real_replace = active_clients.os.replace
+        old_writer_ident = []
+
+        def serializer(payload):
+            old_writer_ident.append(threading.get_ident())
+            old_write_started.set()
+            self.assertTrue(release_old_write.wait(timeout=5.0))
+            return json.dumps(payload)
+
+        def replace(source, destination):
+            real_replace(source, destination)
+            if old_writer_ident and threading.get_ident() == old_writer_ident[0]:
+                old_replace_finished.set()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "active.json"
+            old_registry = web_app.ActiveClientRegistry(path, serializer=serializer)
+            old_registry.record(
+                {
+                    "username": "prior-user",
+                    "client_id": "prior-client",
+                    "last_seen_epoch": time.time(),
+                }
+            )
+            old_registry.schedule_flush(force=True)
+            self.assertTrue(old_write_started.wait(timeout=5.0))
+            self.assertFalse(old_registry.close(timeout=0.01))
+
+            def renew_registry():
+                try:
+                    replacement_holder["registry"] = web_app._ensure_active_client_registry()
+                except Exception as exc:
+                    renewal_errors.append(exc)
+                finally:
+                    replacement_ready.set()
+
+            try:
+                with (
+                    patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", old_registry),
+                    patch.object(web_app, "_active_clients_log_path", return_value=path),
+                    patch.object(active_clients.os, "replace", replace),
+                ):
+                    renewal_thread = threading.Thread(target=renew_registry)
+                    renewal_thread.start()
+                    replacement_returned_while_old_writer_blocked = replacement_ready.wait(
+                        timeout=0.2
+                    )
+                    release_old_write.set()
+                    self.assertTrue(old_replace_finished.wait(timeout=5.0))
+                    renewal_thread.join(timeout=5.0)
+                    self.assertFalse(renewal_thread.is_alive())
+                    self.assertEqual(renewal_errors, [])
+
+                    replacement = replacement_holder["registry"]
+                    replacement.record(
+                        {
+                            "username": "later-user",
+                            "client_id": "later-client",
+                            "last_seen_epoch": time.time(),
+                        }
+                    )
+                    replacement.flush(force=True)
+                    replacement.close(timeout=5.0)
+            finally:
+                release_old_write.set()
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertFalse(replacement_returned_while_old_writer_blocked)
+        self.assertEqual(
+            {item["username"] for item in payload},
+            {"later-user", "prior-user"},
         )
 
     def test_active_presence_payload_hides_stale_browser_clients_quickly(self) -> None:
