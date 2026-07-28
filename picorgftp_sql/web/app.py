@@ -5438,6 +5438,7 @@ def create_app() -> FastAPI:
         color2: str = "",
         color3: str = "",
         extra: str = "",
+        limit: int = 100,
     ) -> Dict[str, Any]:
         _require_user(request)
         values = field_suggestions(
@@ -5451,6 +5452,7 @@ def create_app() -> FastAPI:
                 "color3": color3,
                 "extra": extra,
             },
+            limit=limit,
         )
         return {"values": values, "file_index": file_index_status(start=True)}
 
@@ -5734,6 +5736,7 @@ def create_app() -> FastAPI:
         type_name: str = "",
         model: str = "",
         query: str = "",
+        limit: int = 30,
     ) -> Dict[str, Any]:
         _require_user(request)
         return {
@@ -5744,6 +5747,7 @@ def create_app() -> FastAPI:
                 type_name=type_name,
                 model=model,
                 query=query,
+                limit=limit,
             )
         }
 

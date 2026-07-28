@@ -1,10 +1,12 @@
 """Tests for the common product query contract."""
 
+from unittest.mock import Mock
+
 from picorgftp_sql.product_queries import (
     ProductSearchCriteria,
     filter_product_records,
 )
-from picorgftp_sql import data_store, excel_utils
+from picorgftp_sql import data_store, excel_utils, web_data
 
 
 RECORDS = [
@@ -86,3 +88,83 @@ def test_sqlite_product_queries_do_not_load_all_lists(tmp_path, monkeypatch):
     assert adapter.suggest_product_field(
         "model", "a", {"name": "ALFA"}
     ) == legacy.suggest_product_field("model", "a", {"name": "ALFA"})
+
+
+def test_search_entries_delegates_to_active_store(monkeypatch):
+    """Catch a regression to web-side product-list materialization."""
+
+    store = Mock()
+    store.search_product_entries.return_value = [
+        {"PRODUCT_ID": "P-1", "EAN": "5901", "NAZWA": "ALFA"}
+    ]
+    monkeypatch.setattr(web_data, "get_active_store", lambda: store)
+    monkeypatch.setattr(
+        web_data,
+        "prepare_excel_lists",
+        lambda: (_ for _ in ()).throw(AssertionError("full load")),
+    )
+
+    result = web_data.search_entries(ean="5901", limit=10)
+
+    assert result[0]["product_id"] == "P-1"
+    store.search_product_entries.assert_called_once_with(
+        ProductSearchCriteria(ean="5901"), limit=10
+    )
+
+
+def test_field_suggestions_delegates_to_active_store(monkeypatch):
+    """Catch a regression to loading all product rows for suggestions."""
+
+    store = Mock()
+    store.mode = "sqlite"
+    store.suggest_product_field.return_value = ["ALFA"]
+    monkeypatch.setattr(web_data, "get_active_store", lambda: store)
+    monkeypatch.setattr(web_data, "_get_file_index", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        web_data,
+        "prepare_excel_lists",
+        lambda: (_ for _ in ()).throw(AssertionError("full load")),
+    )
+
+    result = web_data.field_suggestions("name", {"name": "al"}, limit=10)
+
+    assert result == ["ALFA"]
+    store.suggest_product_field.assert_called_once_with(
+        "name",
+        "al",
+        {
+            "product_id": "",
+            "ean": "",
+            "name": "",
+            "type_name": "",
+            "model": "",
+        },
+        limit=10,
+    )
+
+
+def test_save_web_entry_uses_one_active_store_identity_lookup(monkeypatch):
+    """Catch duplicate product-ID and EAN pre-lookups before a save."""
+
+    store = Mock()
+    store.get_product_by_id.return_value = {
+        "PRODUCT_ID": "P-1",
+        "EAN": "5901",
+    }
+    monkeypatch.setattr(web_data, "get_active_store", lambda: store)
+    save_entry = Mock(return_value={"updated": True, "product_id": "P-1", "entry": {}})
+    monkeypatch.setattr(web_data, "save_ean_entry", save_entry)
+
+    web_data.save_web_entry(
+        {
+            "product_id": "P-1",
+            "ean": "5901",
+            "name": "ALFA",
+            "type_name": "STOL",
+            "model": "A1",
+            "color1": "BIALY",
+        }
+    )
+
+    store.get_product_by_id.assert_called_once_with("P-1")
+    store.get_product_by_ean.assert_not_called()
