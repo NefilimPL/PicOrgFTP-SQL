@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from picorgftp_sql.excel_utils import ENTRY_RECORDS_KEY
+from picorgftp_sql.product_queries import ProductSearchCriteria
 from picorgftp_sql.sqlite_store import SqliteStore
 
 
@@ -990,3 +991,92 @@ def test_save_product_entry_updates_by_product_id(tmp_path: Path) -> None:
     assert second["updated"] is True
     assert len(records) == 1
     assert records[0]["MODEL"] == "MA04"
+
+
+def test_product_queries_use_indexed_exact_identity_and_form_criteria(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.initialize()
+    store.save_product_entry(
+        {
+            "EAN": "5901234567890",
+            "NAZWA": "MAGGIORE",
+            "TYP": "KOMODA",
+            "MODEL": "MA03",
+            "KOLOR1": "BIALY",
+            "KOLOR2": "",
+            "KOLOR3": "",
+            "DODATKI": "NO-LED",
+            "PRODUCT_ID": "PRD-1",
+        }
+    )
+    store.save_product_entry(
+        {
+            "EAN": "5901234567891",
+            "NAZWA": "MAGGIORE",
+            "TYP": "KOMODA",
+            "MODEL": "MA04",
+            "KOLOR1": "CZARNY",
+            "KOLOR2": "",
+            "KOLOR3": "",
+            "DODATKI": "NO-LED",
+            "PRODUCT_ID": "PRD-2",
+        }
+    )
+
+    assert store.get_product_by_ean(" 5901234567890 ")["product_id"] == "PRD-1"
+    assert store.get_product_by_id("prd-2")["model"] == "MA04"
+    assert store.search_product_entries(
+        ProductSearchCriteria(name="maggiore", type_name="komoda"), limit=1
+    ) == [
+        {
+            "product_id": "PRD-1",
+            "ean": "5901234567890",
+            "name": "MAGGIORE",
+            "type_name": "KOMODA",
+            "model": "MA03",
+            "color1": "BIALY",
+            "color2": "",
+            "color3": "",
+            "extra": "NO-LED",
+        }
+    ]
+    assert store.search_product_entries(
+        ProductSearchCriteria(product_id="PRD-2", name="not-a-match"), limit=10
+    )[0]["product_id"] == "PRD-2"
+
+    with sqlite3.connect(store.path) as conn:
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT * FROM product_entries WHERE ean = ? LIMIT 1",
+            ("5901234567890",),
+        ).fetchall()
+    assert any("INDEX" in str(row).upper() for row in plan)
+    assert not any("SCAN PRODUCT_ENTRIES" in str(row).upper() for row in plan)
+
+
+def test_product_field_suggestions_validate_context_and_limit_results(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.save_product_entry(
+        {
+            "EAN": "5901",
+            "NAZWA": "ALFA",
+            "TYP": "STÓŁ",
+            "MODEL": "A2",
+            "PRODUCT_ID": "PRD-1",
+        }
+    )
+    store.save_product_entry(
+        {
+            "EAN": "5902",
+            "NAZWA": "ALFA",
+            "TYP": "STÓŁ",
+            "MODEL": "A1",
+            "PRODUCT_ID": "PRD-2",
+        }
+    )
+
+    assert store.suggest_product_field("model", "a", {"name": "alfa"}, limit=1) == [
+        "A1"
+    ]
+    assert store.suggest_product_field("unknown", "", {}, limit=20) == []

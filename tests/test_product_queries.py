@@ -41,3 +41,30 @@ def test_legacy_store_suggests_values_from_prepared_records(monkeypatch):
     assert data_store.LegacyDataStore().suggest_product_field(
         "model", "a", {"name": "ALFA"}, limit=1
     ) == ["A1"]
+
+
+def test_sqlite_product_queries_do_not_load_all_lists(tmp_path, monkeypatch):
+    """Catch a regression to the full SQLite product-table materialization path."""
+
+    adapter = data_store.SqliteDataStoreAdapter(str(tmp_path / "products.sqlite"))
+    adapter.save_product_entry(
+        {
+            "product_id": "P-1",
+            "ean": "5901234567890",
+            "name": "ALFA",
+            "type_name": "STÓŁ",
+            "model": "A1",
+        }
+    )
+    monkeypatch.setattr(
+        adapter.store,
+        "load_lists",
+        lambda: (_ for _ in ()).throw(AssertionError("full load")),
+    )
+
+    assert adapter.get_product_by_ean("5901234567890")["product_id"] == "P-1"
+    assert adapter.get_product_by_id("p-1")["ean"] == "5901234567890"
+    assert adapter.search_product_entries(
+        ProductSearchCriteria(name="alfa"), limit=1
+    )[0]["name"] == "ALFA"
+    assert adapter.suggest_product_field("model", "a", {"name": "ALFA"}) == ["A1"]
