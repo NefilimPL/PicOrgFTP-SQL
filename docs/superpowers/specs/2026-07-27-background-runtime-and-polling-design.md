@@ -181,7 +181,10 @@ Benchmark raportuje:
 
 Automatyczny benchmark w `tests/test_background_runtime_performance.py`
 symuluje minutę pracy bez oczekiwania w czasie rzeczywistym. Sprawdza limit
-dwóch cykli workera, wake przed kolejnym terminem awaryjnym, stop poniżej
+dwóch cykli workera. Osobno trwała dostawa utworzona przez
+`SqliteStore.enqueue_notification_delivery(...)` przechodzi przez realny
+wake workera i `WakeableDeadlineScheduler`, a wątek workera przetwarza ją
+przed 60-sekundowym terminem awaryjnym. Benchmark sprawdza też stop poniżej
 sekundy, pięć instancji produkcyjnego pollera JavaScript (maksymalnie 12
 requestów aktywnych i 2 ukryte na klienta) oraz 100 aktualizacji rejestru
 podczas zablokowanej serializacji. Niezmienione wersje runtime nie wywołują

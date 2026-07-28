@@ -10,6 +10,7 @@ import time
 
 from picorgftp_sql import notification_service
 from picorgftp_sql.notification_scheduler import WakeableDeadlineScheduler
+from picorgftp_sql.sqlite_store import SqliteStore
 from picorgftp_sql.web.active_clients import ActiveClientRegistry
 
 
@@ -28,24 +29,18 @@ class _FakeWorkerClock:
         self.elapsed_seconds += seconds
 
 
-def test_worker_idle_minute_and_wake_use_bounded_cycles(monkeypatch) -> None:
-    """Returning to a tight poll or dropping a wake would violate the idle budget."""
+def test_worker_fake_idle_minute_uses_at_most_two_cycles(monkeypatch) -> None:
+    """Returning to a tight poll would exceed the idle minute cycle budget."""
     clock = _FakeWorkerClock()
     stop = threading.Event()
-    pending = []
     cycle_times = []
-    attempt_times = []
 
     class Scheduler:
         def __init__(self) -> None:
-            self.generation = 0
             self.wait_count = 0
 
         def capture_generation(self) -> int:
-            return self.generation
-
-        def wake(self) -> None:
-            self.generation += 1
+            return 0
 
         def wait(
             self,
@@ -54,16 +49,11 @@ def test_worker_idle_minute_and_wake_use_bounded_cycles(monkeypatch) -> None:
             *,
             since_generation=None,
         ) -> str:
+            del since_generation
             self.wait_count += 1
             if self.wait_count == 1:
                 clock.advance(min(60.0, float(delay_seconds)))
                 return "deadline"
-            if self.wait_count == 2:
-                clock.advance(1.0)
-                pending.append("delivery")
-                self.wake()
-                assert self.generation != since_generation
-                return "wake"
             stop_event.set()
             return "stop"
 
@@ -85,11 +75,7 @@ def test_worker_idle_minute_and_wake_use_bounded_cycles(monkeypatch) -> None:
         def process_pending_batch(limit: int) -> int:
             del limit
             cycle_times.append(clock.elapsed_seconds)
-            if not pending:
-                return 0
-            pending.pop()
-            attempt_times.append(clock.elapsed_seconds)
-            return 1
+            return 0
 
     monkeypatch.setattr(notification_service, "_WORKER_SCHEDULER", scheduler)
     monkeypatch.setattr(notification_service, "_utc_now", clock.now)
@@ -103,8 +89,132 @@ def test_worker_idle_minute_and_wake_use_bounded_cycles(monkeypatch) -> None:
 
     idle_cycles = [value for value in cycle_times if value <= 60.0]
     assert len(idle_cycles) <= 2
-    assert attempt_times == [61.0]
-    assert attempt_times[0] < 120.0
+
+
+def _notification_settings() -> dict[str, object]:
+    return {
+        "primary_channel": "smtp",
+        "fallback_enabled": False,
+        "entra": {
+            "tenant_id": "tenant",
+            "client_id": "client",
+            "client_secret": "secret",
+            "from_address": "alerts@example.com",
+        },
+        "smtp": {
+            "host": "smtp.example.com",
+            "port": 587,
+            "security": "starttls",
+            "username": "sender",
+            "password": "secret",
+            "from_address": "alerts@example.com",
+            "from_name": "PicOrgFTP-SQL",
+        },
+        "rules": {},
+    }
+
+
+def _delivery_record(delivery_id: str) -> dict[str, object]:
+    return {
+        "id": delivery_id,
+        "incident_id": "",
+        "event_id": "",
+        "severity": "warning",
+        "status": "pending",
+        "primary_channel": "smtp",
+        "used_channel": "",
+        "recipients": ["ops@example.com"],
+        "message": {
+            "message_id": delivery_id,
+            "subject": "wake benchmark",
+            "text_body": "durable wake path",
+            "html_body": "<p>durable wake path</p>",
+        },
+        "attempts": [],
+        "created_at": "2026-07-27T10:00:00.000Z",
+        "updated_at": "2026-07-27T10:00:00.000Z",
+        "next_attempt_at": "",
+    }
+
+
+def test_durable_enqueue_wakes_real_worker_before_fallback(monkeypatch, tmp_path) -> None:
+    """Dropping SQLite's wake hook would defer a durable delivery for 60 seconds."""
+    store = SqliteStore(str(tmp_path / "wake.sqlite"))
+    store.initialize()
+    scheduler = WakeableDeadlineScheduler(max_idle_seconds=60.0)
+    stop = threading.Event()
+    any_delivery_processed = threading.Event()
+    woken_delivery_processed = threading.Event()
+    sent_message_ids = []
+    wake_calls = []
+
+    class Transport:
+        @staticmethod
+        def send(message):
+            sent_message_ids.append(message.message_id)
+            any_delivery_processed.set()
+            if message.message_id == "durable-woken":
+                woken_delivery_processed.set()
+            return {"status": "sent", "elapsed_ms": 1}
+
+    service = notification_service.NotificationService(
+        store=store,
+        transport_factory=lambda _channel, _settings: Transport(),
+        settings_loader=_notification_settings,
+        user_lookup=lambda _username: None,
+        event_emitter=lambda **_kwargs: None,
+        now=lambda: datetime(2026, 7, 27, 10, 0, tzinfo=UTC),
+    )
+    real_wake_notification_worker = notification_service.wake_notification_worker
+
+    def observe_real_wake() -> None:
+        wake_calls.append(time.perf_counter())
+        real_wake_notification_worker()
+
+    monkeypatch.setattr(notification_service, "_WORKER_SCHEDULER", scheduler)
+    monkeypatch.setattr(
+        notification_service,
+        "_WORKER_LAST_ENTRA_MONITOR_AT",
+        datetime(2026, 7, 27, 10, 0, tzinfo=UTC),
+    )
+    monkeypatch.setattr(
+        notification_service,
+        "process_due_entra_secret_reminders",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        notification_service,
+        "wake_notification_worker",
+        observe_real_wake,
+    )
+    worker = threading.Thread(
+        target=notification_service._worker_loop,
+        args=(service, stop),
+        name="durable-wake-benchmark",
+    )
+    worker.start()
+    try:
+        assert scheduler.wait_until_waiting(timeout=1.0)
+
+        original_store_wake = store._wake_notification_worker
+        monkeypatch.setattr(store, "_wake_notification_worker", lambda: None)
+        store.enqueue_notification_delivery(_delivery_record("durable-unwoken"))
+        assert not any_delivery_processed.wait(timeout=0.15)
+
+        monkeypatch.setattr(store, "_wake_notification_worker", original_store_wake)
+        enqueue_started = time.perf_counter()
+        store.enqueue_notification_delivery(_delivery_record("durable-woken"))
+        assert woken_delivery_processed.wait(timeout=0.75)
+        enqueue_to_process_seconds = time.perf_counter() - enqueue_started
+    finally:
+        stop.set()
+        scheduler.wake()
+        worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert len(wake_calls) == 1
+    assert "durable-woken" in sent_message_ids
+    assert enqueue_to_process_seconds < 1.0
 
 
 def test_real_scheduler_stop_interrupts_sixty_second_wait_in_under_one_second() -> None:
