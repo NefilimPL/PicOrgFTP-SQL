@@ -198,6 +198,82 @@ def test_process_queue_generation_is_stable_until_queue_state_changes() -> None:
     assert changed["active_count"] == before["active_count"]
 
 
+def test_process_queue_runtime_summary_does_not_build_detailed_snapshot() -> None:
+    with web_app._PROCESS_JOBS_LOCK:
+        original = dict(web_app._PROCESS_JOBS)
+        web_app._PROCESS_JOBS.clear()
+        web_app._PROCESS_JOBS.update(
+            {
+                "queued": {"status": "queued"},
+                "running": {"status": "running"},
+                "completed": {"status": "completed"},
+            }
+        )
+        expected_generation = web_app._PROCESS_QUEUE_GENERATION
+    try:
+        with (
+            patch.object(
+                web_app,
+                "_active_process_jobs_snapshot",
+                side_effect=AssertionError("detailed snapshot was constructed"),
+            ),
+            patch.object(
+                web_app,
+                "_cleanup_process_jobs",
+                side_effect=AssertionError("runtime polling performed cleanup"),
+            ),
+        ):
+            summary = web_app._runtime_process_queue_summary()
+    finally:
+        with web_app._PROCESS_JOBS_LOCK:
+            web_app._PROCESS_JOBS.clear()
+            web_app._PROCESS_JOBS.update(original)
+
+    assert summary == {
+        "generation": expected_generation,
+        "active_count": 2,
+    }
+
+
+def test_runtime_active_client_summary_uses_atomic_registry_projection() -> None:
+    registry = Mock()
+    registry.runtime_summary.return_value = {
+        "generation": 41,
+        "active_user_count": 131,
+    }
+    registry.snapshot.side_effect = AssertionError("capped client snapshot was used")
+
+    with patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", registry):
+        summary = web_app._runtime_active_clients_summary()
+
+    assert summary == {"generation": 41, "count": 131}
+    registry.runtime_summary.assert_called_once_with()
+    registry.snapshot.assert_not_called()
+    registry.schedule_flush.assert_called_once_with()
+
+
+def test_runtime_status_checks_file_index_without_starting_refresh(
+    client: TestClient,
+) -> None:
+    patches = _provider_patches()
+    patches[2] = patch.object(
+        web_app,
+        "file_index_status",
+        return_value={"generated_at": "index-1", "state": "ready"},
+    )
+    with (
+        patches[0],
+        patches[1],
+        patches[2] as file_index_provider,
+        patches[3],
+        patches[4],
+    ):
+        response = client.get("/api/runtime-status")
+
+    assert response.status_code == 200
+    file_index_provider.assert_called_once_with(start=False)
+
+
 def test_runtime_status_is_excluded_from_active_client_tracking() -> None:
     registry = Mock()
     request = SimpleNamespace(

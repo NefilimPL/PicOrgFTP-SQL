@@ -4077,11 +4077,15 @@ def _active_process_jobs_snapshot() -> Dict[str, Any]:
 
 
 def _runtime_process_queue_summary() -> Dict[str, Any]:
-    snapshot = _active_process_jobs_snapshot()
-    return {
-        "generation": snapshot["generation"],
-        "active_count": snapshot["active_count"],
-    }
+    with _PROCESS_JOBS_LOCK:
+        return {
+            "generation": _PROCESS_QUEUE_GENERATION,
+            "active_count": sum(
+                1
+                for job in _PROCESS_JOBS.values()
+                if job.get("status") in {"queued", "running"}
+            ),
+        }
 
 
 def _resource_monitor_context() -> dict[str, int]:
@@ -4232,10 +4236,11 @@ def _active_presence_payload(
 
 
 def _runtime_active_clients_summary() -> Dict[str, Any]:
-    clients = _active_clients_snapshot()
+    summary = _ACTIVE_CLIENT_REGISTRY.runtime_summary()
+    _ACTIVE_CLIENT_REGISTRY.schedule_flush()
     return {
-        "generation": _ACTIVE_CLIENT_REGISTRY.generation,
-        "count": len(clients),
+        "generation": summary["generation"],
+        "count": summary["active_user_count"],
     }
 
 
@@ -4814,7 +4819,7 @@ def create_app() -> FastAPI:
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     runtime_status_service = RuntimeStatusService(
         health_provider=lambda: _health_payload(),
-        file_index_provider=lambda: file_index_status(start=True),
+        file_index_provider=lambda: file_index_status(start=False),
         process_queue_provider=lambda: _runtime_process_queue_summary(),
         active_clients_provider=lambda: _runtime_active_clients_summary(),
         clock=lambda: _utc_now_iso(),

@@ -156,6 +156,52 @@ def test_record_with_request_time_prunes_expired_clients_before_scheduling(tmp_p
     ]
 
 
+def test_runtime_summary_counts_all_distinct_usernames_without_snapshot_cap(tmp_path):
+    registry = ActiveClientRegistry(
+        tmp_path / "active.json",
+        max_age_seconds=180.0,
+        clock=lambda: 1000.0,
+    )
+    try:
+        for index in range(130):
+            item = client_record(f"user-{index}", generation=index)
+            item["last_seen_epoch"] = 1000.0
+            registry.record(item)
+        duplicate = client_record("user-0", generation=1000)
+        duplicate["last_seen_epoch"] = 1000.0
+        registry.record(duplicate)
+        anonymous = client_record("niezalogowany", generation=1001)
+        anonymous["last_seen_epoch"] = 1000.0
+        registry.record(anonymous)
+
+        summary = registry.runtime_summary()
+    finally:
+        registry.close(timeout=5.0)
+
+    assert summary == {"generation": 132, "active_user_count": 130}
+
+
+def test_runtime_summary_prunes_before_capturing_count_and_generation(tmp_path):
+    registry = ActiveClientRegistry(
+        tmp_path / "active.json",
+        max_age_seconds=180.0,
+        clock=lambda: 1000.0,
+    )
+    try:
+        stale = client_record("stale", generation=1)
+        stale["last_seen_epoch"] = 1.0
+        fresh = client_record("fresh", generation=2)
+        fresh["last_seen_epoch"] = 1000.0
+        registry.record(stale)
+        registry.record(fresh)
+
+        summary = registry.runtime_summary()
+    finally:
+        registry.close(timeout=5.0)
+
+    assert summary == {"generation": 3, "active_user_count": 1}
+
+
 def test_close_seals_mutations_before_flushing(tmp_path, monkeypatch):
     flush_finished = threading.Event()
     allow_close_to_finish = threading.Event()

@@ -134,6 +134,24 @@ class ActiveClientRegistry:
             self._prune_locked(now_value)
             return self._snapshot_locked()
 
+    def runtime_summary(self, *, now: float | None = None) -> dict[str, int]:
+        """Return one atomic generation/count projection without client details."""
+
+        now_value = self._clock() if now is None else float(now)
+        with self._condition:
+            self._ensure_accepting_mutations_locked()
+            self._prune_locked(now_value)
+            usernames = {
+                username
+                for item in self._clients.values()
+                if (username := str(item.get("username") or "").strip())
+                and username != "niezalogowany"
+            }
+            return {
+                "generation": self._generation,
+                "active_user_count": len(usernames),
+            }
+
     def schedule_flush(self, *, force: bool = False) -> bool:
         with self._condition:
             self._ensure_open_locked()
