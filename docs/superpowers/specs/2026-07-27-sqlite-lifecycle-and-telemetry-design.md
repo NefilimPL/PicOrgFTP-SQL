@@ -1,6 +1,6 @@
 # SQLite lifecycle i telemetria — specyfikacja
 
-Status: zatwierdzona
+Status: wdrożona
 
 Priorytet: P0
 

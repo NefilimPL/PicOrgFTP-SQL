@@ -392,7 +392,7 @@ def test_v6_schema_adds_notification_deliveries_to_fresh_and_existing_databases(
     with sqlite3.connect(existing_path) as conn:
         conn.execute("DROP TABLE notification_deliveries")
         assert conn.execute("PRAGMA user_version").fetchone()[0] == sqlite_store.SCHEMA_VERSION
-    existing.initialize()
+    SqliteStore(str(existing_path)).initialize()
     with sqlite3.connect(existing_path) as conn:
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notification_deliveries'"
@@ -1444,6 +1444,7 @@ def test_initialize_recovers_missing_v6_stream_table(tmp_path: Path) -> None:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == sqlite_store.SCHEMA_VERSION
         conn.execute("DROP TABLE operational_event_stream")
 
+    store = SqliteStore(str(db_path))
     store.initialize()
 
     with sqlite3.connect(db_path) as conn:
@@ -1545,6 +1546,7 @@ def test_initialize_recovers_missing_origin_without_disturbing_real_sequence(
     with sqlite3.connect(tmp_path / "app.sqlite") as conn:
         conn.execute("DELETE FROM operational_event_stream WHERE sequence = 0")
 
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
     store.initialize()
     store.append_operational_event(_event("evt-real", "2026-07-16T10:00:00.000Z"))
 
