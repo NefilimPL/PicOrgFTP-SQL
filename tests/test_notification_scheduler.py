@@ -1,6 +1,53 @@
 import threading
 
+from picorgftp_sql.data_store import SqliteDataStoreAdapter
 from picorgftp_sql.notification_scheduler import WakeableDeadlineScheduler
+from picorgftp_sql.sqlite_store import SqliteStore
+
+
+def seed_pending_delivery(store, delivery_id, next_attempt_at):
+    with store.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO notification_deliveries (
+                id, severity, status, primary_channel, message_json,
+                created_at, updated_at, next_attempt_at
+            ) VALUES (?, 'warning', 'pending', 'smtp', '{}', ?, ?, ?)
+            """,
+            (
+                delivery_id,
+                "2026-07-27T10:00:00Z",
+                "2026-07-27T10:00:00Z",
+                next_attempt_at,
+            ),
+        )
+
+
+def test_next_notification_due_at_returns_oldest_pending(tmp_path):
+    """Selecting anything but the nearest pending deadline delays durable work."""
+    store = SqliteStore(str(tmp_path / "notifications.sqlite"))
+    store.initialize()
+    seed_pending_delivery(
+        store, delivery_id="late", next_attempt_at="2026-07-27T12:00:00Z"
+    )
+    seed_pending_delivery(
+        store, delivery_id="early", next_attempt_at="2026-07-27T11:00:00Z"
+    )
+
+    assert store.next_notification_due_at() == "2026-07-27T11:00:00Z"
+
+
+def test_sqlite_adapter_delegates_next_notification_due_at():
+    """Bypassing the SQLite store would hide its durable worker deadline."""
+
+    class Store:
+        def next_notification_due_at(self):
+            return "2026-07-27T11:00:00Z"
+
+    adapter = object.__new__(SqliteDataStoreAdapter)
+    adapter.store = Store()
+
+    assert adapter.next_notification_due_at() == "2026-07-27T11:00:00Z"
 
 
 def test_scheduler_wake_interrupts_wait():

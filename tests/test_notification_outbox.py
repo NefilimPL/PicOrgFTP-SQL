@@ -7,7 +7,7 @@ import sqlite3
 
 import pytest
 
-from picorgftp_sql import observability
+from picorgftp_sql import notification_service, observability
 from picorgftp_sql.notification_service import NotificationService
 from picorgftp_sql.sqlite_store import SqliteStore
 
@@ -153,6 +153,31 @@ def test_info_intent_foreign_primary_key_collision_rolls_back_event(tmp_path: Pa
     assert row["event_id"] == "evt-foreign"
 
 
+def test_committed_intent_wakes_once_after_commit(
+    monkeypatch, tmp_path: Path
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    wake_snapshots: list[list[str]] = []
+
+    def observe_wake() -> None:
+        wake_snapshots.append(
+            [
+                str(item["event_id"])
+                for item in store.pending_notification_intents(limit=10)
+            ]
+        )
+
+    monkeypatch.setattr(
+        notification_service, "wake_notification_worker", observe_wake
+    )
+
+    store.append_operational_event(
+        _event("evt-wake", "info"), create_notification_intent=True
+    )
+
+    assert wake_snapshots == [["evt-wake"]]
+
+
 def test_incident_intent_foreign_primary_key_collision_rolls_back_everything(
     tmp_path: Path,
 ) -> None:
@@ -215,10 +240,21 @@ def test_replayed_event_id_must_match_deterministic_intent_identity(tmp_path: Pa
 
 
 def test_incident_event_window_claim_and_outbox_intent_commit_atomically(
-    tmp_path: Path,
+    monkeypatch, tmp_path: Path,
 ) -> None:
     store = SqliteStore(str(tmp_path / "app.sqlite"))
     event = _event("evt-atomic")
+    wake_snapshots: list[list[str]] = []
+    monkeypatch.setattr(
+        notification_service,
+        "wake_notification_worker",
+        lambda: wake_snapshots.append(
+            [
+                str(item["event_id"])
+                for item in store.pending_notification_intents(limit=10)
+            ]
+        ),
+    )
 
     incident = store.coalesce_incident(
         _occurrence(event), source_event=event, create_notification_intent=True
@@ -230,9 +266,12 @@ def test_incident_event_window_claim_and_outbox_intent_commit_atomically(
         ("evt-atomic", incident["id"])
     ]
     assert store.query_operational_events()["items"][0]["incident_id"] == incident["id"]
+    assert wake_snapshots == [["evt-atomic"]]
 
 
-def test_outbox_insert_failure_rolls_back_event_and_incident_claim(tmp_path: Path) -> None:
+def test_outbox_insert_failure_rolls_back_event_and_incident_claim(
+    monkeypatch, tmp_path: Path
+) -> None:
     class FailingStore(SqliteStore):
         def _insert_notification_intent(self, conn, **values):
             super()._insert_notification_intent(conn, **values)
@@ -240,6 +279,10 @@ def test_outbox_insert_failure_rolls_back_event_and_incident_claim(tmp_path: Pat
 
     store = FailingStore(str(tmp_path / "app.sqlite"))
     event = _event("evt-rollback")
+    wakes = []
+    monkeypatch.setattr(
+        notification_service, "wake_notification_worker", lambda: wakes.append(True)
+    )
 
     with pytest.raises(RuntimeError, match="forced crash"):
         store.coalesce_incident(
@@ -249,10 +292,48 @@ def test_outbox_insert_failure_rolls_back_event_and_incident_claim(tmp_path: Pat
     assert store.query_operational_events()["items"] == []
     assert store.query_incidents()["items"] == []
     assert store.pending_notification_intents(limit=10) == []
+    assert wakes == []
+
+
+def test_committed_delivery_enqueue_wakes_once_after_commit(
+    monkeypatch, tmp_path: Path
+) -> None:
+    store = SqliteStore(str(tmp_path / "app.sqlite"))
+    wake_snapshots: list[list[str]] = []
+    monkeypatch.setattr(
+        notification_service,
+        "wake_notification_worker",
+        lambda: wake_snapshots.append(
+            [
+                str(item["id"])
+                for item in store.query_notification_deliveries()["items"]
+            ]
+        ),
+    )
+    delivery = {
+        "id": "delivery-wake",
+        "incident_id": "",
+        "event_id": "",
+        "severity": "warning",
+        "status": "pending",
+        "primary_channel": "smtp",
+        "used_channel": "",
+        "recipients": ["admin@example.com"],
+        "message": {},
+        "attempts": [],
+        "created_at": "2026-07-17T12:00:00.000Z",
+        "updated_at": "2026-07-17T12:00:00.000Z",
+        "next_attempt_at": "",
+    }
+
+    store.enqueue_notification_delivery(delivery)
+    store.enqueue_notification_delivery(delivery)
+
+    assert wake_snapshots == [["delivery-wake"]]
 
 
 def test_materializing_delivery_and_completing_intent_is_atomic_and_idempotent(
-    tmp_path: Path,
+    monkeypatch, tmp_path: Path,
 ) -> None:
     store = SqliteStore(str(tmp_path / "app.sqlite"))
     event = _event("evt-materialize")
@@ -275,6 +356,17 @@ def test_materializing_delivery_and_completing_intent_is_atomic_and_idempotent(
         "updated_at": "2026-07-17T12:00:00.000Z",
         "next_attempt_at": "",
     }
+    wake_snapshots: list[list[str]] = []
+    monkeypatch.setattr(
+        notification_service,
+        "wake_notification_worker",
+        lambda: wake_snapshots.append(
+            [
+                str(item["id"])
+                for item in store.query_notification_deliveries()["items"]
+            ]
+        ),
+    )
 
     first = store.materialize_notification_intent(
         str(intent["id"]), delivery=delivery, completed_at="2026-07-17T12:00:01.000Z"
@@ -286,10 +378,11 @@ def test_materializing_delivery_and_completing_intent_is_atomic_and_idempotent(
     assert first["id"] == second["id"] == "delivery-evt-materialize"
     assert store.pending_notification_intents(limit=10) == []
     assert len(store.query_notification_deliveries()["items"]) == 1
+    assert wake_snapshots == [["delivery-evt-materialize"]]
 
 
 def test_materialization_failure_rolls_back_delivery_and_leaves_intent_pending(
-    tmp_path: Path,
+    monkeypatch, tmp_path: Path,
 ) -> None:
     class FailingStore(SqliteStore):
         def _insert_notification_delivery(self, conn, payload):
@@ -317,6 +410,10 @@ def test_materialization_failure_rolls_back_delivery_and_leaves_intent_pending(
         "updated_at": "2026-07-17T12:00:00.000Z",
         "next_attempt_at": "",
     }
+    wakes = []
+    monkeypatch.setattr(
+        notification_service, "wake_notification_worker", lambda: wakes.append(True)
+    )
 
     with pytest.raises(RuntimeError, match="forced materialization crash"):
         store.materialize_notification_intent(
@@ -329,6 +426,7 @@ def test_materialization_failure_rolls_back_delivery_and_leaves_intent_pending(
         intent["id"]
     ]
     assert store.query_notification_deliveries()["items"] == []
+    assert wakes == []
 
 
 def test_deterministic_delivery_id_conflict_never_completes_wrong_intent(

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import re
+import threading
 
 import pytest
 
 from picorgftp_sql import notification_service
+from picorgftp_sql.notification_scheduler import WakeableDeadlineScheduler
+from picorgftp_sql.sqlite_store import SqliteStore
 
 
 UTC = timezone.utc
@@ -48,7 +51,9 @@ def test_worker_runs_entra_expiry_monitor_at_most_once_each_24_hours(monkeypatch
     calls = []
     service = type("Service", (), {"process_pending_batch": lambda self, limit: None})()
     stop_event = type("Stop", (), {"is_set": lambda self: False, "wait": lambda self, value: True})()
+    scheduler = type("Scheduler", (), {"wait": lambda self, stop, delay: "stop"})()
     monkeypatch.setattr(notification_service, "process_due_entra_secret_reminders", lambda: calls.append(True))
+    monkeypatch.setattr(notification_service, "_WORKER_SCHEDULER", scheduler)
     monkeypatch.setattr(notification_service, "_WORKER_LAST_ENTRA_MONITOR_AT", None)
     monkeypatch.setattr(notification_service, "_utc_now", lambda: NOW)
     notification_service._worker_loop(service, stop_event)
@@ -61,13 +66,81 @@ def test_worker_isolates_entra_expiry_monitor_errors(monkeypatch):
     calls = []
     service = type("Service", (), {"process_pending_batch": lambda self, limit: calls.append("delivery")})()
     stop_event = type("Stop", (), {"is_set": lambda self: False, "wait": lambda self, value: True})()
+    scheduler = type("Scheduler", (), {"wait": lambda self, stop, delay: "stop"})()
     monkeypatch.setattr(notification_service, "process_due_entra_secret_reminders", lambda: (_ for _ in ()).throw(RuntimeError("monitor failed")))
+    monkeypatch.setattr(notification_service, "_WORKER_SCHEDULER", scheduler)
     monkeypatch.setattr(notification_service, "_WORKER_LAST_ENTRA_MONITOR_AT", None)
     monkeypatch.setattr(notification_service, "_utc_now", lambda: NOW)
 
     notification_service._worker_loop(service, stop_event)
 
     assert calls == ["delivery"]
+
+
+def test_worker_waits_for_nearest_persistent_delivery_deadline(monkeypatch):
+    waits = []
+    stop = threading.Event()
+
+    class Scheduler:
+        def wait(self, stop_event, delay_seconds):
+            waits.append(delay_seconds)
+            stop_event.set()
+            return "stop"
+
+    store = type(
+        "Store",
+        (),
+        {"next_notification_due_at": lambda self: "2026-07-17T10:00:30.000Z"},
+    )()
+    service = type(
+        "Service",
+        (),
+        {
+            "store": store,
+            "process_pending_batch": lambda self, limit: None,
+            "_settings": lambda self: {"daily_summary_time": "16:00"},
+        },
+    )()
+    monkeypatch.setattr(notification_service, "_WORKER_SCHEDULER", Scheduler())
+    monkeypatch.setattr(notification_service, "_WORKER_LAST_ENTRA_MONITOR_AT", NOW)
+    monkeypatch.setattr(notification_service, "_utc_now", lambda: NOW)
+
+    notification_service._worker_loop(service, stop)
+
+    assert waits == [30.0]
+
+
+def test_worker_waits_until_daily_summary_when_it_is_nearest(monkeypatch):
+    waits = []
+    stop = threading.Event()
+    now = datetime(2026, 7, 17, 13, 59, 30, tzinfo=UTC)
+
+    class Scheduler:
+        def wait(self, stop_event, delay_seconds):
+            waits.append(delay_seconds)
+            stop_event.set()
+            return "stop"
+
+    store = type("Store", (), {"next_notification_due_at": lambda self: ""})()
+    service = type(
+        "Service",
+        (),
+        {
+            "store": store,
+            "process_pending_batch": lambda self, limit: None,
+            "_settings": lambda self: {"daily_summary_time": "16:00"},
+        },
+    )()
+    monkeypatch.setattr(notification_service, "_WORKER_SCHEDULER", Scheduler())
+    monkeypatch.setattr(
+        notification_service, "WORKER_PRUNE_INTERVAL", timedelta(hours=1)
+    )
+    monkeypatch.setattr(notification_service, "_WORKER_LAST_ENTRA_MONITOR_AT", now)
+    monkeypatch.setattr(notification_service, "_utc_now", lambda: now)
+
+    notification_service._worker_loop(service, stop)
+
+    assert waits == [30.0]
 
 
 def test_starting_a_fresh_worker_resets_the_entra_monitor_guard(monkeypatch):
@@ -1274,9 +1347,84 @@ def test_worker_start_is_best_effort_when_store_is_unavailable(monkeypatch) -> N
     assert notification_service._WORKER_THREAD is None
 
 
-def test_worker_stop_retains_live_handles_and_start_cannot_overlap(monkeypatch) -> None:
-    import threading
+def test_worker_stop_wakes_scheduler_after_setting_stop(monkeypatch) -> None:
+    stop = threading.Event()
+    observed = []
 
+    class Scheduler:
+        def wake(self):
+            observed.append(stop.is_set())
+
+    monkeypatch.setattr(notification_service, "_WORKER_SCHEDULER", Scheduler())
+    monkeypatch.setattr(notification_service, "_WORKER_THREAD", None)
+    monkeypatch.setattr(notification_service, "_WORKER_STOP", stop)
+
+    notification_service.stop_notification_worker()
+
+    assert observed == [True]
+
+
+def test_worker_restart_processes_overdue_delivery_without_prior_wake(
+    monkeypatch, tmp_path
+) -> None:
+    notification_service.stop_notification_worker()
+    store = SqliteStore(str(tmp_path / "restart.sqlite"))
+    store.initialize()
+    with store.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO notification_deliveries (
+                id, severity, status, primary_channel, recipients_json,
+                message_json, created_at, updated_at, next_attempt_at
+            ) VALUES (
+                'overdue', 'warning', 'pending', 'entra', '[]', '{}',
+                '2026-07-17T09:00:00.000Z', '2026-07-17T09:00:00.000Z',
+                '2026-07-17T09:30:00.000Z'
+            )
+            """
+        )
+    attempted = threading.Event()
+
+    class Transport:
+        def send(self, message):
+            del message
+            attempted.set()
+            return {"status": "sent", "elapsed_ms": 1}
+
+    service = notification_service.NotificationService(
+        store=store,
+        transport_factory=lambda _channel, _settings: Transport(),
+        settings_loader=lambda: _settings(),
+        user_lookup=lambda _username: None,
+        event_emitter=lambda **_kwargs: None,
+        now=lambda: NOW,
+    )
+
+    class Scheduler:
+        def __init__(self):
+            self.delegate = WakeableDeadlineScheduler(max_idle_seconds=60)
+            self.wakes = 0
+
+        def wait(self, stop_event, delay_seconds):
+            return self.delegate.wait(stop_event, delay_seconds)
+
+        def wake(self):
+            self.wakes += 1
+            self.delegate.wake()
+
+    scheduler = Scheduler()
+    monkeypatch.setattr(notification_service, "_WORKER_SCHEDULER", scheduler)
+    monkeypatch.setattr(notification_service, "_default_service", lambda: service)
+
+    notification_service.start_notification_worker()
+    try:
+        assert attempted.wait(1)
+        assert scheduler.wakes == 0
+    finally:
+        notification_service.stop_notification_worker()
+
+
+def test_worker_stop_retains_live_handles_and_start_cannot_overlap(monkeypatch) -> None:
     notification_service.stop_notification_worker()
     entered = threading.Event()
     release = threading.Event()
