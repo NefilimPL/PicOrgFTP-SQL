@@ -198,6 +198,7 @@ _ACTIVE_CLIENT_REGISTRY = ActiveClientRegistry(
     max_age_seconds=ACTIVE_CLIENT_MAX_AGE_SECONDS,
     flush_interval_seconds=ACTIVE_CLIENT_FLUSH_INTERVAL_SECONDS,
 )
+_ACTIVE_CLIENT_REGISTRY_LIFECYCLE_LOCK = threading.Lock()
 _RATE_LIMITS: Dict[str, List[float]] = {}
 _RATE_LIMITS_LOCK = threading.Lock()
 _UPLOAD_SCAN_RESULTS: Dict[str, Dict[str, Any]] = {}
@@ -4105,6 +4106,18 @@ def _active_clients_log_path() -> Path:
     return Path(settings.LOG_DIR) / "web_active_clients.json"
 
 
+def _ensure_active_client_registry() -> ActiveClientRegistry:
+    global _ACTIVE_CLIENT_REGISTRY
+    with _ACTIVE_CLIENT_REGISTRY_LIFECYCLE_LOCK:
+        if _ACTIVE_CLIENT_REGISTRY.closed:
+            _ACTIVE_CLIENT_REGISTRY = ActiveClientRegistry(
+                _active_clients_log_path(),
+                max_age_seconds=ACTIVE_CLIENT_MAX_AGE_SECONDS,
+                flush_interval_seconds=ACTIVE_CLIENT_FLUSH_INTERVAL_SECONDS,
+            )
+        return _ACTIVE_CLIENT_REGISTRY
+
+
 def _clean_presence_client_id(value: object) -> str:
     text = str(value or "").strip()
     if not text:
@@ -4849,6 +4862,7 @@ def create_app() -> FastAPI:
         os.environ.setdefault("PICORGFTP_SQL_HEADLESS", "1")
         runtime_info = initialize_application_runtime(interactive=False)
         app.state.runtime_info = runtime_info
+        _ensure_active_client_registry()
         _RESOURCE_MONITOR.start()
         cleanup_web_ftp_cache(force=True)
         cleanup_web_upload_cache(force=True)
@@ -4864,7 +4878,8 @@ def create_app() -> FastAPI:
         _RESOURCE_MONITOR.stop()
         stop_notification_worker()
         _stop_backup_scheduler()
-        _ACTIVE_CLIENT_REGISTRY.close(timeout=5.0)
+        with _ACTIVE_CLIENT_REGISTRY_LIFECYCLE_LOCK:
+            _ACTIVE_CLIENT_REGISTRY.close(timeout=5.0)
         data_store.reset_active_store_cache()
 
     @app.get("/api/health")

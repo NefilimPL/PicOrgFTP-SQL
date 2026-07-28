@@ -76,6 +76,7 @@ class ActiveClientRegistry:
         self._persisted_generation = 0
         self._write_scheduled = False
         self._last_flush = float("-inf")
+        self._accepting_mutations = True
         self._closed = False
         self._last_write_error: Exception | None = None
         self._load_from_disk()
@@ -85,10 +86,15 @@ class ActiveClientRegistry:
         with self._lock:
             return self._generation
 
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._closed
+
     def record(self, item: ClientRecord, *, now: float | None = None) -> None:
         copied = dict(item)
         with self._condition:
-            self._ensure_open_locked()
+            self._ensure_accepting_mutations_locked()
             if now is not None:
                 self._prune_locked(float(now))
             self._clients[_client_key(copied)] = copied
@@ -107,7 +113,7 @@ class ActiveClientRegistry:
             return 0
         now_value = self._clock() if now is None else float(now)
         with self._condition:
-            self._ensure_open_locked()
+            self._ensure_accepting_mutations_locked()
             self._prune_locked(now_value)
             matching = [
                 key
@@ -124,7 +130,7 @@ class ActiveClientRegistry:
     def snapshot(self, *, now: float | None = None) -> list[ClientRecord]:
         now_value = self._clock() if now is None else float(now)
         with self._condition:
-            self._ensure_open_locked()
+            self._ensure_accepting_mutations_locked()
             self._prune_locked(now_value)
             return self._snapshot_locked()
 
@@ -170,6 +176,7 @@ class ActiveClientRegistry:
         with self._condition:
             if self._closed:
                 return not self._write_scheduled
+            self._accepting_mutations = False
         flushed = self.flush(force=True, timeout=timeout)
         with self._condition:
             self._closed = True
@@ -206,6 +213,11 @@ class ActiveClientRegistry:
     def _ensure_open_locked(self) -> None:
         if self._closed:
             raise RuntimeError("ActiveClientRegistry is closed")
+
+    def _ensure_accepting_mutations_locked(self) -> None:
+        self._ensure_open_locked()
+        if not self._accepting_mutations:
+            raise RuntimeError("ActiveClientRegistry is closing")
 
     def _prune_locked(self, now_value: float) -> None:
         expired = [

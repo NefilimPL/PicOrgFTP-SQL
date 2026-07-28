@@ -154,3 +154,47 @@ def test_record_with_request_time_prunes_expired_clients_before_scheduling(tmp_p
     assert [item["username"] for item in json.loads(path.read_text(encoding="utf-8"))] == [
         "fresh"
     ]
+
+
+def test_close_seals_mutations_before_flushing(tmp_path, monkeypatch):
+    flush_finished = threading.Event()
+    allow_close_to_finish = threading.Event()
+    close_errors = []
+    path = tmp_path / "active.json"
+    registry = ActiveClientRegistry(path)
+    registry.record(client_record("alice", generation=1))
+    real_flush = registry.flush
+
+    def controlled_flush(*, force=False, timeout=None):
+        result = real_flush(force=force, timeout=timeout)
+        flush_finished.set()
+        assert allow_close_to_finish.wait(timeout=5.0)
+        return result
+
+    monkeypatch.setattr(registry, "flush", controlled_flush)
+
+    def close_registry():
+        try:
+            registry.close(timeout=5.0)
+        except Exception as exc:
+            close_errors.append(exc)
+
+    close_thread = threading.Thread(target=close_registry)
+    close_thread.start()
+    assert flush_finished.wait(timeout=5.0)
+    try:
+        mutation_was_rejected = False
+        try:
+            registry.record(client_record("bob", generation=2))
+        except RuntimeError:
+            mutation_was_rejected = True
+    finally:
+        allow_close_to_finish.set()
+        close_thread.join(timeout=5.0)
+
+    assert not close_thread.is_alive()
+    assert close_errors == []
+    assert mutation_was_rejected
+    assert {item["username"] for item in json.loads(path.read_text(encoding="utf-8"))} == {
+        "alice"
+    }

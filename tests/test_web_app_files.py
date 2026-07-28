@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import io
+import json
 from pathlib import Path
 import shutil
 import tempfile
@@ -2369,6 +2370,67 @@ class WebAppFileTests(unittest.TestCase):
             shutdown()
 
         registry.close.assert_called_once_with(timeout=5.0)
+
+    def test_later_app_startup_replaces_active_client_registry_closed_by_prior_shutdown(
+        self,
+    ) -> None:
+        first_app = web_app.create_app()
+        later_app = web_app.create_app()
+        shutdown = next(
+            handler for handler in first_app.router.on_shutdown if handler.__name__ == "_shutdown"
+        )
+        startup = next(
+            handler for handler in later_app.router.on_startup if handler.__name__ == "_startup"
+        )
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/api/bootstrap"),
+            client=SimpleNamespace(host="127.0.0.1", port=12345),
+            headers={"user-agent": "test", web_app.PRESENCE_CLIENT_ID_HEADER: "client-a"},
+            method="GET",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "active.json"
+            initial_registry = web_app.ActiveClientRegistry(path)
+            initial_registry.record(
+                {
+                    "username": "prior-user",
+                    "client_id": "prior-client",
+                    "last_seen_epoch": time.time(),
+                }
+            )
+            replacement_registry = initial_registry
+            try:
+                with (
+                    patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", initial_registry),
+                    patch.object(web_app, "_active_clients_log_path", return_value=path),
+                    patch.object(web_app._RESOURCE_MONITOR, "start"),
+                    patch.object(web_app._RESOURCE_MONITOR, "stop"),
+                    patch.object(web_app, "initialize_application_runtime", return_value={}),
+                    patch.object(web_app, "cleanup_web_ftp_cache"),
+                    patch.object(web_app, "cleanup_web_upload_cache"),
+                    patch.object(web_app, "_prune_live_events_if_due"),
+                    patch.object(web_app, "_start_backup_scheduler"),
+                    patch.object(web_app, "_stop_backup_scheduler"),
+                    patch.object(web_app, "start_notification_worker"),
+                    patch.object(web_app, "stop_notification_worker"),
+                    patch.object(web_app.data_store, "reset_active_store_cache"),
+                    patch.object(web_app, "_current_user", return_value="admin"),
+                ):
+                    shutdown()
+                    startup()
+                    replacement_registry = web_app._ACTIVE_CLIENT_REGISTRY
+                    web_app._record_active_client(request, 200)
+                    replacement_registry.flush(force=True)
+            finally:
+                replacement_registry.close(timeout=5.0)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertIsNot(replacement_registry, initial_registry)
+        self.assertEqual(
+            {item["username"] for item in payload},
+            {"admin", "prior-user"},
+        )
 
     def test_active_presence_payload_hides_stale_browser_clients_quickly(self) -> None:
         now = 200.0
