@@ -112,6 +112,84 @@ def test_search_entries_delegates_to_active_store(monkeypatch):
     )
 
 
+def test_web_search_query_is_filtered_by_sqlite_store_before_limit(tmp_path, monkeypatch):
+    """A matching row after an earlier criterion match must remain reachable."""
+
+    store = data_store.SqliteDataStoreAdapter(str(tmp_path / "products.sqlite"))
+    store.save_product_entry(
+        {
+            "PRODUCT_ID": "P-1",
+            "EAN": "5901",
+            "NAZWA": "ALFA",
+            "TYP": "STOL",
+            "MODEL": "A1",
+            "DODATKI": "MISS",
+        }
+    )
+    store.save_product_entry(
+        {
+            "PRODUCT_ID": "P-2",
+            "EAN": "5902",
+            "NAZWA": "ALFA",
+            "TYP": "STOL",
+            "MODEL": "A2",
+            "DODATKI": "TARGET",
+        }
+    )
+    monkeypatch.setattr(web_data, "get_active_store", lambda: store)
+    monkeypatch.setattr(
+        web_data,
+        "prepare_excel_lists",
+        lambda: (_ for _ in ()).throw(AssertionError("full load")),
+    )
+
+    result = web_data.search_entries(name="ALFA", query="target", limit=1)
+
+    assert [entry["product_id"] for entry in result] == ["P-2"]
+
+
+def test_search_entries_clamps_zero_and_negative_limits(monkeypatch):
+    """Store delegation must keep non-positive product limits bounded."""
+
+    store = Mock()
+    store.search_product_entries.return_value = []
+    monkeypatch.setattr(web_data, "get_active_store", lambda: store)
+
+    web_data.search_entries(limit=0)
+    web_data.search_entries(limit=-1)
+
+    assert [call.kwargs["limit"] for call in store.search_product_entries.call_args_list] == [
+        1,
+        1,
+    ]
+
+
+def test_find_entry_by_ean_uses_store_and_returns_browser_payload(monkeypatch):
+    """Identity lookup must retain the lowercase browser response contract."""
+
+    store = Mock()
+    store.get_product_by_ean.return_value = {
+        "PRODUCT_ID": "P-1",
+        "EAN": "5901",
+        "NAZWA": "ALFA",
+        "TYP": "STOL",
+        "MODEL": "A1",
+        "KOLOR1": "BIALY",
+        "KOLOR2": "",
+        "KOLOR3": "",
+        "DODATKI": "NO-LED",
+    }
+    monkeypatch.setattr(web_data, "get_active_store", lambda: store)
+
+    result = web_data.find_entry_by_identity(ean="5901")
+
+    assert result is not None
+    assert result["product_id"] == "P-1"
+    assert result["ean"] == "5901"
+    assert result["extra"] == "NO-LED"
+    store.get_product_by_ean.assert_called_once_with("5901")
+
+
 def test_field_suggestions_delegates_to_active_store(monkeypatch):
     """Catch a regression to loading all product rows for suggestions."""
 

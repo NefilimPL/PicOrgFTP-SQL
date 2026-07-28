@@ -36,7 +36,7 @@ from .sqlite_connection import (
     try_enable_wal,
 )
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 _WAL_FALLBACK_LOGGER = logging.getLogger("picorgftp_sql.sqlite.wal")
 _WAL_FALLBACK_LOGGER.setLevel(logging.WARNING)
 _WAL_FALLBACK_LOGGER.propagate = False
@@ -88,10 +88,15 @@ _PRODUCT_SEARCH_COLUMNS = {
     "name": "name",
     "type_name": "type_name",
     "model": "model",
+    "color1": "color1",
+    "color2": "color2",
+    "color3": "color3",
+    "extra": "extra",
 }
 _PRODUCT_SEARCH_KEY_COLUMNS = {
     field: f"{column}_key" for field, column in _PRODUCT_SEARCH_COLUMNS.items()
 }
+_PRODUCT_SEARCH_TEXT_KEY_COLUMN = "search_text_key"
 _PRODUCT_ENTRY_COLUMNS = (
     ("product_id", PRODUCT_ID_HEADER),
     ("ean", EAN_HEADER),
@@ -800,23 +805,23 @@ def _migrate_product_entry_search_keys(conn: sqlite3.Connection) -> None:
                 f"ALTER TABLE product_entries ADD COLUMN {key_column} "
                 "TEXT NOT NULL DEFAULT ''"
             )
+    if _PRODUCT_SEARCH_TEXT_KEY_COLUMN not in columns:
+        conn.execute(
+            f"ALTER TABLE product_entries ADD COLUMN {_PRODUCT_SEARCH_TEXT_KEY_COLUMN} "
+            "TEXT NOT NULL DEFAULT ''"
+        )
+    product_columns = tuple(_PRODUCT_SEARCH_COLUMNS.values())
     rows = conn.execute(
-        "SELECT rowid, product_id, ean, name, type_name, model FROM product_entries"
+        f"SELECT rowid, {', '.join(product_columns)} FROM product_entries"
     ).fetchall()
+    assignments = [f"{key_column} = ?" for key_column in _PRODUCT_SEARCH_KEY_COLUMNS.values()]
+    assignments.append(f"{_PRODUCT_SEARCH_TEXT_KEY_COLUMN} = ?")
     for row in rows:
         conn.execute(
-            """
-            UPDATE product_entries
-            SET product_id_key = ?, ean_key = ?, name_key = ?,
-                type_name_key = ?, model_key = ?
-            WHERE rowid = ?
-            """,
+            f"UPDATE product_entries SET {', '.join(assignments)} WHERE rowid = ?",
             (
-                _product_search_key(row["product_id"]),
-                _product_search_key(row["ean"]),
-                _product_search_key(row["name"]),
-                _product_search_key(row["type_name"]),
-                _product_search_key(row["model"]),
+                *(_product_search_key(row[column]) for column in product_columns),
+                " ".join(_product_search_key(row[column]) for column in product_columns),
                 row["rowid"],
             ),
         )
@@ -975,6 +980,11 @@ class SqliteStore:
                     color2 TEXT NOT NULL DEFAULT '',
                     color3 TEXT NOT NULL DEFAULT '',
                     extra TEXT NOT NULL DEFAULT '',
+                    color1_key TEXT NOT NULL DEFAULT '',
+                    color2_key TEXT NOT NULL DEFAULT '',
+                    color3_key TEXT NOT NULL DEFAULT '',
+                    extra_key TEXT NOT NULL DEFAULT '',
+                    search_text_key TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL
                 );
 
@@ -1234,6 +1244,14 @@ class SqliteStore:
                     ON product_entries(type_name_key);
                 CREATE INDEX IF NOT EXISTS idx_product_entries_model_key
                     ON product_entries(model_key);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_color1_key
+                    ON product_entries(color1_key);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_color2_key
+                    ON product_entries(color2_key);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_color3_key
+                    ON product_entries(color3_key);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_extra_key
+                    ON product_entries(extra_key);
                 CREATE INDEX IF NOT EXISTS idx_product_entries_identity_key
                     ON product_entries(name_key, type_name_key, model_key);
                 CREATE INDEX IF NOT EXISTS idx_app_config_values_updated_at
@@ -3529,6 +3547,10 @@ class SqliteStore:
                 if values[field]:
                     clauses.append(f"{key_column} = ?")
                     params.append(values[field])
+        query_key = _product_search_key(getattr(criteria, "query", ""))
+        if query_key:
+            clauses.append(f"instr({_PRODUCT_SEARCH_TEXT_KEY_COLUMN}, ?) > 0")
+            params.append(query_key)
         where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(_bounded_product_query_limit(limit, 50))
         with self.connection() as conn:
@@ -3744,24 +3766,31 @@ class SqliteStore:
             """
             INSERT INTO product_entries (
                 product_id, ean, name, type_name, model,
+                color1, color2, color3, extra,
                 product_id_key, ean_key, name_key, type_name_key, model_key,
-                color1, color2, color3, extra, updated_at
+                color1_key, color2_key, color3_key, extra_key, search_text_key,
+                updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(product_id) DO UPDATE SET
                 ean = excluded.ean,
                 name = excluded.name,
                 type_name = excluded.type_name,
                 model = excluded.model,
+                color1 = excluded.color1,
+                color2 = excluded.color2,
+                color3 = excluded.color3,
+                extra = excluded.extra,
                 product_id_key = excluded.product_id_key,
                 ean_key = excluded.ean_key,
                 name_key = excluded.name_key,
                 type_name_key = excluded.type_name_key,
                 model_key = excluded.model_key,
-                color1 = excluded.color1,
-                color2 = excluded.color2,
-                color3 = excluded.color3,
-                extra = excluded.extra,
+                color1_key = excluded.color1_key,
+                color2_key = excluded.color2_key,
+                color3_key = excluded.color3_key,
+                extra_key = excluded.extra_key,
+                search_text_key = excluded.search_text_key,
                 updated_at = excluded.updated_at
             """,
             (
@@ -3770,15 +3799,23 @@ class SqliteStore:
                 entry[NAME_HEADER],
                 entry[TYPE_HEADER],
                 entry[MODEL_HEADER],
+                entry[COLOR1_HEADER],
+                entry[COLOR2_HEADER],
+                entry[COLOR3_HEADER],
+                entry[EXTRA_HEADER],
                 _product_search_key(entry[PRODUCT_ID_HEADER]),
                 _product_search_key(entry[EAN_HEADER]),
                 _product_search_key(entry[NAME_HEADER]),
                 _product_search_key(entry[TYPE_HEADER]),
                 _product_search_key(entry[MODEL_HEADER]),
-                entry[COLOR1_HEADER],
-                entry[COLOR2_HEADER],
-                entry[COLOR3_HEADER],
-                entry[EXTRA_HEADER],
+                _product_search_key(entry[COLOR1_HEADER]),
+                _product_search_key(entry[COLOR2_HEADER]),
+                _product_search_key(entry[COLOR3_HEADER]),
+                _product_search_key(entry[EXTRA_HEADER]),
+                " ".join(
+                    _product_search_key(entry[header])
+                    for _column, header in _PRODUCT_ENTRY_COLUMNS
+                ),
                 _now_iso(),
             ),
         )

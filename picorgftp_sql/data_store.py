@@ -73,7 +73,11 @@ class LegacyDataStore:
         limit: int = 20,
     ) -> list[str]:
         from .excel_utils import (
+            COLOR1_HEADER,
+            COLOR2_HEADER,
+            COLOR3_HEADER,
             EAN_HEADER,
+            EXTRA_HEADER,
             MODEL_HEADER,
             NAME_HEADER,
             PRODUCT_ID_HEADER,
@@ -86,6 +90,10 @@ class LegacyDataStore:
             "name": NAME_HEADER,
             "type_name": TYPE_HEADER,
             "model": MODEL_HEADER,
+            "color1": COLOR1_HEADER,
+            "color2": COLOR2_HEADER,
+            "color3": COLOR3_HEADER,
+            "extra": EXTRA_HEADER,
         }
         header = headers.get(field)
         if header is None:

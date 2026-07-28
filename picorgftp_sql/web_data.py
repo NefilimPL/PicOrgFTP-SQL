@@ -1508,34 +1508,10 @@ def search_entries(
         name=name,
         type_name=type_name,
         model=model,
+        query=query,
     )
     records = get_active_store().search_product_entries(criteria, limit=bounded_limit)
-    query_norm = _norm(query)
-    matches: list[WebEntry] = []
-    for record in records:
-        entry = _entry_from_record(record)
-        if query_norm:
-            haystack = _norm(
-                " ".join(
-                    [
-                        entry.product_id,
-                        entry.ean,
-                        entry.name,
-                        entry.type_name,
-                        entry.model,
-                        entry.color1,
-                        entry.color2,
-                        entry.color3,
-                        entry.extra,
-                    ]
-                )
-            )
-            if query_norm not in haystack:
-                continue
-        matches.append(entry)
-        if len(matches) >= bounded_limit:
-            break
-    return [entry_to_payload(entry) for entry in matches]
+    return [entry_to_payload(_entry_from_record(record)) for record in records]
 
 
 def find_entry_by_identity(*, product_id: str = "", ean: str = "") -> dict[str, str] | None:

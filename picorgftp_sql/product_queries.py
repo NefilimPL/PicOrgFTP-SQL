@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from picorgftp_sql.excel_utils import (
+    COLOR1_HEADER,
+    COLOR2_HEADER,
+    COLOR3_HEADER,
     EAN_HEADER,
+    EXTRA_HEADER,
     MODEL_HEADER,
     NAME_HEADER,
     PRODUCT_ID_HEADER,
@@ -22,6 +26,7 @@ class ProductSearchCriteria:
     name: str = ""
     type_name: str = ""
     model: str = ""
+    query: str = ""
 
 
 def _key(value: object) -> str:
@@ -29,7 +34,7 @@ def _key(value: object) -> str:
 
 
 def filter_product_records(records, criteria: ProductSearchCriteria, limit: int):
-    """Return bounded, exact matches while preserving record field shapes."""
+    """Return bounded product matches while preserving record field shapes."""
 
     bounded_limit = max(1, min(int(limit), 100))
     result = []
@@ -47,6 +52,22 @@ def filter_product_records(records, criteria: ProductSearchCriteria, limit: int)
         ):
             continue
         if criteria.model and _key(record.get(MODEL_HEADER)) != _key(criteria.model):
+            continue
+        query_key = _key(criteria.query)
+        if query_key and query_key not in " ".join(
+            _key(record.get(header))
+            for header in (
+                PRODUCT_ID_HEADER,
+                EAN_HEADER,
+                NAME_HEADER,
+                TYPE_HEADER,
+                MODEL_HEADER,
+                COLOR1_HEADER,
+                COLOR2_HEADER,
+                COLOR3_HEADER,
+                EXTRA_HEADER,
+            )
+        ):
             continue
         result.append(dict(record))
         if len(result) == bounded_limit:

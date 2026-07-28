@@ -1084,6 +1084,45 @@ def test_product_field_suggestions_validate_context_and_limit_results(tmp_path: 
     assert store.suggest_product_field("unknown", "", {}, limit=20) == []
 
 
+def test_product_query_filters_before_limit_and_suggests_color_and_extra(tmp_path: Path) -> None:
+    """Free-text and every web suggestion field stay selective SQLite queries."""
+
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.save_product_entry(
+        {
+            "EAN": "5901",
+            "NAZWA": "ALFA",
+            "TYP": "STOL",
+            "MODEL": "A1",
+            "KOLOR1": "BIALY",
+            "DODATKI": "MISS",
+            "PRODUCT_ID": "PRD-1",
+        }
+    )
+    store.save_product_entry(
+        {
+            "EAN": "5902",
+            "NAZWA": "ALFA",
+            "TYP": "STOL",
+            "MODEL": "A2",
+            "KOLOR1": "CZARNY",
+            "DODATKI": "TARGET",
+            "PRODUCT_ID": "PRD-2",
+        }
+    )
+
+    assert store.search_product_entries(
+        ProductSearchCriteria(name="ALFA", query="target"), limit=1
+    )[0]["PRODUCT_ID"] == "PRD-2"
+    assert store.suggest_product_field("color1", "", {"name": "ALFA"}) == [
+        "BIALY",
+        "CZARNY",
+    ]
+    assert store.suggest_product_field("extra", "tar", {"name": "ALFA"}) == [
+        "TARGET"
+    ]
+
+
 def test_product_query_key_migration_normalizes_legacy_whitespace_and_casefold(
     tmp_path: Path,
 ) -> None:
