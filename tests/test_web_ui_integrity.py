@@ -182,7 +182,7 @@ console.log(JSON.stringify({{
         ]
         health_level = source[
             source.index("function healthLevel") : source.index(
-                "function scheduleBackendHealthPoll"
+                "async function pollBackendHealth"
             )
         ]
         health_poll = source[
@@ -190,6 +190,9 @@ console.log(JSON.stringify({{
                 "function setBackendHealthDetailsExpanded"
             )
         ]
+        self.assertIn("async function fetchRuntimeStatus()", source)
+        self.assertIn('requestJson("/api/runtime-status")', source)
+        self.assertIn("new PicOrg.RuntimeStatusPoller", source)
         node = Path(r"C:\Program Files\nodejs\node.exe")
         if not node.exists():
             self.skipTest("Node.js is required for the browser health rerender contract test")
@@ -467,7 +470,7 @@ async function requestJson() {{
             self.assertIn(label, brand_source)
 
         health_start = js_source.index("function healthLevel")
-        health_end = js_source.index("function scheduleBackendHealthPoll", health_start)
+        health_end = js_source.index("async function pollBackendHealth", health_start)
         health_source = js_source[health_start:health_end]
         self.assertIn('components.backend?.status !== "online"', health_source)
         self.assertIn('components.sqlite?.status === "critical"', health_source)
@@ -483,6 +486,9 @@ async function requestJson() {{
         self.assertIn("healthFailures >= HEALTH_OFFLINE_FAILURES", js_source)
         self.assertIn("document.hidden", js_source)
         self.assertIn("pollBackendHealth().catch(() => {})", js_source)
+        self.assertIn("async function fetchRuntimeStatus()", js_source)
+        self.assertIn('requestJson("/api/runtime-status")', js_source)
+        self.assertIn("new PicOrg.RuntimeStatusPoller", js_source)
         self.assertNotIn("backendHealthDetailsList.innerHTML", js_source)
         self.assertIn("backendHealthDetailsList.replaceChildren", js_source)
         self.assertIn("observed_at", js_source)
@@ -540,7 +546,7 @@ async function requestJson() {{
     def test_resource_visibility_settings_tests_and_ftp_cache_use_safe_state_paths(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         resource_start = source.index("function renderResourceStatus")
-        resource_end = source.index("function scheduleBackendHealthPoll", resource_start)
+        resource_end = source.index("function healthLevel", resource_start)
         resource_source = source[resource_start:resource_end]
         monitor_start = source.index("function renderSettingsResourceMonitor")
         monitor_end = source.index("function renderSettings()", monitor_start)
@@ -563,6 +569,8 @@ async function requestJson() {{
         self.assertIn("resourceMonitorTestState.pending", monitor_source)
         self.assertIn("resourceMonitorTestState.message", monitor_source)
         self.assertIn("await pollBackendHealth()", monitor_source)
+        self.assertIn("async function fetchRuntimeStatus()", source)
+        self.assertIn("new PicOrg.RuntimeStatusPoller", source)
 
         self.assertIn("const FTP_PREVIEW_CACHE_LIMIT = 120;", source)
         helper_start = source.index("function setFtpPreviewCache")
