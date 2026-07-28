@@ -4201,7 +4201,7 @@ def _remove_active_client(username: str, client_id: str, now: Optional[float] = 
         registry = _active_client_registry_locked()
         removed = registry.remove(username, client_id, now=now)
         if removed:
-            registry.flush(force=True)
+            registry.schedule_flush(force=True)
         return removed
 
 

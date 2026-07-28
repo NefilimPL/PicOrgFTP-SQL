@@ -2346,6 +2346,92 @@ class WebAppFileTests(unittest.TestCase):
             {("admin", "client-b"), ("operator", "client-a")},
         )
 
+    def test_active_client_leave_does_not_wait_for_blocked_writer(self) -> None:
+        writer_started = threading.Event()
+        release_writer = threading.Event()
+        leave_finished = threading.Event()
+        record_finished = threading.Event()
+        leave_results = []
+        errors = []
+        serialized_payloads = []
+
+        def serializer(payload):
+            serialized_payloads.append(payload)
+            if len(serialized_payloads) == 1:
+                writer_started.set()
+                self.assertTrue(release_writer.wait(timeout=5.0))
+            return json.dumps(payload)
+
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/api/bootstrap"),
+            client=SimpleNamespace(host="127.0.0.1", port=12345),
+            headers={"user-agent": "test", web_app.PRESENCE_CLIENT_ID_HEADER: "client-b"},
+            method="GET",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "active.json"
+            registry = web_app.ActiveClientRegistry(path, serializer=serializer)
+            registry.record(
+                {
+                    "username": "admin",
+                    "client_id": "client-a",
+                    "last_seen_epoch": time.time(),
+                }
+            )
+
+            def leave():
+                try:
+                    leave_results.append(
+                        web_app._remove_active_client("admin", "client-a", now=time.time())
+                    )
+                except Exception as exc:
+                    errors.append(exc)
+                finally:
+                    leave_finished.set()
+
+            def record():
+                try:
+                    web_app._record_active_client(request, 200)
+                except Exception as exc:
+                    errors.append(exc)
+                finally:
+                    record_finished.set()
+
+            try:
+                with (
+                    patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", registry),
+                    patch.object(web_app, "_current_user", return_value="admin"),
+                ):
+                    leave_thread = threading.Thread(target=leave)
+                    leave_thread.start()
+                    self.assertTrue(writer_started.wait(timeout=5.0))
+
+                    record_thread = threading.Thread(target=record)
+                    record_thread.start()
+                    leave_returned_before_writer_release = leave_finished.wait(timeout=0.2)
+                    record_returned_before_writer_release = record_finished.wait(timeout=0.2)
+
+                    release_writer.set()
+                    leave_thread.join(timeout=5.0)
+                    record_thread.join(timeout=5.0)
+                    self.assertFalse(leave_thread.is_alive())
+                    self.assertFalse(record_thread.is_alive())
+                    registry.flush(force=True)
+            finally:
+                release_writer.set()
+                registry.close(timeout=5.0)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertTrue(leave_returned_before_writer_release)
+        self.assertTrue(record_returned_before_writer_release)
+        self.assertEqual(leave_results, [1])
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            {(item["username"], item["client_id"]) for item in payload},
+            {("admin", "client-b")},
+        )
+
     def test_record_active_client_only_records_and_schedules_writer(self) -> None:
         write_started = threading.Event()
         release_write = threading.Event()
