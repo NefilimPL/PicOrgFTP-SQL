@@ -252,6 +252,34 @@ class WebAppFileTests(unittest.TestCase):
                 for call in emit_event.call_args_list
             )
         )
+        stage_events = [
+            call.kwargs
+            for call in emit_event.call_args_list
+            if call.kwargs["event_type"] == "process.stage_started"
+        ]
+        stage_keys = [
+            (event["job_id"], event["stage"]) for event in stage_events
+        ]
+        self.assertEqual(len(stage_keys), len(set(stage_keys)))
+
+    def test_process_stage_started_once_for_repeated_stage(self) -> None:
+        emitted_stages: set[str] = set()
+
+        with patch.object(web_app, "emit_event") as emit_event:
+            for percent in (4, 8):
+                web_app._emit_process_stage_started_once(
+                    emitted_stages,
+                    current_key="prepare",
+                    current_label="Przygotowanie",
+                    percent=percent,
+                    label="Przygotowanie danych",
+                    username="alice",
+                    job_id="job-repeat",
+                )
+
+        emit_event.assert_called_once()
+        self.assertEqual(emit_event.call_args.kwargs["job_id"], "job-repeat")
+        self.assertEqual(emit_event.call_args.kwargs["stage"], "prepare")
 
     def test_existing_photo_snapshot_captures_size_before_local_mutation(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]

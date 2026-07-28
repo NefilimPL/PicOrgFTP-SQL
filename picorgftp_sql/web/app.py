@@ -3000,6 +3000,31 @@ def _emit_process_integration_events(
         )
 
 
+def _emit_process_stage_started_once(
+    emitted_stages: Set[str],
+    *,
+    current_key: str,
+    current_label: str,
+    percent: int,
+    label: str,
+    username: str,
+    job_id: str,
+) -> None:
+    if not current_key or current_key in emitted_stages:
+        return
+    emitted_stages.add(current_key)
+    emit_event(
+        severity="info",
+        event_type="process.stage_started",
+        module="web.process",
+        stage=current_key,
+        username=username,
+        job_id=job_id,
+        summary=current_label or label,
+        details={"percent": percent, "label": label},
+    )
+
+
 def _process_upload_snapshot(
     *,
     username: str,
@@ -3010,6 +3035,8 @@ def _process_upload_snapshot(
         Callable[[int, str, List[Dict[str, Any]], Optional[Dict[str, Any]]], None]
     ] = None,
 ) -> Dict[str, Any]:
+    emitted_stages: Set[str] = set()
+
     def mark(
         percent: int,
         label: str,
@@ -3017,17 +3044,15 @@ def _process_upload_snapshot(
         current_key: str = "",
         current_label: str = "",
     ) -> None:
-        if current_key:
-            emit_event(
-                severity="info",
-                event_type="process.stage_started",
-                module="web.process",
-                stage=current_key,
-                username=username,
-                job_id=job_id,
-                summary=current_label or label,
-                details={"percent": percent, "label": label},
-            )
+        _emit_process_stage_started_once(
+            emitted_stages,
+            current_key=current_key,
+            current_label=current_label,
+            percent=percent,
+            label=label,
+            username=username,
+            job_id=job_id,
+        )
         if progress:
             current_stage = None
             if current_key:
