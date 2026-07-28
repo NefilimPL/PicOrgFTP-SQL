@@ -48,6 +48,48 @@ class _MemoryUpload:
 
 
 class WebAppFileTests(unittest.TestCase):
+    def test_process_job_progress_coalesces_percent_only_snapshots(self) -> None:
+        """Persisting every progress tick would make this test exceed three writes."""
+        job_id = "progress-gate-100-updates"
+        job = web_app._new_process_job(
+            username="alice",
+            cache_scope="scope",
+            form=web_app._ProcessFormSnapshot(),
+            status="running",
+        )
+        job["id"] = job_id
+        with web_app._PROCESS_JOBS_LOCK:
+            web_app._PROCESS_JOBS[job_id] = job
+
+        try:
+            with (
+                patch.object(web_app, "_persist_process_job") as persist,
+                patch.object(
+                    web_app.time,
+                    "monotonic",
+                    side_effect=[index / 100 for index in range(100)],
+                ),
+            ):
+                for percent in range(1, 101):
+                    web_app._set_process_job_progress(
+                        job_id,
+                        percent,
+                        "Przetwarzanie obrazow",
+                        current_stage={"key": "images", "label": "Obrazy"},
+                    )
+
+            with web_app._PROCESS_JOBS_LOCK:
+                current = dict(web_app._PROCESS_JOBS[job_id])
+            self.assertEqual(current["progress"], 100)
+            self.assertEqual(current["progress_label"], "Przetwarzanie obrazow")
+            self.assertLessEqual(persist.call_count, 3)
+        finally:
+            with web_app._PROCESS_JOBS_LOCK:
+                web_app._PROCESS_JOBS.pop(job_id, None)
+            gate = getattr(web_app, "_PROCESS_PROGRESS_GATE", None)
+            if gate is not None:
+                gate.forget(job_id)
+
     def test_application_lifecycle_starts_and_stops_notification_worker(self) -> None:
         source = inspect.getsource(web_app.create_app)
 

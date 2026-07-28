@@ -87,6 +87,7 @@ from ..services.pimcore_service import PimcoreApiError, PimcoreConflictError
 from ..services.sql_service import detect_available_columns, extract_presence_context
 from ..sqlite_maintenance import repair_sqlite_database
 from ..workflow_utils import build_product_directory, parse_slot_filename, sanitize_path_segment
+from .process_progress import ProcessProgressGate
 from ..web_image_import import (
     ImageImportError,
     discover_image_candidates,
@@ -190,6 +191,7 @@ _PROCESS_JOB_MAX_COMPLETED = 200
 _PROCESS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="picorg-process")
 _PROCESS_JOBS: Dict[str, Dict[str, Any]] = {}
 _PROCESS_JOBS_LOCK = threading.Lock()
+_PROCESS_PROGRESS_GATE = ProcessProgressGate()
 _ACTIVE_CLIENTS: Dict[str, Dict[str, Any]] = {}
 _ACTIVE_CLIENTS_LOCK = threading.Lock()
 _ACTIVE_CLIENTS_LOADED = False
@@ -3678,6 +3680,34 @@ def _persist_process_job(job: Dict[str, Any]) -> None:
         pass
 
 
+def _process_job_stage(job: Dict[str, Any]) -> str:
+    current_stage = job.get("current_stage")
+    if isinstance(current_stage, dict):
+        return str(
+            current_stage.get("key")
+            or current_stage.get("label")
+            or job.get("progress_label")
+            or ""
+        )
+    return str(job.get("progress_label") or "")
+
+
+def _persist_process_job_snapshot(
+    job: Dict[str, Any], *, force: bool = False, forget: bool = False
+) -> None:
+    job_id = str(job.get("id") or "")
+    if _PROCESS_PROGRESS_GATE.should_persist(
+        job_id,
+        stage=_process_job_stage(job),
+        status=str(job.get("status") or "queued"),
+        now=time.monotonic(),
+        force=force,
+    ):
+        _persist_process_job(job)
+    if forget:
+        _PROCESS_PROGRESS_GATE.forget(job_id)
+
+
 def _update_process_job_progress(
     job: Dict[str, Any],
     percent: int,
@@ -3708,7 +3738,7 @@ def _set_process_job_progress(
             return
         _update_process_job_progress(job, percent, label, stages, current_stage)
         durable_job = dict(job)
-    _persist_process_job(durable_job)
+    _persist_process_job_snapshot(durable_job)
 
 
 def _new_process_job(
@@ -3922,7 +3952,7 @@ def _run_process_job(job_id: str) -> None:
             warning_messages = _finish_process_job_success(job, payload)
             _cleanup_process_jobs_locked(now=float(job["finished_at"]))
             durable_job = dict(job)
-        _persist_process_job(durable_job)
+        _persist_process_job_snapshot(durable_job, force=True, forget=True)
         _emit_process_completed(durable_job, payload, warning_messages)
     except Exception as exc:
         with _PROCESS_JOBS_LOCK:
@@ -3932,7 +3962,7 @@ def _run_process_job(job_id: str) -> None:
             message, status_code, severity = _finish_process_job_failure(job, exc)
             _cleanup_process_jobs_locked(now=float(job["finished_at"]))
             durable_job = dict(job)
-        _persist_process_job(durable_job)
+        _persist_process_job_snapshot(durable_job, force=True, forget=True)
         _emit_process_failed(
             durable_job,
             exc,
@@ -6712,7 +6742,7 @@ def create_app() -> FastAPI:
             _update_process_job_progress(
                 job, percent, label, stages, current_stage
             )
-            _persist_process_job(dict(job))
+            _persist_process_job_snapshot(dict(job))
 
         try:
             payload = await run_in_threadpool(
@@ -6727,7 +6757,7 @@ def create_app() -> FastAPI:
         except Exception as exc:
             message, status_code, severity = _finish_process_job_failure(job, exc)
             durable_job = dict(job)
-            _persist_process_job(durable_job)
+            _persist_process_job_snapshot(durable_job, force=True, forget=True)
             _emit_process_failed(
                 durable_job,
                 exc,
@@ -6738,7 +6768,7 @@ def create_app() -> FastAPI:
             raise
         warning_messages = _finish_process_job_success(job, payload)
         durable_job = dict(job)
-        _persist_process_job(durable_job)
+        _persist_process_job_snapshot(durable_job, force=True, forget=True)
         _emit_process_completed(durable_job, payload, warning_messages)
         return JSONResponse(payload)
     return app
