@@ -54,6 +54,7 @@ from .common import (
     w,
 )
 from .config import save_config
+from .data_store import get_active_store
 from .email_settings import (
     EMAIL_CLIENT_SECRET,
     EMAIL_SETTINGS_KEY,
@@ -142,6 +143,7 @@ from .product_fields import (
     missing_required_fields,
     normalize_product_fields,
 )
+from .product_queries import ProductSearchCriteria
 
 from .workflow_utils import (
     build_product_directory,
@@ -948,17 +950,53 @@ def _dedupe(values: list[object], *, limit: int = 200) -> list[str]:
     return result
 
 
-def field_suggestions(field: str, payload: dict[str, object]) -> list[str]:
+PRODUCT_QUERY_MAX_LIMIT = 100
+
+
+def _bounded_product_query_limit(limit: object, *, default: int) -> int:
+    """Return a positive, server-bounded product query limit."""
+
+    try:
+        requested = int(limit)
+    except (TypeError, ValueError):
+        requested = default
+    return max(1, min(requested, PRODUCT_QUERY_MAX_LIMIT))
+
+
+def _product_suggestion_context(field: str, payload: dict[str, object]) -> dict[str, str]:
+    """Return the non-target product fields that narrow a suggestion query."""
+
+    return {
+        key: "" if key == field else _text(payload.get(key))
+        for key in ("product_id", "ean", "name", "type_name", "model")
+    }
+
+
+def field_suggestions(
+    field: str,
+    payload: dict[str, object],
+    *,
+    limit: int = PRODUCT_QUERY_MAX_LIMIT,
+) -> list[str]:
     """Return context-aware suggestions, with existing product data first."""
 
-    lists = prepare_excel_lists()
-    entries = [_entry_from_record(item) for item in lists.get(ENTRY_RECORDS_KEY, [])]
+    store = get_active_store()
+    bounded_limit = _bounded_product_query_limit(limit, default=PRODUCT_QUERY_MAX_LIMIT)
+    prefix = _text(payload.get(field))
+    context = _product_suggestion_context(field, payload)
     name = _text(payload.get("name"))
     type_name = _text(payload.get("type_name"))
     model = _text(payload.get("model"))
     colors = [_text(payload.get("color1")), _text(payload.get("color2")), _text(payload.get("color3"))]
     extra = _text(payload.get("extra"))
-    existing: list[object] = []
+    existing: list[object] = store.suggest_product_field(
+        field,
+        prefix,
+        context,
+        limit=bounded_limit,
+    )
+    workbook: list[object] = []
+    entries: list[WebEntry] = []
 
     def _entry_context(entry: WebEntry, *, through: str) -> bool:
         if through in {"type_name", "model", "color", "extra"} and name and not _matches_field(entry.name, name):
@@ -972,45 +1010,57 @@ def field_suggestions(field: str, payload: dict[str, object]) -> list[str]:
     index = _get_file_index(start=True)
     if field == "name":
         if index is not None and index.has_snapshot():
-            existing.extend(index.get_names())
-        existing.extend(entry.name for entry in entries)
-        workbook = lists.get(LIST_SHEETS["names"], [])
+            existing = [*index.get_names(), *existing]
+        workbook_key = "names"
     elif field == "type_name":
         if index is not None and index.has_snapshot():
             indexed = index.get_types(name)
             if indexed:
-                existing.extend(indexed)
-        existing.extend(entry.type_name for entry in entries if _entry_context(entry, through="type_name"))
-        workbook = lists.get(LIST_SHEETS["types"], [])
+                existing = [*indexed, *existing]
+        workbook_key = "types"
     elif field == "model":
         if index is not None and index.has_snapshot():
             indexed = index.get_models(name, type_name)
             if indexed:
-                existing.extend(indexed)
-        existing.extend(entry.model for entry in entries if _entry_context(entry, through="model"))
-        workbook = lists.get(LIST_SHEETS["models"], [])
+                existing = [*indexed, *existing]
+        workbook_key = "models"
     elif field in {"color1", "color2", "color3"}:
         if index is not None and index.has_snapshot():
             indexed = index.get_colors(name, type_name, model)
             if indexed:
+                indexed_colors = []
                 for item in indexed:
-                    existing.extend(str(item).replace("_", "-").split("-"))
-        for entry in entries:
-            if _entry_context(entry, through="color"):
-                existing.extend([entry.color1, entry.color2, entry.color3])
-        workbook = lists.get(LIST_SHEETS["colors"], [])
+                    indexed_colors.extend(str(item).replace("_", "-").split("-"))
+                existing = [*indexed_colors, *existing]
+        workbook_key = "colors"
     elif field == "extra":
         if index is not None and index.has_snapshot():
             indexed = index.get_extras(name, type_name, model, colors)
             if indexed:
-                existing.extend(indexed)
-        existing.extend(entry.extra for entry in entries if _entry_context(entry, through="extra"))
-        workbook = lists.get(LIST_SHEETS["extras"], [])
+                existing = [*indexed, *existing]
+        workbook_key = "extras"
     else:
-        workbook = []
+        workbook_key = ""
+
+    if getattr(store, "mode", "") != storage_settings.DATA_MODE_SQLITE:
+        lists = prepare_excel_lists()
+        entries = [_entry_from_record(item) for item in lists.get(ENTRY_RECORDS_KEY, [])]
+        if field in {"color1", "color2", "color3"}:
+            existing.extend(
+                color
+                for entry in entries
+                if _entry_context(entry, through="color")
+                for color in (entry.color1, entry.color2, entry.color3)
+            )
+        elif field == "extra":
+            existing.extend(
+                entry.extra for entry in entries if _entry_context(entry, through="extra")
+            )
+        if workbook_key:
+            workbook = list(lists.get(LIST_SHEETS[workbook_key], []) or [])
     if field == "extra" and not extra:
         existing.insert(0, "NO-LED")
-    return _dedupe([*existing, *list(workbook or [])])
+    return _dedupe([*existing, *workbook], limit=bounded_limit)
 
 
 def _public_user(user: dict[str, object]) -> dict[str, object]:
@@ -1451,57 +1501,30 @@ def search_entries(
 ) -> list[dict[str, str]]:
     """Search saved product entries by EAN, product id or form fields."""
 
-    entries = [_entry_from_record(item) for item in prepare_excel_lists().get(ENTRY_RECORDS_KEY, [])]
-    ean_norm = _norm(ean)
-    product_id_norm = _norm(product_id)
-    query_norm = _norm(query)
-    matches: list[WebEntry] = []
-    for entry in entries:
-        if product_id_norm and _norm(entry.product_id) != product_id_norm:
-            continue
-        if ean_norm and _norm(entry.ean) != ean_norm:
-            continue
-        if not _matches_field(entry.name, name):
-            continue
-        if not _matches_field(entry.type_name, type_name):
-            continue
-        if not _matches_field(entry.model, model):
-            continue
-        if query_norm:
-            haystack = _norm(
-                " ".join(
-                    [
-                        entry.product_id,
-                        entry.ean,
-                        entry.name,
-                        entry.type_name,
-                        entry.model,
-                        entry.color1,
-                        entry.color2,
-                        entry.color3,
-                        entry.extra,
-                    ]
-                )
-            )
-            if query_norm not in haystack:
-                continue
-        matches.append(entry)
-        if len(matches) >= limit:
-            break
-    return [entry_to_payload(entry) for entry in matches]
+    bounded_limit = _bounded_product_query_limit(limit, default=30)
+    criteria = ProductSearchCriteria(
+        ean=ean,
+        product_id=product_id,
+        name=name,
+        type_name=type_name,
+        model=model,
+        query=query,
+    )
+    records = get_active_store().search_product_entries(criteria, limit=bounded_limit)
+    return [entry_to_payload(_entry_from_record(record)) for record in records]
 
 
 def find_entry_by_identity(*, product_id: str = "", ean: str = "") -> dict[str, str] | None:
     """Return one saved entry by product id or EAN."""
 
+    store = get_active_store()
+    record = None
     if _text(product_id):
-        matches = search_entries(product_id=product_id, limit=1)
-        if matches:
-            return matches[0]
-    if _text(ean) and _text(ean).upper() != NO_EAN_PLACEHOLDER:
-        matches = search_entries(ean=ean, limit=1)
-        if matches:
-            return matches[0]
+        record = store.get_product_by_id(product_id)
+    elif _text(ean) and _text(ean).upper() != NO_EAN_PLACEHOLDER:
+        record = store.get_product_by_ean(ean)
+    if record:
+        return entry_to_payload(_entry_from_record(record))
     return None
 
 
@@ -1523,9 +1546,7 @@ def save_web_entry(payload: dict[str, object]) -> dict[str, object]:
         )
     product_id = _text(payload.get("product_id"))
     ean = _text(payload.get("ean"))
-    existing = find_entry_by_identity(product_id=product_id) if product_id else None
-    if existing is None and ean and ean.upper() != NO_EAN_PLACEHOLDER:
-        existing = find_entry_by_identity(ean=ean)
+    existing = find_entry_by_identity(product_id=product_id, ean=ean)
     if existing:
         product_id = product_id or _text(existing.get("product_id"))
         if field_settings["ean"]["enabled"] and not ean and _text(existing.get("ean")):

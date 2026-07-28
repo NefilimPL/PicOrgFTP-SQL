@@ -11,10 +11,12 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
+from picorgftp_sql import web_data
 from picorgftp_sql.web import app as web_app
 
 try:
@@ -48,6 +50,30 @@ class _MemoryUpload:
 
 
 class WebAppFileTests(unittest.TestCase):
+    def test_product_query_endpoints_clamp_limit_before_store_delegation(self) -> None:
+        """Requests above 100 must not widen the delegated product queries."""
+
+        client = TestClient(web_app.app)
+        store = Mock()
+        store.mode = "sqlite"
+        store.search_product_entries.return_value = []
+        store.suggest_product_field.return_value = []
+        with (
+            patch.object(web_app, "_require_user", return_value="operator"),
+            patch.object(web_data, "get_active_store", return_value=store),
+            patch.object(web_data, "_get_file_index", return_value=None),
+            patch.object(web_app, "search_entries", web_data.search_entries),
+            patch.object(web_app, "field_suggestions", web_data.field_suggestions),
+            patch.object(web_app, "file_index_status", return_value={}),
+        ):
+            search_response = client.get("/api/entries/search?ean=5901&limit=999")
+            suggestion_response = client.get("/api/suggestions?field=name&name=al&limit=999")
+
+        self.assertEqual(search_response.status_code, 200)
+        self.assertEqual(suggestion_response.status_code, 200)
+        self.assertEqual(store.search_product_entries.call_args.kwargs["limit"], 100)
+        self.assertEqual(store.suggest_product_field.call_args.kwargs["limit"], 100)
+
     def test_process_job_progress_coalesces_percent_only_snapshots(self) -> None:
         """Persisting every progress tick would make this test exceed three writes."""
         job_id = "progress-gate-100-updates"
