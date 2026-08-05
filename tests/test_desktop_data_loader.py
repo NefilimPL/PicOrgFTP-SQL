@@ -14,42 +14,93 @@ from picorgftp_sql.desktop_data_loader import (
 
 
 def test_loader_posts_result_through_scheduler():
+    caller_thread = threading.get_ident()
     scheduled = []
     received = []
     errors = []
+
+    def schedule(callback):
+        scheduled.append(callback)
+        received.append(("schedule", threading.get_ident()))
+
     loader = DesktopDataLoader(
         load=lambda: DesktopDataSnapshot(lists={"NAZWY": ["ALFA"]}, entries=()),
-        schedule=lambda callback: scheduled.append(callback),
+        schedule=schedule,
     )
 
     assert loader.start(
-        on_success=lambda snapshot: received.append(snapshot),
+        on_success=lambda snapshot: received.append(
+            ("success", threading.get_ident(), snapshot)
+        ),
         on_error=errors.append,
     )
     loader.join_for_test(timeout=1.0)
 
-    assert received == []
-    scheduled[0]()
-    assert received[0].lists["NAZWY"] == ["ALFA"]
+    assert received == [("schedule", caller_thread)]
+    scheduled.pop(0)()
+    assert received[1][0:2] == ("success", caller_thread)
+    assert received[1][2].lists["NAZWY"] == ["ALFA"]
 
 
 def test_loader_posts_error_through_scheduler():
+    caller_thread = threading.get_ident()
     scheduled = []
     received = []
+    scheduler_threads = []
     failure = RuntimeError("data unavailable")
 
     def fail_load():
         raise failure
 
-    loader = DesktopDataLoader(load=fail_load, schedule=scheduled.append)
+    def schedule(callback):
+        scheduler_threads.append(threading.get_ident())
+        scheduled.append(callback)
 
-    assert loader.start(on_success=received.append, on_error=received.append)
+    loader = DesktopDataLoader(load=fail_load, schedule=schedule)
+
+    assert loader.start(
+        on_success=received.append,
+        on_error=lambda error: received.append((threading.get_ident(), error)),
+    )
     loader.join_for_test(timeout=1.0)
 
     assert received == []
+    assert scheduler_threads == [caller_thread]
     assert len(scheduled) == 1
-    scheduled[0]()
-    assert received == [failure]
+    scheduled.pop(0)()
+    assert received == [(caller_thread, failure)]
+
+
+def test_loader_reschedules_empty_poll_only_from_caller_thread():
+    caller_thread = threading.get_ident()
+    release_load = threading.Event()
+    load_started = threading.Event()
+    scheduled = []
+    scheduler_threads = []
+    received = []
+
+    def slow_load():
+        load_started.set()
+        release_load.wait(timeout=1.0)
+        return DesktopDataSnapshot(lists={}, entries=())
+
+    def schedule(callback):
+        scheduler_threads.append(threading.get_ident())
+        scheduled.append(callback)
+
+    loader = DesktopDataLoader(load=slow_load, schedule=schedule)
+
+    assert loader.start(on_success=received.append, on_error=received.append)
+    assert load_started.wait(timeout=1.0)
+    scheduled.pop(0)()
+
+    assert received == []
+    assert scheduler_threads == [caller_thread, caller_thread]
+
+    release_load.set()
+    loader.join_for_test(timeout=1.0)
+    scheduled.pop(0)()
+    assert len(received) == 1
 
 
 def test_loader_rejects_second_start_while_load_is_running():

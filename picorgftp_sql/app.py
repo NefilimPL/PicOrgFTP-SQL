@@ -465,7 +465,12 @@ class App(BU.Tk):
         """Toggle controls that require the complete product snapshot."""
 
         state = X if enabled else V
-        for attr in ("btn_submit", "btn_search_entry", "btn_edit_lists"):
+        for attr in (
+            "btn_submit",
+            "btn_search_entry",
+            "btn_new_search",
+            "btn_edit_lists",
+        ):
             widget = Aj(A, attr, I)
             if widget is not I:
                 widget.configure(state=state)
@@ -474,6 +479,11 @@ class App(BU.Tk):
                 text=LANG.get("search_entry_button", "Wyszukaj"),
                 command=A._search_current_entry,
             )
+
+    def _desktop_product_actions_available(A):
+        """Return whether routes backed by desktop product data may run."""
+
+        return not Aj(A, "data_loading", h) and Aj(A, "desktop_data_ready", J)
 
     def _start_desktop_data_loading(A):
         """Start loading product data after the main UI has been built."""
@@ -2202,6 +2212,8 @@ class App(BU.Tk):
     def _search_current_entry(A):
         """Load a saved record by Product ID, EAN or the current form values."""
 
+        if not A._desktop_product_actions_available():
+            return
         ean = G(A.var_ean.get() or B).strip().upper()
         if ean:
             record = A.entries.get(ean)
@@ -2274,6 +2286,8 @@ class App(BU.Tk):
     def _start_new_search(A):
         """Clear the form and switch back to an empty search state."""
 
+        if not A._desktop_product_actions_available():
+            return
         if A.is_processing:
             O.showwarning(OPERATION_TITLE, PROCESSING_MSG)
             return

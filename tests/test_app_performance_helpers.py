@@ -59,6 +59,32 @@ class _ButtonStub:
             self.command()
 
 
+class _ProductActionRouteHarness:
+    _desktop_product_actions_available = App._desktop_product_actions_available
+
+    def __init__(self, *, data_loading: bool, desktop_data_ready: bool) -> None:
+        self.data_loading = data_loading
+        self.desktop_data_ready = desktop_data_ready
+        self.is_processing = False
+        self.var_ean = _VariableStub("590")
+        self.var_product_id = _VariableStub("")
+        self.entries = {"590": {"NAZWA": "ALFA"}}
+        self.entries_by_id = {}
+        self.combo_name = object()
+        self.loaded_records = []
+        self.new_entry_modes = []
+        self.focused_widgets = []
+
+    def _load_entry_record(self, record) -> None:
+        self.loaded_records.append(record)
+
+    def _activate_new_entry_mode(self, keep_values=True) -> None:
+        self.new_entry_modes.append(keep_values)
+
+    def _focus_widget(self, widget) -> None:
+        self.focused_widgets.append(widget)
+
+
 class _StyleStub:
     def theme_use(self, _theme: str) -> None:
         return None
@@ -356,6 +382,7 @@ class AppPerformanceHelperTests(unittest.TestCase):
                 self.assertTrue(app.data_loading)
                 self.assertEqual(app.btn_submit.state, "disabled")
                 self.assertEqual(app.btn_search_entry.state, "disabled")
+                self.assertEqual(app.btn_new_search.state, "disabled")
                 self.assertEqual(app.btn_edit_lists.state, "disabled")
             finally:
                 release_load.set()
@@ -370,6 +397,7 @@ class AppPerformanceHelperTests(unittest.TestCase):
         self.assertEqual(app.entry_records, [record])
         self.assertEqual(app.btn_submit.state, "normal")
         self.assertEqual(app.btn_search_entry.state, "normal")
+        self.assertEqual(app.btn_new_search.state, "normal")
         self.assertEqual(app.btn_edit_lists.state, "normal")
 
     def test_desktop_data_failure_keeps_ui_available_and_retryable(self) -> None:
@@ -402,6 +430,7 @@ class AppPerformanceHelperTests(unittest.TestCase):
             self.assertFalse(app.desktop_data_ready)
             self.assertEqual(app.btn_submit.state, "disabled")
             self.assertEqual(app.btn_search_entry.state, "normal")
+            self.assertEqual(app.btn_new_search.state, "disabled")
             self.assertEqual(len(app.handled_errors), 1)
 
             app.btn_search_entry.invoke()
@@ -419,6 +448,32 @@ class AppPerformanceHelperTests(unittest.TestCase):
         self.assertFalse(app.data_loading)
         self.assertTrue(app.desktop_data_ready)
         self.assertEqual(app.lists["NAZWY"], ["BETA"])
+
+    def test_ean_return_and_new_search_routes_are_blocked_while_loading(self) -> None:
+        harness = _ProductActionRouteHarness(
+            data_loading=True,
+            desktop_data_ready=False,
+        )
+
+        App._search_current_entry(harness)
+        App._start_new_search(harness)
+
+        self.assertEqual(harness.loaded_records, [])
+        self.assertEqual(harness.new_entry_modes, [])
+        self.assertEqual(harness.focused_widgets, [])
+
+    def test_ean_return_and_new_search_routes_are_blocked_after_load_error(self) -> None:
+        harness = _ProductActionRouteHarness(
+            data_loading=False,
+            desktop_data_ready=False,
+        )
+
+        App._search_current_entry(harness)
+        App._start_new_search(harness)
+
+        self.assertEqual(harness.loaded_records, [])
+        self.assertEqual(harness.new_entry_modes, [])
+        self.assertEqual(harness.focused_widgets, [])
 
     def test_thumbnail_queue_capacity_covers_two_visible_memory_windows(self) -> None:
         self.assertEqual(

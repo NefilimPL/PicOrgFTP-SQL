@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import queue
 import threading
 from typing import Callable
 
@@ -41,6 +42,7 @@ class DesktopDataLoader:
         self._thread = None
         self._lock = threading.Lock()
         self._running = False
+        self._results = queue.Queue()
 
     def start(self, on_success: Callable, on_error: Callable) -> bool:
         with self._lock:
@@ -52,13 +54,12 @@ class DesktopDataLoader:
             try:
                 snapshot = self._load()
             except Exception as error:
-                callback = lambda error=error: on_error(error)
+                result = (on_error, error)
             else:
-                callback = lambda snapshot=snapshot: on_success(snapshot)
-            finally:
-                with self._lock:
-                    self._running = False
-            self._schedule(callback)
+                result = (on_success, snapshot)
+            self._results.put(result)
+            with self._lock:
+                self._running = False
 
         thread = threading.Thread(
             target=worker,
@@ -66,8 +67,25 @@ class DesktopDataLoader:
             daemon=True,
         )
         self._thread = thread
+        try:
+            self._schedule(self._deliver_pending_result)
+        except Exception:
+            with self._lock:
+                self._running = False
+            raise
         thread.start()
         return True
+
+    def _deliver_pending_result(self) -> None:
+        try:
+            callback, value = self._results.get_nowait()
+        except queue.Empty:
+            with self._lock:
+                running = self._running
+            if running or not self._results.empty():
+                self._schedule(self._deliver_pending_result)
+            return
+        callback(value)
 
     def join_for_test(self, timeout: float | None = None) -> None:
         thread = self._thread
