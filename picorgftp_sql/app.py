@@ -28,6 +28,11 @@ from .excel_utils import (
     slot_filename_label,
 )
 from .logging_utils import log_error, log_error_loc, log_info, log_info_loc, set_app
+from .desktop_data_loader import (
+    DesktopDataLoader,
+    DesktopDataSnapshot,
+    load_desktop_data,
+)
 from .system_utils import get_file_lock_user, is_admin
 from .database import connect_db
 from .file_index import LocalFileIndex
@@ -261,9 +266,11 @@ class App(BU.Tk):
             "uploading": LANG.get("slot_status_uploading", "Wysylanie"),
             "processing": LANG.get("slot_status_processing", "Przetwarzanie"),
         }
-        D_ = prepare_excel_lists()
-        if not isinstance(D_, dict):
-            D_ = {}
+        B.data_loading = J
+        B.desktop_data_ready = h
+        B.desktop_data_error = I
+        B._desktop_data_snapshot = I
+        D_ = {}
         B.entries = {}
         B.entry_records = []
         B.entries_by_id = {}
@@ -434,6 +441,7 @@ class App(BU.Tk):
                 tracked_var.trace_add("write", B._queue_form_change_refresh)
         B._load_slot_config()
         B._build_form()
+        B._set_desktop_data_actions_enabled(h)
         B._build_slots()
         B._slot_index_by_prefix = {
             slot["prefix"]: idx for idx, slot in A0(B.slot_definitions)
@@ -447,11 +455,164 @@ class App(BU.Tk):
         B.after(150, B._start_file_index_refresh)
         set_app(B)
         B._install_exception_handlers()
+        B._desktop_data_loader = DesktopDataLoader(
+            load=load_desktop_data,
+            schedule=B.after,
+            cancel_schedule=B.after_cancel,
+        )
+        B._start_desktop_data_loading()
+
+    def _set_desktop_data_actions_enabled(A, enabled):
+        """Toggle controls that require the complete product snapshot."""
+
+        state = X if enabled else V
+        for attr in (
+            "btn_submit",
+            "btn_search_entry",
+            "btn_new_search",
+            "btn_edit_lists",
+        ):
+            widget = Aj(A, attr, I)
+            if widget is not I:
+                widget.configure(state=state)
+        if enabled and Aj(A, "btn_search_entry", I) is not I:
+            A.btn_search_entry.configure(
+                text=LANG.get("search_entry_button", "Wyszukaj"),
+                command=A._search_current_entry,
+            )
+
+    def _desktop_product_actions_available(A):
+        """Return whether routes backed by desktop product data may run."""
+
+        return not Aj(A, "data_loading", h) and Aj(A, "desktop_data_ready", J)
+
+    def _start_desktop_data_loading(A):
+        """Start loading product data after the main UI has been built."""
+
+        loader = Aj(A, "_desktop_data_loader", I)
+        if loader is I:
+            return h
+        A.data_loading = J
+        A.desktop_data_ready = h
+        A.desktop_data_error = I
+        A._set_desktop_data_actions_enabled(h)
+        return loader.start(
+            on_success=A._apply_desktop_data_snapshot,
+            on_error=A._handle_desktop_data_error,
+        )
+
+    def _apply_desktop_data_snapshot(A, snapshot):
+        """Publish one complete data snapshot from the Tk event thread."""
+
+        if not isinstance(snapshot, DesktopDataSnapshot):
+            A._handle_desktop_data_error(TypeError("Invalid desktop data snapshot"))
+            return
+
+        next_lists = dict(snapshot.lists) if isinstance(snapshot.lists, dict) else {}
+        indexed_names = A.lists.get(n, []) if isinstance(A.lists, dict) else []
+        for key in (n, t, s, Y, d):
+            if not isinstance(next_lists.get(key), list):
+                next_lists[key] = []
+        next_lists[n], indexed_name_count = A._merge_existing_lookup_values(
+            indexed_names,
+            next_lists[n],
+        )
+
+        next_entries = next_lists.get(W, {})
+        if not isinstance(next_entries, dict):
+            next_entries = {}
+        next_records = [record for record in snapshot.entries if isinstance(record, dict)]
+        next_lists[ENTRY_RECORDS_KEY] = next_records
+        next_entries_by_id = {
+            G(record.get(PRODUCT_ID_HEADER) or B).strip().upper(): record
+            for record in next_records
+            if G(record.get(PRODUCT_ID_HEADER) or B).strip()
+        }
+        next_value_sets = {}
+        for key in (n, t, s, Y, d):
+            next_value_sets[key] = {
+                normalized
+                for value in next_lists[key]
+                if (normalized := A._normalize_list_value(key, value))
+            }
+
+        A._desktop_data_snapshot = snapshot
+        (
+            A.lists,
+            A.entries,
+            A.entry_records,
+            A.entries_by_id,
+            A._list_value_sets,
+        ) = (
+            next_lists,
+            next_entries,
+            next_records,
+            next_entries_by_id,
+            next_value_sets,
+        )
+        A._invalidate_list_filter_cache()
+
+        combo_lists = (
+            ("combo_name", n),
+            ("combo_type", t),
+            ("combo_model", s),
+            ("combo_color1", Y),
+            ("combo_color2", Y),
+            ("combo_color3", Y),
+            ("combo_extra", d),
+        )
+        for attr, key in combo_lists:
+            combo = Aj(A, attr, I)
+            if combo is I:
+                continue
+            if key == n:
+                A._refresh_combobox_list(
+                    combo,
+                    next_lists[key],
+                    existing_count=indexed_name_count,
+                )
+            else:
+                A._set_combobox_values(combo, next_lists[key])
+
+        A.data_loading = h
+        A.desktop_data_ready = J
+        A.desktop_data_error = I
+        A._set_desktop_data_actions_enabled(J)
+        A._queue_dashboard_refresh()
+
+    def _handle_desktop_data_error(A, error):
+        """Keep the window usable and expose a retry after loading fails."""
+
+        A.data_loading = h
+        A.desktop_data_ready = h
+        A.desktop_data_error = error
+        A._set_desktop_data_actions_enabled(h)
+        retry_button = Aj(A, "btn_search_entry", I)
+        if retry_button is not I:
+            retry_button.configure(
+                state=X,
+                text=LANG.get("retry_data_load_button", "Ponów ładowanie danych"),
+                command=A._retry_desktop_data_loading,
+            )
+        A._handle_exception(
+            type(error),
+            error,
+            Aj(error, "__traceback__", I),
+            context="Desktop data loading",
+        )
+
+    def _retry_desktop_data_loading(A):
+        """Retry a failed desktop data load without rebuilding the UI."""
+
+        return A._start_desktop_data_loading()
 
     def report_callback_exception(A, exc, val, tb):
         A._handle_exception(exc, val, tb, context="Tk callback")
 
     def destroy(A):
+        desktop_loader = getattr(A, "_desktop_data_loader", I)
+        if desktop_loader is not I:
+            desktop_loader.cancel()
         for job_attr in (
             "_thumb_poll_job",
             "_perf_monitor_job",
@@ -1842,7 +2003,12 @@ class App(BU.Tk):
     def _on_ean_focus_out(A, _event=I):
         """Run a quick duplicate-EAN check after leaving the field."""
 
+        if not A._desktop_product_actions_available():
+            return
+
         def _deferred_check():
+            if not A._desktop_product_actions_available():
+                return
             if A._should_skip_ean_focus_out_warning():
                 return
             A._warn_about_ean_conflict(force_message=h, quick_check=J)
@@ -2055,6 +2221,8 @@ class App(BU.Tk):
     def _search_current_entry(A):
         """Load a saved record by Product ID, EAN or the current form values."""
 
+        if not A._desktop_product_actions_available():
+            return
         ean = G(A.var_ean.get() or B).strip().upper()
         if ean:
             record = A.entries.get(ean)
@@ -2127,6 +2295,8 @@ class App(BU.Tk):
     def _start_new_search(A):
         """Clear the form and switch back to an empty search state."""
 
+        if not A._desktop_product_actions_available():
+            return
         if A.is_processing:
             O.showwarning(OPERATION_TITLE, PROCESSING_MSG)
             return
@@ -5948,6 +6118,8 @@ class App(BU.Tk):
     def _on_name_commit(C):
         """Handle the user confirming or typing a furniture name."""
 
+        if not C._desktop_product_actions_available():
+            return
         D_ = C.var_name.get().strip()
         if not D_:
             C._cancel_existing_lookup()
@@ -6026,6 +6198,8 @@ class App(BU.Tk):
     def _on_type_commit(C):
         """React to type changes by unlocking model/colour comboboxes."""
 
+        if not C._desktop_product_actions_available():
+            return
         G_ = C.var_name.get().strip()
         D_ = C.var_type.get().strip()
         if not G_ or not D_:
@@ -6401,6 +6575,8 @@ class App(BU.Tk):
         threading.Thread(target=worker, daemon=J).start()
 
     def _on_model_commit(D):
+        if not D._desktop_product_actions_available():
+            return
         H = "new"
         o = D.var_name.get().strip()
         p = D.var_type.get().strip()
@@ -6625,6 +6801,8 @@ class App(BU.Tk):
                     D.btn_open.configure(state=X)
 
     def _on_key_release(C, event):
+        if not C._desktop_product_actions_available():
+            return
         J_ = event
         A_ = J_.widget
         if J_.keysym in ("Up", "Down", "Left", "Right"):
@@ -6661,6 +6839,8 @@ class App(BU.Tk):
             C._set_combobox_values(A_, [])
 
     def _on_color_commit(C):
+        if not C._desktop_product_actions_available():
+            return
         M_ = C.var_name.get().strip()
         N_ = C.var_type.get().strip()
         H_, F_, G_ = C._normalize_color_vars()
@@ -6763,6 +6943,8 @@ class App(BU.Tk):
         C._refresh_existing_files_lookup_for_form_edit()
 
     def _on_extra_commit(C):
+        if not C._desktop_product_actions_available():
+            return
         D_ = C.var_extra.get().strip()
         G_ = C.var_name.get().strip()
         H_ = C.var_type.get().strip()
@@ -7178,6 +7360,8 @@ class App(BU.Tk):
         S = "sql_time"
         P = "sql_error_msg"
         K = "error_set"
+        if not C._desktop_product_actions_available():
+            return
         missing_fields = C._missing_required_product_fields()
         if missing_fields:
             O.showwarning(

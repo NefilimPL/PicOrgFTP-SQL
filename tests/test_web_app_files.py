@@ -53,6 +53,19 @@ class _MemoryUpload:
 
 
 class WebAppFileTests(unittest.TestCase):
+    def test_latest_request_asset_precedes_app(self) -> None:
+        workspace = Path(__file__).resolve().parents[1]
+        index_source = (
+            workspace / "picorgftp_sql" / "web" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+
+        latest_request_asset = '<script src="/static/latest-request.js'
+        app_asset = '<script src="/static/app.js'
+        self.assertIn(latest_request_asset, index_source)
+        self.assertLess(
+            index_source.index(latest_request_asset), index_source.index(app_asset)
+        )
+
     def test_runtime_status_asset_precedes_app_and_replaces_named_runtime_pollers(
         self,
     ) -> None:

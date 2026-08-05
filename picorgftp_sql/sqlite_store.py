@@ -36,7 +36,7 @@ from .sqlite_connection import (
     try_enable_wal,
 )
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 _WAL_FALLBACK_LOGGER = logging.getLogger("picorgftp_sql.sqlite.wal")
 _WAL_FALLBACK_LOGGER.setLevel(logging.WARNING)
 _WAL_FALLBACK_LOGGER.propagate = False
@@ -98,6 +98,10 @@ _PRODUCT_SEARCH_KEY_COLUMNS = {
 }
 _PRODUCT_SEARCH_TEXT_KEY_COLUMN = "search_text_key"
 _PRODUCT_SEARCH_KEY_MIGRATION_BATCH_SIZE = 500
+_PRODUCT_SEARCH_FTS_TABLE = "product_entries_fts"
+_PRODUCT_SHORT_SEARCH_FTS_TABLE = "product_entries_short_fts"
+_PRODUCT_EAN_CONFLICT_TRIGGER_MESSAGE = "product_ean_conflict"
+_NON_UNIQUE_EAN_KEYS = frozenset({"", "brak-ean"})
 _PRODUCT_ENTRY_COLUMNS = (
     ("product_id", PRODUCT_ID_HEADER),
     ("ean", EAN_HEADER),
@@ -155,6 +159,30 @@ _OPERATIONAL_EVENT_QUERY_COLUMNS = (
 
 def _text(value: object) -> str:
     return str(value or "").strip()
+
+
+class ProductEanConflictError(ValueError):
+    """Raised when a real EAN cannot identify exactly one product."""
+
+    def __init__(self, ean: object, product_ids: tuple[str, ...] = ()) -> None:
+        self.ean = _text(ean)
+        self.product_ids = tuple(_text(value) for value in product_ids if _text(value))
+        owners = f" ({', '.join(self.product_ids)})" if self.product_ids else ""
+        super().__init__(
+            f"EAN {self.ean or '<empty>'} is assigned to another or multiple products{owners}."
+        )
+
+
+class ProductIdConflictError(ValueError):
+    """Raised when bulk input contains more than one row for one product ID."""
+
+    def __init__(self, product_id: object, rows: tuple[str, ...] = ()) -> None:
+        self.product_id = _text(product_id)
+        self.rows = tuple(_text(value) for value in rows if _text(value))
+        locations = f" ({', '.join(self.rows)})" if self.rows else ""
+        super().__init__(
+            f"PRODUCT_ID {self.product_id or '<empty>'} occurs in multiple rows{locations}."
+        )
 
 
 def _bounded_scalar_text(
@@ -777,6 +805,57 @@ def _product_search_key(value: object) -> str:
     return _text(value).casefold()
 
 
+def _is_real_product_ean_key(value: object) -> bool:
+    """Return whether an EAN key claims a unique product identity."""
+
+    return _product_search_key(value) not in _NON_UNIQUE_EAN_KEYS
+
+
+def _product_fts_literal(value: object) -> str:
+    """Quote normalized free text as one literal FTS5 phrase."""
+
+    return f'"{_product_search_key(value).replace(chr(34), chr(34) * 2)}"'
+
+
+def _product_short_gram_token(value: object) -> str:
+    """Encode the first indexed one- or two-character substring as one token."""
+
+    text = _product_search_key(value)
+    gram = text[:2]
+    prefix = "b" if len(gram) == 2 else "u"
+    return prefix + "".join(f"{ord(character):06x}" for character in gram)
+
+
+def _product_short_gram_document(value: object) -> str:
+    """Encode distinct unigrams and bigrams for contentless FTS lookup."""
+
+    text = _product_search_key(value)
+    tokens = {
+        "u" + f"{ord(character):06x}"
+        for character in text
+    }
+    tokens.update(
+        "b" + "".join(f"{ord(character):06x}" for character in text[index : index + 2])
+        for index in range(max(0, len(text) - 1))
+    )
+    return " ".join(sorted(tokens))
+
+
+def _fts_feature_unavailable(error: sqlite3.OperationalError) -> bool:
+    """Return whether SQLite lacks FTS5 or the requested tokenizer feature."""
+
+    message = str(error).casefold()
+    return any(
+        marker in message
+        for marker in (
+            "no such module: fts5",
+            "no such tokenizer",
+            "error in tokenizer constructor",
+            "parse error in tokenize directive",
+        )
+    )
+
+
 def _product_prefix_bounds(value: object) -> tuple[str, str]:
     """Return an indexed half-open range covering all casefolded prefixes."""
 
@@ -831,6 +910,264 @@ def _migrate_product_entry_search_keys(conn: sqlite3.Connection) -> None:
             )
 
 
+def _initialize_product_search_fts(
+    conn: sqlite3.Connection,
+    *,
+    rebuild: bool,
+) -> bool:
+    """Create and synchronize the indexed trigram free-text projection."""
+
+    try:
+        conn.execute(
+            f"""
+            CREATE VIRTUAL TABLE IF NOT EXISTS {_PRODUCT_SEARCH_FTS_TABLE}
+            USING fts5(
+                search_text_key,
+                content='product_entries',
+                content_rowid='rowid',
+                tokenize='trigram case_sensitive 1'
+            )
+            """
+        )
+    except sqlite3.OperationalError as exc:
+        if not _fts_feature_unavailable(exc):
+            raise
+        conn.executescript(
+            """
+            DROP TRIGGER IF EXISTS trg_product_entries_fts_insert;
+            DROP TRIGGER IF EXISTS trg_product_entries_fts_delete;
+            DROP TRIGGER IF EXISTS trg_product_entries_fts_update;
+            """
+        )
+        return False
+
+    conn.executescript(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_product_entries_fts_insert
+        AFTER INSERT ON product_entries
+        BEGIN
+            INSERT INTO {_PRODUCT_SEARCH_FTS_TABLE}(rowid, search_text_key)
+            VALUES (new.rowid, new.search_text_key);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_product_entries_fts_delete
+        AFTER DELETE ON product_entries
+        BEGIN
+            INSERT INTO {_PRODUCT_SEARCH_FTS_TABLE}(
+                {_PRODUCT_SEARCH_FTS_TABLE}, rowid, search_text_key
+            )
+            VALUES ('delete', old.rowid, old.search_text_key);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_product_entries_fts_update
+        AFTER UPDATE OF search_text_key ON product_entries
+        BEGIN
+            INSERT INTO {_PRODUCT_SEARCH_FTS_TABLE}(
+                {_PRODUCT_SEARCH_FTS_TABLE}, rowid, search_text_key
+            )
+            VALUES ('delete', old.rowid, old.search_text_key);
+            INSERT INTO {_PRODUCT_SEARCH_FTS_TABLE}(rowid, search_text_key)
+            VALUES (new.rowid, new.search_text_key);
+        END;
+        """
+    )
+    if rebuild:
+        conn.execute(
+            f"INSERT INTO {_PRODUCT_SEARCH_FTS_TABLE}({_PRODUCT_SEARCH_FTS_TABLE}) "
+            "VALUES ('rebuild')"
+        )
+    return True
+
+
+def _initialize_product_short_search_fts(
+    conn: sqlite3.Connection,
+    *,
+    rebuild: bool,
+) -> bool:
+    """Create a compact candidate index for one/two-character search and fallback."""
+
+    try:
+        conn.execute(
+            f"""
+            CREATE VIRTUAL TABLE IF NOT EXISTS {_PRODUCT_SHORT_SEARCH_FTS_TABLE}
+            USING fts5(
+                grams,
+                content='',
+                detail='none',
+                columnsize=0
+            )
+            """
+        )
+    except sqlite3.OperationalError as exc:
+        if not _fts_feature_unavailable(exc):
+            raise
+        conn.executescript(
+            """
+            DROP TRIGGER IF EXISTS trg_product_entries_short_fts_insert;
+            DROP TRIGGER IF EXISTS trg_product_entries_short_fts_delete;
+            DROP TRIGGER IF EXISTS trg_product_entries_short_fts_update;
+            """
+        )
+        return False
+
+    conn.executescript(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_product_entries_short_fts_insert
+        AFTER INSERT ON product_entries
+        BEGIN
+            INSERT INTO {_PRODUCT_SHORT_SEARCH_FTS_TABLE}(rowid, grams)
+            VALUES (new.rowid, picorg_product_short_grams(new.search_text_key));
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_product_entries_short_fts_delete
+        AFTER DELETE ON product_entries
+        BEGIN
+            INSERT INTO {_PRODUCT_SHORT_SEARCH_FTS_TABLE}(
+                {_PRODUCT_SHORT_SEARCH_FTS_TABLE}, rowid, grams
+            )
+            VALUES (
+                'delete', old.rowid,
+                picorg_product_short_grams(old.search_text_key)
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_product_entries_short_fts_update
+        AFTER UPDATE OF search_text_key ON product_entries
+        BEGIN
+            INSERT INTO {_PRODUCT_SHORT_SEARCH_FTS_TABLE}(
+                {_PRODUCT_SHORT_SEARCH_FTS_TABLE}, rowid, grams
+            )
+            VALUES (
+                'delete', old.rowid,
+                picorg_product_short_grams(old.search_text_key)
+            );
+            INSERT INTO {_PRODUCT_SHORT_SEARCH_FTS_TABLE}(rowid, grams)
+            VALUES (new.rowid, picorg_product_short_grams(new.search_text_key));
+        END;
+        """
+    )
+    if rebuild:
+        conn.execute(
+            f"INSERT INTO {_PRODUCT_SHORT_SEARCH_FTS_TABLE}"
+            f"({_PRODUCT_SHORT_SEARCH_FTS_TABLE}) VALUES ('delete-all')"
+        )
+        conn.execute(
+            f"""
+            INSERT INTO {_PRODUCT_SHORT_SEARCH_FTS_TABLE}(rowid, grams)
+            SELECT rowid, picorg_product_short_grams(search_text_key)
+            FROM product_entries
+            """
+        )
+    return True
+
+
+def _preflight_bulk_product_entries(records: object) -> list[dict[str, str]]:
+    """Validate bulk identity ownership before any target data is replaced."""
+
+    prepared = []
+    real_ean_owners: dict[str, list[str]] = {}
+    product_id_rows: dict[str, list[str]] = {}
+    for index, record in enumerate(records if isinstance(records, list) else []):
+        if not isinstance(record, dict):
+            continue
+        entry = _entry_payload(record)
+        prepared.append(entry)
+        product_id_key = _product_search_key(entry[PRODUCT_ID_HEADER])
+        if product_id_key:
+            locations = product_id_rows.setdefault(product_id_key, [])
+            locations.append(f"row {index + 1}")
+            if len(locations) > 1:
+                raise ProductIdConflictError(
+                    entry[PRODUCT_ID_HEADER],
+                    tuple(locations),
+                )
+        ean_key = _product_search_key(entry[EAN_HEADER])
+        if not _is_real_product_ean_key(ean_key):
+            continue
+        owner = entry[PRODUCT_ID_HEADER] or f"row {index + 1}"
+        owners = real_ean_owners.setdefault(ean_key, [])
+        owners.append(owner)
+        if len(owners) > 1:
+            raise ProductEanConflictError(entry[EAN_HEADER], tuple(owners))
+    return prepared
+
+
+def _configure_product_ean_integrity(
+    conn: sqlite3.Connection,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Prevent new real-EAN conflicts without rewriting historical rows."""
+
+    conn.executescript(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_product_entries_real_ean_insert
+        BEFORE INSERT ON product_entries
+        WHEN new.ean_key NOT IN ('', 'brak-ean')
+         AND NOT EXISTS (
+             SELECT 1
+             FROM product_entries
+             WHERE product_id = new.product_id AND ean_key = new.ean_key
+         )
+         AND EXISTS (
+             SELECT 1 FROM product_entries WHERE ean_key = new.ean_key
+         )
+        BEGIN
+            SELECT RAISE(ABORT, '{_PRODUCT_EAN_CONFLICT_TRIGGER_MESSAGE}');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_product_entries_real_ean_update
+        BEFORE UPDATE OF ean_key ON product_entries
+        WHEN new.ean_key NOT IN ('', 'brak-ean')
+         AND new.ean_key <> old.ean_key
+         AND EXISTS (
+             SELECT 1
+             FROM product_entries
+             WHERE ean_key = new.ean_key AND rowid <> old.rowid
+         )
+        BEGIN
+            SELECT RAISE(ABORT, '{_PRODUCT_EAN_CONFLICT_TRIGGER_MESSAGE}');
+        END;
+        """
+    )
+    conflict_rows = conn.execute(
+        """
+        SELECT ean_key
+        FROM product_entries
+        WHERE ean_key NOT IN ('', 'brak-ean')
+        GROUP BY ean_key
+        HAVING COUNT(*) > 1
+        ORDER BY ean_key
+        """
+    ).fetchall()
+    conflicts = []
+    for row in conflict_rows:
+        key = _text(row["ean_key"])
+        owners = tuple(
+            _text(owner["product_id"])
+            for owner in conn.execute(
+                """
+                SELECT product_id
+                FROM product_entries
+                WHERE ean_key = ?
+                ORDER BY rowid
+                """,
+                (key,),
+            ).fetchall()
+        )
+        conflicts.append((key, owners))
+
+    if conflicts:
+        conn.execute("DROP INDEX IF EXISTS uq_product_entries_real_ean_key")
+    else:
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_product_entries_real_ean_key
+            ON product_entries(ean_key)
+            WHERE ean_key <> '' AND ean_key <> 'brak-ean'
+            """
+        )
+    return tuple(conflicts)
+
+
 class SqliteStore:
     """Small SQLite persistence wrapper used by the active data store layer."""
 
@@ -844,6 +1181,9 @@ class SqliteStore:
         self._connection_settings = SQLiteConnectionSettings()
         self._journal_mode = ""
         self._wal_fallback_reason = ""
+        self._product_search_fts_available = False
+        self._product_short_search_fts_available = False
+        self._product_ean_conflicts: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     def connect(self) -> sqlite3.Connection:
         directory = Path(self.path).parent
@@ -857,6 +1197,12 @@ class SqliteStore:
             "picorg_lower",
             1,
             _unicode_lower,
+            deterministic=True,
+        )
+        conn.create_function(
+            "picorg_product_short_grams",
+            1,
+            _product_short_gram_document,
             deterministic=True,
         )
         configure_connection(
@@ -930,6 +1276,45 @@ class SqliteStore:
                 ).fetchone()
                 is not None
             )
+            product_fts_table_existed = (
+                conn.execute(
+                    """
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = ?
+                    """,
+                    (_PRODUCT_SEARCH_FTS_TABLE,),
+                ).fetchone()
+                is not None
+            )
+            product_short_fts_table_existed = (
+                conn.execute(
+                    """
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = ?
+                    """,
+                    (_PRODUCT_SHORT_SEARCH_FTS_TABLE,),
+                ).fetchone()
+                is not None
+            )
+            product_trigger_names = {
+                _text(row["name"])
+                for row in conn.execute(
+                    """
+                    SELECT name FROM sqlite_master
+                    WHERE type = 'trigger' AND name LIKE 'trg_product_entries_%fts_%'
+                    """
+                ).fetchall()
+            }
+            product_fts_triggers_existed = {
+                "trg_product_entries_fts_insert",
+                "trg_product_entries_fts_delete",
+                "trg_product_entries_fts_update",
+            }.issubset(product_trigger_names)
+            product_short_fts_triggers_existed = {
+                "trg_product_entries_short_fts_insert",
+                "trg_product_entries_short_fts_delete",
+                "trg_product_entries_short_fts_update",
+            }.issubset(product_trigger_names)
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS schema_version (
@@ -1194,6 +1579,25 @@ class SqliteStore:
             _migrate_daily_change_summary_reports(conn)
             if previous_user_version < SCHEMA_VERSION:
                 _migrate_product_entry_search_keys(conn)
+            self._product_search_fts_available = _initialize_product_search_fts(
+                conn,
+                rebuild=(
+                    previous_user_version < SCHEMA_VERSION
+                    or not product_fts_table_existed
+                    or not product_fts_triggers_existed
+                ),
+            )
+            self._product_short_search_fts_available = (
+                _initialize_product_short_search_fts(
+                    conn,
+                    rebuild=(
+                        previous_user_version < SCHEMA_VERSION
+                        or not product_short_fts_table_existed
+                        or not product_short_fts_triggers_existed
+                    ),
+                )
+            )
+            self._product_ean_conflicts = _configure_product_ean_integrity(conn)
             _rebuild_web_history_index_if_needed(conn)
             _reconcile_duplicate_open_incidents(conn)
             conn.execute(
@@ -3539,19 +3943,25 @@ class SqliteStore:
         """Return one product by its normalized EAN without materializing lists."""
 
         self.initialize()
+        ean_key = _product_search_key(ean)
         with self.connection() as conn:
-            row = conn.execute(
+            rows = conn.execute(
                 """
                 SELECT product_id, ean, name, type_name, model,
                        color1, color2, color3, extra
                 FROM product_entries
                 WHERE ean_key = ?
                 ORDER BY rowid
-                LIMIT 1
+                LIMIT 2
                 """,
-                (_product_search_key(ean),),
-            ).fetchone()
-        return self._product_entry_from_row(row) if row else None
+                (ean_key,),
+            ).fetchall()
+        if _is_real_product_ean_key(ean_key) and len(rows) > 1:
+            raise ProductEanConflictError(
+                ean,
+                tuple(_text(row["product_id"]) for row in rows),
+            )
+        return self._product_entry_from_row(rows[0]) if rows else None
 
     def get_product_by_id(self, product_id: str) -> dict[str, str] | None:
         """Return one product by its normalized id without materializing lists."""
@@ -3577,6 +3987,19 @@ class SqliteStore:
         """Return bounded exact product matches through whitelisted SQL fields."""
 
         self.initialize()
+        statement, params = self._product_search_statement(criteria, limit=limit)
+        with self.connection() as conn:
+            rows = conn.execute(statement, params).fetchall()
+        return [self._product_entry_from_row(row) for row in rows]
+
+    def _product_search_statement(
+        self,
+        criteria: ProductSearchCriteria,
+        *,
+        limit: int,
+    ) -> tuple[str, list[object]]:
+        """Build the parameterized SQL used by production product search."""
+
         clauses: list[str] = []
         params: list[object] = []
         values = {
@@ -3586,32 +4009,73 @@ class SqliteStore:
         identity_field = "product_id" if values["product_id"] else "ean"
         if values[identity_field]:
             key_column = _PRODUCT_SEARCH_KEY_COLUMNS[identity_field]
-            clauses.append(f"{key_column} = ?")
+            clauses.append(f"p.{key_column} = ?")
             params.append(values[identity_field])
         else:
             for field, key_column in _PRODUCT_SEARCH_KEY_COLUMNS.items():
                 if values[field]:
-                    clauses.append(f"{key_column} = ?")
+                    clauses.append(f"p.{key_column} = ?")
                     params.append(values[field])
         query_key = _product_search_key(getattr(criteria, "query", ""))
+        use_fts = (
+            bool(query_key)
+            and len(query_key) >= 3
+            and "\x00" not in query_key
+            and self._product_search_fts_available
+        )
+        use_short_fts = (
+            bool(query_key)
+            and not use_fts
+            and self._product_short_search_fts_available
+        )
         if query_key:
-            clauses.append(f"instr({_PRODUCT_SEARCH_TEXT_KEY_COLUMN}, ?) > 0")
+            if use_fts:
+                clauses.append(f"{_PRODUCT_SEARCH_FTS_TABLE} MATCH ?")
+                params.append(_product_fts_literal(query_key))
+            elif use_short_fts:
+                clauses.append(f"{_PRODUCT_SHORT_SEARCH_FTS_TABLE} MATCH ?")
+                params.append(_product_short_gram_token(query_key))
+            clauses.append(f"instr(p.{_PRODUCT_SEARCH_TEXT_KEY_COLUMN}, ?) > 0")
             params.append(query_key)
         where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(_bounded_product_query_limit(limit, 50))
+        candidate_table = (
+            _PRODUCT_SEARCH_FTS_TABLE
+            if use_fts
+            else _PRODUCT_SHORT_SEARCH_FTS_TABLE if use_short_fts else ""
+        )
+        from_clause = (
+            f"{candidate_table} "
+            f"JOIN product_entries AS p ON p.rowid = {candidate_table}.rowid"
+            if candidate_table
+            else "product_entries AS p"
+        )
+        order_column = f"{candidate_table}.rowid" if candidate_table else "p.rowid"
+        statement = f"""
+            SELECT p.product_id, p.ean, p.name, p.type_name, p.model,
+                   p.color1, p.color2, p.color3, p.extra
+            FROM {from_clause}
+            {where_clause}
+            ORDER BY {order_column}
+            LIMIT ?
+        """
+        return statement, params
+
+    def explain_product_search(
+        self,
+        criteria: ProductSearchCriteria,
+        limit: int = 50,
+    ) -> list[str]:
+        """Return the SQLite plan for the exact production search statement."""
+
+        self.initialize()
+        statement, params = self._product_search_statement(criteria, limit=limit)
         with self.connection() as conn:
             rows = conn.execute(
-                f"""
-                SELECT product_id, ean, name, type_name, model,
-                       color1, color2, color3, extra
-                FROM product_entries
-                {where_clause}
-                ORDER BY rowid
-                LIMIT ?
-                """,
+                f"EXPLAIN QUERY PLAN {statement}",
                 params,
             ).fetchall()
-        return [self._product_entry_from_row(row) for row in rows]
+        return [_text(row["detail"]) for row in rows]
 
     def suggest_product_field(
         self,
@@ -3674,6 +4138,17 @@ class SqliteStore:
             ).fetchall()
         for row in list_rows:
             payload.setdefault(row["list_key"], []).append(row["value"])
+        real_ean_rows: dict[str, list[sqlite3.Row]] = {}
+        for row in entry_rows:
+            ean_key = _product_search_key(row["ean"])
+            if _is_real_product_ean_key(ean_key):
+                real_ean_rows.setdefault(ean_key, []).append(row)
+        for rows in real_ean_rows.values():
+            if len(rows) > 1:
+                raise ProductEanConflictError(
+                    rows[0]["ean"],
+                    tuple(_text(row["product_id"]) for row in rows),
+                )
         records = []
         entries = {}
         for row in entry_rows:
@@ -3707,6 +4182,8 @@ class SqliteStore:
     def save_lists(self, payload: dict[str, object]) -> None:
         """Replace list values and product entries from an Excel-shaped payload."""
 
+        records = payload.get(ENTRY_RECORDS_KEY, []) if isinstance(payload, dict) else []
+        prepared_records = _preflight_bulk_product_entries(records)
         self.initialize()
         with self.connection() as conn:
             conn.execute("DELETE FROM list_values")
@@ -3725,10 +4202,15 @@ class SqliteStore:
                         """,
                         (sheet, cleaned, index),
                     )
-            records = payload.get(ENTRY_RECORDS_KEY, []) if isinstance(payload, dict) else []
-            for record in records if isinstance(records, list) else []:
-                if isinstance(record, dict):
-                    self._save_product_entry_conn(conn, record)
+            for record in prepared_records:
+                self._save_product_entry_conn(conn, record)
+
+    @staticmethod
+    def validate_lists_payload(payload: dict[str, object]) -> None:
+        """Validate bulk product identity data without opening or mutating SQLite."""
+
+        records = payload.get(ENTRY_RECORDS_KEY, []) if isinstance(payload, dict) else []
+        _preflight_bulk_product_entries(records)
 
     def add_list_value(self, sheet: str, value: object) -> bool:
         """Add a normalized value to one list. Return False for duplicates."""
@@ -3801,70 +4283,112 @@ class SqliteStore:
         self, conn: sqlite3.Connection, payload: dict[str, object]
     ) -> dict[str, Any]:
         entry = _entry_payload(payload)
-        product_id = entry[PRODUCT_ID_HEADER] or f"PRD-{uuid.uuid4().hex[:12].upper()}"
+        product_id = entry[PRODUCT_ID_HEADER]
+        ean_key = _product_search_key(entry[EAN_HEADER])
+        ean_owners = []
+        if _is_real_product_ean_key(ean_key):
+            ean_owners = conn.execute(
+                """
+                SELECT rowid, product_id, product_id_key, ean_key
+                FROM product_entries
+                WHERE ean_key = ?
+                ORDER BY rowid
+                LIMIT 3
+                """,
+                (ean_key,),
+            ).fetchall()
+        if not product_id:
+            if len(ean_owners) > 1:
+                raise ProductEanConflictError(
+                    entry[EAN_HEADER],
+                    tuple(_text(row["product_id"]) for row in ean_owners),
+                )
+            if ean_owners:
+                product_id = _text(ean_owners[0]["product_id"])
+            else:
+                product_id = f"PRD-{uuid.uuid4().hex[:12].upper()}"
         entry[PRODUCT_ID_HEADER] = product_id
         existing = conn.execute(
-            "SELECT 1 FROM product_entries WHERE product_id = ?",
+            """
+            SELECT rowid, ean_key
+            FROM product_entries
+            WHERE product_id = ?
+            """,
             (product_id,),
         ).fetchone()
         updated = existing is not None
-        conn.execute(
-            """
-            INSERT INTO product_entries (
-                product_id, ean, name, type_name, model,
-                color1, color2, color3, extra,
-                product_id_key, ean_key, name_key, type_name_key, model_key,
-                color1_key, color2_key, color3_key, extra_key, search_text_key,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(product_id) DO UPDATE SET
-                ean = excluded.ean,
-                name = excluded.name,
-                type_name = excluded.type_name,
-                model = excluded.model,
-                color1 = excluded.color1,
-                color2 = excluded.color2,
-                color3 = excluded.color3,
-                extra = excluded.extra,
-                product_id_key = excluded.product_id_key,
-                ean_key = excluded.ean_key,
-                name_key = excluded.name_key,
-                type_name_key = excluded.type_name_key,
-                model_key = excluded.model_key,
-                color1_key = excluded.color1_key,
-                color2_key = excluded.color2_key,
-                color3_key = excluded.color3_key,
-                extra_key = excluded.extra_key,
-                search_text_key = excluded.search_text_key,
-                updated_at = excluded.updated_at
-            """,
-            (
-                entry[PRODUCT_ID_HEADER],
+        if ean_owners and (
+            existing is None or _text(existing["ean_key"]) != ean_key
+        ):
+            raise ProductEanConflictError(
                 entry[EAN_HEADER],
-                entry[NAME_HEADER],
-                entry[TYPE_HEADER],
-                entry[MODEL_HEADER],
-                entry[COLOR1_HEADER],
-                entry[COLOR2_HEADER],
-                entry[COLOR3_HEADER],
-                entry[EXTRA_HEADER],
-                _product_search_key(entry[PRODUCT_ID_HEADER]),
-                _product_search_key(entry[EAN_HEADER]),
-                _product_search_key(entry[NAME_HEADER]),
-                _product_search_key(entry[TYPE_HEADER]),
-                _product_search_key(entry[MODEL_HEADER]),
-                _product_search_key(entry[COLOR1_HEADER]),
-                _product_search_key(entry[COLOR2_HEADER]),
-                _product_search_key(entry[COLOR3_HEADER]),
-                _product_search_key(entry[EXTRA_HEADER]),
-                " ".join(
-                    _product_search_key(entry[header])
-                    for _column, header in _PRODUCT_ENTRY_COLUMNS
+                tuple(_text(row["product_id"]) for row in ean_owners),
+            )
+        try:
+            conn.execute(
+                """
+                INSERT INTO product_entries (
+                    product_id, ean, name, type_name, model,
+                    color1, color2, color3, extra,
+                    product_id_key, ean_key, name_key, type_name_key, model_key,
+                    color1_key, color2_key, color3_key, extra_key, search_text_key,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(product_id) DO UPDATE SET
+                    ean = excluded.ean,
+                    name = excluded.name,
+                    type_name = excluded.type_name,
+                    model = excluded.model,
+                    color1 = excluded.color1,
+                    color2 = excluded.color2,
+                    color3 = excluded.color3,
+                    extra = excluded.extra,
+                    product_id_key = excluded.product_id_key,
+                    ean_key = excluded.ean_key,
+                    name_key = excluded.name_key,
+                    type_name_key = excluded.type_name_key,
+                    model_key = excluded.model_key,
+                    color1_key = excluded.color1_key,
+                    color2_key = excluded.color2_key,
+                    color3_key = excluded.color3_key,
+                    extra_key = excluded.extra_key,
+                    search_text_key = excluded.search_text_key,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    entry[PRODUCT_ID_HEADER],
+                    entry[EAN_HEADER],
+                    entry[NAME_HEADER],
+                    entry[TYPE_HEADER],
+                    entry[MODEL_HEADER],
+                    entry[COLOR1_HEADER],
+                    entry[COLOR2_HEADER],
+                    entry[COLOR3_HEADER],
+                    entry[EXTRA_HEADER],
+                    _product_search_key(entry[PRODUCT_ID_HEADER]),
+                    ean_key,
+                    _product_search_key(entry[NAME_HEADER]),
+                    _product_search_key(entry[TYPE_HEADER]),
+                    _product_search_key(entry[MODEL_HEADER]),
+                    _product_search_key(entry[COLOR1_HEADER]),
+                    _product_search_key(entry[COLOR2_HEADER]),
+                    _product_search_key(entry[COLOR3_HEADER]),
+                    _product_search_key(entry[EXTRA_HEADER]),
+                    " ".join(
+                        _product_search_key(entry[header])
+                        for _column, header in _PRODUCT_ENTRY_COLUMNS
+                    ),
+                    _now_iso(),
                 ),
-                _now_iso(),
-            ),
-        )
+            )
+        except sqlite3.IntegrityError as exc:
+            if (
+                _PRODUCT_EAN_CONFLICT_TRIGGER_MESSAGE in str(exc)
+                or "product_entries.ean_key" in str(exc)
+            ):
+                raise ProductEanConflictError(entry[EAN_HEADER]) from exc
+            raise
         return {"updated": updated, "product_id": product_id, "entry": entry}
 
     def save_product_entry(self, payload: dict[str, object]) -> dict[str, Any]:
