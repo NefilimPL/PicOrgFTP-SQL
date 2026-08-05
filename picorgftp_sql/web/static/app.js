@@ -1937,9 +1937,9 @@ function localSuggestions(fieldName) {
   return uniqueValues([...existing, ...listValues]);
 }
 
-async function remoteSuggestions(fieldName) {
+async function remoteSuggestions(fieldName, signal) {
   const params = new URLSearchParams({ field: fieldName, ...currentFormPayload() });
-  const payload = await requestJson(`/api/suggestions?${params.toString()}`);
+  const payload = await requestJson(`/api/suggestions?${params.toString()}`, { signal });
   state.fileIndex = payload.file_index || state.fileIndex;
   updateRuntimeMetrics();
   return payload.values || [];
@@ -2063,7 +2063,7 @@ function setupAutocomplete() {
     panel.className = "autocomplete-panel";
     panel.setAttribute("role", "listbox");
     host.appendChild(panel);
-    let requestId = 0;
+    const latestRequest = new PicOrg.LatestRequest();
     let remoteTimer = 0;
     const unlockBrowserAutofill = () => {
       input.removeAttribute("readonly");
@@ -2074,16 +2074,18 @@ function setupAutocomplete() {
       closeAutocompletePanels(panel);
       const local = localSuggestions(fieldName);
       renderAutocompletePanel(input, panel, local);
-      const currentRequest = ++requestId;
+      const token = latestRequest.next();
       window.clearTimeout(remoteTimer);
       remoteTimer = window.setTimeout(() => {
-        remoteSuggestions(fieldName)
+        remoteSuggestions(fieldName, token.signal)
           .then((values) => {
-            if (currentRequest === requestId && activeAutocompletePanel === panel) {
+            if (token.isCurrent() && activeAutocompletePanel === panel) {
               renderAutocompletePanel(input, panel, uniqueValues([...local, ...values]));
             }
           })
-          .catch(() => {});
+          .catch((error) => {
+            if (error && error.name === "AbortError") return;
+          });
       }, 180);
     };
     input.addEventListener("mousedown", unlockBrowserAutofill);
