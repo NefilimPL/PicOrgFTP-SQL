@@ -142,6 +142,7 @@ const state = {
   activePresenceClientId: "",
   csrfToken: "",
   pollers: [],
+  runtimeStatusPoller: null,
   githubStatus: null,
   githubStatusLoading: false,
   resources: {},
@@ -165,7 +166,6 @@ const CLIENT_FAILURE_DEDUPE_MS = 60000;
 const LOG_AUTOSCROLL_KEY = "picorg-log-autoscroll";
 const MAX_LIVE_LOG_EVENTS = 2000;
 const OBSERVABILITY_PAGE_SIZE = 20;
-const HEALTH_POLL_INTERVAL_MS = 5000;
 const HEALTH_SLOW_MS = 300;
 const HEALTH_CRITICAL_MS = 1000;
 const HEALTH_OFFLINE_FAILURES = 3;
@@ -173,7 +173,6 @@ state.observability.autoscroll = localStorage.getItem(LOG_AUTOSCROLL_KEY) !== "f
 const clientFailureFingerprints = new Map();
 const healthSamples = [];
 let healthFailures = 0;
-let healthPollTimer = 0;
 let healthPollGeneration = 0;
 let healthPollController = null;
 let lastSuccessfulHealthComponents = {};
@@ -5869,21 +5868,8 @@ function healthLevel(ms, components = {}, payloadOk = true) {
   return "online";
 }
 
-function scheduleBackendHealthPoll(requestGeneration = healthPollGeneration) {
-  if (healthPollTimer) window.clearTimeout(healthPollTimer);
-  healthPollTimer = 0;
-  if (document.hidden) return;
-  healthPollTimer = window.setTimeout(() => {
-    healthPollTimer = 0;
-    if (document.hidden || requestGeneration !== healthPollGeneration) return;
-    pollBackendHealth().catch(() => {});
-  }, HEALTH_POLL_INTERVAL_MS);
-}
-
 async function pollBackendHealth() {
   if (document.hidden) return;
-  if (healthPollTimer) window.clearTimeout(healthPollTimer);
-  healthPollTimer = 0;
   const requestGeneration = ++healthPollGeneration;
   healthPollController?.abort();
   const controller = new AbortController();
@@ -5935,8 +5921,49 @@ async function pollBackendHealth() {
   } finally {
     if (requestGeneration === healthPollGeneration) {
       if (healthPollController === controller) healthPollController = null;
-      if (!document.hidden) scheduleBackendHealthPoll(requestGeneration);
     }
+  }
+}
+
+function updateRuntimeHealthSummary(payload = {}, elapsedMs = 0) {
+  const health = payload.health || {};
+  const status = String(health.status || "unknown");
+  const components = lastSuccessfulHealthComponents;
+  healthFailures = 0;
+  healthSamples.push(elapsedMs);
+  if (healthSamples.length > 5) healthSamples.shift();
+  const medianMs = medianHealthLatency();
+  let level = "critical";
+  if (health.ok && status === "online") {
+    level = healthLevel(medianMs, components, true);
+  } else if (health.ok && status === "degraded") {
+    level = "slow";
+  }
+  state.lastHealthPayload = {
+    components,
+    elapsedMs,
+    medianMs,
+    ok: Boolean(health.ok),
+    serverTime: payload.observed_at || "",
+  };
+  updateBackendHealthStatus(level, elapsedMs, components, {
+    medianLatencyMs: medianMs,
+    serverTime: payload.observed_at || "",
+  });
+}
+
+async function fetchRuntimeStatus() {
+  const startedAt = performance.now();
+  try {
+    const payload = await requestJson("/api/runtime-status");
+    updateRuntimeHealthSummary(payload, Math.max(0, performance.now() - startedAt));
+    return payload;
+  } catch (error) {
+    healthFailures += 1;
+    if (healthFailures >= HEALTH_OFFLINE_FAILURES) {
+      updateBackendHealthStatus("offline", 0, lastSuccessfulHealthComponents);
+    }
+    throw error;
   }
 }
 
@@ -6581,6 +6608,9 @@ async function pollLogStatus() {
     updateLogAlert({});
     return;
   }
+  if (state.observability.stream && state.observability.streamConnected) {
+    return;
+  }
   await requestObservabilityPayload("/api/observability/events?limit=1");
 }
 
@@ -6639,22 +6669,25 @@ function createPoller(name, intervalMs, callback, options = {}) {
 }
 
 function startBackgroundPollers() {
-  createPoller("fileIndex", 5000, refreshFileIndexStatus).schedule(5000);
+  state.runtimeStatusPoller = new PicOrg.RuntimeStatusPoller({
+    fetchStatus: fetchRuntimeStatus,
+    onVersionChanged: refreshRuntimeDetailForVersion,
+    activeIntervalMs: 5000,
+    hiddenIntervalMs: 30000,
+    maxBackoffMs: 60000,
+    isHidden: () => document.hidden,
+  });
+  state.runtimeStatusPoller.start().catch(() => {});
   createPoller("logs", 15000, pollLogStatus).schedule(15000);
-  createPoller("processQueue", 2500, refreshProcessQueue).schedule(2500);
-  createPoller("activeUsers", 15000, refreshActiveUsersPresence).schedule(15000);
 }
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
-    if (healthPollTimer) window.clearTimeout(healthPollTimer);
-    healthPollTimer = 0;
     healthPollGeneration += 1;
     healthPollController?.abort();
     healthPollController = null;
     return;
   }
-  pollBackendHealth().catch(() => {});
   state.pollers.forEach((poller) => poller.kick());
   if ([...state.processJobs.values()].some(processJobIsActive)) {
     scheduleProcessJobPoll(0);
@@ -7334,13 +7367,9 @@ async function loadBootstrap(options = {}) {
   state.currentUser = payload.current_user || null;
   applyPimcoreRuntimeCapabilities(payload.pimcore);
   updateAdminUi();
-  refreshActiveUsersPresence().catch(() => {
-    renderActiveUsersPresence({ enabled: false, users: [] });
-  });
   applyTimingDetailsVisibility();
   pollLogStatus().catch(() => {});
   loadRecentProcessJobs().catch(() => {});
-  refreshProcessQueue().catch(() => {});
   refreshGithubStatus().catch(() => {});
   state.lists = payload.lists || {};
   state.entries = payload.entries || [];
@@ -7355,12 +7384,31 @@ async function loadBootstrap(options = {}) {
   renderSlots(payload.slots || []);
   renderListEditor();
   updateRuntimeMetrics();
+  refreshRuntimeDetailViews();
 }
 
 async function refreshFileIndexStatus() {
   const payload = await requestJson("/api/file-index/status");
   state.fileIndex = payload;
   updateRuntimeMetrics();
+}
+
+function refreshRuntimeDetailForVersion(name) {
+  const refreshers = {
+    file_index: refreshFileIndexStatus,
+    process_queue: refreshProcessQueue,
+    active_clients: refreshActiveUsersPresence,
+  };
+  const refresh = refreshers[name];
+  return refresh ? refresh() : Promise.resolve();
+}
+
+function refreshRuntimeDetailViews() {
+  refreshFileIndexStatus().catch(() => {});
+  refreshProcessQueue().catch(() => {});
+  refreshActiveUsersPresence().catch(() => {
+    renderActiveUsersPresence({ enabled: false, users: [] });
+  });
 }
 
 async function searchByEan() {
@@ -8256,9 +8304,6 @@ function settingsSaveButton(form, buildPayload) {
       state.productFields = state.settings.product_fields || state.productFields || {};
       rerenderPanelTimestampViews();
       renderResourceStatus(state.resources);
-      refreshActiveUsersPresence().catch(() => {
-        renderActiveUsersPresence({ enabled: false, users: [] });
-      });
       updateAdminUi();
       if (Array.isArray(state.settings.slots)) {
         renderSlots(state.settings.slots);
@@ -12933,7 +12978,6 @@ productForm.addEventListener("submit", async (event) => {
     const job = payload.job || {};
     stopProcessStatusTicker("Backend przyjal zadanie w tle.");
     trackProcessJob(job);
-    refreshProcessQueue().catch(() => {});
     showQueuedProcess(job);
     resetCurrentDraft({
       clearOutput: false,

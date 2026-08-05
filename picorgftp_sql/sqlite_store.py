@@ -1628,16 +1628,19 @@ class SqliteStore:
 
         self.initialize()
         payload = self._normalize_operational_event(event)
+        intent_created = False
         with self.connection() as conn:
             self._insert_operational_event(conn, payload)
             if create_notification_intent:
-                self._insert_notification_intent(
+                intent_created = self._insert_notification_intent(
                     conn,
                     event_id=payload["id"],
                     incident_id=payload["incident_id"],
                     severity=payload["severity"],
                     created_at=payload["created_at"],
                 )
+        if intent_created:
+            self._wake_notification_worker()
         return payload
 
     @staticmethod
@@ -1648,7 +1651,7 @@ class SqliteStore:
         incident_id: object,
         severity: object,
         created_at: object,
-    ) -> None:
+    ) -> bool:
         normalized_event_id = _text(event_id)
         if not normalized_event_id:
             raise ValueError("notification intent event id is required")
@@ -1657,7 +1660,7 @@ class SqliteStore:
             raise ValueError("invalid notification intent severity")
         timestamp = _canonical_timestamp(created_at, field="created_at")
         expected_id = f"intent-{normalized_event_id}"
-        conn.execute(
+        cursor = conn.execute(
             """
             INSERT INTO notification_outbox (
                 id, event_id, incident_id, severity, status,
@@ -1680,6 +1683,17 @@ class SqliteStore:
         ).fetchone()
         if row is None or _text(row["id"]) != expected_id:
             raise RuntimeError("notification intent identity conflict")
+        return cursor.rowcount == 1
+
+    @staticmethod
+    def _wake_notification_worker() -> None:
+        try:
+            from .notification_service import wake_notification_worker
+
+            wake_notification_worker()
+        except Exception:
+            # The durable row remains authoritative if the process wake fails.
+            pass
 
     @staticmethod
     def _normalize_operational_event(
@@ -2194,6 +2208,7 @@ class SqliteStore:
         except (TypeError, ValueError):
             window_seconds = 15 * 60
 
+        intent_created = False
         with self.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
@@ -2338,7 +2353,7 @@ class SqliteStore:
                 event_payload["incident_id"] = incident_id
                 self._insert_operational_event(conn, event_payload)
                 if create_notification_intent and notification_due:
-                    self._insert_notification_intent(
+                    intent_created = self._insert_notification_intent(
                         conn,
                         event_id=event_payload["id"],
                         incident_id=incident_id,
@@ -2346,6 +2361,8 @@ class SqliteStore:
                         created_at=event_payload["created_at"],
                     )
 
+        if intent_created:
+            self._wake_notification_worker()
         result = self._incident_from_row(persisted_row)
         result["notification_due"] = notification_due
         result["notification_claim_at"] = notification_claim_at
@@ -2602,8 +2619,8 @@ class SqliteStore:
     @staticmethod
     def _insert_notification_delivery(
         conn: sqlite3.Connection, payload: dict[str, Any]
-    ) -> None:
-        conn.execute(
+    ) -> bool:
+        cursor = conn.execute(
             """
             INSERT OR IGNORE INTO notification_deliveries (
                 id, incident_id, event_id, severity, status,
@@ -2622,6 +2639,7 @@ class SqliteStore:
                 payload["updated_at"], payload["next_attempt_at"],
             ),
         )
+        return cursor.rowcount == 1
 
     def enqueue_notification_delivery(
         self, record: dict[str, object]
@@ -2631,11 +2649,13 @@ class SqliteStore:
         self.initialize()
         payload = self._notification_delivery_payload(record)
         with self.connection() as conn:
-            self._insert_notification_delivery(conn, payload)
+            delivery_created = self._insert_notification_delivery(conn, payload)
             row = conn.execute(
                 "SELECT * FROM notification_deliveries WHERE id = ?",
                 (payload["id"],),
             ).fetchone()
+        if delivery_created:
+            self._wake_notification_worker()
         return self._delivery_from_row(row)
 
     def pending_notification_intents(
@@ -2706,6 +2726,7 @@ class SqliteStore:
             if isinstance(delivery, dict)
             else None
         )
+        delivery_created = False
         with self.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             intent = conn.execute(
@@ -2726,7 +2747,9 @@ class SqliteStore:
                     (payload["event_id"],),
                 ).fetchone()
                 if existing is None and intent["status"] == "pending":
-                    self._insert_notification_delivery(conn, payload)
+                    delivery_created = self._insert_notification_delivery(
+                        conn, payload
+                    )
                     existing = conn.execute(
                         "SELECT * FROM notification_deliveries WHERE id = ?",
                         (payload["id"],),
@@ -2749,6 +2772,8 @@ class SqliteStore:
                     """,
                     (completed, completed, normalized_id),
                 )
+        if delivery_created:
+            self._wake_notification_worker()
         return self._delivery_from_row(existing) if existing is not None else {}
 
     def prune_done_notification_intents(self, before: str) -> int:
@@ -2785,6 +2810,23 @@ class SqliteStore:
                 (_now_iso(), _bounded_page_limit(limit)),
             ).fetchall()
         return [self._delivery_from_row(row) for row in rows]
+
+    def next_notification_due_at(self) -> str:
+        """Return the nearest durable pending-delivery deadline."""
+
+        self.initialize()
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT MIN(next_attempt_at) AS due_at
+                FROM notification_deliveries
+                WHERE status = 'pending'
+                """
+            ).fetchone()
+        if row is None or row["due_at"] is None:
+            return ""
+        due_at = _text(row["due_at"])
+        return due_at or _now_iso()
 
     def update_notification_delivery(
         self,

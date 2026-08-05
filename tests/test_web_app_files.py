@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import io
+import json
 from pathlib import Path
 import shutil
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -17,6 +19,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from picorgftp_sql import web_data
+from picorgftp_sql.web import active_clients
 from picorgftp_sql.web import app as web_app
 
 try:
@@ -50,6 +53,30 @@ class _MemoryUpload:
 
 
 class WebAppFileTests(unittest.TestCase):
+    def test_runtime_status_asset_precedes_app_and_replaces_named_runtime_pollers(
+        self,
+    ) -> None:
+        workspace = Path(__file__).resolve().parents[1]
+        index_source = (
+            workspace / "picorgftp_sql" / "web" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+        app_source = (
+            workspace / "picorgftp_sql" / "web" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+
+        runtime_asset = '<script src="/static/runtime-status.js'
+        app_asset = '<script src="/static/app.js'
+        self.assertIn(runtime_asset, index_source)
+        self.assertLess(index_source.index(runtime_asset), index_source.index(app_asset))
+        self.assertEqual(app_source.count("new PicOrg.RuntimeStatusPoller("), 1)
+        self.assertNotIn('createPoller("fileIndex"', app_source)
+        self.assertNotIn('createPoller("processQueue"', app_source)
+        self.assertNotIn('createPoller("activeUsers"', app_source)
+        self.assertIn(
+            "if (state.observability.stream && state.observability.streamConnected)",
+            app_source,
+        )
+
     def test_product_query_endpoints_clamp_limit_before_store_delegation(self) -> None:
         """Requests above 100 must not widen the delegated product queries."""
 
@@ -2286,11 +2313,8 @@ class WebAppFileTests(unittest.TestCase):
         )
 
     def test_remove_active_client_removes_only_matching_browser_client(self) -> None:
-        with web_app._ACTIVE_CLIENTS_LOCK:
-            original = dict(web_app._ACTIVE_CLIENTS)
-            original_loaded = web_app._ACTIVE_CLIENTS_LOADED
-            web_app._ACTIVE_CLIENTS.clear()
-            web_app._ACTIVE_CLIENTS_LOADED = True
+        with tempfile.TemporaryDirectory() as temp_dir:
+            registry = web_app.ActiveClientRegistry(Path(temp_dir) / "active.json")
             first = {
                 "username": "admin",
                 "client_id": "client-a",
@@ -2306,23 +2330,328 @@ class WebAppFileTests(unittest.TestCase):
                 "client_id": "client-a",
                 "last_seen_epoch": 100.0,
             }
-            web_app._ACTIVE_CLIENTS[web_app._active_client_key(first)] = first
-            web_app._ACTIVE_CLIENTS[web_app._active_client_key(second)] = second
-            web_app._ACTIVE_CLIENTS[web_app._active_client_key(other_user)] = other_user
-        try:
-            removed = web_app._remove_active_client("admin", "client-a", now=100.0)
-            snapshot = web_app._active_clients_snapshot(now=100.0)
-        finally:
-            with web_app._ACTIVE_CLIENTS_LOCK:
-                web_app._ACTIVE_CLIENTS.clear()
-                web_app._ACTIVE_CLIENTS.update(original)
-                web_app._ACTIVE_CLIENTS_LOADED = original_loaded
+            registry.record(first)
+            registry.record(second)
+            registry.record(other_user)
+            try:
+                with patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", registry):
+                    removed = web_app._remove_active_client("admin", "client-a", now=100.0)
+                    snapshot = web_app._active_clients_snapshot(now=100.0)
+            finally:
+                registry.close(timeout=5.0)
 
         self.assertEqual(removed, 1)
         self.assertEqual(
             {(item.get("username"), item.get("client_id")) for item in snapshot},
             {("admin", "client-b"), ("operator", "client-a")},
         )
+
+    def test_active_client_leave_does_not_wait_for_blocked_writer(self) -> None:
+        writer_started = threading.Event()
+        release_writer = threading.Event()
+        leave_finished = threading.Event()
+        record_finished = threading.Event()
+        leave_results = []
+        errors = []
+        serialized_payloads = []
+
+        def serializer(payload):
+            serialized_payloads.append(payload)
+            if len(serialized_payloads) == 1:
+                writer_started.set()
+                self.assertTrue(release_writer.wait(timeout=5.0))
+            return json.dumps(payload)
+
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/api/bootstrap"),
+            client=SimpleNamespace(host="127.0.0.1", port=12345),
+            headers={"user-agent": "test", web_app.PRESENCE_CLIENT_ID_HEADER: "client-b"},
+            method="GET",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "active.json"
+            registry = web_app.ActiveClientRegistry(path, serializer=serializer)
+            registry.record(
+                {
+                    "username": "admin",
+                    "client_id": "client-a",
+                    "last_seen_epoch": time.time(),
+                }
+            )
+
+            def leave():
+                try:
+                    leave_results.append(
+                        web_app._remove_active_client("admin", "client-a", now=time.time())
+                    )
+                except Exception as exc:
+                    errors.append(exc)
+                finally:
+                    leave_finished.set()
+
+            def record():
+                try:
+                    web_app._record_active_client(request, 200)
+                except Exception as exc:
+                    errors.append(exc)
+                finally:
+                    record_finished.set()
+
+            try:
+                with (
+                    patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", registry),
+                    patch.object(web_app, "_current_user", return_value="admin"),
+                ):
+                    leave_thread = threading.Thread(target=leave)
+                    leave_thread.start()
+                    self.assertTrue(writer_started.wait(timeout=5.0))
+
+                    record_thread = threading.Thread(target=record)
+                    record_thread.start()
+                    leave_returned_before_writer_release = leave_finished.wait(timeout=0.2)
+                    record_returned_before_writer_release = record_finished.wait(timeout=0.2)
+
+                    release_writer.set()
+                    leave_thread.join(timeout=5.0)
+                    record_thread.join(timeout=5.0)
+                    self.assertFalse(leave_thread.is_alive())
+                    self.assertFalse(record_thread.is_alive())
+                    registry.flush(force=True)
+            finally:
+                release_writer.set()
+                registry.close(timeout=5.0)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertTrue(leave_returned_before_writer_release)
+        self.assertTrue(record_returned_before_writer_release)
+        self.assertEqual(leave_results, [1])
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            {(item["username"], item["client_id"]) for item in payload},
+            {("admin", "client-b")},
+        )
+
+    def test_record_active_client_only_records_and_schedules_writer(self) -> None:
+        write_started = threading.Event()
+        release_write = threading.Event()
+
+        def serializer(payload):
+            write_started.set()
+            self.assertTrue(release_write.wait(timeout=5.0))
+            return "[]"
+
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/api/bootstrap"),
+            client=SimpleNamespace(host="127.0.0.1", port=12345),
+            headers={"user-agent": "test", web_app.PRESENCE_CLIENT_ID_HEADER: "client-a"},
+            method="GET",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            registry = web_app.ActiveClientRegistry(
+                Path(temp_dir) / "active.json",
+                serializer=serializer,
+            )
+            try:
+                with (
+                    patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", registry),
+                    patch.object(web_app, "_current_user", return_value="admin"),
+                ):
+                    web_app._record_active_client(request, 200)
+                    self.assertTrue(write_started.wait(timeout=5.0))
+                    self.assertEqual(registry.generation, 1)
+            finally:
+                release_write.set()
+                registry.close(timeout=5.0)
+
+    def test_shutdown_closes_active_client_registry_with_five_second_bound(self) -> None:
+        shutdown = next(
+            handler
+            for handler in web_app.app.router.on_shutdown
+            if handler.__name__ == "_shutdown"
+        )
+        registry = Mock()
+        with (
+            patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", registry),
+            patch.object(web_app._RESOURCE_MONITOR, "stop"),
+            patch.object(web_app, "stop_notification_worker"),
+            patch.object(web_app, "_stop_backup_scheduler"),
+            patch.object(web_app.data_store, "reset_active_store_cache"),
+        ):
+            shutdown()
+
+        registry.close.assert_called_once_with(timeout=5.0)
+
+    def test_later_app_startup_replaces_active_client_registry_closed_by_prior_shutdown(
+        self,
+    ) -> None:
+        first_app = web_app.create_app()
+        later_app = web_app.create_app()
+        shutdown = next(
+            handler for handler in first_app.router.on_shutdown if handler.__name__ == "_shutdown"
+        )
+        startup = next(
+            handler for handler in later_app.router.on_startup if handler.__name__ == "_startup"
+        )
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/api/bootstrap"),
+            client=SimpleNamespace(host="127.0.0.1", port=12345),
+            headers={"user-agent": "test", web_app.PRESENCE_CLIENT_ID_HEADER: "client-a"},
+            method="GET",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "active.json"
+            initial_registry = web_app.ActiveClientRegistry(path)
+            initial_registry.record(
+                {
+                    "username": "prior-user",
+                    "client_id": "prior-client",
+                    "last_seen_epoch": time.time(),
+                }
+            )
+            replacement_registry = initial_registry
+            try:
+                with (
+                    patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", initial_registry),
+                    patch.object(web_app, "_active_clients_log_path", return_value=path),
+                    patch.object(web_app._RESOURCE_MONITOR, "start"),
+                    patch.object(web_app._RESOURCE_MONITOR, "stop"),
+                    patch.object(web_app, "initialize_application_runtime", return_value={}),
+                    patch.object(web_app, "cleanup_web_ftp_cache"),
+                    patch.object(web_app, "cleanup_web_upload_cache"),
+                    patch.object(web_app, "_prune_live_events_if_due"),
+                    patch.object(web_app, "_start_backup_scheduler"),
+                    patch.object(web_app, "_stop_backup_scheduler"),
+                    patch.object(web_app, "start_notification_worker"),
+                    patch.object(web_app, "stop_notification_worker"),
+                    patch.object(web_app.data_store, "reset_active_store_cache"),
+                    patch.object(web_app, "_current_user", return_value="admin"),
+                ):
+                    shutdown()
+                    startup()
+                    replacement_registry = web_app._ACTIVE_CLIENT_REGISTRY
+                    web_app._record_active_client(request, 200)
+                    replacement_registry.flush(force=True)
+            finally:
+                replacement_registry.close(timeout=5.0)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertIsNot(replacement_registry, initial_registry)
+        self.assertEqual(
+            {item["username"] for item in payload},
+            {"admin", "prior-user"},
+        )
+
+    def test_startup_waits_for_timed_out_active_client_writer_handoff(self) -> None:
+        old_write_started = threading.Event()
+        release_old_write = threading.Event()
+        old_replace_finished = threading.Event()
+        replacement_ready = threading.Event()
+        replacement_holder = {}
+        renewal_errors = []
+        real_replace = active_clients.os.replace
+        old_writer_ident = []
+
+        def serializer(payload):
+            old_writer_ident.append(threading.get_ident())
+            old_write_started.set()
+            self.assertTrue(release_old_write.wait(timeout=5.0))
+            return json.dumps(payload)
+
+        def replace(source, destination):
+            real_replace(source, destination)
+            if old_writer_ident and threading.get_ident() == old_writer_ident[0]:
+                old_replace_finished.set()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "active.json"
+            old_registry = web_app.ActiveClientRegistry(path, serializer=serializer)
+            old_registry.record(
+                {
+                    "username": "prior-user",
+                    "client_id": "prior-client",
+                    "last_seen_epoch": time.time(),
+                }
+            )
+            old_registry.schedule_flush(force=True)
+            self.assertTrue(old_write_started.wait(timeout=5.0))
+            self.assertFalse(old_registry.close(timeout=0.01))
+
+            def renew_registry():
+                try:
+                    replacement_holder["registry"] = web_app._ensure_active_client_registry()
+                except Exception as exc:
+                    renewal_errors.append(exc)
+                finally:
+                    replacement_ready.set()
+
+            try:
+                with (
+                    patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", old_registry),
+                    patch.object(web_app, "_active_clients_log_path", return_value=path),
+                    patch.object(active_clients.os, "replace", replace),
+                ):
+                    renewal_thread = threading.Thread(target=renew_registry)
+                    renewal_thread.start()
+                    replacement_returned_while_old_writer_blocked = replacement_ready.wait(
+                        timeout=0.2
+                    )
+                    release_old_write.set()
+                    self.assertTrue(old_replace_finished.wait(timeout=5.0))
+                    renewal_thread.join(timeout=5.0)
+                    self.assertFalse(renewal_thread.is_alive())
+                    self.assertEqual(renewal_errors, [])
+
+                    replacement = replacement_holder["registry"]
+                    replacement.record(
+                        {
+                            "username": "later-user",
+                            "client_id": "later-client",
+                            "last_seen_epoch": time.time(),
+                        }
+                    )
+                    replacement.flush(force=True)
+                    replacement.close(timeout=5.0)
+            finally:
+                release_old_write.set()
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertFalse(replacement_returned_while_old_writer_blocked)
+        self.assertEqual(
+            {item["username"] for item in payload},
+            {"later-user", "prior-user"},
+        )
+
+    def test_active_client_record_lazily_renews_closed_registry_without_startup(self) -> None:
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/api/bootstrap"),
+            client=SimpleNamespace(host="127.0.0.1", port=12345),
+            headers={"user-agent": "test", web_app.PRESENCE_CLIENT_ID_HEADER: "client-a"},
+            method="GET",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "active.json"
+            closed_registry = web_app.ActiveClientRegistry(path)
+            closed_registry.close(timeout=5.0)
+            renewed_registry = closed_registry
+            try:
+                with (
+                    patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", closed_registry),
+                    patch.object(web_app, "_active_clients_log_path", return_value=path),
+                    patch.object(web_app, "_current_user", return_value="admin"),
+                ):
+                    web_app._record_active_client(request, 200)
+                    renewed_registry = web_app._ACTIVE_CLIENT_REGISTRY
+                    renewed_registry.flush(force=True)
+            finally:
+                renewed_registry.close(timeout=5.0)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertIsNot(renewed_registry, closed_registry)
+        self.assertEqual(payload[0]["username"], "admin")
 
     def test_active_presence_payload_hides_stale_browser_clients_quickly(self) -> None:
         now = 200.0

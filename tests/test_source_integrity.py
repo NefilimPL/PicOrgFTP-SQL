@@ -92,11 +92,17 @@ class SourceIntegrityTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         css_match = re.search(r'/static/app\.css\?v=([^"\s]+)', html_source)
+        runtime_js_match = re.search(
+            r'/static/runtime-status\.js\?v=([^"\s]+)', html_source
+        )
         js_match = re.search(r'/static/app\.js\?v=([^"\s]+)', html_source)
         self.assertIsNotNone(css_match)
+        self.assertIsNotNone(runtime_js_match)
         self.assertIsNotNone(js_match)
-        self.assertEqual(css_match.group(1), js_match.group(1))
         self.assertEqual(css_match.group(1), "20260724-list-usage-guard1")
+        self.assertEqual(runtime_js_match.group(1), "20260728-runtime-poll1")
+        self.assertEqual(js_match.group(1), "20260728-runtime-poll1")
+        self.assertNotEqual(css_match.group(1), js_match.group(1))
 
     def test_resource_detail_copy_explains_clients_and_latch_stages(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -330,10 +336,15 @@ class SourceIntegrityTests(unittest.TestCase):
             poll_source.index("requestGeneration !== healthPollGeneration"),
             poll_source.index("healthSamples.push"),
         )
-        self.assertIn("scheduleBackendHealthPoll(requestGeneration)", poll_source)
+        self.assertIn(
+            "state.runtimeStatusPoller = new PicOrg.RuntimeStatusPoller",
+            js_source,
+        )
+        self.assertIn("fetchStatus: fetchRuntimeStatus", js_source)
+        self.assertNotIn("function scheduleBackendHealthPoll", js_source)
         self.assertIn("healthPollGeneration += 1", visibility_source)
         self.assertIn("healthPollController?.abort()", visibility_source)
-        self.assertIn("pollBackendHealth().catch(() => {})", visibility_source)
+        self.assertNotIn("pollBackendHealth().catch(() => {})", visibility_source)
         self.assertNotIn("scheduleBackendHealthPoll(0)", visibility_source)
 
     def test_backend_health_offline_reuses_normalized_last_successful_components(self) -> None:
@@ -784,7 +795,13 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertNotIn('class="slots-layout"', html_source)
         self.assertIn('requestJson("/api/process-jobs/active")', js_source)
         self.assertIn("renderProcessQueue(payload)", js_source)
-        self.assertIn('createPoller("processQueue", 2500, refreshProcessQueue)', js_source)
+        self.assertIn(
+            "state.runtimeStatusPoller = new PicOrg.RuntimeStatusPoller",
+            js_source,
+        )
+        self.assertIn("onVersionChanged: refreshRuntimeDetailForVersion", js_source)
+        self.assertIn("process_queue: refreshProcessQueue", js_source)
+        self.assertNotIn('createPoller("processQueue"', js_source)
         self.assertIn("document.hidden", js_source)
         self.assertIn("renderProcessMeasurements(payload)", js_source)
 

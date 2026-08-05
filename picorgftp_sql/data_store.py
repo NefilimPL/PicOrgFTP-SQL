@@ -338,6 +338,9 @@ class SqliteDataStoreAdapter:
     ) -> list[dict[str, Any]]:
         return self.store.pending_notification_deliveries(limit=limit)
 
+    def next_notification_due_at(self) -> str:
+        return self.store.next_notification_due_at()
+
     def update_notification_delivery(
         self,
         delivery_id: str,
