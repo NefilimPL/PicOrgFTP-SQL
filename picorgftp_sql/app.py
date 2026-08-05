@@ -28,6 +28,11 @@ from .excel_utils import (
     slot_filename_label,
 )
 from .logging_utils import log_error, log_error_loc, log_info, log_info_loc, set_app
+from .desktop_data_loader import (
+    DesktopDataLoader,
+    DesktopDataSnapshot,
+    load_desktop_data,
+)
 from .system_utils import get_file_lock_user, is_admin
 from .database import connect_db
 from .file_index import LocalFileIndex
@@ -261,9 +266,11 @@ class App(BU.Tk):
             "uploading": LANG.get("slot_status_uploading", "Wysylanie"),
             "processing": LANG.get("slot_status_processing", "Przetwarzanie"),
         }
-        D_ = prepare_excel_lists()
-        if not isinstance(D_, dict):
-            D_ = {}
+        B.data_loading = J
+        B.desktop_data_ready = h
+        B.desktop_data_error = I
+        B._desktop_data_snapshot = I
+        D_ = {}
         B.entries = {}
         B.entry_records = []
         B.entries_by_id = {}
@@ -434,6 +441,7 @@ class App(BU.Tk):
                 tracked_var.trace_add("write", B._queue_form_change_refresh)
         B._load_slot_config()
         B._build_form()
+        B._set_desktop_data_actions_enabled(h)
         B._build_slots()
         B._slot_index_by_prefix = {
             slot["prefix"]: idx for idx, slot in A0(B.slot_definitions)
@@ -447,6 +455,145 @@ class App(BU.Tk):
         B.after(150, B._start_file_index_refresh)
         set_app(B)
         B._install_exception_handlers()
+        B._desktop_data_loader = DesktopDataLoader(
+            load=load_desktop_data,
+            schedule=lambda callback: B.after(0, callback),
+        )
+        B._start_desktop_data_loading()
+
+    def _set_desktop_data_actions_enabled(A, enabled):
+        """Toggle controls that require the complete product snapshot."""
+
+        state = X if enabled else V
+        for attr in ("btn_submit", "btn_search_entry", "btn_edit_lists"):
+            widget = Aj(A, attr, I)
+            if widget is not I:
+                widget.configure(state=state)
+        if enabled and Aj(A, "btn_search_entry", I) is not I:
+            A.btn_search_entry.configure(
+                text=LANG.get("search_entry_button", "Wyszukaj"),
+                command=A._search_current_entry,
+            )
+
+    def _start_desktop_data_loading(A):
+        """Start loading product data after the main UI has been built."""
+
+        loader = Aj(A, "_desktop_data_loader", I)
+        if loader is I:
+            return h
+        A.data_loading = J
+        A.desktop_data_ready = h
+        A.desktop_data_error = I
+        A._set_desktop_data_actions_enabled(h)
+        return loader.start(
+            on_success=A._apply_desktop_data_snapshot,
+            on_error=A._handle_desktop_data_error,
+        )
+
+    def _apply_desktop_data_snapshot(A, snapshot):
+        """Publish one complete data snapshot from the Tk event thread."""
+
+        if not isinstance(snapshot, DesktopDataSnapshot):
+            A._handle_desktop_data_error(TypeError("Invalid desktop data snapshot"))
+            return
+
+        next_lists = dict(snapshot.lists) if isinstance(snapshot.lists, dict) else {}
+        indexed_names = A.lists.get(n, []) if isinstance(A.lists, dict) else []
+        for key in (n, t, s, Y, d):
+            if not isinstance(next_lists.get(key), list):
+                next_lists[key] = []
+        next_lists[n], indexed_name_count = A._merge_existing_lookup_values(
+            indexed_names,
+            next_lists[n],
+        )
+
+        next_entries = next_lists.get(W, {})
+        if not isinstance(next_entries, dict):
+            next_entries = {}
+        next_records = [record for record in snapshot.entries if isinstance(record, dict)]
+        next_lists[ENTRY_RECORDS_KEY] = next_records
+        next_entries_by_id = {
+            G(record.get(PRODUCT_ID_HEADER) or B).strip().upper(): record
+            for record in next_records
+            if G(record.get(PRODUCT_ID_HEADER) or B).strip()
+        }
+        next_value_sets = {}
+        for key in (n, t, s, Y, d):
+            next_value_sets[key] = {
+                normalized
+                for value in next_lists[key]
+                if (normalized := A._normalize_list_value(key, value))
+            }
+
+        A._desktop_data_snapshot = snapshot
+        (
+            A.lists,
+            A.entries,
+            A.entry_records,
+            A.entries_by_id,
+            A._list_value_sets,
+        ) = (
+            next_lists,
+            next_entries,
+            next_records,
+            next_entries_by_id,
+            next_value_sets,
+        )
+        A._invalidate_list_filter_cache()
+
+        combo_lists = (
+            ("combo_name", n),
+            ("combo_type", t),
+            ("combo_model", s),
+            ("combo_color1", Y),
+            ("combo_color2", Y),
+            ("combo_color3", Y),
+            ("combo_extra", d),
+        )
+        for attr, key in combo_lists:
+            combo = Aj(A, attr, I)
+            if combo is I:
+                continue
+            if key == n:
+                A._refresh_combobox_list(
+                    combo,
+                    next_lists[key],
+                    existing_count=indexed_name_count,
+                )
+            else:
+                A._set_combobox_values(combo, next_lists[key])
+
+        A.data_loading = h
+        A.desktop_data_ready = J
+        A.desktop_data_error = I
+        A._set_desktop_data_actions_enabled(J)
+        A._queue_dashboard_refresh()
+
+    def _handle_desktop_data_error(A, error):
+        """Keep the window usable and expose a retry after loading fails."""
+
+        A.data_loading = h
+        A.desktop_data_ready = h
+        A.desktop_data_error = error
+        A._set_desktop_data_actions_enabled(h)
+        retry_button = Aj(A, "btn_search_entry", I)
+        if retry_button is not I:
+            retry_button.configure(
+                state=X,
+                text=LANG.get("retry_data_load_button", "Ponów ładowanie danych"),
+                command=A._retry_desktop_data_loading,
+            )
+        A._handle_exception(
+            type(error),
+            error,
+            Aj(error, "__traceback__", I),
+            context="Desktop data loading",
+        )
+
+    def _retry_desktop_data_loading(A):
+        """Retry a failed desktop data load without rebuilding the UI."""
+
+        return A._start_desktop_data_loading()
 
     def report_callback_exception(A, exc, val, tb):
         A._handle_exception(exc, val, tb, context="Tk callback")
