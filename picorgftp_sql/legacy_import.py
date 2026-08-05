@@ -118,11 +118,22 @@ def import_legacy_to_sqlite(legacy_dir: str, database_path: str) -> dict[str, An
     """Import supported legacy files from ``legacy_dir`` into ``database_path``."""
 
     source = Path(legacy_dir)
-    store = SqliteStore(database_path)
-    store.initialize()
-
     raw_config = _read_json(source / "config.json", {})
     config_imported = isinstance(raw_config, dict) and bool(raw_config)
+    lists_payload = _read_workbook_payload(source / "lists.xlsx")
+    users = _read_json(source / "web_users.json", [])
+    if not isinstance(users, list):
+        users = []
+    history = _read_json(source / "web_history.json", [])
+    if not isinstance(history, list):
+        history = []
+    file_index = _read_json(source / "file_index.json", {})
+    file_index_imported = isinstance(file_index, dict) and bool(file_index)
+
+    store = SqliteStore(database_path)
+    store.validate_lists_payload(lists_payload)
+    store.initialize()
+
     if config_imported:
         store.save_config(raw_config)
         columns = raw_config.get(SQL_AVAILABLE_COLUMNS_KEY, [])
@@ -133,21 +144,12 @@ def import_legacy_to_sqlite(legacy_dir: str, database_path: str) -> dict[str, An
         if isinstance(slot_defs, list) and isinstance(sql_map, dict):
             store.save_slots(slot_defs, sql_map)
 
-    lists_payload = _read_workbook_payload(source / "lists.xlsx")
     store.save_lists(lists_payload)
 
-    users = _read_json(source / "web_users.json", [])
-    if not isinstance(users, list):
-        users = []
     store.save_users([item for item in users if isinstance(item, dict)])
 
-    history = _read_json(source / "web_history.json", [])
-    if not isinstance(history, list):
-        history = []
     store.save_history([item for item in history if isinstance(item, dict)])
 
-    file_index = _read_json(source / "file_index.json", {})
-    file_index_imported = isinstance(file_index, dict) and bool(file_index)
     if file_index_imported:
         store.save_file_index_cache(file_index)
 

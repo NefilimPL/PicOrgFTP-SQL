@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from . import storage_settings
-from .product_queries import ProductSearchCriteria, filter_product_records
+from .product_queries import (
+    ProductSearchCriteria,
+    filter_product_records,
+    product_record_matches,
+)
 from .sqlite_store import SqliteStore
 
 _ACTIVE_STORE = None
@@ -109,7 +113,9 @@ class LegacyDataStore:
         seen = set()
         normalized_prefix = str(prefix or "").strip().casefold()
         bounded_limit = max(1, min(int(limit), 100))
-        for record in filter_product_records(self._product_records(), criteria, limit=100):
+        for record in self._product_records():
+            if not product_record_matches(record, criteria):
+                continue
             value = str(record.get(header) or "").strip()
             normalized_value = value.casefold()
             if (

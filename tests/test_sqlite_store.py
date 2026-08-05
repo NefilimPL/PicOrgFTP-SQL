@@ -1123,6 +1123,393 @@ def test_product_query_filters_before_limit_and_suggests_color_and_extra(tmp_pat
     ]
 
 
+def test_free_text_product_search_uses_index_and_tracks_every_mutation(
+    tmp_path: Path,
+) -> None:
+    """Catch a fallback to table scans or stale FTS content after product writes."""
+
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.save_product_entry(
+        {
+            "EAN": "5901",
+            "NAZWA": 'ALFA "DELUXE"',
+            "TYP": "STOL",
+            "MODEL": "A1",
+            "PRODUCT_ID": "PRD-ALPHA",
+        }
+    )
+    store.save_product_entry(
+        {
+            "EAN": "5902",
+            "NAZWA": "ALPHA TWO",
+            "TYP": "STOL",
+            "MODEL": "A2",
+            "PRODUCT_ID": "PRD-BETA",
+        }
+    )
+
+    cross_field = ProductSearchCriteria(query="pha 5901")
+    assert [
+        row["PRODUCT_ID"] for row in store.search_product_entries(cross_field)
+    ] == ["PRD-ALPHA"]
+    assert store.search_product_entries(ProductSearchCriteria(query='"del'))[0][
+        "PRODUCT_ID"
+    ] == "PRD-ALPHA"
+    assert [
+        row["PRODUCT_ID"]
+        for row in store.search_product_entries(ProductSearchCriteria(query="alpha"))
+    ] == ["PRD-ALPHA", "PRD-BETA"]
+
+    explain = getattr(store, "explain_product_search", None)
+    assert explain is not None, "production free-text search must expose its real plan"
+    plan = explain(cross_field, limit=50)
+    assert any("VIRTUAL TABLE INDEX" in detail.upper() for detail in plan)
+    assert not any(
+        detail.upper().strip() == "SCAN P"
+        or detail.upper().strip().startswith("SCAN P ")
+        for detail in plan
+    )
+
+    store.save_product_entry(
+        {
+            "EAN": "5901",
+            "NAZWA": "OMEGA",
+            "TYP": "STOL",
+            "MODEL": "A1",
+            "PRODUCT_ID": "PRD-ALPHA",
+        }
+    )
+    assert store.search_product_entries(ProductSearchCriteria(query="deluxe")) == []
+    assert store.search_product_entries(ProductSearchCriteria(query="mega"))[0][
+        "PRODUCT_ID"
+    ] == "PRD-ALPHA"
+
+    store.save_lists(
+        {
+            ENTRY_RECORDS_KEY: [
+                {
+                    "EAN": "5903",
+                    "NAZWA": "GAMMA",
+                    "TYP": "SZAFA",
+                    "MODEL": "G1",
+                    "PRODUCT_ID": "PRD-GAMMA",
+                }
+            ]
+        }
+    )
+    assert store.search_product_entries(ProductSearchCriteria(query="mega")) == []
+    assert store.search_product_entries(ProductSearchCriteria(query="amm"))[0][
+        "PRODUCT_ID"
+    ] == "PRD-GAMMA"
+    assert store.search_product_entries(ProductSearchCriteria(query="mm"))[0][
+        "PRODUCT_ID"
+    ] == "PRD-GAMMA"
+    short_plan = explain(ProductSearchCriteria(query="mm"), limit=50)
+    assert any("VIRTUAL TABLE INDEX" in detail.upper() for detail in short_plan)
+    assert not any(
+        detail.upper().strip() == "SCAN P"
+        or detail.upper().strip().startswith("SCAN P ")
+        for detail in short_plan
+    )
+
+
+def test_missing_fts_triggers_force_rebuild_before_search_is_reenabled(
+    tmp_path: Path,
+) -> None:
+    """A stale surviving FTS table must never become a false-negative filter."""
+
+    db_path = tmp_path / "data.sqlite"
+    store = SqliteStore(str(db_path))
+    store.save_product_entry(
+        {"PRODUCT_ID": "P-1", "EAN": "5901", "NAZWA": "ALPHA"}
+    )
+    with store.connection() as conn:
+        conn.executescript(
+            """
+            DROP TRIGGER trg_product_entries_fts_insert;
+            DROP TRIGGER trg_product_entries_fts_delete;
+            DROP TRIGGER trg_product_entries_fts_update;
+            """
+        )
+        conn.execute(
+            """
+            UPDATE product_entries
+            SET name = 'OMEGA', name_key = 'omega',
+                search_text_key = replace(search_text_key, 'alpha', 'omega')
+            WHERE product_id = 'P-1'
+            """
+        )
+
+    reopened = SqliteStore(str(db_path))
+    assert reopened.search_product_entries(ProductSearchCriteria(query="omega"))[
+        0
+    ]["PRODUCT_ID"] == "P-1"
+
+
+def test_save_lists_rejects_duplicate_real_eans_before_replacing_data(
+    tmp_path: Path,
+) -> None:
+    """Bulk replacement must reject, not collapse, blank-ID EAN conflicts."""
+
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.save_lists(
+        {
+            "NAZWY": ["EXISTING"],
+            ENTRY_RECORDS_KEY: [
+                {"PRODUCT_ID": "P-OLD", "EAN": "OLD-EAN", "NAZWA": "EXISTING"}
+            ],
+        }
+    )
+    conflict_error = getattr(sqlite_store, "ProductEanConflictError", ValueError)
+
+    with pytest.raises(conflict_error):
+        store.save_lists(
+            {
+                "NAZWY": ["REPLACEMENT"],
+                ENTRY_RECORDS_KEY: [
+                    {"EAN": "DUP-EAN", "NAZWA": "FIRST"},
+                    {"EAN": " dup-ean ", "NAZWA": "SECOND"},
+                ],
+            }
+        )
+
+    product_id_conflict_error = getattr(
+        sqlite_store,
+        "ProductIdConflictError",
+        ValueError,
+    )
+    with pytest.raises(product_id_conflict_error):
+        store.save_lists(
+            {
+                "NAZWY": ["REPLACEMENT"],
+                ENTRY_RECORDS_KEY: [
+                    {"PRODUCT_ID": "DUP-ID", "EAN": "EAN-1", "NAZWA": "FIRST"},
+                    {"PRODUCT_ID": " dup-id ", "EAN": "EAN-2", "NAZWA": "SECOND"},
+                ],
+            }
+        )
+
+    lists = store.load_lists()
+    assert lists["NAZWY"] == ["EXISTING"]
+    assert [row["PRODUCT_ID"] for row in lists[ENTRY_RECORDS_KEY]] == ["P-OLD"]
+
+
+def test_sqlite_rejects_normalized_real_ean_duplicates_and_reuses_blank_id(
+    tmp_path: Path,
+) -> None:
+    """Catch SQLite accepting an EAN already owned by another product."""
+
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.save_product_entry(
+        {
+            "EAN": "ean-123",
+            "NAZWA": "ALFA",
+            "PRODUCT_ID": "P-1",
+        }
+    )
+    conflict_error = getattr(sqlite_store, "ProductEanConflictError", ValueError)
+
+    with pytest.raises(conflict_error):
+        store.save_product_entry(
+            {
+                "EAN": " EAN-123 ",
+                "NAZWA": "BETA",
+                "PRODUCT_ID": "P-2",
+            }
+        )
+
+    updated = store.save_product_entry(
+        {
+            "EAN": " EAN-123 ",
+            "NAZWA": "UPDATED",
+        }
+    )
+    assert updated["product_id"] == "P-1"
+    assert updated["updated"] is True
+    assert store.get_product_by_ean("ean-123")["NAZWA"] == "UPDATED"
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM product_entries WHERE ean_key = ?",
+            ("ean-123",),
+        ).fetchone()[0] == 1
+
+
+def test_sqlite_allows_multiple_blank_and_placeholder_eans(tmp_path: Path) -> None:
+    """Blank and BRAK-EAN values do not claim a real product identity."""
+
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    for index, ean in enumerate(("", "", "BRAK-EAN", " brak-ean ")):
+        store.save_product_entry(
+            {
+                "EAN": ean,
+                "NAZWA": f"PRODUCT-{index}",
+                "PRODUCT_ID": f"P-{index}",
+            }
+        )
+
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM product_entries").fetchone()[0] == 4
+
+
+def test_insert_or_replace_cannot_steal_another_products_real_ean(
+    tmp_path: Path,
+) -> None:
+    """The database trigger must run before REPLACE can delete either owner."""
+
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.save_product_entry({"PRODUCT_ID": "P-1", "EAN": "EAN-1", "NAZWA": "ONE"})
+    store.save_product_entry({"PRODUCT_ID": "P-2", "EAN": "EAN-2", "NAZWA": "TWO"})
+
+    with store.connection() as conn:
+        source = dict(
+            conn.execute(
+                "SELECT * FROM product_entries WHERE product_id = 'P-2'"
+            ).fetchone()
+        )
+        source["product_id"] = "P-1"
+        source["product_id_key"] = "p-1"
+        columns = tuple(source)
+        statement = (
+            f"INSERT OR REPLACE INTO product_entries ({', '.join(columns)}) "
+            f"VALUES ({', '.join('?' for _column in columns)})"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(statement, tuple(source[column] for column in columns))
+
+    with store.connection() as conn:
+        rows = conn.execute(
+            "SELECT product_id, ean FROM product_entries ORDER BY product_id"
+        ).fetchall()
+    assert [tuple(row) for row in rows] == [("P-1", "EAN-1"), ("P-2", "EAN-2")]
+
+
+def test_v13_duplicate_ean_migration_preserves_rows_and_quarantines_conflict(
+    tmp_path: Path,
+) -> None:
+    """Historical conflicts stay intact while new collisions become impossible."""
+
+    db_path = tmp_path / "legacy-duplicates.sqlite"
+    seed_store = SqliteStore(str(db_path))
+    seed_store.initialize()
+    insert_sql = """
+        INSERT INTO product_entries (
+            product_id, ean, name, type_name, model,
+            product_id_key, ean_key, name_key, type_name_key, model_key,
+            color1, color2, color3, extra,
+            color1_key, color2_key, color3_key, extra_key,
+            search_text_key, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+
+    def raw_row(product_id: str, ean: str, name: str):
+        values = (
+            product_id,
+            ean,
+            name,
+            "STOL",
+            "A1",
+            product_id.casefold(),
+            ean.casefold(),
+            name.casefold(),
+            "stol",
+            "a1",
+            "",
+            "",
+            "",
+            "NO-LED",
+            "",
+            "",
+            "",
+            "no-led",
+        )
+        return (*values, " ".join(str(value) for value in values[:5]).casefold(), "2026-08-05T00:00:00.000Z")
+
+    with seed_store.connection() as conn:
+        conn.executescript(
+            """
+            DROP INDEX IF EXISTS uq_product_entries_real_ean_key;
+            DROP TRIGGER IF EXISTS trg_product_entries_real_ean_insert;
+            DROP TRIGGER IF EXISTS trg_product_entries_real_ean_update;
+            DELETE FROM product_entries;
+            """
+        )
+        conn.execute(insert_sql, raw_row("P-1", "EAN-LEGACY", "ALFA"))
+        conn.execute(insert_sql, raw_row("P-2", "EAN-LEGACY", "BETA"))
+        conn.execute("PRAGMA user_version = 13")
+        before = conn.execute(
+            """
+            SELECT product_id, ean, name, type_name, model,
+                   color1, color2, color3, extra, updated_at
+            FROM product_entries ORDER BY rowid
+            """
+        ).fetchall()
+
+    migrated = SqliteStore(str(db_path))
+    migrated.initialize()
+    conflict_error = getattr(sqlite_store, "ProductEanConflictError", ValueError)
+    with migrated.connection() as conn:
+        after = conn.execute(
+            """
+            SELECT product_id, ean, name, type_name, model,
+                   color1, color2, color3, extra, updated_at
+            FROM product_entries ORDER BY rowid
+            """
+        ).fetchall()
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            )
+        }
+    assert [tuple(row) for row in after] == [tuple(row) for row in before]
+    assert "uq_product_entries_real_ean_key" not in indexes
+    with pytest.raises(conflict_error):
+        migrated.get_product_by_ean("ean-legacy")
+    with pytest.raises(conflict_error):
+        migrated.load_lists()
+
+    unchanged = migrated.save_product_entry(
+        {
+            "PRODUCT_ID": "P-1",
+            "EAN": "EAN-LEGACY",
+            "NAZWA": "ALFA",
+            "TYP": "STOL",
+            "MODEL": "A1",
+        }
+    )
+    assert unchanged["updated"] is True
+    with pytest.raises(conflict_error):
+        migrated.save_product_entry(
+            {
+                "PRODUCT_ID": "P-3",
+                "EAN": "EAN-LEGACY",
+                "NAZWA": "GAMMA",
+            }
+        )
+    with migrated.connection() as conn, pytest.raises(sqlite3.IntegrityError):
+        conn.execute(insert_sql, raw_row("P-3", "EAN-LEGACY", "GAMMA"))
+
+    migrated.save_product_entry(
+        {
+            "PRODUCT_ID": "P-2",
+            "EAN": "EAN-OTHER",
+            "NAZWA": "BETA",
+            "TYP": "STOL",
+            "MODEL": "A1",
+        }
+    )
+    reinitialized = SqliteStore(str(db_path))
+    reinitialized.initialize()
+    with reinitialized.connection() as conn:
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            )
+        }
+    assert "uq_product_entries_real_ean_key" in indexes
+
+
 def test_product_query_key_migration_normalizes_legacy_whitespace_and_casefold(
     tmp_path: Path,
 ) -> None:

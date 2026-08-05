@@ -5,11 +5,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
+import pytest
 
-from picorgftp_sql import config
+from picorgftp_sql import config, sqlite_store
 from picorgftp_sql.legacy_import import import_legacy_to_sqlite
-from picorgftp_sql.sqlite_store import SqliteStore
+from picorgftp_sql.sqlite_store import (
+    ProductEanConflictError,
+    SqliteStore,
+)
+
+ProductIdConflictError = getattr(sqlite_store, "ProductIdConflictError", ValueError)
 
 
 def _write_workbook(path: Path) -> None:
@@ -121,3 +127,51 @@ def test_import_legacy_files_to_sqlite(tmp_path: Path) -> None:
     assert isinstance(imported_index["generated_at"], str)
     assert imported_index["generated_at"].endswith("Z")
     assert "T" in imported_index["generated_at"]
+
+
+@pytest.mark.parametrize(
+    ("duplicate_row", "conflict_error"),
+    (
+        (
+            [" 5901234567890 ", "DUPLICATE", "KOMODA", "MA03", "BIALY", "", "", "NO-LED", ""],
+            ProductEanConflictError,
+        ),
+        (
+            ["5901234567891", "DUPLICATE", "KOMODA", "MA03", "BIALY", "", "", "NO-LED", " prd-1 "],
+            ProductIdConflictError,
+        ),
+    ),
+)
+def test_conflicting_legacy_identity_is_rejected_before_target_mutation(
+    tmp_path: Path,
+    duplicate_row,
+    conflict_error,
+) -> None:
+    """Invalid workbook identity data must not leave a partially imported target."""
+
+    legacy_dir = tmp_path / "legacy"
+    legacy_dir.mkdir()
+    source_config = json.loads(json.dumps(config.DEFAULT_CONFIG))
+    source_config[config.p] = "mysql"
+    (legacy_dir / "config.json").write_text(
+        json.dumps(source_config), encoding="utf-8"
+    )
+    workbook_path = legacy_dir / "lists.xlsx"
+    _write_workbook(workbook_path)
+    workbook = load_workbook(workbook_path)
+    workbook["ENTRIES"].append(duplicate_row)
+    workbook.save(workbook_path)
+    workbook.close()
+
+    db_path = tmp_path / "data.sqlite"
+    target = SqliteStore(str(db_path))
+    target.save_config({config.p: "before-import"})
+    target.save_product_entry(
+        {"PRODUCT_ID": "P-OLD", "EAN": "OLD-EAN", "NAZWA": "EXISTING"}
+    )
+
+    with pytest.raises(conflict_error):
+        import_legacy_to_sqlite(str(legacy_dir), str(db_path))
+
+    assert target.load_config()[config.p] == "before-import"
+    assert target.get_product_by_id("P-OLD")["NAZWA"] == "EXISTING"

@@ -59,6 +59,14 @@ class _ButtonStub:
             self.command()
 
 
+class _LoaderCancelStub:
+    def __init__(self) -> None:
+        self.cancel_calls = 0
+
+    def cancel(self) -> None:
+        self.cancel_calls += 1
+
+
 class _ProductActionRouteHarness:
     _desktop_product_actions_available = App._desktop_product_actions_available
 
@@ -83,6 +91,52 @@ class _ProductActionRouteHarness:
 
     def _focus_widget(self, widget) -> None:
         self.focused_widgets.append(widget)
+
+
+class _BlockedCommitHarness:
+    _desktop_product_actions_available = App._desktop_product_actions_available
+
+    def __init__(self, *, data_loading: bool, desktop_data_ready: bool) -> None:
+        self.data_loading = data_loading
+        self.desktop_data_ready = desktop_data_ready
+        self.var_name = _VariableStub("")
+        self.var_type = _VariableStub("")
+        self.var_model = _VariableStub("")
+        self.var_color1 = _VariableStub("")
+        self.var_color2 = _VariableStub("")
+        self.var_color3 = _VariableStub("")
+        self.var_extra = _VariableStub("")
+        self.route_calls = []
+
+    def _cancel_existing_lookup(self) -> None:
+        self.route_calls.append("cancel_lookup")
+
+    def _normalize_color_vars(self):
+        self.route_calls.append("normalize_colors")
+        return "", "", ""
+
+    def _commit_matches_snapshot(self, *_args) -> bool:
+        self.route_calls.append("commit_snapshot")
+        return True
+
+    def _normalize_entry_part(self, value, **_kwargs):
+        return value
+
+    def _missing_required_product_fields(self):
+        self.route_calls.append("submit_validation")
+        return ["name"]
+
+    def _required_product_fields_message(self, message):
+        return message
+
+    def after_idle(self, callback) -> None:
+        callback()
+
+    def _should_skip_ean_focus_out_warning(self) -> bool:
+        return False
+
+    def _warn_about_ean_conflict(self, **_kwargs) -> None:
+        self.route_calls.append("ean_conflict")
 
 
 class _StyleStub:
@@ -176,8 +230,16 @@ class _HeadlessStartupApp(App):
         self.handled_errors.append((exc_type, exc, tb, context))
 
     def run_ui_callbacks(self) -> None:
-        callbacks = [callback for delay, callback in self.after_calls if delay == 0]
-        self.after_calls = [item for item in self.after_calls if item[0] != 0]
+        callbacks = [
+            callback
+            for _delay, callback in self.after_calls
+            if getattr(callback, "__name__", "") == "_deliver_pending_result"
+        ]
+        self.after_calls = [
+            item
+            for item in self.after_calls
+            if getattr(item[1], "__name__", "") != "_deliver_pending_result"
+        ]
         for callback in callbacks:
             callback()
 
@@ -474,6 +536,69 @@ class AppPerformanceHelperTests(unittest.TestCase):
         self.assertEqual(harness.loaded_records, [])
         self.assertEqual(harness.new_entry_modes, [])
         self.assertEqual(harness.focused_widgets, [])
+
+    def test_form_commit_routes_are_blocked_while_loading_and_after_error(self) -> None:
+        commit_routes = (
+            App._on_name_commit,
+            App._on_type_commit,
+            App._on_model_commit,
+            App._on_color_commit,
+            App._on_extra_commit,
+        )
+        for data_loading, desktop_data_ready in ((True, False), (False, False)):
+            for route in commit_routes:
+                with self.subTest(
+                    route=route.__name__,
+                    data_loading=data_loading,
+                ):
+                    harness = _BlockedCommitHarness(
+                        data_loading=data_loading,
+                        desktop_data_ready=desktop_data_ready,
+                    )
+                    route(harness)
+                    self.assertEqual(harness.route_calls, [])
+
+    def test_submit_route_is_blocked_while_loading_and_after_error(self) -> None:
+        with patch.object(app_module.O, "showwarning") as showwarning:
+            for data_loading, desktop_data_ready in ((True, False), (False, False)):
+                with self.subTest(data_loading=data_loading):
+                    harness = _BlockedCommitHarness(
+                        data_loading=data_loading,
+                        desktop_data_ready=desktop_data_ready,
+                    )
+                    App._on_submit(harness)
+                    self.assertEqual(harness.route_calls, [])
+            showwarning.assert_not_called()
+
+    def test_edit_routes_are_blocked_while_loading_and_after_error(self) -> None:
+        for data_loading, desktop_data_ready in ((True, False), (False, False)):
+            with self.subTest(data_loading=data_loading):
+                harness = _BlockedCommitHarness(
+                    data_loading=data_loading,
+                    desktop_data_ready=desktop_data_ready,
+                )
+                App._on_key_release(harness, object())
+                App._on_ean_focus_out(harness)
+                self.assertEqual(harness.route_calls, [])
+
+    def test_destroy_cancels_desktop_data_delivery_poll(self) -> None:
+        with _headless_app_environment(), patch.object(
+            app_module,
+            "load_desktop_data",
+            return_value=DesktopDataSnapshot(lists={}, entries=()),
+            create=True,
+        ), patch.object(
+            app_module.BU.Tk,
+            "destroy",
+            return_value=None,
+            create=True,
+        ):
+            app = _HeadlessStartupApp()
+            loader = _LoaderCancelStub()
+            app._desktop_data_loader = loader
+            app.destroy()
+
+        self.assertEqual(loader.cancel_calls, 1)
 
     def test_thumbnail_queue_capacity_covers_two_visible_memory_windows(self) -> None:
         self.assertEqual(

@@ -156,7 +156,7 @@ def _normalize_cell(value: object) -> str:
     return str(value).strip()
 
 
-def _ensure_workbook_exists() -> None:
+def _ensure_workbook_exists(*, ui_errors: bool = True) -> None:
     """Create the workbook on disk if it is missing."""
 
     workbook_path = _workbook_path()
@@ -175,8 +175,13 @@ def _ensure_workbook_exists() -> None:
         workbook.save(workbook_path)
         clear_excel_snapshot_cache(workbook_path)
     except Exception as exc:  # pylint: disable=broad-except
-        messagebox.showerror(ERROR_TITLE, localization.LIST_CREATE_FAILED_MSG.format(error=exc))
-        log_error_loc("excel_create_failed", error=exc)
+        if ui_errors:
+            messagebox.showerror(
+                ERROR_TITLE,
+                localization.LIST_CREATE_FAILED_MSG.format(error=exc),
+            )
+            log_error_loc("excel_create_failed", error=exc)
+        raise
 
 
 def _load_workbook():
@@ -186,10 +191,10 @@ def _load_workbook():
     return load_workbook(_workbook_path())
 
 
-def _load_workbook_readonly():
+def _load_workbook_readonly(*, ui_errors: bool = True):
     """Load the shared workbook in read-only mode for startup cache reads."""
 
-    _ensure_workbook_exists()
+    _ensure_workbook_exists(ui_errors=ui_errors)
     return load_workbook(_workbook_path(), read_only=True, data_only=True)
 
 
@@ -350,14 +355,14 @@ def _find_ean_conflict_row(sheet, header_map: dict[str, int], ean: str, skip_row
     return None
 
 
-def prepare_excel_lists() -> Dict[str, Dict[str, dict] | list]:
+def prepare_excel_lists(*, ui_errors: bool = True) -> Dict[str, Dict[str, dict] | list]:
     """Load all Excel lists into memory."""
 
     sqlite_store = _active_sqlite_store()
     if sqlite_store is not None:
         return sqlite_store.load_lists()
 
-    _ensure_workbook_exists()
+    _ensure_workbook_exists(ui_errors=ui_errors)
     workbook_path = _workbook_path()
     snapshot_key = _workbook_snapshot_key(workbook_path)
     with _EXCEL_CACHE_LOCK:
@@ -365,7 +370,7 @@ def prepare_excel_lists() -> Dict[str, Dict[str, dict] | list]:
         if snapshot is not None:
             return deepcopy(snapshot)
 
-        workbook = _load_workbook_readonly()
+        workbook = _load_workbook_readonly(ui_errors=ui_errors)
         lists: Dict[str, Dict[str, dict] | list] = {}
         try:
             for sheet_name in _excel_sheets().values():
@@ -421,6 +426,9 @@ def prepare_excel_lists() -> Dict[str, Dict[str, dict] | list]:
                     lists[sheet_name] = values
         finally:
             workbook.close()
+        for cached_key in list(_EXCEL_CACHE):
+            if cached_key[0] == snapshot_key[0] and cached_key != snapshot_key:
+                _EXCEL_CACHE.pop(cached_key, None)
         _EXCEL_CACHE[snapshot_key] = deepcopy(lists)
         return deepcopy(lists)
 
@@ -674,9 +682,9 @@ def save_ean_entry(
             if isinstance(locked_by, str)
             else LOCKED_REASON_OTHER_PROCESS
         )
-        messagebox = localization.O if hasattr(localization, "O") else None
-        if messagebox:
-            messagebox.showerror(
+        legacy_messagebox = localization.O if hasattr(localization, "O") else None
+        if legacy_messagebox:
+            legacy_messagebox.showerror(
                 LOCKED_TITLE,
                 localization.LANG.get(
                     "excel_data_file_open",

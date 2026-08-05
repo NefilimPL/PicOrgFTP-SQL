@@ -457,7 +457,8 @@ class App(BU.Tk):
         B._install_exception_handlers()
         B._desktop_data_loader = DesktopDataLoader(
             load=load_desktop_data,
-            schedule=lambda callback: B.after(0, callback),
+            schedule=B.after,
+            cancel_schedule=B.after_cancel,
         )
         B._start_desktop_data_loading()
 
@@ -609,6 +610,9 @@ class App(BU.Tk):
         A._handle_exception(exc, val, tb, context="Tk callback")
 
     def destroy(A):
+        desktop_loader = getattr(A, "_desktop_data_loader", I)
+        if desktop_loader is not I:
+            desktop_loader.cancel()
         for job_attr in (
             "_thumb_poll_job",
             "_perf_monitor_job",
@@ -1999,7 +2003,12 @@ class App(BU.Tk):
     def _on_ean_focus_out(A, _event=I):
         """Run a quick duplicate-EAN check after leaving the field."""
 
+        if not A._desktop_product_actions_available():
+            return
+
         def _deferred_check():
+            if not A._desktop_product_actions_available():
+                return
             if A._should_skip_ean_focus_out_warning():
                 return
             A._warn_about_ean_conflict(force_message=h, quick_check=J)
@@ -6109,6 +6118,8 @@ class App(BU.Tk):
     def _on_name_commit(C):
         """Handle the user confirming or typing a furniture name."""
 
+        if not C._desktop_product_actions_available():
+            return
         D_ = C.var_name.get().strip()
         if not D_:
             C._cancel_existing_lookup()
@@ -6187,6 +6198,8 @@ class App(BU.Tk):
     def _on_type_commit(C):
         """React to type changes by unlocking model/colour comboboxes."""
 
+        if not C._desktop_product_actions_available():
+            return
         G_ = C.var_name.get().strip()
         D_ = C.var_type.get().strip()
         if not G_ or not D_:
@@ -6562,6 +6575,8 @@ class App(BU.Tk):
         threading.Thread(target=worker, daemon=J).start()
 
     def _on_model_commit(D):
+        if not D._desktop_product_actions_available():
+            return
         H = "new"
         o = D.var_name.get().strip()
         p = D.var_type.get().strip()
@@ -6786,6 +6801,8 @@ class App(BU.Tk):
                     D.btn_open.configure(state=X)
 
     def _on_key_release(C, event):
+        if not C._desktop_product_actions_available():
+            return
         J_ = event
         A_ = J_.widget
         if J_.keysym in ("Up", "Down", "Left", "Right"):
@@ -6822,6 +6839,8 @@ class App(BU.Tk):
             C._set_combobox_values(A_, [])
 
     def _on_color_commit(C):
+        if not C._desktop_product_actions_available():
+            return
         M_ = C.var_name.get().strip()
         N_ = C.var_type.get().strip()
         H_, F_, G_ = C._normalize_color_vars()
@@ -6924,6 +6943,8 @@ class App(BU.Tk):
         C._refresh_existing_files_lookup_for_form_edit()
 
     def _on_extra_commit(C):
+        if not C._desktop_product_actions_available():
+            return
         D_ = C.var_extra.get().strip()
         G_ = C.var_name.get().strip()
         H_ = C.var_type.get().strip()
@@ -7339,6 +7360,8 @@ class App(BU.Tk):
         S = "sql_time"
         P = "sql_error_msg"
         K = "error_set"
+        if not C._desktop_product_actions_available():
+            return
         missing_fields = C._missing_required_product_fields()
         if missing_fields:
             O.showwarning(
