@@ -1,6 +1,9 @@
 """Tests for the common product query contract."""
 
+from pathlib import Path
 from unittest.mock import Mock
+
+from openpyxl import Workbook
 
 from picorgftp_sql.product_queries import (
     ProductSearchCriteria,
@@ -13,6 +16,130 @@ RECORDS = [
     {"PRODUCT_ID": "P-1", "EAN": "5901", "NAZWA": "ALFA", "TYP": "STÓŁ", "MODEL": "A1"},
     {"PRODUCT_ID": "P-2", "EAN": "5902", "NAZWA": "BETA", "TYP": "SZAFA", "MODEL": "B1"},
 ]
+
+
+def write_product_workbook(path: Path) -> None:
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    for sheet_name in ("NAZWY", "TYPY", "MODELE", "KOLORY", "DODATKI"):
+        workbook.create_sheet(sheet_name)
+    entries = workbook.create_sheet("ENTRIES")
+    entries.append(excel_utils.ENTRY_HEADERS)
+    entries.append(
+        [
+            "5901234567890",
+            "ALFA",
+            "STÓŁ",
+            "A1",
+            "BIAŁY",
+            "",
+            "",
+            "NO-LED",
+            "P-1",
+        ]
+    )
+    workbook.save(path)
+
+
+def test_prepare_excel_lists_reuses_snapshot_until_mtime_changes(monkeypatch, tmp_path):
+    """Catch a regression that reloads an unchanged legacy workbook."""
+
+    workbook_path = tmp_path / "data.xlsx"
+    write_product_workbook(workbook_path)
+    loads = 0
+    original_load_workbook = excel_utils.load_workbook
+
+    def fake_load_workbook(*args, **kwargs):
+        nonlocal loads
+        loads += 1
+        return original_load_workbook(*args, **kwargs)
+
+    monkeypatch.setattr(excel_utils, "load_workbook", fake_load_workbook)
+    monkeypatch.setattr(excel_utils.settings, "LISTS_WORKBOOK_PATH", str(workbook_path))
+    excel_utils.clear_excel_snapshot_cache()
+
+    excel_utils.prepare_excel_lists()
+    excel_utils.prepare_excel_lists()
+
+    assert loads == 1
+
+
+def test_prepare_excel_lists_returns_independent_snapshot_copies(monkeypatch, tmp_path):
+    """Catch cached list or entry data leaking mutations between callers."""
+
+    workbook_path = tmp_path / "data.xlsx"
+    write_product_workbook(workbook_path)
+    monkeypatch.setattr(excel_utils.settings, "LISTS_WORKBOOK_PATH", str(workbook_path))
+    excel_utils.clear_excel_snapshot_cache()
+
+    first = excel_utils.prepare_excel_lists()
+    first["NAZWY"].append("MUTATED")
+    first["ENTRIES"]["5901234567890"]["NAZWA"] = "MUTATED"
+    first[excel_utils.ENTRY_RECORDS_KEY][0]["NAZWA"] = "MUTATED"
+
+    second = excel_utils.prepare_excel_lists()
+
+    assert second["NAZWY"] == []
+    assert second["ENTRIES"]["5901234567890"]["NAZWA"] == "ALFA"
+    assert second[excel_utils.ENTRY_RECORDS_KEY][0]["NAZWA"] == "ALFA"
+
+
+def test_failed_workbook_save_keeps_existing_excel_snapshot(monkeypatch, tmp_path):
+    """Catch cache eviction when an application workbook save fails."""
+
+    workbook_path = tmp_path / "data.xlsx"
+    write_product_workbook(workbook_path)
+    loads = 0
+    original_load_workbook = excel_utils.load_workbook
+
+    def fake_load_workbook(*args, **kwargs):
+        nonlocal loads
+        loads += 1
+        return original_load_workbook(*args, **kwargs)
+
+    class FailingWorkbook:
+        def save(self, _path):
+            raise OSError("write failed")
+
+    monkeypatch.setattr(excel_utils, "load_workbook", fake_load_workbook)
+    monkeypatch.setattr(excel_utils.settings, "LISTS_WORKBOOK_PATH", str(workbook_path))
+    monkeypatch.setattr(excel_utils.messagebox, "showerror", lambda *_args: None)
+    excel_utils.clear_excel_snapshot_cache()
+
+    before_save = excel_utils.prepare_excel_lists()
+
+    assert not excel_utils._save_workbook(FailingWorkbook(), "test_save_failed")
+    assert excel_utils.prepare_excel_lists() == before_save
+    assert loads == 1
+
+
+def test_successful_workbook_save_clears_existing_excel_snapshot(monkeypatch, tmp_path):
+    """Catch a successful application save that leaves stale data cached."""
+
+    workbook_path = tmp_path / "data.xlsx"
+    write_product_workbook(workbook_path)
+    loads = 0
+    original_load_workbook = excel_utils.load_workbook
+
+    def fake_load_workbook(*args, **kwargs):
+        nonlocal loads
+        loads += 1
+        return original_load_workbook(*args, **kwargs)
+
+    class SuccessfulWorkbook:
+        def save(self, _path):
+            return None
+
+    monkeypatch.setattr(excel_utils, "load_workbook", fake_load_workbook)
+    monkeypatch.setattr(excel_utils.settings, "LISTS_WORKBOOK_PATH", str(workbook_path))
+    excel_utils.clear_excel_snapshot_cache()
+
+    excel_utils.prepare_excel_lists()
+
+    assert excel_utils._save_workbook(SuccessfulWorkbook(), "test_save_succeeded")
+    excel_utils.prepare_excel_lists()
+
+    assert loads == 2
 
 
 def test_filter_product_records_prefers_exact_identity_and_limits():
