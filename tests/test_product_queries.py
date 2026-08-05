@@ -1,21 +1,81 @@
 """Tests for the common product query contract."""
 
+import json
 from pathlib import Path
+import statistics
+import time
 from unittest.mock import Mock
 
 from openpyxl import Workbook
+import pytest
 
 from picorgftp_sql.product_queries import (
     ProductSearchCriteria,
     filter_product_records,
 )
 from picorgftp_sql import data_store, excel_utils, web_data
+from picorgftp_sql.sqlite_store import SqliteStore
 
 
 RECORDS = [
     {"PRODUCT_ID": "P-1", "EAN": "5901", "NAZWA": "ALFA", "TYP": "STÓŁ", "MODEL": "A1"},
     {"PRODUCT_ID": "P-2", "EAN": "5902", "NAZWA": "BETA", "TYP": "SZAFA", "MODEL": "B1"},
 ]
+
+_BENCHMARK_PRODUCT_COUNT = 100_000
+_BENCHMARK_INSERT_SQL = """
+    INSERT INTO product_entries (
+        product_id, ean, name, type_name, model,
+        product_id_key, ean_key, name_key, type_name_key, model_key,
+        color1, color2, color3, extra,
+        color1_key, color2_key, color3_key, extra_key,
+        search_text_key, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+
+def benchmark_product_rows(count: int = _BENCHMARK_PRODUCT_COUNT):
+    """Yield repeatable, workbook-free product rows for SQLite benchmarks."""
+
+    for index in range(count):
+        product_id = f"PRD-{index:06d}"
+        ean = f"5901{index:09d}"
+        name = f"PRODUKT-{index % 250:03d}"
+        type_name = f"TYP-{index % 25:02d}"
+        model = f"MODEL-{index % 100:03d}"
+        color1 = ("BIALY", "CZARNY", "DAB")[index % 3]
+        color2 = ""
+        color3 = ""
+        extra = ("NO-LED", "LED")[index % 2]
+        keys = tuple(
+            value.casefold()
+            for value in (
+                product_id,
+                ean,
+                name,
+                type_name,
+                model,
+                color1,
+                color2,
+                color3,
+                extra,
+            )
+        )
+        yield (
+            product_id,
+            ean,
+            name,
+            type_name,
+            model,
+            *keys[:5],
+            color1,
+            color2,
+            color3,
+            extra,
+            *keys[5:],
+            " ".join(keys),
+            "2026-07-27T00:00:00.000Z",
+        )
 
 
 def write_product_workbook(path: Path) -> None:
@@ -373,3 +433,111 @@ def test_save_web_entry_uses_one_active_store_identity_lookup(monkeypatch):
 
     store.get_product_by_id.assert_called_once_with("P-1")
     store.get_product_by_ean.assert_not_called()
+
+
+@pytest.mark.performance
+def test_100000_product_selective_query_benchmark(tmp_path):
+    """Keep indexed identity lookups and bounded suggestions within budgets."""
+
+    store = SqliteStore(str(tmp_path / "products-100000.sqlite"))
+    store.initialize()
+    with store.connection() as conn:
+        conn.executemany(
+            _BENCHMARK_INSERT_SQL,
+            benchmark_product_rows(),
+        )
+
+    target_index = _BENCHMARK_PRODUCT_COUNT - 1
+    target_id = f"PRD-{target_index:06d}"
+    target_ean = f"5901{target_index:09d}"
+
+    # Warm the database page cache and each production query path before sampling.
+    assert store.get_product_by_id(target_id)["EAN"] == target_ean
+    assert store.get_product_by_ean(target_ean)["PRODUCT_ID"] == target_id
+    assert store.suggest_product_field("name", "produkt-", {}, limit=50)
+
+    lookup_samples = []
+    for index in range(200):
+        started = time.perf_counter()
+        if index % 2:
+            result = store.get_product_by_id(target_id)
+        else:
+            result = store.get_product_by_ean(target_ean)
+        lookup_samples.append(time.perf_counter() - started)
+        assert result is not None
+        assert result["PRODUCT_ID"] == target_id
+
+    suggestion_samples = []
+    suggestions = []
+    for _ in range(100):
+        started = time.perf_counter()
+        suggestions = store.suggest_product_field(
+            "name", "produkt-", {}, limit=50
+        )
+        suggestion_samples.append(time.perf_counter() - started)
+
+    lookup_p50 = statistics.median(lookup_samples)
+    lookup_p95 = statistics.quantiles(lookup_samples, n=100)[94]
+    suggestion_p50 = statistics.median(suggestion_samples)
+    suggestion_p95 = statistics.quantiles(suggestion_samples, n=100)[94]
+
+    with store.connection() as conn:
+        ean_plan = [
+            row["detail"]
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN SELECT product_id FROM product_entries "
+                "WHERE ean_key = ? ORDER BY rowid LIMIT 1",
+                (target_ean.casefold(),),
+            )
+        ]
+        product_id_plan = [
+            row["detail"]
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN SELECT ean FROM product_entries "
+                "WHERE product_id_key = ? ORDER BY rowid LIMIT 1",
+                (target_id.casefold(),),
+            )
+        ]
+        suggestion_plan = [
+            row["detail"]
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN SELECT DISTINCT name FROM product_entries "
+                "WHERE name <> '' AND name_key >= ? AND name_key < ? "
+                "ORDER BY name_key, name LIMIT ?",
+                ("produkt-", "produkt-\U0010ffff", 50),
+            )
+        ]
+
+    assert any("idx_product_entries_ean_key" in detail for detail in ean_plan)
+    assert any(
+        "idx_product_entries_product_id_key" in detail
+        for detail in product_id_plan
+    )
+    assert any(
+        "idx_product_entries_name_key" in detail for detail in suggestion_plan
+    )
+    assert not any(
+        "SCAN product_entries" in detail
+        for detail in (*ean_plan, *product_id_plan, *suggestion_plan)
+    )
+
+    report = {
+        "lookup_p50_seconds": lookup_p50,
+        "lookup_p95_seconds": lookup_p95,
+        "lookup_samples": len(lookup_samples),
+        "plans": {
+            "ean": ean_plan,
+            "product_id": product_id_plan,
+            "suggestion": suggestion_plan,
+        },
+        "product_count": _BENCHMARK_PRODUCT_COUNT,
+        "suggestion_count": len(suggestions),
+        "suggestion_p50_seconds": suggestion_p50,
+        "suggestion_p95_seconds": suggestion_p95,
+        "suggestion_samples": len(suggestion_samples),
+    }
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+
+    assert lookup_p95 < 0.050
+    assert suggestion_p95 < 0.200
+    assert len(suggestions) <= 50

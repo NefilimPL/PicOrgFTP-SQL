@@ -197,6 +197,26 @@ Testy desktopu:
 Benchmark porównuje p50/p95 oraz liczbę odczytanych wierszy dla 10 000 i
 100 000 produktów. Raport zapisuje osobno zimne i ciepłe wywołania.
 
+### Wynik referencyjny Task 7 — 2026-08-05
+
+Benchmark regresyjny został wykonany na lokalnym SQLite z 100 000 rekordów
+wstawionych bez workbooka przez `executemany`, na Windows, Python 3.14.5 i
+pytest 9.1.1. Po rozgrzaniu stron bazy 200 naprzemiennych lookupów EAN/ID
+osiągnęło p50 1,828 ms i p95 2,163 ms. Sto podpowiedzi nazwy z limitem 50
+osiągnęło p50 16,261 ms i p95 19,272 ms; każde wywołanie zwróciło najwyżej
+50 wartości.
+
+`EXPLAIN QUERY PLAN` potwierdził następujące ścieżki:
+
+- EAN: `SEARCH product_entries USING INDEX idx_product_entries_ean_key (ean_key=?)`;
+- ID: `SEARCH product_entries USING INDEX idx_product_entries_product_id_key (product_id_key=?)`;
+- podpowiedź nazwy: `SEARCH product_entries USING INDEX idx_product_entries_name_key (name_key>? AND name_key<?)`.
+
+Żaden z planów nie zawierał `SCAN product_entries`. Wynik jest zapisem
+referencyjnym dla testu oznaczonego markerem `performance`; czasy zależą od
+lokalnego sprzętu, natomiast budżety regresyjne pozostają na poziomie 50 ms
+dla lookupu p95 i 200 ms dla podpowiedzi p95.
+
 ## Główne miejsca w kodzie
 
 - `picorgftp_sql/sqlite_store.py`
