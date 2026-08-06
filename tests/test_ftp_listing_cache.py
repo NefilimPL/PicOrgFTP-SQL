@@ -134,3 +134,19 @@ def test_failed_refresh_keeps_previous_snapshot_for_concurrent_callers():
 
     assert calls == 1
     assert listings == [previous] * 12
+
+
+def test_listing_cache_exposes_only_fresh_snapshot_and_location_capability():
+    """Lookup code may reuse only a fresh full listing and its capability state."""
+    cache = RemoteListingCache(ttl_seconds=60)
+    records = [RemoteFileRecord(name="5901_01.jpg")]
+
+    assert cache.get_if_fresh(FTP_CONFIG, now=100.0) is None
+    assert cache.wildcard_capability(FTP_CONFIG) == "unknown"
+    assert cache.get_or_refresh(FTP_CONFIG, lambda: records, now=100.0) == records
+
+    cache.set_wildcard_capability(FTP_CONFIG, "supported")
+
+    assert cache.get_if_fresh(FTP_CONFIG, now=159.9) == records
+    assert cache.wildcard_capability(FTP_CONFIG) == "supported"
+    assert cache.get_if_fresh(FTP_CONFIG, now=160.0) is None

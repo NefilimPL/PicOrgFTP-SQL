@@ -53,6 +53,7 @@ class RemoteListingCache:
         self._refreshing: set[str] = set()
         self._refresh_generations: dict[str, int] = {}
         self._refresh_errors: dict[str, BaseException] = {}
+        self._wildcard_capabilities: dict[str, str] = {}
 
     def __repr__(self) -> str:
         return (
@@ -63,6 +64,42 @@ class RemoteListingCache:
     def diagnostic_key(self, config: Mapping[str, object]) -> str:
         """Return a non-secret identifier suitable for diagnostic output."""
         return f"ftp:{_location_key(config)[:16]}"
+
+    def get_if_fresh(
+        self,
+        config: Mapping[str, object],
+        *,
+        now: float | None = None,
+    ) -> list[RemoteFileRecord] | None:
+        """Return a full snapshot only when it is still inside its TTL."""
+        checked_at = time.monotonic() if now is None else float(now)
+        key = _location_key(config)
+        with self._condition:
+            cached = self._listings.get(key)
+            if (
+                cached is None
+                or checked_at - cached.refreshed_at >= self._ttl_seconds
+            ):
+                return None
+            return list(cached.records)
+
+    def wildcard_capability(self, config: Mapping[str, object]) -> str:
+        """Return whether this FTP location accepts targeted wildcard ``NLST``."""
+        key = _location_key(config)
+        with self._condition:
+            return self._wildcard_capabilities.get(key, "unknown")
+
+    def set_wildcard_capability(
+        self,
+        config: Mapping[str, object],
+        capability: str,
+    ) -> None:
+        """Record a tested targeted-listing capability for this location."""
+        if capability not in {"unknown", "supported", "unsupported"}:
+            raise ValueError("unsupported FTP wildcard capability state")
+        key = _location_key(config)
+        with self._condition:
+            self._wildcard_capabilities[key] = capability
 
     def get_or_refresh(
         self,

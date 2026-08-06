@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import os
 import tempfile
 
@@ -24,6 +25,19 @@ from ..common import (
     Au,
 )
 from ..workflow_utils import parse_slot_filename, select_remote_files_for_ean
+from .ftp_listing_cache import RemoteFileRecord, RemoteListingCache
+
+
+_REMOTE_LISTING_CACHE = RemoteListingCache()
+
+
+@dataclass(frozen=True)
+class TargetedListingResult:
+    """Result and wildcard capability discovered by a targeted ``NLST``."""
+
+    records: list[RemoteFileRecord]
+    capability: str
+    requires_full_listing: bool
 
 
 def list_remote_filenames(ftp_conn):
@@ -54,6 +68,40 @@ def list_remote_filenames(ftp_conn):
         raise
 
 
+def list_remote_records_for_ean(ftp_conn, ean, *, capability):
+    """List a product's files through a targeted FTP wildcard request."""
+    if capability not in {"unknown", "supported", "unsupported"}:
+        raise ValueError("unsupported FTP wildcard capability state")
+    if capability == "unsupported":
+        return TargetedListingResult(
+            records=[],
+            capability="unsupported",
+            requires_full_listing=True,
+        )
+
+    pattern = f"{str(ean).strip().upper()}_*"
+    try:
+        names = ftp_conn.nlst(pattern)
+    except AB.error_perm:
+        return TargetedListingResult(
+            records=[],
+            capability="unsupported",
+            requires_full_listing=True,
+        )
+    selected = select_remote_files_for_ean(ean, names)
+    if not names and capability == "unknown":
+        return TargetedListingResult(
+            records=[],
+            capability="unknown",
+            requires_full_listing=True,
+        )
+    return TargetedListingResult(
+        records=[RemoteFileRecord(name=name) for name in selected.values()],
+        capability="supported",
+        requires_full_listing=False,
+    )
+
+
 def connect_ftp(ftp_config):
     """Create and return an FTP connection using the configured settings."""
 
@@ -69,9 +117,40 @@ def connect_ftp(ftp_config):
 def list_remote_files_for_ean(ftp_config, ean):
     """Return a map of slot prefix to remote file name for a single EAN."""
 
+    cached_records = _REMOTE_LISTING_CACHE.get_if_fresh(ftp_config)
+    if cached_records is not None:
+        return select_remote_files_for_ean(
+            ean,
+            [record.name for record in cached_records],
+        )
+
     ftp = connect_ftp(ftp_config)
     try:
-        return select_remote_files_for_ean(ean, list_remote_filenames(ftp))
+        targeted = list_remote_records_for_ean(
+            ftp,
+            ean,
+            capability=_REMOTE_LISTING_CACHE.wildcard_capability(ftp_config),
+        )
+        _REMOTE_LISTING_CACHE.set_wildcard_capability(
+            ftp_config,
+            targeted.capability,
+        )
+        if not targeted.requires_full_listing:
+            return select_remote_files_for_ean(
+                ean,
+                [record.name for record in targeted.records],
+            )
+
+        records = _REMOTE_LISTING_CACHE.get_or_refresh(
+            ftp_config,
+            lambda: [
+                RemoteFileRecord(name=name) for name in list_remote_filenames(ftp)
+            ],
+        )
+        return select_remote_files_for_ean(
+            ean,
+            [record.name for record in records],
+        )
     finally:
         try:
             ftp.quit()

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from ftplib import error_perm
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 from picorgftp_sql.services import ftp_service
+from picorgftp_sql.services.ftp_listing_cache import RemoteListingCache
 
 
 class _FakeFTP:
@@ -43,6 +45,28 @@ class _SyncFTP:
 
     def delete(self, filename: str) -> None:
         self.deleted.append(filename)
+
+    def quit(self) -> None:
+        return None
+
+
+class _TargetedListingFTP:
+    def __init__(self) -> None:
+        self.nlst_results: dict[str | None, list[str]] = {}
+        self.nlst_calls: list[str | None] = []
+        self.mlsd_calls = 0
+        self.mlsd_results: list[tuple[str, dict[str, str]]] = []
+        self.nlst_error: BaseException | None = None
+
+    def nlst(self, pattern: str | None = None) -> list[str]:
+        self.nlst_calls.append(pattern)
+        if self.nlst_error is not None:
+            raise self.nlst_error
+        return list(self.nlst_results.get(pattern, []))
+
+    def mlsd(self):
+        self.mlsd_calls += 1
+        return iter(self.mlsd_results)
 
     def quit(self) -> None:
         return None
@@ -102,6 +126,120 @@ class DownloadRemoteSlotsTests(unittest.TestCase):
 
         self.assertEqual(result["deleted"], 1)
         self.assertEqual(fake_ftp.deleted, ["5901234567890_02.jpg"])
+
+
+class TargetedListingTests(unittest.TestCase):
+    def test_targeted_nlst_returns_ean_files_without_full_listing(self) -> None:
+        ftp = _TargetedListingFTP()
+        ftp.nlst_results["5901_*"] = [
+            "5901_01.jpg",
+            "5901_02.png",
+            "OTHER_01.jpg",
+        ]
+
+        result = ftp_service.list_remote_records_for_ean(
+            ftp,
+            "5901",
+            capability="unknown",
+        )
+
+        self.assertEqual(
+            [item.name for item in result.records],
+            ["5901_01.jpg", "5901_02.png"],
+        )
+        self.assertEqual(result.capability, "supported")
+        self.assertFalse(result.requires_full_listing)
+        self.assertEqual(ftp.mlsd_calls, 0)
+        self.assertEqual(ftp.nlst_calls, ["5901_*"])
+
+    def test_unknown_empty_wildcard_requires_full_listing(self) -> None:
+        ftp = _TargetedListingFTP()
+
+        result = ftp_service.list_remote_records_for_ean(
+            ftp,
+            "5901",
+            capability="unknown",
+        )
+
+        self.assertEqual(result.records, [])
+        self.assertEqual(result.capability, "unknown")
+        self.assertTrue(result.requires_full_listing)
+
+    def test_supported_empty_wildcard_is_a_trusted_empty_result(self) -> None:
+        ftp = _TargetedListingFTP()
+
+        result = ftp_service.list_remote_records_for_ean(
+            ftp,
+            "5901",
+            capability="supported",
+        )
+
+        self.assertEqual(result.records, [])
+        self.assertEqual(result.capability, "supported")
+        self.assertFalse(result.requires_full_listing)
+
+    def test_wildcard_syntax_error_requires_full_listing(self) -> None:
+        ftp = _TargetedListingFTP()
+        ftp.nlst_error = error_perm("500 wildcard unsupported")
+
+        result = ftp_service.list_remote_records_for_ean(
+            ftp,
+            "5901",
+            capability="unknown",
+        )
+
+        self.assertEqual(result.records, [])
+        self.assertEqual(result.capability, "unsupported")
+        self.assertTrue(result.requires_full_listing)
+
+    def test_unsupported_capability_skips_targeted_nlst(self) -> None:
+        ftp = _TargetedListingFTP()
+
+        result = ftp_service.list_remote_records_for_ean(
+            ftp,
+            "5901",
+            capability="unsupported",
+        )
+
+        self.assertEqual(result.records, [])
+        self.assertEqual(result.capability, "unsupported")
+        self.assertTrue(result.requires_full_listing)
+        self.assertEqual(ftp.nlst_calls, [])
+
+    def test_product_lookup_uses_targeted_listing_without_full_listing(self) -> None:
+        ftp = _TargetedListingFTP()
+        ftp.nlst_results["5901_*"] = ["5901_01.jpg", "5901_02.png"]
+        cache = RemoteListingCache()
+        config = {"host": "ftp.example.test", "port": 21, "user": "operator", "pass": "p"}
+
+        with (
+            patch.object(ftp_service, "_REMOTE_LISTING_CACHE", cache),
+            patch.object(ftp_service, "connect_ftp", return_value=ftp),
+        ):
+            files = ftp_service.list_remote_files_for_ean(config, "5901")
+
+        self.assertEqual(files, {"01": "5901_01.jpg", "02": "5901_02.png"})
+        self.assertEqual(ftp.mlsd_calls, 0)
+        self.assertEqual(ftp.nlst_calls, ["5901_*"])
+
+    def test_product_lookup_falls_back_once_then_reuses_full_snapshot(self) -> None:
+        ftp = _TargetedListingFTP()
+        ftp.mlsd_results = [("5901_01.jpg", {"type": "file"})]
+        cache = RemoteListingCache()
+        config = {"host": "ftp.example.test", "port": 21, "user": "operator", "pass": "p"}
+
+        with (
+            patch.object(ftp_service, "_REMOTE_LISTING_CACHE", cache),
+            patch.object(ftp_service, "connect_ftp", return_value=ftp) as connect,
+        ):
+            first = ftp_service.list_remote_files_for_ean(config, "5901")
+            second = ftp_service.list_remote_files_for_ean(config, "5901")
+
+        self.assertEqual(first, {"01": "5901_01.jpg"})
+        self.assertEqual(second, first)
+        self.assertEqual(connect.call_count, 1)
+        self.assertEqual(ftp.mlsd_calls, 1)
+        self.assertEqual(ftp.nlst_calls, ["5901_*"])
 
 
 if __name__ == "__main__":
