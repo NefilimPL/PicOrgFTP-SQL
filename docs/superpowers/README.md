@@ -43,7 +43,8 @@ Plan: `plans/2026-07-27-ftp-and-file-indexing.md`
 
 | Zadanie | Stan | Wynik / następny krok |
 | --- | --- | --- |
-| 1–8 | Nie ruszono | Zostanie rozpoczęty po pakiecie 3. |
+| 1. Procesowy cache listingu z singleflight | Ukończono | Dodano lokalny cache FTP z TTL 60 s, HMAC-owym kluczem bez sekretów, singleflight per lokalizacja i fallbackiem do ostatniego kompletnego snapshotu po błędzie refreshu. Potwierdzone uploady/delete mogą aktualizować snapshot natychmiast, a `invalidate` wymusza kolejny refresh. Zweryfikowano: 4 passed; kompilacja i `git diff --check`. |
+| 2–8 | Nie ruszono | Zostaną rozpoczęte po ukończeniu zadania 1. |
 
 ## Pakiet 5 — Integracje SQL, Pimcore i tłumaczenia
 
