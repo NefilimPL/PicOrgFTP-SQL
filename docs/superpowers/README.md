@@ -35,7 +35,7 @@ Plan: `plans/2026-07-27-upload-image-processing-and-queue.md`
 | 3. Jeden końcowy `ImagePipeline` | Ukończono | Dodano atomowy `ImagePipeline` z pojedynczym otwarciem źródła, usuwaniem EXIF i ograniczonym do 6 prób wyszukiwania jakości. Web i desktop delegują końcowy zapis rasterów do pipeline'u; dokumenty nadal są kopiowane bez przetwarzania. Zweryfikowano: 122 passed, 12 istniejących ostrzeżeń FastAPI, 43 subtests. |
 | 4. Wspólna kolejka foreground/background | Ukończono | Endpointy foreground i background rezerwują po `cache_scope` przed odczytem formularza, a następnie używają jednej `ProcessQueueService`. Pełna kolejka zwraca `429` z `Retry-After`; foreground czeka na końcowy wynik tego samego joba. Zweryfikowano: 18 testów kolejki/route/job oraz test health procesora; kompilacja i `git diff --check`. |
 | 5. Anulowanie i bezpieczny cleanup | Ukończono | Dodano endpoint `DELETE /api/process-jobs/{job_id}`, współpracujący token anulowania między etapami oraz bezpieczny root `job-*`. Cleanup usuwa staging po sukcesie, błędzie i anulowaniu, odrzuca ścieżki poza rootem i okresowo usuwa tylko nieaktywne katalogi starsze niż 24 h. Zweryfikowano: 99 passed, 12 istniejących ostrzeżeń FastAPI, 20 subtests; kompilacja i `git diff --check`. |
-| 6. Benchmark event loopa i pipeline'u | Nie ruszono | — |
+| 6. Benchmark event loopa i pipeline'u | Ukończono | Dodano deterministyczny benchmark 26 obrazów: p95 `/api/health`, głębokość kolejki, peak pamięci i liczba kodowań JPEG. Ostatni pomiar: p95 19,25 ms, peak 1 023 477 B, głębokość 1 i maksymalnie 6 kodowań JPEG. Zweryfikowano: 1214 passed, 20 istniejących ostrzeżeń FastAPI, 66 subtests; kompilacja i `git diff --check`. |
 
 ## Pakiet 4 — FTP i indeks plików
 

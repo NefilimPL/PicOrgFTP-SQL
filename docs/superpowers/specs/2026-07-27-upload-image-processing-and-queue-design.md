@@ -211,6 +211,13 @@ Benchmark raportuje:
 - czas całego produktu;
 - maksymalny rozmiar kolejki, RAM i katalogów tymczasowych.
 
+Automatyczny benchmark `tests/test_upload_event_loop_performance.py` tworzy lokalnie
+26 obrazów JPEG i uruchamia rzeczywisty `ImagePipeline` w workerze
+`ProcessQueueService`. W tym samym czasie odpytuje `/api/health`; bez sieci,
+FTP ani Defendera egzekwuje p95 poniżej 250 ms, maksymalnie 8 aktywnych zadań
+i nie więcej niż 6 kodowań JPEG na obraz; test mierzy także peak pamięci bez
+wprowadzania kruchego absolutnego limitu RAM w CI.
+
 ## Główne miejsca w kodzie
 
 - `picorgftp_sql/web/app.py`

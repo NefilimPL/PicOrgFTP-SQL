@@ -3918,6 +3918,7 @@ def _queue_process_job(
     cache_scope: str,
     form: _ProcessFormSnapshot,
     reservation: QueueReservation,
+    persist_as_running: bool = False,
 ) -> Dict[str, Any]:
     _cleanup_process_jobs()
     job = _new_process_job(
@@ -3929,6 +3930,14 @@ def _queue_process_job(
         _PROCESS_JOBS[job_id] = job
         _PROCESS_JOB_COMPLETIONS[job_id] = completion
         _advance_process_queue_generation_locked()
+        persisted_job = dict(job)
+        if persist_as_running:
+            job["start_persisted"] = True
+            persisted_job["status"] = "running"
+            persisted_job["started_at"] = time.time()
+            persisted_job["progress"] = 1
+            persisted_job["progress_label"] = "Start zadania"
+    _persist_process_job(persisted_job)
     try:
         queue_position = _PROCESS_QUEUE.submit(reservation, job_id, _run_process_job)
     except Exception:
@@ -3945,7 +3954,6 @@ def _queue_process_job(
             queued_job["queue_position"] = queue_position
             job = queued_job
         durable_job = dict(job)
-    _persist_process_job(durable_job)
     return _process_job_payload(durable_job, include_result=False)
 
 
@@ -3967,8 +3975,10 @@ def _run_process_job(
             cache_scope = str(job.get("cache_scope") or "")
             form = job.get("form")
             staging_dir = form.temp_dir if isinstance(form, _ProcessFormSnapshot) else ""
+            start_persisted = bool(job.pop("start_persisted", False))
             durable_job = dict(job)
-        _persist_process_job(durable_job)
+        if not start_persisted:
+            _persist_process_job(durable_job)
         try:
             if cancel_event is not None and cancel_event.is_set():
                 raise _ProcessJobCancelled()
@@ -6807,6 +6817,7 @@ def create_app() -> FastAPI:
                 cache_scope=cache_scope,
                 form=snapshot,
                 reservation=reservation,
+                persist_as_running=True,
             )
         except Exception:
             reservation.release()
@@ -6822,8 +6833,11 @@ def create_app() -> FastAPI:
         if job.get("status") == "cancelled":
             raise HTTPException(status_code=409, detail="Zadanie zostalo anulowane.")
         if job.get("status") == "failed":
+            status_code = max(400, int(job.get("error_status_code") or 500))
+            if status_code >= 500:
+                raise RuntimeError("process job failed")
             raise HTTPException(
-                status_code=max(400, int(job.get("error_status_code") or 500)),
+                status_code=status_code,
                 detail=str(job.get("error") or "Przetwarzanie zakonczone bledem."),
             )
         payload = job.get("result")
