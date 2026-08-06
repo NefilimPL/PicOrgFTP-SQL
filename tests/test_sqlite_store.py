@@ -546,7 +546,9 @@ def test_sqlite_timestamps_are_iso_8601_text(tmp_path: Path) -> None:
             conn.execute("SELECT detected_at FROM sql_available_columns").fetchone()[0],
             conn.execute("SELECT updated_at FROM product_entries").fetchone()[0],
             conn.execute("SELECT updated_at FROM web_users").fetchone()[0],
-            conn.execute("SELECT updated_at FROM file_index_cache").fetchone()[0],
+            conn.execute(
+                "SELECT generated_at FROM file_index_generations WHERE complete = 1"
+            ).fetchone()[0],
         ]
 
     for value in values:
@@ -859,6 +861,41 @@ def test_file_index_segments_are_saved_by_name_prefix(tmp_path: Path) -> None:
 
     assert ("L", "names", "LUNA", '"LUNA"') in rows
     assert ("M", "names", "MAGGIORE", '"MAGGIORE"') in rows
+
+
+def test_legacy_file_index_payload_migrates_to_complete_generation(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.initialize()
+    snapshot = {
+        "version": 1,
+        "root": "C:/photos",
+        "generated_at": "2026-06-25T13:02:34.300Z",
+        "dirs_scanned": 1,
+        "products_scanned": 1,
+        "names": ["ALFA"],
+        "types": {"ALFA": ["KOMODA"]},
+        "models": {},
+        "colors": {},
+        "extras": {},
+        "files": {},
+    }
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO file_index_cache (cache_key, payload_json, updated_at) VALUES (?, ?, ?)",
+            ("default", json.dumps(snapshot), snapshot["generated_at"]),
+        )
+
+    generation = store.load_file_index_generation()
+
+    assert generation.complete is True
+    assert generation.snapshot["names"] == ["ALFA"]
+    with store.connection() as conn:
+        legacy = conn.execute(
+            "SELECT payload_json FROM file_index_cache WHERE cache_key = 'default'"
+        ).fetchone()
+        segment_count = conn.execute("SELECT COUNT(*) FROM file_index_segments").fetchone()[0]
+    assert legacy is None or legacy[0] in ("", "{}")
+    assert segment_count > 0
 
 
 def test_slots_and_sql_columns_roundtrip(tmp_path: Path) -> None:

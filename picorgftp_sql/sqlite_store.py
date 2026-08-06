@@ -28,6 +28,12 @@ from .excel_utils import (
     PRODUCT_ID_HEADER,
     TYPE_HEADER,
 )
+from .file_index_segments import (
+    FileIndexGeneration,
+    FileIndexSegment,
+    segments_to_snapshot,
+    snapshot_to_segments,
+)
 from .product_queries import ProductSearchCriteria
 from .redaction import redact_sensitive_value, sanitize_free_text
 from .sqlite_connection import (
@@ -36,7 +42,7 @@ from .sqlite_connection import (
     try_enable_wal,
 )
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 _WAL_FALLBACK_LOGGER = logging.getLogger("picorgftp_sql.sqlite.wal")
 _WAL_FALLBACK_LOGGER.setLevel(logging.WARNING)
 _WAL_FALLBACK_LOGGER.propagate = False
@@ -1407,13 +1413,26 @@ class SqliteStore:
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS file_index_generations (
+                    cache_key TEXT NOT NULL,
+                    generation_id TEXT NOT NULL,
+                    root TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    generated_at TEXT NOT NULL,
+                    dirs_scanned INTEGER NOT NULL DEFAULT 0,
+                    products_scanned INTEGER NOT NULL DEFAULT 0,
+                    complete INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (cache_key, generation_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS file_index_segments (
+                    generation_id TEXT NOT NULL,
                     segment_key TEXT NOT NULL,
                     section TEXT NOT NULL,
                     lookup_key TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    PRIMARY KEY (segment_key, section, lookup_key)
+                    PRIMARY KEY (generation_id, segment_key, section, lookup_key)
                 );
 
                 CREATE TABLE IF NOT EXISTS pimcore_submissions (
@@ -1575,6 +1594,25 @@ class SqliteStore:
                 );
                 """
             )
+            segment_columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(file_index_segments)")
+            }
+            if "generation_id" not in segment_columns:
+                conn.execute("DROP TABLE file_index_segments")
+                conn.execute(
+                    """
+                    CREATE TABLE file_index_segments (
+                        generation_id TEXT NOT NULL,
+                        segment_key TEXT NOT NULL,
+                        section TEXT NOT NULL,
+                        lookup_key TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (generation_id, segment_key, section, lookup_key)
+                    )
+                    """
+                )
             _migrate_web_history_created_at(conn)
             _migrate_daily_change_summary_reports(conn)
             if previous_user_version < SCHEMA_VERSION:
@@ -1665,9 +1703,11 @@ class SqliteStore:
                 CREATE INDEX IF NOT EXISTS idx_app_config_values_updated_at
                     ON app_config_values(updated_at);
                 CREATE INDEX IF NOT EXISTS idx_file_index_segments_lookup
-                    ON file_index_segments(segment_key, section, lookup_key);
+                    ON file_index_segments(generation_id, segment_key, section, lookup_key);
                 CREATE INDEX IF NOT EXISTS idx_file_index_segments_updated_at
-                    ON file_index_segments(updated_at);
+                    ON file_index_segments(generation_id, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_file_index_generations_complete
+                    ON file_index_generations(cache_key, complete, generated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_pimcore_submissions_created_at
                     ON pimcore_submissions(created_at);
                 CREATE INDEX IF NOT EXISTS idx_pimcore_submissions_ean
@@ -4880,70 +4920,162 @@ class SqliteStore:
     def load_file_index_cache(self, key: str = "default") -> dict[str, Any]:
         """Return stored local file index cache payload."""
 
-        self.initialize()
-        with self.connection() as conn:
-            row = conn.execute(
-                "SELECT payload_json FROM file_index_cache WHERE cache_key = ?",
-                (_text(key) or "default",),
-            ).fetchone()
-        if not row:
-            return {}
-        payload = _json_loads(row["payload_json"], {})
-        return dict(payload) if isinstance(payload, dict) else {}
+        generation = self.load_file_index_generation(key)
+        return dict(generation.snapshot or {}) if generation is not None else {}
 
     def save_file_index_cache(
         self, payload: dict[str, object], key: str = "default"
     ) -> None:
         """Store local file index cache payload."""
 
-        self.initialize()
         snapshot = dict(payload or {})
         snapshot["generated_at"] = _iso_from_timestamp(snapshot.get("generated_at"))
+        generation = FileIndexGeneration(
+            cache_key=_text(key) or "default",
+            generation_id=uuid.uuid4().hex,
+            root=_text(snapshot.get("root")),
+            version=int(snapshot.get("version") or 0),
+            generated_at=snapshot["generated_at"],
+            complete=False,
+            dirs_scanned=int(snapshot.get("dirs_scanned") or 0),
+            products_scanned=int(snapshot.get("products_scanned") or 0),
+        )
+        self.commit_file_index_generation(generation, snapshot_to_segments(snapshot))
+
+    def commit_file_index_generation(
+        self,
+        generation: FileIndexGeneration,
+        segments: list[FileIndexSegment],
+    ) -> None:
+        """Atomically replace a cache key with one complete segment generation."""
+
+        self.initialize()
+        rows = [
+            (
+                generation.generation_id,
+                segment.segment_key,
+                segment.section,
+                segment.lookup_key,
+                _json_dumps(segment.payload),
+                generation.generated_at,
+            )
+            for segment in segments
+        ]
         with self.connection() as conn:
             conn.execute(
                 """
-                INSERT INTO file_index_cache (cache_key, payload_json, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(cache_key) DO UPDATE SET
-                    payload_json = excluded.payload_json,
-                    updated_at = excluded.updated_at
+                INSERT INTO file_index_generations
+                    (cache_key, generation_id, root, version, generated_at,
+                     dirs_scanned, products_scanned, complete)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0)
                 """,
                 (
-                    _text(key) or "default",
-                    _json_dumps(snapshot),
-                    snapshot["generated_at"],
+                    generation.cache_key,
+                    generation.generation_id,
+                    generation.root,
+                    generation.version,
+                    generation.generated_at,
+                    generation.dirs_scanned,
+                    generation.products_scanned,
                 ),
             )
-        self.save_file_index_segments(snapshot)
+            conn.executemany(
+                """
+                INSERT INTO file_index_segments
+                    (generation_id, segment_key, section, lookup_key, payload_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            conn.execute(
+                """
+                UPDATE file_index_generations SET complete = 1
+                WHERE cache_key = ? AND generation_id = ?
+                """,
+                (generation.cache_key, generation.generation_id),
+            )
+            conn.execute(
+                """
+                DELETE FROM file_index_generations
+                WHERE cache_key = ? AND generation_id <> ?
+                """,
+                (generation.cache_key, generation.generation_id),
+            )
+            conn.execute(
+                "DELETE FROM file_index_cache WHERE cache_key = ?",
+                (generation.cache_key,),
+            )
+
+    def load_file_index_generation(
+        self, key: str = "default"
+    ) -> FileIndexGeneration | None:
+        """Load the current complete generation, migrating a legacy blob once."""
+
+        self.initialize()
+        cache_key = _text(key) or "default"
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT cache_key, generation_id, root, version, generated_at,
+                       dirs_scanned, products_scanned, complete
+                FROM file_index_generations
+                WHERE cache_key = ? AND complete = 1
+                ORDER BY generated_at DESC
+                LIMIT 1
+                """,
+                (cache_key,),
+            ).fetchone()
+            legacy = None
+            if row is None:
+                legacy = conn.execute(
+                    "SELECT payload_json FROM file_index_cache WHERE cache_key = ?",
+                    (cache_key,),
+                ).fetchone()
+            if row is not None:
+                segment_rows = conn.execute(
+                    """
+                    SELECT segment_key, section, lookup_key, payload_json
+                    FROM file_index_segments WHERE generation_id = ?
+                    """,
+                    (row["generation_id"],),
+                ).fetchall()
+        if row is None and legacy is not None:
+            snapshot = _json_loads(legacy["payload_json"], {})
+            if not isinstance(snapshot, dict):
+                return None
+            self.save_file_index_cache(snapshot, cache_key)
+            return self.load_file_index_generation(cache_key)
+        if row is None:
+            return None
+        generation = FileIndexGeneration(
+            cache_key=str(row["cache_key"]),
+            generation_id=str(row["generation_id"]),
+            root=str(row["root"]),
+            version=int(row["version"]),
+            generated_at=str(row["generated_at"]),
+            complete=bool(row["complete"]),
+            dirs_scanned=int(row["dirs_scanned"]),
+            products_scanned=int(row["products_scanned"]),
+        )
+        segments = [
+            FileIndexSegment(
+                segment_key=str(item["segment_key"]),
+                section=str(item["section"]),
+                lookup_key=str(item["lookup_key"]),
+                payload=_json_loads(item["payload_json"], None),
+            )
+            for item in segment_rows
+        ]
+        snapshot = segments_to_snapshot(generation, segments)
+        return FileIndexGeneration(
+            **{**generation.__dict__, "snapshot": snapshot}
+        )
 
     def save_file_index_segments(self, snapshot: dict[str, object]) -> int:
         """Store segmented lookup rows for the local file index cache."""
 
-        self.initialize()
-        generated_at = _iso_from_timestamp(snapshot.get("generated_at"))
-        rows = []
-        names = snapshot.get("names", [])
-        for name in names if isinstance(names, list) else []:
-            rows.append((_segment_key(name), "names", _upper(name), name))
-        for section in ("types", "models", "colors", "extras", "files"):
-            section_payload = snapshot.get(section, {})
-            if not isinstance(section_payload, dict):
-                continue
-            for lookup_key, value in section_payload.items():
-                segment = _segment_key(str(lookup_key).split("\x1f", 1)[0])
-                rows.append((segment, section, str(lookup_key), value))
-        with self.connection() as conn:
-            conn.execute("DELETE FROM file_index_segments")
-            for segment, section, lookup_key, value in rows:
-                conn.execute(
-                    """
-                    INSERT INTO file_index_segments
-                        (segment_key, section, lookup_key, payload_json, updated_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (segment, section, lookup_key, _json_dumps(value), generated_at),
-                )
-        return len(rows)
+        self.save_file_index_cache(snapshot)
+        return len(snapshot_to_segments(snapshot))
 
     def load_file_index_segment(self, segment_key: str, section: str, lookup_key: str):
         """Return one segmented local file index payload, or None."""
@@ -4952,8 +5084,14 @@ class SqliteStore:
         with self.connection() as conn:
             row = conn.execute(
                 """
-                SELECT payload_json FROM file_index_segments
-                WHERE segment_key = ? AND section = ? AND lookup_key = ?
+                SELECT segment.payload_json FROM file_index_segments AS segment
+                JOIN file_index_generations AS generation
+                    ON generation.generation_id = segment.generation_id
+                WHERE generation.cache_key = 'default' AND generation.complete = 1
+                    AND segment.segment_key = ? AND segment.section = ?
+                    AND segment.lookup_key = ?
+                ORDER BY generation.generated_at DESC
+                LIMIT 1
                 """,
                 (
                     _segment_key(segment_key) if segment_key else "_",
