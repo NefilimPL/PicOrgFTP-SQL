@@ -1945,7 +1945,7 @@ def test_health_is_critical_when_job_processor_is_shutdown_even_if_storage_is_on
     client, _store = api_environment
 
     with (
-        patch.object(web_app._PROCESS_EXECUTOR, "_shutdown", True),
+        patch.object(web_app._PROCESS_QUEUE, "_stopping", True),
         patch.object(
             web_app,
             "notification_worker_health",

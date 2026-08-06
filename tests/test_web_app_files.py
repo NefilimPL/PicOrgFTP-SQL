@@ -21,6 +21,11 @@ from fastapi.testclient import TestClient
 from picorgftp_sql import web_data
 from picorgftp_sql.web import active_clients
 from picorgftp_sql.web import app as web_app
+from picorgftp_sql.web.process_queue import (
+    ProcessQueueFull,
+    ProcessQueueService,
+    QueueLimits,
+)
 
 try:
     from PIL import Image
@@ -168,6 +173,9 @@ class WebAppFileTests(unittest.TestCase):
         form = web_app._ProcessFormSnapshot(
             fields={"ean": "5901234567890", "name": "Test product"}
         )
+        queue = Mock()
+        queue.submit.return_value = 1
+        reservation = Mock()
         result = {
             "timing": {"stages": [{"key": "prepare", "elapsed_ms": 12}]},
             "ftp": {},
@@ -177,13 +185,13 @@ class WebAppFileTests(unittest.TestCase):
         }
 
         with (
-            patch.object(web_app._PROCESS_EXECUTOR, "submit"),
+            patch.object(web_app, "_PROCESS_QUEUE", queue),
             patch.object(web_app, "_process_upload_snapshot", return_value=result) as process,
             patch.object(web_app, "record_job") as record_job,
             patch.object(web_app, "emit_event") as emit_event,
         ):
             queued = web_app._queue_process_job(
-                username="alice", cache_scope="scope", form=form
+                username="alice", cache_scope="scope", form=form, reservation=reservation
             )
             web_app._run_process_job(queued["job_id"])
 
@@ -201,9 +209,12 @@ class WebAppFileTests(unittest.TestCase):
 
     def test_process_job_persists_critical_unexpected_failure(self) -> None:
         form = web_app._ProcessFormSnapshot(fields={"ean": "5901234567890"})
+        queue = Mock()
+        queue.submit.return_value = 1
+        reservation = Mock()
 
         with (
-            patch.object(web_app._PROCESS_EXECUTOR, "submit"),
+            patch.object(web_app, "_PROCESS_QUEUE", queue),
             patch.object(
                 web_app,
                 "_process_upload_snapshot",
@@ -213,7 +224,7 @@ class WebAppFileTests(unittest.TestCase):
             patch.object(web_app, "emit_event") as emit_event,
         ):
             queued = web_app._queue_process_job(
-                username="alice", cache_scope="scope", form=form
+                username="alice", cache_scope="scope", form=form, reservation=reservation
             )
             web_app._run_process_job(queued["job_id"])
 
@@ -226,6 +237,9 @@ class WebAppFileTests(unittest.TestCase):
 
     def test_failed_process_job_persists_the_active_stage(self) -> None:
         form = web_app._ProcessFormSnapshot(fields={"ean": "5901234567890"})
+        queue = Mock()
+        queue.submit.return_value = 1
+        reservation = Mock()
 
         def fail_during_stage(*, progress, **_kwargs):
             progress(
@@ -243,13 +257,13 @@ class WebAppFileTests(unittest.TestCase):
             raise RuntimeError("FTP crashed")
 
         with (
-            patch.object(web_app._PROCESS_EXECUTOR, "submit"),
+            patch.object(web_app, "_PROCESS_QUEUE", queue),
             patch.object(web_app, "_process_upload_snapshot", side_effect=fail_during_stage),
             patch.object(web_app, "record_job") as record_job,
             patch.object(web_app, "emit_event"),
         ):
             queued = web_app._queue_process_job(
-                username="alice", cache_scope="scope", form=form
+                username="alice", cache_scope="scope", form=form, reservation=reservation
             )
             web_app._run_process_job(queued["job_id"])
 
@@ -2126,6 +2140,134 @@ class WebAppFileTests(unittest.TestCase):
         self.assertIn("/api/process-jobs", route_paths)
         self.assertIn("/api/process-jobs/active", route_paths)
         self.assertIn("/api/process-jobs/{job_id}", route_paths)
+
+    def test_background_process_rejects_before_materializing_when_queue_is_full(
+        self,
+    ) -> None:
+        """Catches a saturated queue that still stages an upload before rejecting it."""
+        client = TestClient(web_app.app)
+        full_queue = Mock()
+        full_queue.reserve.side_effect = ProcessQueueFull(retry_after_seconds=2)
+        snapshot = web_app._ProcessFormSnapshot()
+
+        with (
+            patch.object(web_app, "_require_user", return_value="operator"),
+            patch.object(web_app, "_PROCESS_QUEUE", full_queue, create=True),
+            patch.object(
+                web_app,
+                "_materialize_process_form",
+                return_value=snapshot,
+            ) as materialize,
+            patch.object(web_app, "_queue_process_job", return_value={"job_id": "job-1"}),
+        ):
+            response = client.post(
+                "/api/process/background",
+                data={
+                    "ean": "5901234567890",
+                    "name": "ALFA",
+                    "type_name": "STOL",
+                    "model": "A1",
+                },
+            )
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["Retry-After"], "2")
+        materialize.assert_not_awaited()
+
+    def test_foreground_and_background_share_the_owner_queue_limit(self) -> None:
+        """Catches separate endpoint queues that let one owner exceed two active jobs."""
+        queue = ProcessQueueService(
+            QueueLimits(workers=1, max_pending=3, max_per_owner=2),
+        )
+        original_submit = queue.submit
+        second_submitted = threading.Event()
+        first_started = threading.Event()
+        release_first = threading.Event()
+        foreground_done = threading.Event()
+        foreground_result: dict[str, object] = {}
+        submit_count = 0
+        submit_lock = threading.Lock()
+        materialize_calls = 0
+        materialize_lock = threading.Lock()
+        snapshot = web_app._ProcessFormSnapshot()
+        result = {"timing": {"stages": []}, "ftp": {}, "sql": {}, "local_delete": {}}
+
+        def track_submit(*args, **kwargs):
+            nonlocal submit_count
+            position = original_submit(*args, **kwargs)
+            with submit_lock:
+                submit_count += 1
+                if submit_count == 2:
+                    second_submitted.set()
+            return position
+
+        async def materialize(_form, _temp_dir):
+            nonlocal materialize_calls
+            with materialize_lock:
+                materialize_calls += 1
+            return snapshot
+
+        def process(**_kwargs):
+            if not first_started.is_set():
+                first_started.set()
+                assert release_first.wait(timeout=5)
+            return result
+
+        def run_foreground() -> None:
+            try:
+                foreground_result["response"] = TestClient(web_app.app).post(
+                    "/api/process",
+                    data={"ean": "5901234567890"},
+                )
+            except BaseException as exc:  # pragma: no cover - reported by the assertion below
+                foreground_result["error"] = exc
+            finally:
+                foreground_done.set()
+
+        background_client = TestClient(web_app.app)
+        try:
+            with (
+                patch.object(web_app, "_require_user", return_value="operator"),
+                patch.object(web_app, "_PROCESS_QUEUE", queue),
+                patch.object(web_app, "_materialize_process_form", side_effect=materialize),
+                patch.object(web_app, "_process_upload_snapshot", side_effect=process),
+                patch.object(web_app, "record_job"),
+                patch.object(web_app, "emit_event"),
+            ):
+                queue.submit = track_submit
+                background = background_client.post(
+                    "/api/process/background",
+                    data={"ean": "5901234567890"},
+                )
+                self.assertEqual(background.status_code, 200)
+                self.assertTrue(first_started.wait(timeout=5))
+
+                foreground_thread = threading.Thread(target=run_foreground)
+                foreground_thread.start()
+                self.assertTrue(second_submitted.wait(timeout=5))
+
+                rejected = background_client.post(
+                    "/api/process/background",
+                    data={"ean": "5901234567890"},
+                )
+                self.assertEqual(rejected.status_code, 429)
+                self.assertEqual(rejected.headers["Retry-After"], "2")
+                self.assertEqual(materialize_calls, 2)
+
+                release_first.set()
+                self.assertTrue(foreground_done.wait(timeout=5))
+                foreground_thread.join(timeout=1)
+                self.assertNotIn("error", foreground_result)
+                self.assertEqual(foreground_result["response"].status_code, 200)
+                self.assertEqual(foreground_result["response"].json(), result)
+        finally:
+            release_first.set()
+            queue.shutdown()
+            with web_app._PROCESS_JOBS_LOCK:
+                for job_id, job in list(web_app._PROCESS_JOBS.items()):
+                    if job.get("form") is snapshot or job.get("username") == "operator":
+                        web_app._PROCESS_JOBS.pop(job_id, None)
+                        web_app._PROCESS_JOB_COMPLETIONS.pop(job_id, None)
 
     def test_process_warning_messages_are_user_visible(self) -> None:
         payload = {

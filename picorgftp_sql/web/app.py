@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -90,6 +89,12 @@ from ..workflow_utils import build_product_directory, parse_slot_filename, sanit
 from . import upload_staging
 from .active_clients import ActiveClientRegistry
 from .process_progress import ProcessProgressGate
+from .process_queue import (
+    OwnerQueueLimit,
+    ProcessQueueFull,
+    ProcessQueueService,
+    QueueReservation,
+)
 from .runtime_status import RuntimeStatusService
 from .upload_staging import UploadSizeLimitExceeded, UploadStagingService
 from ..web_image_import import (
@@ -192,9 +197,10 @@ _BROWSER_EXTENSION_IMPORTS_LOCK = threading.Lock()
 _PROCESS_JOB_RETENTION_SECONDS = 6 * 60 * 60
 # Active work is never discarded; only the newest terminal jobs stay in memory.
 _PROCESS_JOB_MAX_COMPLETED = 200
-_PROCESS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="picorg-process")
+_PROCESS_QUEUE = ProcessQueueService()
 _PROCESS_JOBS: Dict[str, Dict[str, Any]] = {}
 _PROCESS_JOBS_LOCK = threading.Lock()
+_PROCESS_JOB_COMPLETIONS: Dict[str, threading.Event] = {}
 _PROCESS_QUEUE_GENERATION = 0
 _PROCESS_PROGRESS_GATE = ProcessProgressGate()
 _ACTIVE_CLIENT_REGISTRY = ActiveClientRegistry(
@@ -3482,6 +3488,7 @@ def _cleanup_process_jobs_locked(now: Optional[float] = None) -> None:
             continue
         if float(job.get("finished_at") or 0) < cutoff:
             _PROCESS_JOBS.pop(job_id, None)
+            _PROCESS_JOB_COMPLETIONS.pop(job_id, None)
             removed = True
             continue
         terminal_jobs.append((job_id, job))
@@ -3494,6 +3501,7 @@ def _cleanup_process_jobs_locked(now: Optional[float] = None) -> None:
     )
     for job_id, _job in terminal_jobs[_PROCESS_JOB_MAX_COMPLETED:]:
         _PROCESS_JOBS.pop(job_id, None)
+        _PROCESS_JOB_COMPLETIONS.pop(job_id, None)
         removed = True
     if removed:
         _advance_process_queue_generation_locked()
@@ -3507,6 +3515,42 @@ def _cleanup_process_jobs(now: Optional[float] = None) -> None:
 def _advance_process_queue_generation_locked() -> None:
     global _PROCESS_QUEUE_GENERATION
     _PROCESS_QUEUE_GENERATION += 1
+
+
+def _queue_retry_after_seconds() -> int:
+    limits = getattr(_PROCESS_QUEUE, "limits", None)
+    return max(1, int(getattr(limits, "retry_after_seconds", 2) or 2))
+
+
+def _reserve_process_capacity(cache_scope: str) -> QueueReservation:
+    try:
+        return _PROCESS_QUEUE.reserve(cache_scope)
+    except (ProcessQueueFull, OwnerQueueLimit) as exc:
+        retry_after = getattr(exc, "retry_after_seconds", None)
+        if retry_after is None:
+            retry_after = _queue_retry_after_seconds()
+        raise HTTPException(
+            status_code=429,
+            detail="Kolejka przetwarzania jest pelna. Sprobuj ponownie za chwile.",
+            headers={"Retry-After": str(max(1, int(retry_after)))},
+        ) from exc
+
+
+async def _reserve_and_materialize_process(
+    request: Request,
+    *,
+    cache_scope: str,
+) -> tuple[QueueReservation, _ProcessFormSnapshot]:
+    reservation = _reserve_process_capacity(cache_scope)
+    temp_dir = tempfile.mkdtemp(prefix="picorg_web_process_")
+    try:
+        form = await request.form()
+        snapshot = await _materialize_process_form(form, temp_dir)
+    except Exception:
+        reservation.release()
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+    return reservation, snapshot
 
 
 def _process_job_payload(job: Dict[str, Any], *, include_result: bool = True) -> Dict[str, Any]:
@@ -3678,6 +3722,7 @@ def _new_process_job(
         "timing_stages": [],
         "current_stage": None,
         "error": "",
+        "error_status_code": 0,
         "warning_messages": [],
     }
 
@@ -3740,6 +3785,7 @@ def _finish_process_job_failure(
     job["status"] = "failed"
     job["finished_at"] = finished_at
     job["error"] = message
+    job["error_status_code"] = status_code
     job["progress_label"] = "Blad zadania"
     job["warning_messages"] = [message]
     job["current_stage"] = None
@@ -3810,76 +3856,102 @@ def _queue_process_job(
     username: str,
     cache_scope: str,
     form: _ProcessFormSnapshot,
+    reservation: QueueReservation,
 ) -> Dict[str, Any]:
     _cleanup_process_jobs()
     job = _new_process_job(
         username=username, cache_scope=cache_scope, form=form, status="queued"
     )
     job_id = str(job["id"])
+    completion = threading.Event()
     with _PROCESS_JOBS_LOCK:
         _PROCESS_JOBS[job_id] = job
+        _PROCESS_JOB_COMPLETIONS[job_id] = completion
         _advance_process_queue_generation_locked()
-    _persist_process_job(dict(job))
-    _PROCESS_EXECUTOR.submit(_run_process_job, job_id)
-    return _process_job_payload(job, include_result=False)
-
-
-def _run_process_job(job_id: str) -> None:
+    try:
+        queue_position = _PROCESS_QUEUE.submit(reservation, job_id, _run_process_job)
+    except Exception:
+        with _PROCESS_JOBS_LOCK:
+            _PROCESS_JOBS.pop(job_id, None)
+            _PROCESS_JOB_COMPLETIONS.pop(job_id, None)
+            _advance_process_queue_generation_locked()
+        reservation.release()
+        raise
     with _PROCESS_JOBS_LOCK:
-        job = _PROCESS_JOBS.get(job_id)
-        if not job:
-            return
-        job["status"] = "running"
-        job["started_at"] = time.time()
-        job["progress"] = max(1, int(job.get("progress") or 0))
-        job["progress_label"] = "Start zadania"
-        _advance_process_queue_generation_locked()
-        username = str(job.get("username") or "")
-        cache_scope = str(job.get("cache_scope") or "")
-        form = job.get("form")
+        queued_job = _PROCESS_JOBS.get(job_id)
+        if queued_job and queued_job.get("status") == "queued":
+            queued_job["queue_position"] = queue_position
+            job = queued_job
         durable_job = dict(job)
     _persist_process_job(durable_job)
+    return _process_job_payload(durable_job, include_result=False)
+
+
+def _run_process_job(
+    job_id: str,
+    _cancel_event: threading.Event | None = None,
+) -> None:
     try:
-        payload = _process_upload_snapshot(
-            username=username,
-            cache_scope=cache_scope,
-            form=form,
-            job_id=job_id,
-            progress=lambda percent, label, stages, current_stage: _set_process_job_progress(
-                job_id,
-                percent,
-                label,
-                stages,
-                current_stage,
-            ),
-        )
         with _PROCESS_JOBS_LOCK:
             job = _PROCESS_JOBS.get(job_id)
             if not job:
                 return
-            warning_messages = _finish_process_job_success(job, payload)
+            job["status"] = "running"
+            job["started_at"] = time.time()
+            job["progress"] = max(1, int(job.get("progress") or 0))
+            job["progress_label"] = "Start zadania"
             _advance_process_queue_generation_locked()
-            _cleanup_process_jobs_locked(now=float(job["finished_at"]))
+            username = str(job.get("username") or "")
+            cache_scope = str(job.get("cache_scope") or "")
+            form = job.get("form")
             durable_job = dict(job)
-        _persist_process_job_snapshot(durable_job, force=True, forget=True)
-        _emit_process_completed(durable_job, payload, warning_messages)
-    except Exception as exc:
+        _persist_process_job(durable_job)
+        try:
+            payload = _process_upload_snapshot(
+                username=username,
+                cache_scope=cache_scope,
+                form=form,
+                job_id=job_id,
+                progress=lambda percent, label, stages, current_stage: _set_process_job_progress(
+                    job_id,
+                    percent,
+                    label,
+                    stages,
+                    current_stage,
+                ),
+            )
+            with _PROCESS_JOBS_LOCK:
+                job = _PROCESS_JOBS.get(job_id)
+                if not job:
+                    return
+                warning_messages = _finish_process_job_success(job, payload)
+                _advance_process_queue_generation_locked()
+                _cleanup_process_jobs_locked(now=float(job["finished_at"]))
+                durable_job = dict(job)
+            _persist_process_job_snapshot(durable_job, force=True, forget=True)
+            _emit_process_completed(durable_job, payload, warning_messages)
+        except Exception as exc:
+            with _PROCESS_JOBS_LOCK:
+                job = _PROCESS_JOBS.get(job_id)
+                if not job:
+                    return
+                message, status_code, severity = _finish_process_job_failure(job, exc)
+                _advance_process_queue_generation_locked()
+                _cleanup_process_jobs_locked(now=float(job["finished_at"]))
+                durable_job = dict(job)
+            _persist_process_job_snapshot(durable_job, force=True, forget=True)
+            _emit_process_failed(
+                durable_job,
+                exc,
+                message=message,
+                status_code=status_code,
+                severity=severity,
+            )
+    finally:
         with _PROCESS_JOBS_LOCK:
-            job = _PROCESS_JOBS.get(job_id)
-            if not job:
-                return
-            message, status_code, severity = _finish_process_job_failure(job, exc)
-            _advance_process_queue_generation_locked()
-            _cleanup_process_jobs_locked(now=float(job["finished_at"]))
-            durable_job = dict(job)
-        _persist_process_job_snapshot(durable_job, force=True, forget=True)
-        _emit_process_failed(
-            durable_job,
-            exc,
-            message=message,
-            status_code=status_code,
-            severity=severity,
-        )
+            completion = _PROCESS_JOB_COMPLETIONS.get(job_id)
+        if completion is not None:
+            completion.set()
 
 
 def _process_job_for_user(job_id: str, username: str) -> Optional[Dict[str, Any]]:
@@ -4490,7 +4562,7 @@ def _health_payload() -> Dict[str, Any]:
         "sqlite": {"status": "critical", "observed_at": server_time},
         "job_processor": {
             "status": "critical"
-            if bool(getattr(_PROCESS_EXECUTOR, "_shutdown", False))
+            if bool(getattr(_PROCESS_QUEUE, "_stopping", False))
             else "online",
             "observed_at": server_time,
         },
@@ -6584,77 +6656,56 @@ def create_app() -> FastAPI:
     async def process_uploads_background(request: Request) -> JSONResponse:
         username = _require_user(request)
         cache_scope = _user_cache_scope(request, username)
-        temp_dir = tempfile.mkdtemp(prefix="picorg_web_process_")
-        try:
-            form = await request.form()
-            snapshot = await _materialize_process_form(form, temp_dir)
-        except Exception:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            raise
-        job = _queue_process_job(
-            username=username,
+        reservation, snapshot = await _reserve_and_materialize_process(
+            request,
             cache_scope=cache_scope,
-            form=snapshot,
         )
+        try:
+            job = _queue_process_job(
+                username=username,
+                cache_scope=cache_scope,
+                form=snapshot,
+                reservation=reservation,
+            )
+        except Exception:
+            reservation.release()
+            raise
         return JSONResponse({"queued": True, "job": job})
 
     @app.post("/api/process")
     async def process_uploads(request: Request) -> JSONResponse:
         username = _require_user(request)
         cache_scope = _user_cache_scope(request, username)
-        temp_dir = tempfile.mkdtemp(prefix="picorg_web_process_")
-        try:
-            form = await request.form()
-            snapshot = await _materialize_process_form(form, temp_dir)
-        except Exception:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            raise
-        job = _new_process_job(
-            username=username,
+        reservation, snapshot = await _reserve_and_materialize_process(
+            request,
             cache_scope=cache_scope,
-            form=snapshot,
-            status="running",
         )
-        job_id = str(job["id"])
-        _persist_process_job(dict(job))
-
-        def update_progress(
-            percent: int,
-            label: str,
-            stages: List[Dict[str, Any]],
-            current_stage: Optional[Dict[str, Any]],
-        ) -> None:
-            _update_process_job_progress(
-                job, percent, label, stages, current_stage
-            )
-            _persist_process_job_snapshot(dict(job))
-
         try:
-            payload = await run_in_threadpool(
-                lambda: _process_upload_snapshot(
-                    username=username,
-                    cache_scope=cache_scope,
-                    form=snapshot,
-                    job_id=job_id,
-                    progress=update_progress,
-                )
+            queued = _queue_process_job(
+                username=username,
+                cache_scope=cache_scope,
+                form=snapshot,
+                reservation=reservation,
             )
-        except Exception as exc:
-            message, status_code, severity = _finish_process_job_failure(job, exc)
-            durable_job = dict(job)
-            _persist_process_job_snapshot(durable_job, force=True, forget=True)
-            _emit_process_failed(
-                durable_job,
-                exc,
-                message=message,
-                status_code=status_code,
-                severity=severity,
-            )
+        except Exception:
+            reservation.release()
             raise
-        warning_messages = _finish_process_job_success(job, payload)
-        durable_job = dict(job)
-        _persist_process_job_snapshot(durable_job, force=True, forget=True)
-        _emit_process_completed(durable_job, payload, warning_messages)
+        job_id = str(queued["job_id"])
+        with _PROCESS_JOBS_LOCK:
+            completion = _PROCESS_JOB_COMPLETIONS.get(job_id)
+        if completion is None:
+            raise HTTPException(status_code=500, detail="Nie znaleziono zadania kolejki.")
+        await run_in_threadpool(completion.wait)
+        with _PROCESS_JOBS_LOCK:
+            job = dict(_PROCESS_JOBS.get(job_id) or {})
+        if job.get("status") == "failed":
+            raise HTTPException(
+                status_code=max(400, int(job.get("error_status_code") or 500)),
+                detail=str(job.get("error") or "Przetwarzanie zakonczone bledem."),
+            )
+        payload = job.get("result")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=500, detail="Brak wyniku zadania kolejki.")
         return JSONResponse(payload)
     return app
 
