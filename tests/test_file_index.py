@@ -2,15 +2,71 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from picorgftp_sql.file_index import LocalFileIndex
+from picorgftp_sql.file_index import INDEX_VERSION, LocalFileIndex
 from picorgftp_sql.sqlite_store import SqliteStore
 
 
+def _index_with_cache(base: Path, generated_at_epoch: float) -> LocalFileIndex:
+    root = base / "photos"
+    root.mkdir()
+    cache_path = base / "file-index.json"
+    generated_at = (
+        datetime.fromtimestamp(generated_at_epoch, timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    cache_path.write_text(
+        json.dumps(
+            {
+                "version": INDEX_VERSION,
+                "root": str(root.resolve()),
+                "generated_at": generated_at,
+                "dirs_scanned": 0,
+                "products_scanned": 0,
+                "names": [],
+                "types": {},
+                "models": {},
+                "colors": {},
+                "extras": {},
+                "files": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    index = LocalFileIndex(str(root), str(cache_path))
+    assert index.load_cache()
+    return index
+
+
 class LocalFileIndexTests(unittest.TestCase):
+    def test_refresh_if_stale_skips_fresh_cached_snapshot(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            index = _index_with_cache(base, generated_at_epoch=1_000.0)
+            started: list[bool] = []
+            index.refresh_async = lambda: started.append(True) or True
+
+            self.assertTrue(index.cache_is_fresh(now=1_899.0))
+            self.assertFalse(index.refresh_if_stale(now=1_899.0))
+            self.assertEqual(started, [])
+
+    def test_refresh_if_stale_starts_for_old_or_forced_snapshot(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            index = _index_with_cache(Path(temp_dir), generated_at_epoch=1_000.0)
+            started: list[bool] = []
+            index.refresh_async = lambda: started.append(True) or True
+
+            self.assertFalse(index.cache_is_fresh(now=1_900.1))
+            self.assertTrue(index.refresh_if_stale(now=1_900.1))
+            self.assertTrue(index.refresh_if_stale(force=True, now=1_100.0))
+            self.assertEqual(started, [True, True])
+
     def test_refresh_sync_builds_hierarchy_and_files(self) -> None:
         with TemporaryDirectory() as temp_dir:
             base = Path(temp_dir)

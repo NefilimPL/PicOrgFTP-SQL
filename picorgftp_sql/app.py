@@ -1130,7 +1130,7 @@ class App(BU.Tk):
         except E:
             pass
 
-    def _start_file_index_refresh(A):
+    def _start_file_index_refresh(A, *, force=False):
         """Kick off the background filesystem index if it is not already running."""
 
         if not getattr(A, "_local_file_index_enabled", J):
@@ -1144,7 +1144,7 @@ class App(BU.Tk):
         file_index = Aj(A, "_file_index", I)
         if file_index is I:
             return h
-        started = file_index.refresh_async()
+        started = file_index.refresh_if_stale(force=force)
         if not started:
             A._on_file_index_status_change(file_index.get_status())
         return started
@@ -8390,7 +8390,7 @@ class App(BU.Tk):
                     color3=s_,
                     extras=b_,
                 )
-            C._start_file_index_refresh()
+            C._start_file_index_refresh(force=True)
 
     def _load_by_ean(A):
         E_ = NO_EAN_LABEL
@@ -9010,7 +9010,7 @@ class App(BU.Tk):
         file_index_btn = C.Button(
             system_tab,
             text=LANG.get("file_index_rebuild_action", "Odbuduj indeks plików"),
-            command=A._start_file_index_refresh,
+            command=lambda: A._start_file_index_refresh(force=True),
         )
         file_index_btn.grid(row=11, column=0, padx=5, pady=(6, 0), sticky="w")
         _slabel(

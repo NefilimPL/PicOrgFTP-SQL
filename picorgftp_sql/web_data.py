@@ -402,7 +402,7 @@ def _get_file_index(*, start: bool = False) -> LocalFileIndex | None:
         _FILE_INDEX_KEY = key
         _FILE_INDEX_REFRESH_STARTED = False
     if start and _FILE_INDEX is not None and not _FILE_INDEX_REFRESH_STARTED:
-        _FILE_INDEX.refresh_async()
+        _FILE_INDEX.refresh_if_stale()
         _FILE_INDEX_REFRESH_STARTED = True
     return _FILE_INDEX
 
@@ -467,7 +467,7 @@ def refresh_file_index() -> dict[str, object]:
 
     index = _get_file_index(start=False)
     if index is not None:
-        index.refresh_async()
+        index.refresh_if_stale(force=True)
     return file_index_status()
 
 

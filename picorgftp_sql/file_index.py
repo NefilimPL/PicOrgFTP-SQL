@@ -16,6 +16,7 @@ from .workflow_utils import (
 )
 
 INDEX_VERSION = 1
+FILE_INDEX_CACHE_TTL_SECONDS = 15 * 60
 KEY_SEPARATOR = "\x1f"
 NO_EXTRA_VALUE = "NO-LED"
 
@@ -24,6 +25,23 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
         "+00:00", "Z"
     )
+
+
+def _canonical_path(value: object) -> str:
+    return os.path.realpath(os.path.abspath(str(value or "")))
+
+
+def _generated_at_epoch(value: object) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        timestamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if timestamp.tzinfo is None:
+        return None
+    return timestamp.timestamp()
 
 
 def _directory_names(path: str) -> list[str]:
@@ -88,7 +106,7 @@ class LocalFileIndex:
         status_callback=None,
         cache_store=None,
     ):
-        self.root_dir = os.path.abspath(root_dir)
+        self.root_dir = _canonical_path(root_dir)
         self.cache_path = os.path.abspath(cache_path)
         self._cache_store = cache_store
         self._status_callback = status_callback
@@ -284,13 +302,41 @@ class LocalFileIndex:
             return False
         if snapshot.get("version") != INDEX_VERSION:
             return False
-        if os.path.abspath(snapshot.get("root", "")) != self.root_dir:
+        if _canonical_path(snapshot.get("root", "")) != self.root_dir:
             return False
         for key in ("names", "types", "models", "colors", "extras", "files"):
             if key not in snapshot:
                 return False
         self._replace_snapshot(snapshot, state="cached", cache_loaded=True)
         return True
+
+    def cache_is_fresh(self, *, now: float | None = None) -> bool:
+        """Return whether the loaded snapshot still falls inside the cache TTL."""
+        with self._lock:
+            snapshot = self._snapshot
+        if not isinstance(snapshot, dict):
+            return False
+        if snapshot.get("version") != INDEX_VERSION:
+            return False
+        if _canonical_path(snapshot.get("root", "")) != self.root_dir:
+            return False
+        generated_at = _generated_at_epoch(snapshot.get("generated_at"))
+        if generated_at is None:
+            return False
+        checked_at = time.time() if now is None else float(now)
+        age_seconds = checked_at - generated_at
+        return 0 <= age_seconds < FILE_INDEX_CACHE_TTL_SECONDS
+
+    def refresh_if_stale(
+        self,
+        *,
+        force: bool = False,
+        now: float | None = None,
+    ) -> bool:
+        """Start a rebuild only when no compatible fresh snapshot is available."""
+        if not force and self.cache_is_fresh(now=now):
+            return False
+        return self.refresh_async()
 
     def refresh_sync(self) -> bool:
         """Rebuild the snapshot immediately and persist it to disk."""

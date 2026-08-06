@@ -409,6 +409,35 @@ class _PublishedBeforeReturnQueue(queue.Queue):
 
 @unittest.skipIf(App is None, f"App import unavailable: {APP_IMPORT_ERROR}")
 class AppPerformanceHelperTests(unittest.TestCase):
+    def test_desktop_start_skips_refresh_when_file_index_cache_is_fresh(self) -> None:
+        class Index:
+            def __init__(self) -> None:
+                self.force_values: list[bool] = []
+
+            def refresh_if_stale(self, *, force: bool = False) -> bool:
+                self.force_values.append(force)
+                return False
+
+            def get_status(self) -> dict[str, str]:
+                return {"state": "cached"}
+
+        class Harness:
+            def __init__(self) -> None:
+                self._local_file_index_enabled = True
+                self._file_index = Index()
+                self.statuses: list[dict[str, str]] = []
+
+            def _on_file_index_status_change(self, status: dict[str, str]) -> None:
+                self.statuses.append(status)
+
+        harness = Harness()
+
+        started = App._start_file_index_refresh(harness)
+
+        self.assertFalse(started)
+        self.assertEqual(harness._file_index.force_values, [False])
+        self.assertEqual(harness.statuses, [{"state": "cached"}])
+
     def test_app_builds_main_view_before_desktop_data_is_ready(self) -> None:
         load_started = threading.Event()
         release_load = threading.Event()
