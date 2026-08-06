@@ -90,6 +90,7 @@ from ..workflow_utils import build_product_directory, parse_slot_filename, sanit
 from .active_clients import ActiveClientRegistry
 from .process_progress import ProcessProgressGate
 from .runtime_status import RuntimeStatusService
+from .upload_staging import UploadSizeLimitExceeded, UploadStagingService
 from ..web_image_import import (
     ImageImportError,
     discover_image_candidates,
@@ -1520,35 +1521,27 @@ def _validate_upload_image_pixels(path: str, max_pixels: int) -> tuple[int, int]
 
 async def _save_upload(upload: UploadFile, temp_dir: str, prefix: str) -> str:
     safe_name = _safe_upload_name(upload.filename, f"{prefix}.upload")
-    suffix = _safe_file_suffix(safe_name)
-    target_path = os.path.join(temp_dir, f"{prefix}_{secrets.token_hex(8)}{suffix}")
     max_bytes, max_pixels = _upload_limits()
-    size = 0
+    content_type = getattr(upload, "content_type", "")
     try:
         _validate_upload_extension(safe_name)
-        with open(target_path, "wb") as handle:
-            while True:
-                chunk = await upload.read(1024 * 1024)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > max_bytes:
-                    _raise_upload_too_large(_upload_limit_message(size, max_bytes))
-                handle.write(chunk)
-        _validate_upload_content(target_path, safe_name, getattr(upload, "content_type", ""), max_pixels)
-        _strip_upload_metadata(target_path, safe_name)
-        _enforce_upload_size(target_path, max_bytes)
-        _scan_uploaded_file(target_path)
-        return target_path
     except Exception:
-        if os.path.exists(target_path):
-            try:
-                os.remove(target_path)
-            except OSError:
-                pass
-        raise
-    finally:
         await upload.close()
+        raise
+
+    def validate(path: str, _filename: object, limit: int) -> tuple[int, int]:
+        return _validate_upload_content(path, safe_name, content_type, limit)
+
+    try:
+        staged = await UploadStagingService(
+            max_bytes=max_bytes,
+            max_pixels=max_pixels,
+            validate_image=validate,
+            scan_file=_scan_uploaded_file,
+        ).stage(upload, temp_dir, prefix)
+    except UploadSizeLimitExceeded as exc:
+        _raise_upload_too_large(_upload_limit_message(exc.size_bytes, exc.max_bytes))
+    return staged.path
 
 
 def _upload_prefix_from_form_key(key: str) -> str:

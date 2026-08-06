@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+import threading
+
+import pytest
+from fastapi import HTTPException
+
+from picorgftp_sql.web import app as web_app
+from picorgftp_sql.web.upload_staging import UploadStagingService
+from tests.helpers_process_upload import jpeg_bytes, upload_file
+
+
+@pytest.mark.anyio
+async def test_stage_runs_validation_and_scan_off_event_loop(tmp_path) -> None:
+    """Catches validation or antivirus work that blocks the request event loop."""
+    event_loop_thread = threading.get_ident()
+    worker_threads: list[int] = []
+
+    def validate(path: str, filename: object, max_pixels: int) -> tuple[int, int]:
+        worker_threads.append(threading.get_ident())
+        return 100, 100
+
+    def scan(path: str) -> dict[str, object]:
+        worker_threads.append(threading.get_ident())
+        return {"status": "clean"}
+
+    service = UploadStagingService(validate_image=validate, scan_file=scan)
+    result = await service.stage(
+        upload_file("photo.jpg", jpeg_bytes()),
+        str(tmp_path),
+        "01",
+    )
+
+    assert result.path.endswith(".jpg")
+    assert result.width == 100
+    assert result.height == 100
+    assert worker_threads
+    assert all(thread_id != event_loop_thread for thread_id in worker_threads)
+
+
+@pytest.mark.anyio
+async def test_process_form_staging_keeps_validation_and_scan_off_event_loop(
+    tmp_path, monkeypatch
+) -> None:
+    """Catches the existing process form path running its security checks inline."""
+    event_loop_thread = threading.get_ident()
+    worker_threads: list[int] = []
+
+    def validate(
+        path: str,
+        filename: object,
+        content_type: object,
+        max_pixels: int,
+    ) -> tuple[int, int]:
+        worker_threads.append(threading.get_ident())
+        return 100, 100
+
+    def scan(path: str) -> dict[str, object]:
+        worker_threads.append(threading.get_ident())
+        return {"status": "clean"}
+
+    monkeypatch.setattr(web_app, "_validate_upload_content", validate)
+    monkeypatch.setattr(web_app, "_scan_uploaded_file", scan)
+    monkeypatch.setattr(web_app, "_upload_limits", lambda: (1024 * 1024, 25_000_000))
+
+    path = await web_app._save_upload(
+        upload_file("photo.jpg", jpeg_bytes()),
+        str(tmp_path),
+        "01",
+    )
+
+    assert path.endswith(".jpg")
+    assert worker_threads
+    assert all(thread_id != event_loop_thread for thread_id in worker_threads)
+
+
+def test_raw_staged_path_is_rejected_by_file_token_resolver(tmp_path, monkeypatch) -> None:
+    """Catches an endpoint policy that would expose a raw staged upload."""
+    raw_dir = tmp_path / "process-job"
+    raw_dir.mkdir()
+    raw_path = raw_dir / "01_raw.jpg"
+    raw_path.write_bytes(b"raw upload bytes with private metadata")
+    processed_dir = tmp_path / "processed"
+    processed_dir.mkdir()
+    cache_root = tmp_path / "cache-root"
+
+    monkeypatch.setattr(web_app.settings, "l", str(processed_dir))
+    monkeypatch.setattr(web_app.settings, "AC", str(cache_root))
+
+    with pytest.raises(HTTPException) as error:
+        web_app._path_from_file_token(web_app._file_token(str(raw_path)))
+
+    assert error.value.status_code == 403
