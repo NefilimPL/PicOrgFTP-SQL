@@ -48,7 +48,8 @@ Plan: `plans/2026-07-27-ftp-and-file-indexing.md`
 | 3. Invalidacja cache po synchronizacji FTP | Ukończono | Po potwierdzonym `STOR` snapshot dostaje nową nazwę, a po `DELE` traci usuniętą; tylko potwierdzone komendy zmieniają cache. Szeroki błąd w częściowej synchronizacji unieważnia go przed zwróceniem wyniku błędu. Zweryfikowano: 29 passed, 77 deselected, 4 istniejące ostrzeżenia FastAPI; kompilacja i `git diff --check`. |
 | 4. Start lokalnego indeksu bez automatycznego pełnego skanu | Ukończono | `LocalFileIndex` ocenia wersję, kanoniczny root i poprawny UTC timestamp z TTL 15 min; świeży snapshot nie uruchamia workera. Desktop i web używają warunkowego startu, a przyciski ręczne oraz zapis produktu wymuszają refresh. Zweryfikowano: 11 passed, 161 deselected, 4 istniejące ostrzeżenia FastAPI; kompilacja i `git diff --check`. |
 | 5. Jedna segmentowa reprezentacja SQLite | Ukończono | Zastąpiono blob aktywną, kompletną generacją segmentów SQLite. Migracja legacy zapisuje segmenty i metadane atomowo, oznacza generację jako kompletną, a następnie usuwa blob; odczyt rekonstruuje snapshot z segmentów. Zweryfikowano: 53 passed; kompilacja i `git diff --check`. |
-| 6–8 | Nie ruszono | Zostaną rozpoczęte po ukończeniu zadania 5. |
+| 6. Przyrostowe odświeżanie segmentów | Ukończono | Indeks porównuje metadane katalogów i parsuje pliki tylko w zmienionych segmentach; niepewny fingerprint wymusza pełny skan. SQLite kopiuje niezmienione segmenty atomowo przez `INSERT … SELECT`, a awaria pozostawia poprzednią kompletną generację aktywną. Zweryfikowano: 14 passed, 45 deselected; kompilacja i `git diff --check`. |
+| 7–8 | Nie ruszono | Zostaną rozpoczęte po ukończeniu zadania 6. |
 
 ## Pakiet 5 — Integracje SQL, Pimcore i tłumaczenia
 

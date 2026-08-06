@@ -185,7 +185,10 @@ class LocalFileIndexTests(unittest.TestCase):
             self.assertIsInstance(snapshot["generated_at"], str)
             self.assertIn("T", snapshot["generated_at"])
             self.assertTrue(snapshot["generated_at"].endswith("Z"))
-            self.assertEqual(sqlite_store.load_file_index_segment("M", "names", "MAGGIORE"), "MAGGIORE")
+            self.assertEqual(
+                sqlite_store.load_file_index_segment("MAGGIORE", "names", "MAGGIORE"),
+                "MAGGIORE",
+            )
 
 
 if __name__ == "__main__":

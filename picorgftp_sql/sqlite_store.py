@@ -31,6 +31,7 @@ from .excel_utils import (
 from .file_index_segments import (
     FileIndexGeneration,
     FileIndexSegment,
+    normalize_segment_key,
     segments_to_snapshot,
     snapshot_to_segments,
 )
@@ -537,11 +538,7 @@ def _history_timestamp_from_created_at(value: object) -> float:
 
 
 def _segment_key(value: object) -> str:
-    text = _upper(value)
-    for ch in text:
-        if ch.isalnum():
-            return ch if ch.isascii() else "_"
-    return "_"
+    return normalize_segment_key(value)
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -4924,7 +4921,11 @@ class SqliteStore:
         return dict(generation.snapshot or {}) if generation is not None else {}
 
     def save_file_index_cache(
-        self, payload: dict[str, object], key: str = "default"
+        self,
+        payload: dict[str, object],
+        key: str = "default",
+        *,
+        reused_segment_keys: tuple[str, ...] = (),
     ) -> None:
         """Store local file index cache payload."""
 
@@ -4940,12 +4941,18 @@ class SqliteStore:
             dirs_scanned=int(snapshot.get("dirs_scanned") or 0),
             products_scanned=int(snapshot.get("products_scanned") or 0),
         )
-        self.commit_file_index_generation(generation, snapshot_to_segments(snapshot))
+        self.commit_file_index_generation(
+            generation,
+            snapshot_to_segments(snapshot),
+            reused_segment_keys=reused_segment_keys,
+        )
 
     def commit_file_index_generation(
         self,
         generation: FileIndexGeneration,
         segments: list[FileIndexSegment],
+        *,
+        reused_segment_keys: tuple[str, ...] = (),
     ) -> None:
         """Atomically replace a cache key with one complete segment generation."""
 
@@ -4961,7 +4968,23 @@ class SqliteStore:
             )
             for segment in segments
         ]
+        reusable_keys = tuple(
+            sorted({normalize_segment_key(segment_key) for segment_key in reused_segment_keys})
+        )
         with self.connection() as conn:
+            previous_generation_id = None
+            if reusable_keys:
+                previous = conn.execute(
+                    """
+                    SELECT generation_id FROM file_index_generations
+                    WHERE cache_key = ? AND complete = 1
+                    ORDER BY generated_at DESC
+                    LIMIT 1
+                    """,
+                    (generation.cache_key,),
+                ).fetchone()
+                if previous is not None:
+                    previous_generation_id = str(previous["generation_id"])
             conn.execute(
                 """
                 INSERT INTO file_index_generations
@@ -4979,6 +5002,26 @@ class SqliteStore:
                     generation.products_scanned,
                 ),
             )
+            if previous_generation_id is not None:
+                key_markers = ", ".join("?" for _key in reusable_keys)
+                conn.execute(
+                    """
+                    INSERT INTO file_index_segments
+                        (generation_id, segment_key, section, lookup_key, payload_json, updated_at)
+                    SELECT ?, segment_key, section, lookup_key, payload_json, ?
+                    FROM file_index_segments
+                    WHERE generation_id = ? AND segment_key IN ("""
+                    + key_markers
+                    + ")",
+                    (
+                        generation.generation_id,
+                        generation.generated_at,
+                        previous_generation_id,
+                        *reusable_keys,
+                    ),
+                )
+                reusable_set = set(reusable_keys)
+                rows = [row for row in rows if row[1] not in reusable_set]
             conn.executemany(
                 """
                 INSERT INTO file_index_segments

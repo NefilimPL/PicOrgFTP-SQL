@@ -423,8 +423,16 @@ class SqliteDataStoreAdapter:
     def load_file_index_cache(self) -> dict[str, Any]:
         return self.store.load_file_index_cache()
 
-    def save_file_index_cache(self, payload: dict[str, object]) -> None:
-        self.store.save_file_index_cache(payload)
+    def save_file_index_cache(
+        self,
+        payload: dict[str, object],
+        *,
+        reused_segment_keys: tuple[str, ...] = (),
+    ) -> None:
+        self.store.save_file_index_cache(
+            payload,
+            reused_segment_keys=reused_segment_keys,
+        )
 
     def save_file_index_segments(self, snapshot: dict[str, object]) -> int:
         return self.store.save_file_index_segments(snapshot)
