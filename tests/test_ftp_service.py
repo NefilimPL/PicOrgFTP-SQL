@@ -5,6 +5,7 @@ from __future__ import annotations
 from ftplib import error_perm
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -121,6 +122,39 @@ class DownloadRemoteSlotsTests(unittest.TestCase):
                 remote_only_info["02"]["filename"],
                 "5901234567890_02_DETAIL.png",
             )
+
+    def test_download_remote_slots_stops_after_cancellation_between_files(self) -> None:
+        class CancellingFTP(_FakeFTP):
+            def __init__(self, files, cancel_event) -> None:
+                super().__init__(files)
+                self.cancel_event = cancel_event
+                self.downloaded: list[str] = []
+
+            def retrbinary(self, command: str, writer) -> None:
+                self.downloaded.append(command)
+                super().retrbinary(command, writer)
+                self.cancel_event.set()
+
+        cancel_event = threading.Event()
+        files = {
+            "5901234567890_01_MAIN.jpg": b"first",
+            "5901234567890_02_DETAIL.jpg": b"second",
+        }
+        fake_ftp = CancellingFTP(files, cancel_event)
+        with TemporaryDirectory() as temp_dir:
+            with patch.object(ftp_service, "connect_ftp", return_value=fake_ftp):
+                _, ftp_presence, preview_info, _ = ftp_service.download_remote_slots(
+                    {"host": "x", "port": 21, "user": "u", "pass": "p"},
+                    "5901234567890",
+                    {},
+                    {"01": 0, "02": 1},
+                    temp_root=temp_dir,
+                    cancel_event=cancel_event,
+                )
+
+        self.assertEqual(len(fake_ftp.downloaded), 1)
+        self.assertEqual(len(ftp_presence), 1)
+        self.assertEqual(len(preview_info), 1)
 
     def test_sync_remote_files_deletes_candidates_without_uploads(self) -> None:
         fake_ftp = _SyncFTP()

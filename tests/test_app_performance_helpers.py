@@ -67,6 +67,19 @@ class _LoaderCancelStub:
         self.cancel_calls += 1
 
 
+class _FtpTempManagerStub:
+    def __init__(self, *_args, **_kwargs) -> None:
+        self.close_calls = 0
+        self.released_paths: list[str] = []
+
+    def release(self, path: str) -> bool:
+        self.released_paths.append(path)
+        return True
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
 class _ProductActionRouteHarness:
     _desktop_product_actions_available = App._desktop_product_actions_available
 
@@ -91,6 +104,30 @@ class _ProductActionRouteHarness:
 
     def _focus_widget(self, widget) -> None:
         self.focused_widgets.append(widget)
+
+
+class _LookupCancellationHarness:
+    _cancel_existing_lookup = App._cancel_existing_lookup
+
+    def __init__(self) -> None:
+        self._load_existing_after_id = app_module.I
+        self._existing_lookup_cancel_event = threading.Event()
+        self._ftp_preview_temp_dir = "C:/temp/managed-preview"
+        self._ftp_temp_manager = _FtpTempManagerStub()
+        self._load_existing_request_id = 7
+        self._existing_lookup_lock = threading.Lock()
+        self._retry_existing_lookup = True
+        self._existing_lookup_running = True
+        self._existing_lookup_active_request_id = 7
+        self._existing_lookup_busy = True
+        self.slot_activity_calls: list[bool] = []
+        self.busy_calls: list[tuple[str, bool]] = []
+
+    def _update_all_slot_activity(self, *, active: bool) -> None:
+        self.slot_activity_calls.append(active)
+
+    def _set_busy_state(self, message: str, *, active: bool) -> None:
+        self.busy_calls.append((message, active))
 
 
 class _BlockedCommitHarness:
@@ -256,6 +293,14 @@ def _headless_app_environment():
         stack.enter_context(patch.object(app_module.data_store, "get_active_store", return_value=object()))
         stack.enter_context(patch.object(app_module, "prepare_excel_lists", return_value={}))
         stack.enter_context(patch.object(app_module, "set_app"))
+        stack.enter_context(
+            patch.object(
+                app_module,
+                "FtpTempManager",
+                side_effect=_FtpTempManagerStub,
+                create=True,
+            )
+        )
         yield
 
 
@@ -628,6 +673,32 @@ class AppPerformanceHelperTests(unittest.TestCase):
             app.destroy()
 
         self.assertEqual(loader.cancel_calls, 1)
+
+    def test_destroy_closes_ftp_temp_manager(self) -> None:
+        with _headless_app_environment(), patch.object(
+            app_module.BU.Tk,
+            "destroy",
+            return_value=None,
+            create=True,
+        ):
+            app = _HeadlessStartupApp()
+            temp_manager = app._ftp_temp_manager
+            app.destroy()
+
+        self.assertEqual(temp_manager.close_calls, 1)
+
+    def test_cancel_existing_lookup_stops_request_and_releases_preview_dir(self) -> None:
+        harness = _LookupCancellationHarness()
+
+        App._cancel_existing_lookup(harness)
+
+        self.assertTrue(harness._existing_lookup_cancel_event.is_set())
+        self.assertEqual(
+            harness._ftp_temp_manager.released_paths,
+            ["C:/temp/managed-preview"],
+        )
+        self.assertIs(harness._ftp_preview_temp_dir, app_module.I)
+        self.assertEqual(harness._load_existing_request_id, 8)
 
     def test_thumbnail_queue_capacity_covers_two_visible_memory_windows(self) -> None:
         self.assertEqual(

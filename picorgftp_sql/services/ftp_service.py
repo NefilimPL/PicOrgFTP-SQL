@@ -166,6 +166,7 @@ def download_remote_slots(
     *,
     temp_root=None,
     status_callback=None,
+    cancel_event=None,
 ):
     """Download FTP preview files and mark which slots are remote-only."""
 
@@ -178,6 +179,8 @@ def download_remote_slots(
         temp_root = temp_root or tempfile.mkdtemp(prefix="picorgftp_sql_")
         os.makedirs(temp_root, exist_ok=True)
         for label, filename in remote_files.items():
+            if cancel_event is not None and cancel_event.is_set():
+                break
             raw_temp_path = os.path.join(temp_root, filename)
             ftp_presence[label] = filename
             if status_callback:

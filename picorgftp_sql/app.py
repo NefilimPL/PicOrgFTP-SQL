@@ -5,6 +5,7 @@ import copy
 from collections import OrderedDict, deque
 import queue
 import re
+import tempfile
 import traceback
 import tokenize
 
@@ -69,6 +70,7 @@ from .services.ftp_service import (
     download_remote_slots as svc_download_remote_slots,
     list_remote_filenames as svc_list_remote_filenames,
 )
+from .services.ftp_temp_manager import FtpTempManager
 from .services.sql_service import (
     build_column_detection_query as svc_build_column_detection_query,
     extract_presence_context as svc_extract_presence_context,
@@ -298,6 +300,9 @@ class App(BU.Tk):
             status_callback=B._on_file_index_status_change,
             cache_store=file_index_cache_store,
         )
+        B._ftp_temp_manager = FtpTempManager(
+            A.path.join(tempfile.gettempdir(), "picorgftp_sql_ftp")
+        )
         if B._local_file_index_enabled and B._file_index.load_cache():
             B._refresh_name_values_from_index()
         elif B._local_file_index_enabled:
@@ -342,6 +347,8 @@ class App(BU.Tk):
         B._ui_log_flush_job = I
         B._load_existing_after_id = I
         B._load_existing_request_id = 0
+        B._existing_lookup_cancel_event = I
+        B._ftp_preview_temp_dir = I
         B._last_lookup_signature = I
         B._dashboard_refresh_job = I
         B._slot_grid_columns = 0
@@ -614,6 +621,12 @@ class App(BU.Tk):
         desktop_loader = getattr(A, "_desktop_data_loader", I)
         if desktop_loader is not I:
             desktop_loader.cancel()
+        cancel_event = getattr(A, "_existing_lookup_cancel_event", I)
+        if cancel_event is not I:
+            cancel_event.set()
+        ftp_temp_manager = getattr(A, "_ftp_temp_manager", I)
+        if ftp_temp_manager is not I:
+            ftp_temp_manager.close()
         for job_attr in (
             "_thumb_poll_job",
             "_perf_monitor_job",
@@ -2819,6 +2832,13 @@ class App(BU.Tk):
             except E:
                 pass
             B._load_existing_after_id = I
+        cancel_event = getattr(B, "_existing_lookup_cancel_event", I)
+        if cancel_event is not I:
+            cancel_event.set()
+        preview_temp_dir = getattr(B, "_ftp_preview_temp_dir", I)
+        if preview_temp_dir is not I:
+            B._ftp_temp_manager.release(preview_temp_dir)
+            B._ftp_preview_temp_dir = I
         B._load_existing_request_id += 1
         clear_busy = h
         with B._existing_lookup_lock:
@@ -6274,8 +6294,17 @@ class App(BU.Tk):
         lookup_signature = C._current_lookup_signature()
         if not force and lookup_signature == C._last_lookup_signature:
             return
+        previous_cancel_event = getattr(C, "_existing_lookup_cancel_event", I)
+        if previous_cancel_event is not I:
+            previous_cancel_event.set()
+        previous_preview_temp_dir = getattr(C, "_ftp_preview_temp_dir", I)
+        if previous_preview_temp_dir is not I:
+            C._ftp_temp_manager.release(previous_preview_temp_dir)
+            C._ftp_preview_temp_dir = I
         C._load_existing_request_id += 1
         request_id = C._load_existing_request_id
+        cancel_event = threading.Event()
+        C._existing_lookup_cancel_event = cancel_event
         started_at = Ag.perf_counter()
         state_snapshot = C._snapshot_product_state()
         C.logged_counts = h
@@ -6381,7 +6410,10 @@ class App(BU.Tk):
                 )
             C._queue_dashboard_refresh()
 
+        request_temp_dir = I
+
         def worker():
+            nonlocal request_temp_dir
             worker_state = state_snapshot.clone()
             try:
                 V_ = C._resolve_product_file_rows(
@@ -6440,6 +6472,9 @@ class App(BU.Tk):
                 if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
                     remote_files = {}
                     try:
+                        request_temp_dir = C._ftp_temp_manager.create_request_dir(
+                            request_id
+                        )
                         (
                             remote_files,
                             ftp_presence,
@@ -6450,10 +6485,7 @@ class App(BU.Tk):
                             K_,
                             slot_paths,
                             C._slot_index_by_prefix,
-                            temp_root=A.path.join(
-                                tempfile.gettempdir(),
-                                f"picorgftp_sql_{request_id}",
-                            ),
+                            temp_root=request_temp_dir,
                             status_callback=lambda idx, status: C._update_slot_activity(
                                 idx,
                                 active=J,
@@ -6461,6 +6493,7 @@ class App(BU.Tk):
                             )
                             if idx is not I and request_id == C._load_existing_request_id
                             else I,
+                            cancel_event=cancel_event,
                         )
                         worker_state.ftp_presence.update(ftp_presence)
                         worker_state.ftp_preview_files.update(ftp_preview_files)
@@ -6512,12 +6545,16 @@ class App(BU.Tk):
                         ),
                     )
                 except E:
+                    if request_temp_dir is not I:
+                        C._ftp_temp_manager.release(request_temp_dir)
                     C._finish_existing_lookup(request_id=request_id)
             except E:
                 log_error(traceback.format_exc())
                 try:
                     C.after(0, lambda rid=request_id: finalize_lookup_error(rid))
                 except E:
+                    if request_temp_dir is not I:
+                        C._ftp_temp_manager.release(request_temp_dir)
                     C._finish_existing_lookup(request_id=request_id)
 
         def finalize(
@@ -6562,6 +6599,11 @@ class App(BU.Tk):
                 )
                 C._queue_dashboard_refresh()
             finally:
+                if request_temp_dir is not I:
+                    if rid == C._load_existing_request_id and not cancel_event.is_set():
+                        C._ftp_preview_temp_dir = request_temp_dir
+                    else:
+                        C._ftp_temp_manager.release(request_temp_dir)
                 C._finish_existing_lookup(request_id=rid)
 
         def finalize_lookup_error(rid):
@@ -6571,6 +6613,8 @@ class App(BU.Tk):
                 C._update_all_slot_activity(active=h)
                 C._queue_dashboard_refresh()
             finally:
+                if request_temp_dir is not I:
+                    C._ftp_temp_manager.release(request_temp_dir)
                 C._finish_existing_lookup(request_id=rid)
 
         threading.Thread(target=worker, daemon=J).start()

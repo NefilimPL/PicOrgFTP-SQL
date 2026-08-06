@@ -49,7 +49,8 @@ Plan: `plans/2026-07-27-ftp-and-file-indexing.md`
 | 4. Start lokalnego indeksu bez automatycznego pełnego skanu | Ukończono | `LocalFileIndex` ocenia wersję, kanoniczny root i poprawny UTC timestamp z TTL 15 min; świeży snapshot nie uruchamia workera. Desktop i web używają warunkowego startu, a przyciski ręczne oraz zapis produktu wymuszają refresh. Zweryfikowano: 11 passed, 161 deselected, 4 istniejące ostrzeżenia FastAPI; kompilacja i `git diff --check`. |
 | 5. Jedna segmentowa reprezentacja SQLite | Ukończono | Zastąpiono blob aktywną, kompletną generacją segmentów SQLite. Migracja legacy zapisuje segmenty i metadane atomowo, oznacza generację jako kompletną, a następnie usuwa blob; odczyt rekonstruuje snapshot z segmentów. Zweryfikowano: 53 passed; kompilacja i `git diff --check`. |
 | 6. Przyrostowe odświeżanie segmentów | Ukończono | Indeks porównuje metadane katalogów i parsuje pliki tylko w zmienionych segmentach; niepewny fingerprint wymusza pełny skan. SQLite kopiuje niezmienione segmenty atomowo przez `INSERT … SELECT`, a awaria pozostawia poprzednią kompletną generację aktywną. Zweryfikowano: 14 passed, 45 deselected; kompilacja i `git diff --check`. |
-| 7–8 | Nie ruszono | Zostaną rozpoczęte po ukończeniu zadania 6. |
+| 7. Zarządzany lifecycle temp FTP | Ukończono | Dodano bezpieczny manager katalogów requestowych FTP: kanonizację ścieżek, ochronę przed usuwaniem poza rootem, TTL dla nieaktywnych katalogów i zamknięcie przy `App.destroy`. Kolejny lookup anuluje poprzedni transfer między plikami; nieaktualne preview jest zwalniane po zakończeniu workera. Zweryfikowano: 37 passed, 14 subtests; kompilacja i `git diff --check`. |
+| 8. Usunięcie nieaktywnych indeksów i benchmark | Nie ruszono | Ostatnie zadanie pakietu 4. |
 
 ## Pakiet 5 — Integracje SQL, Pimcore i tłumaczenia
 
