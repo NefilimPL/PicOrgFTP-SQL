@@ -59,7 +59,8 @@ Plan: `plans/2026-07-27-integration-throughput.md`
 | Zadanie | Stan | Wynik / następny krok |
 | --- | --- | --- |
 | 1. Transport Pimcore z prywatną sesją | Ukończono | `PimcoreClient` używa prywatnej `requests.Session` przez cały lifecycle klienta i zamyka ją jako context manager. Jawny legacy `opener` nadal korzysta z adaptera `urllib`; oba transporty mają zgodne nagłówki, query, timeout i redakcję API key. Zweryfikowano: 42 passed; kompilacja i `git diff --check`. |
-| 2–7 | Nie ruszono | Następne jest zadanie 2: własność klienta, `close` i bezpieczne retry GET. |
+| 2. Własność klienta, `close` i bezpieczne retry GET | W toku | Dodano `pimcore_client_scope`, który zamyka tylko klienta utworzonego w operacji, oraz jednokrotne retry po błędzie połączenia wyłącznie dla GET na świeżej sesji. Następnie: przełączenie call sites na scope i pełna regresja Pimcore. |
+| 3–7 | Nie ruszono | Zostaną rozpoczęte po ukończeniu zadania 2. |
 
 ## Pakiet 7 — Podział dużych modułów
 

@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import json
 import ssl
+from unittest.mock import Mock
 from urllib.parse import parse_qs, urlsplit
 
 import certifi
+import pytest
+import requests
 
-from picorgftp_sql.services.pimcore_service import PimcoreClient
+from picorgftp_sql.services.pimcore_service import (
+    PimcoreApiError,
+    PimcoreClient,
+    pimcore_client_scope,
+)
 
 
 SETTINGS = {
@@ -34,7 +41,10 @@ class FakeSession:
     def request(self, **request):
         self.request_count += 1
         self.requests.append(request)
-        return next(self.responses)
+        response = next(self.responses)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
     def close(self) -> None:
         self.close_count += 1
@@ -124,3 +134,41 @@ def test_requests_and_legacy_transports_keep_request_contract_equivalent() -> No
     assert isinstance(legacy_request["context"], ssl.SSLContext)
     assert "test-secret" not in str(request["url"])
     assert "test-secret" not in str(legacy_request["url"])
+
+
+def test_client_scope_closes_owned_but_not_supplied_client() -> None:
+    owned = Mock()
+    with pimcore_client_scope(SETTINGS, factory=lambda _config: owned):
+        pass
+    owned.close.assert_called_once()
+
+    supplied = Mock()
+    with pimcore_client_scope(SETTINGS, supplied=supplied) as client:
+        assert client is supplied
+    supplied.close.assert_not_called()
+
+
+def test_client_retries_get_once_with_new_session_after_connection_error() -> None:
+    failed_session = FakeSession([requests.Timeout("connection lost")])
+    replacement_session = FakeSession([FakeResponse(200, {"data": {"version": "6"}})])
+    sessions = iter((failed_session, replacement_session))
+
+    with PimcoreClient(SETTINGS, session_factory=lambda: next(sessions)) as client:
+        assert client.server_info() == {"data": {"version": "6"}}
+
+    assert failed_session.request_count == 1
+    assert failed_session.close_count == 1
+    assert replacement_session.request_count == 1
+    assert replacement_session.close_count == 1
+
+
+def test_client_does_not_retry_mutating_request_after_connection_error() -> None:
+    failed_session = FakeSession([requests.Timeout("connection lost")])
+    session_factory = Mock(return_value=failed_session)
+
+    with PimcoreClient(SETTINGS, session_factory=session_factory) as client:
+        with pytest.raises(PimcoreApiError, match="Nie mozna polaczyc"):
+            client.create_object({"key": "p-1"})
+
+    assert failed_session.request_count == 1
+    assert session_factory.call_count == 1

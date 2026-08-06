@@ -12,7 +12,7 @@ samodzielnym zleceniem, a pakiety 2–6 zakładają ukończenie pakietu 1.
 | 2 | Wyszukiwanie produktów i start desktopu | [plan](2026-07-27-product-query-and-desktop-startup.md) | **w pełni wykonano** — 7 z 7 zadań |
 | 3 | Upload, obrazy i kolejka | [plan](2026-07-27-upload-image-processing-and-queue.md) | **w pełni wykonano** — 6 z 6 zadań |
 | 4 | FTP i indeks plików | [plan](2026-07-27-ftp-and-file-indexing.md) | **w pełni wykonano** — 8 z 8 zadań; pełna regresja: 1247 testów i 66 subtestów |
-| 5 | Integracje SQL, Pimcore i tłumaczenia | [plan](2026-07-27-integration-throughput.md) | **w toku** — 1 z 7 zadań ukończone; następne jest zadanie 2: lifecycle klienta Pimcore i bezpieczne retry GET |
+| 5 | Integracje SQL, Pimcore i tłumaczenia | [plan](2026-07-27-integration-throughput.md) | **w toku** — 1 z 7 zadań ukończone; trwa zadanie 2: lifecycle klienta Pimcore i bezpieczne retry GET |
 | 6 | Procesy w tle, polling i aktywni klienci | [plan](2026-07-27-background-runtime-and-polling.md) | **w pełni wykonano** |
 | 7 | Podział dużych modułów | [plan](2026-07-27-module-boundaries.md) | **nie wykonano** |
 
