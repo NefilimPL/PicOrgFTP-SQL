@@ -77,6 +77,7 @@ from .services.sql_service import (
     should_check_presence as svc_should_check_presence,
 )
 from .image_utils import fit_image_to_content
+from .image_pipeline import ImagePipelineOptions, process_image
 from .version import get_display_version
 from .workflow_utils import (
     build_product_directory,
@@ -7802,131 +7803,33 @@ class App(BU.Tk):
                         ext_lower = BH_.lower()
                         is_image = ext_lower in IMAGE_EXTENSION_FORMATS
                         content_fit_enabled = bool(slot.get("content_fit", h))
-                        if is_image and convert_tif_enabled:
-                            t_ext = target_ext
+                        if is_image:
                             save_target = S_
                             if same_source_target:
                                 save_target = f"{S_}.__gui_tmp__"
                                 temp_output_path = save_target
                                 if A.path.exists(save_target):
                                     A.remove(save_target)
-                            elif A.path.exists(S_):
-                                try:
-                                    A.remove(S_)
-                                except E as z:
-                                    log_error_loc(
-                                        "remove_file_before_overwrite_failed",
-                                        file=A.path.basename(S_),
-                                        error=z,
-                                    )
-                            with AA.open(src_path) as A1:
-                                if content_fit_enabled:
-                                    A1 = fit_image_to_content(
-                                        A1,
-                                        target_size=SLOT_PREVIEW_SIZE,
-                                    )
-                                if target_fmt == "JPEG" and A1.mode in ("RGBA", "LA", "P"):
-                                    A1 = A1.convert("RGB")
-                                if resize_enabled:
-                                    A1.thumbnail((max_dim, max_dim), LANCZOS_FILTER)
-                                save_params = {}
-                                if t_ext in [F, O]:
-                                    quality = 95
-                                    if compress_enabled:
-                                        quality = compress_quality
-                                    save_params[W] = quality
-                                    save_params[X] = J
-                                if t_ext == V:
-                                    save_params[X] = J
-                                A1.save(save_target, format=target_fmt, **save_params)
-                                if limit_size_enabled:
-                                    if max_bytes > 0 and t_ext in [F, O]:
-                                        try:
-                                            quality = save_params.get(W, 95)
-                                            while (
-                                                quality > 10
-                                                and A.path.getsize(save_target) > max_bytes
-                                            ):
-                                                quality -= 5
-                                                A1.save(
-                                                    save_target,
-                                                    format=target_fmt,
-                                                    quality=quality,
-                                                    optimize=J,
-                                                )
-                                        except E as R:
-                                            log_error_loc(
-                                                "file_resize_error",
-                                                file=c_,
-                                                error=R,
-                                            )
+                            process_image(
+                                src_path,
+                                save_target,
+                                ImagePipelineOptions(
+                                    target_format=target_fmt if convert_tif_enabled else B,
+                                    max_dimensions=(max_dim, max_dim)
+                                    if resize_enabled
+                                    else (1000000, 1000000),
+                                    content_fit=content_fit_enabled,
+                                    compress_enabled=compress_enabled,
+                                    compress_quality=compress_quality,
+                                    max_bytes=max_bytes
+                                    if limit_size_enabled and max_bytes > 0
+                                    else B,
+                                ),
+                            )
                             if temp_output_path:
                                 A.replace(temp_output_path, S_)
                                 temp_output_path = B
                             log_info_loc("image_added_modified", file=c_)
-                        elif ext_lower in [F, O, V, ".bmp", ".gif"] or (
-                            content_fit_enabled and is_image
-                        ):
-                            save_target = S_
-                            if same_source_target:
-                                save_target = f"{S_}.__gui_tmp__"
-                                temp_output_path = save_target
-                                if A.path.exists(save_target):
-                                    A.remove(save_target)
-                            with AA.open(src_path) as A1:
-                                if content_fit_enabled:
-                                    A1 = fit_image_to_content(
-                                        A1,
-                                        target_size=SLOT_PREVIEW_SIZE,
-                                    )
-                                if resize_enabled:
-                                    A1.thumbnail((max_dim, max_dim), LANCZOS_FILTER)
-                                save_params = {}
-                                if ext_lower in [F, O]:
-                                    quality = 95
-                                    if compress_enabled:
-                                        quality = compress_quality
-                                    save_params[W] = quality
-                                    save_params[X] = J
-                                if ext_lower == V:
-                                    save_params[X] = J
-                                A1.save(save_target, **save_params)
-                                if limit_size_enabled:
-                                    if max_bytes > 0:
-                                        if A.path.getsize(save_target) > max_bytes and ext_lower in [
-                                            F,
-                                            O,
-                                        ]:
-                                            try:
-                                                quality = save_params.get(W, 95)
-                                                while (
-                                                    quality > 10
-                                                    and A.path.getsize(save_target) > max_bytes
-                                                ):
-                                                    quality -= 5
-                                                    A1.save(
-                                                        save_target,
-                                                        quality=quality,
-                                                        optimize=J,
-                                                    )
-                                            except E as R:
-                                                log_error_loc(
-                                                    "file_resize_error",
-                                                    file=c_,
-                                                    error=R,
-                                                )
-                            if temp_output_path:
-                                A.replace(temp_output_path, S_)
-                                temp_output_path = B
-                            log_info_loc("image_added_modified", file=c_)
-                        elif ext_lower in [".tif", ".tiff"]:
-                            if not same_source_target:
-                                Af.copy2(src_path, S_)
-                            log_info_loc("file_added_modified", file=c_)
-                        elif is_image:
-                            if not same_source_target:
-                                Af.copy2(src_path, S_)
-                            log_info_loc("file_added_modified", file=c_)
                         else:
                             if not same_source_target:
                                 Af.copy2(src_path, S_)

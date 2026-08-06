@@ -17,6 +17,7 @@ from .common import (
     SLOT_DEFS_KEY,
 )
 from .image_utils import fit_image_to_content
+from .image_pipeline import ImagePipelineOptions, process_image
 from .product_fields import (
     effective_product_values,
     missing_required_fields,
@@ -369,9 +370,6 @@ def _save_processed_file(
     if ext not in IMAGE_EXTENSIONS:
         shutil.copy2(source_path, target_path)
         return "copy_document"
-    if not content_fit and not _processing_changes_enabled(options):
-        shutil.copy2(source_path, target_path)
-        return "copy_without_processing"
     if (
         not options.convert_enabled
         and ext not in {".jpg", ".jpeg", ".png", ".bmp", ".gif"}
@@ -383,18 +381,25 @@ def _save_processed_file(
         shutil.copy2(source_path, target_path)
         return "copy_no_pillow"
 
-    with Image.open(source_path) as image:
-        work = image.copy()
-        if content_fit:
-            work = fit_image_to_content(work)
-        if options.resize_enabled:
-            max_dim = max(1, int(options.max_dim or 2000))
-            work.thumbnail((max_dim, max_dim), _resample_filter())
-        target_format = None
-        if options.convert_enabled:
-            target_format, _target_ext = _target_format_info(options)
-        work = _prepare_for_format(work, target_format or image.format or "")
-        _save_image_with_options(work, target_path, target_format, options)
+    target_format = None
+    if options.convert_enabled:
+        target_format, _target_ext = _target_format_info(options)
+    max_dim = max(1, int(options.max_dim or 2000))
+    max_dimensions = (max_dim, max_dim) if options.resize_enabled else (1_000_000, 1_000_000)
+    process_image(
+        source_path,
+        target_path,
+        ImagePipelineOptions(
+            target_format=target_format,
+            max_dimensions=max_dimensions,
+            content_fit=content_fit,
+            compress_enabled=options.compress_enabled,
+            compress_quality=options.compress_quality,
+            max_bytes=(max(1, int(options.max_file_kb or 500)) * 1024)
+            if options.max_size_enabled
+            else None,
+        ),
+    )
     return "process_image"
 
 
