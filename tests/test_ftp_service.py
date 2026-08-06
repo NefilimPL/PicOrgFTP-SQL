@@ -9,7 +9,10 @@ import unittest
 from unittest.mock import patch
 
 from picorgftp_sql.services import ftp_service
-from picorgftp_sql.services.ftp_listing_cache import RemoteListingCache
+from picorgftp_sql.services.ftp_listing_cache import (
+    RemoteFileRecord,
+    RemoteListingCache,
+)
 
 
 class _FakeFTP:
@@ -30,6 +33,8 @@ class _FakeFTP:
 class _SyncFTP:
     def __init__(self) -> None:
         self.deleted: list[str] = []
+        self.uploaded: list[str] = []
+        self.fail_upload_number: int | None = None
 
     def connect(self, host: str, port: int, timeout: int = 10) -> None:
         return None
@@ -45,6 +50,11 @@ class _SyncFTP:
 
     def delete(self, filename: str) -> None:
         self.deleted.append(filename)
+
+    def storbinary(self, command: str, handle) -> None:
+        self.uploaded.append(command)
+        if self.fail_upload_number == len(self.uploaded):
+            raise OSError("FTP connection dropped")
 
     def quit(self) -> None:
         return None
@@ -126,6 +136,103 @@ class DownloadRemoteSlotsTests(unittest.TestCase):
 
         self.assertEqual(result["deleted"], 1)
         self.assertEqual(fake_ftp.deleted, ["5901234567890_02.jpg"])
+
+    def test_confirmed_upload_updates_cached_listing_without_relisting(self) -> None:
+        fake_ftp = _SyncFTP()
+        cache = RemoteListingCache()
+        config = {"host": "ftp.example.test", "port": 21, "user": "operator", "pass": "p"}
+        ean = "5901234567890"
+        cache.get_or_refresh(
+            config,
+            lambda: [RemoteFileRecord(name=f"{ean}_01.jpg")],
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            local_name = f"{ean}_03_MAIN.jpg"
+            Path(temp_dir, local_name).write_bytes(b"new-file")
+            with (
+                patch.object(ftp_service, "_REMOTE_LISTING_CACHE", cache),
+                patch.object(ftp_service.AB, "FTP", return_value=fake_ftp),
+            ):
+                result = ftp_service.sync_remote_files(
+                    config,
+                    temp_dir,
+                    [local_name],
+                    [],
+                    set(),
+                )
+                visible = ftp_service.list_remote_files_for_ean(config, ean)
+
+        self.assertEqual(result["uploaded"], 1)
+        self.assertEqual(fake_ftp.uploaded, [f"STOR {ean}_03.jpg"])
+        self.assertEqual(
+            visible,
+            {"01": f"{ean}_01.jpg", "03": f"{ean}_03.jpg"},
+        )
+
+    def test_partial_upload_failure_invalidates_cached_listing(self) -> None:
+        fake_ftp = _SyncFTP()
+        fake_ftp.fail_upload_number = 2
+        cache = RemoteListingCache()
+        config = {"host": "ftp.example.test", "port": 21, "user": "operator", "pass": "p"}
+        ean = "5901234567890"
+        cache.get_or_refresh(
+            config,
+            lambda: [RemoteFileRecord(name=f"{ean}_01.jpg")],
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            first_name = f"{ean}_03_MAIN.jpg"
+            second_name = f"{ean}_04_MAIN.jpg"
+            Path(temp_dir, first_name).write_bytes(b"first-file")
+            Path(temp_dir, second_name).write_bytes(b"second-file")
+            with (
+                patch.object(ftp_service, "_REMOTE_LISTING_CACHE", cache),
+                patch.object(ftp_service.AB, "FTP", return_value=fake_ftp),
+            ):
+                result = ftp_service.sync_remote_files(
+                    config,
+                    temp_dir,
+                    [first_name, second_name],
+                    [],
+                    set(),
+                )
+
+        self.assertEqual(result["uploaded"], 1)
+        self.assertNotEqual(result["error"], "")
+        self.assertIsNone(cache.get_if_fresh(config))
+
+    def test_confirmed_delete_removes_file_from_cached_listing(self) -> None:
+        fake_ftp = _SyncFTP()
+        cache = RemoteListingCache()
+        config = {"host": "ftp.example.test", "port": 21, "user": "operator", "pass": "p"}
+        ean = "5901234567890"
+        deleted_name = f"{ean}_02.jpg"
+        cache.get_or_refresh(
+            config,
+            lambda: [
+                RemoteFileRecord(name=f"{ean}_01.jpg"),
+                RemoteFileRecord(name=deleted_name),
+            ],
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            with (
+                patch.object(ftp_service, "_REMOTE_LISTING_CACHE", cache),
+                patch.object(ftp_service.AB, "FTP", return_value=fake_ftp),
+            ):
+                result = ftp_service.sync_remote_files(
+                    config,
+                    temp_dir,
+                    [],
+                    [deleted_name],
+                    set(),
+                )
+                visible = ftp_service.list_remote_files_for_ean(config, ean)
+
+        self.assertEqual(result["deleted"], 1)
+        self.assertEqual(fake_ftp.deleted, [deleted_name])
+        self.assertEqual(visible, {"01": f"{ean}_01.jpg"})
 
 
 class TargetedListingTests(unittest.TestCase):

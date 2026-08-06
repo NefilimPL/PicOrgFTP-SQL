@@ -45,7 +45,8 @@ Plan: `plans/2026-07-27-ftp-and-file-indexing.md`
 | --- | --- | --- |
 | 1. Procesowy cache listingu z singleflight | Ukończono | Dodano lokalny cache FTP z TTL 60 s, HMAC-owym kluczem bez sekretów, singleflight per lokalizacja i fallbackiem do ostatniego kompletnego snapshotu po błędzie refreshu. Potwierdzone uploady/delete mogą aktualizować snapshot natychmiast, a `invalidate` wymusza kolejny refresh. Zweryfikowano: 4 passed; kompilacja i `git diff --check`. |
 | 2. Selektywne `NLST` z capability i fallbackiem | Ukończono | Dodano trójstan capability (`unknown`/`supported`/`unsupported`) dla targeted `NLST EAN_*`. Odpowiedź jest ponownie filtrowana parserem slotów; pusta odpowiedź przy `unknown` i błąd wildcarda wymuszają pełny listing, który jest cache’owany. Świeży pełny snapshot omija nowe połączenie FTP. Zweryfikowano: 14 passed; kompilacja i `git diff --check`. |
-| 3–8 | Nie ruszono | Zostaną rozpoczęte po ukończeniu zadania 2. |
+| 3. Invalidacja cache po synchronizacji FTP | Ukończono | Po potwierdzonym `STOR` snapshot dostaje nową nazwę, a po `DELE` traci usuniętą; tylko potwierdzone komendy zmieniają cache. Szeroki błąd w częściowej synchronizacji unieważnia go przed zwróceniem wyniku błędu. Zweryfikowano: 29 passed, 77 deselected, 4 istniejące ostrzeżenia FastAPI; kompilacja i `git diff --check`. |
+| 4–8 | Nie ruszono | Zostaną rozpoczęte po ukończeniu zadania 3. |
 
 ## Pakiet 5 — Integracje SQL, Pimcore i tłumaczenia
 

@@ -275,6 +275,10 @@ def sync_remote_files(
             with open(path, "rb") as handle:
                 ftp.storbinary(f"STOR {remote_name}", handle)
             result["uploaded"] += 1
+            _REMOTE_LISTING_CACHE.apply_uploaded(
+                ftp_config,
+                [RemoteFileRecord(name=remote_name)],
+            )
             if status_callback:
                 status_callback(slot_idx, "")
 
@@ -282,11 +286,15 @@ def sync_remote_files(
             try:
                 ftp.delete(remote_name)
                 result["deleted"] += 1
+                _REMOTE_LISTING_CACHE.apply_deleted(ftp_config, [remote_name])
             except E as exc:
                 text = G(exc)
                 if As not in text:
                     result["error"] = OTHER_ERROR_MSG.format(error=exc)
                     break
+    except E as exc:
+        _REMOTE_LISTING_CACHE.invalidate(ftp_config)
+        result["error"] = OTHER_ERROR_MSG.format(error=exc)
     finally:
         result["elapsed_ms"] = int((__import__("time").perf_counter() - started) * 1000)
         try:
