@@ -31,7 +31,7 @@ Plan: `plans/2026-07-27-upload-image-processing-and-queue.md`
 | Zadanie | Stan | Wynik / następny krok |
 | --- | --- | --- |
 | 1. Ograniczona `ProcessQueueService` | Ukończono | Dodano rezerwacje globalne/per użytkownik, FIFO workerów, pozycje, anulowanie oczekującego zadania i kontrolowane zamknięcie. Zweryfikowano: `tests/test_process_queue.py` — 2 passed. |
-| 2. Rezerwacja przed stagingiem i bezpieczny staging | W toku | Dodano `UploadStagingService` ze strumieniowaniem 1 MiB, limitem, cleanupem oraz wykonaniem walidacji i AV poza event loopem. Ścieżka formularza procesowania korzysta z usługi, a cache podglądów pozostaje oczyszczaną ścieżką. Zweryfikowano regresję bezpieczeństwa: 24 passed, 20 subtests; do wykonania: wydzielenie wszystkich walidatorów z `web/app.py`. |
+| 2. Rezerwacja przed stagingiem i bezpieczny staging | Ukończono | Dodano `UploadStagingService` ze strumieniowaniem 1 MiB, limitem, cleanupem oraz wykonaniem walidacji i AV poza event loopem. Walidacja obrazu, sygnatury i rdzeń Defendera zostały wydzielone z `web/app.py`; adaptery zachowują konfigurację i historię wyników skanu. Raw staged pliki są odrzucane przez resolver tokenów. Zweryfikowano: 27 passed, 20 subtests. |
 | 3. Jeden końcowy `ImagePipeline` | Nie ruszono | — |
 | 4. Wspólna kolejka foreground/background | Nie ruszono | — |
 | 5. Anulowanie i bezpieczny cleanup | Nie ruszono | — |

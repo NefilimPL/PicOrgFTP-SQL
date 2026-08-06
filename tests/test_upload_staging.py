@@ -6,7 +6,12 @@ import pytest
 from fastapi import HTTPException
 
 from picorgftp_sql.web import app as web_app
-from picorgftp_sql.web.upload_staging import UploadStagingService
+from picorgftp_sql.web.upload_staging import (
+    UploadStagingService,
+    scan_uploaded_file,
+    validate_image_file,
+    validate_upload_signature,
+)
 from tests.helpers_process_upload import jpeg_bytes, upload_file
 
 
@@ -91,3 +96,40 @@ def test_raw_staged_path_is_rejected_by_file_token_resolver(tmp_path, monkeypatc
         web_app._path_from_file_token(web_app._file_token(str(raw_path)))
 
     assert error.value.status_code == 403
+
+
+def test_staging_validator_rejects_image_over_pixel_limit(tmp_path) -> None:
+    """Catches a moved image validator that no longer enforces its pixel ceiling."""
+    path = tmp_path / "large.jpg"
+    path.write_bytes(jpeg_bytes())
+
+    with pytest.raises(HTTPException) as error:
+        validate_image_file(str(path), "large.jpg", max_pixels=1)
+
+    assert error.value.status_code == 413
+
+
+def test_staging_validator_rejects_html_disguised_as_jpeg(tmp_path) -> None:
+    """Catches a signature validator that accepts executable HTML as an image."""
+    path = tmp_path / "payload.jpg"
+    path.write_bytes(b"<!doctype html><script>alert(1)</script>")
+
+    with pytest.raises(HTTPException) as error:
+        validate_upload_signature(str(path), "payload.jpg")
+
+    assert error.value.status_code == 400
+
+
+def test_staging_scanner_reports_disabled_without_starting_process(tmp_path) -> None:
+    """Catches a staging scanner that launches Defender despite being disabled."""
+    path = tmp_path / "photo.jpg"
+    path.write_bytes(jpeg_bytes())
+
+    result = scan_uploaded_file(
+        str(path),
+        enabled=False,
+        scanner_executable="C:/missing/MpCmdRun.exe",
+        timeout_seconds=120,
+    )
+
+    assert result == {"enabled": False, "scanned": False, "scanner": "", "elapsed_ms": 0}

@@ -87,6 +87,7 @@ from ..services.pimcore_service import PimcoreApiError, PimcoreConflictError
 from ..services.sql_service import detect_available_columns, extract_presence_context
 from ..sqlite_maintenance import repair_sqlite_database
 from ..workflow_utils import build_product_directory, parse_slot_filename, sanitize_path_segment
+from . import upload_staging
 from .active_clients import ActiveClientRegistry
 from .process_progress import ProcessProgressGate
 from .runtime_status import RuntimeStatusService
@@ -917,56 +918,7 @@ def _is_pcx_header(header: bytes) -> bool:
 
 
 def _upload_signature_matches(extension: str, header: bytes) -> bool:
-    if extension in JPEG_UPLOAD_EXTENSIONS:
-        return header.startswith(b"\xff\xd8\xff")
-    if extension in PNG_UPLOAD_EXTENSIONS:
-        return header.startswith(b"\x89PNG\r\n\x1a\n")
-    if extension == "gif":
-        return header.startswith((b"GIF87a", b"GIF89a"))
-    if extension == "bmp":
-        return header.startswith(b"BM")
-    if extension == "dib":
-        return _is_dib_header(header)
-    if extension in TIFF_UPLOAD_EXTENSIONS:
-        return header.startswith((b"II*\x00", b"MM\x00*"))
-    if extension == "webp":
-        return len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP"
-    if extension in AVIF_UPLOAD_EXTENSIONS:
-        return _is_iso_base_media_brand(header, {b"avif", b"avis"})
-    if extension in HEIF_UPLOAD_EXTENSIONS:
-        return _is_iso_base_media_brand(
-            header,
-            {b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"hevm", b"hevs", b"mif1", b"msf1"},
-        )
-    if extension in JPEG2000_UPLOAD_EXTENSIONS:
-        return _is_jpeg2000_header(header)
-    if extension == "ico":
-        return (
-            len(header) >= 6
-            and header.startswith(b"\x00\x00\x01\x00")
-            and int.from_bytes(header[4:6], "little", signed=False) > 0
-        )
-    if extension == "cur":
-        return (
-            len(header) >= 6
-            and header.startswith(b"\x00\x00\x02\x00")
-            and int.from_bytes(header[4:6], "little", signed=False) > 0
-        )
-    if extension == "tga":
-        return _is_tga_header(header)
-    if extension in PNM_UPLOAD_EXTENSIONS:
-        return _is_pnm_header(header, extension)
-    if extension == "pcx":
-        return _is_pcx_header(header)
-    if extension == "pdf":
-        return header.startswith(b"%PDF-")
-    if extension == "eps":
-        return header.startswith(b"%!PS-Adobe-")
-    if extension == "ai":
-        return header.startswith((b"%PDF-", b"%!PS-Adobe-"))
-    if extension == "psd":
-        return header.startswith(b"8BPS")
-    return False
+    return upload_staging.signature_matches(extension, header)
 
 
 def _upload_extension_from_signature(header: bytes) -> str:
@@ -1020,50 +972,11 @@ def _normalize_upload_cache_extension(
 
 
 def _validate_upload_signature(path: str, filename: object) -> None:
-    extension = _upload_extension(filename)
-    try:
-        with open(path, "rb") as handle:
-            header = handle.read(128)
-    except OSError as exc:
-        raise HTTPException(status_code=400, detail="Nie mozna odczytac wyslanego pliku.") from exc
-    if not header:
-        raise HTTPException(status_code=400, detail="Plik jest pusty.")
-    stripped = header.lstrip().lower()
-    if stripped.startswith((b"<html", b"<!doctype", b"<svg", b"<?xml")):
-        raise HTTPException(
-            status_code=400,
-            detail="Zawartosc pliku wyglada jak HTML/XML/SVG, a nie dozwolony upload.",
-        )
-    if not _upload_signature_matches(extension, header):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Sygnatura pliku nie pasuje do rozszerzenia .{extension}.",
-        )
+    upload_staging.validate_upload_signature(path, filename)
 
 
 def _validate_upload_image_file(path: str, filename: object, max_pixels: int) -> tuple[int, int]:
-    extension = _upload_extension(filename)
-    if extension not in IMAGE_UPLOAD_EXTENSIONS:
-        return 0, 0
-    if Image is None:
-        raise HTTPException(status_code=415, detail="Pillow nie jest dostepny do walidacji obrazu.")
-    try:
-        with warnings.catch_warnings():
-            if hasattr(Image, "DecompressionBombWarning"):
-                warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(path) as image:
-                width, height = int(image.size[0]), int(image.size[1])
-                pixels = width * height
-                if pixels > max_pixels:
-                    _raise_upload_too_large(
-                        f"Obraz ma {pixels} pikseli ({width}x{height}), limit uploadu to {max_pixels} pikseli."
-                    )
-                image.verify()
-                return width, height
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="Nie mozna otworzyc pliku jako obrazu.") from exc
+    return upload_staging.validate_image_file(path, filename, max_pixels)
 
 
 def _validate_upload_content(
@@ -1236,55 +1149,15 @@ def _uploaded_scan_summary(uploaded_slots: List[WebUploadedSlot]) -> Dict[str, A
 
 
 def _scan_uploaded_file(path: str) -> Dict[str, Any]:
-    if not _security_settings().get("antivirus_scan_uploads", False):
-        result = {"enabled": False, "scanned": False, "scanner": "", "elapsed_ms": 0}
-        _remember_upload_scan_result(path, result)
-        return result
-    started = time.perf_counter()
-    scanner = _defender_scan_executable()
-    if not scanner:
-        raise HTTPException(
-            status_code=503,
-            detail="Skan antywirusowy uploadu jest wlaczony, ale nie znaleziono Microsoft Defender MpCmdRun.exe.",
-        )
-    try:
-        completed = subprocess.run(
-            [
-                scanner,
-                "-Scan",
-                "-ScanType",
-                "3",
-                "-File",
-                os.path.abspath(path),
-                "-DisableRemediation",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=ANTIVIRUS_SCAN_TIMEOUT_SECONDS,
-            creationflags=int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(status_code=503, detail="Skan antywirusowy uploadu przekroczyl limit czasu.") from exc
-    output = "\n".join(
-        part.strip()
-        for part in (completed.stdout, completed.stderr)
-        if str(part or "").strip()
+    security = _security_settings()
+    return upload_staging.scan_uploaded_file(
+        path,
+        enabled=bool(security.get("antivirus_scan_uploads", False)),
+        scanner_executable=_defender_scan_executable(),
+        timeout_seconds=ANTIVIRUS_SCAN_TIMEOUT_SECONDS,
+        process_runner=subprocess.run,
+        on_result=lambda result: _remember_upload_scan_result(path, result),
     )
-    result = {
-        "enabled": True,
-        "scanned": completed.returncode == 0,
-        "scanner": "Microsoft Defender",
-        "return_code": int(completed.returncode),
-        "elapsed_ms": _elapsed_ms(started),
-    }
-    _remember_upload_scan_result(path, result)
-    if completed.returncode != 0:
-        details = output[-500:] if output else f"kod {completed.returncode}"
-        raise HTTPException(
-            status_code=400,
-            detail=f"Skan antywirusowy odrzucil upload ({details}).",
-        )
-    return result
 
 
 def _upload_cache_root() -> str:
