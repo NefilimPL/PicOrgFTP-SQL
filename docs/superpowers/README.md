@@ -58,7 +58,8 @@ Plan: `plans/2026-07-27-integration-throughput.md`
 
 | Zadanie | Stan | Wynik / następny krok |
 | --- | --- | --- |
-| 1–7 | Nie ruszono | Pakiet 4 jest ukończony; to następny pakiet do rozpoczęcia. |
+| 1. Transport Pimcore z prywatną sesją | Ukończono | `PimcoreClient` używa prywatnej `requests.Session` przez cały lifecycle klienta i zamyka ją jako context manager. Jawny legacy `opener` nadal korzysta z adaptera `urllib`; oba transporty mają zgodne nagłówki, query, timeout i redakcję API key. Zweryfikowano: 42 passed; kompilacja i `git diff --check`. |
+| 2–7 | Nie ruszono | Następne jest zadanie 2: własność klienta, `close` i bezpieczne retry GET. |
 
 ## Pakiet 7 — Podział dużych modułów
 
