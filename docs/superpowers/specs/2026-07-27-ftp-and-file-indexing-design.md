@@ -1,6 +1,6 @@
 # FTP i indeks plików — specyfikacja
 
-Status: zatwierdzona
+Status: wdrożona (pakiet 4)
 
 Priorytet: P0/P1
 
@@ -146,9 +146,10 @@ Nie zmieniony segment jest kopiowany logicznie do nowej generacji bez
 ponownego parsowania wszystkich plików. Zmienione i nowe segmenty są
 skanowane ponownie, a usunięte są usuwane z nowej generacji.
 
-Zapis używa `executemany` lub wielowierszowego upsertu. Nowa generacja staje
-się aktywna dopiero po pełnym sukcesie. Przerwany refresh pozostawia
-poprzednią generację.
+Niezmienione segmenty są kopiowane do nowej generacji przez parametryczne
+`INSERT … SELECT`, bez dekodowania ich JSON w Pythonie; zmienione segmenty są
+zapisywane osobno. Nowa generacja staje się aktywna dopiero po pełnym sukcesie.
+Przerwany refresh pozostawia poprzednią generację.
 
 Jeżeli filesystem nie dostarcza wiarygodnych mtime, konfiguracja lub wykryta
 niespójność wymusza pełny skan. Poprawność ma pierwszeństwo przed
@@ -168,8 +169,9 @@ aktywne katalogi bieżącej sesji.
 
 Przy starcie okresowy cleanup może usunąć wyłącznie katalogi o dokładnym
 prefiksie aplikacji, starsze niż 24 godziny i nieoznaczone jako aktywne.
-Każdy cel jest kanonizowany i sprawdzany jako dziecko systemowego katalogu
-tymczasowego.
+Każdy cel jest kanonizowany i sprawdzany jako bezpośrednie dziecko osobnego
+zarządzanego rootu tymczasowego. Implementacja odrzuca symlinki i ścieżki poza
+tym rootem.
 
 ## Usunięcie duplikatów
 
@@ -241,8 +243,8 @@ Benchmark obejmuje:
 
 - `picorgftp_sql/services/ftp_service.py`
 - `picorgftp_sql/file_index.py`
-- `picorgftp_sql/services/file_index_service.py`
-- `picorgftp_sql/services/directory_index_service.py`
+- `picorgftp_sql/services/ftp_listing_cache.py`
+- `picorgftp_sql/services/ftp_temp_manager.py`
 - `picorgftp_sql/sqlite_store.py`
 - `picorgftp_sql/web_data.py`
 - `picorgftp_sql/app.py`

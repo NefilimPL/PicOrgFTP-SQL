@@ -50,7 +50,7 @@ Plan: `plans/2026-07-27-ftp-and-file-indexing.md`
 | 5. Jedna segmentowa reprezentacja SQLite | Ukończono | Zastąpiono blob aktywną, kompletną generacją segmentów SQLite. Migracja legacy zapisuje segmenty i metadane atomowo, oznacza generację jako kompletną, a następnie usuwa blob; odczyt rekonstruuje snapshot z segmentów. Zweryfikowano: 53 passed; kompilacja i `git diff --check`. |
 | 6. Przyrostowe odświeżanie segmentów | Ukończono | Indeks porównuje metadane katalogów i parsuje pliki tylko w zmienionych segmentach; niepewny fingerprint wymusza pełny skan. SQLite kopiuje niezmienione segmenty atomowo przez `INSERT … SELECT`, a awaria pozostawia poprzednią kompletną generację aktywną. Zweryfikowano: 14 passed, 45 deselected; kompilacja i `git diff --check`. |
 | 7. Zarządzany lifecycle temp FTP | Ukończono | Dodano bezpieczny manager katalogów requestowych FTP: kanonizację ścieżek, ochronę przed usuwaniem poza rootem, TTL dla nieaktywnych katalogów i zamknięcie przy `App.destroy`. Kolejny lookup anuluje poprzedni transfer między plikami; nieaktualne preview jest zwalniane po zakończeniu workera. Zweryfikowano: 37 passed, 14 subtests; kompilacja i `git diff --check`. |
-| 8. Usunięcie nieaktywnych indeksów i benchmark | Nie ruszono | Ostatnie zadanie pakietu 4. |
+| 8. Usunięcie nieaktywnych indeksów i benchmark | Ukończono | Po potwierdzeniu braku importów runtime usunięto `file_index_service.py` i `directory_index_service.py`. Dodano benchmarki regresyjne: 100 000 nazw FTP z jednym pełnym listingiem w TTL oraz 10 000 segmentów z 1% zmian (100 skanowanych, 9 900 kopiowanych, jedna aktywna generacja SQLite). Zweryfikowano: 81 testów pakietu; pełna regresja 1247 passed, 20 istniejących ostrzeżeń FastAPI, 66 subtests; kompilacja i `git diff --check`. |
 
 ## Pakiet 5 — Integracje SQL, Pimcore i tłumaczenia
 
@@ -58,7 +58,7 @@ Plan: `plans/2026-07-27-integration-throughput.md`
 
 | Zadanie | Stan | Wynik / następny krok |
 | --- | --- | --- |
-| 1–7 | Nie ruszono | Zostanie rozpoczęty po pakiecie 4. |
+| 1–7 | Nie ruszono | Pakiet 4 jest ukończony; to następny pakiet do rozpoczęcia. |
 
 ## Pakiet 7 — Podział dużych modułów
 
