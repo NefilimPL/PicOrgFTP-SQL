@@ -17,11 +17,13 @@ from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+import pytest
 
 from picorgftp_sql import web_data
 from picorgftp_sql.web import active_clients
 from picorgftp_sql.web import app as web_app
 from picorgftp_sql.web.process_queue import (
+    OwnerQueueLimit,
     ProcessQueueFull,
     ProcessQueueService,
     QueueLimits,
@@ -39,6 +41,137 @@ def _workspace_temp(name: str) -> Path:
         shutil.rmtree(root)
     root.mkdir(parents=True)
     return root
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
+def test_terminal_process_jobs_cleanup_staging_and_release_reservation(
+    tmp_path, monkeypatch, outcome: str
+) -> None:
+    """Catches terminal jobs that retain a staging directory or owner queue slot."""
+    root = tmp_path / "jobs"
+    root.mkdir()
+    staging = root / "job-terminal"
+    staging.mkdir()
+    (staging / "upload.jpg").write_bytes(b"staged")
+    queue = ProcessQueueService(QueueLimits(workers=1, max_pending=1, max_per_owner=1))
+    jobs: dict[str, dict[str, object]] = {}
+    completions: dict[str, threading.Event] = {}
+    started = threading.Event()
+    form = web_app._ProcessFormSnapshot(temp_dir=str(staging))
+    result = {
+        "timing": {"stages": []},
+        "ftp": {},
+        "sql": {},
+        "local_delete": {},
+        "skipped_slots": [],
+    }
+
+    def process(**kwargs):
+        started.set()
+        if outcome == "failed":
+            raise RuntimeError("expected worker failure")
+        if outcome == "cancelled":
+            assert kwargs["cancel_event"].wait(timeout=5)
+            raise web_app._ProcessJobCancelled()
+        return result
+
+    monkeypatch.setattr(web_app, "_PROCESS_JOB_ROOT", root)
+    monkeypatch.setattr(web_app, "_PROCESS_QUEUE", queue)
+    monkeypatch.setattr(web_app, "_PROCESS_JOBS", jobs)
+    monkeypatch.setattr(web_app, "_PROCESS_JOB_COMPLETIONS", completions)
+    try:
+        with (
+            patch.object(web_app, "_process_upload_snapshot", side_effect=process),
+            patch.object(web_app, "record_job"),
+            patch.object(web_app, "emit_event"),
+            patch.object(web_app, "_write_web_event"),
+        ):
+            queued = web_app._queue_process_job(
+                username="operator",
+                cache_scope="scope",
+                form=form,
+                reservation=queue.reserve("scope"),
+            )
+            job_id = str(queued["job_id"])
+            assert started.wait(timeout=5)
+            if outcome == "cancelled":
+                cancelled = web_app._cancel_process_job_for_user(job_id, "operator")
+                assert cancelled is not None
+            assert completions[job_id].wait(timeout=5)
+
+        assert not staging.exists()
+        assert web_app._process_job_for_user(job_id, "operator")["status"] == outcome
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                replacement = queue.reserve("scope")
+                break
+            except OwnerQueueLimit:
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+        replacement.release()
+    finally:
+        queue.shutdown()
+
+
+def test_cancel_process_endpoint_cleans_waiting_job(tmp_path, monkeypatch) -> None:
+    """Catches a cancel endpoint that leaves queued staging or capacity behind."""
+    root = tmp_path / "jobs"
+    root.mkdir()
+    staging = root / "job-waiting"
+    staging.mkdir()
+    (staging / "upload.jpg").write_bytes(b"staged")
+    queue = ProcessQueueService(
+        QueueLimits(workers=1, max_pending=1, max_per_owner=1),
+        start_workers=False,
+    )
+    jobs: dict[str, dict[str, object]] = {}
+    completions: dict[str, threading.Event] = {}
+    monkeypatch.setattr(web_app, "_PROCESS_JOB_ROOT", root)
+    monkeypatch.setattr(web_app, "_PROCESS_QUEUE", queue)
+    monkeypatch.setattr(web_app, "_PROCESS_JOBS", jobs)
+    monkeypatch.setattr(web_app, "_PROCESS_JOB_COMPLETIONS", completions)
+    try:
+        with patch.object(web_app, "record_job"):
+            queued = web_app._queue_process_job(
+                username="operator",
+                cache_scope="scope",
+                form=web_app._ProcessFormSnapshot(temp_dir=str(staging)),
+                reservation=queue.reserve("scope"),
+            )
+        job_id = str(queued["job_id"])
+        with patch.object(web_app, "_require_user", return_value="operator"):
+            response = TestClient(web_app.app).delete(f"/api/process-jobs/{job_id}")
+
+        assert response.status_code == 200
+        assert response.json()["job"]["status"] == "cancelled"
+        assert not staging.exists()
+        replacement = queue.reserve("scope")
+        replacement.release()
+    finally:
+        queue.shutdown()
+
+
+def test_process_snapshot_stops_before_validation_when_cancelled() -> None:
+    """Catches a cancellation token that is ignored until after validation starts."""
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    with (
+        patch.object(web_app, "slot_definitions_from_config", return_value=[]),
+        patch.object(
+            web_app,
+            "validate_product_form",
+            side_effect=AssertionError("validation must not run after cancellation"),
+        ),
+        pytest.raises(web_app._ProcessJobCancelled),
+    ):
+        web_app._process_upload_snapshot(
+            username="operator",
+            cache_scope="scope",
+            form=web_app._ProcessFormSnapshot(),
+            cancel_event=cancel_event,
+        )
 
 
 class _MemoryUpload:

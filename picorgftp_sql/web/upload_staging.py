@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import secrets
+import shutil
 import subprocess
 import time
 import warnings
@@ -45,6 +46,69 @@ IMAGE_EXTENSIONS = {
     "pcx",
     "psd",
 }
+
+
+def cleanup_job_directory(
+    path: str,
+    *,
+    managed_root: str,
+    active_paths: set[str] | None = None,
+) -> bool:
+    """Remove one inactive job directory only when it is directly under its root."""
+    try:
+        root = Path(managed_root).resolve(strict=False)
+        target = Path(path).resolve(strict=False)
+        active = {
+            Path(item).resolve(strict=False)
+            for item in (active_paths or set())
+            if item
+        }
+    except (OSError, RuntimeError, TypeError):
+        return False
+    if target.parent != root or target in active:
+        return False
+    if not target.exists():
+        return True
+    if not target.is_dir() or target.is_symlink():
+        return False
+    try:
+        shutil.rmtree(target)
+    except OSError:
+        return False
+    return not target.exists()
+
+
+def cleanup_expired_job_directories(
+    *,
+    managed_root: str,
+    prefix: str,
+    max_age_seconds: float,
+    active_paths: set[str] | None = None,
+    now: float | None = None,
+) -> int:
+    """Remove inactive, expired direct children whose names use the job prefix."""
+    try:
+        root = Path(managed_root).resolve(strict=False)
+        children = list(root.iterdir())
+    except OSError:
+        return 0
+    cutoff = (time.time() if now is None else float(now)) - max(0.0, max_age_seconds)
+    removed = 0
+    for child in children:
+        if not child.name.startswith(prefix):
+            continue
+        try:
+            if child.stat().st_mtime >= cutoff:
+                continue
+        except OSError:
+            continue
+        if cleanup_job_directory(
+            str(child),
+            managed_root=str(root),
+            active_paths=active_paths,
+        ):
+            removed += 1
+    return removed
 
 
 def upload_extension(filename: object) -> str:

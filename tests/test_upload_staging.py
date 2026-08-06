@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import threading
+import time
 
 import pytest
 from fastapi import HTTPException
@@ -8,6 +10,8 @@ from fastapi import HTTPException
 from picorgftp_sql.web import app as web_app
 from picorgftp_sql.web.upload_staging import (
     UploadStagingService,
+    cleanup_expired_job_directories,
+    cleanup_job_directory,
     scan_uploaded_file,
     validate_image_file,
     validate_upload_signature,
@@ -133,3 +137,40 @@ def test_staging_scanner_reports_disabled_without_starting_process(tmp_path) -> 
     )
 
     assert result == {"enabled": False, "scanned": False, "scanner": "", "elapsed_ms": 0}
+
+
+def test_cleanup_refuses_directory_outside_managed_root(tmp_path) -> None:
+    """Catches cleanup that could delete a directory it does not own."""
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    assert cleanup_job_directory(str(outside), managed_root=str(managed)) is False
+    assert outside.exists()
+
+
+def test_expired_cleanup_skips_active_and_non_job_directories(tmp_path) -> None:
+    """Catches TTL cleanup that removes active staging or unrelated siblings."""
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    expired = managed / "job-expired"
+    active = managed / "job-active"
+    unrelated = managed / "upload-cache"
+    for directory in (expired, active, unrelated):
+        directory.mkdir()
+    old = time.time() - 25 * 60 * 60
+    for directory in (expired, active, unrelated):
+        os.utime(directory, (old, old))
+
+    removed = cleanup_expired_job_directories(
+        managed_root=str(managed),
+        prefix="job-",
+        max_age_seconds=24 * 60 * 60,
+        active_paths={str(active)},
+    )
+
+    assert removed == 1
+    assert not expired.exists()
+    assert active.exists()
+    assert unrelated.exists()

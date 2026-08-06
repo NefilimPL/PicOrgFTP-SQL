@@ -96,7 +96,12 @@ from .process_queue import (
     QueueReservation,
 )
 from .runtime_status import RuntimeStatusService
-from .upload_staging import UploadSizeLimitExceeded, UploadStagingService
+from .upload_staging import (
+    UploadSizeLimitExceeded,
+    UploadStagingService,
+    cleanup_expired_job_directories,
+    cleanup_job_directory,
+)
 from ..web_image_import import (
     ImageImportError,
     discover_image_candidates,
@@ -195,6 +200,9 @@ _UPLOAD_CACHE_LAST_CLEANUP = 0.0
 _BROWSER_EXTENSION_IMPORTS: Dict[str, List[Dict[str, Any]]] = {}
 _BROWSER_EXTENSION_IMPORTS_LOCK = threading.Lock()
 _PROCESS_JOB_RETENTION_SECONDS = 6 * 60 * 60
+_PROCESS_JOB_DIRECTORY_TTL_SECONDS = 24 * 60 * 60
+_PROCESS_JOB_DIRECTORY_PREFIX = "job-"
+_PROCESS_JOB_ROOT = Path(tempfile.gettempdir()) / "picorg_web_process_jobs"
 # Active work is never discarded; only the newest terminal jobs stay in memory.
 _PROCESS_JOB_MAX_COMPLETED = 200
 _PROCESS_QUEUE = ProcessQueueService()
@@ -421,6 +429,10 @@ class _ProcessFormSnapshot:
         if key in self.uploads:
             return self.uploads[key]
         return self.fields.get(key, default)
+
+
+class _ProcessJobCancelled(Exception):
+    """Signals cooperative cancellation before the next external process step."""
 
 
 def _elapsed_ms(started: float) -> int:
@@ -2907,6 +2919,7 @@ def _process_upload_snapshot(
     cache_scope: str,
     form: _ProcessFormSnapshot,
     job_id: str = "",
+    cancel_event: threading.Event | None = None,
     progress: Optional[
         Callable[[int, str, List[Dict[str, Any]], Optional[Dict[str, Any]]], None]
     ] = None,
@@ -2941,6 +2954,11 @@ def _process_upload_snapshot(
                 }
             progress(percent, label, list(timings), current_stage)
 
+    def check_cancelled() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise _ProcessJobCancelled()
+
+    check_cancelled()
     process_started = time.perf_counter()
     timings: List[Dict[str, Any]] = []
     stage_started = time.perf_counter()
@@ -2956,6 +2974,7 @@ def _process_upload_snapshot(
     antivirus_scan_result: Dict[str, Any] = {"enabled": False, "scanned": 0, "skipped": 0, "items": []}
     try:
         for prefix, slot in slot_by_prefix.items():
+            check_cancelled()
             if str(form.get(f"delete_slot_{prefix}") or "") == "1":
                 delete_item: Dict[str, Any] = {
                     "prefix": prefix,
@@ -3153,6 +3172,7 @@ def _process_upload_snapshot(
             )
         stage_started = time.perf_counter()
         mark(34, "Przetwarzanie plikow", current_key="local_files", current_label="Zapis/przetwarzanie plikow lokalnych")
+        check_cancelled()
         result = process_web_uploads(
             base_output_dir=settings.l,
             form=product,
@@ -3171,6 +3191,7 @@ def _process_upload_snapshot(
         )
         stage_started = time.perf_counter()
         mark(60, "Usuwanie lokalne", current_key="local_delete", current_label="Usuwanie lokalne")
+        check_cancelled()
         saved_paths = {os.path.abspath(item.path) for item in result.saved_files}
         local_delete_result = _delete_local_files(delete_requests, saved_paths)
         timings.append(
@@ -3184,6 +3205,7 @@ def _process_upload_snapshot(
         )
         stage_started = time.perf_counter()
         mark(70, "Synchronizacja FTP", current_key="ftp", current_label="Synchronizacja FTP")
+        check_cancelled()
         ftp_backfill_prefixes = {
             str(item.get("prefix") or "")
             for item in delete_requests
@@ -3229,6 +3251,7 @@ def _process_upload_snapshot(
         )
         stage_started = time.perf_counter()
         mark(80, "Czyszczenie cache FTP", current_key="ftp_cache", current_label="Czyszczenie cache FTP")
+        check_cancelled()
         changed_ftp_names = {
             _remote_name_for_output(str(item.filename or ""))
             for item in result.saved_files
@@ -3255,6 +3278,7 @@ def _process_upload_snapshot(
         )
         stage_started = time.perf_counter()
         mark(88, "Aktualizacja SQL", current_key="sql", current_label="Aktualizacja SQL")
+        check_cancelled()
         sql_result = _sync_result_to_sql(
             result,
             clear_prefixes={
@@ -3275,6 +3299,7 @@ def _process_upload_snapshot(
         )
         stage_started = time.perf_counter()
         mark(94, "Sprzatanie cache", current_key="upload_cache", current_label="Sprzatanie cache uploadu")
+        check_cancelled()
         upload_cache_result = _delete_upload_cache_files(
             [
                 str(slot.source_path or "")
@@ -3293,6 +3318,7 @@ def _process_upload_snapshot(
         )
         stage_started = time.perf_counter()
         mark(96, "Zapis wpisu", current_key="entry_save", current_label="Zapis wpisu produktu")
+        check_cancelled()
         entry_result = save_web_entry(_entry_payload_from_product(product))
         timings.append(_timing_item("entry_save", "Zapis wpisu produktu", stage_started))
     except HTTPException as exc:
@@ -3342,7 +3368,7 @@ def _process_upload_snapshot(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         if form.temp_dir:
-            shutil.rmtree(form.temp_dir, ignore_errors=True)
+            _cleanup_process_job_directory(form.temp_dir)
 
     payload = _result_payload(result)
     payload["entry"] = entry_result
@@ -3356,6 +3382,7 @@ def _process_upload_snapshot(
     payload["antivirus_scan"] = antivirus_scan_result
     stage_started = time.perf_counter()
     mark(98, "Odswiezanie indeksu", current_key="file_index", current_label="Odswiezenie indeksu lokalnego")
+    check_cancelled()
     payload["file_index"] = refresh_file_index()
     timings.append(_timing_item("file_index", "Odswiezenie indeksu lokalnego", stage_started))
     payload["timing"] = _timing_payload(timings, process_started)
@@ -3484,7 +3511,7 @@ def _cleanup_process_jobs_locked(now: Optional[float] = None) -> None:
     cutoff = (time.time() if now is None else now) - _PROCESS_JOB_RETENTION_SECONDS
     terminal_jobs: List[tuple[str, Dict[str, Any]]] = []
     for job_id, job in list(_PROCESS_JOBS.items()):
-        if job.get("status") not in {"completed", "failed"}:
+        if job.get("status") not in {"completed", "failed", "cancelled"}:
             continue
         if float(job.get("finished_at") or 0) < cutoff:
             _PROCESS_JOBS.pop(job_id, None)
@@ -3510,6 +3537,24 @@ def _cleanup_process_jobs_locked(now: Optional[float] = None) -> None:
 def _cleanup_process_jobs(now: Optional[float] = None) -> None:
     with _PROCESS_JOBS_LOCK:
         _cleanup_process_jobs_locked(now=now)
+        active_paths = {
+            str(job.get("form").temp_dir)
+            for job in _PROCESS_JOBS.values()
+            if job.get("status") in {"queued", "running"}
+            and isinstance(job.get("form"), _ProcessFormSnapshot)
+            and job.get("form").temp_dir
+        }
+    cleanup_expired_job_directories(
+        managed_root=str(_PROCESS_JOB_ROOT),
+        prefix=_PROCESS_JOB_DIRECTORY_PREFIX,
+        max_age_seconds=_PROCESS_JOB_DIRECTORY_TTL_SECONDS,
+        active_paths=active_paths,
+        now=now,
+    )
+
+
+def _cleanup_process_job_directory(path: str) -> bool:
+    return cleanup_job_directory(path, managed_root=str(_PROCESS_JOB_ROOT))
 
 
 def _advance_process_queue_generation_locked() -> None:
@@ -3542,13 +3587,17 @@ async def _reserve_and_materialize_process(
     cache_scope: str,
 ) -> tuple[QueueReservation, _ProcessFormSnapshot]:
     reservation = _reserve_process_capacity(cache_scope)
-    temp_dir = tempfile.mkdtemp(prefix="picorg_web_process_")
+    os.makedirs(_PROCESS_JOB_ROOT, exist_ok=True)
+    temp_dir = tempfile.mkdtemp(
+        prefix=_PROCESS_JOB_DIRECTORY_PREFIX,
+        dir=str(_PROCESS_JOB_ROOT),
+    )
     try:
         form = await request.form()
         snapshot = await _materialize_process_form(form, temp_dir)
     except Exception:
         reservation.release()
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        _cleanup_process_job_directory(temp_dir)
         raise
     return reservation, snapshot
 
@@ -3793,6 +3842,18 @@ def _finish_process_job_failure(
     return message, status_code, severity
 
 
+def _finish_process_job_cancelled(job: Dict[str, Any]) -> str:
+    form = job.get("form")
+    temp_dir = form.temp_dir if isinstance(form, _ProcessFormSnapshot) else ""
+    job["status"] = "cancelled"
+    job["finished_at"] = time.time()
+    job["progress_label"] = "Anulowano"
+    job["current_stage"] = None
+    job["warning_messages"] = ["Zadanie zostalo anulowane."]
+    job.pop("form", None)
+    return temp_dir
+
+
 def _emit_process_completed(
     job: Dict[str, Any], payload: Dict[str, Any], warning_messages: List[str]
 ) -> None:
@@ -3876,6 +3937,7 @@ def _queue_process_job(
             _PROCESS_JOB_COMPLETIONS.pop(job_id, None)
             _advance_process_queue_generation_locked()
         reservation.release()
+        _cleanup_process_job_directory(form.temp_dir)
         raise
     with _PROCESS_JOBS_LOCK:
         queued_job = _PROCESS_JOBS.get(job_id)
@@ -3889,7 +3951,7 @@ def _queue_process_job(
 
 def _run_process_job(
     job_id: str,
-    _cancel_event: threading.Event | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     try:
         with _PROCESS_JOBS_LOCK:
@@ -3904,14 +3966,18 @@ def _run_process_job(
             username = str(job.get("username") or "")
             cache_scope = str(job.get("cache_scope") or "")
             form = job.get("form")
+            staging_dir = form.temp_dir if isinstance(form, _ProcessFormSnapshot) else ""
             durable_job = dict(job)
         _persist_process_job(durable_job)
         try:
+            if cancel_event is not None and cancel_event.is_set():
+                raise _ProcessJobCancelled()
             payload = _process_upload_snapshot(
                 username=username,
                 cache_scope=cache_scope,
                 form=form,
                 job_id=job_id,
+                cancel_event=cancel_event,
                 progress=lambda percent, label, stages, current_stage: _set_process_job_progress(
                     job_id,
                     percent,
@@ -3928,8 +3994,20 @@ def _run_process_job(
                 _advance_process_queue_generation_locked()
                 _cleanup_process_jobs_locked(now=float(job["finished_at"]))
                 durable_job = dict(job)
+            _cleanup_process_job_directory(staging_dir)
             _persist_process_job_snapshot(durable_job, force=True, forget=True)
             _emit_process_completed(durable_job, payload, warning_messages)
+        except _ProcessJobCancelled:
+            with _PROCESS_JOBS_LOCK:
+                job = _PROCESS_JOBS.get(job_id)
+                if not job:
+                    return
+                temp_dir = _finish_process_job_cancelled(job)
+                _advance_process_queue_generation_locked()
+                _cleanup_process_jobs_locked(now=float(job["finished_at"]))
+                durable_job = dict(job)
+            _cleanup_process_job_directory(temp_dir)
+            _persist_process_job_snapshot(durable_job, force=True, forget=True)
         except Exception as exc:
             with _PROCESS_JOBS_LOCK:
                 job = _PROCESS_JOBS.get(job_id)
@@ -3939,6 +4017,7 @@ def _run_process_job(
                 _advance_process_queue_generation_locked()
                 _cleanup_process_jobs_locked(now=float(job["finished_at"]))
                 durable_job = dict(job)
+            _cleanup_process_job_directory(staging_dir)
             _persist_process_job_snapshot(durable_job, force=True, forget=True)
             _emit_process_failed(
                 durable_job,
@@ -3952,6 +4031,37 @@ def _run_process_job(
             completion = _PROCESS_JOB_COMPLETIONS.get(job_id)
         if completion is not None:
             completion.set()
+
+
+def _cancel_process_job_for_user(job_id: str, username: str) -> Optional[Dict[str, Any]]:
+    with _PROCESS_JOBS_LOCK:
+        job = _PROCESS_JOBS.get(job_id)
+        if not job or str(job.get("username") or "") != username:
+            return None
+        if job.get("status") not in {"queued", "running"}:
+            return None
+    if not _PROCESS_QUEUE.cancel(job_id):
+        return None
+    temp_dir = ""
+    completion: threading.Event | None = None
+    with _PROCESS_JOBS_LOCK:
+        job = _PROCESS_JOBS.get(job_id)
+        if not job:
+            return None
+        if job.get("status") == "queued":
+            temp_dir = _finish_process_job_cancelled(job)
+            completion = _PROCESS_JOB_COMPLETIONS.get(job_id)
+        else:
+            job["cancel_requested"] = True
+            job["progress_label"] = "Anulowanie zadania"
+        _advance_process_queue_generation_locked()
+        durable_job = dict(job)
+    if temp_dir:
+        _cleanup_process_job_directory(temp_dir)
+    if completion is not None:
+        completion.set()
+    _persist_process_job_snapshot(durable_job, force=True, forget=bool(temp_dir))
+    return _process_job_payload(durable_job, include_result=False)
 
 
 def _process_job_for_user(job_id: str, username: str) -> Optional[Dict[str, Any]]:
@@ -6652,6 +6762,17 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Nie znaleziono zadania.")
         return _process_job_payload(job)
 
+    @app.delete("/api/process-jobs/{job_id}")
+    def cancel_process_job_api(request: Request, job_id: str) -> Dict[str, Any]:
+        username = _require_user(request)
+        job = _cancel_process_job_for_user(job_id, username)
+        if not job:
+            raise HTTPException(
+                status_code=409,
+                detail="Zadanie nie oczekuje juz w kolejce ani nie jest uruchomione.",
+            )
+        return {"cancelled": True, "job": job}
+
     @app.post("/api/process/background")
     async def process_uploads_background(request: Request) -> JSONResponse:
         username = _require_user(request)
@@ -6698,6 +6819,8 @@ def create_app() -> FastAPI:
         await run_in_threadpool(completion.wait)
         with _PROCESS_JOBS_LOCK:
             job = dict(_PROCESS_JOBS.get(job_id) or {})
+        if job.get("status") == "cancelled":
+            raise HTTPException(status_code=409, detail="Zadanie zostalo anulowane.")
         if job.get("status") == "failed":
             raise HTTPException(
                 status_code=max(400, int(job.get("error_status_code") or 500)),
