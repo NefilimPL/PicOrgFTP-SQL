@@ -15,7 +15,8 @@ Stan: 2026-08-07. Ten plik jest jedynym bieżącym rejestrem wykonania; plany i 
 | 5.5 | Niezależne tłumaczenia | Ukończono | Maksymalnie 4 workery, zachowana kolejność; SQL nie jest współużywany równolegle. |
 | 5.6 | SQL zdjęć | Ukończono | Web i desktop używają pojedynczego parametryzowanego UPDATE dla rozpoznanego standardowego szablonu; niestandardowe szablony zachowują fallback pojedynczych UPDATE. Zweryfikowano testami batch/SQL sync. |
 | 5.7 | Benchmark integracyjny i pełna regresja | Ukończono | Deterministyczny benchmark potwierdza 1 klienta Pimcore, 2 połączenia SQL, 4 unikalne tłumaczenia, 1 statement zdjęć i maks. 4 workery. W czystym worktree: 1267 testów pytest przeszło; po ustawieniu `C:\Program Files\nodejs` benchmark pytest przeszedł 5/5, a testy Node 7/7. |
-| 7 | Podział dużych modułów | Nie rozpoczęto | Cel kolejnej połowy pracy, po zamknięciu pakietu 5. |
+| 7.1 | Charakterystyka tras i granic importów | Ukończono | `tests/test_module_boundaries.py`: snapshot tras i guard importów serwisów przechodzą. |
+| 7.2–7.7 | Routery, kontroler desktopowy, moduły frontendowe i assety | W toku | Następny krok: izolowana ekstrakcja routera procesów przy zachowaniu snapshotu tras. |
 
 ## Środowisko testowe
 
