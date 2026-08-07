@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
@@ -91,10 +91,12 @@ from . import upload_staging
 from .active_clients import ActiveClientRegistry
 from .process_progress import ProcessProgressGate
 from .process_api import ProcessApiDependencies, build_process_router
+from .process_models import (
+    ProcessFormSnapshot as _ProcessFormSnapshot,
+    QueuedUploadFile as _QueuedUploadFile,
+)
 from .runtime_api import RuntimeApiDependencies, build_runtime_router
 from .process_queue import (
-    OwnerQueueLimit,
-    ProcessQueueFull,
     ProcessQueueService,
     QueueReservation,
 )
@@ -209,6 +211,16 @@ _PROCESS_JOB_ROOT = Path(tempfile.gettempdir()) / "picorg_web_process_jobs"
 # Active work is never discarded; only the newest terminal jobs stay in memory.
 _PROCESS_JOB_MAX_COMPLETED = 200
 _PROCESS_QUEUE = ProcessQueueService()
+
+
+class _ProcessQueueReference:
+    """Delegates reservations to the active queue, including test replacements."""
+
+    def reserve(self, cache_scope: str) -> QueueReservation:
+        return _PROCESS_QUEUE.reserve(cache_scope)
+
+
+_PROCESS_QUEUE_REFERENCE = _ProcessQueueReference()
 _PROCESS_JOBS: Dict[str, Dict[str, Any]] = {}
 _PROCESS_JOBS_LOCK = threading.Lock()
 _PROCESS_JOB_COMPLETIONS: Dict[str, threading.Event] = {}
@@ -410,28 +422,10 @@ IMAGE_SIGNATURE_EXTENSIONS = (
 
 
 @dataclass(frozen=True)
-class _QueuedUploadFile:
-    path: str
-    filename: str
-
-
-@dataclass(frozen=True)
 class _SavedUploadCache:
     path: str
     size: int
     name: str
-
-
-@dataclass
-class _ProcessFormSnapshot:
-    fields: Dict[str, str] = field(default_factory=dict)
-    uploads: Dict[str, _QueuedUploadFile] = field(default_factory=dict)
-    temp_dir: str = ""
-
-    def get(self, key: str, default: Any = None) -> Any:
-        if key in self.uploads:
-            return self.uploads[key]
-        return self.fields.get(key, default)
 
 
 class _ProcessJobCancelled(Exception):
@@ -3600,31 +3594,7 @@ def _advance_process_queue_generation_locked() -> None:
     _PROCESS_QUEUE_GENERATION += 1
 
 
-def _queue_retry_after_seconds() -> int:
-    limits = getattr(_PROCESS_QUEUE, "limits", None)
-    return max(1, int(getattr(limits, "retry_after_seconds", 2) or 2))
-
-
-def _reserve_process_capacity(cache_scope: str) -> QueueReservation:
-    try:
-        return _PROCESS_QUEUE.reserve(cache_scope)
-    except (ProcessQueueFull, OwnerQueueLimit) as exc:
-        retry_after = getattr(exc, "retry_after_seconds", None)
-        if retry_after is None:
-            retry_after = _queue_retry_after_seconds()
-        raise HTTPException(
-            status_code=429,
-            detail="Kolejka przetwarzania jest pelna. Sprobuj ponownie za chwile.",
-            headers={"Retry-After": str(max(1, int(retry_after)))},
-        ) from exc
-
-
-async def _reserve_and_materialize_process(
-    request: Request,
-    *,
-    cache_scope: str,
-) -> tuple[QueueReservation, _ProcessFormSnapshot]:
-    reservation = _reserve_process_capacity(cache_scope)
+async def _stage_process_form(request: Request) -> _ProcessFormSnapshot:
     os.makedirs(_PROCESS_JOB_ROOT, exist_ok=True)
     temp_dir = tempfile.mkdtemp(
         prefix=_PROCESS_JOB_DIRECTORY_PREFIX,
@@ -3634,10 +3604,9 @@ async def _reserve_and_materialize_process(
         form = await request.form()
         snapshot = await _materialize_process_form(form, temp_dir)
     except Exception:
-        reservation.release()
         _cleanup_process_job_directory(temp_dir)
         raise
-    return reservation, snapshot
+    return snapshot
 
 
 def _process_job_payload(job: Dict[str, Any], *, include_result: bool = True) -> Dict[str, Any]:
@@ -6791,9 +6760,23 @@ def create_app() -> FastAPI:
         job = _process_job_for_user(job_id, username)
         return _process_job_payload(job) if job else None
 
+    def process_job_completion(job_id: str) -> threading.Event | None:
+        with _PROCESS_JOBS_LOCK:
+            return _PROCESS_JOB_COMPLETIONS.get(job_id)
+
+    def process_job_snapshot(job_id: str) -> Dict[str, Any]:
+        with _PROCESS_JOBS_LOCK:
+            return dict(_PROCESS_JOBS.get(job_id) or {})
+
     process_router = build_process_router(
         ProcessApiDependencies(
             current_user=lambda request: _require_user(request),
+            queue=_PROCESS_QUEUE_REFERENCE,
+            stage_form=_stage_process_form,
+            cache_scope=_user_cache_scope,
+            job_store=_queue_process_job,
+            job_completion=process_job_completion,
+            job_snapshot=process_job_snapshot,
             jobs_for_user=lambda username, limit: _process_jobs_for_user(username, limit=limit),
             active_jobs=_active_process_jobs_snapshot,
             job_for_user=process_job_payload_for_user,
@@ -6801,68 +6784,6 @@ def create_app() -> FastAPI:
         )
     )
     app.routes.extend(process_router.routes)
-
-    @app.post("/api/process/background")
-    async def process_uploads_background(request: Request) -> JSONResponse:
-        username = _require_user(request)
-        cache_scope = _user_cache_scope(request, username)
-        reservation, snapshot = await _reserve_and_materialize_process(
-            request,
-            cache_scope=cache_scope,
-        )
-        try:
-            job = _queue_process_job(
-                username=username,
-                cache_scope=cache_scope,
-                form=snapshot,
-                reservation=reservation,
-            )
-        except Exception:
-            reservation.release()
-            raise
-        return JSONResponse({"queued": True, "job": job})
-
-    @app.post("/api/process")
-    async def process_uploads(request: Request) -> JSONResponse:
-        username = _require_user(request)
-        cache_scope = _user_cache_scope(request, username)
-        reservation, snapshot = await _reserve_and_materialize_process(
-            request,
-            cache_scope=cache_scope,
-        )
-        try:
-            queued = _queue_process_job(
-                username=username,
-                cache_scope=cache_scope,
-                form=snapshot,
-                reservation=reservation,
-                persist_as_running=True,
-            )
-        except Exception:
-            reservation.release()
-            raise
-        job_id = str(queued["job_id"])
-        with _PROCESS_JOBS_LOCK:
-            completion = _PROCESS_JOB_COMPLETIONS.get(job_id)
-        if completion is None:
-            raise HTTPException(status_code=500, detail="Nie znaleziono zadania kolejki.")
-        await run_in_threadpool(completion.wait)
-        with _PROCESS_JOBS_LOCK:
-            job = dict(_PROCESS_JOBS.get(job_id) or {})
-        if job.get("status") == "cancelled":
-            raise HTTPException(status_code=409, detail="Zadanie zostalo anulowane.")
-        if job.get("status") == "failed":
-            status_code = max(400, int(job.get("error_status_code") or 500))
-            if status_code >= 500:
-                raise RuntimeError("process job failed")
-            raise HTTPException(
-                status_code=status_code,
-                detail=str(job.get("error") or "Przetwarzanie zakonczone bledem."),
-            )
-        payload = job.get("result")
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=500, detail="Brak wyniku zadania kolejki.")
-        return JSONResponse(payload)
     return app
 
 

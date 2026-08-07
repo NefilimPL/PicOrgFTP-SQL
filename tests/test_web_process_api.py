@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from unittest.mock import AsyncMock, Mock
 
 
 def test_process_router_delegates_job_queries_and_cancellation() -> None:
@@ -28,3 +29,36 @@ def test_process_router_delegates_job_queries_and_cancellation() -> None:
         "cancelled": True,
         "job": {"id": "one", "owner": "alice"},
     }
+
+
+def test_process_router_reserves_capacity_before_staging_a_background_upload() -> None:
+    """Catches extracted upload routes that stage files before reserving queue capacity."""
+    from picorgftp_sql.web.process_api import ProcessApiDependencies, build_process_router
+
+    reservation = Mock()
+    queue = Mock()
+    queue.reserve.return_value = reservation
+    stage_form = AsyncMock(return_value=Mock())
+    job_store = Mock(return_value={"job_id": "job-1"})
+    app = FastAPI()
+    app.include_router(
+        build_process_router(
+            ProcessApiDependencies(
+                queue=queue,
+                stage_form=stage_form,
+                current_user=lambda _request: "alice",
+                cache_scope=lambda _request, _username: "scope-a",
+                job_store=job_store,
+            )
+        )
+    )
+
+    response = TestClient(app).post(
+        "/api/process/background",
+        data={"ean": "5901234567890", "name": "ALFA"},
+        files={"slot_1": ("photo.jpg", b"photo", "image/jpeg")},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"queued": True, "job": {"job_id": "job-1"}}
+    queue.reserve.assert_called_once_with("scope-a")
