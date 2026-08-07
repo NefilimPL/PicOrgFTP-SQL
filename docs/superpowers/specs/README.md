@@ -1,3 +1,3 @@
 # Specyfikacje
 
-Specyfikacje przechowują decyzje projektowe. Aktualny rejestr realizacji prowadzi [STATUS.md](../STATUS.md).
+Zachowano wyłącznie specyfikację aktywnego pakietu 7. Aktualny rejestr realizacji prowadzi [STATUS.md](../STATUS.md).

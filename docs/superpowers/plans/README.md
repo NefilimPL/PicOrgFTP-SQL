@@ -1,3 +1,3 @@
 # Plany implementacyjne
 
-Plany opisują uzgodniony zakres i kolejność prac. Bieżący stan wykonania prowadzi [STATUS.md](../STATUS.md).
+Zachowano wyłącznie aktywny plan pakietu 7. Bieżący stan wykonania prowadzi [STATUS.md](../STATUS.md).
