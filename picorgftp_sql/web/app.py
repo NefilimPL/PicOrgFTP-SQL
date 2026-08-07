@@ -91,6 +91,7 @@ from . import upload_staging
 from .active_clients import ActiveClientRegistry
 from .process_progress import ProcessProgressGate
 from .process_api import ProcessApiDependencies, build_process_router
+from .runtime_api import RuntimeApiDependencies, build_runtime_router
 from .process_queue import (
     OwnerQueueLimit,
     ProcessQueueFull,
@@ -5043,9 +5044,22 @@ def create_app() -> FastAPI:
     def health() -> Dict[str, Any]:
         return _health_payload()
 
-    @app.get("/api/runtime-status")
-    def runtime_status(request: Request) -> Dict[str, Any]:
-        return runtime_status_service.snapshot(_current_user_payload(request))
+    runtime_router = build_runtime_router(
+        RuntimeApiDependencies(
+            current_user_payload=lambda request: _current_user_payload(request),
+            require_user=lambda request: _require_user(request),
+            require_admin=lambda request: _require_admin(request),
+            runtime_status=runtime_status_service.snapshot,
+            file_index_status=lambda: file_index_status(start=True),
+            refresh_file_index=refresh_file_index,
+            active_clients=_active_clients_snapshot,
+            presence_payload=_active_presence_payload,
+            request_client_id=_request_presence_client_id,
+            remove_active_client=_remove_active_client,
+        )
+    )
+    runtime_routes = {route.path: route for route in runtime_router.routes}
+    app.routes.append(runtime_routes["/api/runtime-status"])
 
     @app.post("/api/resource-monitor/simulate-safe")
     def resource_monitor_simulate_safe(request: Request) -> Dict[str, Any]:
@@ -5221,10 +5235,7 @@ def create_app() -> FastAPI:
         _require_user(request)
         return load_web_data()
 
-    @app.get("/api/file-index/status")
-    def file_index_status_api(request: Request) -> Dict[str, Any]:
-        _require_user(request)
-        return file_index_status(start=True)
+    app.routes.append(runtime_routes["/api/file-index/status"])
 
     @app.get("/api/history")
     def history_api(
@@ -5473,21 +5484,9 @@ def create_app() -> FastAPI:
             "server_time": _utc_now_iso(),
         }
 
-    @app.get("/api/server/active-users")
-    def active_users_api(request: Request) -> Dict[str, Any]:
-        _require_admin(request)
-        return {"clients": _active_clients_snapshot()}
-
-    @app.get("/api/server/presence")
-    def active_presence_api(request: Request) -> Dict[str, Any]:
-        _require_user(request)
-        return _active_presence_payload(_active_clients_snapshot())
-
-    @app.post("/api/server/presence/leave")
-    def active_presence_leave_api(request: Request) -> Dict[str, Any]:
-        username = _require_user(request)
-        removed = _remove_active_client(username, _request_presence_client_id(request))
-        return {"ok": True, "removed": removed}
+    app.routes.append(runtime_routes["/api/server/active-users"])
+    app.routes.append(runtime_routes["/api/server/presence"])
+    app.routes.append(runtime_routes["/api/server/presence/leave"])
 
     @app.post("/api/logs/clear")
     async def logs_clear_api(request: Request) -> JSONResponse:
@@ -5507,10 +5506,7 @@ def create_app() -> FastAPI:
         response["structured_cleared"] = structured_result
         return JSONResponse(response)
 
-    @app.post("/api/file-index/refresh")
-    def file_index_refresh_api(request: Request) -> Dict[str, Any]:
-        _require_admin(request)
-        return refresh_file_index()
+    app.routes.append(runtime_routes["/api/file-index/refresh"])
 
     @app.get("/api/suggestions")
     def suggestions_api(

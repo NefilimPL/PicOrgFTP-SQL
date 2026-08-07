@@ -17,7 +17,8 @@ Stan: 2026-08-07. Ten plik jest jedynym bieżącym rejestrem wykonania; plany i 
 | 5.7 | Benchmark integracyjny i pełna regresja | Ukończono | Deterministyczny benchmark potwierdza 1 klienta Pimcore, 2 połączenia SQL, 4 unikalne tłumaczenia, 1 statement zdjęć i maks. 4 workery. W czystym worktree: 1267 testów pytest przeszło; po ustawieniu `C:\Program Files\nodejs` benchmark pytest przeszedł 5/5, a testy Node 7/7. |
 | 7.1 | Charakterystyka tras i granic importów | Ukończono | `tests/test_module_boundaries.py`: snapshot tras i guard importów serwisów przechodzą. |
 | 7.2 | Router procesów — odczyt i anulowanie | Ukończono | `process_api.py` zawiera listę, aktywne zadania, szczegóły i anulowanie z jawnymi zależnościami; snapshot tras zachowany. Upload/staging pozostaje w rootcie do kolejnego kroku. |
-| 7.3–7.7 | Pozostałe routery, kontroler desktopowy, moduły frontendowe i assety | W toku | Następny krok: ekstrakcja runtime/presence API. |
+| 7.3 | Router runtime, indeksu i obecności | Ukończono | `runtime_api.py` obsługuje runtime status, status/odświeżenie indeksu oraz obecność. Rejestracja zachowuje kolejność tras; testy skoncentrowane: 20 przeszło. |
+| 7.4–7.7 | Kontroler desktopowy, moduły frontendowe i assety | W toku | Następny krok: wydzielenie kontrolera podglądu FTP w aplikacji desktopowej. |
 
 ## Środowisko testowe
 
