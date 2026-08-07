@@ -210,6 +210,7 @@ def execute_sql_value_query(
     pimcore_values: dict[str, object],
     *,
     mappings: Sequence[dict[str, object]] | None = None,
+    connection: object | None = None,
     connector: Callable[[dict[str, object]], object] = connect_profile,
 ) -> SqlValueResult:
     """Execute a SQL value lookup and return the first column of the first row."""
@@ -221,10 +222,12 @@ def execute_sql_value_query(
         str(profile.get("type") or K),
         mappings=mappings,
     )
-    conn = None
+    conn = connection
+    owns_connection = connection is None
     cursor = None
     try:
-        conn = connector(profile)
+        if conn is None:
+            conn = connector(profile)
         cursor = conn.cursor()
         cursor.execute(bound_query, params)
         rows = cursor.fetchmany(2)
@@ -236,7 +239,7 @@ def execute_sql_value_query(
                 cursor.close()
             except E:
                 pass
-        if conn is not None:
+        if owns_connection and conn is not None:
             try:
                 conn.close()
             except E:

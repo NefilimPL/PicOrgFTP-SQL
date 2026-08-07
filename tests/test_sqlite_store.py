@@ -546,7 +546,9 @@ def test_sqlite_timestamps_are_iso_8601_text(tmp_path: Path) -> None:
             conn.execute("SELECT detected_at FROM sql_available_columns").fetchone()[0],
             conn.execute("SELECT updated_at FROM product_entries").fetchone()[0],
             conn.execute("SELECT updated_at FROM web_users").fetchone()[0],
-            conn.execute("SELECT updated_at FROM file_index_cache").fetchone()[0],
+            conn.execute(
+                "SELECT generated_at FROM file_index_generations WHERE complete = 1"
+            ).fetchone()[0],
         ]
 
     for value in values:
@@ -831,7 +833,7 @@ def test_migration_converts_legacy_web_history_ts_real(tmp_path: Path) -> None:
     assert payload["ts"].endswith("Z")
 
 
-def test_file_index_segments_are_saved_by_name_prefix(tmp_path: Path) -> None:
+def test_file_index_segments_are_saved_by_product_name(tmp_path: Path) -> None:
     store = SqliteStore(str(tmp_path / "data.sqlite"))
     store.initialize()
     snapshot = {
@@ -857,8 +859,132 @@ def test_file_index_segments_are_saved_by_name_prefix(tmp_path: Path) -> None:
             """
         ).fetchall()
 
-    assert ("L", "names", "LUNA", '"LUNA"') in rows
-    assert ("M", "names", "MAGGIORE", '"MAGGIORE"') in rows
+    assert ("LUNA", "names", "LUNA", '"LUNA"') in rows
+    assert ("MAGGIORE", "names", "MAGGIORE", '"MAGGIORE"') in rows
+
+
+def test_file_index_generation_copies_unchanged_segments_in_sqlite(tmp_path: Path) -> None:
+    database_path = tmp_path / "data.sqlite"
+    store = SqliteStore(str(database_path))
+    first_snapshot = {
+        "version": 1,
+        "root": "C:/photos",
+        "generated_at": "2026-06-25T13:02:34.300Z",
+        "names": ["ALFA", "BETA"],
+        "types": {"ALFA": ["KOMODA"], "BETA": ["SZAFKA"]},
+        "models": {},
+        "colors": {},
+        "extras": {},
+        "files": {},
+    }
+    store.save_file_index_cache(first_snapshot)
+
+    second_snapshot = {
+        **first_snapshot,
+        "generated_at": "2026-06-25T13:03:34.300Z",
+        "types": {"ALFA": ["KOMODA"], "BETA": ["SZAFKA", "STOL"]},
+    }
+
+    store.save_file_index_cache(second_snapshot, reused_segment_keys=("ALFA",))
+
+    with sqlite3.connect(database_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT segment_key, section, lookup_key, payload_json
+            FROM file_index_segments
+            ORDER BY segment_key, section, lookup_key
+            """
+        ).fetchall()
+        complete_generations = conn.execute(
+            "SELECT COUNT(*) FROM file_index_generations WHERE complete = 1"
+        ).fetchone()[0]
+
+    assert ("ALFA", "types", "ALFA", '["KOMODA"]') in rows
+    assert ("BETA", "types", "BETA", '["SZAFKA", "STOL"]') in rows
+    assert complete_generations == 1
+
+
+def test_file_index_generation_failure_keeps_previous_complete_snapshot(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "data.sqlite"
+    store = SqliteStore(str(database_path))
+    first_snapshot = {
+        "version": 1,
+        "root": "C:/photos",
+        "generated_at": "2026-06-25T13:02:34.300Z",
+        "names": ["ALFA", "BETA"],
+        "types": {"ALFA": ["KOMODA"], "BETA": ["SZAFKA"]},
+        "models": {},
+        "colors": {},
+        "extras": {},
+        "files": {"BETA\x1fSZAFKA": ["before.jpg"]},
+    }
+    store.save_file_index_cache(first_snapshot)
+    with store.connection() as conn:
+        conn.execute(
+            """
+            CREATE TRIGGER fail_changed_file_index_segment
+            BEFORE INSERT ON file_index_segments
+            WHEN NEW.section = 'files'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected file index failure');
+            END
+            """
+        )
+
+    second_snapshot = {
+        **first_snapshot,
+        "generated_at": "2026-06-25T13:03:34.300Z",
+        "files": {"BETA\x1fSZAFKA": ["after.jpg"]},
+    }
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected file index failure"):
+        store.save_file_index_cache(second_snapshot, reused_segment_keys=("ALFA",))
+
+    assert store.load_file_index_cache()["files"] == {
+        "BETA\x1fSZAFKA": ["before.jpg"]
+    }
+    with sqlite3.connect(database_path) as conn:
+        generation_count = conn.execute(
+            "SELECT COUNT(*) FROM file_index_generations"
+        ).fetchone()[0]
+    assert generation_count == 1
+
+
+def test_legacy_file_index_payload_migrates_to_complete_generation(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    store.initialize()
+    snapshot = {
+        "version": 1,
+        "root": "C:/photos",
+        "generated_at": "2026-06-25T13:02:34.300Z",
+        "dirs_scanned": 1,
+        "products_scanned": 1,
+        "names": ["ALFA"],
+        "types": {"ALFA": ["KOMODA"]},
+        "models": {},
+        "colors": {},
+        "extras": {},
+        "files": {},
+    }
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO file_index_cache (cache_key, payload_json, updated_at) VALUES (?, ?, ?)",
+            ("default", json.dumps(snapshot), snapshot["generated_at"]),
+        )
+
+    generation = store.load_file_index_generation()
+
+    assert generation.complete is True
+    assert generation.snapshot["names"] == ["ALFA"]
+    with store.connection() as conn:
+        legacy = conn.execute(
+            "SELECT payload_json FROM file_index_cache WHERE cache_key = 'default'"
+        ).fetchone()
+        segment_count = conn.execute("SELECT COUNT(*) FROM file_index_segments").fetchone()[0]
+    assert legacy is None or legacy[0] in ("", "{}")
+    assert segment_count > 0
 
 
 def test_slots_and_sql_columns_roundtrip(tmp_path: Path) -> None:

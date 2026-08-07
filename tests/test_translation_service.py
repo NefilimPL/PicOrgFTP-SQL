@@ -1,7 +1,7 @@
 import json
 from unittest.mock import Mock
 
-from picorgftp_sql.services.translation_service import translate_text
+from picorgftp_sql.services.translation_service import clear_translation_cache, translate_text
 
 
 class Response:
@@ -34,6 +34,23 @@ def test_google_translation_returns_translated_text():
 
     assert result.text == "White cabinet"
     assert result.warning is None
+
+
+def test_google_translation_reuses_a_cached_success():
+    clear_translation_cache()
+    opener = Mock(
+        return_value=Response(
+            json.dumps([[['White cabinet', "Biala szafka"]]]).encode()
+        )
+    )
+    settings = {"provider": "google", "api_key": "", "api_url": ""}
+
+    first = translate_text("Biala szafka", "en", settings, opener=opener)
+    second = translate_text("Biala szafka", "en", settings, opener=opener)
+
+    assert [first.text, second.text] == ["White cabinet", "White cabinet"]
+    opener.assert_called_once()
+    clear_translation_cache()
 
 
 def test_provider_failure_keeps_source_text_and_warning():

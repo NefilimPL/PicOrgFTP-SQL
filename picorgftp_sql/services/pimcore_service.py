@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
 import hashlib
 import json
 import re
@@ -20,6 +21,11 @@ from ..pimcore_config import (
     field_mapping_issues,
     normalize_pimcore_settings,
     parse_mapping_value,
+)
+from .pimcore_transport import (
+    LegacyPimcoreTransport,
+    PimcoreTransportNetworkError,
+    RequestsPimcoreTransport,
 )
 
 LOCALIZED_FIELD_LANGUAGES = ("en", "pl")
@@ -81,11 +87,45 @@ class PimcoreClient:
         settings: object,
         *,
         opener: Callable[[Request, int, ssl.SSLContext | None], object] = _default_opener,
+        session_factory: Callable[[], object] | None = None,
     ) -> None:
         self.settings = normalize_pimcore_settings(settings)
         self.base_url = self.settings["base_url"].rstrip("/")
         self.opener = opener
+        context = None
+        if self.base_url.lower().startswith("https://"):
+            context = (
+                SSL_CONTEXT
+                if self.settings["verify_tls"]
+                else ssl._create_unverified_context()
+            )
+        if opener is not _default_opener:
+            self._session_factory = None
+            self._transport = LegacyPimcoreTransport(opener, ssl_context=context)
+        else:
+            if session_factory is None:
+                import requests
+
+                session_factory = requests.Session
+            self._session_factory = session_factory
+            self._transport = self._new_requests_transport()
         self.last_response: dict[str, object] = {}
+
+    def _new_requests_transport(self) -> RequestsPimcoreTransport:
+        return RequestsPimcoreTransport(
+            self._session_factory(),
+            verify_tls=bool(self.settings["verify_tls"]),
+        )
+
+    def close(self) -> None:
+        self._transport.close()
+
+    def __enter__(self) -> "PimcoreClient":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        self.close()
+        return False
 
     def request_json(
         self,
@@ -96,42 +136,47 @@ class PimcoreClient:
         body: dict[str, object] | None = None,
     ) -> dict[str, Any]:
         endpoint = f"{self.base_url}{path}"
-        if query:
-            endpoint = f"{endpoint}?{urlencode(query)}"
-        data = json.dumps(body).encode("utf-8") if body is not None else None
-        request = Request(
-            endpoint,
-            data=data,
-            method=method.upper(),
-            headers={
+        request_arguments = {
+            "headers": {
                 "Accept": "application/json",
                 "Content-Type": "application/json",
                 "X-api-key": self.settings[PIMCORE_API_KEY],
             },
-        )
-        context = None
-        if endpoint.lower().startswith("https://"):
-            context = SSL_CONTEXT if self.settings["verify_tls"] else ssl._create_unverified_context()
+            "query": query,
+            "body": body,
+            "timeout": self.settings["timeout_seconds"],
+        }
+        normalized_method = method.upper()
         try:
-            with self.opener(request, self.settings["timeout_seconds"], context) as response:
-                raw = response.read().decode("utf-8", errors="replace")
-                status = int(getattr(response, "status", 200) or 200)
-        except HTTPError as exc:
-            raw = exc.read().decode("utf-8", errors="replace")
-            detail = _response_detail(raw, self.settings[PIMCORE_API_KEY])
-            self.last_response = {
-                "method": method.upper(),
-                "endpoint": path,
-                "status_code": int(exc.code),
-            }
-            raise PimcoreApiError(
-                f"Pimcore zwrocil HTTP {exc.code}.",
-                path,
-                status_code=int(exc.code),
-                response_excerpt=_response_excerpt(detail),
-                response_detail=detail,
-                kind="http",
-            ) from exc
+            response = self._transport.request(
+                normalized_method,
+                endpoint,
+                **request_arguments,
+            )
+        except PimcoreTransportNetworkError as original_error:
+            network_error: BaseException | None = original_error
+            if normalized_method == "GET" and self._session_factory is not None:
+                self._transport.close()
+                self._transport = self._new_requests_transport()
+                try:
+                    response = self._transport.request(
+                        normalized_method,
+                        endpoint,
+                        **request_arguments,
+                    )
+                except PimcoreTransportNetworkError as retry_error:
+                    network_error = retry_error
+                else:
+                    network_error = None
+            if network_error is not None:
+                detail = _response_detail(network_error, self.settings[PIMCORE_API_KEY])
+                raise PimcoreApiError(
+                    f"Nie mozna polaczyc sie z Pimcore: {network_error}",
+                    path,
+                    response_excerpt=_response_excerpt(detail),
+                    response_detail=detail,
+                    kind="network",
+                ) from network_error
         except (URLError, TimeoutError, OSError) as exc:
             detail = _response_detail(exc, self.settings[PIMCORE_API_KEY])
             raise PimcoreApiError(
@@ -141,6 +186,8 @@ class PimcoreClient:
                 response_detail=detail,
                 kind="network",
             ) from exc
+        raw = response.text
+        status = response.status_code
         if status < 200 or status >= 300:
             detail = _response_detail(raw, self.settings[PIMCORE_API_KEY])
             raise PimcoreApiError(
@@ -231,6 +278,25 @@ class PimcoreClient:
             "DELETE",
             f"/webservice/rest/object/id/{quote(str(object_id))}",
         )
+
+
+@contextmanager
+def pimcore_client_scope(
+    config: object,
+    supplied: PimcoreClient | None = None,
+    *,
+    factory: Callable[[object], PimcoreClient] = PimcoreClient,
+):
+    """Yield a caller-owned client or close one created for this operation."""
+
+    if supplied is not None:
+        yield supplied
+        return
+    client = factory(config)
+    try:
+        yield client
+    finally:
+        client.close()
 
 
 def validate_ean(ean: object) -> str:

@@ -96,6 +96,11 @@ from .services.pimcore_sql_service import (
     connect_profile,
     execute_sql_value_query,
 )
+from .services.sql_execution_context import SqlExecutionContext
+from .services.template_execution import (
+    classify_template_operation,
+    execute_independent_operations,
+)
 from .file_index import LocalFileIndex
 from .pimcore_config import (
     PIMCORE_API_KEY,
@@ -123,11 +128,12 @@ from .services.pimcore_service import (
     discover_folders,
     fetch_product_for_edit,
     find_product_by_ean,
+    pimcore_client_scope,
     run_settings_test,
     run_test_create,
     update_product,
 )
-from .services.translation_service import translate_text
+from .services.translation_service import clear_translation_cache, translate_text
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
 from .sql_profiles import (
     DEFAULT_SQL_PROFILE_ID,
@@ -402,7 +408,7 @@ def _get_file_index(*, start: bool = False) -> LocalFileIndex | None:
         _FILE_INDEX_KEY = key
         _FILE_INDEX_REFRESH_STARTED = False
     if start and _FILE_INDEX is not None and not _FILE_INDEX_REFRESH_STARTED:
-        _FILE_INDEX.refresh_async()
+        _FILE_INDEX.refresh_if_stale()
         _FILE_INDEX_REFRESH_STARTED = True
     return _FILE_INDEX
 
@@ -467,7 +473,7 @@ def refresh_file_index() -> dict[str, object]:
 
     index = _get_file_index(start=False)
     if index is not None:
-        index.refresh_async()
+        index.refresh_if_stale(force=True)
     return file_index_status()
 
 
@@ -1750,17 +1756,20 @@ def _merged_pimcore_settings(overrides: object = None) -> dict[str, object]:
 
 def discover_pimcore_classes(overrides: object = None) -> dict[str, object]:
     settings_payload = _merged_pimcore_settings(overrides)
-    return {"items": discover_classes(PimcoreClient(settings_payload))}
+    with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+        return {"items": discover_classes(client)}
 
 
 def discover_pimcore_fields(overrides: object, class_id: object) -> dict[str, object]:
     settings_payload = _merged_pimcore_settings(overrides)
-    return {"items": discover_fields(PimcoreClient(settings_payload), class_id)}
+    with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+        return {"items": discover_fields(client, class_id)}
 
 
 def discover_pimcore_folders(overrides: object = None) -> dict[str, object]:
     settings_payload = _merged_pimcore_settings(overrides)
-    return {"items": discover_folders(PimcoreClient(settings_payload))}
+    with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+        return {"items": discover_folders(client)}
 
 
 def complete_pimcore_setup(payload: object, username: str) -> dict[str, object]:
@@ -1782,7 +1791,8 @@ def test_pimcore_settings(
     username: str = "admin",
 ) -> dict[str, object]:
     merged = _merged_pimcore_settings(overrides)
-    report = run_settings_test(merged, client=PimcoreClient(merged))
+    with pimcore_client_scope(merged, factory=PimcoreClient) as client:
+        report = run_settings_test(merged, client=client)
     audit_report = redact_pimcore_log_value(report)
     record_history(
         username=username,
@@ -1941,6 +1951,22 @@ def _persist_pimcore_audit(report: dict[str, object]) -> None:
     _persist_pimcore_submission(report)
 
 
+def _run_pimcore_test_create(
+    settings_payload: dict[str, object],
+    submitted: dict[str, object],
+    policy: str,
+    emit: object,
+) -> dict[str, object]:
+    with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+        return run_test_create(
+            settings_payload,
+            submitted,
+            policy,
+            client=client,
+            emit=emit,
+        )
+
+
 def start_pimcore_test_create(
     values: object,
     cleanup_policy: object,
@@ -1954,11 +1980,11 @@ def start_pimcore_test_create(
         username=username,
         values=submitted,
         cleanup_policy=policy,
-        worker=lambda emit: run_test_create(
+        worker=lambda emit: _run_pimcore_test_create(
             settings_payload,
             submitted,
             policy,
-            emit=emit,
+            emit,
         ),
         persist=_persist_pimcore_audit,
     )
@@ -2139,6 +2165,28 @@ def _render_templates(
     fill_missing_product_values: bool = False,
     mode: str = "create",
 ) -> dict[str, object]:
+    with SqlExecutionContext(execute_query=execute_sql_value_query) as sql_context:
+        return _render_templates_with_sql_context(
+            settings_payload,
+            product_values,
+            values,
+            targets,
+            fill_missing_product_values=fill_missing_product_values,
+            mode=mode,
+            sql_context=sql_context,
+        )
+
+
+def _render_templates_with_sql_context(
+    settings_payload: dict[str, object],
+    product_values: object,
+    values: object,
+    targets: list[str] | None = None,
+    *,
+    fill_missing_product_values: bool = False,
+    mode: str = "create",
+    sql_context: SqlExecutionContext,
+) -> dict[str, object]:
     submitted = dict(values) if isinstance(values, dict) else {}
     mappings_list = list(settings_payload["field_mappings"])
     sql_sources = {
@@ -2195,7 +2243,7 @@ def _render_templates(
             if not profile.get("enabled", True):
                 label = profile.get("label") or profile.get("id")
                 raise ValueError(f"Profil SQL {label} jest wylaczony.")
-            sql_result = execute_sql_value_query(
+            sql_result = sql_context.execute(
                 profile,
                 mapping.get("sql_query"),
                 product_context,
@@ -2241,15 +2289,35 @@ def _render_templates(
         extra_values=extra_values,
     )
     translation_settings = config.CONFIG.get(TRANSLATION_SETTINGS_KEY, {}) or {}
+    independent_translation_operations = [
+        (
+            lambda source=source: (
+                source,
+                translate_text(
+                    rendered.values[source],
+                    mappings[source].get("target_language"),
+                    translation_settings,
+                ),
+            )
+        )
+        for source in rendered.order
+        if mappings[source].get("translate")
+        and classify_template_operation(mappings[source]).independent
+    ]
+    translated_values = dict(
+        execute_independent_operations(independent_translation_operations)
+    )
     for source in rendered.order:
         mapping = mappings[source]
         value = rendered.values[source]
         if mapping.get("translate"):
-            translated = translate_text(
-                value,
-                mapping.get("target_language"),
-                translation_settings,
-            )
+            translated = translated_values.get(source)
+            if translated is None:
+                translated = translate_text(
+                    value,
+                    mapping.get("target_language"),
+                    translation_settings,
+                )
             value = translated.text
             if translated.warning:
                 warnings.append({"source": source, **translated.warning})
@@ -2272,7 +2340,7 @@ def _render_templates(
             if not profile.get("enabled", True):
                 label = profile.get("label") or profile.get("id")
                 raise ValueError(f"Profil SQL {label} jest wylaczony.")
-            sql_result = execute_sql_value_query(
+            sql_result = sql_context.execute(
                 profile,
                 mapping.get("sql_query"),
                 product_context,
@@ -2586,7 +2654,13 @@ def create_pimcore_product(
         events.append(event)
 
     try:
-        result = create_product(settings_payload, submitted, emit=emit)
+        with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+            result = create_product(
+                settings_payload,
+                submitted,
+                client=client,
+                emit=emit,
+            )
         change_set = result.get("change_set") if isinstance(result.get("change_set"), dict) else {}
         if change_set:
             result["change_set"] = {**change_set, "integrations": safe_integrations}
@@ -2645,7 +2719,12 @@ def get_pimcore_product_for_edit(
     status = "failed"
     events: list[dict[str, object]] = []
     try:
-        result = fetch_product_for_edit(settings_payload, object_id)
+        with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+            result = fetch_product_for_edit(
+                settings_payload,
+                object_id,
+                client=client,
+            )
         result["form_schema"] = _pimcore_runtime_form_schema(settings_payload)
         status = "completed"
         return result
@@ -2730,13 +2809,15 @@ def update_pimcore_product(
         events.append(event)
 
     try:
-        result = update_product(
-            settings_payload,
-            object_id,
-            str(marker or ""),
-            submitted,
-            emit=emit,
-        )
+        with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+            result = update_product(
+                settings_payload,
+                object_id,
+                str(marker or ""),
+                submitted,
+                client=client,
+                emit=emit,
+            )
         change_set = result.get("change_set") if isinstance(result.get("change_set"), dict) else {}
         if change_set:
             result["change_set"] = {**change_set, "integrations": safe_integrations}
@@ -3037,6 +3118,7 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
     )
     security_payload = payload.get("security") if isinstance(payload.get("security"), dict) else {}
     web_display_payload = payload.get(WEB_DISPLAY_SETTINGS_KEY)
+    translation_payload = payload.get(TRANSLATION_SETTINGS_KEY)
     pimcore_payload = payload.get(PIMCORE_SETTINGS_KEY)
     email_payload = payload.get(EMAIL_SETTINGS_KEY)
     previous_entra_identity = ("", "")
@@ -3051,6 +3133,7 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
     backup_payload = payload.get("sqlite_backup") if isinstance(payload.get("sqlite_backup"), dict) else None
     slots_payload = payload.get("slots") if isinstance(payload.get("slots"), list) else None
     runtime_reloaded = False
+    translation_settings_changed = False
 
     if "image_dir" in app_payload:
         runtime_reloaded = _apply_base_dir_from_web(app_payload.get("image_dir")) or runtime_reloaded
@@ -3122,6 +3205,18 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
         cfg[WEB_DISPLAY_SETTINGS_KEY] = config.normalize_web_display_settings(
             merged_web_display
         )
+
+    if isinstance(translation_payload, dict):
+        current_translation = dict(cfg.get(TRANSLATION_SETTINGS_KEY, {}) or {})
+        merged_translation = dict(current_translation)
+        merged_translation.update(translation_payload)
+        if not _text(translation_payload.get(TRANSLATION_API_KEY)):
+            merged_translation[TRANSLATION_API_KEY] = current_translation.get(
+                TRANSLATION_API_KEY,
+                "",
+            )
+        cfg[TRANSLATION_SETTINGS_KEY] = merged_translation
+        translation_settings_changed = True
 
     if isinstance(pimcore_payload, dict):
         if "field_mappings" in pimcore_payload:
@@ -3242,6 +3337,8 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
 
     save_config(cfg, preserve_secrets=_preserve_unsubmitted_config_secrets(payload))
     config.initialize_config(interactive=False)
+    if translation_settings_changed:
+        clear_translation_cache()
     if entra_configuration_changed:
         try:
             from .entra_secret_monitor import refresh_entra_secret_status

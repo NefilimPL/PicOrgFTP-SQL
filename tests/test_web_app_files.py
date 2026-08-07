@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import io
 import json
@@ -17,10 +18,17 @@ from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+import pytest
 
 from picorgftp_sql import web_data
 from picorgftp_sql.web import active_clients
 from picorgftp_sql.web import app as web_app
+from picorgftp_sql.web.process_queue import (
+    OwnerQueueLimit,
+    ProcessQueueFull,
+    ProcessQueueService,
+    QueueLimits,
+)
 
 try:
     from PIL import Image
@@ -34,6 +42,137 @@ def _workspace_temp(name: str) -> Path:
         shutil.rmtree(root)
     root.mkdir(parents=True)
     return root
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
+def test_terminal_process_jobs_cleanup_staging_and_release_reservation(
+    tmp_path, monkeypatch, outcome: str
+) -> None:
+    """Catches terminal jobs that retain a staging directory or owner queue slot."""
+    root = tmp_path / "jobs"
+    root.mkdir()
+    staging = root / "job-terminal"
+    staging.mkdir()
+    (staging / "upload.jpg").write_bytes(b"staged")
+    queue = ProcessQueueService(QueueLimits(workers=1, max_pending=1, max_per_owner=1))
+    jobs: dict[str, dict[str, object]] = {}
+    completions: dict[str, threading.Event] = {}
+    started = threading.Event()
+    form = web_app._ProcessFormSnapshot(temp_dir=str(staging))
+    result = {
+        "timing": {"stages": []},
+        "ftp": {},
+        "sql": {},
+        "local_delete": {},
+        "skipped_slots": [],
+    }
+
+    def process(**kwargs):
+        started.set()
+        if outcome == "failed":
+            raise RuntimeError("expected worker failure")
+        if outcome == "cancelled":
+            assert kwargs["cancel_event"].wait(timeout=5)
+            raise web_app._ProcessJobCancelled()
+        return result
+
+    monkeypatch.setattr(web_app, "_PROCESS_JOB_ROOT", root)
+    monkeypatch.setattr(web_app, "_PROCESS_QUEUE", queue)
+    monkeypatch.setattr(web_app, "_PROCESS_JOBS", jobs)
+    monkeypatch.setattr(web_app, "_PROCESS_JOB_COMPLETIONS", completions)
+    try:
+        with (
+            patch.object(web_app, "_process_upload_snapshot", side_effect=process),
+            patch.object(web_app, "record_job"),
+            patch.object(web_app, "emit_event"),
+            patch.object(web_app, "_write_web_event"),
+        ):
+            queued = web_app._queue_process_job(
+                username="operator",
+                cache_scope="scope",
+                form=form,
+                reservation=queue.reserve("scope"),
+            )
+            job_id = str(queued["job_id"])
+            assert started.wait(timeout=5)
+            if outcome == "cancelled":
+                cancelled = web_app._cancel_process_job_for_user(job_id, "operator")
+                assert cancelled is not None
+            assert completions[job_id].wait(timeout=5)
+
+        assert not staging.exists()
+        assert web_app._process_job_for_user(job_id, "operator")["status"] == outcome
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                replacement = queue.reserve("scope")
+                break
+            except OwnerQueueLimit:
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+        replacement.release()
+    finally:
+        queue.shutdown()
+
+
+def test_cancel_process_endpoint_cleans_waiting_job(tmp_path, monkeypatch) -> None:
+    """Catches a cancel endpoint that leaves queued staging or capacity behind."""
+    root = tmp_path / "jobs"
+    root.mkdir()
+    staging = root / "job-waiting"
+    staging.mkdir()
+    (staging / "upload.jpg").write_bytes(b"staged")
+    queue = ProcessQueueService(
+        QueueLimits(workers=1, max_pending=1, max_per_owner=1),
+        start_workers=False,
+    )
+    jobs: dict[str, dict[str, object]] = {}
+    completions: dict[str, threading.Event] = {}
+    monkeypatch.setattr(web_app, "_PROCESS_JOB_ROOT", root)
+    monkeypatch.setattr(web_app, "_PROCESS_QUEUE", queue)
+    monkeypatch.setattr(web_app, "_PROCESS_JOBS", jobs)
+    monkeypatch.setattr(web_app, "_PROCESS_JOB_COMPLETIONS", completions)
+    try:
+        with patch.object(web_app, "record_job"):
+            queued = web_app._queue_process_job(
+                username="operator",
+                cache_scope="scope",
+                form=web_app._ProcessFormSnapshot(temp_dir=str(staging)),
+                reservation=queue.reserve("scope"),
+            )
+        job_id = str(queued["job_id"])
+        with patch.object(web_app, "_require_user", return_value="operator"):
+            response = TestClient(web_app.app).delete(f"/api/process-jobs/{job_id}")
+
+        assert response.status_code == 200
+        assert response.json()["job"]["status"] == "cancelled"
+        assert not staging.exists()
+        replacement = queue.reserve("scope")
+        replacement.release()
+    finally:
+        queue.shutdown()
+
+
+def test_process_snapshot_stops_before_validation_when_cancelled() -> None:
+    """Catches a cancellation token that is ignored until after validation starts."""
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    with (
+        patch.object(web_app, "slot_definitions_from_config", return_value=[]),
+        patch.object(
+            web_app,
+            "validate_product_form",
+            side_effect=AssertionError("validation must not run after cancellation"),
+        ),
+        pytest.raises(web_app._ProcessJobCancelled),
+    ):
+        web_app._process_upload_snapshot(
+            username="operator",
+            cache_scope="scope",
+            form=web_app._ProcessFormSnapshot(),
+            cancel_event=cancel_event,
+        )
 
 
 class _MemoryUpload:
@@ -168,6 +307,9 @@ class WebAppFileTests(unittest.TestCase):
         form = web_app._ProcessFormSnapshot(
             fields={"ean": "5901234567890", "name": "Test product"}
         )
+        queue = Mock()
+        queue.submit.return_value = 1
+        reservation = Mock()
         result = {
             "timing": {"stages": [{"key": "prepare", "elapsed_ms": 12}]},
             "ftp": {},
@@ -177,13 +319,13 @@ class WebAppFileTests(unittest.TestCase):
         }
 
         with (
-            patch.object(web_app._PROCESS_EXECUTOR, "submit"),
+            patch.object(web_app, "_PROCESS_QUEUE", queue),
             patch.object(web_app, "_process_upload_snapshot", return_value=result) as process,
             patch.object(web_app, "record_job") as record_job,
             patch.object(web_app, "emit_event") as emit_event,
         ):
             queued = web_app._queue_process_job(
-                username="alice", cache_scope="scope", form=form
+                username="alice", cache_scope="scope", form=form, reservation=reservation
             )
             web_app._run_process_job(queued["job_id"])
 
@@ -201,9 +343,12 @@ class WebAppFileTests(unittest.TestCase):
 
     def test_process_job_persists_critical_unexpected_failure(self) -> None:
         form = web_app._ProcessFormSnapshot(fields={"ean": "5901234567890"})
+        queue = Mock()
+        queue.submit.return_value = 1
+        reservation = Mock()
 
         with (
-            patch.object(web_app._PROCESS_EXECUTOR, "submit"),
+            patch.object(web_app, "_PROCESS_QUEUE", queue),
             patch.object(
                 web_app,
                 "_process_upload_snapshot",
@@ -213,7 +358,7 @@ class WebAppFileTests(unittest.TestCase):
             patch.object(web_app, "emit_event") as emit_event,
         ):
             queued = web_app._queue_process_job(
-                username="alice", cache_scope="scope", form=form
+                username="alice", cache_scope="scope", form=form, reservation=reservation
             )
             web_app._run_process_job(queued["job_id"])
 
@@ -226,6 +371,9 @@ class WebAppFileTests(unittest.TestCase):
 
     def test_failed_process_job_persists_the_active_stage(self) -> None:
         form = web_app._ProcessFormSnapshot(fields={"ean": "5901234567890"})
+        queue = Mock()
+        queue.submit.return_value = 1
+        reservation = Mock()
 
         def fail_during_stage(*, progress, **_kwargs):
             progress(
@@ -243,13 +391,13 @@ class WebAppFileTests(unittest.TestCase):
             raise RuntimeError("FTP crashed")
 
         with (
-            patch.object(web_app._PROCESS_EXECUTOR, "submit"),
+            patch.object(web_app, "_PROCESS_QUEUE", queue),
             patch.object(web_app, "_process_upload_snapshot", side_effect=fail_during_stage),
             patch.object(web_app, "record_job") as record_job,
             patch.object(web_app, "emit_event"),
         ):
             queued = web_app._queue_process_job(
-                username="alice", cache_scope="scope", form=form
+                username="alice", cache_scope="scope", form=form, reservation=reservation
             )
             web_app._run_process_job(queued["job_id"])
 
@@ -2126,6 +2274,163 @@ class WebAppFileTests(unittest.TestCase):
         self.assertIn("/api/process-jobs", route_paths)
         self.assertIn("/api/process-jobs/active", route_paths)
         self.assertIn("/api/process-jobs/{job_id}", route_paths)
+
+    def test_background_process_rejects_before_materializing_when_queue_is_full(
+        self,
+    ) -> None:
+        """Catches a saturated queue that still stages an upload before rejecting it."""
+        client = TestClient(web_app.app)
+        full_queue = Mock()
+        full_queue.reserve.side_effect = ProcessQueueFull(retry_after_seconds=2)
+        snapshot = web_app._ProcessFormSnapshot()
+
+        with (
+            patch.object(web_app, "_require_user", return_value="operator"),
+            patch.object(web_app, "_PROCESS_QUEUE", full_queue, create=True),
+            patch.object(
+                web_app,
+                "_materialize_process_form",
+                return_value=snapshot,
+            ) as materialize,
+            patch.object(web_app, "_queue_process_job", return_value={"job_id": "job-1"}),
+        ):
+            response = client.post(
+                "/api/process/background",
+                data={
+                    "ean": "5901234567890",
+                    "name": "ALFA",
+                    "type_name": "STOL",
+                    "model": "A1",
+                },
+            )
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["Retry-After"], "2")
+        materialize.assert_not_awaited()
+
+    def test_background_process_owner_limit_uses_configured_retry_after(self) -> None:
+        """Catches the process-router proxy losing configured owner-limit retry delays."""
+        queue = ProcessQueueService(
+            QueueLimits(workers=1, max_pending=3, max_per_owner=1, retry_after_seconds=17),
+            start_workers=False,
+        )
+        scope = "operator-" + hashlib.sha1(b"scope-token").hexdigest()[:12]
+        reservation = queue.reserve(scope)
+        client = TestClient(web_app.app)
+        client.cookies.set(web_app.SESSION_COOKIE, "scope-token")
+        try:
+            with (
+                patch.object(web_app, "_require_user", return_value="operator"),
+                patch.object(web_app, "_PROCESS_QUEUE", queue),
+            ):
+                response = client.post(
+                    "/api/process/background",
+                    data={"ean": "5901234567890"},
+                    headers={
+                        web_app.CSRF_HEADER: web_app._csrf_token_for_session("scope-token")
+                    },
+                )
+        finally:
+            reservation.release()
+            queue.shutdown()
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["Retry-After"], "17")
+
+    def test_foreground_and_background_share_the_owner_queue_limit(self) -> None:
+        """Catches separate endpoint queues that let one owner exceed two active jobs."""
+        queue = ProcessQueueService(
+            QueueLimits(workers=1, max_pending=3, max_per_owner=2),
+        )
+        original_submit = queue.submit
+        second_submitted = threading.Event()
+        first_started = threading.Event()
+        release_first = threading.Event()
+        foreground_done = threading.Event()
+        foreground_result: dict[str, object] = {}
+        submit_count = 0
+        submit_lock = threading.Lock()
+        materialize_calls = 0
+        materialize_lock = threading.Lock()
+        snapshot = web_app._ProcessFormSnapshot()
+        result = {"timing": {"stages": []}, "ftp": {}, "sql": {}, "local_delete": {}}
+
+        def track_submit(*args, **kwargs):
+            nonlocal submit_count
+            position = original_submit(*args, **kwargs)
+            with submit_lock:
+                submit_count += 1
+                if submit_count == 2:
+                    second_submitted.set()
+            return position
+
+        async def materialize(_form, _temp_dir):
+            nonlocal materialize_calls
+            with materialize_lock:
+                materialize_calls += 1
+            return snapshot
+
+        def process(**_kwargs):
+            if not first_started.is_set():
+                first_started.set()
+                assert release_first.wait(timeout=5)
+            return result
+
+        def run_foreground() -> None:
+            try:
+                foreground_result["response"] = TestClient(web_app.app).post(
+                    "/api/process",
+                    data={"ean": "5901234567890"},
+                )
+            except BaseException as exc:  # pragma: no cover - reported by the assertion below
+                foreground_result["error"] = exc
+            finally:
+                foreground_done.set()
+
+        background_client = TestClient(web_app.app)
+        try:
+            with (
+                patch.object(web_app, "_require_user", return_value="operator"),
+                patch.object(web_app, "_PROCESS_QUEUE", queue),
+                patch.object(web_app, "_materialize_process_form", side_effect=materialize),
+                patch.object(web_app, "_process_upload_snapshot", side_effect=process),
+                patch.object(web_app, "record_job"),
+                patch.object(web_app, "emit_event"),
+            ):
+                queue.submit = track_submit
+                background = background_client.post(
+                    "/api/process/background",
+                    data={"ean": "5901234567890"},
+                )
+                self.assertEqual(background.status_code, 200)
+                self.assertTrue(first_started.wait(timeout=5))
+
+                foreground_thread = threading.Thread(target=run_foreground)
+                foreground_thread.start()
+                self.assertTrue(second_submitted.wait(timeout=5))
+
+                rejected = background_client.post(
+                    "/api/process/background",
+                    data={"ean": "5901234567890"},
+                )
+                self.assertEqual(rejected.status_code, 429)
+                self.assertEqual(rejected.headers["Retry-After"], "2")
+                self.assertEqual(materialize_calls, 2)
+
+                release_first.set()
+                self.assertTrue(foreground_done.wait(timeout=5))
+                foreground_thread.join(timeout=1)
+                self.assertNotIn("error", foreground_result)
+                self.assertEqual(foreground_result["response"].status_code, 200)
+                self.assertEqual(foreground_result["response"].json(), result)
+        finally:
+            release_first.set()
+            queue.shutdown()
+            with web_app._PROCESS_JOBS_LOCK:
+                for job_id, job in list(web_app._PROCESS_JOBS.items()):
+                    if job.get("form") is snapshot or job.get("username") == "operator":
+                        web_app._PROCESS_JOBS.pop(job_id, None)
+                        web_app._PROCESS_JOB_COMPLETIONS.pop(job_id, None)
 
     def test_process_warning_messages_are_user_visible(self) -> None:
         payload = {

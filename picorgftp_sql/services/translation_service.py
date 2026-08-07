@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import html
+import hmac
 import json
 import re
 from typing import Callable, Mapping
@@ -9,12 +11,36 @@ from urllib.parse import quote_plus, urlencode
 from urllib.request import Request, urlopen
 
 from ..common import SSL_CONTEXT
+from .translation_cache import TranslationCache
 
 
 @dataclass(frozen=True)
 class TranslationResult:
     text: str
     warning: dict[str, str] | None = None
+
+
+_TRANSLATION_CACHE = TranslationCache()
+
+
+def clear_translation_cache() -> None:
+    _TRANSLATION_CACHE.clear()
+
+
+def _cache_key(
+    source: str,
+    target: str,
+    provider: str,
+    api_key: str,
+    api_url: str,
+) -> tuple[str, str, str, str]:
+    secret_material = "\x1f".join((provider, api_url, api_key)).encode("utf-8")
+    settings_fingerprint = hmac.new(
+        b"picorgftp-translation-cache-v1",
+        secret_material,
+        hashlib.sha256,
+    ).hexdigest()
+    return (provider, target, settings_fingerprint, source)
 
 
 def _language(value: object, *, deepl: bool = False) -> str:
@@ -55,31 +81,37 @@ def translate_text(
             },
         )
 
-    try:
-        if provider == "deepl":
-            translated = _translate_deepl(
+    def load_translation() -> TranslationResult:
+        try:
+            if provider == "deepl":
+                translated = _translate_deepl(
+                    source,
+                    target,
+                    api_key,
+                    api_url,
+                    opener,
+                )
+            elif provider == "mymemory":
+                translated = _translate_mymemory(source, target, opener)
+            else:
+                translated = _translate_google(source, target, opener)
+            translated = html.unescape(str(translated or "")).strip()
+            if not translated:
+                raise ValueError("pusta odpowiedz")
+            return TranslationResult(translated)
+        except Exception as exc:
+            return TranslationResult(
                 source,
-                target,
-                api_key,
-                api_url,
-                opener,
+                {
+                    "code": "translation_failed",
+                    "message": f"Nie udalo sie przetlumaczyc tekstu: {exc}",
+                },
             )
-        elif provider == "mymemory":
-            translated = _translate_mymemory(source, target, opener)
-        else:
-            translated = _translate_google(source, target, opener)
-        translated = html.unescape(str(translated or "")).strip()
-        if not translated:
-            raise ValueError("pusta odpowiedz")
-        return TranslationResult(translated)
-    except Exception as exc:
-        return TranslationResult(
-            source,
-            {
-                "code": "translation_failed",
-                "message": f"Nie udalo sie przetlumaczyc tekstu: {exc}",
-            },
-        )
+
+    return _TRANSLATION_CACHE.get_or_translate(
+        _cache_key(source, target, provider, api_key, api_url),
+        load_translation,
+    )
 
 
 def _translate_deepl(

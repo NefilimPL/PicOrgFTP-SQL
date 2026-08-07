@@ -149,7 +149,7 @@ class WebWorkflowTests(unittest.TestCase):
                 options=WebProcessingOptions(resize_enabled=False),
             )
 
-            self.assertEqual(result.saved_files[0].operation, "copy_without_processing")
+            self.assertEqual(result.saved_files[0].operation, "process_image")
             self.assertTrue(result.saved_files[0].filename.endswith(".jpg"))
 
     def test_process_web_uploads_accepts_additional_image_aliases_and_variants(self) -> None:
@@ -311,8 +311,40 @@ class WebWorkflowTests(unittest.TestCase):
                 ean="123",
             )
         )
-
         self.assertIn("EAN musi miec 13 cyfr albo zostac pusty.", errors)
+
+    def test_process_web_uploads_removes_exif_without_optional_processing(self) -> None:
+        if Image is None:
+            self.skipTest("Pillow is not available")
+        workspace_tmp = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
+            source = Path(temp_dir) / "source.jpg"
+            exif = Image.Exif()
+            exif[0x010E] = "private description"
+            Image.new("RGB", (24, 16), "white").save(source, format="JPEG", exif=exif)
+
+            result = process_web_uploads(
+                base_output_dir=str(Path(temp_dir) / "processed"),
+                form=WebProductForm(
+                    name="Maggiore",
+                    type_name="komoda",
+                    model="MA03",
+                    color1="bialy",
+                    ean="5901234567890",
+                ),
+                uploaded_slots=[
+                    WebUploadedSlot(
+                        prefix="03",
+                        label="DETAIL_pic",
+                        source_path=str(source),
+                        original_filename="front.jpg",
+                    )
+                ],
+                options=WebProcessingOptions(resize_enabled=False),
+            )
+
+            with Image.open(result.saved_files[0].path) as saved:
+                self.assertEqual(dict(saved.getexif()), {})
 
     def test_validation_uses_custom_required_labels_and_ignores_disabled_fields(
         self,
@@ -451,7 +483,7 @@ class WebWorkflowTests(unittest.TestCase):
             self._make_image(source)
 
             with patch(
-                "picorgftp_sql.web_workflow.fit_image_to_content",
+                "picorgftp_sql.image_pipeline.fit_image_to_content",
                 side_effect=lambda image: image,
             ) as fit:
                 process_web_uploads(
@@ -486,7 +518,7 @@ class WebWorkflowTests(unittest.TestCase):
             self._make_image(source)
 
             with patch(
-                "picorgftp_sql.web_workflow.fit_image_to_content",
+                "picorgftp_sql.image_pipeline.fit_image_to_content",
                 side_effect=lambda image: image,
             ) as fit:
                 process_web_uploads(
