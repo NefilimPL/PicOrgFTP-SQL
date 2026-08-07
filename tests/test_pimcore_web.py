@@ -146,6 +146,20 @@ def test_settings_diagnostic_persists_full_detail_but_returns_public_report():
     assert persisted["checks"][0]["response_detail"] == "complete sanitized trace"
 
 
+def test_pimcore_settings_test_closes_its_owned_client():
+    client = Mock()
+    report = {"ok": True, "checks": []}
+
+    with (
+        patch.object(web_data, "PimcoreClient", return_value=client),
+        patch.object(web_data, "run_settings_test", return_value=report),
+        patch.object(web_data, "record_history"),
+    ):
+        assert web_data.test_pimcore_settings() == report
+
+    client.close.assert_called_once()
+
+
 def test_discovery_uses_unsaved_key_without_persisting_or_returning_it():
     captured = {}
     fake_client = Mock()
@@ -170,6 +184,7 @@ def test_discovery_uses_unsaved_key_without_persisting_or_returning_it():
     assert result == {"items": [{"id": "7", "name": "product"}]}
     assert "temporary" not in json.dumps(result)
     discover.assert_called_once_with(fake_client)
+    fake_client.close.assert_called_once()
 
 
 def test_complete_setup_saves_only_after_successful_report():
@@ -768,9 +783,11 @@ def test_update_adapter_persists_manual_update_audit():
         "object": {"id": 91, "path": "/Produkty/5904"},
         "values": {"EAN": "5904804578169"},
     }
+    client = Mock()
     with (
         patch.object(web_data.config, "CONFIG", cfg),
-        patch.object(web_data, "update_product", return_value=expected),
+        patch.object(web_data, "update_product", return_value=expected) as update,
+        patch.object(web_data, "PimcoreClient", return_value=client),
         patch.object(web_data, "_persist_pimcore_operation") as persist,
     ):
         result = web_data.update_pimcore_product(
@@ -784,6 +801,8 @@ def test_update_adapter_persists_manual_update_audit():
     report = persist.call_args.args[0]
     assert report["operation_type"] == "manual_update"
     assert report["username"] == "operator"
+    assert update.call_args.kwargs["client"] is client
+    client.close.assert_called_once()
 
 
 def test_update_adapter_emits_failure_diagnostics_for_manual_update_error():
@@ -873,18 +892,22 @@ def test_update_adapter_conflict_event_has_no_failure_diagnostics():
 def test_create_adapter_uses_manual_create_operation_kind():
     cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
     cfg["pimcore"].update({"enabled": True, "setup_complete": True})
+    client = Mock()
     with (
         patch.object(web_data.config, "CONFIG", cfg),
         patch.object(
             web_data,
             "create_product",
             return_value={"created": True, "duplicate": False, "object": {"id": 91}},
-        ),
+        ) as create,
+        patch.object(web_data, "PimcoreClient", return_value=client),
         patch.object(web_data, "_persist_pimcore_operation") as persist,
     ):
         web_data.create_pimcore_product({"EAN": "5904804578169"}, "operator")
 
     assert persist.call_args.args[0]["operation_type"] == "manual_create"
+    assert create.call_args.kwargs["client"] is client
+    client.close.assert_called_once()
 
 
 def test_create_adapter_filters_and_attaches_integration_results_to_audit_and_change_set():
@@ -1301,6 +1324,7 @@ def test_edit_adapter_persists_loaded_product_to_sqlite(tmp_path):
         "marker": "100",
         "values": {"EAN": "5904804578169"},
     }
+    client = Mock()
 
     with (
         patch.object(web_data.config, "CONFIG", cfg),
@@ -1309,7 +1333,8 @@ def test_edit_adapter_persists_loaded_product_to_sqlite(tmp_path):
             "resolve_sqlite_path",
             return_value=str(database_path),
         ),
-        patch.object(web_data, "fetch_product_for_edit", return_value=loaded),
+        patch.object(web_data, "fetch_product_for_edit", return_value=loaded) as fetch,
+        patch.object(web_data, "PimcoreClient", return_value=client),
         patch.object(web_data, "_persist_pimcore_operation"),
     ):
         result = web_data.get_pimcore_product_for_edit(91, "operator")
@@ -1324,6 +1349,8 @@ def test_edit_adapter_persists_loaded_product_to_sqlite(tmp_path):
     assert len(rows) == 1
     assert rows[0]["status"] == "completed"
     assert rows[0]["values"]["EAN"] == "5904804578169"
+    assert fetch.call_args.kwargs["client"] is client
+    client.close.assert_called_once()
 
 
 def test_runtime_edit_routes_allow_logged_in_user():

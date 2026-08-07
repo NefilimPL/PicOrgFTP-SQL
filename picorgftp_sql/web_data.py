@@ -123,6 +123,7 @@ from .services.pimcore_service import (
     discover_folders,
     fetch_product_for_edit,
     find_product_by_ean,
+    pimcore_client_scope,
     run_settings_test,
     run_test_create,
     update_product,
@@ -1750,17 +1751,20 @@ def _merged_pimcore_settings(overrides: object = None) -> dict[str, object]:
 
 def discover_pimcore_classes(overrides: object = None) -> dict[str, object]:
     settings_payload = _merged_pimcore_settings(overrides)
-    return {"items": discover_classes(PimcoreClient(settings_payload))}
+    with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+        return {"items": discover_classes(client)}
 
 
 def discover_pimcore_fields(overrides: object, class_id: object) -> dict[str, object]:
     settings_payload = _merged_pimcore_settings(overrides)
-    return {"items": discover_fields(PimcoreClient(settings_payload), class_id)}
+    with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+        return {"items": discover_fields(client, class_id)}
 
 
 def discover_pimcore_folders(overrides: object = None) -> dict[str, object]:
     settings_payload = _merged_pimcore_settings(overrides)
-    return {"items": discover_folders(PimcoreClient(settings_payload))}
+    with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+        return {"items": discover_folders(client)}
 
 
 def complete_pimcore_setup(payload: object, username: str) -> dict[str, object]:
@@ -1782,7 +1786,8 @@ def test_pimcore_settings(
     username: str = "admin",
 ) -> dict[str, object]:
     merged = _merged_pimcore_settings(overrides)
-    report = run_settings_test(merged, client=PimcoreClient(merged))
+    with pimcore_client_scope(merged, factory=PimcoreClient) as client:
+        report = run_settings_test(merged, client=client)
     audit_report = redact_pimcore_log_value(report)
     record_history(
         username=username,
@@ -2586,7 +2591,13 @@ def create_pimcore_product(
         events.append(event)
 
     try:
-        result = create_product(settings_payload, submitted, emit=emit)
+        with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+            result = create_product(
+                settings_payload,
+                submitted,
+                client=client,
+                emit=emit,
+            )
         change_set = result.get("change_set") if isinstance(result.get("change_set"), dict) else {}
         if change_set:
             result["change_set"] = {**change_set, "integrations": safe_integrations}
@@ -2645,7 +2656,12 @@ def get_pimcore_product_for_edit(
     status = "failed"
     events: list[dict[str, object]] = []
     try:
-        result = fetch_product_for_edit(settings_payload, object_id)
+        with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+            result = fetch_product_for_edit(
+                settings_payload,
+                object_id,
+                client=client,
+            )
         result["form_schema"] = _pimcore_runtime_form_schema(settings_payload)
         status = "completed"
         return result
@@ -2730,13 +2746,15 @@ def update_pimcore_product(
         events.append(event)
 
     try:
-        result = update_product(
-            settings_payload,
-            object_id,
-            str(marker or ""),
-            submitted,
-            emit=emit,
-        )
+        with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+            result = update_product(
+                settings_payload,
+                object_id,
+                str(marker or ""),
+                submitted,
+                client=client,
+                emit=emit,
+            )
         change_set = result.get("change_set") if isinstance(result.get("change_set"), dict) else {}
         if change_set:
             result["change_set"] = {**change_set, "integrations": safe_integrations}
