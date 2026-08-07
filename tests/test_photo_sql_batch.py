@@ -33,6 +33,20 @@ def test_rejects_custom_template_for_legacy_fallback():
     )
 
 
+def test_accepts_standard_desktop_template_with_concrete_table_and_ean():
+    batch = build_photo_sql_batch(
+        "products",
+        " WHERE EAN = '5901234567890'",
+        {"photo_1": "5901234567890_01.jpg"},
+        "mysql",
+        "UPDATE products SET {col} = '{filename}' WHERE EAN = '{ean}'",
+        allow_concrete_template=True,
+    )
+
+    assert batch is not None
+    assert batch.query == "UPDATE products SET photo_1 = %s WHERE EAN = '5901234567890'"
+
+
 def test_rejects_unsafe_identifiers():
     assert (
         build_photo_sql_batch(

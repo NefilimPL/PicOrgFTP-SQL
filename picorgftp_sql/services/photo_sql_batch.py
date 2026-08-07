@@ -31,16 +31,25 @@ def build_photo_sql_batch(
     assignments: Mapping[object, object],
     db_type: object,
     template: object,
+    *,
+    allow_concrete_template: bool = False,
 ) -> PhotoSqlBatch | None:
     normalized_template = " ".join(str(template or "").strip().split())
-    if not _STANDARD_TEMPLATE_RE.fullmatch(normalized_template):
-        return None
     safe_table = _identifier(table)
+    concrete_template_re = re.compile(
+        rf"\AUPDATE\s+{re.escape(safe_table)}\s+SET\s+\{{(?:col|column)\}}\s*=\s*'\{{filename\}}'\s+WHERE\s+.+\{{ean\}}.+\Z",
+        re.IGNORECASE,
+    )
+    if not safe_table or not (
+        _STANDARD_TEMPLATE_RE.fullmatch(normalized_template)
+        or (allow_concrete_template and concrete_template_re.fullmatch(normalized_template))
+    ):
+        return None
     ordered_assignments = [
         (_identifier(column), str(filename or ""))
         for column, filename in assignments.items()
     ]
-    if not safe_table or not ordered_assignments or any(
+    if not ordered_assignments or any(
         not column for column, _filename in ordered_assignments
     ):
         return None

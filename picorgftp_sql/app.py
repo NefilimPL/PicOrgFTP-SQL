@@ -8149,6 +8149,48 @@ class App(BU.Tk):
                     try:
                         conn = connect_db()
                         cur = conn.cursor()
+                        from .services.photo_sql_batch import build_photo_sql_batch
+                        from .services.sql_service import extract_presence_context
+
+                        batch_context = extract_presence_context(D, K_)
+                        batch_assignments = {}
+                        if batch_context:
+                            for batch_slot in worker_slots:
+                                batch_prefix = batch_slot[Aa]
+                                batch_column = C._resolve_sql_column(
+                                    batch_prefix,
+                                    batch_slot["label"],
+                                    log_missing=J,
+                                )
+                                if not batch_column:
+                                    continue
+                                if batch_prefix in sql_update_prefixes and batch_slot[f]:
+                                    batch_name = A.path.basename(batch_slot[f])
+                                    batch_extension = A.path.splitext(batch_name)[1].lower()
+                                    batch_assignments[batch_column] = (
+                                        f"{K_}_{batch_prefix}{batch_extension}"
+                                    )
+                                elif batch_prefix in sql_clear_prefixes:
+                                    batch_assignments[batch_column] = B
+                        batch = (
+                            build_photo_sql_batch(
+                                batch_context[0],
+                                batch_context[1],
+                                batch_assignments,
+                                D.get(p, K),
+                                AX_,
+                                allow_concrete_template=J,
+                            )
+                            if batch_context and batch_assignments
+                            else I
+                        )
+                        if batch is not I:
+                            cur.execute(batch.query, batch.params)
+                            Aq_ = 1
+                            if Aj(cur, A3, -1) >= 0:
+                                CANCEL_LABEL += cur.rowcount
+                            sql_update_prefixes.clear()
+                            sql_clear_prefixes.clear()
                         for d_ in worker_slots:
                             Az_ = d_[Aa]
                             B3_ = C._resolve_sql_column(Az_, d_["label"], log_missing=J)
