@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 from pathlib import Path
 
@@ -7,6 +8,7 @@ from picorgftp_sql.web.app import app
 
 
 SERVICE_MODULES = tuple((Path(__file__).parents[1] / "picorgftp_sql" / "services").glob("*.py"))
+DESKTOP_FTP_PREVIEW_MODULE = Path(__file__).parents[1] / "picorgftp_sql" / "desktop_ftp_preview.py"
 ROUTE_SNAPSHOT_SHA256 = "934e219e33b84de2f3b4cfcd1fa836d332404a60ec652977f2c39de8e4f05adf"
 
 
@@ -23,6 +25,20 @@ def test_services_do_not_import_composition_roots() -> None:
         source = path.read_text(encoding="utf-8")
         assert "picorgftp_sql.web.app" not in source
         assert "picorgftp_sql.app" not in source
+
+
+def test_desktop_ftp_preview_does_not_import_ui_or_composition_roots() -> None:
+    tree = ast.parse(DESKTOP_FTP_PREVIEW_MODULE.read_text(encoding="utf-8"))
+    imports = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports.add(node.module)
+
+    assert not any(name == "tkinter" or name.startswith("tkinter.") for name in imports)
+    assert "picorgftp_sql.web.app" not in imports
+    assert "picorgftp_sql.app" not in imports
 
 
 def test_route_contract_snapshot_is_stable() -> None:

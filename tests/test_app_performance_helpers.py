@@ -80,6 +80,18 @@ class _FtpTempManagerStub:
         self.close_calls += 1
 
 
+class _FtpPreviewControllerStub:
+    def __init__(self, *_args, **_kwargs) -> None:
+        self.cancel_calls = 0
+        self.close_calls = 0
+
+    def cancel_current(self) -> None:
+        self.cancel_calls += 1
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
 class _ProductActionRouteHarness:
     _desktop_product_actions_available = App._desktop_product_actions_available
 
@@ -674,18 +686,22 @@ class AppPerformanceHelperTests(unittest.TestCase):
 
         self.assertEqual(loader.cancel_calls, 1)
 
-    def test_destroy_closes_ftp_temp_manager(self) -> None:
+    def test_destroy_closes_desktop_ftp_preview_controller(self) -> None:
         with _headless_app_environment(), patch.object(
             app_module.BU.Tk,
             "destroy",
             return_value=None,
             create=True,
+        ), patch.object(
+            app_module,
+            "DesktopFtpPreviewController",
+            side_effect=_FtpPreviewControllerStub,
         ):
             app = _HeadlessStartupApp()
-            temp_manager = app._ftp_temp_manager
+            controller = app._desktop_ftp_preview
             app.destroy()
 
-        self.assertEqual(temp_manager.close_calls, 1)
+        self.assertEqual(controller.close_calls, 1)
 
     def test_cancel_existing_lookup_stops_request_and_releases_preview_dir(self) -> None:
         harness = _LookupCancellationHarness()
