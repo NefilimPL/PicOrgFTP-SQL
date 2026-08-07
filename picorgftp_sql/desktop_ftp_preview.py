@@ -16,10 +16,11 @@ class DesktopFtpPreviewController:
         *,
         downloader: Callable[[int, str, threading.Event, Callable[[Any], None]], None],
         temp_manager: Any,
-        schedule: Callable[[Callable[[], None]], Any],
+        schedule: Callable[[], Any],
     ) -> None:
         self._downloader = downloader
         self._temp_manager = temp_manager
+        self._schedule = schedule
         self._lock = threading.Lock()
         self._ui_thread_id = threading.get_ident()
         self._deliveries: SimpleQueue = SimpleQueue()
@@ -42,6 +43,10 @@ class DesktopFtpPreviewController:
         delivery; :meth:`drain` must be called by the UI thread.
         """
 
+        if not isinstance(ean, str):
+            raise TypeError("ean must be a string")
+        if threading.get_ident() != self._ui_thread_id:
+            raise RuntimeError("desktop FTP preview requests require the UI thread")
         with self._lock:
             if self._closed:
                 raise RuntimeError("desktop FTP preview controller is closed")
@@ -76,6 +81,7 @@ class DesktopFtpPreviewController:
                 on_error,
                 on_discard,
             )
+        self._schedule()
         return request_id
 
     def drain(self) -> int:

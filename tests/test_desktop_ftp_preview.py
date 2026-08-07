@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import threading
 
+import pytest
+
 from picorgftp_sql.desktop_ftp_preview import DesktopFtpPreviewController
 
 
@@ -70,7 +72,7 @@ def test_preview_controller_publishes_only_latest_request() -> None:
     controller = DesktopFtpPreviewController(
         downloader=downloader,
         temp_manager=FakeTempManager(),
-        schedule=scheduled.append,
+        schedule=lambda: scheduled.append(None),
     )
 
     first = controller.request("5901", on_success=results.append, on_error=errors.append)
@@ -83,13 +85,36 @@ def test_preview_controller_publishes_only_latest_request() -> None:
     assert errors == []
 
 
+def test_preview_controller_requires_and_forwards_a_string_ean() -> None:
+    received_eans = []
+
+    def downloader(_request_id, ean, _cancel_event, _complete) -> None:
+        received_eans.append(ean)
+
+    controller = DesktopFtpPreviewController(
+        downloader=downloader,
+        temp_manager=FakeTempManager(),
+        schedule=lambda: None,
+    )
+
+    controller.request("5901", on_success=lambda _result: None, on_error=lambda _error: None)
+
+    assert received_eans == ["5901"]
+    with pytest.raises(TypeError, match="ean must be a string"):
+        controller.request(
+            {"ean": "5902"},
+            on_success=lambda _result: None,
+            on_error=lambda _error: None,
+        )
+
+
 def test_preview_controller_close_cancels_request_and_closes_temp_manager_once() -> None:
     downloader = ControlledDownloader()
     temp_manager = FakeTempManager()
     controller = DesktopFtpPreviewController(
         downloader=downloader,
         temp_manager=temp_manager,
-        schedule=lambda _callback: None,
+        schedule=lambda: None,
     )
 
     request_id = controller.request("5901", on_success=lambda _result: None, on_error=lambda _error: None)
@@ -107,7 +132,7 @@ def test_preview_controller_schedules_stale_request_cleanup() -> None:
     controller = DesktopFtpPreviewController(
         downloader=downloader,
         temp_manager=FakeTempManager(),
-        schedule=scheduled.append,
+        schedule=lambda: scheduled.append(None),
     )
 
     first = controller.request(
@@ -142,7 +167,7 @@ def test_worker_completion_never_invokes_ui_scheduler() -> None:
     controller = DesktopFtpPreviewController(
         downloader=downloader,
         temp_manager=FakeTempManager(),
-        schedule=lambda _callback: scheduled_from_threads.append(threading.get_ident()),
+        schedule=lambda: scheduled_from_threads.append(threading.get_ident()),
     )
     controller.request(
         "5901",
@@ -151,7 +176,7 @@ def test_worker_completion_never_invokes_ui_scheduler() -> None:
     )
     assert worker_finished.wait(timeout=1)
 
-    assert scheduled_from_threads == []
+    assert scheduled_from_threads == [threading.get_ident()]
     controller.drain()
     assert callbacks_run_on == [threading.get_ident()]
 
@@ -161,7 +186,7 @@ def test_drain_rejects_non_ui_thread() -> None:
     controller = DesktopFtpPreviewController(
         downloader=downloader,
         temp_manager=FakeTempManager(),
-        schedule=lambda _callback: None,
+        schedule=lambda: None,
     )
     request_id = controller.request(
         "5901",
@@ -197,7 +222,7 @@ def test_close_releases_created_temp_directory_once_and_prevents_late_creation()
     controller = DesktopFtpPreviewController(
         downloader=downloader,
         temp_manager=temp_manager,
-        schedule=lambda _callback: None,
+        schedule=lambda: None,
     )
     temp_manager.block_creation = True
 

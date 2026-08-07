@@ -307,7 +307,7 @@ class App(BU.Tk):
         B._desktop_ftp_preview = DesktopFtpPreviewController(
             downloader=B._start_desktop_ftp_preview_download,
             temp_manager=B._ftp_temp_manager,
-            schedule=lambda _callback: I,
+            schedule=B._ensure_desktop_ftp_preview_polling,
         )
         if B._local_file_index_enabled and B._file_index.load_cache():
             B._refresh_name_values_from_index()
@@ -355,6 +355,7 @@ class App(BU.Tk):
         B._load_existing_request_id = 0
         B._existing_lookup_cancel_event = I
         B._ftp_preview_temp_dir = I
+        B._ftp_preview_work_queue = queue.SimpleQueue()
         B._ftp_preview_ui_events = queue.SimpleQueue()
         B._ftp_preview_poll_job = I
         B._last_lookup_signature = I
@@ -2838,10 +2839,16 @@ class App(BU.Tk):
     def _start_desktop_ftp_preview_download(
         A,
         _controller_request_id,
-        request,
+        ean,
         cancel_event,
         complete,
     ):
+        try:
+            request = A._ftp_preview_work_queue.get_nowait()
+        except queue.Empty as exc:
+            raise RuntimeError("desktop FTP preview work is unavailable") from exc
+        if request["ean"] != ean:
+            raise RuntimeError("desktop FTP preview work does not match the EAN")
         threading.Thread(
             target=request["worker"],
             args=(_controller_request_id, cancel_event, complete),
@@ -6698,13 +6705,13 @@ class App(BU.Tk):
                 C._ftp_temp_manager.release(request_temp_dir)
             C._finish_existing_lookup(request_id=request_id)
 
+        C._ftp_preview_work_queue.put({"ean": current_ean, "worker": worker})
         C._desktop_ftp_preview.request(
-            {"ean": current_ean, "worker": worker},
+            current_ean,
             on_success=apply_preview_result,
             on_error=lambda _error: finalize_lookup_error(I, request_id),
             on_discard=discard_preview_result,
         )
-        C._ensure_desktop_ftp_preview_polling()
 
     def _on_model_commit(D):
         if not D._desktop_product_actions_available():
