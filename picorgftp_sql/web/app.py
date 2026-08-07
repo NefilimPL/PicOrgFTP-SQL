@@ -90,6 +90,7 @@ from ..workflow_utils import build_product_directory, parse_slot_filename, sanit
 from . import upload_staging
 from .active_clients import ActiveClientRegistry
 from .process_progress import ProcessProgressGate
+from .process_api import ProcessApiDependencies, build_process_router
 from .process_queue import (
     OwnerQueueLimit,
     ProcessQueueFull,
@@ -6790,34 +6791,20 @@ def create_app() -> FastAPI:
         )
         return {"ok": True}
 
-    @app.get("/api/process-jobs")
-    def process_jobs_api(request: Request, limit: int = 20) -> Dict[str, Any]:
-        username = _require_user(request)
-        return {"jobs": _process_jobs_for_user(username, limit=limit)}
-
-    @app.get("/api/process-jobs/active")
-    def process_jobs_active_api(request: Request) -> Dict[str, Any]:
-        _require_user(request)
-        return _active_process_jobs_snapshot()
-
-    @app.get("/api/process-jobs/{job_id}")
-    def process_job_api(request: Request, job_id: str) -> Dict[str, Any]:
-        username = _require_user(request)
+    def process_job_payload_for_user(job_id: str, username: str) -> Dict[str, Any] | None:
         job = _process_job_for_user(job_id, username)
-        if not job:
-            raise HTTPException(status_code=404, detail="Nie znaleziono zadania.")
-        return _process_job_payload(job)
+        return _process_job_payload(job) if job else None
 
-    @app.delete("/api/process-jobs/{job_id}")
-    def cancel_process_job_api(request: Request, job_id: str) -> Dict[str, Any]:
-        username = _require_user(request)
-        job = _cancel_process_job_for_user(job_id, username)
-        if not job:
-            raise HTTPException(
-                status_code=409,
-                detail="Zadanie nie oczekuje juz w kolejce ani nie jest uruchomione.",
-            )
-        return {"cancelled": True, "job": job}
+    process_router = build_process_router(
+        ProcessApiDependencies(
+            current_user=lambda request: _require_user(request),
+            jobs_for_user=lambda username, limit: _process_jobs_for_user(username, limit=limit),
+            active_jobs=_active_process_jobs_snapshot,
+            job_for_user=process_job_payload_for_user,
+            cancel_job=_cancel_process_job_for_user,
+        )
+    )
+    app.routes.extend(process_router.routes)
 
     @app.post("/api/process/background")
     async def process_uploads_background(request: Request) -> JSONResponse:
