@@ -305,9 +305,9 @@ class App(BU.Tk):
             A.path.join(tempfile.gettempdir(), "picorgftp_sql_ftp")
         )
         B._desktop_ftp_preview = DesktopFtpPreviewController(
-            downloader=lambda _request_id, _ean, _cancel_event, _complete: I,
+            downloader=B._start_desktop_ftp_preview_download,
             temp_manager=B._ftp_temp_manager,
-            schedule=lambda callback: B.after(0, callback),
+            schedule=lambda _callback: I,
         )
         if B._local_file_index_enabled and B._file_index.load_cache():
             B._refresh_name_values_from_index()
@@ -355,6 +355,8 @@ class App(BU.Tk):
         B._load_existing_request_id = 0
         B._existing_lookup_cancel_event = I
         B._ftp_preview_temp_dir = I
+        B._ftp_preview_ui_events = queue.SimpleQueue()
+        B._ftp_preview_poll_job = I
         B._last_lookup_signature = I
         B._dashboard_refresh_job = I
         B._slot_grid_columns = 0
@@ -638,6 +640,7 @@ class App(BU.Tk):
             "_thumb_poll_job",
             "_perf_monitor_job",
             "_load_existing_after_id",
+            "_ftp_preview_poll_job",
             "_dashboard_refresh_job",
             "_field_change_refresh_job",
             "_slots_refresh_job",
@@ -2831,6 +2834,41 @@ class App(BU.Tk):
     def _run_scheduled_existing_files_lookup(B):
         B._load_existing_after_id = I
         B._load_existing_files()
+
+    def _start_desktop_ftp_preview_download(
+        A,
+        _controller_request_id,
+        request,
+        cancel_event,
+        complete,
+    ):
+        threading.Thread(
+            target=request["worker"],
+            args=(_controller_request_id, cancel_event, complete),
+            daemon=J,
+        ).start()
+
+    def _ensure_desktop_ftp_preview_polling(A):
+        if A._ftp_preview_poll_job is I:
+            A._ftp_preview_poll_job = A.after(
+                0,
+                A._poll_desktop_ftp_preview_events,
+            )
+
+    def _poll_desktop_ftp_preview_events(A):
+        A._ftp_preview_poll_job = I
+        while True:
+            try:
+                callback = A._ftp_preview_ui_events.get_nowait()
+            except queue.Empty:
+                break
+            callback()
+        A._desktop_ftp_preview.drain()
+        if A._desktop_ftp_preview.has_pending_work():
+            A._ftp_preview_poll_job = A.after(
+                25,
+                A._poll_desktop_ftp_preview_events,
+            )
 
     def _cancel_existing_lookup(B):
         if B._load_existing_after_id is not I:
@@ -6424,9 +6462,7 @@ class App(BU.Tk):
                 )
             C._queue_dashboard_refresh()
 
-        schedule_ui = lambda callback: C.after(0, callback)
-
-        def worker(cancel_event, complete):
+        def worker(controller_request_id, cancel_event, complete):
             request_temp_dir = I
             worker_state = state_snapshot.clone()
             try:
@@ -6466,13 +6502,13 @@ class App(BU.Tk):
                     slot_paths[norm_label] = d_
                 local_slot_paths = dict(slot_paths)
                 try:
-                    schedule_ui(
+                    C._ftp_preview_ui_events.put(
                         lambda rid=request_id: apply_local_results(
                             worker_state.clone(),
                             local_slot_paths,
                             ean_guess,
                             rid,
-                        ),
+                        )
                     )
                 except E:
                     pass
@@ -6482,51 +6518,61 @@ class App(BU.Tk):
                 worker_state.sql_presence = I
                 worker_state.sql_values.clear()
                 K_ = current_ean or G(ean_guess or B).strip()
-                if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
+                if (
+                    not cancel_event.is_set()
+                    and K_
+                    and Q(K_) == 13
+                    and K_.isdigit()
+                    and K_.upper() != q
+                ):
                     remote_files = {}
                     try:
-                        request_temp_dir = C._ftp_temp_manager.create_request_dir(
-                            request_id
+                        request_temp_dir = C._desktop_ftp_preview.create_request_dir(
+                            controller_request_id,
+                            cancel_event,
                         )
-                        (
-                            remote_files,
-                            ftp_presence,
-                            ftp_preview_files,
-                            ftp_remote_only,
-                        ) = svc_download_remote_slots(
-                            D[H],
-                            K_,
-                            slot_paths,
-                            C._slot_index_by_prefix,
-                            temp_root=request_temp_dir,
-                            status_callback=lambda idx, status: schedule_ui(
-                                lambda: C._update_slot_activity(
-                                    idx,
-                                    active=J,
-                                    status=C._slot_status.get(status, status),
+                        if request_temp_dir is not I:
+                            (
+                                remote_files,
+                                ftp_presence,
+                                ftp_preview_files,
+                                ftp_remote_only,
+                            ) = svc_download_remote_slots(
+                                D[H],
+                                K_,
+                                slot_paths,
+                                C._slot_index_by_prefix,
+                                temp_root=request_temp_dir,
+                                status_callback=lambda idx, status: C._ftp_preview_ui_events.put(
+                                    lambda: C._update_slot_activity(
+                                        idx,
+                                        active=J,
+                                        status=C._slot_status.get(status, status),
+                                    )
+                                    if request_id == C._load_existing_request_id
+                                    else I
                                 )
-                                if request_id == C._load_existing_request_id
-                                else I
+                                if idx is not I
+                                else I,
+                                cancel_event=cancel_event,
                             )
-                            if idx is not I
-                            else I,
-                            cancel_event=cancel_event,
-                        )
-                        worker_state.ftp_presence.update(ftp_presence)
-                        worker_state.ftp_preview_files.update(ftp_preview_files)
-                        worker_state.ftp_remote_only.update(ftp_remote_only)
-                        for label, info in ftp_remote_only.items():
-                            slot_paths[label] = info["temp_path"]
+                            worker_state.ftp_presence.update(ftp_presence)
+                            worker_state.ftp_preview_files.update(ftp_preview_files)
+                            worker_state.ftp_remote_only.update(ftp_remote_only)
+                            for label, info in ftp_remote_only.items():
+                                slot_paths[label] = info["temp_path"]
                     except E as T:
                         log_error_loc("ftp_check_error", ean=K_, error=T)
-                    if not C.logged_counts:
+                    if not cancel_event.is_set() and not C.logged_counts:
                         log_info_loc(
                             "found_images_counts",
                             local=Q(worker_state.original_files),
                             ftp=Q(remote_files),
                         )
                         C.logged_counts = J
-                    if svc_should_check_presence(config.CONFIG):
+                    if not cancel_event.is_set() and svc_should_check_presence(
+                        config.CONFIG
+                    ):
                         columns = []
                         for slot in C.slots:
                             prefix = slot[Aa]
@@ -6632,13 +6678,6 @@ class App(BU.Tk):
                     C._ftp_temp_manager.release(request_temp_dir)
                 C._finish_existing_lookup(request_id=rid)
 
-        def download_preview(_controller_request_id, _ean, cancel_event, complete):
-            threading.Thread(
-                target=worker,
-                args=(cancel_event, complete),
-                daemon=J,
-            ).start()
-
         def apply_preview_result(result):
             if result["error"]:
                 finalize_lookup_error(result["temp_dir"], request_id)
@@ -6659,17 +6698,13 @@ class App(BU.Tk):
                 C._ftp_temp_manager.release(request_temp_dir)
             C._finish_existing_lookup(request_id=request_id)
 
-        C._desktop_ftp_preview = DesktopFtpPreviewController(
-            downloader=download_preview,
-            temp_manager=C._ftp_temp_manager,
-            schedule=schedule_ui,
-        )
         C._desktop_ftp_preview.request(
-            current_ean,
+            {"ean": current_ean, "worker": worker},
             on_success=apply_preview_result,
             on_error=lambda _error: finalize_lookup_error(I, request_id),
             on_discard=discard_preview_result,
         )
+        C._ensure_desktop_ftp_preview_polling()
 
     def _on_model_commit(D):
         if not D._desktop_product_actions_available():
