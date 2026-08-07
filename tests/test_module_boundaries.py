@@ -10,6 +10,7 @@ from picorgftp_sql.web.app import app
 SERVICE_MODULES = tuple((Path(__file__).parents[1] / "picorgftp_sql" / "services").glob("*.py"))
 DESKTOP_FTP_PREVIEW_MODULE = Path(__file__).parents[1] / "picorgftp_sql" / "desktop_ftp_preview.py"
 ROUTE_SNAPSHOT_SHA256 = "934e219e33b84de2f3b4cfcd1fa836d332404a60ec652977f2c39de8e4f05adf"
+WEB_STATIC_DIRECTORY = Path(__file__).parents[1] / "picorgftp_sql" / "web" / "static"
 
 
 def _route_snapshot() -> str:
@@ -43,3 +44,18 @@ def test_desktop_ftp_preview_does_not_import_ui_or_composition_roots() -> None:
 
 def test_route_contract_snapshot_is_stable() -> None:
     assert hashlib.sha256(_route_snapshot().encode("utf-8")).hexdigest() == ROUTE_SNAPSHOT_SHA256
+
+
+def test_frontend_modules_load_before_the_app_composition_root() -> None:
+    index_html = (WEB_STATIC_DIRECTORY / "index.html").read_text(encoding="utf-8")
+    scripts = [
+        "/static/latest-request.js",
+        "/static/autocomplete.js",
+        "/static/runtime-status.js",
+        "/static/process-jobs.js",
+        "/static/app.js",
+    ]
+
+    positions = [index_html.index(script) for script in scripts]
+
+    assert positions == sorted(positions)

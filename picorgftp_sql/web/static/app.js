@@ -688,7 +688,7 @@ function openModal(name) {
     formStatus.textContent = "Ten widok jest dostepny tylko dla administratora.";
     return;
   }
-  closeAutocompletePanels();
+  autocompleteControls.closePanels();
   document.querySelector(`#${name}View`)?.classList.add("active");
   document.querySelector(`#${name}Modal`)?.classList.add("active");
   setActiveModalNav(name);
@@ -800,7 +800,7 @@ async function refreshGithubStatus(options = {}) {
 }
 
 function openGithubStatusModal() {
-  closeAutocompletePanels();
+  autocompleteControls.closePanels();
   githubStatusModal?.classList.add("active");
   if (!state.githubStatus) {
     if (githubStatusOutput) githubStatusOutput.textContent = "Pobieranie danych GitHub...";
@@ -1960,187 +1960,6 @@ function autocompleteRequestSnapshot(fieldName) {
       payload.extra,
     ]),
   };
-}
-
-let activeAutocompletePanel = null;
-
-function closeAutocompletePanels(exceptPanel = null) {
-  activeAutocompletePanel = exceptPanel;
-  document.querySelectorAll(".autocomplete-panel").forEach((panel) => {
-    if (panel !== exceptPanel) panel.classList.remove("active");
-  });
-}
-
-function autocompleteOptions(panel) {
-  return [...panel.querySelectorAll('button[data-autocomplete-option="1"]')];
-}
-
-function setActiveAutocompleteOption(panel, index) {
-  const options = autocompleteOptions(panel);
-  if (!options.length) {
-    panel.dataset.activeIndex = "-1";
-    return;
-  }
-  const nextIndex = ((index % options.length) + options.length) % options.length;
-  options.forEach((option, optionIndex) => {
-    option.classList.toggle("active", optionIndex === nextIndex);
-    option.setAttribute("aria-selected", optionIndex === nextIndex ? "true" : "false");
-  });
-  panel.dataset.activeIndex = String(nextIndex);
-  options[nextIndex].scrollIntoView({ block: "nearest" });
-}
-
-function appendAutocompleteText(button, value, query) {
-  const text = String(value || "");
-  const needle = String(query || "").trim();
-  if (!needle) {
-    button.textContent = text;
-    return;
-  }
-  const index = text.toLowerCase().indexOf(needle.toLowerCase());
-  if (index < 0) {
-    button.textContent = text;
-    return;
-  }
-  button.append(
-    document.createTextNode(text.slice(0, index)),
-    Object.assign(document.createElement("mark"), { textContent: text.slice(index, index + needle.length) }),
-    document.createTextNode(text.slice(index + needle.length))
-  );
-}
-
-function commitAutocompleteValue(input, panel, value) {
-  panel.dataset.selecting = "1";
-  input.value = value;
-  input.dispatchEvent(new Event("input", { bubbles: true }));
-  input.dispatchEvent(new Event("change", { bubbles: true }));
-  closeAutocompletePanels();
-  window.setTimeout(() => {
-    panel.dataset.selecting = "";
-  }, 0);
-}
-
-function renderAutocompletePanel(input, panel, values) {
-  if (activeAutocompletePanel && activeAutocompletePanel !== panel && document.activeElement !== input) {
-    return;
-  }
-  if (panel.dataset.selecting === "1") {
-    return;
-  }
-  closeAutocompletePanels(panel);
-  const previousScroll = panel.scrollTop;
-  const typed = input.value.trim();
-  const typedUpper = typed.toUpperCase();
-  const filtered = values
-    .filter((value) => !typedUpper || value.toUpperCase().includes(typedUpper))
-    .slice(0, MAX_AUTOCOMPLETE_OPTIONS);
-  panel.textContent = "";
-  panel.dataset.activeIndex = "-1";
-  if (!filtered.length) {
-    panel.classList.remove("active");
-    return;
-  }
-  for (const [index, value] of filtered.entries()) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.dataset.autocompleteOption = "1";
-    button.setAttribute("role", "option");
-    button.setAttribute("aria-selected", "false");
-    appendAutocompleteText(button, value, typed);
-    button.addEventListener("mouseenter", () => setActiveAutocompleteOption(panel, index));
-    button.addEventListener("mousedown", (event) => {
-      event.preventDefault();
-      commitAutocompleteValue(input, panel, value);
-    });
-    panel.appendChild(button);
-  }
-  panel.scrollTop = previousScroll;
-  panel.classList.add("active");
-  activeAutocompletePanel = panel;
-}
-
-function setupAutocomplete() {
-  productForm.setAttribute("autocomplete", "off");
-  for (const fieldName of Object.keys(fieldListKey)) {
-    const input = productForm.elements[fieldName];
-    if (!input) continue;
-    input.removeAttribute("list");
-    input.setAttribute("autocomplete", "off");
-    input.setAttribute("spellcheck", "false");
-    input.setAttribute("aria-autocomplete", "list");
-    input.setAttribute("data-lpignore", "true");
-    input.setAttribute("data-1p-ignore", "true");
-    input.setAttribute("data-bwignore", "true");
-    input.setAttribute("data-form-type", "other");
-    input.setAttribute("readonly", "readonly");
-    const host = input.closest("label");
-    if (!host) continue;
-    host.classList.add("autocomplete-host");
-    const panel = document.createElement("div");
-    panel.className = "autocomplete-panel";
-    panel.setAttribute("role", "listbox");
-    host.appendChild(panel);
-    const autocompleteSession = new PicOrg.AutocompleteSession({
-      captureRequest: () => autocompleteRequestSnapshot(fieldName),
-      getQuery: () => input.value,
-      isActive: () => activeAutocompletePanel === panel,
-      load: (request, signal) => remoteSuggestions(fieldName, request.payload, signal),
-      render: (local, values) => {
-        renderAutocompletePanel(input, panel, uniqueValues([...local, ...values]));
-      },
-      schedule: (callback, delay) => window.setTimeout(callback, delay),
-      cancelSchedule: (timer) => window.clearTimeout(timer),
-      delay: 180,
-      limit: MAX_AUTOCOMPLETE_OPTIONS,
-    });
-    const unlockBrowserAutofill = () => {
-      input.removeAttribute("readonly");
-      window.setTimeout(() => input.setAttribute("autocomplete", "off"), 0);
-    };
-    const refresh = () => {
-      activeAutocompletePanel = panel;
-      closeAutocompletePanels(panel);
-      const local = localSuggestions(fieldName);
-      autocompleteSession.refresh(local);
-    };
-    input.addEventListener("mousedown", unlockBrowserAutofill);
-    input.addEventListener("focus", unlockBrowserAutofill);
-    input.addEventListener("focus", refresh);
-    input.addEventListener("input", refresh);
-    input.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") {
-        closeAutocompletePanels();
-        return;
-      }
-      if (!["ArrowDown", "ArrowUp", "Enter"].includes(event.key)) {
-        return;
-      }
-      if (!panel.classList.contains("active")) {
-        if (event.key === "Enter") {
-          return;
-        }
-        refresh();
-      }
-      const options = autocompleteOptions(panel);
-      if (!options.length) {
-        return;
-      }
-      const currentIndex = Number(panel.dataset.activeIndex || "-1");
-      if (event.key === "ArrowDown") {
-        event.preventDefault();
-        setActiveAutocompleteOption(panel, currentIndex + 1);
-      } else if (event.key === "ArrowUp") {
-        event.preventDefault();
-        setActiveAutocompleteOption(panel, currentIndex - 1);
-      } else if (event.key === "Enter" && currentIndex >= 0 && options[currentIndex]) {
-        event.preventDefault();
-        commitAutocompleteValue(input, panel, options[currentIndex].textContent || "");
-      }
-    });
-  }
-  document.addEventListener("mousedown", (event) => {
-    if (!event.target.closest(".autocomplete-host")) closeAutocompletePanels();
-  });
 }
 
 function renderEntrySelect(entries = state.entries) {
@@ -13180,7 +12999,18 @@ logoutButton.addEventListener("click", async () => {
   window.location.href = "/";
 });
 
-setupAutocomplete();
+const autocompleteControls = window.PicOrg.setupAutocomplete({
+  document,
+  productForm,
+  fieldNames: Object.keys(fieldListKey),
+  localSuggestions,
+  remoteSuggestions,
+  captureRequest: autocompleteRequestSnapshot,
+  uniqueValues,
+  maxOptions: MAX_AUTOCOMPLETE_OPTIONS,
+  setTimer: (callback, delay) => window.setTimeout(callback, delay),
+  clearTimer: (timer) => window.clearTimeout(timer),
+});
 setupFieldChangeTracking();
 setupPageExitGuards();
 applyTheme();
