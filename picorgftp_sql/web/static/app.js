@@ -134,7 +134,7 @@ const state = {
   webImageCacheQueue: [],
   webImageCacheActive: 0,
   processJobs: new Map(),
-  processJobPollTimer: 0,
+  processJobsController: null,
   processQueue: { jobs: [], active_count: 0, queued_count: 0, current: null },
   acknowledgedProcessAlerts: new Set(),
   activeUsers: [],
@@ -4127,9 +4127,45 @@ function renderProcessQueue(payload = state.processQueue) {
   renderProcessMeasurements(payload);
 }
 
-async function refreshProcessQueue() {
+async function fetchProcessJobs({ activeJob } = {}) {
   const payload = await requestJson("/api/process-jobs/active");
+  const previousJobId = activeJob?.job_id || "";
+  const activeJobIds = new Set((payload.jobs || []).map((job) => job.job_id));
+  if (previousJobId && !activeJobIds.has(previousJobId)) {
+    try {
+      payload.completedJob = await requestJson(
+        `/api/process-jobs/${encodeURIComponent(previousJobId)}`
+      );
+    } catch (error) {
+      payload.completedJob = {
+        ...activeJob,
+        status: "failed",
+        error: error.message || "Nie udalo sie sprawdzic statusu zadania.",
+      };
+    }
+  }
+  return payload;
+}
+
+function renderProcessJobs(payload = {}) {
+  for (const job of payload.jobs || []) {
+    updateProcessJobFromPayload(job);
+  }
+  if (payload.completedJob) {
+    updateProcessJobFromPayload(payload.completedJob);
+  }
   renderProcessQueue(payload);
+}
+
+const processJobsController = new PicOrg.ProcessJobsController({
+  fetchJobs: fetchProcessJobs,
+  render: renderProcessJobs,
+  timerApi: window,
+});
+state.processJobsController = processJobsController;
+
+function refreshProcessQueue(runtimeVersion) {
+  return processJobsController.refresh(runtimeVersion);
 }
 
 function updateProcessJobFromPayload(job = {}) {
@@ -4156,53 +4192,12 @@ function updateProcessJobFromPayload(job = {}) {
   }
 }
 
-function scheduleProcessJobPoll(delay = 1500) {
-  if (state.processJobPollTimer) {
-    if (delay > 0) {
-      return;
-    }
-    window.clearTimeout(state.processJobPollTimer);
-    state.processJobPollTimer = 0;
-  }
-  state.processJobPollTimer = window.setTimeout(() => {
-    state.processJobPollTimer = 0;
-    pollProcessJobs().catch(() => {});
-  }, delay);
-}
-
-async function pollProcessJobs() {
-  if (document.hidden) {
-    scheduleProcessJobPoll(POLL_HIDDEN_DELAY_MS);
-    return;
-  }
-  const active = [...state.processJobs.values()].filter(processJobIsActive);
-  if (!active.length) {
-    return;
-  }
-  for (const job of active) {
-    try {
-      const payload = await requestJson(`/api/process-jobs/${encodeURIComponent(job.job_id)}`);
-      updateProcessJobFromPayload(payload);
-    } catch (error) {
-      const failed = {
-        ...job,
-        status: "failed",
-        error: error.message || "Nie udalo sie sprawdzic statusu zadania.",
-      };
-      updateProcessJobFromPayload(failed);
-    }
-  }
-  if ([...state.processJobs.values()].some(processJobIsActive)) {
-    scheduleProcessJobPoll();
-  }
-}
-
 function trackProcessJob(job = {}) {
   if (!job.job_id) {
     return;
   }
   state.processJobs.set(job.job_id, job);
-  scheduleProcessJobPoll();
+  refreshProcessQueue().catch(() => {});
 }
 
 async function loadRecentProcessJobs() {
@@ -6525,9 +6520,6 @@ document.addEventListener("visibilitychange", () => {
     return;
   }
   state.pollers.forEach((poller) => poller.kick());
-  if ([...state.processJobs.values()].some(processJobIsActive)) {
-    scheduleProcessJobPoll(0);
-  }
 });
 
 function openLogsClearModal() {
@@ -7229,10 +7221,10 @@ async function refreshFileIndexStatus() {
   updateRuntimeMetrics();
 }
 
-function refreshRuntimeDetailForVersion(name) {
+function refreshRuntimeDetailForVersion(name, version) {
   const refreshers = {
     file_index: refreshFileIndexStatus,
-    process_queue: refreshProcessQueue,
+    process_queue: () => refreshProcessQueue(version),
     active_clients: refreshActiveUsersPresence,
   };
   const refresh = refreshers[name];
