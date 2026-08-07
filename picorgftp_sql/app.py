@@ -5,6 +5,7 @@ import copy
 from collections import OrderedDict, deque
 import queue
 import re
+import tempfile
 import traceback
 import tokenize
 
@@ -28,6 +29,12 @@ from .excel_utils import (
     slot_filename_label,
 )
 from .logging_utils import log_error, log_error_loc, log_info, log_info_loc, set_app
+from .desktop_data_loader import (
+    DesktopDataLoader,
+    DesktopDataSnapshot,
+    load_desktop_data,
+)
+from .desktop_ftp_preview import DesktopFtpPreviewController
 from .system_utils import get_file_lock_user, is_admin
 from .database import connect_db
 from .file_index import LocalFileIndex
@@ -64,6 +71,7 @@ from .services.ftp_service import (
     download_remote_slots as svc_download_remote_slots,
     list_remote_filenames as svc_list_remote_filenames,
 )
+from .services.ftp_temp_manager import FtpTempManager
 from .services.sql_service import (
     build_column_detection_query as svc_build_column_detection_query,
     extract_presence_context as svc_extract_presence_context,
@@ -72,6 +80,7 @@ from .services.sql_service import (
     should_check_presence as svc_should_check_presence,
 )
 from .image_utils import fit_image_to_content
+from .image_pipeline import ImagePipelineOptions, process_image
 from .version import get_display_version
 from .workflow_utils import (
     build_product_directory,
@@ -261,9 +270,11 @@ class App(BU.Tk):
             "uploading": LANG.get("slot_status_uploading", "Wysylanie"),
             "processing": LANG.get("slot_status_processing", "Przetwarzanie"),
         }
-        D_ = prepare_excel_lists()
-        if not isinstance(D_, dict):
-            D_ = {}
+        B.data_loading = J
+        B.desktop_data_ready = h
+        B.desktop_data_error = I
+        B._desktop_data_snapshot = I
+        D_ = {}
         B.entries = {}
         B.entry_records = []
         B.entries_by_id = {}
@@ -289,6 +300,14 @@ class App(BU.Tk):
             A.path.join(settings.AC, "file_index.json"),
             status_callback=B._on_file_index_status_change,
             cache_store=file_index_cache_store,
+        )
+        B._ftp_temp_manager = FtpTempManager(
+            A.path.join(tempfile.gettempdir(), "picorgftp_sql_ftp")
+        )
+        B._desktop_ftp_preview = DesktopFtpPreviewController(
+            downloader=B._start_desktop_ftp_preview_download,
+            temp_manager=B._ftp_temp_manager,
+            schedule=B._ensure_desktop_ftp_preview_polling,
         )
         if B._local_file_index_enabled and B._file_index.load_cache():
             B._refresh_name_values_from_index()
@@ -334,6 +353,11 @@ class App(BU.Tk):
         B._ui_log_flush_job = I
         B._load_existing_after_id = I
         B._load_existing_request_id = 0
+        B._existing_lookup_cancel_event = I
+        B._ftp_preview_temp_dir = I
+        B._ftp_preview_work_queue = queue.SimpleQueue()
+        B._ftp_preview_ui_events = queue.SimpleQueue()
+        B._ftp_preview_poll_job = I
         B._last_lookup_signature = I
         B._dashboard_refresh_job = I
         B._slot_grid_columns = 0
@@ -434,6 +458,7 @@ class App(BU.Tk):
                 tracked_var.trace_add("write", B._queue_form_change_refresh)
         B._load_slot_config()
         B._build_form()
+        B._set_desktop_data_actions_enabled(h)
         B._build_slots()
         B._slot_index_by_prefix = {
             slot["prefix"]: idx for idx, slot in A0(B.slot_definitions)
@@ -447,15 +472,176 @@ class App(BU.Tk):
         B.after(150, B._start_file_index_refresh)
         set_app(B)
         B._install_exception_handlers()
+        B._desktop_data_loader = DesktopDataLoader(
+            load=load_desktop_data,
+            schedule=B.after,
+            cancel_schedule=B.after_cancel,
+        )
+        B._start_desktop_data_loading()
+
+    def _set_desktop_data_actions_enabled(A, enabled):
+        """Toggle controls that require the complete product snapshot."""
+
+        state = X if enabled else V
+        for attr in (
+            "btn_submit",
+            "btn_search_entry",
+            "btn_new_search",
+            "btn_edit_lists",
+        ):
+            widget = Aj(A, attr, I)
+            if widget is not I:
+                widget.configure(state=state)
+        if enabled and Aj(A, "btn_search_entry", I) is not I:
+            A.btn_search_entry.configure(
+                text=LANG.get("search_entry_button", "Wyszukaj"),
+                command=A._search_current_entry,
+            )
+
+    def _desktop_product_actions_available(A):
+        """Return whether routes backed by desktop product data may run."""
+
+        return not Aj(A, "data_loading", h) and Aj(A, "desktop_data_ready", J)
+
+    def _start_desktop_data_loading(A):
+        """Start loading product data after the main UI has been built."""
+
+        loader = Aj(A, "_desktop_data_loader", I)
+        if loader is I:
+            return h
+        A.data_loading = J
+        A.desktop_data_ready = h
+        A.desktop_data_error = I
+        A._set_desktop_data_actions_enabled(h)
+        return loader.start(
+            on_success=A._apply_desktop_data_snapshot,
+            on_error=A._handle_desktop_data_error,
+        )
+
+    def _apply_desktop_data_snapshot(A, snapshot):
+        """Publish one complete data snapshot from the Tk event thread."""
+
+        if not isinstance(snapshot, DesktopDataSnapshot):
+            A._handle_desktop_data_error(TypeError("Invalid desktop data snapshot"))
+            return
+
+        next_lists = dict(snapshot.lists) if isinstance(snapshot.lists, dict) else {}
+        indexed_names = A.lists.get(n, []) if isinstance(A.lists, dict) else []
+        for key in (n, t, s, Y, d):
+            if not isinstance(next_lists.get(key), list):
+                next_lists[key] = []
+        next_lists[n], indexed_name_count = A._merge_existing_lookup_values(
+            indexed_names,
+            next_lists[n],
+        )
+
+        next_entries = next_lists.get(W, {})
+        if not isinstance(next_entries, dict):
+            next_entries = {}
+        next_records = [record for record in snapshot.entries if isinstance(record, dict)]
+        next_lists[ENTRY_RECORDS_KEY] = next_records
+        next_entries_by_id = {
+            G(record.get(PRODUCT_ID_HEADER) or B).strip().upper(): record
+            for record in next_records
+            if G(record.get(PRODUCT_ID_HEADER) or B).strip()
+        }
+        next_value_sets = {}
+        for key in (n, t, s, Y, d):
+            next_value_sets[key] = {
+                normalized
+                for value in next_lists[key]
+                if (normalized := A._normalize_list_value(key, value))
+            }
+
+        A._desktop_data_snapshot = snapshot
+        (
+            A.lists,
+            A.entries,
+            A.entry_records,
+            A.entries_by_id,
+            A._list_value_sets,
+        ) = (
+            next_lists,
+            next_entries,
+            next_records,
+            next_entries_by_id,
+            next_value_sets,
+        )
+        A._invalidate_list_filter_cache()
+
+        combo_lists = (
+            ("combo_name", n),
+            ("combo_type", t),
+            ("combo_model", s),
+            ("combo_color1", Y),
+            ("combo_color2", Y),
+            ("combo_color3", Y),
+            ("combo_extra", d),
+        )
+        for attr, key in combo_lists:
+            combo = Aj(A, attr, I)
+            if combo is I:
+                continue
+            if key == n:
+                A._refresh_combobox_list(
+                    combo,
+                    next_lists[key],
+                    existing_count=indexed_name_count,
+                )
+            else:
+                A._set_combobox_values(combo, next_lists[key])
+
+        A.data_loading = h
+        A.desktop_data_ready = J
+        A.desktop_data_error = I
+        A._set_desktop_data_actions_enabled(J)
+        A._queue_dashboard_refresh()
+
+    def _handle_desktop_data_error(A, error):
+        """Keep the window usable and expose a retry after loading fails."""
+
+        A.data_loading = h
+        A.desktop_data_ready = h
+        A.desktop_data_error = error
+        A._set_desktop_data_actions_enabled(h)
+        retry_button = Aj(A, "btn_search_entry", I)
+        if retry_button is not I:
+            retry_button.configure(
+                state=X,
+                text=LANG.get("retry_data_load_button", "Ponów ładowanie danych"),
+                command=A._retry_desktop_data_loading,
+            )
+        A._handle_exception(
+            type(error),
+            error,
+            Aj(error, "__traceback__", I),
+            context="Desktop data loading",
+        )
+
+    def _retry_desktop_data_loading(A):
+        """Retry a failed desktop data load without rebuilding the UI."""
+
+        return A._start_desktop_data_loading()
 
     def report_callback_exception(A, exc, val, tb):
         A._handle_exception(exc, val, tb, context="Tk callback")
 
     def destroy(A):
+        desktop_loader = getattr(A, "_desktop_data_loader", I)
+        if desktop_loader is not I:
+            desktop_loader.cancel()
+        ftp_preview = getattr(A, "_desktop_ftp_preview", I)
+        if ftp_preview is not I:
+            ftp_preview.close()
+        else:
+            ftp_temp_manager = getattr(A, "_ftp_temp_manager", I)
+            if ftp_temp_manager is not I:
+                ftp_temp_manager.close()
         for job_attr in (
             "_thumb_poll_job",
             "_perf_monitor_job",
             "_load_existing_after_id",
+            "_ftp_preview_poll_job",
             "_dashboard_refresh_job",
             "_field_change_refresh_job",
             "_slots_refresh_job",
@@ -968,7 +1154,7 @@ class App(BU.Tk):
         except E:
             pass
 
-    def _start_file_index_refresh(A):
+    def _start_file_index_refresh(A, *, force=False):
         """Kick off the background filesystem index if it is not already running."""
 
         if not getattr(A, "_local_file_index_enabled", J):
@@ -982,7 +1168,7 @@ class App(BU.Tk):
         file_index = Aj(A, "_file_index", I)
         if file_index is I:
             return h
-        started = file_index.refresh_async()
+        started = file_index.refresh_if_stale(force=force)
         if not started:
             A._on_file_index_status_change(file_index.get_status())
         return started
@@ -1842,7 +2028,12 @@ class App(BU.Tk):
     def _on_ean_focus_out(A, _event=I):
         """Run a quick duplicate-EAN check after leaving the field."""
 
+        if not A._desktop_product_actions_available():
+            return
+
         def _deferred_check():
+            if not A._desktop_product_actions_available():
+                return
             if A._should_skip_ean_focus_out_warning():
                 return
             A._warn_about_ean_conflict(force_message=h, quick_check=J)
@@ -2055,6 +2246,8 @@ class App(BU.Tk):
     def _search_current_entry(A):
         """Load a saved record by Product ID, EAN or the current form values."""
 
+        if not A._desktop_product_actions_available():
+            return
         ean = G(A.var_ean.get() or B).strip().upper()
         if ean:
             record = A.entries.get(ean)
@@ -2127,6 +2320,8 @@ class App(BU.Tk):
     def _start_new_search(A):
         """Clear the form and switch back to an empty search state."""
 
+        if not A._desktop_product_actions_available():
+            return
         if A.is_processing:
             O.showwarning(OPERATION_TITLE, PROCESSING_MSG)
             return
@@ -2641,6 +2836,47 @@ class App(BU.Tk):
         B._load_existing_after_id = I
         B._load_existing_files()
 
+    def _start_desktop_ftp_preview_download(
+        A,
+        _controller_request_id,
+        ean,
+        cancel_event,
+        complete,
+    ):
+        try:
+            request = A._ftp_preview_work_queue.get_nowait()
+        except queue.Empty as exc:
+            raise RuntimeError("desktop FTP preview work is unavailable") from exc
+        if request["ean"] != ean:
+            raise RuntimeError("desktop FTP preview work does not match the EAN")
+        threading.Thread(
+            target=request["worker"],
+            args=(_controller_request_id, cancel_event, complete),
+            daemon=J,
+        ).start()
+
+    def _ensure_desktop_ftp_preview_polling(A):
+        if A._ftp_preview_poll_job is I:
+            A._ftp_preview_poll_job = A.after(
+                0,
+                A._poll_desktop_ftp_preview_events,
+            )
+
+    def _poll_desktop_ftp_preview_events(A):
+        A._ftp_preview_poll_job = I
+        while True:
+            try:
+                callback = A._ftp_preview_ui_events.get_nowait()
+            except queue.Empty:
+                break
+            callback()
+        A._desktop_ftp_preview.drain()
+        if A._desktop_ftp_preview.has_pending_work():
+            A._ftp_preview_poll_job = A.after(
+                25,
+                A._poll_desktop_ftp_preview_events,
+            )
+
     def _cancel_existing_lookup(B):
         if B._load_existing_after_id is not I:
             try:
@@ -2648,6 +2884,17 @@ class App(BU.Tk):
             except E:
                 pass
             B._load_existing_after_id = I
+        ftp_preview = getattr(B, "_desktop_ftp_preview", I)
+        if ftp_preview is not I:
+            ftp_preview.cancel_current()
+        else:
+            cancel_event = getattr(B, "_existing_lookup_cancel_event", I)
+            if cancel_event is not I:
+                cancel_event.set()
+        preview_temp_dir = getattr(B, "_ftp_preview_temp_dir", I)
+        if preview_temp_dir is not I:
+            B._ftp_temp_manager.release(preview_temp_dir)
+            B._ftp_preview_temp_dir = I
         B._load_existing_request_id += 1
         clear_busy = h
         with B._existing_lookup_lock:
@@ -5948,6 +6195,8 @@ class App(BU.Tk):
     def _on_name_commit(C):
         """Handle the user confirming or typing a furniture name."""
 
+        if not C._desktop_product_actions_available():
+            return
         D_ = C.var_name.get().strip()
         if not D_:
             C._cancel_existing_lookup()
@@ -6026,6 +6275,8 @@ class App(BU.Tk):
     def _on_type_commit(C):
         """React to type changes by unlocking model/colour comboboxes."""
 
+        if not C._desktop_product_actions_available():
+            return
         G_ = C.var_name.get().strip()
         D_ = C.var_type.get().strip()
         if not G_ or not D_:
@@ -6099,8 +6350,20 @@ class App(BU.Tk):
         lookup_signature = C._current_lookup_signature()
         if not force and lookup_signature == C._last_lookup_signature:
             return
+        previous_ftp_preview = getattr(C, "_desktop_ftp_preview", I)
+        if previous_ftp_preview is not I:
+            previous_ftp_preview.cancel_current()
+        else:
+            previous_cancel_event = getattr(C, "_existing_lookup_cancel_event", I)
+            if previous_cancel_event is not I:
+                previous_cancel_event.set()
+        previous_preview_temp_dir = getattr(C, "_ftp_preview_temp_dir", I)
+        if previous_preview_temp_dir is not I:
+            C._ftp_temp_manager.release(previous_preview_temp_dir)
+            C._ftp_preview_temp_dir = I
         C._load_existing_request_id += 1
         request_id = C._load_existing_request_id
+        C._existing_lookup_cancel_event = I
         started_at = Ag.perf_counter()
         state_snapshot = C._snapshot_product_state()
         C.logged_counts = h
@@ -6206,7 +6469,8 @@ class App(BU.Tk):
                 )
             C._queue_dashboard_refresh()
 
-        def worker():
+        def worker(controller_request_id, cancel_event, complete):
+            request_temp_dir = I
             worker_state = state_snapshot.clone()
             try:
                 V_ = C._resolve_product_file_rows(
@@ -6245,14 +6509,13 @@ class App(BU.Tk):
                     slot_paths[norm_label] = d_
                 local_slot_paths = dict(slot_paths)
                 try:
-                    C.after(
-                        0,
+                    C._ftp_preview_ui_events.put(
                         lambda rid=request_id: apply_local_results(
                             worker_state.clone(),
                             local_slot_paths,
                             ean_guess,
                             rid,
-                        ),
+                        )
                     )
                 except E:
                     pass
@@ -6262,46 +6525,61 @@ class App(BU.Tk):
                 worker_state.sql_presence = I
                 worker_state.sql_values.clear()
                 K_ = current_ean or G(ean_guess or B).strip()
-                if K_ and Q(K_) == 13 and K_.isdigit() and K_.upper() != q:
+                if (
+                    not cancel_event.is_set()
+                    and K_
+                    and Q(K_) == 13
+                    and K_.isdigit()
+                    and K_.upper() != q
+                ):
                     remote_files = {}
                     try:
-                        (
-                            remote_files,
-                            ftp_presence,
-                            ftp_preview_files,
-                            ftp_remote_only,
-                        ) = svc_download_remote_slots(
-                            D[H],
-                            K_,
-                            slot_paths,
-                            C._slot_index_by_prefix,
-                            temp_root=A.path.join(
-                                tempfile.gettempdir(),
-                                f"picorgftp_sql_{request_id}",
-                            ),
-                            status_callback=lambda idx, status: C._update_slot_activity(
-                                idx,
-                                active=J,
-                                status=C._slot_status.get(status, status),
-                            )
-                            if idx is not I and request_id == C._load_existing_request_id
-                            else I,
+                        request_temp_dir = C._desktop_ftp_preview.create_request_dir(
+                            controller_request_id,
+                            cancel_event,
                         )
-                        worker_state.ftp_presence.update(ftp_presence)
-                        worker_state.ftp_preview_files.update(ftp_preview_files)
-                        worker_state.ftp_remote_only.update(ftp_remote_only)
-                        for label, info in ftp_remote_only.items():
-                            slot_paths[label] = info["temp_path"]
+                        if request_temp_dir is not I:
+                            (
+                                remote_files,
+                                ftp_presence,
+                                ftp_preview_files,
+                                ftp_remote_only,
+                            ) = svc_download_remote_slots(
+                                D[H],
+                                K_,
+                                slot_paths,
+                                C._slot_index_by_prefix,
+                                temp_root=request_temp_dir,
+                                status_callback=lambda idx, status: C._ftp_preview_ui_events.put(
+                                    lambda: C._update_slot_activity(
+                                        idx,
+                                        active=J,
+                                        status=C._slot_status.get(status, status),
+                                    )
+                                    if request_id == C._load_existing_request_id
+                                    else I
+                                )
+                                if idx is not I
+                                else I,
+                                cancel_event=cancel_event,
+                            )
+                            worker_state.ftp_presence.update(ftp_presence)
+                            worker_state.ftp_preview_files.update(ftp_preview_files)
+                            worker_state.ftp_remote_only.update(ftp_remote_only)
+                            for label, info in ftp_remote_only.items():
+                                slot_paths[label] = info["temp_path"]
                     except E as T:
                         log_error_loc("ftp_check_error", ean=K_, error=T)
-                    if not C.logged_counts:
+                    if not cancel_event.is_set() and not C.logged_counts:
                         log_info_loc(
                             "found_images_counts",
                             local=Q(worker_state.original_files),
                             ftp=Q(remote_files),
                         )
                         C.logged_counts = J
-                    if svc_should_check_presence(config.CONFIG):
+                    if not cancel_event.is_set() and svc_should_check_presence(
+                        config.CONFIG
+                    ):
                         columns = []
                         for slot in C.slots:
                             prefix = slot[Aa]
@@ -6325,31 +6603,33 @@ class App(BU.Tk):
                                 worker_state.sql_presence = I
                                 worker_state.sql_values.clear()
                                 log_error_loc("sql_check_error", ean=K_, error=T)
-                try:
-                    C.after(
-                        0,
-                        lambda rid=request_id: finalize(
-                            worker_state,
-                            local_slot_paths,
-                            slot_paths,
-                            ean_guess,
-                            rid,
-                        ),
-                    )
-                except E:
-                    C._finish_existing_lookup(request_id=request_id)
+                complete(
+                    {
+                        "error": I,
+                        "worker_state": worker_state,
+                        "local_slot_paths": local_slot_paths,
+                        "slot_paths": slot_paths,
+                        "ean_guess": ean_guess,
+                        "temp_dir": request_temp_dir,
+                        "cancel_event": cancel_event,
+                    }
+                )
             except E:
                 log_error(traceback.format_exc())
-                try:
-                    C.after(0, lambda rid=request_id: finalize_lookup_error(rid))
-                except E:
-                    C._finish_existing_lookup(request_id=request_id)
+                complete(
+                    {
+                        "error": J,
+                        "temp_dir": request_temp_dir,
+                    }
+                )
 
         def finalize(
             worker_state,
             local_slot_paths,
             slot_paths,
             ean_guess,
+            request_temp_dir,
+            cancel_event,
             rid,
         ):
             try:
@@ -6387,20 +6667,55 @@ class App(BU.Tk):
                 )
                 C._queue_dashboard_refresh()
             finally:
+                if request_temp_dir is not I:
+                    if rid == C._load_existing_request_id and not cancel_event.is_set():
+                        C._ftp_preview_temp_dir = request_temp_dir
+                    else:
+                        C._ftp_temp_manager.release(request_temp_dir)
                 C._finish_existing_lookup(request_id=rid)
 
-        def finalize_lookup_error(rid):
+        def finalize_lookup_error(request_temp_dir, rid):
             try:
                 if rid != C._load_existing_request_id:
                     return
                 C._update_all_slot_activity(active=h)
                 C._queue_dashboard_refresh()
             finally:
+                if request_temp_dir is not I:
+                    C._ftp_temp_manager.release(request_temp_dir)
                 C._finish_existing_lookup(request_id=rid)
 
-        threading.Thread(target=worker, daemon=J).start()
+        def apply_preview_result(result):
+            if result["error"]:
+                finalize_lookup_error(result["temp_dir"], request_id)
+                return
+            finalize(
+                result["worker_state"],
+                result["local_slot_paths"],
+                result["slot_paths"],
+                result["ean_guess"],
+                result["temp_dir"],
+                result["cancel_event"],
+                request_id,
+            )
+
+        def discard_preview_result(result):
+            request_temp_dir = result.get("temp_dir", I)
+            if request_temp_dir is not I:
+                C._ftp_temp_manager.release(request_temp_dir)
+            C._finish_existing_lookup(request_id=request_id)
+
+        C._ftp_preview_work_queue.put({"ean": current_ean, "worker": worker})
+        C._desktop_ftp_preview.request(
+            current_ean,
+            on_success=apply_preview_result,
+            on_error=lambda _error: finalize_lookup_error(I, request_id),
+            on_discard=discard_preview_result,
+        )
 
     def _on_model_commit(D):
+        if not D._desktop_product_actions_available():
+            return
         H = "new"
         o = D.var_name.get().strip()
         p = D.var_type.get().strip()
@@ -6625,6 +6940,8 @@ class App(BU.Tk):
                     D.btn_open.configure(state=X)
 
     def _on_key_release(C, event):
+        if not C._desktop_product_actions_available():
+            return
         J_ = event
         A_ = J_.widget
         if J_.keysym in ("Up", "Down", "Left", "Right"):
@@ -6661,6 +6978,8 @@ class App(BU.Tk):
             C._set_combobox_values(A_, [])
 
     def _on_color_commit(C):
+        if not C._desktop_product_actions_available():
+            return
         M_ = C.var_name.get().strip()
         N_ = C.var_type.get().strip()
         H_, F_, G_ = C._normalize_color_vars()
@@ -6763,6 +7082,8 @@ class App(BU.Tk):
         C._refresh_existing_files_lookup_for_form_edit()
 
     def _on_extra_commit(C):
+        if not C._desktop_product_actions_available():
+            return
         D_ = C.var_extra.get().strip()
         G_ = C.var_name.get().strip()
         H_ = C.var_type.get().strip()
@@ -7178,6 +7499,8 @@ class App(BU.Tk):
         S = "sql_time"
         P = "sql_error_msg"
         K = "error_set"
+        if not C._desktop_product_actions_available():
+            return
         missing_fields = C._missing_required_product_fields()
         if missing_fields:
             O.showwarning(
@@ -7618,131 +7941,33 @@ class App(BU.Tk):
                         ext_lower = BH_.lower()
                         is_image = ext_lower in IMAGE_EXTENSION_FORMATS
                         content_fit_enabled = bool(slot.get("content_fit", h))
-                        if is_image and convert_tif_enabled:
-                            t_ext = target_ext
+                        if is_image:
                             save_target = S_
                             if same_source_target:
                                 save_target = f"{S_}.__gui_tmp__"
                                 temp_output_path = save_target
                                 if A.path.exists(save_target):
                                     A.remove(save_target)
-                            elif A.path.exists(S_):
-                                try:
-                                    A.remove(S_)
-                                except E as z:
-                                    log_error_loc(
-                                        "remove_file_before_overwrite_failed",
-                                        file=A.path.basename(S_),
-                                        error=z,
-                                    )
-                            with AA.open(src_path) as A1:
-                                if content_fit_enabled:
-                                    A1 = fit_image_to_content(
-                                        A1,
-                                        target_size=SLOT_PREVIEW_SIZE,
-                                    )
-                                if target_fmt == "JPEG" and A1.mode in ("RGBA", "LA", "P"):
-                                    A1 = A1.convert("RGB")
-                                if resize_enabled:
-                                    A1.thumbnail((max_dim, max_dim), LANCZOS_FILTER)
-                                save_params = {}
-                                if t_ext in [F, O]:
-                                    quality = 95
-                                    if compress_enabled:
-                                        quality = compress_quality
-                                    save_params[W] = quality
-                                    save_params[X] = J
-                                if t_ext == V:
-                                    save_params[X] = J
-                                A1.save(save_target, format=target_fmt, **save_params)
-                                if limit_size_enabled:
-                                    if max_bytes > 0 and t_ext in [F, O]:
-                                        try:
-                                            quality = save_params.get(W, 95)
-                                            while (
-                                                quality > 10
-                                                and A.path.getsize(save_target) > max_bytes
-                                            ):
-                                                quality -= 5
-                                                A1.save(
-                                                    save_target,
-                                                    format=target_fmt,
-                                                    quality=quality,
-                                                    optimize=J,
-                                                )
-                                        except E as R:
-                                            log_error_loc(
-                                                "file_resize_error",
-                                                file=c_,
-                                                error=R,
-                                            )
+                            process_image(
+                                src_path,
+                                save_target,
+                                ImagePipelineOptions(
+                                    target_format=target_fmt if convert_tif_enabled else B,
+                                    max_dimensions=(max_dim, max_dim)
+                                    if resize_enabled
+                                    else (1000000, 1000000),
+                                    content_fit=content_fit_enabled,
+                                    compress_enabled=compress_enabled,
+                                    compress_quality=compress_quality,
+                                    max_bytes=max_bytes
+                                    if limit_size_enabled and max_bytes > 0
+                                    else B,
+                                ),
+                            )
                             if temp_output_path:
                                 A.replace(temp_output_path, S_)
                                 temp_output_path = B
                             log_info_loc("image_added_modified", file=c_)
-                        elif ext_lower in [F, O, V, ".bmp", ".gif"] or (
-                            content_fit_enabled and is_image
-                        ):
-                            save_target = S_
-                            if same_source_target:
-                                save_target = f"{S_}.__gui_tmp__"
-                                temp_output_path = save_target
-                                if A.path.exists(save_target):
-                                    A.remove(save_target)
-                            with AA.open(src_path) as A1:
-                                if content_fit_enabled:
-                                    A1 = fit_image_to_content(
-                                        A1,
-                                        target_size=SLOT_PREVIEW_SIZE,
-                                    )
-                                if resize_enabled:
-                                    A1.thumbnail((max_dim, max_dim), LANCZOS_FILTER)
-                                save_params = {}
-                                if ext_lower in [F, O]:
-                                    quality = 95
-                                    if compress_enabled:
-                                        quality = compress_quality
-                                    save_params[W] = quality
-                                    save_params[X] = J
-                                if ext_lower == V:
-                                    save_params[X] = J
-                                A1.save(save_target, **save_params)
-                                if limit_size_enabled:
-                                    if max_bytes > 0:
-                                        if A.path.getsize(save_target) > max_bytes and ext_lower in [
-                                            F,
-                                            O,
-                                        ]:
-                                            try:
-                                                quality = save_params.get(W, 95)
-                                                while (
-                                                    quality > 10
-                                                    and A.path.getsize(save_target) > max_bytes
-                                                ):
-                                                    quality -= 5
-                                                    A1.save(
-                                                        save_target,
-                                                        quality=quality,
-                                                        optimize=J,
-                                                    )
-                                            except E as R:
-                                                log_error_loc(
-                                                    "file_resize_error",
-                                                    file=c_,
-                                                    error=R,
-                                                )
-                            if temp_output_path:
-                                A.replace(temp_output_path, S_)
-                                temp_output_path = B
-                            log_info_loc("image_added_modified", file=c_)
-                        elif ext_lower in [".tif", ".tiff"]:
-                            if not same_source_target:
-                                Af.copy2(src_path, S_)
-                            log_info_loc("file_added_modified", file=c_)
-                        elif is_image:
-                            if not same_source_target:
-                                Af.copy2(src_path, S_)
-                            log_info_loc("file_added_modified", file=c_)
                         else:
                             if not same_source_target:
                                 Af.copy2(src_path, S_)
@@ -8018,6 +8243,48 @@ class App(BU.Tk):
                     try:
                         conn = connect_db()
                         cur = conn.cursor()
+                        from .services.photo_sql_batch import build_photo_sql_batch
+                        from .services.sql_service import extract_presence_context
+
+                        batch_context = extract_presence_context(D, K_)
+                        batch_assignments = {}
+                        if batch_context:
+                            for batch_slot in worker_slots:
+                                batch_prefix = batch_slot[Aa]
+                                batch_column = C._resolve_sql_column(
+                                    batch_prefix,
+                                    batch_slot["label"],
+                                    log_missing=J,
+                                )
+                                if not batch_column:
+                                    continue
+                                if batch_prefix in sql_update_prefixes and batch_slot[f]:
+                                    batch_name = A.path.basename(batch_slot[f])
+                                    batch_extension = A.path.splitext(batch_name)[1].lower()
+                                    batch_assignments[batch_column] = (
+                                        f"{K_}_{batch_prefix}{batch_extension}"
+                                    )
+                                elif batch_prefix in sql_clear_prefixes:
+                                    batch_assignments[batch_column] = B
+                        batch = (
+                            build_photo_sql_batch(
+                                batch_context[0],
+                                batch_context[1],
+                                batch_assignments,
+                                D.get(p, K),
+                                AX_,
+                                allow_concrete_template=J,
+                            )
+                            if batch_context and batch_assignments
+                            else I
+                        )
+                        if batch is not I:
+                            cur.execute(batch.query, batch.params)
+                            Aq_ = 1
+                            if Aj(cur, A3, -1) >= 0:
+                                CANCEL_LABEL += cur.rowcount
+                            sql_update_prefixes.clear()
+                            sql_clear_prefixes.clear()
                         for d_ in worker_slots:
                             Az_ = d_[Aa]
                             B3_ = C._resolve_sql_column(Az_, d_["label"], log_missing=J)
@@ -8303,7 +8570,7 @@ class App(BU.Tk):
                     color3=s_,
                     extras=b_,
                 )
-            C._start_file_index_refresh()
+            C._start_file_index_refresh(force=True)
 
     def _load_by_ean(A):
         E_ = NO_EAN_LABEL
@@ -8923,7 +9190,7 @@ class App(BU.Tk):
         file_index_btn = C.Button(
             system_tab,
             text=LANG.get("file_index_rebuild_action", "Odbuduj indeks plików"),
-            command=A._start_file_index_refresh,
+            command=lambda: A._start_file_index_refresh(force=True),
         )
         file_index_btn.grid(row=11, column=0, padx=5, pady=(6, 0), sticky="w")
         _slabel(

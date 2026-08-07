@@ -651,31 +651,32 @@ def test_record_job_redacts_all_nested_data(monkeypatch) -> None:
     assert fake.jobs[0] == stored
 
 
-def test_observability_store_resolves_and_initializes_each_database(
+def test_observability_store_uses_registry_for_each_resolved_database(
     monkeypatch,
 ) -> None:
     paths = iter(["first.sqlite", "second.sqlite"])
-    initialized: list[str] = []
+    registered: list[str] = []
 
     class Store:
         def __init__(self, path: str) -> None:
             self.path = path
 
-        def initialize(self) -> None:
-            initialized.append(self.path)
+    def registered_store(path: str) -> Store:
+        registered.append(path)
+        return Store(path)
 
     monkeypatch.setattr(
         observability.storage_settings,
         "resolve_sqlite_path",
         lambda: next(paths),
     )
-    monkeypatch.setattr(observability, "SqliteStore", Store)
+    monkeypatch.setattr(observability, "get_sqlite_store", registered_store)
 
     first = observability.observability_store()
     second = observability.observability_store()
 
     assert (first.path, second.path) == ("first.sqlite", "second.sqlite")
-    assert initialized == ["first.sqlite", "second.sqlite"]
+    assert registered == ["first.sqlite", "second.sqlite"]
 
 
 def test_emit_event_mirrors_persistence_failure_and_is_strict_only_on_request(

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import os
+from pathlib import Path
+from threading import RLock
 import unicodedata
 import uuid
 from typing import Dict
@@ -53,9 +56,33 @@ WRITE_ERROR_TITLE = localization.Ac
 # Order used by the GUI when building slot labels.
 SLOT_LABELS = [(slot["prefix"], slot["label"]) for slot in DEFAULT_SLOT_DEFS]
 
+_EXCEL_CACHE_LOCK = RLock()
+_EXCEL_CACHE: dict[tuple[str, int, int], Dict[str, Dict[str, dict] | list]] = {}
+
 
 def _workbook_path() -> str:
     return settings.LISTS_WORKBOOK_PATH
+
+
+def _workbook_snapshot_key(path) -> tuple[str, int, int]:
+    """Return the resolved path and modification metadata for a workbook."""
+
+    resolved_path = Path(path).resolve()
+    stat = resolved_path.stat()
+    return str(resolved_path), stat.st_mtime_ns, stat.st_size
+
+
+def clear_excel_snapshot_cache(path: str | None = None) -> None:
+    """Clear cached legacy Excel list snapshots globally or for one workbook."""
+
+    with _EXCEL_CACHE_LOCK:
+        if path is None:
+            _EXCEL_CACHE.clear()
+        else:
+            resolved = str(Path(path).resolve())
+            for key in list(_EXCEL_CACHE):
+                if key[0] == resolved:
+                    _EXCEL_CACHE.pop(key, None)
 
 
 def _excel_sheets() -> dict[str, str]:
@@ -129,7 +156,7 @@ def _normalize_cell(value: object) -> str:
     return str(value).strip()
 
 
-def _ensure_workbook_exists() -> None:
+def _ensure_workbook_exists(*, ui_errors: bool = True) -> None:
     """Create the workbook on disk if it is missing."""
 
     workbook_path = _workbook_path()
@@ -146,9 +173,15 @@ def _ensure_workbook_exists() -> None:
             sheet.append(ENTRY_HEADERS)
     try:
         workbook.save(workbook_path)
+        clear_excel_snapshot_cache(workbook_path)
     except Exception as exc:  # pylint: disable=broad-except
-        messagebox.showerror(ERROR_TITLE, localization.LIST_CREATE_FAILED_MSG.format(error=exc))
-        log_error_loc("excel_create_failed", error=exc)
+        if ui_errors:
+            messagebox.showerror(
+                ERROR_TITLE,
+                localization.LIST_CREATE_FAILED_MSG.format(error=exc),
+            )
+            log_error_loc("excel_create_failed", error=exc)
+        raise
 
 
 def _load_workbook():
@@ -158,10 +191,10 @@ def _load_workbook():
     return load_workbook(_workbook_path())
 
 
-def _load_workbook_readonly():
+def _load_workbook_readonly(*, ui_errors: bool = True):
     """Load the shared workbook in read-only mode for startup cache reads."""
 
-    _ensure_workbook_exists()
+    _ensure_workbook_exists(ui_errors=ui_errors)
     return load_workbook(_workbook_path(), read_only=True, data_only=True)
 
 
@@ -322,70 +355,82 @@ def _find_ean_conflict_row(sheet, header_map: dict[str, int], ean: str, skip_row
     return None
 
 
-def prepare_excel_lists() -> Dict[str, Dict[str, dict] | list]:
+def prepare_excel_lists(*, ui_errors: bool = True) -> Dict[str, Dict[str, dict] | list]:
     """Load all Excel lists into memory."""
 
     sqlite_store = _active_sqlite_store()
     if sqlite_store is not None:
         return sqlite_store.load_lists()
 
-    workbook = _load_workbook_readonly()
-    lists: Dict[str, Dict[str, dict] | list] = {}
-    try:
-        for sheet_name in _excel_sheets().values():
-            sheet = workbook[sheet_name]
-            if sheet_name == ENTRY_SHEET:
-                entries: Dict[str, dict] = {}
-                records: list[dict[str, str]] = []
-                header_map, _changed = _entry_header_map(sheet, ensure_missing=False)
-                for row in sheet.iter_rows(min_row=2):
-                    ean = _entry_row_value(row, header_map, EAN_HEADER)
-                    if not ean:
-                        continue
-                    entry = _build_entry_payload(
-                        ean,
-                        _entry_row_value(row, header_map, NAME_HEADER),
-                        _entry_row_value(row, header_map, TYPE_HEADER),
-                        _entry_row_value(row, header_map, MODEL_HEADER),
-                        _entry_row_value(row, header_map, COLOR1_HEADER),
-                        _entry_row_value(row, header_map, COLOR2_HEADER),
-                        _entry_row_value(row, header_map, COLOR3_HEADER),
-                        _entry_row_value(row, header_map, EXTRA_HEADER),
-                        _entry_row_value(row, header_map, PRODUCT_ID_HEADER),
-                    )
-                    entries[ean.strip()] = {
-                        NAME_HEADER: entry[NAME_HEADER],
-                        TYPE_HEADER: entry[TYPE_HEADER],
-                        MODEL_HEADER: entry[MODEL_HEADER],
-                        COLOR1_HEADER: entry[COLOR1_HEADER],
-                        COLOR2_HEADER: entry[COLOR2_HEADER],
-                        COLOR3_HEADER: entry[COLOR3_HEADER],
-                        EXTRA_HEADER: entry[EXTRA_HEADER],
-                        PRODUCT_ID_HEADER: entry[PRODUCT_ID_HEADER],
-                    }
-                    records.append(entry)
-                lists[sheet_name] = entries
-                lists[ENTRY_RECORDS_KEY] = records
-            else:
-                values: list[str] = []
-                for row in sheet.iter_rows(
-                    min_col=1,
-                    max_col=1,
-                    values_only=True,
-                ):
-                    cell_value = row[0]
-                    if not cell_value:
-                        continue
-                    raw = str(cell_value).strip()
-                    if sheet_name == EXTRAS_SHEET:
-                        raw = raw.replace(UNDERSCORE, HYPHEN)
-                    normalized = raw.upper()
-                    if normalized not in values:
-                        values.append(normalized)
-                lists[sheet_name] = values
-    finally:
-        workbook.close()
-    return lists
+    _ensure_workbook_exists(ui_errors=ui_errors)
+    workbook_path = _workbook_path()
+    snapshot_key = _workbook_snapshot_key(workbook_path)
+    with _EXCEL_CACHE_LOCK:
+        snapshot = _EXCEL_CACHE.get(snapshot_key)
+        if snapshot is not None:
+            return deepcopy(snapshot)
+
+        workbook = _load_workbook_readonly(ui_errors=ui_errors)
+        lists: Dict[str, Dict[str, dict] | list] = {}
+        try:
+            for sheet_name in _excel_sheets().values():
+                sheet = workbook[sheet_name]
+                if sheet_name == ENTRY_SHEET:
+                    entries: Dict[str, dict] = {}
+                    records: list[dict[str, str]] = []
+                    header_map, _changed = _entry_header_map(sheet, ensure_missing=False)
+                    for row in sheet.iter_rows(min_row=2):
+                        ean = _entry_row_value(row, header_map, EAN_HEADER)
+                        if not ean:
+                            continue
+                        entry = _build_entry_payload(
+                            ean,
+                            _entry_row_value(row, header_map, NAME_HEADER),
+                            _entry_row_value(row, header_map, TYPE_HEADER),
+                            _entry_row_value(row, header_map, MODEL_HEADER),
+                            _entry_row_value(row, header_map, COLOR1_HEADER),
+                            _entry_row_value(row, header_map, COLOR2_HEADER),
+                            _entry_row_value(row, header_map, COLOR3_HEADER),
+                            _entry_row_value(row, header_map, EXTRA_HEADER),
+                            _entry_row_value(row, header_map, PRODUCT_ID_HEADER),
+                        )
+                        entries[ean.strip()] = {
+                            NAME_HEADER: entry[NAME_HEADER],
+                            TYPE_HEADER: entry[TYPE_HEADER],
+                            MODEL_HEADER: entry[MODEL_HEADER],
+                            COLOR1_HEADER: entry[COLOR1_HEADER],
+                            COLOR2_HEADER: entry[COLOR2_HEADER],
+                            COLOR3_HEADER: entry[COLOR3_HEADER],
+                            EXTRA_HEADER: entry[EXTRA_HEADER],
+                            PRODUCT_ID_HEADER: entry[PRODUCT_ID_HEADER],
+                        }
+                        records.append(entry)
+                    lists[sheet_name] = entries
+                    lists[ENTRY_RECORDS_KEY] = records
+                else:
+                    values: list[str] = []
+                    for row in sheet.iter_rows(
+                        min_col=1,
+                        max_col=1,
+                        values_only=True,
+                    ):
+                        cell_value = row[0]
+                        if not cell_value:
+                            continue
+                        raw = str(cell_value).strip()
+                        if sheet_name == EXTRAS_SHEET:
+                            raw = raw.replace(UNDERSCORE, HYPHEN)
+                        normalized = raw.upper()
+                        if normalized not in values:
+                            values.append(normalized)
+                    lists[sheet_name] = values
+        finally:
+            workbook.close()
+        for cached_key in list(_EXCEL_CACHE):
+            if cached_key[0] == snapshot_key[0] and cached_key != snapshot_key:
+                _EXCEL_CACHE.pop(cached_key, None)
+        _EXCEL_CACHE[snapshot_key] = deepcopy(lists)
+        return deepcopy(lists)
 
 
 def find_list_value_usage(
@@ -488,7 +533,9 @@ def _save_workbook(workbook: Workbook, error_event: str, **context) -> bool:
     """Persist the workbook and log a translated error message on failure."""
 
     try:
-        workbook.save(_workbook_path())
+        workbook_path = _workbook_path()
+        workbook.save(workbook_path)
+        clear_excel_snapshot_cache(workbook_path)
         return True
     except Exception as exc:  # pylint: disable=broad-except
         messagebox.showerror(WRITE_ERROR_TITLE, localization.LIST_SAVE_FAILED_MSG.format(error=exc))
@@ -635,9 +682,9 @@ def save_ean_entry(
             if isinstance(locked_by, str)
             else LOCKED_REASON_OTHER_PROCESS
         )
-        messagebox = localization.O if hasattr(localization, "O") else None
-        if messagebox:
-            messagebox.showerror(
+        legacy_messagebox = localization.O if hasattr(localization, "O") else None
+        if legacy_messagebox:
+            legacy_messagebox.showerror(
                 LOCKED_TITLE,
                 localization.LANG.get(
                     "excel_data_file_open",

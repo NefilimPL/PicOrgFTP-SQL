@@ -134,7 +134,7 @@ const state = {
   webImageCacheQueue: [],
   webImageCacheActive: 0,
   processJobs: new Map(),
-  processJobPollTimer: 0,
+  processJobsController: null,
   processQueue: { jobs: [], active_count: 0, queued_count: 0, current: null },
   acknowledgedProcessAlerts: new Set(),
   activeUsers: [],
@@ -142,6 +142,7 @@ const state = {
   activePresenceClientId: "",
   csrfToken: "",
   pollers: [],
+  runtimeStatusPoller: null,
   githubStatus: null,
   githubStatusLoading: false,
   resources: {},
@@ -165,7 +166,6 @@ const CLIENT_FAILURE_DEDUPE_MS = 60000;
 const LOG_AUTOSCROLL_KEY = "picorg-log-autoscroll";
 const MAX_LIVE_LOG_EVENTS = 2000;
 const OBSERVABILITY_PAGE_SIZE = 20;
-const HEALTH_POLL_INTERVAL_MS = 5000;
 const HEALTH_SLOW_MS = 300;
 const HEALTH_CRITICAL_MS = 1000;
 const HEALTH_OFFLINE_FAILURES = 3;
@@ -173,7 +173,6 @@ state.observability.autoscroll = localStorage.getItem(LOG_AUTOSCROLL_KEY) !== "f
 const clientFailureFingerprints = new Map();
 const healthSamples = [];
 let healthFailures = 0;
-let healthPollTimer = 0;
 let healthPollGeneration = 0;
 let healthPollController = null;
 let lastSuccessfulHealthComponents = {};
@@ -689,7 +688,7 @@ function openModal(name) {
     formStatus.textContent = "Ten widok jest dostepny tylko dla administratora.";
     return;
   }
-  closeAutocompletePanels();
+  autocompleteControls.closePanels();
   document.querySelector(`#${name}View`)?.classList.add("active");
   document.querySelector(`#${name}Modal`)?.classList.add("active");
   setActiveModalNav(name);
@@ -801,7 +800,7 @@ async function refreshGithubStatus(options = {}) {
 }
 
 function openGithubStatusModal() {
-  closeAutocompletePanels();
+  autocompleteControls.closePanels();
   githubStatusModal?.classList.add("active");
   if (!state.githubStatus) {
     if (githubStatusOutput) githubStatusOutput.textContent = "Pobieranie danych GitHub...";
@@ -1938,193 +1937,29 @@ function localSuggestions(fieldName) {
   return uniqueValues([...existing, ...listValues]);
 }
 
-async function remoteSuggestions(fieldName) {
-  const params = new URLSearchParams({ field: fieldName, ...currentFormPayload() });
-  const payload = await requestJson(`/api/suggestions?${params.toString()}`);
-  state.fileIndex = payload.file_index || state.fileIndex;
+async function remoteSuggestions(fieldName, requestPayload, signal) {
+  const params = new URLSearchParams({ field: fieldName, ...requestPayload });
+  const response = await requestJson(`/api/suggestions?${params.toString()}`, { signal });
+  state.fileIndex = response.file_index || state.fileIndex;
   updateRuntimeMetrics();
-  return payload.values || [];
+  return response.values || [];
 }
 
-let activeAutocompletePanel = null;
-
-function closeAutocompletePanels(exceptPanel = null) {
-  activeAutocompletePanel = exceptPanel;
-  document.querySelectorAll(".autocomplete-panel").forEach((panel) => {
-    if (panel !== exceptPanel) panel.classList.remove("active");
-  });
-}
-
-function autocompleteOptions(panel) {
-  return [...panel.querySelectorAll('button[data-autocomplete-option="1"]')];
-}
-
-function setActiveAutocompleteOption(panel, index) {
-  const options = autocompleteOptions(panel);
-  if (!options.length) {
-    panel.dataset.activeIndex = "-1";
-    return;
-  }
-  const nextIndex = ((index % options.length) + options.length) % options.length;
-  options.forEach((option, optionIndex) => {
-    option.classList.toggle("active", optionIndex === nextIndex);
-    option.setAttribute("aria-selected", optionIndex === nextIndex ? "true" : "false");
-  });
-  panel.dataset.activeIndex = String(nextIndex);
-  options[nextIndex].scrollIntoView({ block: "nearest" });
-}
-
-function appendAutocompleteText(button, value, query) {
-  const text = String(value || "");
-  const needle = String(query || "").trim();
-  if (!needle) {
-    button.textContent = text;
-    return;
-  }
-  const index = text.toLowerCase().indexOf(needle.toLowerCase());
-  if (index < 0) {
-    button.textContent = text;
-    return;
-  }
-  button.append(
-    document.createTextNode(text.slice(0, index)),
-    Object.assign(document.createElement("mark"), { textContent: text.slice(index, index + needle.length) }),
-    document.createTextNode(text.slice(index + needle.length))
-  );
-}
-
-function commitAutocompleteValue(input, panel, value) {
-  panel.dataset.selecting = "1";
-  input.value = value;
-  input.dispatchEvent(new Event("input", { bubbles: true }));
-  input.dispatchEvent(new Event("change", { bubbles: true }));
-  closeAutocompletePanels();
-  window.setTimeout(() => {
-    panel.dataset.selecting = "";
-  }, 0);
-}
-
-function renderAutocompletePanel(input, panel, values) {
-  if (activeAutocompletePanel && activeAutocompletePanel !== panel && document.activeElement !== input) {
-    return;
-  }
-  if (panel.dataset.selecting === "1") {
-    return;
-  }
-  closeAutocompletePanels(panel);
-  const previousScroll = panel.scrollTop;
-  const typed = input.value.trim();
-  const typedUpper = typed.toUpperCase();
-  const filtered = values
-    .filter((value) => !typedUpper || value.toUpperCase().includes(typedUpper))
-    .slice(0, MAX_AUTOCOMPLETE_OPTIONS);
-  panel.textContent = "";
-  panel.dataset.activeIndex = "-1";
-  if (!filtered.length) {
-    panel.classList.remove("active");
-    return;
-  }
-  for (const [index, value] of filtered.entries()) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.dataset.autocompleteOption = "1";
-    button.setAttribute("role", "option");
-    button.setAttribute("aria-selected", "false");
-    appendAutocompleteText(button, value, typed);
-    button.addEventListener("mouseenter", () => setActiveAutocompleteOption(panel, index));
-    button.addEventListener("mousedown", (event) => {
-      event.preventDefault();
-      commitAutocompleteValue(input, panel, value);
-    });
-    panel.appendChild(button);
-  }
-  panel.scrollTop = previousScroll;
-  panel.classList.add("active");
-  activeAutocompletePanel = panel;
-}
-
-function setupAutocomplete() {
-  productForm.setAttribute("autocomplete", "off");
-  for (const fieldName of Object.keys(fieldListKey)) {
-    const input = productForm.elements[fieldName];
-    if (!input) continue;
-    input.removeAttribute("list");
-    input.setAttribute("autocomplete", "off");
-    input.setAttribute("spellcheck", "false");
-    input.setAttribute("aria-autocomplete", "list");
-    input.setAttribute("data-lpignore", "true");
-    input.setAttribute("data-1p-ignore", "true");
-    input.setAttribute("data-bwignore", "true");
-    input.setAttribute("data-form-type", "other");
-    input.setAttribute("readonly", "readonly");
-    const host = input.closest("label");
-    if (!host) continue;
-    host.classList.add("autocomplete-host");
-    const panel = document.createElement("div");
-    panel.className = "autocomplete-panel";
-    panel.setAttribute("role", "listbox");
-    host.appendChild(panel);
-    let requestId = 0;
-    let remoteTimer = 0;
-    const unlockBrowserAutofill = () => {
-      input.removeAttribute("readonly");
-      window.setTimeout(() => input.setAttribute("autocomplete", "off"), 0);
-    };
-    const refresh = () => {
-      activeAutocompletePanel = panel;
-      closeAutocompletePanels(panel);
-      const local = localSuggestions(fieldName);
-      renderAutocompletePanel(input, panel, local);
-      const currentRequest = ++requestId;
-      window.clearTimeout(remoteTimer);
-      remoteTimer = window.setTimeout(() => {
-        remoteSuggestions(fieldName)
-          .then((values) => {
-            if (currentRequest === requestId && activeAutocompletePanel === panel) {
-              renderAutocompletePanel(input, panel, uniqueValues([...local, ...values]));
-            }
-          })
-          .catch(() => {});
-      }, 180);
-    };
-    input.addEventListener("mousedown", unlockBrowserAutofill);
-    input.addEventListener("focus", unlockBrowserAutofill);
-    input.addEventListener("focus", refresh);
-    input.addEventListener("input", refresh);
-    input.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") {
-        closeAutocompletePanels();
-        return;
-      }
-      if (!["ArrowDown", "ArrowUp", "Enter"].includes(event.key)) {
-        return;
-      }
-      if (!panel.classList.contains("active")) {
-        if (event.key === "Enter") {
-          return;
-        }
-        refresh();
-      }
-      const options = autocompleteOptions(panel);
-      if (!options.length) {
-        return;
-      }
-      const currentIndex = Number(panel.dataset.activeIndex || "-1");
-      if (event.key === "ArrowDown") {
-        event.preventDefault();
-        setActiveAutocompleteOption(panel, currentIndex + 1);
-      } else if (event.key === "ArrowUp") {
-        event.preventDefault();
-        setActiveAutocompleteOption(panel, currentIndex - 1);
-      } else if (event.key === "Enter" && currentIndex >= 0 && options[currentIndex]) {
-        event.preventDefault();
-        commitAutocompleteValue(input, panel, options[currentIndex].textContent || "");
-      }
-    });
-  }
-  document.addEventListener("mousedown", (event) => {
-    if (!event.target.closest(".autocomplete-host")) closeAutocompletePanels();
-  });
+function autocompleteRequestSnapshot(fieldName) {
+  const payload = currentFormPayload();
+  return {
+    payload,
+    signature: JSON.stringify([
+      fieldName,
+      payload.name,
+      payload.type_name,
+      payload.model,
+      payload.color1,
+      payload.color2,
+      payload.color3,
+      payload.extra,
+    ]),
+  };
 }
 
 function renderEntrySelect(entries = state.entries) {
@@ -4292,9 +4127,45 @@ function renderProcessQueue(payload = state.processQueue) {
   renderProcessMeasurements(payload);
 }
 
-async function refreshProcessQueue() {
+async function fetchProcessJobs({ activeJob } = {}) {
   const payload = await requestJson("/api/process-jobs/active");
+  const previousJobId = activeJob?.job_id || "";
+  const activeJobIds = new Set((payload.jobs || []).map((job) => job.job_id));
+  if (previousJobId && !activeJobIds.has(previousJobId)) {
+    try {
+      payload.completedJob = await requestJson(
+        `/api/process-jobs/${encodeURIComponent(previousJobId)}`
+      );
+    } catch (error) {
+      payload.completedJob = {
+        ...activeJob,
+        status: "failed",
+        error: error.message || "Nie udalo sie sprawdzic statusu zadania.",
+      };
+    }
+  }
+  return payload;
+}
+
+function renderProcessJobs(payload = {}) {
+  for (const job of payload.jobs || []) {
+    updateProcessJobFromPayload(job);
+  }
+  if (payload.completedJob) {
+    updateProcessJobFromPayload(payload.completedJob);
+  }
   renderProcessQueue(payload);
+}
+
+const processJobsController = new PicOrg.ProcessJobsController({
+  fetchJobs: fetchProcessJobs,
+  render: renderProcessJobs,
+  timerApi: window,
+});
+state.processJobsController = processJobsController;
+
+function refreshProcessQueue(runtimeVersion) {
+  return processJobsController.refresh(runtimeVersion);
 }
 
 function updateProcessJobFromPayload(job = {}) {
@@ -4321,53 +4192,12 @@ function updateProcessJobFromPayload(job = {}) {
   }
 }
 
-function scheduleProcessJobPoll(delay = 1500) {
-  if (state.processJobPollTimer) {
-    if (delay > 0) {
-      return;
-    }
-    window.clearTimeout(state.processJobPollTimer);
-    state.processJobPollTimer = 0;
-  }
-  state.processJobPollTimer = window.setTimeout(() => {
-    state.processJobPollTimer = 0;
-    pollProcessJobs().catch(() => {});
-  }, delay);
-}
-
-async function pollProcessJobs() {
-  if (document.hidden) {
-    scheduleProcessJobPoll(POLL_HIDDEN_DELAY_MS);
-    return;
-  }
-  const active = [...state.processJobs.values()].filter(processJobIsActive);
-  if (!active.length) {
-    return;
-  }
-  for (const job of active) {
-    try {
-      const payload = await requestJson(`/api/process-jobs/${encodeURIComponent(job.job_id)}`);
-      updateProcessJobFromPayload(payload);
-    } catch (error) {
-      const failed = {
-        ...job,
-        status: "failed",
-        error: error.message || "Nie udalo sie sprawdzic statusu zadania.",
-      };
-      updateProcessJobFromPayload(failed);
-    }
-  }
-  if ([...state.processJobs.values()].some(processJobIsActive)) {
-    scheduleProcessJobPoll();
-  }
-}
-
 function trackProcessJob(job = {}) {
   if (!job.job_id) {
     return;
   }
   state.processJobs.set(job.job_id, job);
-  scheduleProcessJobPoll();
+  refreshProcessQueue().catch(() => {});
 }
 
 async function loadRecentProcessJobs() {
@@ -5869,21 +5699,8 @@ function healthLevel(ms, components = {}, payloadOk = true) {
   return "online";
 }
 
-function scheduleBackendHealthPoll(requestGeneration = healthPollGeneration) {
-  if (healthPollTimer) window.clearTimeout(healthPollTimer);
-  healthPollTimer = 0;
-  if (document.hidden) return;
-  healthPollTimer = window.setTimeout(() => {
-    healthPollTimer = 0;
-    if (document.hidden || requestGeneration !== healthPollGeneration) return;
-    pollBackendHealth().catch(() => {});
-  }, HEALTH_POLL_INTERVAL_MS);
-}
-
 async function pollBackendHealth() {
   if (document.hidden) return;
-  if (healthPollTimer) window.clearTimeout(healthPollTimer);
-  healthPollTimer = 0;
   const requestGeneration = ++healthPollGeneration;
   healthPollController?.abort();
   const controller = new AbortController();
@@ -5935,8 +5752,49 @@ async function pollBackendHealth() {
   } finally {
     if (requestGeneration === healthPollGeneration) {
       if (healthPollController === controller) healthPollController = null;
-      if (!document.hidden) scheduleBackendHealthPoll(requestGeneration);
     }
+  }
+}
+
+function updateRuntimeHealthSummary(payload = {}, elapsedMs = 0) {
+  const health = payload.health || {};
+  const status = String(health.status || "unknown");
+  const components = lastSuccessfulHealthComponents;
+  healthFailures = 0;
+  healthSamples.push(elapsedMs);
+  if (healthSamples.length > 5) healthSamples.shift();
+  const medianMs = medianHealthLatency();
+  let level = "critical";
+  if (health.ok && status === "online") {
+    level = healthLevel(medianMs, components, true);
+  } else if (health.ok && status === "degraded") {
+    level = "slow";
+  }
+  state.lastHealthPayload = {
+    components,
+    elapsedMs,
+    medianMs,
+    ok: Boolean(health.ok),
+    serverTime: payload.observed_at || "",
+  };
+  updateBackendHealthStatus(level, elapsedMs, components, {
+    medianLatencyMs: medianMs,
+    serverTime: payload.observed_at || "",
+  });
+}
+
+async function fetchRuntimeStatus() {
+  const startedAt = performance.now();
+  try {
+    const payload = await requestJson("/api/runtime-status");
+    updateRuntimeHealthSummary(payload, Math.max(0, performance.now() - startedAt));
+    return payload;
+  } catch (error) {
+    healthFailures += 1;
+    if (healthFailures >= HEALTH_OFFLINE_FAILURES) {
+      updateBackendHealthStatus("offline", 0, lastSuccessfulHealthComponents);
+    }
+    throw error;
   }
 }
 
@@ -6581,6 +6439,9 @@ async function pollLogStatus() {
     updateLogAlert({});
     return;
   }
+  if (state.observability.stream && state.observability.streamConnected) {
+    return;
+  }
   await requestObservabilityPayload("/api/observability/events?limit=1");
 }
 
@@ -6639,26 +6500,26 @@ function createPoller(name, intervalMs, callback, options = {}) {
 }
 
 function startBackgroundPollers() {
-  createPoller("fileIndex", 5000, refreshFileIndexStatus).schedule(5000);
+  state.runtimeStatusPoller = new PicOrg.RuntimeStatusPoller({
+    fetchStatus: fetchRuntimeStatus,
+    onVersionChanged: refreshRuntimeDetailForVersion,
+    activeIntervalMs: 5000,
+    hiddenIntervalMs: 30000,
+    maxBackoffMs: 60000,
+    isHidden: () => document.hidden,
+  });
+  state.runtimeStatusPoller.start().catch(() => {});
   createPoller("logs", 15000, pollLogStatus).schedule(15000);
-  createPoller("processQueue", 2500, refreshProcessQueue).schedule(2500);
-  createPoller("activeUsers", 15000, refreshActiveUsersPresence).schedule(15000);
 }
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
-    if (healthPollTimer) window.clearTimeout(healthPollTimer);
-    healthPollTimer = 0;
     healthPollGeneration += 1;
     healthPollController?.abort();
     healthPollController = null;
     return;
   }
-  pollBackendHealth().catch(() => {});
   state.pollers.forEach((poller) => poller.kick());
-  if ([...state.processJobs.values()].some(processJobIsActive)) {
-    scheduleProcessJobPoll(0);
-  }
 });
 
 function openLogsClearModal() {
@@ -7334,13 +7195,9 @@ async function loadBootstrap(options = {}) {
   state.currentUser = payload.current_user || null;
   applyPimcoreRuntimeCapabilities(payload.pimcore);
   updateAdminUi();
-  refreshActiveUsersPresence().catch(() => {
-    renderActiveUsersPresence({ enabled: false, users: [] });
-  });
   applyTimingDetailsVisibility();
   pollLogStatus().catch(() => {});
   loadRecentProcessJobs().catch(() => {});
-  refreshProcessQueue().catch(() => {});
   refreshGithubStatus().catch(() => {});
   state.lists = payload.lists || {};
   state.entries = payload.entries || [];
@@ -7355,12 +7212,31 @@ async function loadBootstrap(options = {}) {
   renderSlots(payload.slots || []);
   renderListEditor();
   updateRuntimeMetrics();
+  refreshRuntimeDetailViews();
 }
 
 async function refreshFileIndexStatus() {
   const payload = await requestJson("/api/file-index/status");
   state.fileIndex = payload;
   updateRuntimeMetrics();
+}
+
+function refreshRuntimeDetailForVersion(name, version) {
+  const refreshers = {
+    file_index: refreshFileIndexStatus,
+    process_queue: () => refreshProcessQueue(version),
+    active_clients: refreshActiveUsersPresence,
+  };
+  const refresh = refreshers[name];
+  return refresh ? refresh() : Promise.resolve();
+}
+
+function refreshRuntimeDetailViews() {
+  refreshFileIndexStatus().catch(() => {});
+  refreshProcessQueue().catch(() => {});
+  refreshActiveUsersPresence().catch(() => {
+    renderActiveUsersPresence({ enabled: false, users: [] });
+  });
 }
 
 async function searchByEan() {
@@ -8256,9 +8132,6 @@ function settingsSaveButton(form, buildPayload) {
       state.productFields = state.settings.product_fields || state.productFields || {};
       rerenderPanelTimestampViews();
       renderResourceStatus(state.resources);
-      refreshActiveUsersPresence().catch(() => {
-        renderActiveUsersPresence({ enabled: false, users: [] });
-      });
       updateAdminUi();
       if (Array.isArray(state.settings.slots)) {
         renderSlots(state.settings.slots);
@@ -12933,7 +12806,6 @@ productForm.addEventListener("submit", async (event) => {
     const job = payload.job || {};
     stopProcessStatusTicker("Backend przyjal zadanie w tle.");
     trackProcessJob(job);
-    refreshProcessQueue().catch(() => {});
     showQueuedProcess(job);
     resetCurrentDraft({
       clearOutput: false,
@@ -13119,7 +12991,18 @@ logoutButton.addEventListener("click", async () => {
   window.location.href = "/";
 });
 
-setupAutocomplete();
+const autocompleteControls = window.PicOrg.setupAutocomplete({
+  document,
+  productForm,
+  fieldNames: Object.keys(fieldListKey),
+  localSuggestions,
+  remoteSuggestions,
+  captureRequest: autocompleteRequestSnapshot,
+  uniqueValues,
+  maxOptions: MAX_AUTOCOMPLETE_OPTIONS,
+  setTimer: (callback, delay) => window.setTimeout(callback, delay),
+  clearTimer: (timer) => window.clearTimeout(timer),
+});
 setupFieldChangeTracking();
 setupPageExitGuards();
 applyTheme();

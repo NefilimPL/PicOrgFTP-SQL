@@ -5,8 +5,10 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 import secrets
 import sqlite3
+import threading
 import unicodedata
 import uuid
 from contextlib import contextmanager
@@ -26,9 +28,31 @@ from .excel_utils import (
     PRODUCT_ID_HEADER,
     TYPE_HEADER,
 )
+from .file_index_segments import (
+    FileIndexGeneration,
+    FileIndexSegment,
+    normalize_segment_key,
+    segments_to_snapshot,
+    snapshot_to_segments,
+)
+from .product_queries import ProductSearchCriteria
 from .redaction import redact_sensitive_value, sanitize_free_text
+from .sqlite_connection import (
+    SQLiteConnectionSettings,
+    configure_connection,
+    try_enable_wal,
+)
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 15
+_WAL_FALLBACK_LOGGER = logging.getLogger("picorgftp_sql.sqlite.wal")
+_WAL_FALLBACK_LOGGER.setLevel(logging.WARNING)
+_WAL_FALLBACK_LOGGER.propagate = False
+if not _WAL_FALLBACK_LOGGER.handlers:
+    _wal_fallback_handler = logging.StreamHandler()
+    _wal_fallback_handler.setFormatter(
+        logging.Formatter("%(levelname)s: %(message)s")
+    )
+    _WAL_FALLBACK_LOGGER.addHandler(_wal_fallback_handler)
 _NOTIFICATION_DELIVERY_STATUSES = frozenset(
     {"pending", "sending", "sent", "fallback", "skipped", "error"}
 )
@@ -64,6 +88,37 @@ ENTRY_HEADERS = (
     COLOR3_HEADER,
     EXTRA_HEADER,
     PRODUCT_ID_HEADER,
+)
+_PRODUCT_SEARCH_COLUMNS = {
+    "product_id": "product_id",
+    "ean": "ean",
+    "name": "name",
+    "type_name": "type_name",
+    "model": "model",
+    "color1": "color1",
+    "color2": "color2",
+    "color3": "color3",
+    "extra": "extra",
+}
+_PRODUCT_SEARCH_KEY_COLUMNS = {
+    field: f"{column}_key" for field, column in _PRODUCT_SEARCH_COLUMNS.items()
+}
+_PRODUCT_SEARCH_TEXT_KEY_COLUMN = "search_text_key"
+_PRODUCT_SEARCH_KEY_MIGRATION_BATCH_SIZE = 500
+_PRODUCT_SEARCH_FTS_TABLE = "product_entries_fts"
+_PRODUCT_SHORT_SEARCH_FTS_TABLE = "product_entries_short_fts"
+_PRODUCT_EAN_CONFLICT_TRIGGER_MESSAGE = "product_ean_conflict"
+_NON_UNIQUE_EAN_KEYS = frozenset({"", "brak-ean"})
+_PRODUCT_ENTRY_COLUMNS = (
+    ("product_id", PRODUCT_ID_HEADER),
+    ("ean", EAN_HEADER),
+    ("name", NAME_HEADER),
+    ("type_name", TYPE_HEADER),
+    ("model", MODEL_HEADER),
+    ("color1", COLOR1_HEADER),
+    ("color2", COLOR2_HEADER),
+    ("color3", COLOR3_HEADER),
+    ("extra", EXTRA_HEADER),
 )
 
 _INCIDENT_CONTEXT_BEFORE_SQL = """
@@ -111,6 +166,30 @@ _OPERATIONAL_EVENT_QUERY_COLUMNS = (
 
 def _text(value: object) -> str:
     return str(value or "").strip()
+
+
+class ProductEanConflictError(ValueError):
+    """Raised when a real EAN cannot identify exactly one product."""
+
+    def __init__(self, ean: object, product_ids: tuple[str, ...] = ()) -> None:
+        self.ean = _text(ean)
+        self.product_ids = tuple(_text(value) for value in product_ids if _text(value))
+        owners = f" ({', '.join(self.product_ids)})" if self.product_ids else ""
+        super().__init__(
+            f"EAN {self.ean or '<empty>'} is assigned to another or multiple products{owners}."
+        )
+
+
+class ProductIdConflictError(ValueError):
+    """Raised when bulk input contains more than one row for one product ID."""
+
+    def __init__(self, product_id: object, rows: tuple[str, ...] = ()) -> None:
+        self.product_id = _text(product_id)
+        self.rows = tuple(_text(value) for value in rows if _text(value))
+        locations = f" ({', '.join(self.rows)})" if self.rows else ""
+        super().__init__(
+            f"PRODUCT_ID {self.product_id or '<empty>'} occurs in multiple rows{locations}."
+        )
 
 
 def _bounded_scalar_text(
@@ -459,11 +538,7 @@ def _history_timestamp_from_created_at(value: object) -> float:
 
 
 def _segment_key(value: object) -> str:
-    text = _upper(value)
-    for ch in text:
-        if ch.isalnum():
-            return ch if ch.isascii() else "_"
-    return "_"
+    return normalize_segment_key(value)
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -707,12 +782,393 @@ def _usage_label(entry: dict[str, str]) -> str:
 
 def _entry_payload(payload: dict[str, object]) -> dict[str, str]:
     entry = {header: _upper(payload.get(header)) for header in ENTRY_HEADERS}
-    entry[COLOR2_HEADER] = _upper(payload.get(COLOR2_HEADER)) if payload.get(COLOR2_HEADER) else ""
-    entry[COLOR3_HEADER] = _upper(payload.get(COLOR3_HEADER)) if payload.get(COLOR3_HEADER) else ""
+    color2 = payload.get(COLOR2_HEADER)
+    color3 = payload.get(COLOR3_HEADER)
+    entry[COLOR2_HEADER] = _upper(color2) if color2 else ""
+    entry[COLOR3_HEADER] = _upper(color3) if color3 else ""
     extra = _upper(payload.get(EXTRA_HEADER)).replace("_", "-")
     entry[EXTRA_HEADER] = extra or "NO-LED"
     entry[PRODUCT_ID_HEADER] = _upper(payload.get(PRODUCT_ID_HEADER))
     return entry
+
+
+def _bounded_product_query_limit(value: object, default: int) -> int:
+    """Keep all product lookup, search, and suggestion queries bounded."""
+
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, min(parsed, 100))
+
+
+def _product_search_key(value: object) -> str:
+    """Return the shared stripped, Unicode-casefold product comparison key."""
+
+    return _text(value).casefold()
+
+
+def _is_real_product_ean_key(value: object) -> bool:
+    """Return whether an EAN key claims a unique product identity."""
+
+    return _product_search_key(value) not in _NON_UNIQUE_EAN_KEYS
+
+
+def _product_fts_literal(value: object) -> str:
+    """Quote normalized free text as one literal FTS5 phrase."""
+
+    return f'"{_product_search_key(value).replace(chr(34), chr(34) * 2)}"'
+
+
+def _product_short_gram_token(value: object) -> str:
+    """Encode the first indexed one- or two-character substring as one token."""
+
+    text = _product_search_key(value)
+    gram = text[:2]
+    prefix = "b" if len(gram) == 2 else "u"
+    return prefix + "".join(f"{ord(character):06x}" for character in gram)
+
+
+def _product_short_gram_document(value: object) -> str:
+    """Encode distinct unigrams and bigrams for contentless FTS lookup."""
+
+    text = _product_search_key(value)
+    tokens = {
+        "u" + f"{ord(character):06x}"
+        for character in text
+    }
+    tokens.update(
+        "b" + "".join(f"{ord(character):06x}" for character in text[index : index + 2])
+        for index in range(max(0, len(text) - 1))
+    )
+    return " ".join(sorted(tokens))
+
+
+def _fts_feature_unavailable(error: sqlite3.OperationalError) -> bool:
+    """Return whether SQLite lacks FTS5 or the requested tokenizer feature."""
+
+    message = str(error).casefold()
+    return any(
+        marker in message
+        for marker in (
+            "no such module: fts5",
+            "no such tokenizer",
+            "error in tokenizer constructor",
+            "parse error in tokenize directive",
+        )
+    )
+
+
+def _product_prefix_bounds(value: object) -> tuple[str, str]:
+    """Return an indexed half-open range covering all casefolded prefixes."""
+
+    prefix = _product_search_key(value)
+    return prefix, f"{prefix}\U0010ffff"
+
+
+def _migrate_product_entry_search_keys(conn: sqlite3.Connection) -> None:
+    """Backfill persisted query keys without storing connection-local SQL code."""
+
+    conn.executescript(
+        """
+        DROP INDEX IF EXISTS idx_product_entries_product_id_fold;
+        DROP INDEX IF EXISTS idx_product_entries_ean_fold;
+        DROP INDEX IF EXISTS idx_product_entries_name_fold;
+        DROP INDEX IF EXISTS idx_product_entries_type_name_fold;
+        DROP INDEX IF EXISTS idx_product_entries_model_fold;
+        DROP INDEX IF EXISTS idx_product_entries_identity_fold;
+        """
+    )
+    columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(product_entries)")
+    }
+    for key_column in _PRODUCT_SEARCH_KEY_COLUMNS.values():
+        if key_column not in columns:
+            conn.execute(
+                f"ALTER TABLE product_entries ADD COLUMN {key_column} "
+                "TEXT NOT NULL DEFAULT ''"
+            )
+    if _PRODUCT_SEARCH_TEXT_KEY_COLUMN not in columns:
+        conn.execute(
+            f"ALTER TABLE product_entries ADD COLUMN {_PRODUCT_SEARCH_TEXT_KEY_COLUMN} "
+            "TEXT NOT NULL DEFAULT ''"
+        )
+    product_columns = tuple(_PRODUCT_SEARCH_COLUMNS.values())
+    cursor = conn.execute(
+        f"SELECT rowid, {', '.join(product_columns)} FROM product_entries"
+    )
+    assignments = [
+        f"{key_column} = ?" for key_column in _PRODUCT_SEARCH_KEY_COLUMNS.values()
+    ]
+    assignments.append(f"{_PRODUCT_SEARCH_TEXT_KEY_COLUMN} = ?")
+    while rows := cursor.fetchmany(_PRODUCT_SEARCH_KEY_MIGRATION_BATCH_SIZE):
+        for row in rows:
+            conn.execute(
+                f"UPDATE product_entries SET {', '.join(assignments)} WHERE rowid = ?",
+                (
+                    *(_product_search_key(row[column]) for column in product_columns),
+                    " ".join(_product_search_key(row[column]) for column in product_columns),
+                    row["rowid"],
+                ),
+            )
+
+
+def _initialize_product_search_fts(
+    conn: sqlite3.Connection,
+    *,
+    rebuild: bool,
+) -> bool:
+    """Create and synchronize the indexed trigram free-text projection."""
+
+    try:
+        conn.execute(
+            f"""
+            CREATE VIRTUAL TABLE IF NOT EXISTS {_PRODUCT_SEARCH_FTS_TABLE}
+            USING fts5(
+                search_text_key,
+                content='product_entries',
+                content_rowid='rowid',
+                tokenize='trigram case_sensitive 1'
+            )
+            """
+        )
+    except sqlite3.OperationalError as exc:
+        if not _fts_feature_unavailable(exc):
+            raise
+        conn.executescript(
+            """
+            DROP TRIGGER IF EXISTS trg_product_entries_fts_insert;
+            DROP TRIGGER IF EXISTS trg_product_entries_fts_delete;
+            DROP TRIGGER IF EXISTS trg_product_entries_fts_update;
+            """
+        )
+        return False
+
+    conn.executescript(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_product_entries_fts_insert
+        AFTER INSERT ON product_entries
+        BEGIN
+            INSERT INTO {_PRODUCT_SEARCH_FTS_TABLE}(rowid, search_text_key)
+            VALUES (new.rowid, new.search_text_key);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_product_entries_fts_delete
+        AFTER DELETE ON product_entries
+        BEGIN
+            INSERT INTO {_PRODUCT_SEARCH_FTS_TABLE}(
+                {_PRODUCT_SEARCH_FTS_TABLE}, rowid, search_text_key
+            )
+            VALUES ('delete', old.rowid, old.search_text_key);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_product_entries_fts_update
+        AFTER UPDATE OF search_text_key ON product_entries
+        BEGIN
+            INSERT INTO {_PRODUCT_SEARCH_FTS_TABLE}(
+                {_PRODUCT_SEARCH_FTS_TABLE}, rowid, search_text_key
+            )
+            VALUES ('delete', old.rowid, old.search_text_key);
+            INSERT INTO {_PRODUCT_SEARCH_FTS_TABLE}(rowid, search_text_key)
+            VALUES (new.rowid, new.search_text_key);
+        END;
+        """
+    )
+    if rebuild:
+        conn.execute(
+            f"INSERT INTO {_PRODUCT_SEARCH_FTS_TABLE}({_PRODUCT_SEARCH_FTS_TABLE}) "
+            "VALUES ('rebuild')"
+        )
+    return True
+
+
+def _initialize_product_short_search_fts(
+    conn: sqlite3.Connection,
+    *,
+    rebuild: bool,
+) -> bool:
+    """Create a compact candidate index for one/two-character search and fallback."""
+
+    try:
+        conn.execute(
+            f"""
+            CREATE VIRTUAL TABLE IF NOT EXISTS {_PRODUCT_SHORT_SEARCH_FTS_TABLE}
+            USING fts5(
+                grams,
+                content='',
+                detail='none',
+                columnsize=0
+            )
+            """
+        )
+    except sqlite3.OperationalError as exc:
+        if not _fts_feature_unavailable(exc):
+            raise
+        conn.executescript(
+            """
+            DROP TRIGGER IF EXISTS trg_product_entries_short_fts_insert;
+            DROP TRIGGER IF EXISTS trg_product_entries_short_fts_delete;
+            DROP TRIGGER IF EXISTS trg_product_entries_short_fts_update;
+            """
+        )
+        return False
+
+    conn.executescript(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_product_entries_short_fts_insert
+        AFTER INSERT ON product_entries
+        BEGIN
+            INSERT INTO {_PRODUCT_SHORT_SEARCH_FTS_TABLE}(rowid, grams)
+            VALUES (new.rowid, picorg_product_short_grams(new.search_text_key));
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_product_entries_short_fts_delete
+        AFTER DELETE ON product_entries
+        BEGIN
+            INSERT INTO {_PRODUCT_SHORT_SEARCH_FTS_TABLE}(
+                {_PRODUCT_SHORT_SEARCH_FTS_TABLE}, rowid, grams
+            )
+            VALUES (
+                'delete', old.rowid,
+                picorg_product_short_grams(old.search_text_key)
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_product_entries_short_fts_update
+        AFTER UPDATE OF search_text_key ON product_entries
+        BEGIN
+            INSERT INTO {_PRODUCT_SHORT_SEARCH_FTS_TABLE}(
+                {_PRODUCT_SHORT_SEARCH_FTS_TABLE}, rowid, grams
+            )
+            VALUES (
+                'delete', old.rowid,
+                picorg_product_short_grams(old.search_text_key)
+            );
+            INSERT INTO {_PRODUCT_SHORT_SEARCH_FTS_TABLE}(rowid, grams)
+            VALUES (new.rowid, picorg_product_short_grams(new.search_text_key));
+        END;
+        """
+    )
+    if rebuild:
+        conn.execute(
+            f"INSERT INTO {_PRODUCT_SHORT_SEARCH_FTS_TABLE}"
+            f"({_PRODUCT_SHORT_SEARCH_FTS_TABLE}) VALUES ('delete-all')"
+        )
+        conn.execute(
+            f"""
+            INSERT INTO {_PRODUCT_SHORT_SEARCH_FTS_TABLE}(rowid, grams)
+            SELECT rowid, picorg_product_short_grams(search_text_key)
+            FROM product_entries
+            """
+        )
+    return True
+
+
+def _preflight_bulk_product_entries(records: object) -> list[dict[str, str]]:
+    """Validate bulk identity ownership before any target data is replaced."""
+
+    prepared = []
+    real_ean_owners: dict[str, list[str]] = {}
+    product_id_rows: dict[str, list[str]] = {}
+    for index, record in enumerate(records if isinstance(records, list) else []):
+        if not isinstance(record, dict):
+            continue
+        entry = _entry_payload(record)
+        prepared.append(entry)
+        product_id_key = _product_search_key(entry[PRODUCT_ID_HEADER])
+        if product_id_key:
+            locations = product_id_rows.setdefault(product_id_key, [])
+            locations.append(f"row {index + 1}")
+            if len(locations) > 1:
+                raise ProductIdConflictError(
+                    entry[PRODUCT_ID_HEADER],
+                    tuple(locations),
+                )
+        ean_key = _product_search_key(entry[EAN_HEADER])
+        if not _is_real_product_ean_key(ean_key):
+            continue
+        owner = entry[PRODUCT_ID_HEADER] or f"row {index + 1}"
+        owners = real_ean_owners.setdefault(ean_key, [])
+        owners.append(owner)
+        if len(owners) > 1:
+            raise ProductEanConflictError(entry[EAN_HEADER], tuple(owners))
+    return prepared
+
+
+def _configure_product_ean_integrity(
+    conn: sqlite3.Connection,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Prevent new real-EAN conflicts without rewriting historical rows."""
+
+    conn.executescript(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_product_entries_real_ean_insert
+        BEFORE INSERT ON product_entries
+        WHEN new.ean_key NOT IN ('', 'brak-ean')
+         AND NOT EXISTS (
+             SELECT 1
+             FROM product_entries
+             WHERE product_id = new.product_id AND ean_key = new.ean_key
+         )
+         AND EXISTS (
+             SELECT 1 FROM product_entries WHERE ean_key = new.ean_key
+         )
+        BEGIN
+            SELECT RAISE(ABORT, '{_PRODUCT_EAN_CONFLICT_TRIGGER_MESSAGE}');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_product_entries_real_ean_update
+        BEFORE UPDATE OF ean_key ON product_entries
+        WHEN new.ean_key NOT IN ('', 'brak-ean')
+         AND new.ean_key <> old.ean_key
+         AND EXISTS (
+             SELECT 1
+             FROM product_entries
+             WHERE ean_key = new.ean_key AND rowid <> old.rowid
+         )
+        BEGIN
+            SELECT RAISE(ABORT, '{_PRODUCT_EAN_CONFLICT_TRIGGER_MESSAGE}');
+        END;
+        """
+    )
+    conflict_rows = conn.execute(
+        """
+        SELECT ean_key
+        FROM product_entries
+        WHERE ean_key NOT IN ('', 'brak-ean')
+        GROUP BY ean_key
+        HAVING COUNT(*) > 1
+        ORDER BY ean_key
+        """
+    ).fetchall()
+    conflicts = []
+    for row in conflict_rows:
+        key = _text(row["ean_key"])
+        owners = tuple(
+            _text(owner["product_id"])
+            for owner in conn.execute(
+                """
+                SELECT product_id
+                FROM product_entries
+                WHERE ean_key = ?
+                ORDER BY rowid
+                """,
+                (key,),
+            ).fetchall()
+        )
+        conflicts.append((key, owners))
+
+    if conflicts:
+        conn.execute("DROP INDEX IF EXISTS uq_product_entries_real_ean_key")
+    else:
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_product_entries_real_ean_key
+            ON product_entries(ean_key)
+            WHERE ean_key <> '' AND ean_key <> 'brak-ean'
+            """
+        )
+    return tuple(conflicts)
 
 
 class SqliteStore:
@@ -723,11 +1179,22 @@ class SqliteStore:
 
     def __init__(self, path: str):
         self.path = str(Path(path))
+        self._initialize_lock = threading.Lock()
+        self._initialized = False
+        self._connection_settings = SQLiteConnectionSettings()
+        self._journal_mode = ""
+        self._wal_fallback_reason = ""
+        self._product_search_fts_available = False
+        self._product_short_search_fts_available = False
+        self._product_ean_conflicts: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     def connect(self) -> sqlite3.Connection:
         directory = Path(self.path).parent
         directory.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(
+            self.path,
+            timeout=self._connection_settings.connect_timeout_seconds,
+        )
         conn.row_factory = sqlite3.Row
         conn.create_function(
             "picorg_lower",
@@ -735,7 +1202,17 @@ class SqliteStore:
             _unicode_lower,
             deterministic=True,
         )
-        conn.execute("PRAGMA foreign_keys = ON")
+        conn.create_function(
+            "picorg_product_short_grams",
+            1,
+            _product_short_gram_document,
+            deterministic=True,
+        )
+        configure_connection(
+            conn,
+            self._connection_settings,
+            wal_active=self._journal_mode == "wal",
+        )
         return conn
 
     @contextmanager
@@ -752,7 +1229,41 @@ class SqliteStore:
     def initialize(self) -> None:
         """Create schema tables when the database is first used."""
 
+        if self._initialized:
+            return
+        with self._initialize_lock:
+            if self._initialized:
+                return
+            self._initialize_schema()
+            self._initialized = True
+
+    def _initialize_schema(self) -> None:
+        """Create schema tables when the database is first used."""
+
         with self.connection() as conn:
+            try:
+                self._journal_mode = try_enable_wal(conn)
+            except sqlite3.DatabaseError as exc:
+                self._wal_fallback_reason = type(exc).__name__
+                try:
+                    row = conn.execute("PRAGMA journal_mode").fetchone()
+                    self._journal_mode = str(row[0] if row else "").lower()
+                except sqlite3.DatabaseError:
+                    self._journal_mode = ""
+            if self._journal_mode != "wal":
+                if not self._wal_fallback_reason:
+                    self._wal_fallback_reason = (
+                        f"journal_mode_{self._journal_mode or 'unknown'}"
+                    )
+                _WAL_FALLBACK_LOGGER.warning(
+                    "SQLite WAL fallback warning: %s.",
+                    self._wal_fallback_reason,
+                )
+            configure_connection(
+                conn,
+                self._connection_settings,
+                wal_active=self._journal_mode == "wal",
+            )
             previous_user_version_row = conn.execute("PRAGMA user_version").fetchone()
             previous_user_version = (
                 int(previous_user_version_row[0] or 0)
@@ -768,6 +1279,45 @@ class SqliteStore:
                 ).fetchone()
                 is not None
             )
+            product_fts_table_existed = (
+                conn.execute(
+                    """
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = ?
+                    """,
+                    (_PRODUCT_SEARCH_FTS_TABLE,),
+                ).fetchone()
+                is not None
+            )
+            product_short_fts_table_existed = (
+                conn.execute(
+                    """
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = ?
+                    """,
+                    (_PRODUCT_SHORT_SEARCH_FTS_TABLE,),
+                ).fetchone()
+                is not None
+            )
+            product_trigger_names = {
+                _text(row["name"])
+                for row in conn.execute(
+                    """
+                    SELECT name FROM sqlite_master
+                    WHERE type = 'trigger' AND name LIKE 'trg_product_entries_%fts_%'
+                    """
+                ).fetchall()
+            }
+            product_fts_triggers_existed = {
+                "trg_product_entries_fts_insert",
+                "trg_product_entries_fts_delete",
+                "trg_product_entries_fts_update",
+            }.issubset(product_trigger_names)
+            product_short_fts_triggers_existed = {
+                "trg_product_entries_short_fts_insert",
+                "trg_product_entries_short_fts_delete",
+                "trg_product_entries_short_fts_update",
+            }.issubset(product_trigger_names)
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS schema_version (
@@ -813,10 +1363,20 @@ class SqliteStore:
                     name TEXT NOT NULL DEFAULT '',
                     type_name TEXT NOT NULL DEFAULT '',
                     model TEXT NOT NULL DEFAULT '',
+                    product_id_key TEXT NOT NULL DEFAULT '',
+                    ean_key TEXT NOT NULL DEFAULT '',
+                    name_key TEXT NOT NULL DEFAULT '',
+                    type_name_key TEXT NOT NULL DEFAULT '',
+                    model_key TEXT NOT NULL DEFAULT '',
                     color1 TEXT NOT NULL DEFAULT '',
                     color2 TEXT NOT NULL DEFAULT '',
                     color3 TEXT NOT NULL DEFAULT '',
                     extra TEXT NOT NULL DEFAULT '',
+                    color1_key TEXT NOT NULL DEFAULT '',
+                    color2_key TEXT NOT NULL DEFAULT '',
+                    color3_key TEXT NOT NULL DEFAULT '',
+                    extra_key TEXT NOT NULL DEFAULT '',
+                    search_text_key TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL
                 );
 
@@ -850,13 +1410,26 @@ class SqliteStore:
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS file_index_generations (
+                    cache_key TEXT NOT NULL,
+                    generation_id TEXT NOT NULL,
+                    root TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    generated_at TEXT NOT NULL,
+                    dirs_scanned INTEGER NOT NULL DEFAULT 0,
+                    products_scanned INTEGER NOT NULL DEFAULT 0,
+                    complete INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (cache_key, generation_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS file_index_segments (
+                    generation_id TEXT NOT NULL,
                     segment_key TEXT NOT NULL,
                     section TEXT NOT NULL,
                     lookup_key TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    PRIMARY KEY (segment_key, section, lookup_key)
+                    PRIMARY KEY (generation_id, segment_key, section, lookup_key)
                 );
 
                 CREATE TABLE IF NOT EXISTS pimcore_submissions (
@@ -1018,8 +1591,48 @@ class SqliteStore:
                 );
                 """
             )
+            segment_columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(file_index_segments)")
+            }
+            if "generation_id" not in segment_columns:
+                conn.execute("DROP TABLE file_index_segments")
+                conn.execute(
+                    """
+                    CREATE TABLE file_index_segments (
+                        generation_id TEXT NOT NULL,
+                        segment_key TEXT NOT NULL,
+                        section TEXT NOT NULL,
+                        lookup_key TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (generation_id, segment_key, section, lookup_key)
+                    )
+                    """
+                )
             _migrate_web_history_created_at(conn)
             _migrate_daily_change_summary_reports(conn)
+            if previous_user_version < SCHEMA_VERSION:
+                _migrate_product_entry_search_keys(conn)
+            self._product_search_fts_available = _initialize_product_search_fts(
+                conn,
+                rebuild=(
+                    previous_user_version < SCHEMA_VERSION
+                    or not product_fts_table_existed
+                    or not product_fts_triggers_existed
+                ),
+            )
+            self._product_short_search_fts_available = (
+                _initialize_product_short_search_fts(
+                    conn,
+                    rebuild=(
+                        previous_user_version < SCHEMA_VERSION
+                        or not product_short_fts_table_existed
+                        or not product_short_fts_triggers_existed
+                    ),
+                )
+            )
+            self._product_ean_conflicts = _configure_product_ean_integrity(conn)
             _rebuild_web_history_index_if_needed(conn)
             _reconcile_duplicate_open_incidents(conn)
             conn.execute(
@@ -1064,12 +1677,34 @@ class SqliteStore:
                     ON product_entries(ean);
                 CREATE INDEX IF NOT EXISTS idx_product_entries_identity
                     ON product_entries(name, type_name, model);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_product_id_key
+                    ON product_entries(product_id_key);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_ean_key
+                    ON product_entries(ean_key);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_name_key
+                    ON product_entries(name_key);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_type_name_key
+                    ON product_entries(type_name_key);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_model_key
+                    ON product_entries(model_key);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_color1_key
+                    ON product_entries(color1_key);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_color2_key
+                    ON product_entries(color2_key);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_color3_key
+                    ON product_entries(color3_key);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_extra_key
+                    ON product_entries(extra_key);
+                CREATE INDEX IF NOT EXISTS idx_product_entries_identity_key
+                    ON product_entries(name_key, type_name_key, model_key);
                 CREATE INDEX IF NOT EXISTS idx_app_config_values_updated_at
                     ON app_config_values(updated_at);
                 CREATE INDEX IF NOT EXISTS idx_file_index_segments_lookup
-                    ON file_index_segments(segment_key, section, lookup_key);
+                    ON file_index_segments(generation_id, segment_key, section, lookup_key);
                 CREATE INDEX IF NOT EXISTS idx_file_index_segments_updated_at
-                    ON file_index_segments(updated_at);
+                    ON file_index_segments(generation_id, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_file_index_generations_complete
+                    ON file_index_generations(cache_key, complete, generated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_pimcore_submissions_created_at
                     ON pimcore_submissions(created_at);
                 CREATE INDEX IF NOT EXISTS idx_pimcore_submissions_ean
@@ -1434,16 +2069,19 @@ class SqliteStore:
 
         self.initialize()
         payload = self._normalize_operational_event(event)
+        intent_created = False
         with self.connection() as conn:
             self._insert_operational_event(conn, payload)
             if create_notification_intent:
-                self._insert_notification_intent(
+                intent_created = self._insert_notification_intent(
                     conn,
                     event_id=payload["id"],
                     incident_id=payload["incident_id"],
                     severity=payload["severity"],
                     created_at=payload["created_at"],
                 )
+        if intent_created:
+            self._wake_notification_worker()
         return payload
 
     @staticmethod
@@ -1454,7 +2092,7 @@ class SqliteStore:
         incident_id: object,
         severity: object,
         created_at: object,
-    ) -> None:
+    ) -> bool:
         normalized_event_id = _text(event_id)
         if not normalized_event_id:
             raise ValueError("notification intent event id is required")
@@ -1463,7 +2101,7 @@ class SqliteStore:
             raise ValueError("invalid notification intent severity")
         timestamp = _canonical_timestamp(created_at, field="created_at")
         expected_id = f"intent-{normalized_event_id}"
-        conn.execute(
+        cursor = conn.execute(
             """
             INSERT INTO notification_outbox (
                 id, event_id, incident_id, severity, status,
@@ -1486,6 +2124,17 @@ class SqliteStore:
         ).fetchone()
         if row is None or _text(row["id"]) != expected_id:
             raise RuntimeError("notification intent identity conflict")
+        return cursor.rowcount == 1
+
+    @staticmethod
+    def _wake_notification_worker() -> None:
+        try:
+            from .notification_service import wake_notification_worker
+
+            wake_notification_worker()
+        except Exception:
+            # The durable row remains authoritative if the process wake fails.
+            pass
 
     @staticmethod
     def _normalize_operational_event(
@@ -2000,6 +2649,7 @@ class SqliteStore:
         except (TypeError, ValueError):
             window_seconds = 15 * 60
 
+        intent_created = False
         with self.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
@@ -2144,7 +2794,7 @@ class SqliteStore:
                 event_payload["incident_id"] = incident_id
                 self._insert_operational_event(conn, event_payload)
                 if create_notification_intent and notification_due:
-                    self._insert_notification_intent(
+                    intent_created = self._insert_notification_intent(
                         conn,
                         event_id=event_payload["id"],
                         incident_id=incident_id,
@@ -2152,6 +2802,8 @@ class SqliteStore:
                         created_at=event_payload["created_at"],
                     )
 
+        if intent_created:
+            self._wake_notification_worker()
         result = self._incident_from_row(persisted_row)
         result["notification_due"] = notification_due
         result["notification_claim_at"] = notification_claim_at
@@ -2408,8 +3060,8 @@ class SqliteStore:
     @staticmethod
     def _insert_notification_delivery(
         conn: sqlite3.Connection, payload: dict[str, Any]
-    ) -> None:
-        conn.execute(
+    ) -> bool:
+        cursor = conn.execute(
             """
             INSERT OR IGNORE INTO notification_deliveries (
                 id, incident_id, event_id, severity, status,
@@ -2428,6 +3080,7 @@ class SqliteStore:
                 payload["updated_at"], payload["next_attempt_at"],
             ),
         )
+        return cursor.rowcount == 1
 
     def enqueue_notification_delivery(
         self, record: dict[str, object]
@@ -2437,11 +3090,13 @@ class SqliteStore:
         self.initialize()
         payload = self._notification_delivery_payload(record)
         with self.connection() as conn:
-            self._insert_notification_delivery(conn, payload)
+            delivery_created = self._insert_notification_delivery(conn, payload)
             row = conn.execute(
                 "SELECT * FROM notification_deliveries WHERE id = ?",
                 (payload["id"],),
             ).fetchone()
+        if delivery_created:
+            self._wake_notification_worker()
         return self._delivery_from_row(row)
 
     def pending_notification_intents(
@@ -2512,6 +3167,7 @@ class SqliteStore:
             if isinstance(delivery, dict)
             else None
         )
+        delivery_created = False
         with self.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             intent = conn.execute(
@@ -2532,7 +3188,9 @@ class SqliteStore:
                     (payload["event_id"],),
                 ).fetchone()
                 if existing is None and intent["status"] == "pending":
-                    self._insert_notification_delivery(conn, payload)
+                    delivery_created = self._insert_notification_delivery(
+                        conn, payload
+                    )
                     existing = conn.execute(
                         "SELECT * FROM notification_deliveries WHERE id = ?",
                         (payload["id"],),
@@ -2555,6 +3213,8 @@ class SqliteStore:
                     """,
                     (completed, completed, normalized_id),
                 )
+        if delivery_created:
+            self._wake_notification_worker()
         return self._delivery_from_row(existing) if existing is not None else {}
 
     def prune_done_notification_intents(self, before: str) -> int:
@@ -2591,6 +3251,23 @@ class SqliteStore:
                 (_now_iso(), _bounded_page_limit(limit)),
             ).fetchall()
         return [self._delivery_from_row(row) for row in rows]
+
+    def next_notification_due_at(self) -> str:
+        """Return the nearest durable pending-delivery deadline."""
+
+        self.initialize()
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT MIN(next_attempt_at) AS due_at
+                FROM notification_deliveries
+                WHERE status = 'pending'
+                """
+            ).fetchone()
+        if row is None or row["due_at"] is None:
+            return ""
+        due_at = _text(row["due_at"])
+        return due_at or _now_iso()
 
     def update_notification_delivery(
         self,
@@ -3290,6 +3967,192 @@ class SqliteStore:
                     (column, _text(table_name), index, detected_at),
                 )
 
+    @staticmethod
+    def _product_entry_from_row(row: sqlite3.Row) -> dict[str, str]:
+        """Convert one selective product row to the store query payload shape."""
+
+        return {
+            header: str(row[column] or "")
+            for column, header in _PRODUCT_ENTRY_COLUMNS
+        }
+
+    def get_product_by_ean(self, ean: str) -> dict[str, str] | None:
+        """Return one product by its normalized EAN without materializing lists."""
+
+        self.initialize()
+        ean_key = _product_search_key(ean)
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT product_id, ean, name, type_name, model,
+                       color1, color2, color3, extra
+                FROM product_entries
+                WHERE ean_key = ?
+                ORDER BY rowid
+                LIMIT 2
+                """,
+                (ean_key,),
+            ).fetchall()
+        if _is_real_product_ean_key(ean_key) and len(rows) > 1:
+            raise ProductEanConflictError(
+                ean,
+                tuple(_text(row["product_id"]) for row in rows),
+            )
+        return self._product_entry_from_row(rows[0]) if rows else None
+
+    def get_product_by_id(self, product_id: str) -> dict[str, str] | None:
+        """Return one product by its normalized id without materializing lists."""
+
+        self.initialize()
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT product_id, ean, name, type_name, model,
+                       color1, color2, color3, extra
+                FROM product_entries
+                WHERE product_id_key = ?
+                ORDER BY rowid
+                LIMIT 1
+                """,
+                (_product_search_key(product_id),),
+            ).fetchone()
+        return self._product_entry_from_row(row) if row else None
+
+    def search_product_entries(
+        self, criteria: ProductSearchCriteria, limit: int = 50
+    ) -> list[dict[str, str]]:
+        """Return bounded exact product matches through whitelisted SQL fields."""
+
+        self.initialize()
+        statement, params = self._product_search_statement(criteria, limit=limit)
+        with self.connection() as conn:
+            rows = conn.execute(statement, params).fetchall()
+        return [self._product_entry_from_row(row) for row in rows]
+
+    def _product_search_statement(
+        self,
+        criteria: ProductSearchCriteria,
+        *,
+        limit: int,
+    ) -> tuple[str, list[object]]:
+        """Build the parameterized SQL used by production product search."""
+
+        clauses: list[str] = []
+        params: list[object] = []
+        values = {
+            field: _product_search_key(getattr(criteria, field, ""))
+            for field in _PRODUCT_SEARCH_COLUMNS
+        }
+        identity_field = "product_id" if values["product_id"] else "ean"
+        if values[identity_field]:
+            key_column = _PRODUCT_SEARCH_KEY_COLUMNS[identity_field]
+            clauses.append(f"p.{key_column} = ?")
+            params.append(values[identity_field])
+        else:
+            for field, key_column in _PRODUCT_SEARCH_KEY_COLUMNS.items():
+                if values[field]:
+                    clauses.append(f"p.{key_column} = ?")
+                    params.append(values[field])
+        query_key = _product_search_key(getattr(criteria, "query", ""))
+        use_fts = (
+            bool(query_key)
+            and len(query_key) >= 3
+            and "\x00" not in query_key
+            and self._product_search_fts_available
+        )
+        use_short_fts = (
+            bool(query_key)
+            and not use_fts
+            and self._product_short_search_fts_available
+        )
+        if query_key:
+            if use_fts:
+                clauses.append(f"{_PRODUCT_SEARCH_FTS_TABLE} MATCH ?")
+                params.append(_product_fts_literal(query_key))
+            elif use_short_fts:
+                clauses.append(f"{_PRODUCT_SHORT_SEARCH_FTS_TABLE} MATCH ?")
+                params.append(_product_short_gram_token(query_key))
+            clauses.append(f"instr(p.{_PRODUCT_SEARCH_TEXT_KEY_COLUMN}, ?) > 0")
+            params.append(query_key)
+        where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(_bounded_product_query_limit(limit, 50))
+        candidate_table = (
+            _PRODUCT_SEARCH_FTS_TABLE
+            if use_fts
+            else _PRODUCT_SHORT_SEARCH_FTS_TABLE if use_short_fts else ""
+        )
+        from_clause = (
+            f"{candidate_table} "
+            f"JOIN product_entries AS p ON p.rowid = {candidate_table}.rowid"
+            if candidate_table
+            else "product_entries AS p"
+        )
+        order_column = f"{candidate_table}.rowid" if candidate_table else "p.rowid"
+        statement = f"""
+            SELECT p.product_id, p.ean, p.name, p.type_name, p.model,
+                   p.color1, p.color2, p.color3, p.extra
+            FROM {from_clause}
+            {where_clause}
+            ORDER BY {order_column}
+            LIMIT ?
+        """
+        return statement, params
+
+    def explain_product_search(
+        self,
+        criteria: ProductSearchCriteria,
+        limit: int = 50,
+    ) -> list[str]:
+        """Return the SQLite plan for the exact production search statement."""
+
+        self.initialize()
+        statement, params = self._product_search_statement(criteria, limit=limit)
+        with self.connection() as conn:
+            rows = conn.execute(
+                f"EXPLAIN QUERY PLAN {statement}",
+                params,
+            ).fetchall()
+        return [_text(row["detail"]) for row in rows]
+
+    def suggest_product_field(
+        self,
+        field: str,
+        prefix: str,
+        context: dict[str, str],
+        limit: int = 20,
+    ) -> list[str]:
+        """Suggest bounded, distinct values for one whitelisted product field."""
+
+        field_name = _text(field)
+        column = _PRODUCT_SEARCH_COLUMNS.get(field_name)
+        key_column = _PRODUCT_SEARCH_KEY_COLUMNS.get(field_name)
+        if column is None or key_column is None:
+            return []
+        self.initialize()
+        clauses = [f"{column} <> ''"]
+        prefix_start, prefix_end = _product_prefix_bounds(prefix)
+        params: list[object] = [prefix_start, prefix_end]
+        clauses.append(f"{key_column} >= ? AND {key_column} < ?")
+        context_values = context if isinstance(context, dict) else {}
+        for context_field, context_key_column in _PRODUCT_SEARCH_KEY_COLUMNS.items():
+            value = _product_search_key(context_values.get(context_field))
+            if value:
+                clauses.append(f"{context_key_column} = ?")
+                params.append(value)
+        params.append(_bounded_product_query_limit(limit, 20))
+        with self.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT {column} AS value
+                FROM product_entries
+                WHERE {' AND '.join(clauses)}
+                ORDER BY {key_column}, {column}
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [_text(row["value"]) for row in rows]
+
     def load_lists(self) -> dict[str, Any]:
         """Return data in the same shape as ``prepare_excel_lists``."""
 
@@ -3312,6 +4175,17 @@ class SqliteStore:
             ).fetchall()
         for row in list_rows:
             payload.setdefault(row["list_key"], []).append(row["value"])
+        real_ean_rows: dict[str, list[sqlite3.Row]] = {}
+        for row in entry_rows:
+            ean_key = _product_search_key(row["ean"])
+            if _is_real_product_ean_key(ean_key):
+                real_ean_rows.setdefault(ean_key, []).append(row)
+        for rows in real_ean_rows.values():
+            if len(rows) > 1:
+                raise ProductEanConflictError(
+                    rows[0]["ean"],
+                    tuple(_text(row["product_id"]) for row in rows),
+                )
         records = []
         entries = {}
         for row in entry_rows:
@@ -3345,6 +4219,8 @@ class SqliteStore:
     def save_lists(self, payload: dict[str, object]) -> None:
         """Replace list values and product entries from an Excel-shaped payload."""
 
+        records = payload.get(ENTRY_RECORDS_KEY, []) if isinstance(payload, dict) else []
+        prepared_records = _preflight_bulk_product_entries(records)
         self.initialize()
         with self.connection() as conn:
             conn.execute("DELETE FROM list_values")
@@ -3363,10 +4239,15 @@ class SqliteStore:
                         """,
                         (sheet, cleaned, index),
                     )
-            records = payload.get(ENTRY_RECORDS_KEY, []) if isinstance(payload, dict) else []
-            for record in records if isinstance(records, list) else []:
-                if isinstance(record, dict):
-                    self._save_product_entry_conn(conn, record)
+            for record in prepared_records:
+                self._save_product_entry_conn(conn, record)
+
+    @staticmethod
+    def validate_lists_payload(payload: dict[str, object]) -> None:
+        """Validate bulk product identity data without opening or mutating SQLite."""
+
+        records = payload.get(ENTRY_RECORDS_KEY, []) if isinstance(payload, dict) else []
+        _preflight_bulk_product_entries(records)
 
     def add_list_value(self, sheet: str, value: object) -> bool:
         """Add a normalized value to one list. Return False for duplicates."""
@@ -3439,44 +4320,112 @@ class SqliteStore:
         self, conn: sqlite3.Connection, payload: dict[str, object]
     ) -> dict[str, Any]:
         entry = _entry_payload(payload)
-        product_id = entry[PRODUCT_ID_HEADER] or f"PRD-{uuid.uuid4().hex[:12].upper()}"
+        product_id = entry[PRODUCT_ID_HEADER]
+        ean_key = _product_search_key(entry[EAN_HEADER])
+        ean_owners = []
+        if _is_real_product_ean_key(ean_key):
+            ean_owners = conn.execute(
+                """
+                SELECT rowid, product_id, product_id_key, ean_key
+                FROM product_entries
+                WHERE ean_key = ?
+                ORDER BY rowid
+                LIMIT 3
+                """,
+                (ean_key,),
+            ).fetchall()
+        if not product_id:
+            if len(ean_owners) > 1:
+                raise ProductEanConflictError(
+                    entry[EAN_HEADER],
+                    tuple(_text(row["product_id"]) for row in ean_owners),
+                )
+            if ean_owners:
+                product_id = _text(ean_owners[0]["product_id"])
+            else:
+                product_id = f"PRD-{uuid.uuid4().hex[:12].upper()}"
         entry[PRODUCT_ID_HEADER] = product_id
         existing = conn.execute(
-            "SELECT 1 FROM product_entries WHERE product_id = ?",
+            """
+            SELECT rowid, ean_key
+            FROM product_entries
+            WHERE product_id = ?
+            """,
             (product_id,),
         ).fetchone()
         updated = existing is not None
-        conn.execute(
-            """
-            INSERT INTO product_entries (
-                product_id, ean, name, type_name, model,
-                color1, color2, color3, extra, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(product_id) DO UPDATE SET
-                ean = excluded.ean,
-                name = excluded.name,
-                type_name = excluded.type_name,
-                model = excluded.model,
-                color1 = excluded.color1,
-                color2 = excluded.color2,
-                color3 = excluded.color3,
-                extra = excluded.extra,
-                updated_at = excluded.updated_at
-            """,
-            (
-                entry[PRODUCT_ID_HEADER],
+        if ean_owners and (
+            existing is None or _text(existing["ean_key"]) != ean_key
+        ):
+            raise ProductEanConflictError(
                 entry[EAN_HEADER],
-                entry[NAME_HEADER],
-                entry[TYPE_HEADER],
-                entry[MODEL_HEADER],
-                entry[COLOR1_HEADER],
-                entry[COLOR2_HEADER],
-                entry[COLOR3_HEADER],
-                entry[EXTRA_HEADER],
-                _now_iso(),
-            ),
-        )
+                tuple(_text(row["product_id"]) for row in ean_owners),
+            )
+        try:
+            conn.execute(
+                """
+                INSERT INTO product_entries (
+                    product_id, ean, name, type_name, model,
+                    color1, color2, color3, extra,
+                    product_id_key, ean_key, name_key, type_name_key, model_key,
+                    color1_key, color2_key, color3_key, extra_key, search_text_key,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(product_id) DO UPDATE SET
+                    ean = excluded.ean,
+                    name = excluded.name,
+                    type_name = excluded.type_name,
+                    model = excluded.model,
+                    color1 = excluded.color1,
+                    color2 = excluded.color2,
+                    color3 = excluded.color3,
+                    extra = excluded.extra,
+                    product_id_key = excluded.product_id_key,
+                    ean_key = excluded.ean_key,
+                    name_key = excluded.name_key,
+                    type_name_key = excluded.type_name_key,
+                    model_key = excluded.model_key,
+                    color1_key = excluded.color1_key,
+                    color2_key = excluded.color2_key,
+                    color3_key = excluded.color3_key,
+                    extra_key = excluded.extra_key,
+                    search_text_key = excluded.search_text_key,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    entry[PRODUCT_ID_HEADER],
+                    entry[EAN_HEADER],
+                    entry[NAME_HEADER],
+                    entry[TYPE_HEADER],
+                    entry[MODEL_HEADER],
+                    entry[COLOR1_HEADER],
+                    entry[COLOR2_HEADER],
+                    entry[COLOR3_HEADER],
+                    entry[EXTRA_HEADER],
+                    _product_search_key(entry[PRODUCT_ID_HEADER]),
+                    ean_key,
+                    _product_search_key(entry[NAME_HEADER]),
+                    _product_search_key(entry[TYPE_HEADER]),
+                    _product_search_key(entry[MODEL_HEADER]),
+                    _product_search_key(entry[COLOR1_HEADER]),
+                    _product_search_key(entry[COLOR2_HEADER]),
+                    _product_search_key(entry[COLOR3_HEADER]),
+                    _product_search_key(entry[EXTRA_HEADER]),
+                    " ".join(
+                        _product_search_key(entry[header])
+                        for _column, header in _PRODUCT_ENTRY_COLUMNS
+                    ),
+                    _now_iso(),
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            if (
+                _PRODUCT_EAN_CONFLICT_TRIGGER_MESSAGE in str(exc)
+                or "product_entries.ean_key" in str(exc)
+            ):
+                raise ProductEanConflictError(entry[EAN_HEADER]) from exc
+            raise
         return {"updated": updated, "product_id": product_id, "entry": entry}
 
     def save_product_entry(self, payload: dict[str, object]) -> dict[str, Any]:
@@ -3968,70 +4917,208 @@ class SqliteStore:
     def load_file_index_cache(self, key: str = "default") -> dict[str, Any]:
         """Return stored local file index cache payload."""
 
-        self.initialize()
-        with self.connection() as conn:
-            row = conn.execute(
-                "SELECT payload_json FROM file_index_cache WHERE cache_key = ?",
-                (_text(key) or "default",),
-            ).fetchone()
-        if not row:
-            return {}
-        payload = _json_loads(row["payload_json"], {})
-        return dict(payload) if isinstance(payload, dict) else {}
+        generation = self.load_file_index_generation(key)
+        return dict(generation.snapshot or {}) if generation is not None else {}
 
     def save_file_index_cache(
-        self, payload: dict[str, object], key: str = "default"
+        self,
+        payload: dict[str, object],
+        key: str = "default",
+        *,
+        reused_segment_keys: tuple[str, ...] = (),
     ) -> None:
         """Store local file index cache payload."""
 
-        self.initialize()
         snapshot = dict(payload or {})
         snapshot["generated_at"] = _iso_from_timestamp(snapshot.get("generated_at"))
+        generation = FileIndexGeneration(
+            cache_key=_text(key) or "default",
+            generation_id=uuid.uuid4().hex,
+            root=_text(snapshot.get("root")),
+            version=int(snapshot.get("version") or 0),
+            generated_at=snapshot["generated_at"],
+            complete=False,
+            dirs_scanned=int(snapshot.get("dirs_scanned") or 0),
+            products_scanned=int(snapshot.get("products_scanned") or 0),
+        )
+        self.commit_file_index_generation(
+            generation,
+            snapshot_to_segments(snapshot),
+            reused_segment_keys=reused_segment_keys,
+        )
+
+    def commit_file_index_generation(
+        self,
+        generation: FileIndexGeneration,
+        segments: list[FileIndexSegment],
+        *,
+        reused_segment_keys: tuple[str, ...] = (),
+    ) -> None:
+        """Atomically replace a cache key with one complete segment generation."""
+
+        self.initialize()
+        rows = [
+            (
+                generation.generation_id,
+                segment.segment_key,
+                segment.section,
+                segment.lookup_key,
+                _json_dumps(segment.payload),
+                generation.generated_at,
+            )
+            for segment in segments
+        ]
+        reusable_keys = tuple(
+            sorted({normalize_segment_key(segment_key) for segment_key in reused_segment_keys})
+        )
         with self.connection() as conn:
+            previous_generation_id = None
+            if reusable_keys:
+                previous = conn.execute(
+                    """
+                    SELECT generation_id FROM file_index_generations
+                    WHERE cache_key = ? AND complete = 1
+                    ORDER BY generated_at DESC
+                    LIMIT 1
+                    """,
+                    (generation.cache_key,),
+                ).fetchone()
+                if previous is not None:
+                    previous_generation_id = str(previous["generation_id"])
             conn.execute(
                 """
-                INSERT INTO file_index_cache (cache_key, payload_json, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(cache_key) DO UPDATE SET
-                    payload_json = excluded.payload_json,
-                    updated_at = excluded.updated_at
+                INSERT INTO file_index_generations
+                    (cache_key, generation_id, root, version, generated_at,
+                     dirs_scanned, products_scanned, complete)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0)
                 """,
                 (
-                    _text(key) or "default",
-                    _json_dumps(snapshot),
-                    snapshot["generated_at"],
+                    generation.cache_key,
+                    generation.generation_id,
+                    generation.root,
+                    generation.version,
+                    generation.generated_at,
+                    generation.dirs_scanned,
+                    generation.products_scanned,
                 ),
             )
-        self.save_file_index_segments(snapshot)
+            if previous_generation_id is not None:
+                key_markers = ", ".join("?" for _key in reusable_keys)
+                conn.execute(
+                    """
+                    INSERT INTO file_index_segments
+                        (generation_id, segment_key, section, lookup_key, payload_json, updated_at)
+                    SELECT ?, segment_key, section, lookup_key, payload_json, ?
+                    FROM file_index_segments
+                    WHERE generation_id = ? AND segment_key IN ("""
+                    + key_markers
+                    + ")",
+                    (
+                        generation.generation_id,
+                        generation.generated_at,
+                        previous_generation_id,
+                        *reusable_keys,
+                    ),
+                )
+                reusable_set = set(reusable_keys)
+                rows = [row for row in rows if row[1] not in reusable_set]
+            conn.executemany(
+                """
+                INSERT INTO file_index_segments
+                    (generation_id, segment_key, section, lookup_key, payload_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            conn.execute(
+                """
+                UPDATE file_index_generations SET complete = 1
+                WHERE cache_key = ? AND generation_id = ?
+                """,
+                (generation.cache_key, generation.generation_id),
+            )
+            conn.execute(
+                """
+                DELETE FROM file_index_generations
+                WHERE cache_key = ? AND generation_id <> ?
+                """,
+                (generation.cache_key, generation.generation_id),
+            )
+            conn.execute(
+                "DELETE FROM file_index_cache WHERE cache_key = ?",
+                (generation.cache_key,),
+            )
+
+    def load_file_index_generation(
+        self, key: str = "default"
+    ) -> FileIndexGeneration | None:
+        """Load the current complete generation, migrating a legacy blob once."""
+
+        self.initialize()
+        cache_key = _text(key) or "default"
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT cache_key, generation_id, root, version, generated_at,
+                       dirs_scanned, products_scanned, complete
+                FROM file_index_generations
+                WHERE cache_key = ? AND complete = 1
+                ORDER BY generated_at DESC
+                LIMIT 1
+                """,
+                (cache_key,),
+            ).fetchone()
+            legacy = None
+            if row is None:
+                legacy = conn.execute(
+                    "SELECT payload_json FROM file_index_cache WHERE cache_key = ?",
+                    (cache_key,),
+                ).fetchone()
+            if row is not None:
+                segment_rows = conn.execute(
+                    """
+                    SELECT segment_key, section, lookup_key, payload_json
+                    FROM file_index_segments WHERE generation_id = ?
+                    """,
+                    (row["generation_id"],),
+                ).fetchall()
+        if row is None and legacy is not None:
+            snapshot = _json_loads(legacy["payload_json"], {})
+            if not isinstance(snapshot, dict):
+                return None
+            self.save_file_index_cache(snapshot, cache_key)
+            return self.load_file_index_generation(cache_key)
+        if row is None:
+            return None
+        generation = FileIndexGeneration(
+            cache_key=str(row["cache_key"]),
+            generation_id=str(row["generation_id"]),
+            root=str(row["root"]),
+            version=int(row["version"]),
+            generated_at=str(row["generated_at"]),
+            complete=bool(row["complete"]),
+            dirs_scanned=int(row["dirs_scanned"]),
+            products_scanned=int(row["products_scanned"]),
+        )
+        segments = [
+            FileIndexSegment(
+                segment_key=str(item["segment_key"]),
+                section=str(item["section"]),
+                lookup_key=str(item["lookup_key"]),
+                payload=_json_loads(item["payload_json"], None),
+            )
+            for item in segment_rows
+        ]
+        snapshot = segments_to_snapshot(generation, segments)
+        return FileIndexGeneration(
+            **{**generation.__dict__, "snapshot": snapshot}
+        )
 
     def save_file_index_segments(self, snapshot: dict[str, object]) -> int:
         """Store segmented lookup rows for the local file index cache."""
 
-        self.initialize()
-        generated_at = _iso_from_timestamp(snapshot.get("generated_at"))
-        rows = []
-        names = snapshot.get("names", [])
-        for name in names if isinstance(names, list) else []:
-            rows.append((_segment_key(name), "names", _upper(name), name))
-        for section in ("types", "models", "colors", "extras", "files"):
-            section_payload = snapshot.get(section, {})
-            if not isinstance(section_payload, dict):
-                continue
-            for lookup_key, value in section_payload.items():
-                segment = _segment_key(str(lookup_key).split("\x1f", 1)[0])
-                rows.append((segment, section, str(lookup_key), value))
-        with self.connection() as conn:
-            conn.execute("DELETE FROM file_index_segments")
-            for segment, section, lookup_key, value in rows:
-                conn.execute(
-                    """
-                    INSERT INTO file_index_segments
-                        (segment_key, section, lookup_key, payload_json, updated_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (segment, section, lookup_key, _json_dumps(value), generated_at),
-                )
-        return len(rows)
+        self.save_file_index_cache(snapshot)
+        return len(snapshot_to_segments(snapshot))
 
     def load_file_index_segment(self, segment_key: str, section: str, lookup_key: str):
         """Return one segmented local file index payload, or None."""
@@ -4040,8 +5127,14 @@ class SqliteStore:
         with self.connection() as conn:
             row = conn.execute(
                 """
-                SELECT payload_json FROM file_index_segments
-                WHERE segment_key = ? AND section = ? AND lookup_key = ?
+                SELECT segment.payload_json FROM file_index_segments AS segment
+                JOIN file_index_generations AS generation
+                    ON generation.generation_id = segment.generation_id
+                WHERE generation.cache_key = 'default' AND generation.complete = 1
+                    AND segment.segment_key = ? AND segment.section = ?
+                    AND segment.lookup_key = ?
+                ORDER BY generation.generated_at DESC
+                LIMIT 1
                 """,
                 (
                     _segment_key(segment_key) if segment_key else "_",

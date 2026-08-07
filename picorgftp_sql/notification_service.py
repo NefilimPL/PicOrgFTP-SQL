@@ -19,12 +19,14 @@ from .email_settings import (
     normalize_email_settings,
 )
 from .entra_secret_monitor import process_due_entra_secret_reminders
+from .notification_scheduler import WakeableDeadlineScheduler
 from .redaction import sanitize_free_text
 
 
-WORKER_POLL_SECONDS = 2.0
+WORKER_MAX_IDLE_SECONDS = 60.0
 WORKER_BATCH_LIMIT = 20
 WORKER_STOP_TIMEOUT_SECONDS = 23.0
+WORKER_PRUNE_INTERVAL = timedelta(seconds=60)
 STALE_SENDING_AFTER = timedelta(minutes=5)
 OUTBOX_DONE_RETENTION = timedelta(days=7)
 DAILY_SUMMARY_TIME_ZONE = ZoneInfo("Europe/Warsaw")
@@ -1393,6 +1395,62 @@ _WORKER_THREAD: threading.Thread | None = None
 _WORKER_SERVICE: NotificationService | None = None
 _WORKER_OBSERVED_AT = ""
 _WORKER_LAST_ENTRA_MONITOR_AT: datetime | None = None
+_WORKER_SCHEDULER = WakeableDeadlineScheduler(
+    max_idle_seconds=WORKER_MAX_IDLE_SECONDS
+)
+
+
+def wake_notification_worker() -> None:
+    """Wake the worker so it can re-read durable notification state."""
+
+    _WORKER_SCHEDULER.wake()
+
+
+def _next_daily_summary_at(
+    service: NotificationService, now: datetime
+) -> datetime | None:
+    try:
+        schedule = _text(service._settings().get("daily_summary_time", "16:00"), 5)
+    except Exception:
+        return None
+    if (
+        len(schedule) != 5
+        or schedule[2] != ":"
+        or not (schedule[:2] + schedule[3:]).isdigit()
+    ):
+        return None
+    hour, minute = int(schedule[:2]), int(schedule[3:])
+    if hour > 23 or minute > 59:
+        return None
+    current = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    local = current.astimezone(DAILY_SUMMARY_TIME_ZONE)
+    scheduled = local.replace(
+        hour=hour, minute=minute, second=0, microsecond=0, fold=0
+    )
+    if local >= scheduled:
+        scheduled += timedelta(days=1)
+    return scheduled.astimezone(timezone.utc)
+
+
+def _worker_delay_seconds(
+    service: NotificationService,
+    *,
+    now: datetime,
+    next_prune_at: datetime,
+) -> float:
+    current = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    deadlines = [next_prune_at]
+    try:
+        due_at = _parse_utc(service.store.next_notification_due_at())
+    except Exception:
+        due_at = None
+    if due_at is not None:
+        deadlines.append(due_at)
+    daily_at = _next_daily_summary_at(service, current)
+    if daily_at is not None:
+        deadlines.append(daily_at)
+    return max(0.0, min((deadline - current).total_seconds() for deadline in deadlines))
 
 
 def _worker_loop(service: NotificationService, stop_event: threading.Event) -> None:
@@ -1415,7 +1473,21 @@ def _worker_loop(service: NotificationService, stop_event: threading.Event) -> N
         except Exception:
             # Queue processing is isolated from the web/product request paths.
             pass
-        if stop_event.wait(WORKER_POLL_SECONDS):
+        wait_generation = _WORKER_SCHEDULER.capture_generation()
+        cycle_finished_at = _utc_now()
+        delay = _worker_delay_seconds(
+            service,
+            now=cycle_finished_at,
+            next_prune_at=cycle_finished_at + WORKER_PRUNE_INTERVAL,
+        )
+        if (
+            _WORKER_SCHEDULER.wait(
+                stop_event,
+                delay,
+                since_generation=wait_generation,
+            )
+            == "stop"
+        ):
             break
 
 
@@ -1464,6 +1536,7 @@ def stop_notification_worker() -> None:
         stop_event = _WORKER_STOP
         if stop_event is not None:
             stop_event.set()
+            wake_notification_worker()
     if thread is not None and thread.is_alive():
         thread.join(timeout=WORKER_STOP_TIMEOUT_SECONDS)
     with _WORKER_LOCK:

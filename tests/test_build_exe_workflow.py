@@ -11,6 +11,7 @@ CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 WEB_REQUIREMENTS = ROOT / "requirements-web.txt"
 BUILD_REQUIREMENTS = ROOT / "requirements-build.txt"
 EMAIL_DELIVERY = ROOT / "picorgftp_sql" / "email_delivery.py"
+BUILD_COMMON = ROOT / "Generator exe" / "build_common.ps1"
 
 
 def workflow_source() -> str:
@@ -106,6 +107,19 @@ def test_web_build_installs_msal_before_static_pyinstaller_analysis() -> None:
     )
     assert "--collect-submodules picorgftp_sql" in source
     assert "import msal" in delivery_source
+
+
+def test_web_build_explicitly_packages_all_composition_static_assets() -> None:
+    source = BUILD_COMMON.read_text(encoding="utf-8")
+
+    for asset in (
+        "latest-request.js",
+        "autocomplete.js",
+        "runtime-status.js",
+        "process-jobs.js",
+        "app.js",
+    ):
+        assert asset in source
 
 
 def test_artifact_uploads_are_guarded_by_probe_and_non_fatal_per_target() -> None:

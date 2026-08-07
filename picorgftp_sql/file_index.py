@@ -9,6 +9,11 @@ import threading
 import time
 from datetime import datetime, timezone
 
+from .file_index_segments import (
+    DirectoryFingerprint,
+    normalize_segment_key,
+    scan_changed_segments,
+)
 from .workflow_utils import (
     build_color_segment,
     normalize_extra_segment,
@@ -16,6 +21,7 @@ from .workflow_utils import (
 )
 
 INDEX_VERSION = 1
+FILE_INDEX_CACHE_TTL_SECONDS = 15 * 60
 KEY_SEPARATOR = "\x1f"
 NO_EXTRA_VALUE = "NO-LED"
 
@@ -24,6 +30,23 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
         "+00:00", "Z"
     )
+
+
+def _canonical_path(value: object) -> str:
+    return os.path.realpath(os.path.abspath(str(value or "")))
+
+
+def _generated_at_epoch(value: object) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        timestamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if timestamp.tzinfo is None:
+        return None
+    return timestamp.timestamp()
 
 
 def _directory_names(path: str) -> list[str]:
@@ -78,6 +101,73 @@ def _normalize_extra_key(value: object) -> str:
     return normalize_extra_segment(value, fallback=NO_EXTRA_VALUE)
 
 
+def _fingerprints_from_snapshot(snapshot: object) -> dict[str, DirectoryFingerprint]:
+    if not isinstance(snapshot, dict):
+        return {}
+    raw_fingerprints = snapshot.get("fingerprints")
+    if not isinstance(raw_fingerprints, dict):
+        return {}
+    fingerprints: dict[str, DirectoryFingerprint] = {}
+    for segment_key, raw_value in raw_fingerprints.items():
+        if not isinstance(raw_value, dict):
+            continue
+        try:
+            fingerprints[str(segment_key)] = DirectoryFingerprint(
+                canonical_path=str(raw_value["canonical_path"]),
+                mtime_ns=int(raw_value["mtime_ns"]),
+                entry_count=int(raw_value["entry_count"]),
+                parser_version=int(raw_value["parser_version"]),
+                reliable=bool(raw_value.get("reliable", True)),
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return fingerprints
+
+
+def _fingerprints_to_snapshot(
+    fingerprints: dict[str, DirectoryFingerprint],
+) -> dict[str, dict[str, object]]:
+    return {
+        segment_key: {
+            "canonical_path": fingerprint.canonical_path,
+            "mtime_ns": fingerprint.mtime_ns,
+            "entry_count": fingerprint.entry_count,
+            "parser_version": fingerprint.parser_version,
+            "reliable": fingerprint.reliable,
+        }
+        for segment_key, fingerprint in fingerprints.items()
+    }
+
+
+def _copy_snapshot_segment(
+    snapshot: dict,
+    segment_key: str,
+    names: list,
+    types: dict,
+    models: dict,
+    colors: dict,
+    extras: dict,
+    files: dict,
+) -> None:
+    for name in snapshot.get("names", []):
+        if normalize_segment_key(name) == segment_key:
+            names.append(name)
+    for section, target in (
+        ("types", types),
+        ("models", models),
+        ("colors", colors),
+        ("extras", extras),
+        ("files", files),
+    ):
+        source = snapshot.get(section, {})
+        if not isinstance(source, dict):
+            continue
+        for lookup_key, payload in source.items():
+            name_key = str(lookup_key).split(KEY_SEPARATOR, 1)[0]
+            if normalize_segment_key(name_key) == segment_key:
+                target[lookup_key] = payload
+
+
 class LocalFileIndex:
     """Cache the local product directory tree for faster GUI lookups."""
 
@@ -88,7 +178,7 @@ class LocalFileIndex:
         status_callback=None,
         cache_store=None,
     ):
-        self.root_dir = os.path.abspath(root_dir)
+        self.root_dir = _canonical_path(root_dir)
         self.cache_path = os.path.abspath(cache_path)
         self._cache_store = cache_store
         self._status_callback = status_callback
@@ -133,9 +223,17 @@ class LocalFileIndex:
             error="",
         )
 
-    def _write_cache(self, snapshot: dict) -> None:
+    def _write_cache(
+        self,
+        snapshot: dict,
+        *,
+        reused_segment_keys: tuple[str, ...] = (),
+    ) -> None:
         if self._cache_store is not None:
-            self._cache_store.save_file_index_cache(snapshot)
+            self._cache_store.save_file_index_cache(
+                snapshot,
+                reused_segment_keys=reused_segment_keys,
+            )
             return
         directory = os.path.dirname(self.cache_path) or "."
         os.makedirs(directory, exist_ok=True)
@@ -155,7 +253,9 @@ class LocalFileIndex:
                 except OSError:
                     pass
 
-    def _build_snapshot(self) -> dict:
+    def _build_snapshot(
+        self, previous_snapshot: dict | None = None
+    ) -> tuple[dict, tuple[str, ...]]:
         names = []
         types = {}
         models = {}
@@ -165,6 +265,13 @@ class LocalFileIndex:
         dirs_scanned = 0
         products_scanned = 0
         last_progress_push = 0.0
+        previous_fingerprints = _fingerprints_from_snapshot(previous_snapshot)
+        refresh = scan_changed_segments(
+            self.root_dir,
+            previous_fingerprints,
+            parser_version=INDEX_VERSION,
+        )
+        reused_segment_keys = set(refresh.reused_segment_keys)
 
         def _report_progress(force: bool = False) -> None:
             nonlocal last_progress_push
@@ -179,21 +286,41 @@ class LocalFileIndex:
             )
 
         if not os.path.isdir(self.root_dir):
-            return {
-                "version": INDEX_VERSION,
-                "root": self.root_dir,
-                "generated_at": _now_iso(),
-                "dirs_scanned": 0,
-                "products_scanned": 0,
-                "names": [],
-                "types": {},
-                "models": {},
-                "colors": {},
-                "extras": {},
-                "files": {},
-            }
+            return (
+                {
+                    "version": INDEX_VERSION,
+                    "root": self.root_dir,
+                    "generated_at": _now_iso(),
+                    "dirs_scanned": 0,
+                    "products_scanned": 0,
+                    "names": [],
+                    "types": {},
+                    "models": {},
+                    "colors": {},
+                    "extras": {},
+                    "files": {},
+                    "fingerprints": {},
+                },
+                (),
+            )
 
         for name_dir in _directory_names(self.root_dir):
+            segment_key = normalize_segment_key(name_dir)
+            if (
+                segment_key in reused_segment_keys
+                and isinstance(previous_snapshot, dict)
+            ):
+                _copy_snapshot_segment(
+                    previous_snapshot,
+                    segment_key,
+                    names,
+                    types,
+                    models,
+                    colors,
+                    extras,
+                    files,
+                )
+                continue
             dirs_scanned += 1
             name_path = os.path.join(self.root_dir, name_dir)
             name_key = _normalize_name_key(name_dir)
@@ -255,19 +382,23 @@ class LocalFileIndex:
                 models[_join_key(name_key, type_key)] = model_values
             types[name_key] = type_values
         _report_progress(force=True)
-        return {
-            "version": INDEX_VERSION,
-            "root": self.root_dir,
-            "generated_at": _now_iso(),
-            "dirs_scanned": dirs_scanned,
-            "products_scanned": products_scanned,
-            "names": names,
-            "types": types,
-            "models": models,
-            "colors": colors,
-            "extras": extras,
-            "files": files,
-        }
+        return (
+            {
+                "version": INDEX_VERSION,
+                "root": self.root_dir,
+                "generated_at": _now_iso(),
+                "dirs_scanned": dirs_scanned,
+                "products_scanned": products_scanned,
+                "names": names,
+                "types": types,
+                "models": models,
+                "colors": colors,
+                "extras": extras,
+                "files": files,
+                "fingerprints": _fingerprints_to_snapshot(refresh.fingerprints),
+            },
+            refresh.reused_segment_keys,
+        )
 
     def load_cache(self) -> bool:
         """Load a previously saved snapshot if it matches the active root."""
@@ -284,7 +415,7 @@ class LocalFileIndex:
             return False
         if snapshot.get("version") != INDEX_VERSION:
             return False
-        if os.path.abspath(snapshot.get("root", "")) != self.root_dir:
+        if _canonical_path(snapshot.get("root", "")) != self.root_dir:
             return False
         for key in ("names", "types", "models", "colors", "extras", "files"):
             if key not in snapshot:
@@ -292,14 +423,44 @@ class LocalFileIndex:
         self._replace_snapshot(snapshot, state="cached", cache_loaded=True)
         return True
 
+    def cache_is_fresh(self, *, now: float | None = None) -> bool:
+        """Return whether the loaded snapshot still falls inside the cache TTL."""
+        with self._lock:
+            snapshot = self._snapshot
+        if not isinstance(snapshot, dict):
+            return False
+        if snapshot.get("version") != INDEX_VERSION:
+            return False
+        if _canonical_path(snapshot.get("root", "")) != self.root_dir:
+            return False
+        generated_at = _generated_at_epoch(snapshot.get("generated_at"))
+        if generated_at is None:
+            return False
+        checked_at = time.time() if now is None else float(now)
+        age_seconds = checked_at - generated_at
+        return 0 <= age_seconds < FILE_INDEX_CACHE_TTL_SECONDS
+
+    def refresh_if_stale(
+        self,
+        *,
+        force: bool = False,
+        now: float | None = None,
+    ) -> bool:
+        """Start a rebuild only when no compatible fresh snapshot is available."""
+        if not force and self.cache_is_fresh(now=now):
+            return False
+        return self.refresh_async()
+
     def refresh_sync(self) -> bool:
         """Rebuild the snapshot immediately and persist it to disk."""
 
         cache_loaded = self.get_status().get("cache_loaded", False)
         self._emit_status(state="refreshing", error="")
         try:
-            snapshot = self._build_snapshot()
-            self._write_cache(snapshot)
+            with self._lock:
+                previous_snapshot = dict(self._snapshot or {})
+            snapshot, reused_segment_keys = self._build_snapshot(previous_snapshot)
+            self._write_cache(snapshot, reused_segment_keys=reused_segment_keys)
         except Exception as exc:
             self._emit_status(state="error", error=str(exc))
             return False

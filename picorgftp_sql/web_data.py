@@ -54,6 +54,7 @@ from .common import (
     w,
 )
 from .config import save_config
+from .data_store import get_active_store
 from .email_settings import (
     EMAIL_CLIENT_SECRET,
     EMAIL_SETTINGS_KEY,
@@ -95,6 +96,11 @@ from .services.pimcore_sql_service import (
     connect_profile,
     execute_sql_value_query,
 )
+from .services.sql_execution_context import SqlExecutionContext
+from .services.template_execution import (
+    classify_template_operation,
+    execute_independent_operations,
+)
 from .file_index import LocalFileIndex
 from .pimcore_config import (
     PIMCORE_API_KEY,
@@ -122,11 +128,12 @@ from .services.pimcore_service import (
     discover_folders,
     fetch_product_for_edit,
     find_product_by_ean,
+    pimcore_client_scope,
     run_settings_test,
     run_test_create,
     update_product,
 )
-from .services.translation_service import translate_text
+from .services.translation_service import clear_translation_cache, translate_text
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
 from .sql_profiles import (
     DEFAULT_SQL_PROFILE_ID,
@@ -142,6 +149,7 @@ from .product_fields import (
     missing_required_fields,
     normalize_product_fields,
 )
+from .product_queries import ProductSearchCriteria
 
 from .workflow_utils import (
     build_product_directory,
@@ -400,7 +408,7 @@ def _get_file_index(*, start: bool = False) -> LocalFileIndex | None:
         _FILE_INDEX_KEY = key
         _FILE_INDEX_REFRESH_STARTED = False
     if start and _FILE_INDEX is not None and not _FILE_INDEX_REFRESH_STARTED:
-        _FILE_INDEX.refresh_async()
+        _FILE_INDEX.refresh_if_stale()
         _FILE_INDEX_REFRESH_STARTED = True
     return _FILE_INDEX
 
@@ -465,7 +473,7 @@ def refresh_file_index() -> dict[str, object]:
 
     index = _get_file_index(start=False)
     if index is not None:
-        index.refresh_async()
+        index.refresh_if_stale(force=True)
     return file_index_status()
 
 
@@ -948,17 +956,53 @@ def _dedupe(values: list[object], *, limit: int = 200) -> list[str]:
     return result
 
 
-def field_suggestions(field: str, payload: dict[str, object]) -> list[str]:
+PRODUCT_QUERY_MAX_LIMIT = 100
+
+
+def _bounded_product_query_limit(limit: object, *, default: int) -> int:
+    """Return a positive, server-bounded product query limit."""
+
+    try:
+        requested = int(limit)
+    except (TypeError, ValueError):
+        requested = default
+    return max(1, min(requested, PRODUCT_QUERY_MAX_LIMIT))
+
+
+def _product_suggestion_context(field: str, payload: dict[str, object]) -> dict[str, str]:
+    """Return the non-target product fields that narrow a suggestion query."""
+
+    return {
+        key: "" if key == field else _text(payload.get(key))
+        for key in ("product_id", "ean", "name", "type_name", "model")
+    }
+
+
+def field_suggestions(
+    field: str,
+    payload: dict[str, object],
+    *,
+    limit: int = PRODUCT_QUERY_MAX_LIMIT,
+) -> list[str]:
     """Return context-aware suggestions, with existing product data first."""
 
-    lists = prepare_excel_lists()
-    entries = [_entry_from_record(item) for item in lists.get(ENTRY_RECORDS_KEY, [])]
+    store = get_active_store()
+    bounded_limit = _bounded_product_query_limit(limit, default=PRODUCT_QUERY_MAX_LIMIT)
+    prefix = _text(payload.get(field))
+    context = _product_suggestion_context(field, payload)
     name = _text(payload.get("name"))
     type_name = _text(payload.get("type_name"))
     model = _text(payload.get("model"))
     colors = [_text(payload.get("color1")), _text(payload.get("color2")), _text(payload.get("color3"))]
     extra = _text(payload.get("extra"))
-    existing: list[object] = []
+    existing: list[object] = store.suggest_product_field(
+        field,
+        prefix,
+        context,
+        limit=bounded_limit,
+    )
+    workbook: list[object] = []
+    entries: list[WebEntry] = []
 
     def _entry_context(entry: WebEntry, *, through: str) -> bool:
         if through in {"type_name", "model", "color", "extra"} and name and not _matches_field(entry.name, name):
@@ -972,45 +1016,57 @@ def field_suggestions(field: str, payload: dict[str, object]) -> list[str]:
     index = _get_file_index(start=True)
     if field == "name":
         if index is not None and index.has_snapshot():
-            existing.extend(index.get_names())
-        existing.extend(entry.name for entry in entries)
-        workbook = lists.get(LIST_SHEETS["names"], [])
+            existing = [*index.get_names(), *existing]
+        workbook_key = "names"
     elif field == "type_name":
         if index is not None and index.has_snapshot():
             indexed = index.get_types(name)
             if indexed:
-                existing.extend(indexed)
-        existing.extend(entry.type_name for entry in entries if _entry_context(entry, through="type_name"))
-        workbook = lists.get(LIST_SHEETS["types"], [])
+                existing = [*indexed, *existing]
+        workbook_key = "types"
     elif field == "model":
         if index is not None and index.has_snapshot():
             indexed = index.get_models(name, type_name)
             if indexed:
-                existing.extend(indexed)
-        existing.extend(entry.model for entry in entries if _entry_context(entry, through="model"))
-        workbook = lists.get(LIST_SHEETS["models"], [])
+                existing = [*indexed, *existing]
+        workbook_key = "models"
     elif field in {"color1", "color2", "color3"}:
         if index is not None and index.has_snapshot():
             indexed = index.get_colors(name, type_name, model)
             if indexed:
+                indexed_colors = []
                 for item in indexed:
-                    existing.extend(str(item).replace("_", "-").split("-"))
-        for entry in entries:
-            if _entry_context(entry, through="color"):
-                existing.extend([entry.color1, entry.color2, entry.color3])
-        workbook = lists.get(LIST_SHEETS["colors"], [])
+                    indexed_colors.extend(str(item).replace("_", "-").split("-"))
+                existing = [*indexed_colors, *existing]
+        workbook_key = "colors"
     elif field == "extra":
         if index is not None and index.has_snapshot():
             indexed = index.get_extras(name, type_name, model, colors)
             if indexed:
-                existing.extend(indexed)
-        existing.extend(entry.extra for entry in entries if _entry_context(entry, through="extra"))
-        workbook = lists.get(LIST_SHEETS["extras"], [])
+                existing = [*indexed, *existing]
+        workbook_key = "extras"
     else:
-        workbook = []
+        workbook_key = ""
+
+    if getattr(store, "mode", "") != storage_settings.DATA_MODE_SQLITE:
+        lists = prepare_excel_lists()
+        entries = [_entry_from_record(item) for item in lists.get(ENTRY_RECORDS_KEY, [])]
+        if field in {"color1", "color2", "color3"}:
+            existing.extend(
+                color
+                for entry in entries
+                if _entry_context(entry, through="color")
+                for color in (entry.color1, entry.color2, entry.color3)
+            )
+        elif field == "extra":
+            existing.extend(
+                entry.extra for entry in entries if _entry_context(entry, through="extra")
+            )
+        if workbook_key:
+            workbook = list(lists.get(LIST_SHEETS[workbook_key], []) or [])
     if field == "extra" and not extra:
         existing.insert(0, "NO-LED")
-    return _dedupe([*existing, *list(workbook or [])])
+    return _dedupe([*existing, *workbook], limit=bounded_limit)
 
 
 def _public_user(user: dict[str, object]) -> dict[str, object]:
@@ -1451,57 +1507,30 @@ def search_entries(
 ) -> list[dict[str, str]]:
     """Search saved product entries by EAN, product id or form fields."""
 
-    entries = [_entry_from_record(item) for item in prepare_excel_lists().get(ENTRY_RECORDS_KEY, [])]
-    ean_norm = _norm(ean)
-    product_id_norm = _norm(product_id)
-    query_norm = _norm(query)
-    matches: list[WebEntry] = []
-    for entry in entries:
-        if product_id_norm and _norm(entry.product_id) != product_id_norm:
-            continue
-        if ean_norm and _norm(entry.ean) != ean_norm:
-            continue
-        if not _matches_field(entry.name, name):
-            continue
-        if not _matches_field(entry.type_name, type_name):
-            continue
-        if not _matches_field(entry.model, model):
-            continue
-        if query_norm:
-            haystack = _norm(
-                " ".join(
-                    [
-                        entry.product_id,
-                        entry.ean,
-                        entry.name,
-                        entry.type_name,
-                        entry.model,
-                        entry.color1,
-                        entry.color2,
-                        entry.color3,
-                        entry.extra,
-                    ]
-                )
-            )
-            if query_norm not in haystack:
-                continue
-        matches.append(entry)
-        if len(matches) >= limit:
-            break
-    return [entry_to_payload(entry) for entry in matches]
+    bounded_limit = _bounded_product_query_limit(limit, default=30)
+    criteria = ProductSearchCriteria(
+        ean=ean,
+        product_id=product_id,
+        name=name,
+        type_name=type_name,
+        model=model,
+        query=query,
+    )
+    records = get_active_store().search_product_entries(criteria, limit=bounded_limit)
+    return [entry_to_payload(_entry_from_record(record)) for record in records]
 
 
 def find_entry_by_identity(*, product_id: str = "", ean: str = "") -> dict[str, str] | None:
     """Return one saved entry by product id or EAN."""
 
+    store = get_active_store()
+    record = None
     if _text(product_id):
-        matches = search_entries(product_id=product_id, limit=1)
-        if matches:
-            return matches[0]
-    if _text(ean) and _text(ean).upper() != NO_EAN_PLACEHOLDER:
-        matches = search_entries(ean=ean, limit=1)
-        if matches:
-            return matches[0]
+        record = store.get_product_by_id(product_id)
+    elif _text(ean) and _text(ean).upper() != NO_EAN_PLACEHOLDER:
+        record = store.get_product_by_ean(ean)
+    if record:
+        return entry_to_payload(_entry_from_record(record))
     return None
 
 
@@ -1523,9 +1552,7 @@ def save_web_entry(payload: dict[str, object]) -> dict[str, object]:
         )
     product_id = _text(payload.get("product_id"))
     ean = _text(payload.get("ean"))
-    existing = find_entry_by_identity(product_id=product_id) if product_id else None
-    if existing is None and ean and ean.upper() != NO_EAN_PLACEHOLDER:
-        existing = find_entry_by_identity(ean=ean)
+    existing = find_entry_by_identity(product_id=product_id, ean=ean)
     if existing:
         product_id = product_id or _text(existing.get("product_id"))
         if field_settings["ean"]["enabled"] and not ean and _text(existing.get("ean")):
@@ -1729,17 +1756,20 @@ def _merged_pimcore_settings(overrides: object = None) -> dict[str, object]:
 
 def discover_pimcore_classes(overrides: object = None) -> dict[str, object]:
     settings_payload = _merged_pimcore_settings(overrides)
-    return {"items": discover_classes(PimcoreClient(settings_payload))}
+    with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+        return {"items": discover_classes(client)}
 
 
 def discover_pimcore_fields(overrides: object, class_id: object) -> dict[str, object]:
     settings_payload = _merged_pimcore_settings(overrides)
-    return {"items": discover_fields(PimcoreClient(settings_payload), class_id)}
+    with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+        return {"items": discover_fields(client, class_id)}
 
 
 def discover_pimcore_folders(overrides: object = None) -> dict[str, object]:
     settings_payload = _merged_pimcore_settings(overrides)
-    return {"items": discover_folders(PimcoreClient(settings_payload))}
+    with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+        return {"items": discover_folders(client)}
 
 
 def complete_pimcore_setup(payload: object, username: str) -> dict[str, object]:
@@ -1761,7 +1791,8 @@ def test_pimcore_settings(
     username: str = "admin",
 ) -> dict[str, object]:
     merged = _merged_pimcore_settings(overrides)
-    report = run_settings_test(merged, client=PimcoreClient(merged))
+    with pimcore_client_scope(merged, factory=PimcoreClient) as client:
+        report = run_settings_test(merged, client=client)
     audit_report = redact_pimcore_log_value(report)
     record_history(
         username=username,
@@ -1920,6 +1951,22 @@ def _persist_pimcore_audit(report: dict[str, object]) -> None:
     _persist_pimcore_submission(report)
 
 
+def _run_pimcore_test_create(
+    settings_payload: dict[str, object],
+    submitted: dict[str, object],
+    policy: str,
+    emit: object,
+) -> dict[str, object]:
+    with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+        return run_test_create(
+            settings_payload,
+            submitted,
+            policy,
+            client=client,
+            emit=emit,
+        )
+
+
 def start_pimcore_test_create(
     values: object,
     cleanup_policy: object,
@@ -1933,11 +1980,11 @@ def start_pimcore_test_create(
         username=username,
         values=submitted,
         cleanup_policy=policy,
-        worker=lambda emit: run_test_create(
+        worker=lambda emit: _run_pimcore_test_create(
             settings_payload,
             submitted,
             policy,
-            emit=emit,
+            emit,
         ),
         persist=_persist_pimcore_audit,
     )
@@ -2118,6 +2165,28 @@ def _render_templates(
     fill_missing_product_values: bool = False,
     mode: str = "create",
 ) -> dict[str, object]:
+    with SqlExecutionContext(execute_query=execute_sql_value_query) as sql_context:
+        return _render_templates_with_sql_context(
+            settings_payload,
+            product_values,
+            values,
+            targets,
+            fill_missing_product_values=fill_missing_product_values,
+            mode=mode,
+            sql_context=sql_context,
+        )
+
+
+def _render_templates_with_sql_context(
+    settings_payload: dict[str, object],
+    product_values: object,
+    values: object,
+    targets: list[str] | None = None,
+    *,
+    fill_missing_product_values: bool = False,
+    mode: str = "create",
+    sql_context: SqlExecutionContext,
+) -> dict[str, object]:
     submitted = dict(values) if isinstance(values, dict) else {}
     mappings_list = list(settings_payload["field_mappings"])
     sql_sources = {
@@ -2174,7 +2243,7 @@ def _render_templates(
             if not profile.get("enabled", True):
                 label = profile.get("label") or profile.get("id")
                 raise ValueError(f"Profil SQL {label} jest wylaczony.")
-            sql_result = execute_sql_value_query(
+            sql_result = sql_context.execute(
                 profile,
                 mapping.get("sql_query"),
                 product_context,
@@ -2220,15 +2289,35 @@ def _render_templates(
         extra_values=extra_values,
     )
     translation_settings = config.CONFIG.get(TRANSLATION_SETTINGS_KEY, {}) or {}
+    independent_translation_operations = [
+        (
+            lambda source=source: (
+                source,
+                translate_text(
+                    rendered.values[source],
+                    mappings[source].get("target_language"),
+                    translation_settings,
+                ),
+            )
+        )
+        for source in rendered.order
+        if mappings[source].get("translate")
+        and classify_template_operation(mappings[source]).independent
+    ]
+    translated_values = dict(
+        execute_independent_operations(independent_translation_operations)
+    )
     for source in rendered.order:
         mapping = mappings[source]
         value = rendered.values[source]
         if mapping.get("translate"):
-            translated = translate_text(
-                value,
-                mapping.get("target_language"),
-                translation_settings,
-            )
+            translated = translated_values.get(source)
+            if translated is None:
+                translated = translate_text(
+                    value,
+                    mapping.get("target_language"),
+                    translation_settings,
+                )
             value = translated.text
             if translated.warning:
                 warnings.append({"source": source, **translated.warning})
@@ -2251,7 +2340,7 @@ def _render_templates(
             if not profile.get("enabled", True):
                 label = profile.get("label") or profile.get("id")
                 raise ValueError(f"Profil SQL {label} jest wylaczony.")
-            sql_result = execute_sql_value_query(
+            sql_result = sql_context.execute(
                 profile,
                 mapping.get("sql_query"),
                 product_context,
@@ -2565,7 +2654,13 @@ def create_pimcore_product(
         events.append(event)
 
     try:
-        result = create_product(settings_payload, submitted, emit=emit)
+        with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+            result = create_product(
+                settings_payload,
+                submitted,
+                client=client,
+                emit=emit,
+            )
         change_set = result.get("change_set") if isinstance(result.get("change_set"), dict) else {}
         if change_set:
             result["change_set"] = {**change_set, "integrations": safe_integrations}
@@ -2624,7 +2719,12 @@ def get_pimcore_product_for_edit(
     status = "failed"
     events: list[dict[str, object]] = []
     try:
-        result = fetch_product_for_edit(settings_payload, object_id)
+        with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+            result = fetch_product_for_edit(
+                settings_payload,
+                object_id,
+                client=client,
+            )
         result["form_schema"] = _pimcore_runtime_form_schema(settings_payload)
         status = "completed"
         return result
@@ -2709,13 +2809,15 @@ def update_pimcore_product(
         events.append(event)
 
     try:
-        result = update_product(
-            settings_payload,
-            object_id,
-            str(marker or ""),
-            submitted,
-            emit=emit,
-        )
+        with pimcore_client_scope(settings_payload, factory=PimcoreClient) as client:
+            result = update_product(
+                settings_payload,
+                object_id,
+                str(marker or ""),
+                submitted,
+                client=client,
+                emit=emit,
+            )
         change_set = result.get("change_set") if isinstance(result.get("change_set"), dict) else {}
         if change_set:
             result["change_set"] = {**change_set, "integrations": safe_integrations}
@@ -3016,6 +3118,7 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
     )
     security_payload = payload.get("security") if isinstance(payload.get("security"), dict) else {}
     web_display_payload = payload.get(WEB_DISPLAY_SETTINGS_KEY)
+    translation_payload = payload.get(TRANSLATION_SETTINGS_KEY)
     pimcore_payload = payload.get(PIMCORE_SETTINGS_KEY)
     email_payload = payload.get(EMAIL_SETTINGS_KEY)
     previous_entra_identity = ("", "")
@@ -3030,6 +3133,7 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
     backup_payload = payload.get("sqlite_backup") if isinstance(payload.get("sqlite_backup"), dict) else None
     slots_payload = payload.get("slots") if isinstance(payload.get("slots"), list) else None
     runtime_reloaded = False
+    translation_settings_changed = False
 
     if "image_dir" in app_payload:
         runtime_reloaded = _apply_base_dir_from_web(app_payload.get("image_dir")) or runtime_reloaded
@@ -3101,6 +3205,18 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
         cfg[WEB_DISPLAY_SETTINGS_KEY] = config.normalize_web_display_settings(
             merged_web_display
         )
+
+    if isinstance(translation_payload, dict):
+        current_translation = dict(cfg.get(TRANSLATION_SETTINGS_KEY, {}) or {})
+        merged_translation = dict(current_translation)
+        merged_translation.update(translation_payload)
+        if not _text(translation_payload.get(TRANSLATION_API_KEY)):
+            merged_translation[TRANSLATION_API_KEY] = current_translation.get(
+                TRANSLATION_API_KEY,
+                "",
+            )
+        cfg[TRANSLATION_SETTINGS_KEY] = merged_translation
+        translation_settings_changed = True
 
     if isinstance(pimcore_payload, dict):
         if "field_mappings" in pimcore_payload:
@@ -3221,6 +3337,8 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
 
     save_config(cfg, preserve_secrets=_preserve_unsubmitted_config_secrets(payload))
     config.initialize_config(interactive=False)
+    if translation_settings_changed:
+        clear_translation_cache()
     if entra_configuration_changed:
         try:
             from .entra_secret_monitor import refresh_entra_secret_status

@@ -10,6 +10,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 from . import storage_settings
+from .data_store import get_sqlite_store
 from .redaction import (
     SECRET_KEY_RE,
     redact_sensitive_value,
@@ -86,9 +87,7 @@ def _mirror_event(event: dict[str, object]) -> None:
 def observability_store() -> SqliteStore:
     """Resolve and initialize the configured observability database."""
 
-    store = SqliteStore(storage_settings.resolve_sqlite_path())
-    store.initialize()
-    return store
+    return get_sqlite_store(storage_settings.resolve_sqlite_path())
 
 
 def emit_event(

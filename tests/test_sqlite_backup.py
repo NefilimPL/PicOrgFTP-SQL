@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from picorgftp_sql import sqlite_backup, storage_settings
+import pytest
+
+from picorgftp_sql import data_store, sqlite_backup, storage_settings
 
 
 def _create_db(path: Path) -> None:
@@ -143,6 +145,34 @@ def test_restore_backup_creates_pre_restore_backup_and_replaces_database(tmp_pat
     with sqlite3.connect(active) as conn:
         value = conn.execute("SELECT value_json FROM app_config_values WHERE path = 'database.query'").fetchone()[0]
     assert value == '"restored"'
+
+
+def test_restore_backup_invalidates_the_replaced_store(tmp_path: Path) -> None:
+    active = tmp_path / "active.sqlite"
+    backup = tmp_path / "BACKUP" / "restore.sqlite"
+    backup.parent.mkdir()
+    _create_db(active)
+    _create_db(backup)
+    stale_store = data_store.get_sqlite_store(str(active))
+
+    sqlite_backup.restore_backup(str(active), str(backup), str(backup.parent))
+
+    assert data_store.get_sqlite_store(str(active)) is not stale_store
+
+
+def test_failed_restore_preserves_the_active_store(tmp_path: Path) -> None:
+    active = tmp_path / "active.sqlite"
+    backup_dir = tmp_path / "BACKUP"
+    backup_dir.mkdir()
+    _create_db(active)
+    active_store = data_store.get_sqlite_store(str(active))
+
+    with pytest.raises(FileNotFoundError):
+        sqlite_backup.restore_backup(
+            str(active), str(backup_dir / "missing.sqlite"), str(backup_dir)
+        )
+
+    assert data_store.get_sqlite_store(str(active)) is active_store
 
 
 def test_diff_databases_masks_secret_values(tmp_path: Path) -> None:

@@ -1,7 +1,7 @@
 import csv
 import io
 import json
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,6 +9,7 @@ from openpyxl import load_workbook
 
 from picorgftp_sql import web_data
 from picorgftp_sql.services.pimcore_service import PimcoreApiError, PimcoreConflictError
+from picorgftp_sql.services.translation_service import TranslationResult
 from picorgftp_sql.sqlite_store import SqliteStore
 from picorgftp_sql.web import app as web_app
 
@@ -64,6 +65,26 @@ def test_update_settings_preserves_blank_pimcore_api_key_and_saves_mapping():
 
     assert saved[0]["pimcore"]["api_key"] == "saved-secret"
     assert saved[0]["pimcore"]["field_mappings"][0]["source"] == "EAN"
+
+
+def test_update_settings_clears_translation_cache_after_accepted_update():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["translation"]["api_key"] = "saved-secret"
+    clear_cache = Mock()
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "save_config"),
+        patch.object(web_data.config, "initialize_config", return_value=cfg),
+        patch.object(web_data, "settings_snapshot", return_value={}),
+        patch.object(web_data, "clear_translation_cache", clear_cache, create=True),
+    ):
+        web_data.update_settings(
+            {"translation": {"provider": "mymemory", "api_key": ""}}
+        )
+
+    assert cfg["translation"]["provider"] == "mymemory"
+    assert cfg["translation"]["api_key"] == "saved-secret"
+    clear_cache.assert_called_once()
 
 
 def test_parse_csv_headers_supports_semicolon_and_quoted_labels():
@@ -146,6 +167,20 @@ def test_settings_diagnostic_persists_full_detail_but_returns_public_report():
     assert persisted["checks"][0]["response_detail"] == "complete sanitized trace"
 
 
+def test_pimcore_settings_test_closes_its_owned_client():
+    client = Mock()
+    report = {"ok": True, "checks": []}
+
+    with (
+        patch.object(web_data, "PimcoreClient", return_value=client),
+        patch.object(web_data, "run_settings_test", return_value=report),
+        patch.object(web_data, "record_history"),
+    ):
+        assert web_data.test_pimcore_settings() == report
+
+    client.close.assert_called_once()
+
+
 def test_discovery_uses_unsaved_key_without_persisting_or_returning_it():
     captured = {}
     fake_client = Mock()
@@ -170,6 +205,7 @@ def test_discovery_uses_unsaved_key_without_persisting_or_returning_it():
     assert result == {"items": [{"id": "7", "name": "product"}]}
     assert "temporary" not in json.dumps(result)
     discover.assert_called_once_with(fake_client)
+    fake_client.close.assert_called_once()
 
 
 def test_complete_setup_saves_only_after_successful_report():
@@ -768,9 +804,11 @@ def test_update_adapter_persists_manual_update_audit():
         "object": {"id": 91, "path": "/Produkty/5904"},
         "values": {"EAN": "5904804578169"},
     }
+    client = Mock()
     with (
         patch.object(web_data.config, "CONFIG", cfg),
-        patch.object(web_data, "update_product", return_value=expected),
+        patch.object(web_data, "update_product", return_value=expected) as update,
+        patch.object(web_data, "PimcoreClient", return_value=client),
         patch.object(web_data, "_persist_pimcore_operation") as persist,
     ):
         result = web_data.update_pimcore_product(
@@ -784,6 +822,8 @@ def test_update_adapter_persists_manual_update_audit():
     report = persist.call_args.args[0]
     assert report["operation_type"] == "manual_update"
     assert report["username"] == "operator"
+    assert update.call_args.kwargs["client"] is client
+    client.close.assert_called_once()
 
 
 def test_update_adapter_emits_failure_diagnostics_for_manual_update_error():
@@ -873,18 +913,22 @@ def test_update_adapter_conflict_event_has_no_failure_diagnostics():
 def test_create_adapter_uses_manual_create_operation_kind():
     cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
     cfg["pimcore"].update({"enabled": True, "setup_complete": True})
+    client = Mock()
     with (
         patch.object(web_data.config, "CONFIG", cfg),
         patch.object(
             web_data,
             "create_product",
             return_value={"created": True, "duplicate": False, "object": {"id": 91}},
-        ),
+        ) as create,
+        patch.object(web_data, "PimcoreClient", return_value=client),
         patch.object(web_data, "_persist_pimcore_operation") as persist,
     ):
         web_data.create_pimcore_product({"EAN": "5904804578169"}, "operator")
 
     assert persist.call_args.args[0]["operation_type"] == "manual_create"
+    assert create.call_args.kwargs["client"] is client
+    client.close.assert_called_once()
 
 
 def test_create_adapter_filters_and_attaches_integration_results_to_audit_and_change_set():
@@ -1292,6 +1336,33 @@ def test_test_create_persists_sqlite_submission_when_operation_finishes():
     assert submitted["username"] == "operator"
 
 
+def test_test_create_worker_closes_its_owned_pimcore_client():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"].update({"enabled": True, "setup_complete": True})
+    client = Mock()
+    captured: dict[str, object] = {}
+
+    def start(**kwargs):
+        captured.update(kwargs)
+        return {"operation_id": "op-test", "status": "queued"}
+
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data._PIMCORE_OPERATIONS, "start", side_effect=start),
+        patch.object(web_data, "PimcoreClient", return_value=client),
+        patch.object(web_data, "run_test_create", return_value={"object_id": 77}) as run_test,
+    ):
+        web_data.start_pimcore_test_create(
+            {"EAN": "5904804578169"},
+            "keep",
+            "operator",
+        )
+        captured["worker"](Mock())
+
+    assert run_test.call_args.kwargs["client"] is client
+    client.close.assert_called_once()
+
+
 def test_edit_adapter_persists_loaded_product_to_sqlite(tmp_path):
     cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
     cfg["pimcore"].update({"enabled": True, "setup_complete": True})
@@ -1301,6 +1372,7 @@ def test_edit_adapter_persists_loaded_product_to_sqlite(tmp_path):
         "marker": "100",
         "values": {"EAN": "5904804578169"},
     }
+    client = Mock()
 
     with (
         patch.object(web_data.config, "CONFIG", cfg),
@@ -1309,7 +1381,8 @@ def test_edit_adapter_persists_loaded_product_to_sqlite(tmp_path):
             "resolve_sqlite_path",
             return_value=str(database_path),
         ),
-        patch.object(web_data, "fetch_product_for_edit", return_value=loaded),
+        patch.object(web_data, "fetch_product_for_edit", return_value=loaded) as fetch,
+        patch.object(web_data, "PimcoreClient", return_value=client),
         patch.object(web_data, "_persist_pimcore_operation"),
     ):
         result = web_data.get_pimcore_product_for_edit(91, "operator")
@@ -1324,6 +1397,8 @@ def test_edit_adapter_persists_loaded_product_to_sqlite(tmp_path):
     assert len(rows) == 1
     assert rows[0]["status"] == "completed"
     assert rows[0]["values"]["EAN"] == "5904804578169"
+    assert fetch.call_args.kwargs["client"] is client
+    client.close.assert_called_once()
 
 
 def test_runtime_edit_routes_allow_logged_in_user():
@@ -1687,13 +1762,11 @@ def test_render_saved_pimcore_templates_auto_applies_sql_only_when_empty():
         }
     ]
 
+    context_type = MagicMock()
+    context_type.return_value.__enter__.return_value.execute.return_value = web_data.SqlValueResult("12", [])
     with (
         patch.object(web_data.config, "CONFIG", cfg),
-        patch.object(
-            web_data,
-            "execute_sql_value_query",
-            return_value=web_data.SqlValueResult("12", []),
-        ),
+        patch.object(web_data, "SqlExecutionContext", context_type),
     ):
         empty = web_data.render_saved_pimcore_templates(
             {"ean": "5901234567890"},
@@ -1746,8 +1819,19 @@ def test_render_saved_pimcore_templates_reports_each_sql_profile_integration():
             "enabled": True,
         }
     ]
+    context_type = MagicMock()
+    context = context_type.return_value.__enter__.return_value
+    context.execute.return_value = web_data.SqlValueResult(
+        "12",
+        [{"code": "multiple_rows", "message": "Used first row"}]
+        + [
+            {"code": f"warning-{index}", "message": "warning"}
+            for index in range(40)
+        ],
+    )
     with (
         patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "SqlExecutionContext", context_type, create=True),
         patch.object(
             web_data,
             "execute_sql_value_query",
@@ -1775,6 +1859,48 @@ def test_render_saved_pimcore_templates_reports_each_sql_profile_integration():
     assert len(integration["warning_codes"]) == web_data.SQL_PROFILE_WARNING_CODES_MAX
     assert integration["error"] == ""
     assert integration["elapsed_ms"] >= 0
+    context_type.assert_called_once()
+    context.execute.assert_called_once()
+
+
+def test_render_templates_parallelizes_independent_translations_in_order():
+    settings_payload = {
+        "field_mappings": [
+                {
+                    "source": "TITLE",
+                    "label": "Title",
+                    "type": "input",
+                    "parser": "text",
+                    "value_template": "first",
+                    "translate": True,
+                    "target_language": "en",
+                },
+                {
+                    "source": "DESCRIPTION",
+                    "label": "Description",
+                    "type": "textarea",
+                    "parser": "text",
+                    "value_template": "second",
+                    "translate": True,
+                    "target_language": "en",
+                },
+        ]
+    }
+    executor = Mock(side_effect=lambda operations, **_kwargs: [operation() for operation in operations])
+
+    with (
+        patch.object(
+            web_data,
+            "translate_text",
+            side_effect=lambda text, *_args: TranslationResult(f"en:{text}"),
+        ),
+        patch.object(web_data, "execute_independent_operations", executor, create=True),
+    ):
+        result = web_data._render_templates(settings_payload, {}, {})
+
+    assert result["values"]["TITLE"] == "en:first"
+    assert result["values"]["DESCRIPTION"] == "en:second"
+    executor.assert_called_once()
 
 
 def test_render_sql_profile_error_redacts_assignments_and_known_profile_secret():
@@ -1810,9 +1936,11 @@ def test_render_sql_profile_error_redacts_assignments_and_known_profile_secret()
         "client_secret=render client secret; db_password=render database password; "
         "x_api_key=render compound api key; query_id=trace-42\nsafe diagnostic"
     )
+    context_type = MagicMock()
+    context_type.return_value.__enter__.return_value.execute.side_effect = RuntimeError(raw_error)
     with (
         patch.object(web_data.config, "CONFIG", cfg),
-        patch.object(web_data, "execute_sql_value_query", side_effect=RuntimeError(raw_error)),
+        patch.object(web_data, "SqlExecutionContext", context_type),
     ):
         result = web_data.render_saved_pimcore_templates(
             {"ean": "5901234567890"}, {"STOCK": ""}, ["STOCK"]
@@ -1925,13 +2053,12 @@ def test_render_saved_pimcore_templates_uses_sql_as_template_source():
         }
     ]
 
+    context_type = MagicMock()
+    context = context_type.return_value.__enter__.return_value
+    context.execute.return_value = web_data.SqlValueResult("12.4", [])
     with (
         patch.object(web_data.config, "CONFIG", cfg),
-        patch.object(
-            web_data,
-            "execute_sql_value_query",
-            return_value=web_data.SqlValueResult("12.4", []),
-        ) as execute_sql,
+        patch.object(web_data, "SqlExecutionContext", context_type),
     ):
         result = web_data.render_saved_pimcore_templates(
             {"ean": "5901234567890"},
@@ -1941,7 +2068,7 @@ def test_render_saved_pimcore_templates_uses_sql_as_template_source():
 
     assert result["values"]["STOCK_LABEL"] == "Stan: 12"
     assert result["calculated_values"]["STOCK_LABEL"] == "Stan: 12"
-    execute_sql.assert_called_once()
+    context.execute.assert_called_once()
 
 
 def test_render_saved_pimcore_templates_marks_sql_template_source_difference_for_edit():
@@ -1977,13 +2104,11 @@ def test_render_saved_pimcore_templates_marks_sql_template_source_difference_for
         }
     ]
 
+    context_type = MagicMock()
+    context_type.return_value.__enter__.return_value.execute.return_value = web_data.SqlValueResult("SKU-NEW", [])
     with (
         patch.object(web_data.config, "CONFIG", cfg),
-        patch.object(
-            web_data,
-            "execute_sql_value_query",
-            return_value=web_data.SqlValueResult("SKU-NEW", []),
-        ),
+        patch.object(web_data, "SqlExecutionContext", context_type),
     ):
         result = web_data.render_saved_pimcore_templates(
             {"ean": "5907763645590"},
@@ -2030,13 +2155,11 @@ def test_render_saved_pimcore_templates_for_edit_does_not_auto_apply_sql():
         }
     ]
 
+    context_type = MagicMock()
+    context_type.return_value.__enter__.return_value.execute.return_value = web_data.SqlValueResult("12", [])
     with (
         patch.object(web_data.config, "CONFIG", cfg),
-        patch.object(
-            web_data,
-            "execute_sql_value_query",
-            return_value=web_data.SqlValueResult("12", []),
-        ),
+        patch.object(web_data, "SqlExecutionContext", context_type),
     ):
         result = web_data.render_saved_pimcore_templates(
             {"ean": "5901234567890"},

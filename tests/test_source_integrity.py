@@ -92,11 +92,17 @@ class SourceIntegrityTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         css_match = re.search(r'/static/app\.css\?v=([^"\s]+)', html_source)
+        runtime_js_match = re.search(
+            r'/static/runtime-status\.js\?v=([^"\s]+)', html_source
+        )
         js_match = re.search(r'/static/app\.js\?v=([^"\s]+)', html_source)
         self.assertIsNotNone(css_match)
+        self.assertIsNotNone(runtime_js_match)
         self.assertIsNotNone(js_match)
-        self.assertEqual(css_match.group(1), js_match.group(1))
         self.assertEqual(css_match.group(1), "20260724-list-usage-guard1")
+        self.assertEqual(runtime_js_match.group(1), "20260728-runtime-poll1")
+        self.assertEqual(js_match.group(1), "20260727-product-query1")
+        self.assertNotEqual(css_match.group(1), js_match.group(1))
 
     def test_resource_detail_copy_explains_clients_and_latch_stages(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -330,10 +336,15 @@ class SourceIntegrityTests(unittest.TestCase):
             poll_source.index("requestGeneration !== healthPollGeneration"),
             poll_source.index("healthSamples.push"),
         )
-        self.assertIn("scheduleBackendHealthPoll(requestGeneration)", poll_source)
+        self.assertIn(
+            "state.runtimeStatusPoller = new PicOrg.RuntimeStatusPoller",
+            js_source,
+        )
+        self.assertIn("fetchStatus: fetchRuntimeStatus", js_source)
+        self.assertNotIn("function scheduleBackendHealthPoll", js_source)
         self.assertIn("healthPollGeneration += 1", visibility_source)
         self.assertIn("healthPollController?.abort()", visibility_source)
-        self.assertIn("pollBackendHealth().catch(() => {})", visibility_source)
+        self.assertNotIn("pollBackendHealth().catch(() => {})", visibility_source)
         self.assertNotIn("scheduleBackendHealthPoll(0)", visibility_source)
 
     def test_backend_health_offline_reuses_normalized_last_successful_components(self) -> None:
@@ -776,17 +787,29 @@ class SourceIntegrityTests(unittest.TestCase):
 
     def test_web_has_global_process_queue_panel(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        js_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(encoding="utf-8")
-        html_source = (root / "picorgftp_sql" / "web" / "static" / "index.html").read_text(encoding="utf-8")
+        app_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        module_source = (
+            root / "picorgftp_sql" / "web" / "static" / "process-jobs.js"
+        ).read_text(encoding="utf-8")
+        html_source = (root / "picorgftp_sql" / "web" / "static" / "index.html").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn('id="processQueuePanel"', html_source)
         self.assertIn('class="process-queue-section"', html_source)
         self.assertNotIn('class="slots-layout"', html_source)
-        self.assertIn('requestJson("/api/process-jobs/active")', js_source)
-        self.assertIn("renderProcessQueue(payload)", js_source)
-        self.assertIn('createPoller("processQueue", 2500, refreshProcessQueue)', js_source)
-        self.assertIn("document.hidden", js_source)
-        self.assertIn("renderProcessMeasurements(payload)", js_source)
+        self.assertIn("class ProcessJobsController", module_source)
+        self.assertIn("global.PicOrg.ProcessJobsController = ProcessJobsController", module_source)
+        self.assertIn("new PicOrg.ProcessJobsController({", app_source)
+        self.assertIn("onVersionChanged: refreshRuntimeDetailForVersion", app_source)
+        self.assertIn("process_queue: () => refreshProcessQueue(version)", app_source)
+        self.assertNotIn('createPoller("processQueue"', app_source)
+        self.assertLess(
+            html_source.index('/static/process-jobs.js'),
+            html_source.index('/static/app.js'),
+        )
 
     def test_web_history_has_search_pagination_and_timing_modal(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -848,19 +871,31 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("changeSet.pimcore?.operation_id", js_source)
 
     def test_web_autocomplete_keeps_local_values_first(self) -> None:
-        app_path = (
-            Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
-            / "web"
-            / "static"
-            / "app.js"
+        root = Path(__file__).resolve().parents[1]
+        app_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(
+            encoding="utf-8"
         )
-        source = app_path.read_text(encoding="utf-8")
+        module_source = (
+            root / "picorgftp_sql" / "web" / "static" / "autocomplete.js"
+        ).read_text(encoding="utf-8")
+        html_source = (root / "picorgftp_sql" / "web" / "static" / "index.html").read_text(
+            encoding="utf-8"
+        )
 
-        self.assertIn("MAX_AUTOCOMPLETE_OPTIONS = 80", source)
-        self.assertIn("uniqueValues([...local, ...values])", source)
-        self.assertIn('panel.dataset.selecting === "1"', source)
-        self.assertIn("setActiveAutocompleteOption", source)
+        self.assertIn("class AutocompleteController", module_source)
+        self.assertIn("global.PicOrg.setupAutocomplete = setupAutocomplete", module_source)
+        self.assertIn("this.mergeSuggestions(local,", module_source)
+        self.assertIn('panel.dataset.selecting === "1"', module_source)
+        self.assertIn("window.PicOrg.setupAutocomplete({", app_source)
+        self.assertIn("maxOptions: MAX_AUTOCOMPLETE_OPTIONS", app_source)
+        self.assertLess(
+            html_source.index('/static/latest-request.js'),
+            html_source.index('/static/autocomplete.js'),
+        )
+        self.assertLess(
+            html_source.index('/static/autocomplete.js'),
+            html_source.index('/static/app.js'),
+        )
 
     def test_web_settings_security_tab_owns_secret_and_upload_limits(self) -> None:
         root = Path(__file__).resolve().parents[1]

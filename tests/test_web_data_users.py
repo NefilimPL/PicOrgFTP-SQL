@@ -1381,6 +1381,25 @@ class WebDataUserTests(unittest.TestCase):
         self.assertEqual(status["generated_at"], "2026-06-25T13:02:34.300Z")
         self.assertEqual(status["label"], "Indeks lokalny")
 
+    def test_manual_file_index_refresh_forces_rebuild(self) -> None:
+        class Index:
+            def __init__(self) -> None:
+                self.force_values: list[bool] = []
+
+            def refresh_if_stale(self, *, force: bool = False) -> bool:
+                self.force_values.append(force)
+                return True
+
+        index = Index()
+        with (
+            patch.object(web_data, "_get_file_index", return_value=index),
+            patch.object(web_data, "file_index_status", return_value={"state": "ready"}),
+        ):
+            status = web_data.refresh_file_index()
+
+        self.assertEqual(status, {"state": "ready"})
+        self.assertEqual(index.force_values, [True])
+
     def test_settings_snapshot_exposes_storage_locations(self) -> None:
         temp_dir = _workspace_temp("web_data_storage_snapshot")
         try:

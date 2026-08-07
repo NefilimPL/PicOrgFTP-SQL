@@ -5,8 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
@@ -84,9 +83,30 @@ from ..product_fields import PRODUCT_FIELDS_KEY, normalize_product_fields
 from ..pimcore_templates import TemplateError
 from ..services.ftp_service import sync_remote_files
 from ..services.pimcore_service import PimcoreApiError, PimcoreConflictError
+from ..services.photo_sql_batch import build_photo_sql_batch
 from ..services.sql_service import detect_available_columns, extract_presence_context
 from ..sqlite_maintenance import repair_sqlite_database
 from ..workflow_utils import build_product_directory, parse_slot_filename, sanitize_path_segment
+from . import upload_staging
+from .active_clients import ActiveClientRegistry
+from .process_progress import ProcessProgressGate
+from .process_api import ProcessApiDependencies, build_process_router
+from .process_models import (
+    ProcessFormSnapshot as _ProcessFormSnapshot,
+    QueuedUploadFile as _QueuedUploadFile,
+)
+from .runtime_api import RuntimeApiDependencies, build_runtime_router
+from .process_queue import (
+    ProcessQueueService,
+    QueueReservation,
+)
+from .runtime_status import RuntimeStatusService
+from .upload_staging import (
+    UploadSizeLimitExceeded,
+    UploadStagingService,
+    cleanup_expired_job_directories,
+    cleanup_job_directory,
+)
 from ..web_image_import import (
     ImageImportError,
     discover_image_candidates,
@@ -185,16 +205,37 @@ _UPLOAD_CACHE_LAST_CLEANUP = 0.0
 _BROWSER_EXTENSION_IMPORTS: Dict[str, List[Dict[str, Any]]] = {}
 _BROWSER_EXTENSION_IMPORTS_LOCK = threading.Lock()
 _PROCESS_JOB_RETENTION_SECONDS = 6 * 60 * 60
+_PROCESS_JOB_DIRECTORY_TTL_SECONDS = 24 * 60 * 60
+_PROCESS_JOB_DIRECTORY_PREFIX = "job-"
+_PROCESS_JOB_ROOT = Path(tempfile.gettempdir()) / "picorg_web_process_jobs"
 # Active work is never discarded; only the newest terminal jobs stay in memory.
 _PROCESS_JOB_MAX_COMPLETED = 200
-_PROCESS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="picorg-process")
+_PROCESS_QUEUE = ProcessQueueService()
+
+
+class _ProcessQueueReference:
+    """Delegates reservations to the active queue, including test replacements."""
+
+    @property
+    def limits(self) -> Any:
+        return _PROCESS_QUEUE.limits
+
+    def reserve(self, cache_scope: str) -> QueueReservation:
+        return _PROCESS_QUEUE.reserve(cache_scope)
+
+
+_PROCESS_QUEUE_REFERENCE = _ProcessQueueReference()
 _PROCESS_JOBS: Dict[str, Dict[str, Any]] = {}
 _PROCESS_JOBS_LOCK = threading.Lock()
-_ACTIVE_CLIENTS: Dict[str, Dict[str, Any]] = {}
-_ACTIVE_CLIENTS_LOCK = threading.Lock()
-_ACTIVE_CLIENTS_LOADED = False
-_ACTIVE_CLIENTS_DIRTY = False
-_ACTIVE_CLIENTS_LAST_FLUSH = 0.0
+_PROCESS_JOB_COMPLETIONS: Dict[str, threading.Event] = {}
+_PROCESS_QUEUE_GENERATION = 0
+_PROCESS_PROGRESS_GATE = ProcessProgressGate()
+_ACTIVE_CLIENT_REGISTRY = ActiveClientRegistry(
+    Path(settings.LOG_DIR) / "web_active_clients.json",
+    max_age_seconds=ACTIVE_CLIENT_MAX_AGE_SECONDS,
+    flush_interval_seconds=ACTIVE_CLIENT_FLUSH_INTERVAL_SECONDS,
+)
+_ACTIVE_CLIENT_REGISTRY_LIFECYCLE_LOCK = threading.Lock()
 _RATE_LIMITS: Dict[str, List[float]] = {}
 _RATE_LIMITS_LOCK = threading.Lock()
 _UPLOAD_SCAN_RESULTS: Dict[str, Dict[str, Any]] = {}
@@ -385,28 +426,14 @@ IMAGE_SIGNATURE_EXTENSIONS = (
 
 
 @dataclass(frozen=True)
-class _QueuedUploadFile:
-    path: str
-    filename: str
-
-
-@dataclass(frozen=True)
 class _SavedUploadCache:
     path: str
     size: int
     name: str
 
 
-@dataclass
-class _ProcessFormSnapshot:
-    fields: Dict[str, str] = field(default_factory=dict)
-    uploads: Dict[str, _QueuedUploadFile] = field(default_factory=dict)
-    temp_dir: str = ""
-
-    def get(self, key: str, default: Any = None) -> Any:
-        if key in self.uploads:
-            return self.uploads[key]
-        return self.fields.get(key, default)
+class _ProcessJobCancelled(Exception):
+    """Signals cooperative cancellation before the next external process step."""
 
 
 def _elapsed_ms(started: float) -> int:
@@ -910,56 +937,7 @@ def _is_pcx_header(header: bytes) -> bool:
 
 
 def _upload_signature_matches(extension: str, header: bytes) -> bool:
-    if extension in JPEG_UPLOAD_EXTENSIONS:
-        return header.startswith(b"\xff\xd8\xff")
-    if extension in PNG_UPLOAD_EXTENSIONS:
-        return header.startswith(b"\x89PNG\r\n\x1a\n")
-    if extension == "gif":
-        return header.startswith((b"GIF87a", b"GIF89a"))
-    if extension == "bmp":
-        return header.startswith(b"BM")
-    if extension == "dib":
-        return _is_dib_header(header)
-    if extension in TIFF_UPLOAD_EXTENSIONS:
-        return header.startswith((b"II*\x00", b"MM\x00*"))
-    if extension == "webp":
-        return len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP"
-    if extension in AVIF_UPLOAD_EXTENSIONS:
-        return _is_iso_base_media_brand(header, {b"avif", b"avis"})
-    if extension in HEIF_UPLOAD_EXTENSIONS:
-        return _is_iso_base_media_brand(
-            header,
-            {b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"hevm", b"hevs", b"mif1", b"msf1"},
-        )
-    if extension in JPEG2000_UPLOAD_EXTENSIONS:
-        return _is_jpeg2000_header(header)
-    if extension == "ico":
-        return (
-            len(header) >= 6
-            and header.startswith(b"\x00\x00\x01\x00")
-            and int.from_bytes(header[4:6], "little", signed=False) > 0
-        )
-    if extension == "cur":
-        return (
-            len(header) >= 6
-            and header.startswith(b"\x00\x00\x02\x00")
-            and int.from_bytes(header[4:6], "little", signed=False) > 0
-        )
-    if extension == "tga":
-        return _is_tga_header(header)
-    if extension in PNM_UPLOAD_EXTENSIONS:
-        return _is_pnm_header(header, extension)
-    if extension == "pcx":
-        return _is_pcx_header(header)
-    if extension == "pdf":
-        return header.startswith(b"%PDF-")
-    if extension == "eps":
-        return header.startswith(b"%!PS-Adobe-")
-    if extension == "ai":
-        return header.startswith((b"%PDF-", b"%!PS-Adobe-"))
-    if extension == "psd":
-        return header.startswith(b"8BPS")
-    return False
+    return upload_staging.signature_matches(extension, header)
 
 
 def _upload_extension_from_signature(header: bytes) -> str:
@@ -1013,50 +991,11 @@ def _normalize_upload_cache_extension(
 
 
 def _validate_upload_signature(path: str, filename: object) -> None:
-    extension = _upload_extension(filename)
-    try:
-        with open(path, "rb") as handle:
-            header = handle.read(128)
-    except OSError as exc:
-        raise HTTPException(status_code=400, detail="Nie mozna odczytac wyslanego pliku.") from exc
-    if not header:
-        raise HTTPException(status_code=400, detail="Plik jest pusty.")
-    stripped = header.lstrip().lower()
-    if stripped.startswith((b"<html", b"<!doctype", b"<svg", b"<?xml")):
-        raise HTTPException(
-            status_code=400,
-            detail="Zawartosc pliku wyglada jak HTML/XML/SVG, a nie dozwolony upload.",
-        )
-    if not _upload_signature_matches(extension, header):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Sygnatura pliku nie pasuje do rozszerzenia .{extension}.",
-        )
+    upload_staging.validate_upload_signature(path, filename)
 
 
 def _validate_upload_image_file(path: str, filename: object, max_pixels: int) -> tuple[int, int]:
-    extension = _upload_extension(filename)
-    if extension not in IMAGE_UPLOAD_EXTENSIONS:
-        return 0, 0
-    if Image is None:
-        raise HTTPException(status_code=415, detail="Pillow nie jest dostepny do walidacji obrazu.")
-    try:
-        with warnings.catch_warnings():
-            if hasattr(Image, "DecompressionBombWarning"):
-                warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(path) as image:
-                width, height = int(image.size[0]), int(image.size[1])
-                pixels = width * height
-                if pixels > max_pixels:
-                    _raise_upload_too_large(
-                        f"Obraz ma {pixels} pikseli ({width}x{height}), limit uploadu to {max_pixels} pikseli."
-                    )
-                image.verify()
-                return width, height
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="Nie mozna otworzyc pliku jako obrazu.") from exc
+    return upload_staging.validate_image_file(path, filename, max_pixels)
 
 
 def _validate_upload_content(
@@ -1229,55 +1168,15 @@ def _uploaded_scan_summary(uploaded_slots: List[WebUploadedSlot]) -> Dict[str, A
 
 
 def _scan_uploaded_file(path: str) -> Dict[str, Any]:
-    if not _security_settings().get("antivirus_scan_uploads", False):
-        result = {"enabled": False, "scanned": False, "scanner": "", "elapsed_ms": 0}
-        _remember_upload_scan_result(path, result)
-        return result
-    started = time.perf_counter()
-    scanner = _defender_scan_executable()
-    if not scanner:
-        raise HTTPException(
-            status_code=503,
-            detail="Skan antywirusowy uploadu jest wlaczony, ale nie znaleziono Microsoft Defender MpCmdRun.exe.",
-        )
-    try:
-        completed = subprocess.run(
-            [
-                scanner,
-                "-Scan",
-                "-ScanType",
-                "3",
-                "-File",
-                os.path.abspath(path),
-                "-DisableRemediation",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=ANTIVIRUS_SCAN_TIMEOUT_SECONDS,
-            creationflags=int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(status_code=503, detail="Skan antywirusowy uploadu przekroczyl limit czasu.") from exc
-    output = "\n".join(
-        part.strip()
-        for part in (completed.stdout, completed.stderr)
-        if str(part or "").strip()
+    security = _security_settings()
+    return upload_staging.scan_uploaded_file(
+        path,
+        enabled=bool(security.get("antivirus_scan_uploads", False)),
+        scanner_executable=_defender_scan_executable(),
+        timeout_seconds=ANTIVIRUS_SCAN_TIMEOUT_SECONDS,
+        process_runner=subprocess.run,
+        on_result=lambda result: _remember_upload_scan_result(path, result),
     )
-    result = {
-        "enabled": True,
-        "scanned": completed.returncode == 0,
-        "scanner": "Microsoft Defender",
-        "return_code": int(completed.returncode),
-        "elapsed_ms": _elapsed_ms(started),
-    }
-    _remember_upload_scan_result(path, result)
-    if completed.returncode != 0:
-        details = output[-500:] if output else f"kod {completed.returncode}"
-        raise HTTPException(
-            status_code=400,
-            detail=f"Skan antywirusowy odrzucil upload ({details}).",
-        )
-    return result
 
 
 def _upload_cache_root() -> str:
@@ -1514,35 +1413,27 @@ def _validate_upload_image_pixels(path: str, max_pixels: int) -> tuple[int, int]
 
 async def _save_upload(upload: UploadFile, temp_dir: str, prefix: str) -> str:
     safe_name = _safe_upload_name(upload.filename, f"{prefix}.upload")
-    suffix = _safe_file_suffix(safe_name)
-    target_path = os.path.join(temp_dir, f"{prefix}_{secrets.token_hex(8)}{suffix}")
     max_bytes, max_pixels = _upload_limits()
-    size = 0
+    content_type = getattr(upload, "content_type", "")
     try:
         _validate_upload_extension(safe_name)
-        with open(target_path, "wb") as handle:
-            while True:
-                chunk = await upload.read(1024 * 1024)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > max_bytes:
-                    _raise_upload_too_large(_upload_limit_message(size, max_bytes))
-                handle.write(chunk)
-        _validate_upload_content(target_path, safe_name, getattr(upload, "content_type", ""), max_pixels)
-        _strip_upload_metadata(target_path, safe_name)
-        _enforce_upload_size(target_path, max_bytes)
-        _scan_uploaded_file(target_path)
-        return target_path
     except Exception:
-        if os.path.exists(target_path):
-            try:
-                os.remove(target_path)
-            except OSError:
-                pass
-        raise
-    finally:
         await upload.close()
+        raise
+
+    def validate(path: str, _filename: object, limit: int) -> tuple[int, int]:
+        return _validate_upload_content(path, safe_name, content_type, limit)
+
+    try:
+        staged = await UploadStagingService(
+            max_bytes=max_bytes,
+            max_pixels=max_pixels,
+            validate_image=validate,
+            scan_file=_scan_uploaded_file,
+        ).stage(upload, temp_dir, prefix)
+    except UploadSizeLimitExceeded as exc:
+        _raise_upload_too_large(_upload_limit_message(exc.size_bytes, exc.max_bytes))
+    return staged.path
 
 
 def _upload_prefix_from_form_key(key: str) -> str:
@@ -2047,35 +1938,70 @@ def _sync_result_to_sql(
             payload["reason"] = "nie skonfigurowano zapytania SQL"
             payload["slot_results"] = [slot_results[key] for key in sorted(slot_results)]
             return payload
+        batch_assignments: dict[str, str] = {}
+        batch_operations: dict[str, str] = {}
         for prefix, filename in saved_by_prefix.items():
             column = _safe_sql_identifier(sql_map.get(prefix, ""))
-            if not column:
-                continue
             parsed = parse_slot_filename(filename)
-            if not parsed:
+            if not column or not parsed:
                 continue
-            short_name = f"{ean}_{prefix}{parsed.extension}"
-            query = template.format(col=column, column=column, filename=short_name, ean=ean)
-            attempted_slots.add(str(prefix))
-            cur.execute(query)
-            rowcount = _cursor_rowcount(cur)
-            if rowcount != 0:
-                payload["updated"] += 1
-                slot_results[str(prefix)]["status"] = "updated"
-            if rowcount > 0:
-                payload["rows"] += rowcount
+            batch_assignments[column] = f"{ean}_{prefix}{parsed.extension}"
+            batch_operations[str(prefix)] = "update"
         for prefix in clear_prefixes:
             column = _safe_sql_identifier(sql_map.get(prefix, ""))
             if not column:
                 continue
-            attempted_slots.add(str(prefix))
-            cur.execute(f"UPDATE {table} SET {column} = ''{where_clause}")
+            batch_assignments[column] = ""
+            batch_operations[str(prefix)] = "clear"
+        batch = build_photo_sql_batch(
+            table,
+            where_clause,
+            batch_assignments,
+            config.CONFIG.get(p, K),
+            template,
+        )
+        if batch is not None:
+            attempted_slots.update(batch_operations)
+            cur.execute(batch.query, batch.params)
             rowcount = _cursor_rowcount(cur)
             if rowcount != 0:
-                payload["cleared"] += 1
-                slot_results[str(prefix)]["status"] = "cleared"
+                for prefix, operation in batch_operations.items():
+                    payload["updated" if operation == "update" else "cleared"] += 1
+                    slot_results[prefix]["status"] = (
+                        "updated" if operation == "update" else "cleared"
+                    )
             if rowcount > 0:
                 payload["rows"] += rowcount
+        else:
+            for prefix, filename in saved_by_prefix.items():
+                column = _safe_sql_identifier(sql_map.get(prefix, ""))
+                if not column:
+                    continue
+                parsed = parse_slot_filename(filename)
+                if not parsed:
+                    continue
+                short_name = f"{ean}_{prefix}{parsed.extension}"
+                query = template.format(col=column, column=column, filename=short_name, ean=ean)
+                attempted_slots.add(str(prefix))
+                cur.execute(query)
+                rowcount = _cursor_rowcount(cur)
+                if rowcount != 0:
+                    payload["updated"] += 1
+                    slot_results[str(prefix)]["status"] = "updated"
+                if rowcount > 0:
+                    payload["rows"] += rowcount
+            for prefix in clear_prefixes:
+                column = _safe_sql_identifier(sql_map.get(prefix, ""))
+                if not column:
+                    continue
+                attempted_slots.add(str(prefix))
+                cur.execute(f"UPDATE {table} SET {column} = ''{where_clause}")
+                rowcount = _cursor_rowcount(cur)
+                if rowcount != 0:
+                    payload["cleared"] += 1
+                    slot_results[str(prefix)]["status"] = "cleared"
+                if rowcount > 0:
+                    payload["rows"] += rowcount
         if payload["updated"] or payload["cleared"]:
             conn.commit()
     except Exception as exc:
@@ -2998,16 +2924,44 @@ def _emit_process_integration_events(
         )
 
 
+def _emit_process_stage_started_once(
+    emitted_stages: Set[str],
+    *,
+    current_key: str,
+    current_label: str,
+    percent: int,
+    label: str,
+    username: str,
+    job_id: str,
+) -> None:
+    if not current_key or current_key in emitted_stages:
+        return
+    emitted_stages.add(current_key)
+    emit_event(
+        severity="info",
+        event_type="process.stage_started",
+        module="web.process",
+        stage=current_key,
+        username=username,
+        job_id=job_id,
+        summary=current_label or label,
+        details={"percent": percent, "label": label},
+    )
+
+
 def _process_upload_snapshot(
     *,
     username: str,
     cache_scope: str,
     form: _ProcessFormSnapshot,
     job_id: str = "",
+    cancel_event: threading.Event | None = None,
     progress: Optional[
         Callable[[int, str, List[Dict[str, Any]], Optional[Dict[str, Any]]], None]
     ] = None,
 ) -> Dict[str, Any]:
+    emitted_stages: Set[str] = set()
+
     def mark(
         percent: int,
         label: str,
@@ -3015,17 +2969,15 @@ def _process_upload_snapshot(
         current_key: str = "",
         current_label: str = "",
     ) -> None:
-        if current_key:
-            emit_event(
-                severity="info",
-                event_type="process.stage_started",
-                module="web.process",
-                stage=current_key,
-                username=username,
-                job_id=job_id,
-                summary=current_label or label,
-                details={"percent": percent, "label": label},
-            )
+        _emit_process_stage_started_once(
+            emitted_stages,
+            current_key=current_key,
+            current_label=current_label,
+            percent=percent,
+            label=label,
+            username=username,
+            job_id=job_id,
+        )
         if progress:
             current_stage = None
             if current_key:
@@ -3038,6 +2990,11 @@ def _process_upload_snapshot(
                 }
             progress(percent, label, list(timings), current_stage)
 
+    def check_cancelled() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise _ProcessJobCancelled()
+
+    check_cancelled()
     process_started = time.perf_counter()
     timings: List[Dict[str, Any]] = []
     stage_started = time.perf_counter()
@@ -3053,6 +3010,7 @@ def _process_upload_snapshot(
     antivirus_scan_result: Dict[str, Any] = {"enabled": False, "scanned": 0, "skipped": 0, "items": []}
     try:
         for prefix, slot in slot_by_prefix.items():
+            check_cancelled()
             if str(form.get(f"delete_slot_{prefix}") or "") == "1":
                 delete_item: Dict[str, Any] = {
                     "prefix": prefix,
@@ -3250,6 +3208,7 @@ def _process_upload_snapshot(
             )
         stage_started = time.perf_counter()
         mark(34, "Przetwarzanie plikow", current_key="local_files", current_label="Zapis/przetwarzanie plikow lokalnych")
+        check_cancelled()
         result = process_web_uploads(
             base_output_dir=settings.l,
             form=product,
@@ -3268,6 +3227,7 @@ def _process_upload_snapshot(
         )
         stage_started = time.perf_counter()
         mark(60, "Usuwanie lokalne", current_key="local_delete", current_label="Usuwanie lokalne")
+        check_cancelled()
         saved_paths = {os.path.abspath(item.path) for item in result.saved_files}
         local_delete_result = _delete_local_files(delete_requests, saved_paths)
         timings.append(
@@ -3281,6 +3241,7 @@ def _process_upload_snapshot(
         )
         stage_started = time.perf_counter()
         mark(70, "Synchronizacja FTP", current_key="ftp", current_label="Synchronizacja FTP")
+        check_cancelled()
         ftp_backfill_prefixes = {
             str(item.get("prefix") or "")
             for item in delete_requests
@@ -3326,6 +3287,7 @@ def _process_upload_snapshot(
         )
         stage_started = time.perf_counter()
         mark(80, "Czyszczenie cache FTP", current_key="ftp_cache", current_label="Czyszczenie cache FTP")
+        check_cancelled()
         changed_ftp_names = {
             _remote_name_for_output(str(item.filename or ""))
             for item in result.saved_files
@@ -3352,6 +3314,7 @@ def _process_upload_snapshot(
         )
         stage_started = time.perf_counter()
         mark(88, "Aktualizacja SQL", current_key="sql", current_label="Aktualizacja SQL")
+        check_cancelled()
         sql_result = _sync_result_to_sql(
             result,
             clear_prefixes={
@@ -3372,6 +3335,7 @@ def _process_upload_snapshot(
         )
         stage_started = time.perf_counter()
         mark(94, "Sprzatanie cache", current_key="upload_cache", current_label="Sprzatanie cache uploadu")
+        check_cancelled()
         upload_cache_result = _delete_upload_cache_files(
             [
                 str(slot.source_path or "")
@@ -3390,6 +3354,7 @@ def _process_upload_snapshot(
         )
         stage_started = time.perf_counter()
         mark(96, "Zapis wpisu", current_key="entry_save", current_label="Zapis wpisu produktu")
+        check_cancelled()
         entry_result = save_web_entry(_entry_payload_from_product(product))
         timings.append(_timing_item("entry_save", "Zapis wpisu produktu", stage_started))
     except HTTPException as exc:
@@ -3439,7 +3404,7 @@ def _process_upload_snapshot(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         if form.temp_dir:
-            shutil.rmtree(form.temp_dir, ignore_errors=True)
+            _cleanup_process_job_directory(form.temp_dir)
 
     payload = _result_payload(result)
     payload["entry"] = entry_result
@@ -3453,6 +3418,7 @@ def _process_upload_snapshot(
     payload["antivirus_scan"] = antivirus_scan_result
     stage_started = time.perf_counter()
     mark(98, "Odswiezanie indeksu", current_key="file_index", current_label="Odswiezenie indeksu lokalnego")
+    check_cancelled()
     payload["file_index"] = refresh_file_index()
     timings.append(_timing_item("file_index", "Odswiezenie indeksu lokalnego", stage_started))
     payload["timing"] = _timing_payload(timings, process_started)
@@ -3577,13 +3543,16 @@ def _result_severity(payload: Dict[str, Any]) -> str:
 
 
 def _cleanup_process_jobs_locked(now: Optional[float] = None) -> None:
+    removed = False
     cutoff = (time.time() if now is None else now) - _PROCESS_JOB_RETENTION_SECONDS
     terminal_jobs: List[tuple[str, Dict[str, Any]]] = []
     for job_id, job in list(_PROCESS_JOBS.items()):
-        if job.get("status") not in {"completed", "failed"}:
+        if job.get("status") not in {"completed", "failed", "cancelled"}:
             continue
         if float(job.get("finished_at") or 0) < cutoff:
             _PROCESS_JOBS.pop(job_id, None)
+            _PROCESS_JOB_COMPLETIONS.pop(job_id, None)
+            removed = True
             continue
         terminal_jobs.append((job_id, job))
     terminal_jobs.sort(
@@ -3595,11 +3564,53 @@ def _cleanup_process_jobs_locked(now: Optional[float] = None) -> None:
     )
     for job_id, _job in terminal_jobs[_PROCESS_JOB_MAX_COMPLETED:]:
         _PROCESS_JOBS.pop(job_id, None)
+        _PROCESS_JOB_COMPLETIONS.pop(job_id, None)
+        removed = True
+    if removed:
+        _advance_process_queue_generation_locked()
 
 
 def _cleanup_process_jobs(now: Optional[float] = None) -> None:
     with _PROCESS_JOBS_LOCK:
         _cleanup_process_jobs_locked(now=now)
+        active_paths = {
+            str(job.get("form").temp_dir)
+            for job in _PROCESS_JOBS.values()
+            if job.get("status") in {"queued", "running"}
+            and isinstance(job.get("form"), _ProcessFormSnapshot)
+            and job.get("form").temp_dir
+        }
+    cleanup_expired_job_directories(
+        managed_root=str(_PROCESS_JOB_ROOT),
+        prefix=_PROCESS_JOB_DIRECTORY_PREFIX,
+        max_age_seconds=_PROCESS_JOB_DIRECTORY_TTL_SECONDS,
+        active_paths=active_paths,
+        now=now,
+    )
+
+
+def _cleanup_process_job_directory(path: str) -> bool:
+    return cleanup_job_directory(path, managed_root=str(_PROCESS_JOB_ROOT))
+
+
+def _advance_process_queue_generation_locked() -> None:
+    global _PROCESS_QUEUE_GENERATION
+    _PROCESS_QUEUE_GENERATION += 1
+
+
+async def _stage_process_form(request: Request) -> _ProcessFormSnapshot:
+    os.makedirs(_PROCESS_JOB_ROOT, exist_ok=True)
+    temp_dir = tempfile.mkdtemp(
+        prefix=_PROCESS_JOB_DIRECTORY_PREFIX,
+        dir=str(_PROCESS_JOB_ROOT),
+    )
+    try:
+        form = await request.form()
+        snapshot = await _materialize_process_form(form, temp_dir)
+    except Exception:
+        _cleanup_process_job_directory(temp_dir)
+        raise
+    return snapshot
 
 
 def _process_job_payload(job: Dict[str, Any], *, include_result: bool = True) -> Dict[str, Any]:
@@ -3678,6 +3689,34 @@ def _persist_process_job(job: Dict[str, Any]) -> None:
         pass
 
 
+def _process_job_stage(job: Dict[str, Any]) -> str:
+    current_stage = job.get("current_stage")
+    if isinstance(current_stage, dict):
+        return str(
+            current_stage.get("key")
+            or current_stage.get("label")
+            or job.get("progress_label")
+            or ""
+        )
+    return str(job.get("progress_label") or "")
+
+
+def _persist_process_job_snapshot(
+    job: Dict[str, Any], *, force: bool = False, forget: bool = False
+) -> None:
+    job_id = str(job.get("id") or "")
+    if _PROCESS_PROGRESS_GATE.should_persist(
+        job_id,
+        stage=_process_job_stage(job),
+        status=str(job.get("status") or "queued"),
+        now=time.monotonic(),
+        force=force,
+    ):
+        _persist_process_job(job)
+    if forget:
+        _PROCESS_PROGRESS_GATE.forget(job_id)
+
+
 def _update_process_job_progress(
     job: Dict[str, Any],
     percent: int,
@@ -3707,8 +3746,9 @@ def _set_process_job_progress(
         if not job:
             return
         _update_process_job_progress(job, percent, label, stages, current_stage)
+        _advance_process_queue_generation_locked()
         durable_job = dict(job)
-    _persist_process_job(durable_job)
+    _persist_process_job_snapshot(durable_job)
 
 
 def _new_process_job(
@@ -3742,6 +3782,7 @@ def _new_process_job(
         "timing_stages": [],
         "current_stage": None,
         "error": "",
+        "error_status_code": 0,
         "warning_messages": [],
     }
 
@@ -3804,11 +3845,24 @@ def _finish_process_job_failure(
     job["status"] = "failed"
     job["finished_at"] = finished_at
     job["error"] = message
+    job["error_status_code"] = status_code
     job["progress_label"] = "Blad zadania"
     job["warning_messages"] = [message]
     job["current_stage"] = None
     job.pop("form", None)
     return message, status_code, severity
+
+
+def _finish_process_job_cancelled(job: Dict[str, Any]) -> str:
+    form = job.get("form")
+    temp_dir = form.temp_dir if isinstance(form, _ProcessFormSnapshot) else ""
+    job["status"] = "cancelled"
+    job["finished_at"] = time.time()
+    job["progress_label"] = "Anulowano"
+    job["current_stage"] = None
+    job["warning_messages"] = ["Zadanie zostalo anulowane."]
+    job.pop("form", None)
+    return temp_dir
 
 
 def _emit_process_completed(
@@ -3874,72 +3928,161 @@ def _queue_process_job(
     username: str,
     cache_scope: str,
     form: _ProcessFormSnapshot,
+    reservation: QueueReservation,
+    persist_as_running: bool = False,
 ) -> Dict[str, Any]:
     _cleanup_process_jobs()
     job = _new_process_job(
         username=username, cache_scope=cache_scope, form=form, status="queued"
     )
     job_id = str(job["id"])
+    completion = threading.Event()
     with _PROCESS_JOBS_LOCK:
         _PROCESS_JOBS[job_id] = job
-    _persist_process_job(dict(job))
-    _PROCESS_EXECUTOR.submit(_run_process_job, job_id)
-    return _process_job_payload(job, include_result=False)
+        _PROCESS_JOB_COMPLETIONS[job_id] = completion
+        _advance_process_queue_generation_locked()
+        persisted_job = dict(job)
+        if persist_as_running:
+            job["start_persisted"] = True
+            persisted_job["status"] = "running"
+            persisted_job["started_at"] = time.time()
+            persisted_job["progress"] = 1
+            persisted_job["progress_label"] = "Start zadania"
+    _persist_process_job(persisted_job)
+    try:
+        queue_position = _PROCESS_QUEUE.submit(reservation, job_id, _run_process_job)
+    except Exception:
+        with _PROCESS_JOBS_LOCK:
+            _PROCESS_JOBS.pop(job_id, None)
+            _PROCESS_JOB_COMPLETIONS.pop(job_id, None)
+            _advance_process_queue_generation_locked()
+        reservation.release()
+        _cleanup_process_job_directory(form.temp_dir)
+        raise
+    with _PROCESS_JOBS_LOCK:
+        queued_job = _PROCESS_JOBS.get(job_id)
+        if queued_job and queued_job.get("status") == "queued":
+            queued_job["queue_position"] = queue_position
+            job = queued_job
+        durable_job = dict(job)
+    return _process_job_payload(durable_job, include_result=False)
 
 
-def _run_process_job(job_id: str) -> None:
+def _run_process_job(
+    job_id: str,
+    cancel_event: threading.Event | None = None,
+) -> None:
+    try:
+        with _PROCESS_JOBS_LOCK:
+            job = _PROCESS_JOBS.get(job_id)
+            if not job:
+                return
+            job["status"] = "running"
+            job["started_at"] = time.time()
+            job["progress"] = max(1, int(job.get("progress") or 0))
+            job["progress_label"] = "Start zadania"
+            _advance_process_queue_generation_locked()
+            username = str(job.get("username") or "")
+            cache_scope = str(job.get("cache_scope") or "")
+            form = job.get("form")
+            staging_dir = form.temp_dir if isinstance(form, _ProcessFormSnapshot) else ""
+            start_persisted = bool(job.pop("start_persisted", False))
+            durable_job = dict(job)
+        if not start_persisted:
+            _persist_process_job(durable_job)
+        try:
+            if cancel_event is not None and cancel_event.is_set():
+                raise _ProcessJobCancelled()
+            payload = _process_upload_snapshot(
+                username=username,
+                cache_scope=cache_scope,
+                form=form,
+                job_id=job_id,
+                cancel_event=cancel_event,
+                progress=lambda percent, label, stages, current_stage: _set_process_job_progress(
+                    job_id,
+                    percent,
+                    label,
+                    stages,
+                    current_stage,
+                ),
+            )
+            with _PROCESS_JOBS_LOCK:
+                job = _PROCESS_JOBS.get(job_id)
+                if not job:
+                    return
+                warning_messages = _finish_process_job_success(job, payload)
+                _advance_process_queue_generation_locked()
+                _cleanup_process_jobs_locked(now=float(job["finished_at"]))
+                durable_job = dict(job)
+            _cleanup_process_job_directory(staging_dir)
+            _persist_process_job_snapshot(durable_job, force=True, forget=True)
+            _emit_process_completed(durable_job, payload, warning_messages)
+        except _ProcessJobCancelled:
+            with _PROCESS_JOBS_LOCK:
+                job = _PROCESS_JOBS.get(job_id)
+                if not job:
+                    return
+                temp_dir = _finish_process_job_cancelled(job)
+                _advance_process_queue_generation_locked()
+                _cleanup_process_jobs_locked(now=float(job["finished_at"]))
+                durable_job = dict(job)
+            _cleanup_process_job_directory(temp_dir)
+            _persist_process_job_snapshot(durable_job, force=True, forget=True)
+        except Exception as exc:
+            with _PROCESS_JOBS_LOCK:
+                job = _PROCESS_JOBS.get(job_id)
+                if not job:
+                    return
+                message, status_code, severity = _finish_process_job_failure(job, exc)
+                _advance_process_queue_generation_locked()
+                _cleanup_process_jobs_locked(now=float(job["finished_at"]))
+                durable_job = dict(job)
+            _cleanup_process_job_directory(staging_dir)
+            _persist_process_job_snapshot(durable_job, force=True, forget=True)
+            _emit_process_failed(
+                durable_job,
+                exc,
+                message=message,
+                status_code=status_code,
+                severity=severity,
+            )
+    finally:
+        with _PROCESS_JOBS_LOCK:
+            completion = _PROCESS_JOB_COMPLETIONS.get(job_id)
+        if completion is not None:
+            completion.set()
+
+
+def _cancel_process_job_for_user(job_id: str, username: str) -> Optional[Dict[str, Any]]:
+    with _PROCESS_JOBS_LOCK:
+        job = _PROCESS_JOBS.get(job_id)
+        if not job or str(job.get("username") or "") != username:
+            return None
+        if job.get("status") not in {"queued", "running"}:
+            return None
+    if not _PROCESS_QUEUE.cancel(job_id):
+        return None
+    temp_dir = ""
+    completion: threading.Event | None = None
     with _PROCESS_JOBS_LOCK:
         job = _PROCESS_JOBS.get(job_id)
         if not job:
-            return
-        job["status"] = "running"
-        job["started_at"] = time.time()
-        job["progress"] = max(1, int(job.get("progress") or 0))
-        job["progress_label"] = "Start zadania"
-        username = str(job.get("username") or "")
-        cache_scope = str(job.get("cache_scope") or "")
-        form = job.get("form")
+            return None
+        if job.get("status") == "queued":
+            temp_dir = _finish_process_job_cancelled(job)
+            completion = _PROCESS_JOB_COMPLETIONS.get(job_id)
+        else:
+            job["cancel_requested"] = True
+            job["progress_label"] = "Anulowanie zadania"
+        _advance_process_queue_generation_locked()
         durable_job = dict(job)
-    _persist_process_job(durable_job)
-    try:
-        payload = _process_upload_snapshot(
-            username=username,
-            cache_scope=cache_scope,
-            form=form,
-            job_id=job_id,
-            progress=lambda percent, label, stages, current_stage: _set_process_job_progress(
-                job_id,
-                percent,
-                label,
-                stages,
-                current_stage,
-            ),
-        )
-        with _PROCESS_JOBS_LOCK:
-            job = _PROCESS_JOBS.get(job_id)
-            if not job:
-                return
-            warning_messages = _finish_process_job_success(job, payload)
-            _cleanup_process_jobs_locked(now=float(job["finished_at"]))
-            durable_job = dict(job)
-        _persist_process_job(durable_job)
-        _emit_process_completed(durable_job, payload, warning_messages)
-    except Exception as exc:
-        with _PROCESS_JOBS_LOCK:
-            job = _PROCESS_JOBS.get(job_id)
-            if not job:
-                return
-            message, status_code, severity = _finish_process_job_failure(job, exc)
-            _cleanup_process_jobs_locked(now=float(job["finished_at"]))
-            durable_job = dict(job)
-        _persist_process_job(durable_job)
-        _emit_process_failed(
-            durable_job,
-            exc,
-            message=message,
-            status_code=status_code,
-            severity=severity,
-        )
+    if temp_dir:
+        _cleanup_process_job_directory(temp_dir)
+    if completion is not None:
+        completion.set()
+    _persist_process_job_snapshot(durable_job, force=True, forget=bool(temp_dir))
+    return _process_job_payload(durable_job, include_result=False)
 
 
 def _process_job_for_user(job_id: str, username: str) -> Optional[Dict[str, Any]]:
@@ -3972,6 +4115,7 @@ def _active_process_jobs_snapshot() -> Dict[str, Any]:
             for job in _PROCESS_JOBS.values()
             if job.get("status") in {"queued", "running"}
         ]
+        queue_generation = _PROCESS_QUEUE_GENERATION
     running = sorted(
         [job for job in active_jobs if job.get("status") == "running"],
         key=lambda item: float(item.get("started_at") or item.get("created_at") or 0),
@@ -3996,14 +4140,27 @@ def _active_process_jobs_snapshot() -> Dict[str, Any]:
         "current": payload_jobs[0] if payload_jobs and payload_jobs[0].get("status") == "running" else None,
         "active_count": len(payload_jobs),
         "queued_count": len(queued),
+        "generation": queue_generation,
         "server_time": now,
     }
 
 
+def _runtime_process_queue_summary() -> Dict[str, Any]:
+    with _PROCESS_JOBS_LOCK:
+        return {
+            "generation": _PROCESS_QUEUE_GENERATION,
+            "active_count": sum(
+                1
+                for job in _PROCESS_JOBS.values()
+                if job.get("status") in {"queued", "running"}
+            ),
+        }
+
+
 def _resource_monitor_context() -> dict[str, int]:
     active = _active_process_jobs_snapshot()
-    with _ACTIVE_CLIENTS_LOCK:
-        active_clients = len(_ACTIVE_CLIENTS)
+    with _ACTIVE_CLIENT_REGISTRY_LIFECYCLE_LOCK:
+        active_clients = len(_active_client_registry_locked().snapshot())
     return {
         "active_jobs": int(active["active_count"]),
         "queued_jobs": int(active["queued_count"]),
@@ -4050,6 +4207,23 @@ def _active_clients_log_path() -> Path:
     return Path(settings.LOG_DIR) / "web_active_clients.json"
 
 
+def _active_client_registry_locked() -> ActiveClientRegistry:
+    global _ACTIVE_CLIENT_REGISTRY
+    if _ACTIVE_CLIENT_REGISTRY.closed:
+        _ACTIVE_CLIENT_REGISTRY.wait_until_idle()
+        _ACTIVE_CLIENT_REGISTRY = ActiveClientRegistry(
+            _active_clients_log_path(),
+            max_age_seconds=ACTIVE_CLIENT_MAX_AGE_SECONDS,
+            flush_interval_seconds=ACTIVE_CLIENT_FLUSH_INTERVAL_SECONDS,
+        )
+    return _ACTIVE_CLIENT_REGISTRY
+
+
+def _ensure_active_client_registry() -> ActiveClientRegistry:
+    with _ACTIVE_CLIENT_REGISTRY_LIFECYCLE_LOCK:
+        return _active_client_registry_locked()
+
+
 def _clean_presence_client_id(value: object) -> str:
     text = str(value or "").strip()
     if not text:
@@ -4083,102 +4257,21 @@ def _active_client_key(item: Dict[str, Any]) -> str:
     )
 
 
-def _load_active_clients_from_disk_locked(now_value: float) -> None:
-    global _ACTIVE_CLIENTS_LOADED
-    if _ACTIVE_CLIENTS_LOADED:
-        return
-    _ACTIVE_CLIENTS_LOADED = True
-    path = _active_clients_log_path()
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    if not isinstance(payload, list):
-        return
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
-        try:
-            last_seen = float(item.get("last_seen_epoch") or 0)
-        except (TypeError, ValueError):
-            continue
-        if last_seen and now_value - last_seen <= ACTIVE_CLIENT_MAX_AGE_SECONDS:
-            _ACTIVE_CLIENTS[_active_client_key(item)] = item
-
-
-def _prune_active_clients_locked(now_value: float) -> None:
-    global _ACTIVE_CLIENTS_DIRTY
-    expired = [
-        key
-        for key, item in _ACTIVE_CLIENTS.items()
-        if now_value - float(item.get("last_seen_epoch") or 0) > ACTIVE_CLIENT_MAX_AGE_SECONDS
-    ]
-    for key in expired:
-        _ACTIVE_CLIENTS.pop(key, None)
-    if expired:
-        _ACTIVE_CLIENTS_DIRTY = True
-
-
-def _active_client_payload_locked(now_value: float) -> List[Dict[str, Any]]:
-    _load_active_clients_from_disk_locked(now_value)
-    _prune_active_clients_locked(now_value)
-    clients = sorted(
-        _ACTIVE_CLIENTS.values(),
-        key=lambda item: float(item.get("last_seen_epoch") or 0),
-        reverse=True,
-    )[:100]
-    return [dict(item) for item in clients]
-
-
-def _flush_active_clients_locked(now_value: float, *, force: bool = False) -> None:
-    global _ACTIVE_CLIENTS_DIRTY, _ACTIVE_CLIENTS_LAST_FLUSH
-    if not _ACTIVE_CLIENTS_DIRTY and not force:
-        return
-    if not force and now_value - _ACTIVE_CLIENTS_LAST_FLUSH < ACTIVE_CLIENT_FLUSH_INTERVAL_SECONDS:
-        return
-    payload = _active_client_payload_locked(now_value)
-    try:
-        path = _active_clients_log_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = path.with_suffix(".json.tmp")
-        temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temp_path, path)
-        _ACTIVE_CLIENTS_DIRTY = False
-        _ACTIVE_CLIENTS_LAST_FLUSH = now_value
-    except OSError:
-        pass
-
-
 def _active_clients_snapshot(now: Optional[float] = None) -> List[Dict[str, Any]]:
-    now_value = time.time() if now is None else float(now)
-    with _ACTIVE_CLIENTS_LOCK:
-        clients = _active_client_payload_locked(now_value)
-        _flush_active_clients_locked(now_value)
+    with _ACTIVE_CLIENT_REGISTRY_LIFECYCLE_LOCK:
+        registry = _active_client_registry_locked()
+        clients = registry.snapshot(now=now)
+        registry.schedule_flush()
         return clients
 
 
 def _remove_active_client(username: str, client_id: str, now: Optional[float] = None) -> int:
-    global _ACTIVE_CLIENTS_DIRTY
-    clean_username = str(username or "").strip()
-    clean_client_id = _clean_presence_client_id(client_id)
-    if not clean_username or not clean_client_id:
-        return 0
-    now_value = time.time() if now is None else float(now)
-    removed = 0
-    with _ACTIVE_CLIENTS_LOCK:
-        _load_active_clients_from_disk_locked(now_value)
-        _prune_active_clients_locked(now_value)
-        for key, item in list(_ACTIVE_CLIENTS.items()):
-            if (
-                str(item.get("username") or "").strip() == clean_username
-                and _clean_presence_client_id(item.get("client_id")) == clean_client_id
-            ):
-                _ACTIVE_CLIENTS.pop(key, None)
-                removed += 1
+    with _ACTIVE_CLIENT_REGISTRY_LIFECYCLE_LOCK:
+        registry = _active_client_registry_locked()
+        removed = registry.remove(username, client_id, now=now)
         if removed:
-            _ACTIVE_CLIENTS_DIRTY = True
-            _flush_active_clients_locked(now_value, force=True)
-    return removed
+            registry.schedule_flush(force=True)
+        return removed
 
 
 def _active_presence_enabled() -> bool:
@@ -4220,12 +4313,23 @@ def _active_presence_payload(
     return {"enabled": True, "users": users}
 
 
+def _runtime_active_clients_summary() -> Dict[str, Any]:
+    with _ACTIVE_CLIENT_REGISTRY_LIFECYCLE_LOCK:
+        registry = _active_client_registry_locked()
+        summary = registry.runtime_summary()
+        registry.schedule_flush()
+        return {
+            "generation": summary["generation"],
+            "count": summary["active_user_count"],
+        }
+
+
 def _record_active_client(request: Request, status_code: int) -> None:
-    global _ACTIVE_CLIENTS_DIRTY
     path_text = str(request.url.path or "")
     if path_text.startswith("/static/") or path_text in {
         "/api/health",
         "/api/logout",
+        "/api/runtime-status",
         "/api/server/presence/leave",
     }:
         return
@@ -4248,12 +4352,10 @@ def _record_active_client(request: Request, status_code: int) -> None:
         "last_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "last_seen_epoch": now_value,
     }
-    with _ACTIVE_CLIENTS_LOCK:
-        _load_active_clients_from_disk_locked(now_value)
-        _prune_active_clients_locked(now_value)
-        _ACTIVE_CLIENTS[_active_client_key(item)] = item
-        _ACTIVE_CLIENTS_DIRTY = True
-        _flush_active_clients_locked(now_value)
+    with _ACTIVE_CLIENT_REGISTRY_LIFECYCLE_LOCK:
+        registry = _active_client_registry_locked()
+        registry.record(item, now=now_value)
+        registry.schedule_flush()
 
 
 def _optional_form_bool(form: Any, key: str) -> Optional[bool]:
@@ -4591,7 +4693,7 @@ def _health_payload() -> Dict[str, Any]:
         "sqlite": {"status": "critical", "observed_at": server_time},
         "job_processor": {
             "status": "critical"
-            if bool(getattr(_PROCESS_EXECUTOR, "_shutdown", False))
+            if bool(getattr(_PROCESS_QUEUE, "_stopping", False))
             else "online",
             "observed_at": server_time,
         },
@@ -4797,6 +4899,13 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="PicOrgFTP-SQL Web", version=get_app_version())
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    runtime_status_service = RuntimeStatusService(
+        health_provider=lambda: _health_payload(),
+        file_index_provider=lambda: file_index_status(start=False),
+        process_queue_provider=lambda: _runtime_process_queue_summary(),
+        active_clients_provider=lambda: _runtime_active_clients_summary(),
+        clock=lambda: _utc_now_iso(),
+    )
 
     @app.exception_handler(Exception)
     async def _unhandled_application_error(
@@ -4884,6 +4993,7 @@ def create_app() -> FastAPI:
         os.environ.setdefault("PICORGFTP_SQL_HEADLESS", "1")
         runtime_info = initialize_application_runtime(interactive=False)
         app.state.runtime_info = runtime_info
+        _ensure_active_client_registry()
         _RESOURCE_MONITOR.start()
         cleanup_web_ftp_cache(force=True)
         cleanup_web_upload_cache(force=True)
@@ -4899,12 +5009,30 @@ def create_app() -> FastAPI:
         _RESOURCE_MONITOR.stop()
         stop_notification_worker()
         _stop_backup_scheduler()
-        with _ACTIVE_CLIENTS_LOCK:
-            _flush_active_clients_locked(time.time(), force=True)
+        with _ACTIVE_CLIENT_REGISTRY_LIFECYCLE_LOCK:
+            _ACTIVE_CLIENT_REGISTRY.close(timeout=5.0)
+        data_store.reset_active_store_cache()
 
     @app.get("/api/health")
     def health() -> Dict[str, Any]:
         return _health_payload()
+
+    runtime_router = build_runtime_router(
+        RuntimeApiDependencies(
+            current_user_payload=lambda request: _current_user_payload(request),
+            require_user=lambda request: _require_user(request),
+            require_admin=lambda request: _require_admin(request),
+            runtime_status=runtime_status_service.snapshot,
+            file_index_status=lambda: file_index_status(start=True),
+            refresh_file_index=refresh_file_index,
+            active_clients=_active_clients_snapshot,
+            presence_payload=_active_presence_payload,
+            request_client_id=_request_presence_client_id,
+            remove_active_client=_remove_active_client,
+        )
+    )
+    runtime_routes = {route.path: route for route in runtime_router.routes}
+    app.routes.append(runtime_routes["/api/runtime-status"])
 
     @app.post("/api/resource-monitor/simulate-safe")
     def resource_monitor_simulate_safe(request: Request) -> Dict[str, Any]:
@@ -5080,10 +5208,7 @@ def create_app() -> FastAPI:
         _require_user(request)
         return load_web_data()
 
-    @app.get("/api/file-index/status")
-    def file_index_status_api(request: Request) -> Dict[str, Any]:
-        _require_user(request)
-        return file_index_status(start=True)
+    app.routes.append(runtime_routes["/api/file-index/status"])
 
     @app.get("/api/history")
     def history_api(
@@ -5332,21 +5457,9 @@ def create_app() -> FastAPI:
             "server_time": _utc_now_iso(),
         }
 
-    @app.get("/api/server/active-users")
-    def active_users_api(request: Request) -> Dict[str, Any]:
-        _require_admin(request)
-        return {"clients": _active_clients_snapshot()}
-
-    @app.get("/api/server/presence")
-    def active_presence_api(request: Request) -> Dict[str, Any]:
-        _require_user(request)
-        return _active_presence_payload(_active_clients_snapshot())
-
-    @app.post("/api/server/presence/leave")
-    def active_presence_leave_api(request: Request) -> Dict[str, Any]:
-        username = _require_user(request)
-        removed = _remove_active_client(username, _request_presence_client_id(request))
-        return {"ok": True, "removed": removed}
+    app.routes.append(runtime_routes["/api/server/active-users"])
+    app.routes.append(runtime_routes["/api/server/presence"])
+    app.routes.append(runtime_routes["/api/server/presence/leave"])
 
     @app.post("/api/logs/clear")
     async def logs_clear_api(request: Request) -> JSONResponse:
@@ -5366,10 +5479,7 @@ def create_app() -> FastAPI:
         response["structured_cleared"] = structured_result
         return JSONResponse(response)
 
-    @app.post("/api/file-index/refresh")
-    def file_index_refresh_api(request: Request) -> Dict[str, Any]:
-        _require_admin(request)
-        return refresh_file_index()
+    app.routes.append(runtime_routes["/api/file-index/refresh"])
 
     @app.get("/api/suggestions")
     def suggestions_api(
@@ -5382,6 +5492,7 @@ def create_app() -> FastAPI:
         color2: str = "",
         color3: str = "",
         extra: str = "",
+        limit: int = 100,
     ) -> Dict[str, Any]:
         _require_user(request)
         values = field_suggestions(
@@ -5395,6 +5506,7 @@ def create_app() -> FastAPI:
                 "color3": color3,
                 "extra": extra,
             },
+            limit=limit,
         )
         return {"values": values, "file_index": file_index_status(start=True)}
 
@@ -5678,6 +5790,7 @@ def create_app() -> FastAPI:
         type_name: str = "",
         model: str = "",
         query: str = "",
+        limit: int = 30,
     ) -> Dict[str, Any]:
         _require_user(request)
         return {
@@ -5688,6 +5801,7 @@ def create_app() -> FastAPI:
                 type_name=type_name,
                 model=model,
                 query=query,
+                limit=limit,
             )
         }
 
@@ -6459,7 +6573,6 @@ def create_app() -> FastAPI:
             database_path,
             backup_dir,
         )
-        data_store.reset_active_store_cache()
         config.initialize_config(interactive=False)
         result["settings"] = settings_snapshot()
         return JSONResponse(result)
@@ -6507,7 +6620,6 @@ def create_app() -> FastAPI:
             backup_path,
             storage_settings.resolve_backup_dir(),
         )
-        data_store.reset_active_store_cache()
         config.initialize_config(interactive=False)
         result["settings"] = settings_snapshot()
         return JSONResponse(result)
@@ -6648,100 +6760,34 @@ def create_app() -> FastAPI:
         )
         return {"ok": True}
 
-    @app.get("/api/process-jobs")
-    def process_jobs_api(request: Request, limit: int = 20) -> Dict[str, Any]:
-        username = _require_user(request)
-        return {"jobs": _process_jobs_for_user(username, limit=limit)}
-
-    @app.get("/api/process-jobs/active")
-    def process_jobs_active_api(request: Request) -> Dict[str, Any]:
-        _require_user(request)
-        return _active_process_jobs_snapshot()
-
-    @app.get("/api/process-jobs/{job_id}")
-    def process_job_api(request: Request, job_id: str) -> Dict[str, Any]:
-        username = _require_user(request)
+    def process_job_payload_for_user(job_id: str, username: str) -> Dict[str, Any] | None:
         job = _process_job_for_user(job_id, username)
-        if not job:
-            raise HTTPException(status_code=404, detail="Nie znaleziono zadania.")
-        return _process_job_payload(job)
+        return _process_job_payload(job) if job else None
 
-    @app.post("/api/process/background")
-    async def process_uploads_background(request: Request) -> JSONResponse:
-        username = _require_user(request)
-        cache_scope = _user_cache_scope(request, username)
-        temp_dir = tempfile.mkdtemp(prefix="picorg_web_process_")
-        try:
-            form = await request.form()
-            snapshot = await _materialize_process_form(form, temp_dir)
-        except Exception:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            raise
-        job = _queue_process_job(
-            username=username,
-            cache_scope=cache_scope,
-            form=snapshot,
+    def process_job_completion(job_id: str) -> threading.Event | None:
+        with _PROCESS_JOBS_LOCK:
+            return _PROCESS_JOB_COMPLETIONS.get(job_id)
+
+    def process_job_snapshot(job_id: str) -> Dict[str, Any]:
+        with _PROCESS_JOBS_LOCK:
+            return dict(_PROCESS_JOBS.get(job_id) or {})
+
+    process_router = build_process_router(
+        ProcessApiDependencies(
+            current_user=lambda request: _require_user(request),
+            queue=_PROCESS_QUEUE_REFERENCE,
+            stage_form=_stage_process_form,
+            cache_scope=_user_cache_scope,
+            job_store=_queue_process_job,
+            job_completion=process_job_completion,
+            job_snapshot=process_job_snapshot,
+            jobs_for_user=lambda username, limit: _process_jobs_for_user(username, limit=limit),
+            active_jobs=_active_process_jobs_snapshot,
+            job_for_user=process_job_payload_for_user,
+            cancel_job=_cancel_process_job_for_user,
         )
-        return JSONResponse({"queued": True, "job": job})
-
-    @app.post("/api/process")
-    async def process_uploads(request: Request) -> JSONResponse:
-        username = _require_user(request)
-        cache_scope = _user_cache_scope(request, username)
-        temp_dir = tempfile.mkdtemp(prefix="picorg_web_process_")
-        try:
-            form = await request.form()
-            snapshot = await _materialize_process_form(form, temp_dir)
-        except Exception:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            raise
-        job = _new_process_job(
-            username=username,
-            cache_scope=cache_scope,
-            form=snapshot,
-            status="running",
-        )
-        job_id = str(job["id"])
-        _persist_process_job(dict(job))
-
-        def update_progress(
-            percent: int,
-            label: str,
-            stages: List[Dict[str, Any]],
-            current_stage: Optional[Dict[str, Any]],
-        ) -> None:
-            _update_process_job_progress(
-                job, percent, label, stages, current_stage
-            )
-            _persist_process_job(dict(job))
-
-        try:
-            payload = await run_in_threadpool(
-                lambda: _process_upload_snapshot(
-                    username=username,
-                    cache_scope=cache_scope,
-                    form=snapshot,
-                    job_id=job_id,
-                    progress=update_progress,
-                )
-            )
-        except Exception as exc:
-            message, status_code, severity = _finish_process_job_failure(job, exc)
-            durable_job = dict(job)
-            _persist_process_job(durable_job)
-            _emit_process_failed(
-                durable_job,
-                exc,
-                message=message,
-                status_code=status_code,
-                severity=severity,
-            )
-            raise
-        warning_messages = _finish_process_job_success(job, payload)
-        durable_job = dict(job)
-        _persist_process_job(durable_job)
-        _emit_process_completed(durable_job, payload, warning_messages)
-        return JSONResponse(payload)
+    )
+    app.routes.extend(process_router.routes)
     return app
 
 

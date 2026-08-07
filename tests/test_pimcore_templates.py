@@ -1,4 +1,7 @@
 import pytest
+from concurrent.futures import ThreadPoolExecutor
+import threading
+import time
 
 from picorgftp_sql.pimcore_templates import (
     SourceDefinition,
@@ -255,3 +258,38 @@ def test_test_values_keep_ean_fresh_when_clock_does_not_advance(monkeypatch):
     assert first["EAN"].isdigit()
     assert len(first["EAN"]) == 13
     assert first["EAN"] != second["EAN"]
+
+
+def test_template_operation_classification_uses_placeholder_dependencies():
+    from picorgftp_sql.services.template_execution import classify_template_operation
+
+    assert classify_template_operation(
+        {"sql_query": "SELECT {PRODUCT:ean}"}
+    ).independent
+    assert not classify_template_operation(
+        {"sql_query": "SELECT {PIMCORE:title}"}
+    ).independent
+
+
+def test_independent_operations_are_bounded_and_keep_input_order():
+    from picorgftp_sql.services.template_execution import execute_independent_operations
+
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def operation(index: int) -> int:
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return index
+
+    assert execute_independent_operations(
+        [lambda index=index: operation(index) for index in range(8)],
+        max_workers=4,
+    ) == list(range(8))
+    assert peak <= 4

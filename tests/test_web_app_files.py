@@ -3,19 +3,32 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import io
+import json
 from pathlib import Path
 import shutil
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
+import pytest
 
+from picorgftp_sql import web_data
+from picorgftp_sql.web import active_clients
 from picorgftp_sql.web import app as web_app
+from picorgftp_sql.web.process_queue import (
+    OwnerQueueLimit,
+    ProcessQueueFull,
+    ProcessQueueService,
+    QueueLimits,
+)
 
 try:
     from PIL import Image
@@ -29,6 +42,137 @@ def _workspace_temp(name: str) -> Path:
         shutil.rmtree(root)
     root.mkdir(parents=True)
     return root
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
+def test_terminal_process_jobs_cleanup_staging_and_release_reservation(
+    tmp_path, monkeypatch, outcome: str
+) -> None:
+    """Catches terminal jobs that retain a staging directory or owner queue slot."""
+    root = tmp_path / "jobs"
+    root.mkdir()
+    staging = root / "job-terminal"
+    staging.mkdir()
+    (staging / "upload.jpg").write_bytes(b"staged")
+    queue = ProcessQueueService(QueueLimits(workers=1, max_pending=1, max_per_owner=1))
+    jobs: dict[str, dict[str, object]] = {}
+    completions: dict[str, threading.Event] = {}
+    started = threading.Event()
+    form = web_app._ProcessFormSnapshot(temp_dir=str(staging))
+    result = {
+        "timing": {"stages": []},
+        "ftp": {},
+        "sql": {},
+        "local_delete": {},
+        "skipped_slots": [],
+    }
+
+    def process(**kwargs):
+        started.set()
+        if outcome == "failed":
+            raise RuntimeError("expected worker failure")
+        if outcome == "cancelled":
+            assert kwargs["cancel_event"].wait(timeout=5)
+            raise web_app._ProcessJobCancelled()
+        return result
+
+    monkeypatch.setattr(web_app, "_PROCESS_JOB_ROOT", root)
+    monkeypatch.setattr(web_app, "_PROCESS_QUEUE", queue)
+    monkeypatch.setattr(web_app, "_PROCESS_JOBS", jobs)
+    monkeypatch.setattr(web_app, "_PROCESS_JOB_COMPLETIONS", completions)
+    try:
+        with (
+            patch.object(web_app, "_process_upload_snapshot", side_effect=process),
+            patch.object(web_app, "record_job"),
+            patch.object(web_app, "emit_event"),
+            patch.object(web_app, "_write_web_event"),
+        ):
+            queued = web_app._queue_process_job(
+                username="operator",
+                cache_scope="scope",
+                form=form,
+                reservation=queue.reserve("scope"),
+            )
+            job_id = str(queued["job_id"])
+            assert started.wait(timeout=5)
+            if outcome == "cancelled":
+                cancelled = web_app._cancel_process_job_for_user(job_id, "operator")
+                assert cancelled is not None
+            assert completions[job_id].wait(timeout=5)
+
+        assert not staging.exists()
+        assert web_app._process_job_for_user(job_id, "operator")["status"] == outcome
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                replacement = queue.reserve("scope")
+                break
+            except OwnerQueueLimit:
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+        replacement.release()
+    finally:
+        queue.shutdown()
+
+
+def test_cancel_process_endpoint_cleans_waiting_job(tmp_path, monkeypatch) -> None:
+    """Catches a cancel endpoint that leaves queued staging or capacity behind."""
+    root = tmp_path / "jobs"
+    root.mkdir()
+    staging = root / "job-waiting"
+    staging.mkdir()
+    (staging / "upload.jpg").write_bytes(b"staged")
+    queue = ProcessQueueService(
+        QueueLimits(workers=1, max_pending=1, max_per_owner=1),
+        start_workers=False,
+    )
+    jobs: dict[str, dict[str, object]] = {}
+    completions: dict[str, threading.Event] = {}
+    monkeypatch.setattr(web_app, "_PROCESS_JOB_ROOT", root)
+    monkeypatch.setattr(web_app, "_PROCESS_QUEUE", queue)
+    monkeypatch.setattr(web_app, "_PROCESS_JOBS", jobs)
+    monkeypatch.setattr(web_app, "_PROCESS_JOB_COMPLETIONS", completions)
+    try:
+        with patch.object(web_app, "record_job"):
+            queued = web_app._queue_process_job(
+                username="operator",
+                cache_scope="scope",
+                form=web_app._ProcessFormSnapshot(temp_dir=str(staging)),
+                reservation=queue.reserve("scope"),
+            )
+        job_id = str(queued["job_id"])
+        with patch.object(web_app, "_require_user", return_value="operator"):
+            response = TestClient(web_app.app).delete(f"/api/process-jobs/{job_id}")
+
+        assert response.status_code == 200
+        assert response.json()["job"]["status"] == "cancelled"
+        assert not staging.exists()
+        replacement = queue.reserve("scope")
+        replacement.release()
+    finally:
+        queue.shutdown()
+
+
+def test_process_snapshot_stops_before_validation_when_cancelled() -> None:
+    """Catches a cancellation token that is ignored until after validation starts."""
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    with (
+        patch.object(web_app, "slot_definitions_from_config", return_value=[]),
+        patch.object(
+            web_app,
+            "validate_product_form",
+            side_effect=AssertionError("validation must not run after cancellation"),
+        ),
+        pytest.raises(web_app._ProcessJobCancelled),
+    ):
+        web_app._process_upload_snapshot(
+            username="operator",
+            cache_scope="scope",
+            form=web_app._ProcessFormSnapshot(),
+            cancel_event=cancel_event,
+        )
 
 
 class _MemoryUpload:
@@ -48,6 +192,109 @@ class _MemoryUpload:
 
 
 class WebAppFileTests(unittest.TestCase):
+    def test_latest_request_asset_precedes_app(self) -> None:
+        workspace = Path(__file__).resolve().parents[1]
+        index_source = (
+            workspace / "picorgftp_sql" / "web" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+
+        latest_request_asset = '<script src="/static/latest-request.js'
+        app_asset = '<script src="/static/app.js'
+        self.assertIn(latest_request_asset, index_source)
+        self.assertLess(
+            index_source.index(latest_request_asset), index_source.index(app_asset)
+        )
+
+    def test_runtime_status_asset_precedes_app_and_replaces_named_runtime_pollers(
+        self,
+    ) -> None:
+        workspace = Path(__file__).resolve().parents[1]
+        index_source = (
+            workspace / "picorgftp_sql" / "web" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+        app_source = (
+            workspace / "picorgftp_sql" / "web" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+
+        runtime_asset = '<script src="/static/runtime-status.js'
+        app_asset = '<script src="/static/app.js'
+        self.assertIn(runtime_asset, index_source)
+        self.assertLess(index_source.index(runtime_asset), index_source.index(app_asset))
+        self.assertEqual(app_source.count("new PicOrg.RuntimeStatusPoller("), 1)
+        self.assertNotIn('createPoller("fileIndex"', app_source)
+        self.assertNotIn('createPoller("processQueue"', app_source)
+        self.assertNotIn('createPoller("activeUsers"', app_source)
+        self.assertIn(
+            "if (state.observability.stream && state.observability.streamConnected)",
+            app_source,
+        )
+
+    def test_product_query_endpoints_clamp_limit_before_store_delegation(self) -> None:
+        """Requests above 100 must not widen the delegated product queries."""
+
+        client = TestClient(web_app.app)
+        store = Mock()
+        store.mode = "sqlite"
+        store.search_product_entries.return_value = []
+        store.suggest_product_field.return_value = []
+        with (
+            patch.object(web_app, "_require_user", return_value="operator"),
+            patch.object(web_data, "get_active_store", return_value=store),
+            patch.object(web_data, "_get_file_index", return_value=None),
+            patch.object(web_app, "search_entries", web_data.search_entries),
+            patch.object(web_app, "field_suggestions", web_data.field_suggestions),
+            patch.object(web_app, "file_index_status", return_value={}),
+        ):
+            search_response = client.get("/api/entries/search?ean=5901&limit=999")
+            suggestion_response = client.get("/api/suggestions?field=name&name=al&limit=999")
+
+        self.assertEqual(search_response.status_code, 200)
+        self.assertEqual(suggestion_response.status_code, 200)
+        self.assertEqual(store.search_product_entries.call_args.kwargs["limit"], 100)
+        self.assertEqual(store.suggest_product_field.call_args.kwargs["limit"], 100)
+
+    def test_process_job_progress_coalesces_percent_only_snapshots(self) -> None:
+        """Persisting every progress tick would make this test exceed three writes."""
+        job_id = "progress-gate-100-updates"
+        job = web_app._new_process_job(
+            username="alice",
+            cache_scope="scope",
+            form=web_app._ProcessFormSnapshot(),
+            status="running",
+        )
+        job["id"] = job_id
+        with web_app._PROCESS_JOBS_LOCK:
+            web_app._PROCESS_JOBS[job_id] = job
+
+        try:
+            with (
+                patch.object(web_app, "_persist_process_job") as persist,
+                patch.object(
+                    web_app.time,
+                    "monotonic",
+                    side_effect=[index / 100 for index in range(100)],
+                ),
+            ):
+                for percent in range(1, 101):
+                    web_app._set_process_job_progress(
+                        job_id,
+                        percent,
+                        "Przetwarzanie obrazow",
+                        current_stage={"key": "images", "label": "Obrazy"},
+                    )
+
+            with web_app._PROCESS_JOBS_LOCK:
+                current = dict(web_app._PROCESS_JOBS[job_id])
+            self.assertEqual(current["progress"], 100)
+            self.assertEqual(current["progress_label"], "Przetwarzanie obrazow")
+            self.assertLessEqual(persist.call_count, 3)
+        finally:
+            with web_app._PROCESS_JOBS_LOCK:
+                web_app._PROCESS_JOBS.pop(job_id, None)
+            gate = getattr(web_app, "_PROCESS_PROGRESS_GATE", None)
+            if gate is not None:
+                gate.forget(job_id)
+
     def test_application_lifecycle_starts_and_stops_notification_worker(self) -> None:
         source = inspect.getsource(web_app.create_app)
 
@@ -60,6 +307,9 @@ class WebAppFileTests(unittest.TestCase):
         form = web_app._ProcessFormSnapshot(
             fields={"ean": "5901234567890", "name": "Test product"}
         )
+        queue = Mock()
+        queue.submit.return_value = 1
+        reservation = Mock()
         result = {
             "timing": {"stages": [{"key": "prepare", "elapsed_ms": 12}]},
             "ftp": {},
@@ -69,13 +319,13 @@ class WebAppFileTests(unittest.TestCase):
         }
 
         with (
-            patch.object(web_app._PROCESS_EXECUTOR, "submit"),
+            patch.object(web_app, "_PROCESS_QUEUE", queue),
             patch.object(web_app, "_process_upload_snapshot", return_value=result) as process,
             patch.object(web_app, "record_job") as record_job,
             patch.object(web_app, "emit_event") as emit_event,
         ):
             queued = web_app._queue_process_job(
-                username="alice", cache_scope="scope", form=form
+                username="alice", cache_scope="scope", form=form, reservation=reservation
             )
             web_app._run_process_job(queued["job_id"])
 
@@ -93,9 +343,12 @@ class WebAppFileTests(unittest.TestCase):
 
     def test_process_job_persists_critical_unexpected_failure(self) -> None:
         form = web_app._ProcessFormSnapshot(fields={"ean": "5901234567890"})
+        queue = Mock()
+        queue.submit.return_value = 1
+        reservation = Mock()
 
         with (
-            patch.object(web_app._PROCESS_EXECUTOR, "submit"),
+            patch.object(web_app, "_PROCESS_QUEUE", queue),
             patch.object(
                 web_app,
                 "_process_upload_snapshot",
@@ -105,7 +358,7 @@ class WebAppFileTests(unittest.TestCase):
             patch.object(web_app, "emit_event") as emit_event,
         ):
             queued = web_app._queue_process_job(
-                username="alice", cache_scope="scope", form=form
+                username="alice", cache_scope="scope", form=form, reservation=reservation
             )
             web_app._run_process_job(queued["job_id"])
 
@@ -118,6 +371,9 @@ class WebAppFileTests(unittest.TestCase):
 
     def test_failed_process_job_persists_the_active_stage(self) -> None:
         form = web_app._ProcessFormSnapshot(fields={"ean": "5901234567890"})
+        queue = Mock()
+        queue.submit.return_value = 1
+        reservation = Mock()
 
         def fail_during_stage(*, progress, **_kwargs):
             progress(
@@ -135,13 +391,13 @@ class WebAppFileTests(unittest.TestCase):
             raise RuntimeError("FTP crashed")
 
         with (
-            patch.object(web_app._PROCESS_EXECUTOR, "submit"),
+            patch.object(web_app, "_PROCESS_QUEUE", queue),
             patch.object(web_app, "_process_upload_snapshot", side_effect=fail_during_stage),
             patch.object(web_app, "record_job") as record_job,
             patch.object(web_app, "emit_event"),
         ):
             queued = web_app._queue_process_job(
-                username="alice", cache_scope="scope", form=form
+                username="alice", cache_scope="scope", form=form, reservation=reservation
             )
             web_app._run_process_job(queued["job_id"])
 
@@ -210,6 +466,34 @@ class WebAppFileTests(unittest.TestCase):
                 for call in emit_event.call_args_list
             )
         )
+        stage_events = [
+            call.kwargs
+            for call in emit_event.call_args_list
+            if call.kwargs["event_type"] == "process.stage_started"
+        ]
+        stage_keys = [
+            (event["job_id"], event["stage"]) for event in stage_events
+        ]
+        self.assertEqual(len(stage_keys), len(set(stage_keys)))
+
+    def test_process_stage_started_once_for_repeated_stage(self) -> None:
+        emitted_stages: set[str] = set()
+
+        with patch.object(web_app, "emit_event") as emit_event:
+            for percent in (4, 8):
+                web_app._emit_process_stage_started_once(
+                    emitted_stages,
+                    current_key="prepare",
+                    current_label="Przygotowanie",
+                    percent=percent,
+                    label="Przygotowanie danych",
+                    username="alice",
+                    job_id="job-repeat",
+                )
+
+        emit_event.assert_called_once()
+        self.assertEqual(emit_event.call_args.kwargs["job_id"], "job-repeat")
+        self.assertEqual(emit_event.call_args.kwargs["stage"], "prepare")
 
     def test_existing_photo_snapshot_captures_size_before_local_mutation(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]
@@ -1991,6 +2275,163 @@ class WebAppFileTests(unittest.TestCase):
         self.assertIn("/api/process-jobs/active", route_paths)
         self.assertIn("/api/process-jobs/{job_id}", route_paths)
 
+    def test_background_process_rejects_before_materializing_when_queue_is_full(
+        self,
+    ) -> None:
+        """Catches a saturated queue that still stages an upload before rejecting it."""
+        client = TestClient(web_app.app)
+        full_queue = Mock()
+        full_queue.reserve.side_effect = ProcessQueueFull(retry_after_seconds=2)
+        snapshot = web_app._ProcessFormSnapshot()
+
+        with (
+            patch.object(web_app, "_require_user", return_value="operator"),
+            patch.object(web_app, "_PROCESS_QUEUE", full_queue, create=True),
+            patch.object(
+                web_app,
+                "_materialize_process_form",
+                return_value=snapshot,
+            ) as materialize,
+            patch.object(web_app, "_queue_process_job", return_value={"job_id": "job-1"}),
+        ):
+            response = client.post(
+                "/api/process/background",
+                data={
+                    "ean": "5901234567890",
+                    "name": "ALFA",
+                    "type_name": "STOL",
+                    "model": "A1",
+                },
+            )
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["Retry-After"], "2")
+        materialize.assert_not_awaited()
+
+    def test_background_process_owner_limit_uses_configured_retry_after(self) -> None:
+        """Catches the process-router proxy losing configured owner-limit retry delays."""
+        queue = ProcessQueueService(
+            QueueLimits(workers=1, max_pending=3, max_per_owner=1, retry_after_seconds=17),
+            start_workers=False,
+        )
+        scope = "operator-" + hashlib.sha1(b"scope-token").hexdigest()[:12]
+        reservation = queue.reserve(scope)
+        client = TestClient(web_app.app)
+        client.cookies.set(web_app.SESSION_COOKIE, "scope-token")
+        try:
+            with (
+                patch.object(web_app, "_require_user", return_value="operator"),
+                patch.object(web_app, "_PROCESS_QUEUE", queue),
+            ):
+                response = client.post(
+                    "/api/process/background",
+                    data={"ean": "5901234567890"},
+                    headers={
+                        web_app.CSRF_HEADER: web_app._csrf_token_for_session("scope-token")
+                    },
+                )
+        finally:
+            reservation.release()
+            queue.shutdown()
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["Retry-After"], "17")
+
+    def test_foreground_and_background_share_the_owner_queue_limit(self) -> None:
+        """Catches separate endpoint queues that let one owner exceed two active jobs."""
+        queue = ProcessQueueService(
+            QueueLimits(workers=1, max_pending=3, max_per_owner=2),
+        )
+        original_submit = queue.submit
+        second_submitted = threading.Event()
+        first_started = threading.Event()
+        release_first = threading.Event()
+        foreground_done = threading.Event()
+        foreground_result: dict[str, object] = {}
+        submit_count = 0
+        submit_lock = threading.Lock()
+        materialize_calls = 0
+        materialize_lock = threading.Lock()
+        snapshot = web_app._ProcessFormSnapshot()
+        result = {"timing": {"stages": []}, "ftp": {}, "sql": {}, "local_delete": {}}
+
+        def track_submit(*args, **kwargs):
+            nonlocal submit_count
+            position = original_submit(*args, **kwargs)
+            with submit_lock:
+                submit_count += 1
+                if submit_count == 2:
+                    second_submitted.set()
+            return position
+
+        async def materialize(_form, _temp_dir):
+            nonlocal materialize_calls
+            with materialize_lock:
+                materialize_calls += 1
+            return snapshot
+
+        def process(**_kwargs):
+            if not first_started.is_set():
+                first_started.set()
+                assert release_first.wait(timeout=5)
+            return result
+
+        def run_foreground() -> None:
+            try:
+                foreground_result["response"] = TestClient(web_app.app).post(
+                    "/api/process",
+                    data={"ean": "5901234567890"},
+                )
+            except BaseException as exc:  # pragma: no cover - reported by the assertion below
+                foreground_result["error"] = exc
+            finally:
+                foreground_done.set()
+
+        background_client = TestClient(web_app.app)
+        try:
+            with (
+                patch.object(web_app, "_require_user", return_value="operator"),
+                patch.object(web_app, "_PROCESS_QUEUE", queue),
+                patch.object(web_app, "_materialize_process_form", side_effect=materialize),
+                patch.object(web_app, "_process_upload_snapshot", side_effect=process),
+                patch.object(web_app, "record_job"),
+                patch.object(web_app, "emit_event"),
+            ):
+                queue.submit = track_submit
+                background = background_client.post(
+                    "/api/process/background",
+                    data={"ean": "5901234567890"},
+                )
+                self.assertEqual(background.status_code, 200)
+                self.assertTrue(first_started.wait(timeout=5))
+
+                foreground_thread = threading.Thread(target=run_foreground)
+                foreground_thread.start()
+                self.assertTrue(second_submitted.wait(timeout=5))
+
+                rejected = background_client.post(
+                    "/api/process/background",
+                    data={"ean": "5901234567890"},
+                )
+                self.assertEqual(rejected.status_code, 429)
+                self.assertEqual(rejected.headers["Retry-After"], "2")
+                self.assertEqual(materialize_calls, 2)
+
+                release_first.set()
+                self.assertTrue(foreground_done.wait(timeout=5))
+                foreground_thread.join(timeout=1)
+                self.assertNotIn("error", foreground_result)
+                self.assertEqual(foreground_result["response"].status_code, 200)
+                self.assertEqual(foreground_result["response"].json(), result)
+        finally:
+            release_first.set()
+            queue.shutdown()
+            with web_app._PROCESS_JOBS_LOCK:
+                for job_id, job in list(web_app._PROCESS_JOBS.items()):
+                    if job.get("form") is snapshot or job.get("username") == "operator":
+                        web_app._PROCESS_JOBS.pop(job_id, None)
+                        web_app._PROCESS_JOB_COMPLETIONS.pop(job_id, None)
+
     def test_process_warning_messages_are_user_visible(self) -> None:
         payload = {
             "ftp": {"error": "brak polaczenia"},
@@ -2190,11 +2631,8 @@ class WebAppFileTests(unittest.TestCase):
         )
 
     def test_remove_active_client_removes_only_matching_browser_client(self) -> None:
-        with web_app._ACTIVE_CLIENTS_LOCK:
-            original = dict(web_app._ACTIVE_CLIENTS)
-            original_loaded = web_app._ACTIVE_CLIENTS_LOADED
-            web_app._ACTIVE_CLIENTS.clear()
-            web_app._ACTIVE_CLIENTS_LOADED = True
+        with tempfile.TemporaryDirectory() as temp_dir:
+            registry = web_app.ActiveClientRegistry(Path(temp_dir) / "active.json")
             first = {
                 "username": "admin",
                 "client_id": "client-a",
@@ -2210,23 +2648,328 @@ class WebAppFileTests(unittest.TestCase):
                 "client_id": "client-a",
                 "last_seen_epoch": 100.0,
             }
-            web_app._ACTIVE_CLIENTS[web_app._active_client_key(first)] = first
-            web_app._ACTIVE_CLIENTS[web_app._active_client_key(second)] = second
-            web_app._ACTIVE_CLIENTS[web_app._active_client_key(other_user)] = other_user
-        try:
-            removed = web_app._remove_active_client("admin", "client-a", now=100.0)
-            snapshot = web_app._active_clients_snapshot(now=100.0)
-        finally:
-            with web_app._ACTIVE_CLIENTS_LOCK:
-                web_app._ACTIVE_CLIENTS.clear()
-                web_app._ACTIVE_CLIENTS.update(original)
-                web_app._ACTIVE_CLIENTS_LOADED = original_loaded
+            registry.record(first)
+            registry.record(second)
+            registry.record(other_user)
+            try:
+                with patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", registry):
+                    removed = web_app._remove_active_client("admin", "client-a", now=100.0)
+                    snapshot = web_app._active_clients_snapshot(now=100.0)
+            finally:
+                registry.close(timeout=5.0)
 
         self.assertEqual(removed, 1)
         self.assertEqual(
             {(item.get("username"), item.get("client_id")) for item in snapshot},
             {("admin", "client-b"), ("operator", "client-a")},
         )
+
+    def test_active_client_leave_does_not_wait_for_blocked_writer(self) -> None:
+        writer_started = threading.Event()
+        release_writer = threading.Event()
+        leave_finished = threading.Event()
+        record_finished = threading.Event()
+        leave_results = []
+        errors = []
+        serialized_payloads = []
+
+        def serializer(payload):
+            serialized_payloads.append(payload)
+            if len(serialized_payloads) == 1:
+                writer_started.set()
+                self.assertTrue(release_writer.wait(timeout=5.0))
+            return json.dumps(payload)
+
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/api/bootstrap"),
+            client=SimpleNamespace(host="127.0.0.1", port=12345),
+            headers={"user-agent": "test", web_app.PRESENCE_CLIENT_ID_HEADER: "client-b"},
+            method="GET",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "active.json"
+            registry = web_app.ActiveClientRegistry(path, serializer=serializer)
+            registry.record(
+                {
+                    "username": "admin",
+                    "client_id": "client-a",
+                    "last_seen_epoch": time.time(),
+                }
+            )
+
+            def leave():
+                try:
+                    leave_results.append(
+                        web_app._remove_active_client("admin", "client-a", now=time.time())
+                    )
+                except Exception as exc:
+                    errors.append(exc)
+                finally:
+                    leave_finished.set()
+
+            def record():
+                try:
+                    web_app._record_active_client(request, 200)
+                except Exception as exc:
+                    errors.append(exc)
+                finally:
+                    record_finished.set()
+
+            try:
+                with (
+                    patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", registry),
+                    patch.object(web_app, "_current_user", return_value="admin"),
+                ):
+                    leave_thread = threading.Thread(target=leave)
+                    leave_thread.start()
+                    self.assertTrue(writer_started.wait(timeout=5.0))
+
+                    record_thread = threading.Thread(target=record)
+                    record_thread.start()
+                    leave_returned_before_writer_release = leave_finished.wait(timeout=0.2)
+                    record_returned_before_writer_release = record_finished.wait(timeout=0.2)
+
+                    release_writer.set()
+                    leave_thread.join(timeout=5.0)
+                    record_thread.join(timeout=5.0)
+                    self.assertFalse(leave_thread.is_alive())
+                    self.assertFalse(record_thread.is_alive())
+                    registry.flush(force=True)
+            finally:
+                release_writer.set()
+                registry.close(timeout=5.0)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertTrue(leave_returned_before_writer_release)
+        self.assertTrue(record_returned_before_writer_release)
+        self.assertEqual(leave_results, [1])
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            {(item["username"], item["client_id"]) for item in payload},
+            {("admin", "client-b")},
+        )
+
+    def test_record_active_client_only_records_and_schedules_writer(self) -> None:
+        write_started = threading.Event()
+        release_write = threading.Event()
+
+        def serializer(payload):
+            write_started.set()
+            self.assertTrue(release_write.wait(timeout=5.0))
+            return "[]"
+
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/api/bootstrap"),
+            client=SimpleNamespace(host="127.0.0.1", port=12345),
+            headers={"user-agent": "test", web_app.PRESENCE_CLIENT_ID_HEADER: "client-a"},
+            method="GET",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            registry = web_app.ActiveClientRegistry(
+                Path(temp_dir) / "active.json",
+                serializer=serializer,
+            )
+            try:
+                with (
+                    patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", registry),
+                    patch.object(web_app, "_current_user", return_value="admin"),
+                ):
+                    web_app._record_active_client(request, 200)
+                    self.assertTrue(write_started.wait(timeout=5.0))
+                    self.assertEqual(registry.generation, 1)
+            finally:
+                release_write.set()
+                registry.close(timeout=5.0)
+
+    def test_shutdown_closes_active_client_registry_with_five_second_bound(self) -> None:
+        shutdown = next(
+            handler
+            for handler in web_app.app.router.on_shutdown
+            if handler.__name__ == "_shutdown"
+        )
+        registry = Mock()
+        with (
+            patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", registry),
+            patch.object(web_app._RESOURCE_MONITOR, "stop"),
+            patch.object(web_app, "stop_notification_worker"),
+            patch.object(web_app, "_stop_backup_scheduler"),
+            patch.object(web_app.data_store, "reset_active_store_cache"),
+        ):
+            shutdown()
+
+        registry.close.assert_called_once_with(timeout=5.0)
+
+    def test_later_app_startup_replaces_active_client_registry_closed_by_prior_shutdown(
+        self,
+    ) -> None:
+        first_app = web_app.create_app()
+        later_app = web_app.create_app()
+        shutdown = next(
+            handler for handler in first_app.router.on_shutdown if handler.__name__ == "_shutdown"
+        )
+        startup = next(
+            handler for handler in later_app.router.on_startup if handler.__name__ == "_startup"
+        )
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/api/bootstrap"),
+            client=SimpleNamespace(host="127.0.0.1", port=12345),
+            headers={"user-agent": "test", web_app.PRESENCE_CLIENT_ID_HEADER: "client-a"},
+            method="GET",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "active.json"
+            initial_registry = web_app.ActiveClientRegistry(path)
+            initial_registry.record(
+                {
+                    "username": "prior-user",
+                    "client_id": "prior-client",
+                    "last_seen_epoch": time.time(),
+                }
+            )
+            replacement_registry = initial_registry
+            try:
+                with (
+                    patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", initial_registry),
+                    patch.object(web_app, "_active_clients_log_path", return_value=path),
+                    patch.object(web_app._RESOURCE_MONITOR, "start"),
+                    patch.object(web_app._RESOURCE_MONITOR, "stop"),
+                    patch.object(web_app, "initialize_application_runtime", return_value={}),
+                    patch.object(web_app, "cleanup_web_ftp_cache"),
+                    patch.object(web_app, "cleanup_web_upload_cache"),
+                    patch.object(web_app, "_prune_live_events_if_due"),
+                    patch.object(web_app, "_start_backup_scheduler"),
+                    patch.object(web_app, "_stop_backup_scheduler"),
+                    patch.object(web_app, "start_notification_worker"),
+                    patch.object(web_app, "stop_notification_worker"),
+                    patch.object(web_app.data_store, "reset_active_store_cache"),
+                    patch.object(web_app, "_current_user", return_value="admin"),
+                ):
+                    shutdown()
+                    startup()
+                    replacement_registry = web_app._ACTIVE_CLIENT_REGISTRY
+                    web_app._record_active_client(request, 200)
+                    replacement_registry.flush(force=True)
+            finally:
+                replacement_registry.close(timeout=5.0)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertIsNot(replacement_registry, initial_registry)
+        self.assertEqual(
+            {item["username"] for item in payload},
+            {"admin", "prior-user"},
+        )
+
+    def test_startup_waits_for_timed_out_active_client_writer_handoff(self) -> None:
+        old_write_started = threading.Event()
+        release_old_write = threading.Event()
+        old_replace_finished = threading.Event()
+        replacement_ready = threading.Event()
+        replacement_holder = {}
+        renewal_errors = []
+        real_replace = active_clients.os.replace
+        old_writer_ident = []
+
+        def serializer(payload):
+            old_writer_ident.append(threading.get_ident())
+            old_write_started.set()
+            self.assertTrue(release_old_write.wait(timeout=5.0))
+            return json.dumps(payload)
+
+        def replace(source, destination):
+            real_replace(source, destination)
+            if old_writer_ident and threading.get_ident() == old_writer_ident[0]:
+                old_replace_finished.set()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "active.json"
+            old_registry = web_app.ActiveClientRegistry(path, serializer=serializer)
+            old_registry.record(
+                {
+                    "username": "prior-user",
+                    "client_id": "prior-client",
+                    "last_seen_epoch": time.time(),
+                }
+            )
+            old_registry.schedule_flush(force=True)
+            self.assertTrue(old_write_started.wait(timeout=5.0))
+            self.assertFalse(old_registry.close(timeout=0.01))
+
+            def renew_registry():
+                try:
+                    replacement_holder["registry"] = web_app._ensure_active_client_registry()
+                except Exception as exc:
+                    renewal_errors.append(exc)
+                finally:
+                    replacement_ready.set()
+
+            try:
+                with (
+                    patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", old_registry),
+                    patch.object(web_app, "_active_clients_log_path", return_value=path),
+                    patch.object(active_clients.os, "replace", replace),
+                ):
+                    renewal_thread = threading.Thread(target=renew_registry)
+                    renewal_thread.start()
+                    replacement_returned_while_old_writer_blocked = replacement_ready.wait(
+                        timeout=0.2
+                    )
+                    release_old_write.set()
+                    self.assertTrue(old_replace_finished.wait(timeout=5.0))
+                    renewal_thread.join(timeout=5.0)
+                    self.assertFalse(renewal_thread.is_alive())
+                    self.assertEqual(renewal_errors, [])
+
+                    replacement = replacement_holder["registry"]
+                    replacement.record(
+                        {
+                            "username": "later-user",
+                            "client_id": "later-client",
+                            "last_seen_epoch": time.time(),
+                        }
+                    )
+                    replacement.flush(force=True)
+                    replacement.close(timeout=5.0)
+            finally:
+                release_old_write.set()
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertFalse(replacement_returned_while_old_writer_blocked)
+        self.assertEqual(
+            {item["username"] for item in payload},
+            {"later-user", "prior-user"},
+        )
+
+    def test_active_client_record_lazily_renews_closed_registry_without_startup(self) -> None:
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/api/bootstrap"),
+            client=SimpleNamespace(host="127.0.0.1", port=12345),
+            headers={"user-agent": "test", web_app.PRESENCE_CLIENT_ID_HEADER: "client-a"},
+            method="GET",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "active.json"
+            closed_registry = web_app.ActiveClientRegistry(path)
+            closed_registry.close(timeout=5.0)
+            renewed_registry = closed_registry
+            try:
+                with (
+                    patch.object(web_app, "_ACTIVE_CLIENT_REGISTRY", closed_registry),
+                    patch.object(web_app, "_active_clients_log_path", return_value=path),
+                    patch.object(web_app, "_current_user", return_value="admin"),
+                ):
+                    web_app._record_active_client(request, 200)
+                    renewed_registry = web_app._ACTIVE_CLIENT_REGISTRY
+                    renewed_registry.flush(force=True)
+            finally:
+                renewed_registry.close(timeout=5.0)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertIsNot(renewed_registry, closed_registry)
+        self.assertEqual(payload[0]["username"], "admin")
 
     def test_active_presence_payload_hides_stale_browser_clients_quickly(self) -> None:
         now = 200.0

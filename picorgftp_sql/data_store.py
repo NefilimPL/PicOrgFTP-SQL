@@ -2,13 +2,35 @@
 
 from __future__ import annotations
 
+import threading
+from pathlib import Path
 from typing import Any
 
 from . import storage_settings
+from .product_queries import (
+    ProductSearchCriteria,
+    filter_product_records,
+    product_record_matches,
+)
 from .sqlite_store import SqliteStore
 
 _ACTIVE_STORE = None
 _ACTIVE_STORE_KEY: tuple[str, str] | None = None
+_STORE_REGISTRY_LOCK = threading.RLock()
+_SQLITE_STORES: dict[str, SqliteStore] = {}
+
+
+def get_sqlite_store(database_path: str) -> SqliteStore:
+    """Return the initialized SQLite store registered for a canonical path."""
+
+    key = str(Path(database_path).resolve())
+    with _STORE_REGISTRY_LOCK:
+        store = _SQLITE_STORES.get(key)
+        if store is None:
+            store = SqliteStore(key)
+            store.initialize()
+            _SQLITE_STORES[key] = store
+        return store
 
 
 class LegacyDataStore:
@@ -22,6 +44,92 @@ class LegacyDataStore:
     def save_config(self, _payload: dict[str, object]) -> None:
         return None
 
+    @staticmethod
+    def _product_records() -> list[dict[str, str]]:
+        """Read the Excel record cache without retaining a workbook handle."""
+
+        from .excel_utils import ENTRY_RECORDS_KEY, prepare_excel_lists
+
+        payload = prepare_excel_lists()
+        records = payload.get(ENTRY_RECORDS_KEY, [])
+        return records if isinstance(records, list) else []
+
+    def get_product_by_ean(self, ean: str):
+        matches = self.search_product_entries(ProductSearchCriteria(ean=ean), limit=1)
+        return matches[0] if matches else None
+
+    def get_product_by_id(self, product_id: str):
+        matches = self.search_product_entries(
+            ProductSearchCriteria(product_id=product_id), limit=1
+        )
+        return matches[0] if matches else None
+
+    def search_product_entries(
+        self, criteria: ProductSearchCriteria, limit: int = 50
+    ) -> list[dict[str, str]]:
+        return filter_product_records(self._product_records(), criteria, limit=limit)
+
+    def suggest_product_field(
+        self,
+        field: str,
+        prefix: str,
+        context: dict[str, str],
+        limit: int = 20,
+    ) -> list[str]:
+        from .excel_utils import (
+            COLOR1_HEADER,
+            COLOR2_HEADER,
+            COLOR3_HEADER,
+            EAN_HEADER,
+            EXTRA_HEADER,
+            MODEL_HEADER,
+            NAME_HEADER,
+            PRODUCT_ID_HEADER,
+            TYPE_HEADER,
+        )
+
+        headers = {
+            "product_id": PRODUCT_ID_HEADER,
+            "ean": EAN_HEADER,
+            "name": NAME_HEADER,
+            "type_name": TYPE_HEADER,
+            "model": MODEL_HEADER,
+            "color1": COLOR1_HEADER,
+            "color2": COLOR2_HEADER,
+            "color3": COLOR3_HEADER,
+            "extra": EXTRA_HEADER,
+        }
+        header = headers.get(field)
+        if header is None:
+            return []
+        criteria = ProductSearchCriteria(
+            product_id=str(context.get("product_id") or ""),
+            ean=str(context.get("ean") or ""),
+            name=str(context.get("name") or ""),
+            type_name=str(context.get("type_name") or ""),
+            model=str(context.get("model") or ""),
+        )
+        values = []
+        seen = set()
+        normalized_prefix = str(prefix or "").strip().casefold()
+        bounded_limit = max(1, min(int(limit), 100))
+        for record in self._product_records():
+            if not product_record_matches(record, criteria):
+                continue
+            value = str(record.get(header) or "").strip()
+            normalized_value = value.casefold()
+            if (
+                not value
+                or not normalized_value.startswith(normalized_prefix)
+                or normalized_value in seen
+            ):
+                continue
+            seen.add(normalized_value)
+            values.append(value)
+            if len(values) == bounded_limit:
+                break
+        return values
+
 
 class SqliteDataStoreAdapter:
     """Adapter exposing SQLite persistence through the active store API."""
@@ -32,8 +140,7 @@ class SqliteDataStoreAdapter:
 
     def __init__(self, database_path: str):
         self.database_path = database_path
-        self.store = SqliteStore(database_path)
-        self.store.initialize()
+        self.store = get_sqlite_store(database_path)
 
     def load_config(self) -> dict[str, Any]:
         return self.store.load_config()
@@ -43,6 +150,31 @@ class SqliteDataStoreAdapter:
 
     def load_lists(self) -> dict[str, Any]:
         return self.store.load_lists()
+
+    def get_product_by_ean(self, ean: str):
+        return self.store.get_product_by_ean(ean)
+
+    def get_product_by_id(self, product_id: str):
+        return self.store.get_product_by_id(product_id)
+
+    def search_product_entries(
+        self, criteria: ProductSearchCriteria, limit: int = 50
+    ):
+        return self.store.search_product_entries(criteria, limit=limit)
+
+    def suggest_product_field(
+        self,
+        field: str,
+        prefix: str,
+        context: dict[str, str],
+        limit: int = 20,
+    ):
+        return self.store.suggest_product_field(
+            field,
+            prefix,
+            context,
+            limit=limit,
+        )
 
     def save_lists(self, payload: dict[str, object]) -> None:
         self.store.save_lists(payload)
@@ -212,6 +344,9 @@ class SqliteDataStoreAdapter:
     ) -> list[dict[str, Any]]:
         return self.store.pending_notification_deliveries(limit=limit)
 
+    def next_notification_due_at(self) -> str:
+        return self.store.next_notification_due_at()
+
     def update_notification_delivery(
         self,
         delivery_id: str,
@@ -288,8 +423,16 @@ class SqliteDataStoreAdapter:
     def load_file_index_cache(self) -> dict[str, Any]:
         return self.store.load_file_index_cache()
 
-    def save_file_index_cache(self, payload: dict[str, object]) -> None:
-        self.store.save_file_index_cache(payload)
+    def save_file_index_cache(
+        self,
+        payload: dict[str, object],
+        *,
+        reused_segment_keys: tuple[str, ...] = (),
+    ) -> None:
+        self.store.save_file_index_cache(
+            payload,
+            reused_segment_keys=reused_segment_keys,
+        )
 
     def save_file_index_segments(self, snapshot: dict[str, object]) -> int:
         return self.store.save_file_index_segments(snapshot)
@@ -302,8 +445,27 @@ def reset_active_store_cache() -> None:
     """Clear the cached active store, mainly for tests and runtime switches."""
 
     global _ACTIVE_STORE, _ACTIVE_STORE_KEY
-    _ACTIVE_STORE = None
-    _ACTIVE_STORE_KEY = None
+    with _STORE_REGISTRY_LOCK:
+        _ACTIVE_STORE = None
+        _ACTIVE_STORE_KEY = None
+        _SQLITE_STORES.clear()
+
+
+def invalidate_sqlite_store(database_path: str | None = None) -> None:
+    """Discard a replaced SQLite store while preserving unrelated stores."""
+
+    global _ACTIVE_STORE, _ACTIVE_STORE_KEY
+    with _STORE_REGISTRY_LOCK:
+        if database_path is None:
+            _SQLITE_STORES.clear()
+        else:
+            _SQLITE_STORES.pop(str(Path(database_path).resolve()), None)
+        if database_path is None or (
+            _ACTIVE_STORE_KEY
+            and _ACTIVE_STORE_KEY[1] == str(Path(database_path).resolve())
+        ):
+            _ACTIVE_STORE = None
+            _ACTIVE_STORE_KEY = None
 
 
 def get_active_store():
@@ -318,14 +480,15 @@ def get_active_store():
     if mode == storage_settings.DATA_MODE_SQLITE:
         database_path = storage_settings.resolve_sqlite_path(bootstrap)
     key = (mode, database_path)
-    if _ACTIVE_STORE is not None and _ACTIVE_STORE_KEY == key:
+    with _STORE_REGISTRY_LOCK:
+        if _ACTIVE_STORE is not None and _ACTIVE_STORE_KEY == key:
+            return _ACTIVE_STORE
+        if mode == storage_settings.DATA_MODE_SQLITE:
+            _ACTIVE_STORE = SqliteDataStoreAdapter(database_path)
+        else:
+            _ACTIVE_STORE = LegacyDataStore()
+        _ACTIVE_STORE_KEY = key
         return _ACTIVE_STORE
-    if mode == storage_settings.DATA_MODE_SQLITE:
-        _ACTIVE_STORE = SqliteDataStoreAdapter(database_path)
-    else:
-        _ACTIVE_STORE = LegacyDataStore()
-    _ACTIVE_STORE_KEY = key
-    return _ACTIVE_STORE
 
 
 def is_sqlite_mode() -> bool:

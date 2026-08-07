@@ -71,6 +71,36 @@ function Install-BuildDependencies {
     }
 }
 
+function Get-WebStaticDataArguments {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $staticDirectory = Join-Path $RepoRoot "picorgftp_sql\web\static"
+    $staticAssets = @(
+        "app.css",
+        "app.js",
+        "autocomplete.js",
+        "index.html",
+        "latest-request.js",
+        "login.html",
+        "login.js",
+        "process-jobs.js",
+        "runtime-status.js"
+    )
+    $arguments = @()
+    foreach ($asset in $staticAssets) {
+        $sourcePath = Join-Path $staticDirectory $asset
+        if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+            throw "Brakuje wymaganego zasobu web: $sourcePath"
+        }
+        $arguments += "--add-data"
+        $arguments += "$sourcePath;picorgftp_sql\web\static"
+    }
+    return $arguments
+}
+
 function Test-BuildEnvironment {
     param(
         [Parameter(Mandatory = $true)]
