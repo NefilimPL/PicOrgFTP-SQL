@@ -83,6 +83,7 @@ from ..product_fields import PRODUCT_FIELDS_KEY, normalize_product_fields
 from ..pimcore_templates import TemplateError
 from ..services.ftp_service import sync_remote_files
 from ..services.pimcore_service import PimcoreApiError, PimcoreConflictError
+from ..services.photo_sql_batch import build_photo_sql_batch
 from ..services.sql_service import detect_available_columns, extract_presence_context
 from ..sqlite_maintenance import repair_sqlite_database
 from ..workflow_utils import build_product_directory, parse_slot_filename, sanitize_path_segment
@@ -1937,35 +1938,70 @@ def _sync_result_to_sql(
             payload["reason"] = "nie skonfigurowano zapytania SQL"
             payload["slot_results"] = [slot_results[key] for key in sorted(slot_results)]
             return payload
+        batch_assignments: dict[str, str] = {}
+        batch_operations: dict[str, str] = {}
         for prefix, filename in saved_by_prefix.items():
             column = _safe_sql_identifier(sql_map.get(prefix, ""))
-            if not column:
-                continue
             parsed = parse_slot_filename(filename)
-            if not parsed:
+            if not column or not parsed:
                 continue
-            short_name = f"{ean}_{prefix}{parsed.extension}"
-            query = template.format(col=column, column=column, filename=short_name, ean=ean)
-            attempted_slots.add(str(prefix))
-            cur.execute(query)
-            rowcount = _cursor_rowcount(cur)
-            if rowcount != 0:
-                payload["updated"] += 1
-                slot_results[str(prefix)]["status"] = "updated"
-            if rowcount > 0:
-                payload["rows"] += rowcount
+            batch_assignments[column] = f"{ean}_{prefix}{parsed.extension}"
+            batch_operations[str(prefix)] = "update"
         for prefix in clear_prefixes:
             column = _safe_sql_identifier(sql_map.get(prefix, ""))
             if not column:
                 continue
-            attempted_slots.add(str(prefix))
-            cur.execute(f"UPDATE {table} SET {column} = ''{where_clause}")
+            batch_assignments[column] = ""
+            batch_operations[str(prefix)] = "clear"
+        batch = build_photo_sql_batch(
+            table,
+            where_clause,
+            batch_assignments,
+            config.CONFIG.get(p, K),
+            template,
+        )
+        if batch is not None:
+            attempted_slots.update(batch_operations)
+            cur.execute(batch.query, batch.params)
             rowcount = _cursor_rowcount(cur)
             if rowcount != 0:
-                payload["cleared"] += 1
-                slot_results[str(prefix)]["status"] = "cleared"
+                for prefix, operation in batch_operations.items():
+                    payload["updated" if operation == "update" else "cleared"] += 1
+                    slot_results[prefix]["status"] = (
+                        "updated" if operation == "update" else "cleared"
+                    )
             if rowcount > 0:
                 payload["rows"] += rowcount
+        else:
+            for prefix, filename in saved_by_prefix.items():
+                column = _safe_sql_identifier(sql_map.get(prefix, ""))
+                if not column:
+                    continue
+                parsed = parse_slot_filename(filename)
+                if not parsed:
+                    continue
+                short_name = f"{ean}_{prefix}{parsed.extension}"
+                query = template.format(col=column, column=column, filename=short_name, ean=ean)
+                attempted_slots.add(str(prefix))
+                cur.execute(query)
+                rowcount = _cursor_rowcount(cur)
+                if rowcount != 0:
+                    payload["updated"] += 1
+                    slot_results[str(prefix)]["status"] = "updated"
+                if rowcount > 0:
+                    payload["rows"] += rowcount
+            for prefix in clear_prefixes:
+                column = _safe_sql_identifier(sql_map.get(prefix, ""))
+                if not column:
+                    continue
+                attempted_slots.add(str(prefix))
+                cur.execute(f"UPDATE {table} SET {column} = ''{where_clause}")
+                rowcount = _cursor_rowcount(cur)
+                if rowcount != 0:
+                    payload["cleared"] += 1
+                    slot_results[str(prefix)]["status"] = "cleared"
+                if rowcount > 0:
+                    payload["rows"] += rowcount
         if payload["updated"] or payload["cleared"]:
             conn.commit()
     except Exception as exc:
