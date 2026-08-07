@@ -19,7 +19,9 @@ Stan: 2026-08-07. Ten plik jest jedynym bieżącym rejestrem wykonania; plany i 
 | 7.2 | Router procesów | Ukończono | `process_api.py` zawiera upload/staging, listę, aktywne zadania, szczegóły i anulowanie z jawnymi zależnościami. Snapshot tras i skonfigurowany `Retry-After` dla limitu kolejki zachowane. |
 | 7.3 | Router runtime, indeksu i obecności | Ukończono | `runtime_api.py` obsługuje runtime status, status/odświeżenie indeksu oraz obecność. Rejestracja zachowuje kolejność tras; testy skoncentrowane: 20 przeszło. |
 | 7.4 | Kontroler podglądu FTP w desktopie | Ukończono | `desktop_ftp_preview.py` zachowuje kontrakt EAN, odrzuca spóźnione wyniki i używa kolejki odbieranej wyłącznie przez UI. Zweryfikowano 45 testami oraz dwoma rundami niezależnego przeglądu. |
-| 7.5–7.7 | Moduły frontendowe i assety | W toku | Następny krok: wydzielenie kontrolera autouzupełniania. |
+| 7.5 | Moduł autouzupełniania | Ukończono | `autocomplete.js` udostępnia kontroler i adapter DOM przez `window.PicOrg`; zachowano debounce, obsługę aktualnego żądania i UI. |
+| 7.6 | Moduł kolejki procesów | Ukończono | `process-jobs.js` współdzieli trwające odświeżenie i reaguje na wersję kolejki runtime bez osobnego pollera; moduł usuwa wcześniejsze 404 assetu. |
+| 7.7 | Assety, shimy, benchmark i pełna regresja | W toku | Następny krok: kompletna weryfikacja, pakowanie assetów i końcowe porządki. |
 
 ## Środowisko testowe
 
