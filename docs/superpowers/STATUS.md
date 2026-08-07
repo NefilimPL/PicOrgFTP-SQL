@@ -21,7 +21,7 @@ Stan: 2026-08-07. Ten plik jest jedynym bieżącym rejestrem wykonania; plany i 
 | 7.4 | Kontroler podglądu FTP w desktopie | Ukończono | `desktop_ftp_preview.py` zachowuje kontrakt EAN, odrzuca spóźnione wyniki i używa kolejki odbieranej wyłącznie przez UI. Zweryfikowano 45 testami oraz dwoma rundami niezależnego przeglądu. |
 | 7.5 | Moduł autouzupełniania | Ukończono | `autocomplete.js` udostępnia kontroler i adapter DOM przez `window.PicOrg`; zachowano debounce, obsługę aktualnego żądania i UI. |
 | 7.6 | Moduł kolejki procesów | Ukończono | `process-jobs.js` współdzieli trwające odświeżenie i reaguje na wersję kolejki runtime bez osobnego pollera; moduł usuwa wcześniejsze 404 assetu. |
-| 7.7 | Assety, shimy, benchmark i pełna regresja | W toku | Następny krok: kompletna weryfikacja, pakowanie assetów i końcowe porządki. |
+| 7.7 | Assety, shimy, benchmark i pełna regresja | Zweryfikowano z ograniczeniem | Shimy: tylko kanoniczne `_save_upload`, `_queue_process_job` i `setupAutocomplete`; brak pozostałych kandydatów. PyInstaller dostaje jawnie wszystkie assety static. Zestaw ukierunkowany: 189 testów + 34 subtesty; Node: 14/14; `compileall`, `node --check` i `git diff --check` przeszły. Benchmark 5 próbek import/start: 4710.353 ms → 4724.147 ms (0.293%). Dwie pełne pytest z Node na PATH: każda 1285 przeszło i 1 upload p95 flake (1.200 s oraz 1.119 s pod pełnym obciążeniem; 3/3 izolowane powtórzenia przeszły); progu nie zmieniono. |
 
 ## Środowisko testowe
 

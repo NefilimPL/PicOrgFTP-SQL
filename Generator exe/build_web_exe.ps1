@@ -29,6 +29,7 @@ Invoke-Native $Python "tools\generate_windows_version_info.py" `
 
 $env:PICORGFTP_SQL_HEADLESS = "1"
 $env:PYINSTALLER_BUILD = "1"
+$WebStaticDataArguments = Get-WebStaticDataArguments -RepoRoot $RepoRoot
 
 Invoke-Native $Python "-m" "PyInstaller" "--noconfirm" "--clean" "--log-level=WARN" `
     --name PicOrgFTP-SQL-WEB `
@@ -48,7 +49,7 @@ Invoke-Native $Python "-m" "PyInstaller" "--noconfirm" "--clean" "--log-level=WA
     --collect-submodules PIL `
     --collect-data mysql.connector `
     --collect-data certifi `
-    --add-data "picorgftp_sql\web\static;picorgftp_sql\web\static" `
+    @WebStaticDataArguments `
     --add-data "picorgftp_sql\browser_extension;picorgftp_sql\browser_extension" `
     --add-data "picorgftp_sql\Localization;picorgftp_sql\Localization" `
     --add-data "picorgftp_sql\VERSION;picorgftp_sql" `
