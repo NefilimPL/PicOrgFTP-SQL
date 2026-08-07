@@ -216,6 +216,10 @@ _PROCESS_QUEUE = ProcessQueueService()
 class _ProcessQueueReference:
     """Delegates reservations to the active queue, including test replacements."""
 
+    @property
+    def limits(self) -> Any:
+        return _PROCESS_QUEUE.limits
+
     def reserve(self, cache_scope: str) -> QueueReservation:
         return _PROCESS_QUEUE.reserve(cache_scope)
 

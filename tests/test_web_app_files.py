@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import io
 import json
@@ -2306,6 +2307,35 @@ class WebAppFileTests(unittest.TestCase):
         self.assertEqual(response.status_code, 429)
         self.assertEqual(response.headers["Retry-After"], "2")
         materialize.assert_not_awaited()
+
+    def test_background_process_owner_limit_uses_configured_retry_after(self) -> None:
+        """Catches the process-router proxy losing configured owner-limit retry delays."""
+        queue = ProcessQueueService(
+            QueueLimits(workers=1, max_pending=3, max_per_owner=1, retry_after_seconds=17),
+            start_workers=False,
+        )
+        scope = "operator-" + hashlib.sha1(b"scope-token").hexdigest()[:12]
+        reservation = queue.reserve(scope)
+        client = TestClient(web_app.app)
+        client.cookies.set(web_app.SESSION_COOKIE, "scope-token")
+        try:
+            with (
+                patch.object(web_app, "_require_user", return_value="operator"),
+                patch.object(web_app, "_PROCESS_QUEUE", queue),
+            ):
+                response = client.post(
+                    "/api/process/background",
+                    data={"ean": "5901234567890"},
+                    headers={
+                        web_app.CSRF_HEADER: web_app._csrf_token_for_session("scope-token")
+                    },
+                )
+        finally:
+            reservation.release()
+            queue.shutdown()
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["Retry-After"], "17")
 
     def test_foreground_and_background_share_the_owner_queue_limit(self) -> None:
         """Catches separate endpoint queues that let one owner exceed two active jobs."""
