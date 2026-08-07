@@ -18,7 +18,8 @@ Stan: 2026-08-07. Ten plik jest jedynym bieżącym rejestrem wykonania; plany i 
 | 7.1 | Charakterystyka tras i granic importów | Ukończono | `tests/test_module_boundaries.py`: snapshot tras i guard importów serwisów przechodzą. |
 | 7.2 | Router procesów | Ukończono | `process_api.py` zawiera upload/staging, listę, aktywne zadania, szczegóły i anulowanie z jawnymi zależnościami. Snapshot tras i skonfigurowany `Retry-After` dla limitu kolejki zachowane. |
 | 7.3 | Router runtime, indeksu i obecności | Ukończono | `runtime_api.py` obsługuje runtime status, status/odświeżenie indeksu oraz obecność. Rejestracja zachowuje kolejność tras; testy skoncentrowane: 20 przeszło. |
-| 7.4–7.7 | Kontroler desktopowy, moduły frontendowe i assety | W toku | Następny krok: wydzielenie kontrolera podglądu FTP w aplikacji desktopowej. |
+| 7.4 | Kontroler podglądu FTP w desktopie | Ukończono | `desktop_ftp_preview.py` zachowuje kontrakt EAN, odrzuca spóźnione wyniki i używa kolejki odbieranej wyłącznie przez UI. Zweryfikowano 45 testami oraz dwoma rundami niezależnego przeglądu. |
+| 7.5–7.7 | Moduły frontendowe i assety | W toku | Następny krok: wydzielenie kontrolera autouzupełniania. |
 
 ## Środowisko testowe
 
