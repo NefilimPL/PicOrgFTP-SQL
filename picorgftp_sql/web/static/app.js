@@ -188,6 +188,7 @@ let resourceDetailsPinned = false;
 let resourceDetailsPointerInside = false;
 let historyLoadController = null;
 let historyDetailsController = null;
+let similarDecisionBackgroundState = [];
 const resourceMonitorTestState = {
   pending: false,
   message: "Nie uruchomiono testu monitora.",
@@ -342,6 +343,7 @@ const similarDecisionModal = document.querySelector("#similarDecisionModal");
 const similarDecisionList = document.querySelector("#similarDecisionList");
 const similarDecisionRejectAllButton = document.querySelector("#similarDecisionRejectAllButton");
 const similarDecisionContinueButton = document.querySelector("#similarDecisionContinueButton");
+const similarDecisionCloseButton = document.querySelector("#similarDecisionCloseButton");
 const submitButton = document.querySelector("#submitButton");
 const clearButton = document.querySelector("#clearButton");
 const logoutButton = document.querySelector("#logoutButton");
@@ -2264,21 +2266,51 @@ function renderSimilarDecisionModal() {
 function focusFirstPendingSimilarCandidate() {
   const prefix = pendingSimilarCandidatePrefixes()[0];
   if (!prefix) return;
-  slotGrid.querySelector(`[data-slot-prefix="${prefix}"]`)?.scrollIntoView({
+  const card = slotGrid.querySelector(`[data-slot-prefix="${prefix}"]`);
+  card?.scrollIntoView({
     behavior: "smooth",
     block: "center",
   });
+  card?.setAttribute("tabindex", "-1");
+  card?.focus({ preventScroll: true });
+}
+
+function setSimilarDecisionBackgroundInert() {
+  if (!similarDecisionModal || similarDecisionBackgroundState.length) return;
+  similarDecisionBackgroundState = Array.from(document.body.children)
+    .filter((node) => node !== similarDecisionModal)
+    .map((node) => ({
+      node,
+      inert: node.getAttribute("inert"),
+      ariaHidden: node.getAttribute("aria-hidden"),
+    }));
+  for (const entry of similarDecisionBackgroundState) {
+    entry.node.setAttribute("inert", "");
+    entry.node.setAttribute("aria-hidden", "true");
+  }
+}
+
+function restoreSimilarDecisionBackground() {
+  for (const entry of similarDecisionBackgroundState) {
+    if (entry.inert === null) entry.node.removeAttribute("inert");
+    else entry.node.setAttribute("inert", entry.inert);
+    if (entry.ariaHidden === null) entry.node.removeAttribute("aria-hidden");
+    else entry.node.setAttribute("aria-hidden", entry.ariaHidden);
+  }
+  similarDecisionBackgroundState = [];
 }
 
 function openSimilarDecisionModal() {
   state.similarDecisionResults.clear();
   renderSimilarDecisionModal();
+  setSimilarDecisionBackgroundInert();
   similarDecisionModal?.classList.add("active");
-  focusFirstPendingSimilarCandidate();
+  window.setTimeout(() => similarDecisionCloseButton?.focus(), 0);
 }
 
 function closeSimilarDecisionModal() {
   similarDecisionModal?.classList.remove("active");
+  restoreSimilarDecisionBackground();
   focusFirstPendingSimilarCandidate();
 }
 
@@ -12761,6 +12793,24 @@ document.querySelectorAll("[data-close-similar-decision]").forEach((button) => {
   button.addEventListener("click", closeSimilarDecisionModal);
 });
 
+similarDecisionModal?.addEventListener("keydown", (event) => {
+  if (event.key !== "Tab") return;
+  const focusable = Array.from(
+    similarDecisionModal.querySelectorAll(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )
+  );
+  if (!focusable.length) return;
+  const currentIndex = focusable.indexOf(document.activeElement);
+  if (event.shiftKey && currentIndex <= 0) {
+    event.preventDefault();
+    focusable.at(-1)?.focus();
+  } else if (!event.shiftKey && currentIndex === focusable.length - 1) {
+    event.preventDefault();
+    focusable[0]?.focus();
+  }
+});
+
 document.querySelectorAll("[data-close-web-images]").forEach((button) => {
   button.addEventListener("click", closeWebImagesModal);
 });
@@ -13168,6 +13218,11 @@ async function submitProductForm() {
     ensureSlotUploadsReady();
     setBusy(true, "Sprawdzanie list...");
     await ensureProductListValues();
+    if (pendingSimilarCandidatePrefixes().length) {
+      setBusy(false, "");
+      openSimilarDecisionModal();
+      return;
+    }
     const identityChanged = productFieldsChangedSinceLoad();
     const updateMode = hasPendingUserChanges();
     setBusy(

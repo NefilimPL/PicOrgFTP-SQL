@@ -711,6 +711,51 @@ const handleProductSubmitError = () => {{ throw new Error("unexpected submit fai
         self.assertEqual(result["closed"], 1)
         self.assertEqual(result["submitted"], 1)
 
+    def test_submit_rechecks_candidates_added_while_lists_are_prepared(self) -> None:
+        """Catches a late lookup candidate being serialized without a decision."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        submit_start = source.index("async function submitProductForm()")
+        submit_end = source.index('productForm.addEventListener("submit",', submit_start)
+        submit_product = source[submit_start:submit_end]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the late similar candidate contract test")
+        script = f"""
+let modalOpens = 0;
+let requests = 0;
+const state = {{ similarCandidates: new Map([['01', {{ token: 'late-token' }}]]) }};
+const clearResult = () => {{}};
+const ensureSlotUploadsReady = () => {{}};
+const setBusy = () => {{}};
+const ensureProductListValues = async () => {{}};
+const pendingSimilarCandidatePrefixes = () => [...state.similarCandidates.keys()];
+const openSimilarDecisionModal = () => {{ modalOpens += 1; }};
+const handleProductSubmitError = () => {{}};
+const productFieldsChangedSinceLoad = () => false;
+const hasPendingUserChanges = () => true;
+const pendingChangedSlotPrefixes = () => new Set();
+const FormData = class {{}};
+const requestJson = () => {{ requests += 1; return Promise.resolve({{}}); }};
+{submit_product}
+(async () => {{
+  await submitProductForm();
+  console.log(JSON.stringify({{ modalOpens, requests }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script], check=True, capture_output=True, text=True, encoding="utf-8"
+        )
+        self.assertEqual(json.loads(completed.stdout), {"modalOpens": 1, "requests": 0})
+
+    def test_similar_decision_modal_inerts_background_and_focuses_close_control(self) -> None:
+        """Catches an aria-modal dialog that still permits background slot actions."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        self.assertIn("function setSimilarDecisionBackgroundInert()", source)
+        self.assertIn("function restoreSimilarDecisionBackground()", source)
+        self.assertIn("similarDecisionCloseButton?.focus()", source)
+
     def test_selected_similar_slot_uses_its_edited_id_when_settings_are_saved(self) -> None:
         """Catches an enabled per-slot checkbox retaining the ID it had at render time."""
 
