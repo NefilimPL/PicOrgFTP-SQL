@@ -75,6 +75,52 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn('["similar", "PODOBNE"', source)
         self.assertIn('source === "similar"', source)
 
+    def test_filling_an_existing_product_replaces_old_similar_lookup_with_a_fresh_one(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function fillForm")
+        end = source.index("async function refreshData", start)
+        body = source[start:end]
+
+        self.assertIn("window.clearTimeout(state.similarFileLookupTimer);", body)
+        self.assertIn("scheduleSimilarFileLookup();", body)
+        self.assertLess(
+            body.index("state.similarFileLookupRequestId += 1;"),
+            body.index("scheduleSimilarFileLookup();"),
+        )
+
+    def test_accepted_similar_image_keeps_the_similar_preview_marker(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function createSlotNode")
+        end = source.index("function renderSlot(", start)
+        renderer = source[start:end]
+        selected_file_start = renderer.index("if (selectedFile) {")
+        selected_file_end = renderer.index("} else if (selectedSlotSource", selected_file_start)
+        selected_file_branch = renderer[selected_file_start:selected_file_end]
+
+        self.assertIn(
+            'selectedSlotSource(slot.prefix, loadedPhoto) === "similar"',
+            selected_file_branch,
+        )
+        self.assertIn(
+            'preview.classList.add("has-similar-candidate");',
+            selected_file_branch,
+        )
+
+    def test_accepting_and_dismissing_a_similar_candidate_preserves_source_semantics(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        accept_start = source.index("function acceptSimilarCandidate")
+        accept_end = source.index("function selectedPhotoToken", accept_start)
+        accept_body = source[accept_start:accept_end]
+        dismiss_start = source.index("function dismissSimilarCandidate")
+        dismiss_end = source.index("function acceptSimilarCandidate", dismiss_start)
+        dismiss_body = source[dismiss_start:dismiss_end]
+
+        self.assertIn("similar_candidate_id: candidate.id", accept_body)
+        self.assertIn('state.slotSources.set(prefix, "similar");', accept_body)
+        self.assertIn("state.dismissedSimilarSlots.add(prefix);", dismiss_body)
+        self.assertIn("state.similarCandidates.delete(prefix);", dismiss_body)
+        self.assertIn('state.slotSources.delete(prefix);', dismiss_body)
+
     def test_list_usage_modal_opens_the_selected_blocking_product(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         start = source.index("function renderListUsageModal")

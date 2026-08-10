@@ -3633,6 +3633,9 @@ function createSlotNode(slot) {
     }
 
     if (selectedFile) {
+      if (selectedSlotSource(slot.prefix, loadedPhoto) === "similar") {
+        preview.classList.add("has-similar-candidate");
+      }
       if (selectedSlotSource(slot.prefix, loadedPhoto) === "similar" && candidate?.is_pdf) {
         renderSimilarCandidatePreview(slot.prefix, preview, previewImage, empty);
       } else if (isFileImageLike(selectedFile)) {
@@ -7288,6 +7291,7 @@ function fillForm(entry, options = {}) {
   state.similarCandidates.clear();
   state.dismissedSimilarSlots.clear();
   state.similarFileLookupRequestId += 1;
+  window.clearTimeout(state.similarFileLookupTimer);
   state.userSelectedSlotSources.clear();
   state.ftpPreviewLoading.clear();
   state.ftpPreviewBackgroundLoading.clear();
@@ -7311,6 +7315,7 @@ function fillForm(entry, options = {}) {
   setTimeout(() => {
     state.suppressAutoSearch = false;
   }, 200);
+  scheduleSimilarFileLookup();
   if (options.loadPhotos) {
     loadPhotosForEntry({ ...entry, ...formPayload() }).catch((error) => {
       formStatus.textContent = `Wpis wczytany, ale zdjecia nie: ${error.message}`;
