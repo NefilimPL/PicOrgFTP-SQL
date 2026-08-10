@@ -142,17 +142,112 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("state.similarCandidates.delete(prefix);", dismiss_body)
         self.assertIn('state.slotSources.delete(prefix);', dismiss_body)
 
-    def test_process_serializer_only_reads_accepted_similar_candidates_from_state_files(self) -> None:
-        """Catches lookup-only candidates being serialized into process form data."""
+    def test_similar_lookup_requires_acceptance_before_its_token_is_serialized(self) -> None:
+        """Catches lookup candidates being submitted without explicit acceptance."""
 
         source = APP_JS.read_text(encoding="utf-8")
-        submit_start = source.index('productForm.addEventListener("submit"')
-        submit_end = source.index("function resetCurrentDraft", submit_start)
-        serializer = source[submit_start:submit_end]
+        helpers = source[
+            source.index("function slotFileItem") : source.index(
+                "function slotUploadProgress"
+            )
+        ]
+        accept = source[
+            source.index("function acceptSimilarCandidate") : source.index(
+                "function selectedPhotoToken"
+            )
+        ]
+        submit_handler = source[
+            source.index('productForm.addEventListener("submit"') : source.index(
+                "function resetCurrentDraft"
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the similar-file submission contract test")
+        script = f"""
+const submittedForms = [];
+let submitHandler = null;
+const productForm = {{
+  elements: {{}},
+  addEventListener(name, handler) {{ if (name === "submit") submitHandler = handler; }},
+}};
+class FormData {{
+  constructor() {{ this.values = new Map(); }}
+  delete(key) {{ this.values.delete(key); }}
+  set(key, value) {{ this.values.set(key, value); }}
+  entries() {{ return this.values.entries(); }}
+}}
+const state = {{
+  slots: [{{ prefix: "01" }}],
+  files: new Map(),
+  similarCandidates: new Map(),
+  dismissedSimilarSlots: new Set(),
+  loadedPhotos: new Map(),
+  deletedSlots: new Map(),
+  slotSources: new Map(),
+}};
+const clearResult = () => {{}};
+const ensureSlotUploadsReady = () => {{}};
+const setBusy = () => {{}};
+const ensureProductListValues = async () => {{}};
+const productFieldsChangedSinceLoad = () => false;
+const hasPendingUserChanges = () => false;
+const pendingChangedSlotPrefixes = () => new Set();
+const isSlotFit = () => true;
+const startProcessStatusTicker = () => {{}};
+const stopProcessStatusTicker = () => {{}};
+const trackProcessJob = () => {{}};
+const showQueuedProcess = () => {{}};
+const resetCurrentDraft = () => {{}};
+const showError = (error) => {{ throw error; }};
+const markSlotDeletion = () => {{}};
+const renderSlot = () => {{}};
+async function requestJson(_url, options) {{
+  submittedForms.push(Object.fromEntries(options.body.entries()));
+  return {{ job: {{}} }};
+}}
+{helpers}
+{accept}
+{submit_handler}
+(async () => {{
+  state.similarCandidates.set("01", {{
+    id: "candidate-1",
+    filename: "5901234567890_01.pdf",
+    size_bytes: 12,
+    is_pdf: true,
+    token: "signed-similar-token",
+    url: "/api/file?token=signed-similar-token",
+    thumb_url: "/api/thumbnail?token=signed-similar-token",
+  }});
+  await submitHandler({{ preventDefault() {{}} }});
+  const lookupOnly = submittedForms.at(-1);
+  const filesBeforeAcceptance = state.files.size;
+  acceptSimilarCandidate("01");
+  await submitHandler({{ preventDefault() {{}} }});
+  const accepted = submittedForms.at(-1);
+  console.log(JSON.stringify({{
+    filesBeforeAcceptance,
+    lookupOnlyToken: lookupOnly.existing_slot_01 || null,
+    acceptedToken: accepted.existing_slot_01 || null,
+    acceptedName: accepted.existing_slot_name_01 || null,
+    browserSlot: accepted.slot_01 || null,
+  }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
 
-        self.assertIn("for (const [prefix, item] of state.files.entries())", serializer)
-        self.assertIn('data.set(`existing_slot_${prefix}`, token);', serializer)
-        self.assertNotIn("state.similarCandidates", serializer)
+        self.assertEqual(result["filesBeforeAcceptance"], 0)
+        self.assertIsNone(result["lookupOnlyToken"])
+        self.assertEqual(result["acceptedToken"], "signed-similar-token")
+        self.assertEqual(result["acceptedName"], "5901234567890_01.pdf")
+        self.assertIsNone(result["browserSlot"])
 
     def test_list_usage_modal_opens_the_selected_blocking_product(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")

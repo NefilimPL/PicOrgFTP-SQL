@@ -152,7 +152,7 @@ def test_similar_files_endpoint_requires_login_and_hides_source_path() -> None:
 def test_similar_lookup_returns_submit_ready_token_but_does_not_schedule_a_slot(
     tmp_path, monkeypatch
 ) -> None:
-    """Catches lookup responses creating a process-form slot before acceptance."""
+    """Catches a lookup request reaching process, cache, or job-history boundaries."""
 
     source = tmp_path / "photos" / "BLACK" / "NO-LED" / "5901234567890_01.pdf"
     source.parent.mkdir(parents=True)
@@ -173,14 +173,24 @@ def test_similar_lookup_returns_submit_ready_token_but_does_not_schedule_a_slot(
     )
     monkeypatch.setattr(web_app, "_require_user", lambda _request: "operator")
 
-    with TestClient(web_app.app) as client:
+    def unexpected_side_effect(*_args, **_kwargs):
+        raise AssertionError("a read-only similar-file lookup must not cause a side effect")
+
+    with (
+        TestClient(web_app.app) as client,
+        patch.object(web_app, "_materialize_process_form", side_effect=unexpected_side_effect),
+        patch.object(web_app, "_queue_process_job", side_effect=unexpected_side_effect),
+        patch.object(web_app, "_save_upload_cache_entry", side_effect=unexpected_side_effect),
+        patch.object(web_app, "record_job", side_effect=unexpected_side_effect),
+        patch.object(web_app, "emit_event", side_effect=unexpected_side_effect),
+        patch.object(web_app, "_write_web_event", side_effect=unexpected_side_effect),
+    ):
         monkeypatch.setattr(web_app.settings, "l", str(tmp_path / "photos"))
         response = client.post("/api/similar-files", json=_similar_product_payload())
         item = response.json()["candidates"][0]
         assert web_app._path_from_file_token(item["token"]) == str(source)
 
     assert response.status_code == 200
-    assert "existing_slot_01" not in response.request.content.decode("utf-8")
 
 
 @pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
