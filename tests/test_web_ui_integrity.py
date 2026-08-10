@@ -403,6 +403,37 @@ console.log(JSON.stringify({{ refreshes }}));
         self.assertIn('acceptButton.textContent = "✓";', slots)
         self.assertIn('rejectButton.textContent = "×";', slots)
 
+    def test_selected_similar_slot_uses_its_edited_id_when_settings_are_saved(self) -> None:
+        """Catches an enabled per-slot checkbox retaining the ID it had at render time."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.find("function selectedSimilarSlotPrefixes")
+        self.assertNotEqual(start, -1, "settings need a row-aware selected-prefix helper")
+        end = source.find("function renderSettingsSlots", start)
+        helper = source[start:end]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the slot settings contract test")
+        script = f"""
+const rows = [
+  {{ querySelector(selector) {{
+    if (selector === '[name="similar_file_slot_prefixes"]') return {{ checked: true }};
+    if (selector === '[name="prefix"]') return {{ value: "15" }};
+    return null;
+  }} }},
+];
+{helper}
+console.log(JSON.stringify(selectedSimilarSlotPrefixes(rows)));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(json.loads(completed.stdout), ["15"])
+
     def test_list_usage_modal_opens_the_selected_blocking_product(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         start = source.index("function renderListUsageModal")

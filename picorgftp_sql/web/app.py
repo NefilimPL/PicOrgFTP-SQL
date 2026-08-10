@@ -1331,7 +1331,7 @@ def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
             common = os.path.commonpath([abs_path, root])
         except ValueError:
             continue
-        if common == root:
+        if os.path.normcase(common) == os.path.normcase(root):
             allowed = True
             break
     if not allowed:

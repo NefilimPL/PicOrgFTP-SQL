@@ -147,6 +147,26 @@ def test_file_token_allows_a_resolved_equivalent_of_the_photos_root(monkeypatch)
         assert web_app._path_from_file_token(web_app._file_token(source)) == source
 
 
+def test_file_token_allows_case_variant_of_a_resolved_photos_root(monkeypatch) -> None:
+    """Catches Windows path casing rejecting a signed file inside the photos root."""
+
+    configured_root = r"C:\Photos"
+    source = r"c:\photos\BLACK\NO-LED\5901234567890_01.jpg"
+
+    def common_path(paths: list[str]) -> str:
+        if configured_root in paths:
+            return r"c:\photos"
+        return r"C:\outside"
+
+    monkeypatch.setattr(web_app.settings, "l", configured_root)
+    with (
+        patch.object(web_app.os.path, "realpath", side_effect=lambda path: path),
+        patch.object(web_app.os.path, "commonpath", side_effect=common_path),
+        patch.object(web_app.os.path, "isfile", return_value=True),
+    ):
+        assert web_app._path_from_file_token(web_app._file_token(source)) == source
+
+
 def test_similar_files_endpoint_requires_login_and_hides_source_path() -> None:
     """Catches a suggestions response that leaks a local filename path or skips auth."""
 

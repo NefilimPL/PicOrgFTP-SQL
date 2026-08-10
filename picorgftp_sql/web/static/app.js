@@ -12081,6 +12081,13 @@ function renderSettingsMail() {
   settingsOutput.appendChild(form);
 }
 
+function selectedSimilarSlotPrefixes(rows) {
+  return Array.from(rows)
+    .filter((row) => row.querySelector('[name="similar_file_slot_prefixes"]')?.checked)
+    .map((row) => String(row.querySelector('[name="prefix"]')?.value || "").trim())
+    .filter(Boolean);
+}
+
 function renderSettingsSlots() {
   ensureSqlColumnsDatalist();
   const form = document.createElement("form");
@@ -12164,7 +12171,8 @@ function renderSettingsSlots() {
     settingsFieldGroup("Lista slotow", note, similarEnabledRow, list, actionRow(addButton, detectSqlColumnsButton()))
   );
   settingsSaveButton(form, (data) => {
-    const slots = [...form.querySelectorAll(".slot-settings-row")].map((row) => {
+    const slotRows = [...form.querySelectorAll(".slot-settings-row")];
+    const slots = slotRows.map((row) => {
       const label = row.querySelector('[name="label"]').value;
       const filenameLabel = row.querySelector('[name="filename_label"]').value;
       const wasExplicit = row.dataset.filenameLabelExplicit === "1";
@@ -12183,9 +12191,7 @@ function renderSettingsSlots() {
       slots,
       "similar_file_detection": {
         enabled: data.has("similar_files_enabled"),
-        slot_prefixes: [...form.querySelectorAll('[name="similar_file_slot_prefixes"]:checked')].map(
-          (input) => input.value
-        ),
+        slot_prefixes: selectedSimilarSlotPrefixes(slotRows),
       },
     };
   });
