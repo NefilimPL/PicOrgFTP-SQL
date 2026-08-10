@@ -16,6 +16,11 @@ const state = {
   slotFits: new Map(),
   defaultSlotFit: false,
   slotSources: new Map(),
+  similarCandidates: new Map(),
+  dismissedSimilarSlots: new Set(),
+  similarFileLookupTimer: 0,
+  similarFileLookupRequestId: 0,
+  similarFileLookupKey: "",
   draggedSlotPrefix: "",
   lastLookupMs: null,
   activeSettingsTab: "app",
@@ -2101,9 +2106,45 @@ function defaultSlotSource(photo) {
 
 function selectedSlotSource(prefix, photo) {
   const selected = state.slotSources.get(prefix);
+  if (selected === "similar" && similarCandidateForSlot(prefix)) return "similar";
   if (selected === "local" && photo?.token) return "local";
   if (selected === "ftp" && (photo?.ftp_token || photo?.ftp_filename)) return "ftp";
   return defaultSlotSource(photo);
+}
+
+function similarCandidateForSlot(prefix) {
+  if (state.dismissedSimilarSlots.has(prefix)) return null;
+  return state.similarCandidates.get(prefix) || null;
+}
+
+function dismissSimilarCandidate(prefix) {
+  state.dismissedSimilarSlots.add(prefix);
+  state.similarCandidates.delete(prefix);
+  if (state.slotSources.get(prefix) === "similar") {
+    state.slotSources.delete(prefix);
+    state.userSelectedSlotSources.delete(prefix);
+  }
+}
+
+function acceptSimilarCandidate(prefix) {
+  const candidate = state.similarCandidates.get(prefix);
+  if (!candidate || state.dismissedSimilarSlots.has(prefix)) return;
+  markSlotDeletion(prefix, state.loadedPhotos.get(prefix));
+  state.files.set(prefix, {
+    file: null,
+    name: candidate.filename,
+    size: candidate.size_bytes,
+    type: candidate.is_pdf ? "application/pdf" : "",
+    token: candidate.token,
+    url: candidate.url,
+    thumb_url: candidate.thumb_url,
+    preprocessed: true,
+    uploading: false,
+    error: "",
+    similar_candidate_id: candidate.id,
+  });
+  state.slotSources.set(prefix, "similar");
+  renderSlot(prefix);
 }
 
 function selectedPhotoToken(photo, prefix) {
@@ -2319,6 +2360,7 @@ async function renderSelectedFilePreview(prefix, file, preview, previewImage, em
 
 function loadedFileUrl(photo, prefix) {
   const source = selectedSlotSource(prefix, photo);
+  if (source === "similar") return similarCandidateForSlot(prefix)?.url || "";
   if (source === "ftp" && photo?.ftp_url) return photo.ftp_url;
   if (source === "local" && photo?.url) return photo.url;
   const token = selectedPhotoToken(photo, prefix);
@@ -2402,6 +2444,7 @@ function renderSlotBadges(container, photo, file, prefix) {
     ["local", "LOCAL", "Plik jest w folderze backendu"],
     ["ftp", "FTP", "Wpis dla slotu jest na FTP"],
     ["sql", "SQL", "Wpis dla slotu jest w SQL"],
+    ["similar", "PODOBNE", "Plik z podobnego produktu"],
   ];
   if (file) {
     const badge = document.createElement("span");
@@ -2412,16 +2455,19 @@ function renderSlotBadges(container, photo, file, prefix) {
   }
   for (const [key, label, title] of statuses) {
     const sqlValue = String(photo?.sql_value || "").trim();
+    const similarCandidate = similarCandidateForSlot(prefix);
     const canPreview =
       (key === "local" && photo?.token) ||
-      (key === "ftp" && photo?.ftp_filename);
+      (key === "ftp" && photo?.ftp_filename) ||
+      (key === "similar" && Boolean(similarCandidate));
     const canCopySql = key === "sql" && Boolean(sqlValue);
+    if (key === "similar" && !similarCandidate) continue;
     const badge = document.createElement(canPreview || canCopySql ? "button" : "span");
     const selected = key !== "sql" && selectedSlotSource(prefix, photo) === key;
     const loading =
       isPhotoSourceLoading(key) || (key === "ftp" && state.ftpPreviewLoading.has(prefix));
     badge.dataset.source = key;
-    badge.className = `slot-badge slot-badge-${key} ${photo && photo[key] ? "on" : ""} ${
+    badge.className = `slot-badge slot-badge-${key} ${photo && photo[key] || key === "similar" ? "on" : ""} ${
       selected ? "selected" : ""
     } ${loading ? "loading" : ""}`;
     badge.title = loading
@@ -3065,6 +3111,10 @@ function isSlotFit(prefix) {
 
 function thumbnailUrl(photo, prefix) {
   const source = selectedSlotSource(prefix, photo);
+  if (source === "similar") {
+    const candidate = similarCandidateForSlot(prefix);
+    return candidate?.thumb_url || candidate?.url || "";
+  }
   const url =
     source === "ftp"
       ? photo?.ftp_thumb_url || photo?.ftp_url || ""
@@ -3072,6 +3122,32 @@ function thumbnailUrl(photo, prefix) {
   if (!url) return "";
   const separator = url.includes("?") ? "&" : "?";
   return `${url}${separator}fit=${isSlotFit(prefix) ? "1" : "0"}&width=260&height=180`;
+}
+
+function renderSimilarCandidatePreview(prefix, preview, previewImage, empty) {
+  const candidate = similarCandidateForSlot(prefix);
+  if (!candidate) return false;
+  preview.classList.add("has-similar-candidate");
+  if (candidate.is_pdf) {
+    const object = document.createElement("object");
+    const fallback = document.createElement("span");
+    object.className = "slot-similar-preview";
+    object.type = "application/pdf";
+    object.data = candidate.url;
+    fallback.textContent = candidate.filename || "Podglad PDF niedostepny";
+    object.appendChild(fallback);
+    preview.appendChild(object);
+    empty.textContent = candidate.filename || "Dokument PDF";
+    return true;
+  }
+  const thumb = thumbnailUrl(null, prefix);
+  if (!thumb) {
+    empty.textContent = candidate.filename || "Podglad niedostepny";
+    return true;
+  }
+  previewImage.src = thumb;
+  preview.classList.add("has-image");
+  return true;
 }
 
 function clearSlotAssignment(prefix, options = {}) {
@@ -3086,6 +3162,7 @@ function clearSlotAssignment(prefix, options = {}) {
   state.slotFits.delete(prefix);
   state.slotSources.delete(prefix);
   state.userSelectedSlotSources.delete(prefix);
+  dismissSimilarCandidate(prefix);
 }
 
 function setSlotFile(prefix, file, options = {}) {
@@ -3100,6 +3177,7 @@ function setSlotFile(prefix, file, options = {}) {
   state.loadedPhotos.delete(prefix);
   state.slotSources.delete(prefix);
   state.userSelectedSlotSources.delete(prefix);
+  dismissSimilarCandidate(prefix);
   if (validationError) {
     item.error = validationError;
     formStatus.textContent = `Blad uploadu slotu ${prefix}: ${item.error}`;
@@ -3361,6 +3439,7 @@ function updateSlotPreview(prefix) {
   const preview = card.querySelector(".slot-preview");
   const previewImage = preview.querySelector("img");
   const empty = preview.querySelector(".slot-empty");
+  const candidate = similarCandidateForSlot(prefix);
   const fitButton = card.querySelector(".slot-fit-button");
   card.dataset.activeSource = selectedSlotSource(prefix, loadedPhoto) || "";
   detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, prefix);
@@ -3373,6 +3452,7 @@ function updateSlotPreview(prefix) {
       local: "Plik jest w folderze backendu",
       ftp: "Wpis dla slotu jest na FTP",
       sql: "Wpis dla slotu jest w SQL",
+      similar: "Plik z podobnego produktu",
     };
     const sqlValue = String(loadedPhoto?.sql_value || "").trim();
     badge.classList.toggle("selected", selected);
@@ -3393,17 +3473,26 @@ function updateSlotPreview(prefix) {
   if (fitButton) {
     fitButton.classList.toggle("active", isSlotFit(prefix));
   }
-  preview.classList.remove("has-image", "thumb-loading", "loaded-photo");
+  preview.classList.remove("has-image", "thumb-loading", "loaded-photo", "has-similar-candidate");
   preview.querySelector(".slot-upload-overlay")?.remove();
+  preview.querySelector(".slot-similar-preview")?.remove();
   previewImage.removeAttribute("src");
   empty.textContent = "Brak pliku";
   if (selectedFile) {
+    if (selectedSlotSource(prefix, loadedPhoto) === "similar" && candidate?.is_pdf) {
+      renderSimilarCandidatePreview(prefix, preview, previewImage, empty);
+      return;
+    }
     if (isFileImageLike(selectedFile)) {
       renderSelectedFilePreview(prefix, selectedFile, preview, previewImage, empty);
     } else {
       empty.textContent = slotFileName(selectedFile);
     }
     renderSlotUploadOverlay(preview, selectedFile);
+    return;
+  }
+  if (selectedSlotSource(prefix, loadedPhoto) === "similar" && candidate) {
+    renderSimilarCandidatePreview(prefix, preview, previewImage, empty);
     return;
   }
   if (!loadedPhoto) return;
@@ -3456,6 +3545,7 @@ function createSlotNode(slot) {
     const meta = node.querySelector(".slot-meta");
     const loadedPhoto = state.loadedPhotos.get(slot.prefix);
     const selectedFile = state.files.get(slot.prefix);
+    const candidate = similarCandidateForSlot(slot.prefix);
     const overlay = document.createElement("div");
     const controls = document.createElement("div");
     const fitButton = document.createElement("button");
@@ -3512,14 +3602,15 @@ function createSlotNode(slot) {
         : `Wyczyszczono slot ${slot.prefix}.`;
       renderSlot(slot.prefix);
     });
-    if (selectedFile || loadedPhoto) {
+    if (selectedFile || loadedPhoto || candidate) {
       const hasOpenableFile =
         Boolean(selectedFile) ||
         Boolean(selectedPhotoToken(loadedPhoto, slot.prefix)) ||
-        Boolean(loadedPhoto?.ftp_filename);
+        Boolean(loadedPhoto?.ftp_filename) || Boolean(candidate?.url);
       const hasFittablePreview =
         (selectedFile && isFileImageLike(selectedFile)) ||
-        (loadedPhoto?.is_image && (selectedPhotoToken(loadedPhoto, slot.prefix) || loadedPhoto?.ftp_filename));
+        (loadedPhoto?.is_image && (selectedPhotoToken(loadedPhoto, slot.prefix) || loadedPhoto?.ftp_filename)) ||
+        Boolean(candidate && !candidate.is_pdf);
       if (hasFittablePreview) {
         controls.appendChild(fitButton);
       }
@@ -3529,14 +3620,29 @@ function createSlotNode(slot) {
       controls.appendChild(clearButton);
       meta.appendChild(controls);
     }
+    if (candidate && !selectedFile) {
+      const acceptButton = document.createElement("button");
+      acceptButton.type = "button";
+      acceptButton.className = "slot-similar-accept";
+      acceptButton.textContent = "Wczytaj z podobnego";
+      acceptButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        acceptSimilarCandidate(slot.prefix);
+      });
+      meta.appendChild(acceptButton);
+    }
 
     if (selectedFile) {
-      if (isFileImageLike(selectedFile)) {
+      if (selectedSlotSource(slot.prefix, loadedPhoto) === "similar" && candidate?.is_pdf) {
+        renderSimilarCandidatePreview(slot.prefix, preview, previewImage, empty);
+      } else if (isFileImageLike(selectedFile)) {
         renderSelectedFilePreview(slot.prefix, selectedFile, preview, previewImage, empty);
       } else {
         empty.textContent = slotFileName(selectedFile);
       }
       renderSlotUploadOverlay(preview, selectedFile);
+    } else if (selectedSlotSource(slot.prefix, loadedPhoto) === "similar" && candidate) {
+      renderSimilarCandidatePreview(slot.prefix, preview, previewImage, empty);
     } else if (loadedPhoto) {
       preview.classList.add("loaded-photo");
       const thumb = thumbnailUrl(loadedPhoto, slot.prefix);
@@ -7018,6 +7124,54 @@ function scheduleBackgroundFtpLookup(delay = 900) {
   }, delay);
 }
 
+function similarFileIdentityKey(fields = formPayload()) {
+  return [
+    fields.name,
+    fields.type_name,
+    fields.model,
+    fields.color1,
+    fields.color2,
+    fields.color3,
+    fields.extra,
+  ]
+    .map(normalizedIdentityValue)
+    .join("|");
+}
+
+async function lookupSimilarFiles() {
+  const fields = formPayload();
+  const key = similarFileIdentityKey(fields);
+  if (!fields.name || !fields.type_name || !fields.model || !fields.color1) {
+    state.similarCandidates.clear();
+    renderSlots();
+    return;
+  }
+  const requestId = state.similarFileLookupRequestId + 1;
+  state.similarFileLookupRequestId = requestId;
+  const payload = await requestJson("/api/similar-files", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+    timeoutMs: 15000,
+  });
+  if (state.similarFileLookupRequestId !== requestId || similarFileIdentityKey() !== key) return;
+  state.similarCandidates.clear();
+  for (const candidate of payload.candidates || []) {
+    const prefix = String(candidate.target_prefix || "").trim();
+    if (prefix && !state.dismissedSimilarSlots.has(prefix)) {
+      state.similarCandidates.set(prefix, candidate);
+    }
+  }
+  renderSlots();
+}
+
+function scheduleSimilarFileLookup(delay = 450) {
+  window.clearTimeout(state.similarFileLookupTimer);
+  state.similarFileLookupTimer = window.setTimeout(() => {
+    lookupSimilarFiles().catch(() => {});
+  }, delay);
+}
+
 function clearSelectedFiles() {
   for (const prefix of Array.from(state.filePreviewUrls.keys())) {
     revokeFilePreviewUrl(prefix);
@@ -7131,6 +7285,9 @@ function fillForm(entry, options = {}) {
   state.slotFits.clear();
   state.deletedSlots.clear();
   state.slotSources.clear();
+  state.similarCandidates.clear();
+  state.dismissedSimilarSlots.clear();
+  state.similarFileLookupRequestId += 1;
   state.userSelectedSlotSources.clear();
   state.ftpPreviewLoading.clear();
   state.ftpPreviewBackgroundLoading.clear();
@@ -11900,6 +12057,32 @@ function renderSettingsSlots() {
   for (const slot of state.settings.slots || []) {
     addSlotRow(slot);
   }
+  const similarSettings = state.settings.similar_file_detection || {};
+  const similarEnabled = document.createElement("input");
+  const similarEnabledRow = document.createElement("label");
+  const similarSlots = document.createElement("div");
+  similarEnabled.type = "checkbox";
+  similarEnabled.name = "similar_files_enabled";
+  similarEnabled.checked = Boolean(similarSettings.enabled);
+  similarEnabledRow.className = "check-row";
+  similarEnabledRow.append(similarEnabled, document.createTextNode("Wykrywaj pliki z podobnych produktow"));
+  similarSlots.className = "check-list";
+  for (const slot of state.settings.slots || []) {
+    const option = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.name = "similar_file_slot_prefixes";
+    input.value = slot.prefix;
+    input.checked = (similarSettings.slot_prefixes || []).includes(slot.prefix);
+    input.disabled = !similarEnabled.checked;
+    option.append(input, document.createTextNode(`${slot.prefix} - ${slot.label}`));
+    similarSlots.appendChild(option);
+  }
+  similarEnabled.addEventListener("change", () => {
+    similarSlots.querySelectorAll("input").forEach((input) => {
+      input.disabled = !similarEnabled.checked;
+    });
+  });
   addButton.type = "button";
   addButton.className = "secondary-button";
   addButton.textContent = "Dodaj slot";
@@ -11913,8 +12096,11 @@ function renderSettingsSlots() {
       sql_column: "",
     });
   });
-  form.append(settingsFieldGroup("Lista slotow", note, list, actionRow(addButton, detectSqlColumnsButton())));
-  settingsSaveButton(form, () => {
+  form.append(
+    settingsFieldGroup("Lista slotow", note, list, actionRow(addButton, detectSqlColumnsButton())),
+    settingsFieldGroup("Podobne produkty", similarEnabledRow, similarSlots)
+  );
+  settingsSaveButton(form, (data) => {
     const slots = [...form.querySelectorAll(".slot-settings-row")].map((row) => {
       const label = row.querySelector('[name="label"]').value;
       const filenameLabel = row.querySelector('[name="filename_label"]').value;
@@ -11930,7 +12116,15 @@ function renderSettingsSlots() {
         sql_column: row.querySelector('[name="sql_column"]').value,
       };
     });
-    return { slots };
+    return {
+      slots,
+      "similar_file_detection": {
+        enabled: data.has("similar_files_enabled"),
+        slot_prefixes: [...form.querySelectorAll('[name="similar_file_slot_prefixes"]:checked')].map(
+          (input) => input.value
+        ),
+      },
+    };
   });
   settingsOutput.appendChild(form);
 }
@@ -12724,7 +12918,10 @@ for (const name of ["name", "type_name", "model"]) {
 productForm.elements.ean?.addEventListener("input", handlePimcoreEanInput);
 
 for (const name of trackedProductFields) {
-  productForm.elements[name]?.addEventListener("input", () => scheduleBackgroundFtpLookup());
+  productForm.elements[name]?.addEventListener("input", () => {
+    scheduleBackgroundFtpLookup();
+    scheduleSimilarFileLookup();
+  });
 }
 
 for (const name of Object.keys(fieldListKey)) {
@@ -12831,6 +13028,10 @@ function resetCurrentDraft({ clearOutput = true, status = "" } = {}) {
   state.slotFits.clear();
   state.deletedSlots.clear();
   state.slotSources.clear();
+  state.similarCandidates.clear();
+  state.dismissedSimilarSlots.clear();
+  state.similarFileLookupRequestId += 1;
+  window.clearTimeout(state.similarFileLookupTimer);
   state.userSelectedSlotSources.clear();
   state.photoSourceStatus.clear();
   state.ftpPreviewLoading.clear();

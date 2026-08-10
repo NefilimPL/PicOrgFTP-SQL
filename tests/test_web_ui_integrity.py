@@ -60,6 +60,21 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
+    def test_slot_settings_collect_similar_file_detection_configuration(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn('"similar_file_detection"', source)
+        self.assertIn('"Wykrywaj pliki z podobnych produktow"', source)
+        self.assertIn("similar_file_slot_prefixes", source)
+
+    def test_similar_candidate_requires_explicit_acceptance_and_has_source_button(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("function acceptSimilarCandidate(prefix)", source)
+        self.assertIn("Wczytaj z podobnego", source)
+        self.assertIn('["similar", "PODOBNE"', source)
+        self.assertIn('source === "similar"', source)
+
     def test_list_usage_modal_opens_the_selected_blocking_product(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         start = source.index("function renderListUsageModal")
