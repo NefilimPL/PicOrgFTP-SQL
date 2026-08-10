@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INDEX_HTML = ROOT / "picorgftp_sql" / "web" / "static" / "index.html"
 LOGIN_HTML = ROOT / "picorgftp_sql" / "web" / "static" / "login.html"
 APP_JS = ROOT / "picorgftp_sql" / "web" / "static" / "app.js"
+APP_CSS = ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
 
 
 class _HtmlCollector(HTMLParser):
@@ -402,6 +403,22 @@ console.log(JSON.stringify({{ refreshes }}));
         self.assertIn('["similar", "POD"', source)
         self.assertIn('acceptButton.textContent = "✓";', slots)
         self.assertIn('rejectButton.textContent = "×";', slots)
+
+    def test_similar_decision_modal_exposes_preview_list_and_blocking_actions(self) -> None:
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        css = APP_CSS.read_text(encoding="utf-8")
+
+        for identifier in (
+            'id="similarDecisionModal"',
+            'id="similarDecisionList"',
+            'id="similarDecisionRejectAllButton"',
+            'id="similarDecisionContinueButton"',
+        ):
+            self.assertIn(identifier, html)
+        self.assertIn('role="dialog"', html)
+        self.assertIn('aria-modal="true"', html)
+        self.assertIn(".slot-card.slot-similar-pending", css)
+        self.assertIn("@keyframes slot-similar-pending-pulse", css)
 
     def test_selected_similar_slot_uses_its_edited_id_when_settings_are_saved(self) -> None:
         """Catches an enabled per-slot checkbox retaining the ID it had at render time."""

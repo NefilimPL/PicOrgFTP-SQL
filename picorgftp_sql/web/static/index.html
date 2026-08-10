@@ -684,6 +684,23 @@
       </section>
     </div>
 
+    <div id="similarDecisionModal" class="modal-view nested-modal" role="dialog" aria-modal="true" aria-labelledby="similarDecisionTitle" tabindex="-1">
+      <section class="modal-panel similar-decision-panel">
+        <div class="section-heading">
+          <div>
+            <h1 id="similarDecisionTitle">Pliki z podobnych produktów</h1>
+            <p class="similar-decision-intro">Zdecyduj, które znalezione pliki zachować przed aktualizacją produktu.</p>
+          </div>
+          <button id="similarDecisionCloseButton" type="button" class="ghost-button modal-close" data-close-similar-decision>Zamknij</button>
+        </div>
+        <div id="similarDecisionList" class="similar-decision-list" aria-live="polite"></div>
+        <div class="heading-actions similar-decision-actions">
+          <button id="similarDecisionRejectAllButton" type="button" class="danger-button">Odrzuć wszystkie</button>
+          <button id="similarDecisionContinueButton" type="button" disabled>Zapisz i kontynuuj</button>
+        </div>
+      </section>
+    </div>
+
     <datalist id="namesList"></datalist>
     <datalist id="typesList"></datalist>
     <datalist id="modelsList"></datalist>
