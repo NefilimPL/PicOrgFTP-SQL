@@ -105,6 +105,26 @@ def test_similar_file_lookup_does_not_start_or_refresh_the_local_index() -> None
         assert web_data.find_web_similar_file_candidates(_similar_product_payload()) == []
 
 
+def test_similar_file_lookup_reserves_currently_occupied_slots() -> None:
+    """Catches web lookup ignoring a loaded or manually selected target slot."""
+
+    captured: dict[str, object] = {}
+
+    def capture_lookup(*_args, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    with (
+        patch.object(web_data, "_get_file_index", return_value=None),
+        patch.object(web_data, "find_similar_file_candidates", side_effect=capture_lookup),
+    ):
+        web_data.find_web_similar_file_candidates(
+            {**_similar_product_payload(), "occupied_prefixes": ["01", "02"]}
+        )
+
+    assert captured["occupied_prefixes"] == ["01", "02"]
+
+
 def test_similar_files_endpoint_requires_login_and_hides_source_path() -> None:
     """Catches a suggestions response that leaks a local filename path or skips auth."""
 

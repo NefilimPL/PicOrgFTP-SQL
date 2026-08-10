@@ -2114,6 +2114,12 @@ function selectedSlotSource(prefix, photo) {
 
 function similarCandidateForSlot(prefix) {
   if (state.dismissedSimilarSlots.has(prefix)) return null;
+  if (
+    state.slotSources.get(prefix) !== "similar" &&
+    (state.files.has(prefix) || (state.loadedPhotos.has(prefix) && !state.deletedSlots.has(prefix)))
+  ) {
+    return null;
+  }
   return state.similarCandidates.get(prefix) || null;
 }
 
@@ -3567,6 +3573,12 @@ function createSlotNode(slot) {
     previewImage.decoding = "async";
     node.draggable = Boolean(selectedFile || loadedPhoto?.token || loadedPhoto?.ftp_token || loadedPhoto?.ftp_filename);
     renderSlotBadges(meta, loadedPhoto, selectedFile, slot.prefix);
+    if (candidate?.source_color) {
+      const sourceInfo = document.createElement("span");
+      sourceInfo.className = "slot-similar-source";
+      sourceInfo.textContent = `Podobne: kolor ${candidate.source_color}`;
+      meta.appendChild(sourceInfo);
+    }
     overlay.className = "slot-loading-overlay";
     overlay.innerHTML = `<span>${photoLoadingText()}</span><div class="progress-line"><i></i></div>`;
     if (state.photosLoading && !selectedFile && !loadedPhoto) {
@@ -7144,6 +7156,14 @@ function similarFileIdentityKey(fields = formPayload()) {
     .join("|");
 }
 
+function similarOccupiedSlotPrefixes() {
+  const occupied = new Set(state.files.keys());
+  for (const prefix of state.loadedPhotos.keys()) {
+    if (!state.deletedSlots.has(prefix)) occupied.add(prefix);
+  }
+  return Array.from(occupied).sort();
+}
+
 async function lookupSimilarFiles() {
   const fields = formPayload();
   const key = similarFileIdentityKey(fields);
@@ -7154,17 +7174,33 @@ async function lookupSimilarFiles() {
   }
   const requestId = state.similarFileLookupRequestId + 1;
   state.similarFileLookupRequestId = requestId;
-  const payload = await requestJson("/api/similar-files", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fields),
-    timeoutMs: 15000,
-  });
+  let payload;
+  try {
+    payload = await requestJson("/api/similar-files", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...fields, occupied_prefixes: similarOccupiedSlotPrefixes() }),
+      timeoutMs: 15000,
+    });
+  } catch (error) {
+    if (state.similarFileLookupRequestId === requestId && similarFileIdentityKey() === key) {
+      formStatus.textContent = `Nie udalo sie sprawdzic plikow z podobnych produktow: ${error.message}`;
+    }
+    return;
+  }
   if (state.similarFileLookupRequestId !== requestId || similarFileIdentityKey() !== key) return;
+  const acceptedCandidates = new Map(
+    Array.from(state.similarCandidates.entries()).filter(
+      ([prefix]) => state.slotSources.get(prefix) === "similar" && state.files.has(prefix)
+    )
+  );
   state.similarCandidates.clear();
+  for (const [prefix, candidate] of acceptedCandidates) {
+    state.similarCandidates.set(prefix, candidate);
+  }
   for (const candidate of payload.candidates || []) {
     const prefix = String(candidate.target_prefix || "").trim();
-    if (prefix && !state.dismissedSimilarSlots.has(prefix)) {
+    if (prefix && !acceptedCandidates.has(prefix) && !state.dismissedSimilarSlots.has(prefix)) {
       state.similarCandidates.set(prefix, candidate);
     }
   }
@@ -7282,6 +7318,7 @@ async function loadPhotosForEntry(entry, options = {}) {
     updateRuntimeMetrics();
     renderSlotsExceptPendingUserEdits(partial ? targetPrefixes : null);
     scheduleBackgroundFtpPreviewLoad(requestId, 1500);
+    if (!partial) scheduleSimilarFileLookup();
   }
 }
 

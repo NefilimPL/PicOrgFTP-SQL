@@ -249,6 +249,68 @@ async function requestJson(_url, options) {{
         self.assertEqual(result["acceptedName"], "5901234567890_01.pdf")
         self.assertIsNone(result["browserSlot"])
 
+    def test_similar_lookup_reserves_occupied_slots_and_reports_current_errors(self) -> None:
+        """Catches a lookup that overwrites occupied slots or hides its current error."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        lookup_helpers = source[
+            source.index("function similarFileIdentityKey") : source.index(
+                "function scheduleSimilarFileLookup", source.index("function similarFileIdentityKey")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the similar-file lookup contract test")
+        script = f"""
+const state = {{
+  files: new Map([["01", {{ token: "manual" }}]]),
+  loadedPhotos: new Map([["02", {{ token: "loaded" }}]]),
+  deletedSlots: new Map(),
+  slotSources: new Map(),
+  similarCandidates: new Map(),
+  dismissedSimilarSlots: new Set(),
+  similarFileLookupRequestId: 0,
+}};
+const formStatus = {{ textContent: "" }};
+const formPayload = () => ({{
+  name: "Simple Sideboard 100 8S", type_name: "Sideboard", model: "100",
+  color1: "WHITE", color2: "", color3: "", extra: "NO-LED",
+}});
+const normalizedIdentityValue = (value) => String(value || "").trim().toUpperCase();
+const renderSlots = () => {{}};
+let sentPayload = null;
+async function requestJson(_url, options) {{
+  sentPayload = JSON.parse(options.body);
+  throw new Error("offline");
+}}
+{lookup_helpers}
+(async () => {{
+  let thrown = null;
+  try {{
+    await lookupSimilarFiles();
+  }} catch (error) {{
+    thrown = error.message;
+  }}
+  console.log(JSON.stringify({{
+    occupied: sentPayload.occupied_prefixes,
+    status: formStatus.textContent,
+    thrown,
+  }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(result["occupied"], ["01", "02"])
+        self.assertIsNone(result["thrown"])
+        self.assertIn("Nie udalo sie sprawdzic plikow z podobnych produktow", result["status"])
+
     def test_list_usage_modal_opens_the_selected_blocking_product(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         start = source.index("function renderListUsageModal")

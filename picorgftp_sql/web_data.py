@@ -3482,12 +3482,16 @@ def find_web_similar_file_candidates(
         legacy_color_labels=config.CONFIG.get(COLOR_FIELD_LABELS_KEY),
     )
     normalized_payload = effective_product_values(product_payload, field_settings)
+    occupied_prefixes = product_payload.get("occupied_prefixes", ())
+    if not isinstance(occupied_prefixes, (list, tuple, set)):
+        occupied_prefixes = ()
     return find_similar_file_candidates(
         settings.l,
         normalized_payload,
         normalize_slot_definitions(config.CONFIG.get(SLOT_DEFS_KEY))[0],
         config.CONFIG.get(SIMILAR_FILE_DETECTION_KEY),
         file_index=_get_file_index(start=False),
+        occupied_prefixes=occupied_prefixes,
     )
 
 

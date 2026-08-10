@@ -111,6 +111,12 @@ def _read_digest(path: str) -> tuple[int, str] | None:
     return size, digest.hexdigest()
 
 
+def _color_signature(values) -> tuple[str, ...]:
+    """Normalize a colour combination without making its field order significant."""
+
+    return tuple(sorted(normalize_color_slots(values), key=str.casefold))
+
+
 def _index_values(file_index, method_name: str, *args) -> list[str]:
     method = getattr(file_index, method_name, None)
     if not callable(method):
@@ -145,6 +151,7 @@ def find_similar_file_candidates(
         [_product_value(product, "color1"), _product_value(product, "color2"), _product_value(product, "color3")]
     )
     color_segment = build_color_segment(colors)
+    color_signature = _color_signature(colors)
     extra = normalize_extra_segment(_product_value(product, "extra"))
     if not all((name, type_name, model, color_segment)):
         return []
@@ -158,7 +165,7 @@ def find_similar_file_candidates(
     color_dirs = _merged_names(indexed_colors, _directory_names(identity_path))
     source_files: list[tuple[str, str, str, str]] = []
     for source_color in color_dirs:
-        if build_color_segment(source_color.split("-")) == color_segment:
+        if _color_signature(source_color.split("-")) == color_signature:
             continue
         color_path = _safe_child(identity_path, source_color)
         if color_path is None:

@@ -79,6 +79,17 @@ def test_occupied_or_non_permitted_slots_are_not_used(tmp_path):
     assert [item.target_prefix for item in candidates] == ["03"]
 
 
+def test_color_order_does_not_turn_the_same_multicolor_variant_into_a_candidate(tmp_path):
+    _write_product_file(tmp_path, "WHITE-BLACK", "01", b"same-colors")
+    product = {**white_product(), "color1": "Black", "color2": "White"}
+
+    candidates = find_similar_file_candidates(
+        str(tmp_path), product, slot_defs(), enabled_slots()
+    )
+
+    assert candidates == []
+
+
 def test_normalize_similar_settings_defaults_disabled_and_removes_unknown_slots():
     slots = [{"prefix": "01", "label": "Instrukcja"}, {"prefix": "02", "label": "Detal"}]
 
