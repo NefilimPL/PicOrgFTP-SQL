@@ -153,16 +153,12 @@ class WebUiIntegrityTests(unittest.TestCase):
                 "function slotUploadProgress"
             )
         ]
-        accept = source[
-            source.index("function acceptSimilarCandidate") : source.index(
-                "function selectedPhotoToken"
-            )
-        ]
-        submit_handler = source[
-            source.index('productForm.addEventListener("submit"') : source.index(
-                "function resetCurrentDraft"
-            )
-        ]
+        accept_start = source.index("function acceptSimilarCandidate")
+        accept = source[accept_start : source.index("function pendingSimilarCandidatePrefixes", accept_start)]
+        submit_start = source.index("function handleProductSubmitError")
+        handler_start = source.index('productForm.addEventListener("submit"')
+        submit_support = source[submit_start:handler_start]
+        submit_handler = source[handler_start : source.index("function resetCurrentDraft", handler_start)]
         node = Path(r"C:\Program Files\nodejs\node.exe")
         if not node.exists():
             self.skipTest("Node.js is required for the similar-file submission contract test")
@@ -204,12 +200,15 @@ const resetCurrentDraft = () => {{}};
 const showError = (error) => {{ throw error; }};
 const markSlotDeletion = () => {{}};
 const renderSlot = () => {{}};
+const pendingSimilarCandidatePrefixes = () => state.files.has("01") ? [] : ["01"];
+const openSimilarDecisionModal = () => {{}};
 async function requestJson(_url, options) {{
   submittedForms.push(Object.fromEntries(options.body.entries()));
   return {{ job: {{}} }};
 }}
 {helpers}
 {accept}
+{submit_support}
 {submit_handler}
 (async () => {{
   state.similarCandidates.set("01", {{
@@ -222,14 +221,14 @@ async function requestJson(_url, options) {{
     thumb_url: "/api/thumbnail?token=signed-similar-token",
   }});
   await submitHandler({{ preventDefault() {{}} }});
-  const lookupOnly = submittedForms.at(-1);
+  const requestsBeforeAcceptance = submittedForms.length;
   const filesBeforeAcceptance = state.files.size;
   acceptSimilarCandidate("01");
   await submitHandler({{ preventDefault() {{}} }});
   const accepted = submittedForms.at(-1);
   console.log(JSON.stringify({{
     filesBeforeAcceptance,
-    lookupOnlyToken: lookupOnly.existing_slot_01 || null,
+    requestsBeforeAcceptance,
     acceptedToken: accepted.existing_slot_01 || null,
     acceptedName: accepted.existing_slot_name_01 || null,
     browserSlot: accepted.slot_01 || null,
@@ -246,7 +245,7 @@ async function requestJson(_url, options) {{
         result = json.loads(completed.stdout)
 
         self.assertEqual(result["filesBeforeAcceptance"], 0)
-        self.assertIsNone(result["lookupOnlyToken"])
+        self.assertEqual(result["requestsBeforeAcceptance"], 0)
         self.assertEqual(result["acceptedToken"], "signed-similar-token")
         self.assertEqual(result["acceptedName"], "5901234567890_01.pdf")
         self.assertIsNone(result["browserSlot"])
@@ -607,6 +606,110 @@ console.log(JSON.stringify({{
         self.assertFalse(result["continueDisabled"])
         self.assertEqual(result["acceptedState"], "Zachowany")
         self.assertEqual(result["rejectedState"], "Odrzucony")
+
+    def test_pending_similar_candidates_block_submit_until_all_are_decided(self) -> None:
+        """A pending suggestion must open the decision modal before any submit work starts."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        self.assertIn("async function submitProductForm()", source)
+        handler_start = source.index('productForm.addEventListener("submit",')
+        handler_end = source.index("function resetCurrentDraft", handler_start)
+        submit_handler = source[handler_start:handler_end]
+        self.assertIn("pendingSimilarCandidatePrefixes()", submit_handler)
+        self.assertIn("openSimilarDecisionModal()", submit_handler)
+        self.assertIn("submitProductForm()", submit_handler)
+        self.assertNotIn('requestJson("/api/process/background"', submit_handler)
+
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the similar submit gate contract test")
+        script = f"""
+let submitHandler;
+let pending = ["01"];
+let opened = 0;
+let submitted = 0;
+const productForm = {{ addEventListener: (_name, handler) => {{ submitHandler = handler; }} }};
+const pendingSimilarCandidatePrefixes = () => pending;
+const openSimilarDecisionModal = () => {{ opened += 1; }};
+const submitProductForm = () => {{ submitted += 1; return Promise.resolve(); }};
+const handleProductSubmitError = () => {{ throw new Error("unexpected submit failure"); }};
+{submit_handler}
+(async () => {{
+  await submitHandler({{ preventDefault() {{}} }});
+  pending = [];
+  await submitHandler({{ preventDefault() {{}} }});
+  console.log(JSON.stringify({{ opened, submitted }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(json.loads(completed.stdout), {"opened": 1, "submitted": 1})
+
+    def test_reject_all_enables_continue_without_submitting_similar_token(self) -> None:
+        """Bulk rejection leaves candidates out of files, then continues through the normal submit path."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        wiring_start = source.index("similarDecisionRejectAllButton?.addEventListener")
+        wiring_end = source.index(
+            'document.querySelectorAll("[data-close-similar-decision]")', wiring_start
+        )
+        wiring = source[wiring_start:wiring_end]
+        self.assertIn("dismissSimilarCandidate(prefix)", wiring)
+        self.assertIn("similarDecisionContinueButton?.addEventListener", wiring)
+        self.assertIn("closeSimilarDecisionModal()", wiring)
+        self.assertIn("submitProductForm()", wiring)
+        self.assertIn('document.querySelectorAll("[data-close-similar-decision]")', source)
+        self.assertIn('button.addEventListener("click", closeSimilarDecisionModal)', source)
+
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the similar decision action contract test")
+        script = f"""
+const listeners = {{}};
+const similarDecisionRejectAllButton = {{ addEventListener: (name, listener) => {{ listeners.rejectAll = listener; }} }};
+const similarDecisionContinueButton = {{ addEventListener: (name, listener) => {{ listeners.continue = listener; }} }};
+const pending = new Set(["01", "02"]);
+const state = {{ files: new Map() }};
+let closed = 0;
+let submitted = 0;
+let rendered = 0;
+const pendingSimilarCandidatePrefixes = () => [...pending];
+const dismissSimilarCandidate = (prefix) => pending.delete(prefix);
+const renderSlot = () => {{ rendered += 1; }};
+const renderSimilarDecisionModal = () => {{ rendered += 1; }};
+const closeSimilarDecisionModal = () => {{ closed += 1; }};
+const submitProductForm = () => {{ submitted += 1; return Promise.resolve(); }};
+const handleProductSubmitError = () => {{ throw new Error("unexpected submit failure"); }};
+{wiring}
+(async () => {{
+  listeners.rejectAll();
+  listeners.continue();
+  await Promise.resolve();
+  console.log(JSON.stringify({{
+    pending: pendingSimilarCandidatePrefixes(),
+    serializedSimilar: [...state.files.values()].some((item) => item.similar_candidate_id),
+    closed,
+    submitted,
+  }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["pending"], [])
+        self.assertFalse(result["serializedSimilar"])
+        self.assertEqual(result["closed"], 1)
+        self.assertEqual(result["submitted"], 1)
 
     def test_selected_similar_slot_uses_its_edited_id_when_settings_are_saved(self) -> None:
         """Catches an enabled per-slot checkbox retaining the ID it had at render time."""

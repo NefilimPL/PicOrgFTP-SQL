@@ -12742,6 +12742,25 @@ document.querySelectorAll("[data-close-modal]").forEach((button) => {
   button.addEventListener("click", closeModals);
 });
 
+similarDecisionRejectAllButton?.addEventListener("click", () => {
+  const prefixes = [...pendingSimilarCandidatePrefixes()];
+  for (const prefix of prefixes) {
+    dismissSimilarCandidate(prefix);
+    renderSlot(prefix);
+  }
+  renderSimilarDecisionModal();
+});
+
+similarDecisionContinueButton?.addEventListener("click", () => {
+  if (pendingSimilarCandidatePrefixes().length) return;
+  closeSimilarDecisionModal();
+  submitProductForm().catch(handleProductSubmitError);
+});
+
+document.querySelectorAll("[data-close-similar-decision]").forEach((button) => {
+  button.addEventListener("click", closeSimilarDecisionModal);
+});
+
 document.querySelectorAll("[data-close-web-images]").forEach((button) => {
   button.addEventListener("click", closeWebImagesModal);
 });
@@ -13137,8 +13156,13 @@ for (const name of Object.keys(fieldListKey)) {
   });
 }
 
-productForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
+function handleProductSubmitError(error) {
+  stopProcessStatusTicker();
+  showError(error);
+  setBusy(false, "");
+}
+
+async function submitProductForm() {
   clearResult();
   try {
     ensureSlotUploadsReady();
@@ -13215,10 +13239,17 @@ productForm.addEventListener("submit", async (event) => {
     });
     setBusy(false, "Zadanie przyjete w tle. Mozesz uzupelniac kolejny wpis.");
   } catch (error) {
-    stopProcessStatusTicker();
-    showError(error);
-    setBusy(false, "");
+    handleProductSubmitError(error);
   }
+}
+
+productForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (pendingSimilarCandidatePrefixes().length) {
+    openSimilarDecisionModal();
+    return;
+  }
+  return submitProductForm().catch(handleProductSubmitError);
 });
 
 function resetCurrentDraft({ clearOutput = true, status = "" } = {}) {
