@@ -37,6 +37,7 @@ from .common import (
     PROCESSING_SETTINGS_KEY,
     RESOURCE_MONITOR_SETTINGS_KEY,
     SECURITY_SETTINGS_KEY,
+    SIMILAR_FILE_DETECTION_KEY,
     WEB_DISPLAY_SETTINGS_KEY,
     SQL_AVAILABLE_COLUMNS_KEY,
     SQL_COLUMN_MAP_KEY,
@@ -135,6 +136,11 @@ from .services.pimcore_service import (
 )
 from .services.translation_service import clear_translation_cache, translate_text
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
+from .similar_product_files import (
+    SimilarFileCandidate,
+    find_similar_file_candidates,
+    normalize_similar_file_settings,
+)
 from .sql_profiles import (
     DEFAULT_SQL_PROFILE_ID,
     SQL_PROFILES_KEY,
@@ -3335,6 +3341,13 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
         cfg[SLOT_DEFS_KEY] = slot_defs
         cfg[SQL_COLUMN_MAP_KEY] = sql_map
 
+    similar_payload = payload.get(SIMILAR_FILE_DETECTION_KEY)
+    if isinstance(similar_payload, dict):
+        cfg[SIMILAR_FILE_DETECTION_KEY] = normalize_similar_file_settings(
+            similar_payload,
+            cfg.get(SLOT_DEFS_KEY, []),
+        )
+
     save_config(cfg, preserve_secrets=_preserve_unsubmitted_config_secrets(payload))
     config.initialize_config(interactive=False)
     if translation_settings_changed:
@@ -3392,6 +3405,10 @@ def settings_snapshot() -> dict[str, object]:
         "app_secret_set": bool(_text(common.APP_SECRET)),
         "local_file_index": bool(cfg.get(LOCAL_FILE_INDEX_KEY, True)),
         "auto_content_fit": bool(cfg.get(AUTO_CONTENT_FIT_KEY, False)),
+        SIMILAR_FILE_DETECTION_KEY: normalize_similar_file_settings(
+            cfg.get(SIMILAR_FILE_DETECTION_KEY),
+            slot_defs,
+        ),
         "processing": config._normalize_processing_settings(
             cfg.get(PROCESSING_SETTINGS_KEY, {})
         ),
@@ -3453,6 +3470,25 @@ def settings_snapshot() -> dict[str, object]:
             for slot in slot_defs
         ],
     }
+
+
+def find_web_similar_file_candidates(
+    product_payload: dict[str, object],
+) -> list[SimilarFileCandidate]:
+    """Find local suggestions for a web product without external side effects."""
+
+    field_settings = normalize_product_fields(
+        config.CONFIG.get(PRODUCT_FIELDS_KEY),
+        legacy_color_labels=config.CONFIG.get(COLOR_FIELD_LABELS_KEY),
+    )
+    normalized_payload = effective_product_values(product_payload, field_settings)
+    return find_similar_file_candidates(
+        settings.l,
+        normalized_payload,
+        normalize_slot_definitions(config.CONFIG.get(SLOT_DEFS_KEY))[0],
+        config.CONFIG.get(SIMILAR_FILE_DETECTION_KEY),
+        file_index=_get_file_index(start=True),
+    )
 
 
 def settings_secret_values() -> dict[str, object]:

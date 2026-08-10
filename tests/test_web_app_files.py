@@ -21,6 +21,8 @@ from fastapi.testclient import TestClient
 import pytest
 
 from picorgftp_sql import web_data
+from picorgftp_sql import common
+from picorgftp_sql.similar_product_files import SimilarFileCandidate
 from picorgftp_sql.web import active_clients
 from picorgftp_sql.web import app as web_app
 from picorgftp_sql.web.process_queue import (
@@ -42,6 +44,88 @@ def _workspace_temp(name: str) -> Path:
         shutil.rmtree(root)
     root.mkdir(parents=True)
     return root
+
+
+def _similar_product_payload() -> dict[str, str]:
+    return {
+        "name": "MAGGIORE",
+        "type_name": "KOMODA",
+        "model": "M1",
+        "color1": "WHITE",
+        "color2": "",
+        "color3": "",
+        "extra": "NO-LED",
+    }
+
+
+def test_similar_settings_round_trip_removes_unknown_slots(monkeypatch) -> None:
+    """Catches selected suggestion slots surviving after their definition is removed."""
+
+    cfg = json.loads(json.dumps(common.DEFAULT_CONFIG))
+    cfg[common.SLOT_DEFS_KEY] = [{"prefix": "01", "label": "Instrukcja"}]
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "save_config"),
+        patch.object(web_data.config, "initialize_config", return_value=cfg),
+        patch.object(web_data, "load_users", return_value=[]),
+    ):
+        snapshot = web_data.update_settings(
+            {
+                common.SIMILAR_FILE_DETECTION_KEY: {
+                    "enabled": True,
+                    "slot_prefixes": ["01", "99"],
+                }
+            }
+        )
+
+    assert snapshot[common.SIMILAR_FILE_DETECTION_KEY] == {
+        "enabled": True,
+        "slot_prefixes": ["01"],
+    }
+
+
+def test_similar_files_endpoint_requires_login_and_hides_source_path() -> None:
+    """Catches a suggestions response that leaks a local filename path or skips auth."""
+
+    with TestClient(web_app.app) as client:
+        assert client.post("/api/similar-files", json=_similar_product_payload()).status_code == 401
+
+    candidate = SimilarFileCandidate(
+        candidate_id="candidate-1",
+        source_prefix="01",
+        target_prefix="01",
+        source_path="C:/photos/BLACK/NO-LED/1_01.pdf",
+        filename="1_01.pdf",
+        source_color_segment="BLACK",
+        size_bytes=12,
+        sha256="digest",
+        is_pdf=True,
+    )
+    with (
+        patch.object(web_app, "_require_user", return_value="operator"),
+        patch.object(web_app, "find_web_similar_file_candidates", return_value=[candidate]),
+        patch.object(web_app, "_enrich_photo_payload", wraps=web_app._enrich_photo_payload),
+    ):
+        response = TestClient(web_app.app).post(
+            "/api/similar-files", json=_similar_product_payload()
+        )
+
+    assert response.status_code == 200
+    item = response.json()["candidates"][0]
+    assert item["url"].startswith("/api/file?token=")
+    assert set(item) == {
+        "id",
+        "source_prefix",
+        "target_prefix",
+        "filename",
+        "source_color",
+        "size_bytes",
+        "is_pdf",
+        "token",
+        "url",
+        "thumb_url",
+    }
+    assert "path" not in item and "C:/" not in json.dumps(item)
 
 
 @pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
