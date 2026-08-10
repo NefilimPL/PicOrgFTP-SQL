@@ -2450,7 +2450,7 @@ function renderSlotBadges(container, photo, file, prefix) {
     ["local", "LOCAL", "Plik jest w folderze backendu"],
     ["ftp", "FTP", "Wpis dla slotu jest na FTP"],
     ["sql", "SQL", "Wpis dla slotu jest w SQL"],
-    ["similar", "PODOBNE", "Plik z podobnego produktu"],
+    ["similar", "POD", "Plik z podobnego produktu"],
   ];
   if (file) {
     const badge = document.createElement("span");
@@ -3146,11 +3146,19 @@ function renderSimilarCandidatePreview(prefix, preview, previewImage, empty) {
     empty.textContent = candidate.filename || "Dokument PDF";
     return true;
   }
-  const thumb = thumbnailUrl(null, prefix);
+  const thumb = candidate.thumb_url || candidate.url || "";
   if (!thumb) {
     empty.textContent = candidate.filename || "Podglad niedostepny";
     return true;
   }
+  previewImage.addEventListener(
+    "error",
+    () => {
+      preview.classList.remove("has-image");
+      empty.textContent = candidate.filename || "Podglad niedostepny";
+    },
+    { once: true }
+  );
   previewImage.src = thumb;
   preview.classList.add("has-image");
   return true;
@@ -3191,6 +3199,7 @@ function setSlotFile(prefix, file, options = {}) {
     return item;
   }
   uploadSlotFile(prefix, item);
+  scheduleSimilarFileLookup();
   return item;
 }
 
@@ -3637,14 +3646,27 @@ function createSlotNode(slot) {
     }
     if (candidate && !selectedFile) {
       const acceptButton = document.createElement("button");
+      const rejectButton = document.createElement("button");
       acceptButton.type = "button";
       acceptButton.className = "slot-similar-accept";
-      acceptButton.textContent = "Wczytaj z podobnego";
+      acceptButton.textContent = "✓";
+      acceptButton.title = "Wczytaj plik z podobnego produktu";
+      acceptButton.setAttribute("aria-label", acceptButton.title);
       acceptButton.addEventListener("click", (event) => {
         event.stopPropagation();
         acceptSimilarCandidate(slot.prefix);
       });
-      meta.appendChild(acceptButton);
+      rejectButton.type = "button";
+      rejectButton.className = "slot-similar-reject";
+      rejectButton.textContent = "×";
+      rejectButton.title = "Odrzuc sugestie z podobnego produktu";
+      rejectButton.setAttribute("aria-label", rejectButton.title);
+      rejectButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        dismissSimilarCandidate(slot.prefix);
+        renderSlot(slot.prefix);
+      });
+      controls.append(acceptButton, rejectButton);
     }
 
     if (selectedFile) {
@@ -12069,7 +12091,15 @@ function renderSettingsSlots() {
     "Nazwa w web jest tylko etykieta slotu. ID trafia do EAN_ID, nazwa w pliku jest zapisywana literalnie po usunieciu znakow niedozwolonych, a pole SQL sluzy do aktualizacji bazy.";
   const list = document.createElement("div");
   const addButton = document.createElement("button");
+  const similarSettings = state.settings.similar_file_detection || {};
+  const similarEnabled = document.createElement("input");
+  const similarEnabledRow = document.createElement("label");
   list.className = "slot-settings-list";
+  similarEnabled.type = "checkbox";
+  similarEnabled.name = "similar_files_enabled";
+  similarEnabled.checked = Boolean(similarSettings.enabled);
+  similarEnabledRow.className = "check-row";
+  similarEnabledRow.append(similarEnabled, document.createTextNode("Wykrywaj pliki z podobnych produktow"));
   const nextPrefix = () => {
     const used = [...list.querySelectorAll('[name="prefix"]')]
       .map((input) => parseInt(input.value, 10))
@@ -12080,6 +12110,8 @@ function renderSettingsSlots() {
   const addSlotRow = (slot = {}) => {
     const row = document.createElement("div");
     const remove = document.createElement("button");
+    const similarOption = document.createElement("label");
+    const similarInput = document.createElement("input");
     row.className = "slot-settings-row";
     row.dataset.filenameLabelExplicit = slot.filename_label_explicit ? "1" : "0";
     row.dataset.originalLabel = slot.label || "";
@@ -12090,11 +12122,19 @@ function renderSettingsSlots() {
     remove.className = "secondary-button";
     remove.textContent = "Usun";
     remove.addEventListener("click", () => row.remove());
+    similarOption.className = "slot-similar-option";
+    similarInput.type = "checkbox";
+    similarInput.name = "similar_file_slot_prefixes";
+    similarInput.value = slot.prefix || "";
+    similarInput.checked = (similarSettings.slot_prefixes || []).includes(slot.prefix);
+    similarInput.disabled = !similarEnabled.checked;
+    similarOption.append(similarInput, document.createTextNode("Podobne"));
     row.append(
       inputField("label", "Nazwa w web", slot.label),
       inputField("prefix", "ID", slot.prefix),
       inputField("filename_label", "Nazwa w pliku", slot.filename_label || slot.label),
       column,
+      similarOption,
       remove
     );
     list.appendChild(row);
@@ -12102,29 +12142,8 @@ function renderSettingsSlots() {
   for (const slot of state.settings.slots || []) {
     addSlotRow(slot);
   }
-  const similarSettings = state.settings.similar_file_detection || {};
-  const similarEnabled = document.createElement("input");
-  const similarEnabledRow = document.createElement("label");
-  const similarSlots = document.createElement("div");
-  similarEnabled.type = "checkbox";
-  similarEnabled.name = "similar_files_enabled";
-  similarEnabled.checked = Boolean(similarSettings.enabled);
-  similarEnabledRow.className = "check-row";
-  similarEnabledRow.append(similarEnabled, document.createTextNode("Wykrywaj pliki z podobnych produktow"));
-  similarSlots.className = "check-list";
-  for (const slot of state.settings.slots || []) {
-    const option = document.createElement("label");
-    const input = document.createElement("input");
-    input.type = "checkbox";
-    input.name = "similar_file_slot_prefixes";
-    input.value = slot.prefix;
-    input.checked = (similarSettings.slot_prefixes || []).includes(slot.prefix);
-    input.disabled = !similarEnabled.checked;
-    option.append(input, document.createTextNode(`${slot.prefix} - ${slot.label}`));
-    similarSlots.appendChild(option);
-  }
   similarEnabled.addEventListener("change", () => {
-    similarSlots.querySelectorAll("input").forEach((input) => {
+    list.querySelectorAll('[name="similar_file_slot_prefixes"]').forEach((input) => {
       input.disabled = !similarEnabled.checked;
     });
   });
@@ -12142,8 +12161,7 @@ function renderSettingsSlots() {
     });
   });
   form.append(
-    settingsFieldGroup("Lista slotow", note, list, actionRow(addButton, detectSqlColumnsButton())),
-    settingsFieldGroup("Podobne produkty", similarEnabledRow, similarSlots)
+    settingsFieldGroup("Lista slotow", note, similarEnabledRow, list, actionRow(addButton, detectSqlColumnsButton()))
   );
   settingsSaveButton(form, (data) => {
     const slots = [...form.querySelectorAll(".slot-settings-row")].map((row) => {

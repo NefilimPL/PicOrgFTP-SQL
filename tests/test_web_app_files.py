@@ -125,6 +125,28 @@ def test_similar_file_lookup_reserves_currently_occupied_slots() -> None:
     assert captured["occupied_prefixes"] == ["01", "02"]
 
 
+def test_file_token_allows_a_resolved_equivalent_of_the_photos_root(monkeypatch) -> None:
+    """Catches preview tokens failing when a mapped photo root resolves elsewhere."""
+
+    configured_root = r"Z:\photos"
+    resolved_root = r"\\server\share\photos"
+    source = rf"{resolved_root}\BLACK\NO-LED\5901234567890_01.jpg"
+    original_realpath = web_app.os.path.realpath
+
+    def resolve_path(path: str) -> str:
+        normalized = original_realpath(path)
+        if normalized.casefold() == configured_root.casefold():
+            return resolved_root
+        return normalized
+
+    monkeypatch.setattr(web_app.settings, "l", configured_root)
+    with (
+        patch.object(web_app.os.path, "realpath", side_effect=resolve_path),
+        patch.object(web_app.os.path, "isfile", return_value=True),
+    ):
+        assert web_app._path_from_file_token(web_app._file_token(source)) == source
+
+
 def test_similar_files_endpoint_requires_login_and_hides_source_path() -> None:
     """Catches a suggestions response that leaks a local filename path or skips auth."""
 

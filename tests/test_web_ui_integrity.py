@@ -71,8 +71,9 @@ class WebUiIntegrityTests(unittest.TestCase):
         source = APP_JS.read_text(encoding="utf-8")
 
         self.assertIn("function acceptSimilarCandidate(prefix)", source)
-        self.assertIn("Wczytaj z podobnego", source)
-        self.assertIn('["similar", "PODOBNE"', source)
+        self.assertIn('acceptButton.textContent = "✓";', source)
+        self.assertIn('rejectButton.textContent = "×";', source)
+        self.assertIn('["similar", "POD"', source)
         self.assertIn('source === "similar"', source)
 
     def test_filling_an_existing_product_replaces_old_similar_lookup_with_a_fresh_one(self) -> None:
@@ -310,6 +311,97 @@ async function requestJson(_url, options) {{
         self.assertEqual(result["occupied"], ["01", "02"])
         self.assertIsNone(result["thrown"])
         self.assertIn("Nie udalo sie sprawdzic plikow z podobnych produktow", result["status"])
+
+    def test_similar_candidate_image_preview_uses_its_signed_thumbnail(self) -> None:
+        """Catches a pending candidate deriving its thumbnail from an inactive slot source."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        renderer = source[
+            source.index("function renderSimilarCandidatePreview") : source.index(
+                "function clearSlotAssignment", source.index("function renderSimilarCandidatePreview")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the similar candidate preview contract")
+        script = f"""
+const candidate = {{
+  filename: "candidate.jpg", is_pdf: false,
+  thumb_url: "/api/thumbnail?token=signed-thumbnail",
+  url: "/api/file?token=signed-file",
+}};
+const preview = {{ classList: {{ add() {{}} }} }};
+const previewImage = {{ src: "", addEventListener() {{}} }};
+const empty = {{ textContent: "" }};
+const similarCandidateForSlot = () => candidate;
+const thumbnailUrl = () => "";
+{renderer}
+renderSimilarCandidatePreview("01", preview, previewImage, empty);
+console.log(JSON.stringify({{ src: previewImage.src }}));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(json.loads(completed.stdout)["src"], "/api/thumbnail?token=signed-thumbnail")
+
+    def test_manual_slot_file_refreshes_similar_candidate_placement(self) -> None:
+        """Catches manual upload permanently hiding a candidate instead of reallocating it."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        set_slot_file = source[
+            source.index("function setSlotFile") : source.index("function getSlotAssignment", source.index("function setSlotFile"))
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the similar candidate reallocation contract")
+        script = f"""
+const state = {{
+  files: new Map(), loadedPhotos: new Map(), slotSources: new Map(),
+  userSelectedSlotSources: new Map(), similarCandidates: new Map(),
+}};
+const formStatus = {{ textContent: "" }};
+const uploadFileValidationError = () => "";
+const bumpSlotRevision = () => {{}};
+const markSlotDeletion = () => {{}};
+const revokeFilePreviewUrl = () => {{}};
+const isProvisionalSlotPlacement = () => false;
+const createSlotFileUpload = (_prefix, file) => ({{ file }});
+const dismissSimilarCandidate = () => {{}};
+const updateSubmitButtonState = () => {{}};
+const uploadSlotFile = () => {{}};
+let refreshes = 0;
+const scheduleSimilarFileLookup = () => {{ refreshes += 1; }};
+{set_slot_file}
+setSlotFile("01", {{ name: "manual.jpg" }});
+console.log(JSON.stringify({{ refreshes }}));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(json.loads(completed.stdout)["refreshes"], 1)
+
+    def test_similar_controls_are_compact_and_slot_local(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        settings_start = source.index("function renderSettingsSlots")
+        settings_end = source.index("function renderSettingsUsers", settings_start)
+        settings = source[settings_start:settings_end]
+        slot_start = source.index("function createSlotNode")
+        slot_end = source.index("function renderSlot(", slot_start)
+        slots = source[slot_start:slot_end]
+
+        self.assertIn('similarInput.name = "similar_file_slot_prefixes";', settings)
+        self.assertNotIn('settingsFieldGroup("Podobne produkty"', settings)
+        self.assertIn('["similar", "POD"', source)
+        self.assertIn('acceptButton.textContent = "✓";', slots)
+        self.assertIn('rejectButton.textContent = "×";', slots)
 
     def test_list_usage_modal_opens_the_selected_blocking_product(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")

@@ -1319,11 +1319,11 @@ def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
         raise HTTPException(status_code=400, detail="Niepoprawny token pliku.") from exc
     if not hmac.compare_digest(_sign(path), signature):
         raise HTTPException(status_code=403, detail="Niepoprawny podpis pliku.")
-    abs_path = os.path.abspath(path)
+    abs_path = os.path.realpath(os.path.abspath(path))
     roots = [
-        os.path.abspath(settings.l),
-        os.path.abspath(os.path.join(settings.AC, "web_ftp_cache")),
-        os.path.abspath(_upload_cache_root()),
+        os.path.realpath(os.path.abspath(settings.l)),
+        os.path.realpath(os.path.abspath(os.path.join(settings.AC, "web_ftp_cache"))),
+        os.path.realpath(os.path.abspath(_upload_cache_root())),
     ]
     allowed = False
     for root in roots:

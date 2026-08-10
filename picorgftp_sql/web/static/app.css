@@ -1907,7 +1907,7 @@ h2 {
 }
 
 .slot-settings-row {
-  grid-template-columns: minmax(140px, 1fr) 82px minmax(140px, 1fr) minmax(180px, 1fr) auto;
+  grid-template-columns: minmax(140px, 1fr) 82px minmax(140px, 1fr) minmax(180px, 1fr) auto auto;
 }
 
 .user-row {
@@ -2139,9 +2139,43 @@ h2 {
   border: 0;
 }
 
+.slot-similar-accept,
+.slot-similar-reject {
+  min-height: 26px;
+  min-width: 26px;
+  padding: 0 7px;
+  font-size: 15px;
+  line-height: 1;
+}
+
 .slot-similar-accept {
-  width: 100%;
-  margin-top: 0.35rem;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.slot-similar-accept:hover {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.slot-similar-reject {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.slot-similar-reject:hover {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: #ffffff;
+}
+
+.slot-similar-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  white-space: nowrap;
 }
 
 .slot-badges {
