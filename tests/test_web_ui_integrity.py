@@ -142,6 +142,18 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("state.similarCandidates.delete(prefix);", dismiss_body)
         self.assertIn('state.slotSources.delete(prefix);', dismiss_body)
 
+    def test_process_serializer_only_reads_accepted_similar_candidates_from_state_files(self) -> None:
+        """Catches lookup-only candidates being serialized into process form data."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        submit_start = source.index('productForm.addEventListener("submit"')
+        submit_end = source.index("function resetCurrentDraft", submit_start)
+        serializer = source[submit_start:submit_end]
+
+        self.assertIn("for (const [prefix, item] of state.files.entries())", serializer)
+        self.assertIn('data.set(`existing_slot_${prefix}`, token);', serializer)
+        self.assertNotIn("state.similarCandidates", serializer)
+
     def test_list_usage_modal_opens_the_selected_blocking_product(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         start = source.index("function renderListUsageModal")

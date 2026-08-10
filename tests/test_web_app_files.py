@@ -149,6 +149,40 @@ def test_similar_files_endpoint_requires_login_and_hides_source_path() -> None:
     assert "path" not in item and "C:/" not in json.dumps(item)
 
 
+def test_similar_lookup_returns_submit_ready_token_but_does_not_schedule_a_slot(
+    tmp_path, monkeypatch
+) -> None:
+    """Catches lookup responses creating a process-form slot before acceptance."""
+
+    source = tmp_path / "photos" / "BLACK" / "NO-LED" / "5901234567890_01.pdf"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"%PDF-1.4\n")
+    candidate = SimilarFileCandidate(
+        candidate_id="candidate-1",
+        source_prefix="01",
+        target_prefix="01",
+        source_path=str(source),
+        filename=source.name,
+        source_color_segment="BLACK",
+        size_bytes=source.stat().st_size,
+        sha256="digest",
+        is_pdf=True,
+    )
+    monkeypatch.setattr(
+        web_app, "find_web_similar_file_candidates", lambda _payload: [candidate]
+    )
+    monkeypatch.setattr(web_app, "_require_user", lambda _request: "operator")
+
+    with TestClient(web_app.app) as client:
+        monkeypatch.setattr(web_app.settings, "l", str(tmp_path / "photos"))
+        response = client.post("/api/similar-files", json=_similar_product_payload())
+        item = response.json()["candidates"][0]
+        assert web_app._path_from_file_token(item["token"]) == str(source)
+
+    assert response.status_code == 200
+    assert "existing_slot_01" not in response.request.content.decode("utf-8")
+
+
 @pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
 def test_terminal_process_jobs_cleanup_staging_and_release_reservation(
     tmp_path, monkeypatch, outcome: str
