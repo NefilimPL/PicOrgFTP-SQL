@@ -84,6 +84,27 @@ def test_similar_settings_round_trip_removes_unknown_slots(monkeypatch) -> None:
     }
 
 
+def test_similar_file_lookup_does_not_start_or_refresh_the_local_index() -> None:
+    """Catches a read-only suggestion request starting the persistent local index."""
+
+    cfg = json.loads(json.dumps(common.DEFAULT_CONFIG))
+    cfg[common.SIMILAR_FILE_DETECTION_KEY] = {
+        "enabled": True,
+        "slot_prefixes": ["01"],
+    }
+
+    def loaded_index_only(*, start: bool = False):
+        assert start is False
+        return None
+
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "_get_file_index", side_effect=loaded_index_only),
+        patch.object(web_data, "find_similar_file_candidates", return_value=[]),
+    ):
+        assert web_data.find_web_similar_file_candidates(_similar_product_payload()) == []
+
+
 def test_similar_files_endpoint_requires_login_and_hides_source_path() -> None:
     """Catches a suggestions response that leaks a local filename path or skips auth."""
 

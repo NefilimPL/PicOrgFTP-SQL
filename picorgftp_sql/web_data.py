@@ -3487,7 +3487,7 @@ def find_web_similar_file_candidates(
         normalized_payload,
         normalize_slot_definitions(config.CONFIG.get(SLOT_DEFS_KEY))[0],
         config.CONFIG.get(SIMILAR_FILE_DETECTION_KEY),
-        file_index=_get_file_index(start=True),
+        file_index=_get_file_index(start=False),
     )
 
 
