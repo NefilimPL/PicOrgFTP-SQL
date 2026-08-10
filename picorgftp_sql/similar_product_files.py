@@ -78,8 +78,24 @@ def _merged_names(*name_groups) -> list[str]:
         for value in group:
             name = str(value or "").strip()
             if name:
-                names.setdefault(name.casefold(), name)
+                names[name.casefold()] = name
     return sorted(names.values(), key=str.casefold)
+
+
+def _safe_child(parent: str, segment: object) -> str | None:
+    """Return a resolved, direct child path only for a safe directory entry."""
+
+    name = str(segment or "").strip()
+    normalized = sanitize_path_segment(name)
+    if not name or not normalized or normalized.casefold() != name.casefold():
+        return None
+    child = os.path.realpath(os.path.join(parent, name))
+    try:
+        if os.path.commonpath((parent, child)) != parent:
+            return None
+    except ValueError:
+        return None
+    return child
 
 
 def _read_digest(path: str) -> tuple[int, str] | None:
@@ -144,7 +160,9 @@ def find_similar_file_candidates(
     for source_color in color_dirs:
         if build_color_segment(source_color.split("-")) == color_segment:
             continue
-        color_path = os.path.join(identity_path, source_color)
+        color_path = _safe_child(identity_path, source_color)
+        if color_path is None:
+            continue
         indexed_extras = _index_values(
             file_index,
             "get_extras",
@@ -156,8 +174,8 @@ def find_similar_file_candidates(
         for source_extra in _merged_names(indexed_extras, _directory_names(color_path)):
             if normalize_extra_segment(source_extra) != extra:
                 continue
-            product_path = os.path.realpath(os.path.join(color_path, source_extra))
-            if os.path.commonpath((root, product_path)) != root:
+            product_path = _safe_child(color_path, source_extra)
+            if product_path is None:
                 continue
             indexed_files = _index_values(
                 file_index,
@@ -169,8 +187,8 @@ def find_similar_file_candidates(
                 source_extra,
             )
             for filename in _merged_names(indexed_files, _file_names(product_path)):
-                source_path = os.path.realpath(os.path.join(product_path, filename))
-                if os.path.commonpath((product_path, source_path)) != product_path:
+                source_path = _safe_child(product_path, filename)
+                if source_path is None:
                     continue
                 parsed = parse_slot_filename(filename)
                 source_prefix = normalize_slot_prefix(parsed.normalized_label) if parsed else ""

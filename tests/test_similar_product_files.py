@@ -1,4 +1,5 @@
 from picorgftp_sql.similar_product_files import (
+    _merged_names,
     find_similar_file_candidates,
     normalize_similar_file_settings,
 )
@@ -108,3 +109,29 @@ def test_config_save_normalizes_similar_settings_after_slot_definitions():
         "enabled": True,
         "slot_prefixes": ["01"],
     }
+
+
+def test_stale_index_segments_cannot_escape_the_product_identity_directory(tmp_path):
+    outside = tmp_path / "MAGGIORI" / "KOMODA" / "OTHER" / "NO-LED"
+    outside.mkdir(parents=True)
+    (outside / "5901234567890_01_MAIN.jpg").write_bytes(b"outside")
+
+    class StaleIndex:
+        def get_colors(self, *_args):
+            return ["../OTHER"]
+
+        def get_extras(self, *_args):
+            return ["NO-LED"]
+
+        def get_product_files(self, *_args):
+            return ["5901234567890_01_MAIN.jpg"]
+
+    candidates = find_similar_file_candidates(
+        str(tmp_path), white_product(), slot_defs(), enabled_slots(), file_index=StaleIndex()
+    )
+
+    assert candidates == []
+
+
+def test_live_scandir_spelling_wins_over_case_colliding_index_spelling():
+    assert _merged_names(["black"], ["BLACK"]) == ["BLACK"]
