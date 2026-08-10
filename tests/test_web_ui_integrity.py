@@ -106,6 +106,27 @@ class WebUiIntegrityTests(unittest.TestCase):
             selected_file_branch,
         )
 
+    def test_updating_an_accepted_similar_image_restores_the_preview_marker(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function updateSlotPreview")
+        end = source.index("function renderSlot(", start)
+        updater = source[start:end]
+        selected_file_start = updater.index("if (selectedFile) {")
+        selected_file_end = updater.index(
+            "if (selectedSlotSource(prefix, loadedPhoto) === \"similar\" && candidate?.is_pdf)",
+            selected_file_start,
+        )
+        selected_file_branch = updater[selected_file_start:selected_file_end]
+
+        self.assertIn(
+            'selectedSlotSource(prefix, loadedPhoto) === "similar"',
+            selected_file_branch,
+        )
+        self.assertIn(
+            'preview.classList.add("has-similar-candidate");',
+            selected_file_branch,
+        )
+
     def test_accepting_and_dismissing_a_similar_candidate_preserves_source_semantics(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         accept_start = source.index("function acceptSimilarCandidate")

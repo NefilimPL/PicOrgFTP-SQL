@@ -3479,6 +3479,9 @@ function updateSlotPreview(prefix) {
   previewImage.removeAttribute("src");
   empty.textContent = "Brak pliku";
   if (selectedFile) {
+    if (selectedSlotSource(prefix, loadedPhoto) === "similar") {
+      preview.classList.add("has-similar-candidate");
+    }
     if (selectedSlotSource(prefix, loadedPhoto) === "similar" && candidate?.is_pdf) {
       renderSimilarCandidatePreview(prefix, preview, previewImage, empty);
       return;
