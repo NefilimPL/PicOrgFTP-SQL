@@ -77,6 +77,94 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn('["similar", "POD"', source)
         self.assertIn('source === "similar"', source)
 
+    def test_sql_badge_selects_text_copy_preview_and_only_opens_http_urls(self) -> None:
+        """SQL must be a visible copyable source state, never a blind file opener."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        badge_start = source.index("function renderSlotBadges")
+        badge_end = source.index("function isPhotoSourceLoading", badge_start)
+        badges = source[badge_start:badge_end]
+        opener_start = source.index("function loadedFileUrl")
+        opener_end = source.index("function markSlotDeletion", opener_start)
+        opener = source[opener_start:opener_end]
+
+        self.assertIn("function isHttpUrl(value)", source)
+        self.assertIn("function renderSqlPreview", source)
+        self.assertIn('state.slotSources.set(prefix, key);', badges)
+        self.assertIn("updateSlotPreview(prefix);", badges)
+        self.assertNotIn("copyTextToClipboard(sqlValue", badges)
+        self.assertIn('source === "sql"', opener)
+        self.assertIn("isHttpUrl", opener)
+
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the SQL URL contract test")
+        start = source.index("function isHttpUrl(value)")
+        end = source.index("function selectedPhotoToken", start)
+        is_http_url = source[start:end]
+        script = f"""
+{is_http_url}
+console.log(JSON.stringify({{
+  http: isHttpUrl('http://example.test/file.pdf'),
+  https: isHttpUrl('https://example.test/file.pdf'),
+  plainSql: isHttpUrl('Assembly_instruction'),
+  ftp: isHttpUrl('ftp://example.test/file.pdf'),
+}}));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {"http": True, "https": True, "plainSql": False, "ftp": False},
+        )
+
+    def test_slot_actions_are_preview_overlays_not_meta_controls(self) -> None:
+        """Preview actions stay anchored to image corners instead of consuming metadata space."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        css = APP_CSS.read_text(encoding="utf-8")
+        renderer_start = source.index("function createSlotNode")
+        renderer_end = source.index("function renderSlot(", renderer_start)
+        renderer = source[renderer_start:renderer_end]
+
+        self.assertIn('controls.className = "slot-preview-actions";', renderer)
+        self.assertIn("preview.appendChild(controls);", renderer)
+        self.assertNotIn("meta.appendChild(controls);", renderer)
+        self.assertIn(".slot-preview-actions", css)
+        self.assertIn("top: 8px", css)
+        self.assertIn("bottom: 8px", css)
+
+    def test_unaccepted_similar_candidate_is_the_current_preview_source(self) -> None:
+        """The candidate shown by default must be openable as the active POD source."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function selectedSlotSource")
+        end = source.index("function similarCandidateForSlot", start)
+        selected_source = source[start:end]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the similar source contract test")
+        script = f"""
+const state = {{ slotSources: new Map() }};
+const similarCandidateForSlot = (prefix) => prefix === '07' ? {{ url: '/api/cache/file' }} : null;
+const defaultSlotSource = () => '';
+{selected_source}
+console.log(selectedSlotSource('07', null));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(completed.stdout.strip(), "similar")
+
     def test_filling_an_existing_product_replaces_old_similar_lookup_with_a_fresh_one(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         start = source.index("function fillForm")

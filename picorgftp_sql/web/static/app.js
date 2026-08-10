@@ -2116,6 +2116,8 @@ function selectedSlotSource(prefix, photo) {
   if (selected === "similar" && similarCandidateForSlot(prefix)) return "similar";
   if (selected === "local" && photo?.token) return "local";
   if (selected === "ftp" && (photo?.ftp_token || photo?.ftp_filename)) return "ftp";
+  if (selected === "sql" && String(photo?.sql_value || "").trim()) return "sql";
+  if (!photo && similarCandidateForSlot(prefix)) return "similar";
   return defaultSlotSource(photo);
 }
 
@@ -2314,9 +2316,19 @@ function closeSimilarDecisionModal() {
   focusFirstPendingSimilarCandidate();
 }
 
+function isHttpUrl(value) {
+  try {
+    const url = new URL(String(value || "").trim());
+    return ["http:", "https:"].includes(url.protocol);
+  } catch (_error) {
+    return false;
+  }
+}
+
 function selectedPhotoToken(photo, prefix) {
   const source = selectedSlotSource(prefix, photo);
   if (source === "ftp") return photo?.ftp_token || "";
+  if (source === "sql" || source === "similar") return "";
   return photo?.token || "";
 }
 
@@ -2528,20 +2540,46 @@ async function renderSelectedFilePreview(prefix, file, preview, previewImage, em
 function loadedFileUrl(photo, prefix) {
   const source = selectedSlotSource(prefix, photo);
   if (source === "similar") return similarCandidateForSlot(prefix)?.url || "";
+  if (source === "sql") {
+    const value = String(photo?.sql_value || "").trim();
+    return isHttpUrl(value) ? value : "";
+  }
   if (source === "ftp" && photo?.ftp_url) return photo.ftp_url;
   if (source === "local" && photo?.url) return photo.url;
   const token = selectedPhotoToken(photo, prefix);
   return token ? `/api/file?token=${encodeURIComponent(token)}` : "";
 }
 
+function selectedSlotSourceCanOpen(prefix, photo, file) {
+  const source = selectedSlotSource(prefix, photo);
+  if (source === "sql") return isHttpUrl(photo?.sql_value);
+  if (source === "similar") return Boolean(filePreviewUrl(prefix, file) || similarCandidateForSlot(prefix)?.url);
+  if (file) return Boolean(filePreviewUrl(prefix, file));
+  return Boolean(loadedFileUrl(photo, prefix));
+}
+
+function selectedSlotSourceCanFit(prefix, photo, file) {
+  const source = selectedSlotSource(prefix, photo);
+  if (source === "sql") return false;
+  if (source === "similar") return Boolean(similarCandidateForSlot(prefix) && !similarCandidateForSlot(prefix).is_pdf);
+  if (file) return isFileImageLike(file);
+  return Boolean(photo?.is_image && (selectedPhotoToken(photo, prefix) || photo?.ftp_filename));
+}
+
 async function openSlotFile(prefix) {
   const selectedFile = state.files.get(prefix);
+  let photo = state.loadedPhotos.get(prefix);
+  const source = selectedSlotSource(prefix, photo);
+  if (source === "sql") {
+    const sqlUrl = loadedFileUrl(photo, prefix);
+    if (sqlUrl) window.open(sqlUrl, "_blank", "noopener");
+    return;
+  }
   if (selectedFile) {
     window.open(filePreviewUrl(prefix, selectedFile), "_blank", "noopener");
     return;
   }
-  let photo = state.loadedPhotos.get(prefix);
-  if (selectedSlotSource(prefix, photo) === "ftp" && photo?.ftp_filename && !photo.ftp_token) {
+  if (source === "ftp" && photo?.ftp_filename && !photo.ftp_token) {
     await loadFtpPreview(photo, prefix);
     photo = state.loadedPhotos.get(prefix);
   }
@@ -2626,11 +2664,11 @@ function renderSlotBadges(container, photo, file, prefix) {
     const canPreview =
       (key === "local" && photo?.token) ||
       (key === "ftp" && photo?.ftp_filename) ||
+      (key === "sql" && Boolean(sqlValue)) ||
       (key === "similar" && Boolean(similarCandidate));
-    const canCopySql = key === "sql" && Boolean(sqlValue);
     if (key === "similar" && !similarCandidate) continue;
-    const badge = document.createElement(canPreview || canCopySql ? "button" : "span");
-    const selected = key !== "sql" && selectedSlotSource(prefix, photo) === key;
+    const badge = document.createElement(canPreview ? "button" : "span");
+    const selected = selectedSlotSource(prefix, photo) === key;
     const loading =
       isPhotoSourceLoading(key) || (key === "ftp" && state.ftpPreviewLoading.has(prefix));
     badge.dataset.source = key;
@@ -2639,13 +2677,11 @@ function renderSlotBadges(container, photo, file, prefix) {
     } ${loading ? "loading" : ""}`;
     badge.title = loading
       ? sourceLoadingTitle(key)
-      : canCopySql
-      ? "Kliknij, aby skopiowac link z SQL"
       : selected
       ? `${title} (aktywny podglad)`
       : title;
     badge.textContent = label;
-    if (canPreview || canCopySql) {
+    if (canPreview) {
       badge.type = "button";
       badge.setAttribute("aria-pressed", selected ? "true" : "false");
       if (loading) {
@@ -2653,12 +2689,6 @@ function renderSlotBadges(container, photo, file, prefix) {
       }
       badge.addEventListener("click", (event) => {
         event.stopPropagation();
-        if (canCopySql) {
-          copyTextToClipboard(sqlValue, `Skopiowano link SQL dla slotu ${prefix}.`).catch((error) => {
-            formStatus.textContent = error.message;
-          });
-          return;
-        }
         state.slotSources.set(prefix, key);
         state.userSelectedSlotSources.add(prefix);
         if (key === "ftp" && !photo.ftp_token) {
@@ -3325,6 +3355,29 @@ function renderSimilarCandidatePreview(prefix, preview, previewImage, empty) {
   return true;
 }
 
+function renderSqlPreview(prefix, photo, preview, empty) {
+  const value = String(photo?.sql_value || "").trim();
+  const card = document.createElement("div");
+  const text = document.createElement("code");
+  const copyButton = document.createElement("button");
+  card.className = "slot-sql-preview";
+  text.textContent = value || "Brak wartosci SQL";
+  copyButton.type = "button";
+  copyButton.className = "slot-sql-copy-button";
+  copyButton.textContent = "Kopiuj";
+  copyButton.disabled = !value;
+  copyButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    copyTextToClipboard(value, `Skopiowano wartosc SQL dla slotu ${prefix}.`).catch((error) => {
+      formStatus.textContent = error.message;
+    });
+  });
+  card.append(text, copyButton);
+  preview.classList.add("has-sql-preview");
+  empty.textContent = "";
+  preview.appendChild(card);
+}
+
 function clearSlotAssignment(prefix, options = {}) {
   bumpSlotRevision(prefix);
   const markDelete = options.markDelete !== false;
@@ -3617,6 +3670,7 @@ function updateSlotPreview(prefix) {
   const empty = preview.querySelector(".slot-empty");
   const candidate = similarCandidateForSlot(prefix);
   const fitButton = card.querySelector(".slot-fit-button");
+  const openButton = card.querySelector(".slot-open-button");
   card.dataset.activeSource = selectedSlotSource(prefix, loadedPhoto) || "";
   card.classList.toggle("slot-similar-pending", Boolean(candidate && !selectedFile));
   detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, prefix);
@@ -3640,21 +3694,27 @@ function updateSlotPreview(prefix) {
       badge.title = sourceLoadingTitle(badge.dataset.source);
     } else {
       badge.removeAttribute("aria-busy");
-      const baseTitle =
-        badge.dataset.source === "sql" && sqlValue
-          ? "Kliknij, aby skopiowac link z SQL"
-          : titleBySource[badge.dataset.source] || "";
+      const baseTitle = titleBySource[badge.dataset.source] || "";
       badge.title = selected ? `${baseTitle} (aktywny podglad)` : baseTitle;
     }
   });
   if (fitButton) {
     fitButton.classList.toggle("active", isSlotFit(prefix));
+    fitButton.hidden = !selectedSlotSourceCanFit(prefix, loadedPhoto, selectedFile);
   }
-  preview.classList.remove("has-image", "thumb-loading", "loaded-photo", "has-similar-candidate");
+  if (openButton) {
+    openButton.hidden = !selectedSlotSourceCanOpen(prefix, loadedPhoto, selectedFile);
+  }
+  preview.classList.remove("has-image", "thumb-loading", "loaded-photo", "has-similar-candidate", "has-sql-preview");
   preview.querySelector(".slot-upload-overlay")?.remove();
   preview.querySelector(".slot-similar-preview")?.remove();
+  preview.querySelector(".slot-sql-preview")?.remove();
   previewImage.removeAttribute("src");
   empty.textContent = "Brak pliku";
+  if (selectedSlotSource(prefix, loadedPhoto) === "sql") {
+    renderSqlPreview(prefix, loadedPhoto, preview, empty);
+    return;
+  }
   if (selectedFile) {
     if (selectedSlotSource(prefix, loadedPhoto) === "similar") {
       preview.classList.add("has-similar-candidate");
@@ -3756,7 +3816,7 @@ function createSlotNode(slot) {
     if (state.photosLoading && !selectedFile && !loadedPhoto) {
       preview.appendChild(overlay);
     }
-    controls.className = "slot-controls";
+    controls.className = "slot-preview-actions";
     fitButton.type = "button";
     fitButton.className = `slot-fit-button ${isSlotFit(slot.prefix) ? "active" : ""}`;
     fitButton.textContent = "FIT";
@@ -3790,22 +3850,13 @@ function createSlotNode(slot) {
       renderSlot(slot.prefix);
     });
     if (selectedFile || loadedPhoto || candidate) {
-      const hasOpenableFile =
-        Boolean(selectedFile) ||
-        Boolean(selectedPhotoToken(loadedPhoto, slot.prefix)) ||
-        Boolean(loadedPhoto?.ftp_filename) || Boolean(candidate?.url);
-      const hasFittablePreview =
-        (selectedFile && isFileImageLike(selectedFile)) ||
-        (loadedPhoto?.is_image && (selectedPhotoToken(loadedPhoto, slot.prefix) || loadedPhoto?.ftp_filename)) ||
-        Boolean(candidate && !candidate.is_pdf);
-      if (hasFittablePreview) {
+      if (selectedSlotSourceCanFit(slot.prefix, loadedPhoto, selectedFile)) {
         controls.appendChild(fitButton);
       }
-      if (hasOpenableFile) {
+      if (selectedSlotSourceCanOpen(slot.prefix, loadedPhoto, selectedFile)) {
         controls.appendChild(openButton);
       }
       controls.appendChild(clearButton);
-      meta.appendChild(controls);
     }
     if (candidate && !selectedFile) {
       const decision = document.createElement("div");
@@ -3837,7 +3888,9 @@ function createSlotNode(slot) {
       meta.appendChild(decision);
     }
 
-    if (selectedFile) {
+    if (selectedSlotSource(slot.prefix, loadedPhoto) === "sql") {
+      renderSqlPreview(slot.prefix, loadedPhoto, preview, empty);
+    } else if (selectedFile) {
       if (selectedSlotSource(slot.prefix, loadedPhoto) === "similar") {
         preview.classList.add("has-similar-candidate");
       }
@@ -3878,6 +3931,9 @@ function createSlotNode(slot) {
             ? "Kliknij FTP, aby pobrac podglad"
             : slotStatusText(loadedPhoto, slot.prefix);
       }
+    }
+    if (controls.childElementCount) {
+      preview.appendChild(controls);
     }
 
     node.addEventListener("dragstart", (event) => {

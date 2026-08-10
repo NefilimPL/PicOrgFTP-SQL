@@ -2436,6 +2436,38 @@ button.slot-badge.on:hover {
   display: none;
 }
 
+.slot-preview.has-sql-preview .slot-empty {
+  display: none;
+}
+
+.slot-sql-preview {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  align-content: center;
+  gap: 10px;
+  padding: 38px 12px 40px;
+  background: var(--surface-2);
+}
+
+.slot-sql-preview code {
+  max-height: 92px;
+  overflow: auto;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.slot-sql-copy-button {
+  justify-self: start;
+  min-height: 26px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
 .slot-loading-overlay,
 .thumb-loading::after {
   position: absolute;
@@ -2550,11 +2582,43 @@ button.slot-badge.on:hover {
   color: var(--text);
 }
 
-.slot-controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 6px;
+.slot-preview-actions {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+}
+
+.slot-preview-actions button {
+  position: absolute;
+  pointer-events: auto;
+}
+
+.slot-preview-actions .slot-fit-button {
+  top: 8px;
+  left: 8px;
+}
+
+.slot-preview-actions .slot-clear-button {
+  top: 8px;
+  right: 8px;
+}
+
+.slot-preview-actions .slot-open-button {
+  bottom: 8px;
+  left: 8px;
+}
+
+.similar-decision-row-actions .slot-similar-accept {
+  border-color: #2d9b70;
+  background: #2d9b70;
+  color: #ffffff;
+}
+
+.similar-decision-row-actions .slot-similar-reject {
+  border-color: #c84d58;
+  background: #c84d58;
+  color: #ffffff;
 }
 
 .history-output,
