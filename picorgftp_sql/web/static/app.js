@@ -17,6 +17,7 @@ const state = {
   defaultSlotFit: false,
   slotSources: new Map(),
   similarCandidates: new Map(),
+  similarDecisionResults: new Map(),
   dismissedSimilarSlots: new Set(),
   similarFileLookupTimer: 0,
   similarFileLookupRequestId: 0,
@@ -337,6 +338,10 @@ const githubStatusButton = document.querySelector("#githubStatusButton");
 const githubStatusModal = document.querySelector("#githubStatusModal");
 const githubStatusOutput = document.querySelector("#githubStatusOutput");
 const githubStatusCheckedAt = document.querySelector("#githubStatusCheckedAt");
+const similarDecisionModal = document.querySelector("#similarDecisionModal");
+const similarDecisionList = document.querySelector("#similarDecisionList");
+const similarDecisionRejectAllButton = document.querySelector("#similarDecisionRejectAllButton");
+const similarDecisionContinueButton = document.querySelector("#similarDecisionContinueButton");
 const submitButton = document.querySelector("#submitButton");
 const clearButton = document.querySelector("#clearButton");
 const logoutButton = document.querySelector("#logoutButton");
@@ -2153,6 +2158,130 @@ function acceptSimilarCandidate(prefix) {
   renderSlot(prefix);
 }
 
+function pendingSimilarCandidatePrefixes() {
+  return (state.slots || [])
+    .map((slot) => String(slot.prefix || ""))
+    .filter((prefix) => Boolean(prefix) && !state.files.has(prefix) && Boolean(similarCandidateForSlot(prefix)));
+}
+
+function similarDecisionSlotLabel(prefix) {
+  const slot = (state.slots || []).find((item) => String(item.prefix) === String(prefix));
+  return slot ? `${slot.prefix} - ${slot.label}` : `Slot ${prefix}`;
+}
+
+function similarDecisionPreview(candidate) {
+  const preview = document.createElement("div");
+  preview.className = "similar-decision-preview";
+  if (candidate.is_pdf) {
+    const object = document.createElement("object");
+    object.className = "similar-decision-pdf";
+    object.type = "application/pdf";
+    object.data = candidate.url || "";
+    const fallback = document.createElement("span");
+    fallback.textContent = "Podglad PDF niedostepny";
+    object.appendChild(fallback);
+    preview.appendChild(object);
+    return preview;
+  }
+  const image = document.createElement("img");
+  const fallback = document.createElement("span");
+  image.src = candidate.thumb_url || candidate.url || "";
+  image.alt = candidate.filename ? `Podglad ${candidate.filename}` : "Podglad pliku z podobnego produktu";
+  image.loading = "lazy";
+  image.addEventListener("error", () => {
+    image.remove();
+    fallback.textContent = "Podglad niedostepny";
+    preview.appendChild(fallback);
+  });
+  preview.appendChild(image);
+  return preview;
+}
+
+function renderSimilarDecisionModal() {
+  if (!similarDecisionList) return;
+  const prefixes = pendingSimilarCandidatePrefixes();
+  for (const prefix of prefixes) {
+    if (state.similarDecisionResults.has(prefix)) continue;
+    const candidate = similarCandidateForSlot(prefix);
+    if (candidate) state.similarDecisionResults.set(prefix, { candidate, decision: "pending" });
+  }
+  similarDecisionList.replaceChildren();
+  for (const [prefix, result] of state.similarDecisionResults) {
+    const candidate = result.candidate;
+    const row = document.createElement("article");
+    const details = document.createElement("div");
+    const title = document.createElement("strong");
+    const filename = document.createElement("span");
+    const source = document.createElement("span");
+    const actions = document.createElement("div");
+    const acceptButton = document.createElement("button");
+    const rejectButton = document.createElement("button");
+    row.className = "similar-decision-row";
+    row.dataset.slotPrefix = prefix;
+    details.className = "similar-decision-details";
+    title.textContent = similarDecisionSlotLabel(prefix);
+    filename.textContent = candidate.filename || "Bez nazwy pliku";
+    source.className = "similar-decision-source";
+    source.textContent = candidate.source_color
+      ? `Źródło: podobny produkt, kolor ${candidate.source_color}`
+      : "Źródło: podobny produkt";
+    actions.className = "similar-decision-row-actions";
+    if (result.decision === "pending") {
+      acceptButton.type = "button";
+      acceptButton.className = "slot-similar-accept";
+      acceptButton.textContent = "Zachowaj";
+      acceptButton.title = "Zachowaj plik z podobnego produktu";
+      acceptButton.addEventListener("click", () => {
+        acceptSimilarCandidate(prefix);
+        result.decision = "accepted";
+        renderSimilarDecisionModal();
+      });
+      rejectButton.type = "button";
+      rejectButton.className = "slot-similar-reject";
+      rejectButton.textContent = "Odrzuć";
+      rejectButton.title = "Odrzuć plik z podobnego produktu";
+      rejectButton.addEventListener("click", () => {
+        dismissSimilarCandidate(prefix);
+        result.decision = "rejected";
+        renderSlot(prefix);
+        renderSimilarDecisionModal();
+      });
+      actions.append(acceptButton, rejectButton);
+    } else {
+      const status = document.createElement("strong");
+      status.className = `similar-decision-result ${result.decision}`;
+      status.textContent = result.decision === "accepted" ? "Zachowany" : "Odrzucony";
+      actions.appendChild(status);
+    }
+    details.append(title, filename, source);
+    row.append(similarDecisionPreview(candidate), details, actions);
+    similarDecisionList.appendChild(row);
+  }
+  if (similarDecisionRejectAllButton) similarDecisionRejectAllButton.disabled = prefixes.length === 0;
+  if (similarDecisionContinueButton) similarDecisionContinueButton.disabled = prefixes.length > 0;
+}
+
+function focusFirstPendingSimilarCandidate() {
+  const prefix = pendingSimilarCandidatePrefixes()[0];
+  if (!prefix) return;
+  slotGrid.querySelector(`[data-slot-prefix="${prefix}"]`)?.scrollIntoView({
+    behavior: "smooth",
+    block: "center",
+  });
+}
+
+function openSimilarDecisionModal() {
+  state.similarDecisionResults.clear();
+  renderSimilarDecisionModal();
+  similarDecisionModal?.classList.add("active");
+  focusFirstPendingSimilarCandidate();
+}
+
+function closeSimilarDecisionModal() {
+  similarDecisionModal?.classList.remove("active");
+  focusFirstPendingSimilarCandidate();
+}
+
 function selectedPhotoToken(photo, prefix) {
   const source = selectedSlotSource(prefix, photo);
   if (source === "ftp") return photo?.ftp_token || "";
@@ -3457,6 +3586,7 @@ function updateSlotPreview(prefix) {
   const candidate = similarCandidateForSlot(prefix);
   const fitButton = card.querySelector(".slot-fit-button");
   card.dataset.activeSource = selectedSlotSource(prefix, loadedPhoto) || "";
+  card.classList.toggle("slot-similar-pending", Boolean(candidate && !selectedFile));
   detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, prefix);
   card.querySelectorAll(".slot-badge[data-source]").forEach((badge) => {
     const selected = selectedSlotSource(prefix, loadedPhoto) === badge.dataset.source;
@@ -3509,7 +3639,7 @@ function updateSlotPreview(prefix) {
     renderSlotUploadOverlay(preview, selectedFile);
     return;
   }
-  if (selectedSlotSource(prefix, loadedPhoto) === "similar" && candidate) {
+  if (candidate) {
     renderSimilarCandidatePreview(prefix, preview, previewImage, empty);
     return;
   }
@@ -3571,6 +3701,7 @@ function createSlotNode(slot) {
     const clearButton = document.createElement("button");
     node.dataset.slotPrefix = slot.prefix;
     node.dataset.activeSource = selectedSlotSource(slot.prefix, loadedPhoto) || "";
+    node.classList.toggle("slot-similar-pending", Boolean(candidate && !selectedFile));
 
     title.textContent = `${slot.prefix} - ${slot.label}`;
     detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, slot.prefix);
@@ -3645,8 +3776,12 @@ function createSlotNode(slot) {
       meta.appendChild(controls);
     }
     if (candidate && !selectedFile) {
+      const decision = document.createElement("div");
       const acceptButton = document.createElement("button");
       const rejectButton = document.createElement("button");
+      const label = document.createElement("span");
+      decision.className = "slot-similar-decision";
+      label.textContent = "Wymaga decyzji · z podobnego";
       acceptButton.type = "button";
       acceptButton.className = "slot-similar-accept";
       acceptButton.textContent = "✓";
@@ -3666,7 +3801,8 @@ function createSlotNode(slot) {
         dismissSimilarCandidate(slot.prefix);
         renderSlot(slot.prefix);
       });
-      controls.append(acceptButton, rejectButton);
+      decision.append(label, acceptButton, rejectButton);
+      meta.appendChild(decision);
     }
 
     if (selectedFile) {
@@ -3681,7 +3817,7 @@ function createSlotNode(slot) {
         empty.textContent = slotFileName(selectedFile);
       }
       renderSlotUploadOverlay(preview, selectedFile);
-    } else if (selectedSlotSource(slot.prefix, loadedPhoto) === "similar" && candidate) {
+    } else if (candidate) {
       renderSimilarCandidatePreview(slot.prefix, preview, previewImage, empty);
     } else if (loadedPhoto) {
       preview.classList.add("loaded-photo");

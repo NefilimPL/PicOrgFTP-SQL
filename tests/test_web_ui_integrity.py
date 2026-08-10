@@ -96,7 +96,7 @@ class WebUiIntegrityTests(unittest.TestCase):
         end = source.index("function renderSlot(", start)
         renderer = source[start:end]
         selected_file_start = renderer.index("if (selectedFile) {")
-        selected_file_end = renderer.index("} else if (selectedSlotSource", selected_file_start)
+        selected_file_end = renderer.index("} else if (candidate) {", selected_file_start)
         selected_file_branch = renderer[selected_file_start:selected_file_end]
 
         self.assertIn(
@@ -270,6 +270,7 @@ const state = {{
   deletedSlots: new Map(),
   slotSources: new Map(),
   similarCandidates: new Map(),
+  similarDecisionResults: new Map(),
   dismissedSimilarSlots: new Set(),
   similarFileLookupRequestId: 0,
 }};
@@ -419,6 +420,193 @@ console.log(JSON.stringify({{ refreshes }}));
         self.assertIn('aria-modal="true"', html)
         self.assertIn(".slot-card.slot-similar-pending", css)
         self.assertIn("@keyframes slot-similar-pending-pulse", css)
+
+    def test_pending_similar_candidate_renders_its_thumbnail_without_selecting_pod(self) -> None:
+        """Catches an empty slot hiding a suggestion until the POD badge is clicked."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        update_start = source.index("function updateSlotPreview")
+        update_end = source.index("function createSlotNode", update_start)
+        update_slot_preview = source[update_start:update_end]
+        helpers = source[
+            source.index("function defaultSlotSource") : source.index(
+                "function selectedPhotoToken", source.index("function defaultSlotSource")
+            )
+        ]
+        candidate_preview = source[
+            source.index("function renderSimilarCandidatePreview") : source.index(
+                "function clearSlotAssignment", source.index("function renderSimilarCandidatePreview")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the similar preview contract test")
+        script = f"""
+const state = {{
+  files: new Map(),
+      loadedPhotos: new Map(),
+      slotSources: new Map(),
+      similarCandidates: new Map(),
+      similarDecisionResults: new Map(),
+      dismissedSimilarSlots: new Set(),
+  deletedSlots: new Map(),
+  ftpPreviewLoading: new Set(),
+  ftpPreviewBackgroundLoading: new Set(),
+  slotFits: new Map(),
+}};
+const classList = () => {{
+  const values = new Set();
+  return {{
+    add: (...names) => names.forEach((name) => values.add(name)),
+    remove: (...names) => names.forEach((name) => values.delete(name)),
+    contains: (name) => values.has(name),
+  }};
+}};
+const previewImage = {{
+  src: "",
+  addEventListener: () => {{}},
+  removeAttribute: () => {{}},
+}};
+const empty = {{ textContent: "" }};
+const preview = {{
+  classList: classList(),
+  querySelector: (selector) => {{
+    if (selector === "img") return previewImage;
+    if (selector === ".slot-empty") return empty;
+    return null;
+  }},
+  appendChild: () => {{}},
+}};
+const card = {{
+  dataset: {{}},
+  classList: {{ toggle: () => {{}} }},
+  querySelector: (selector) => {{
+    if (selector === ".slot-meta span") return {{ textContent: "" }};
+    if (selector === ".slot-preview") return preview;
+    if (selector === ".slot-fit-button") return null;
+    return null;
+  }},
+  querySelectorAll: () => [],
+}};
+const slotGrid = {{ querySelector: () => card }};
+const isSlotFit = () => false;
+const slotStatusText = () => "Brak pliku";
+const isPhotoSourceLoading = () => false;
+const sourceLoadingTitle = () => "";
+const renderSlots = () => {{ throw new Error("slot should already be rendered"); }};
+const renderSlotUploadOverlay = () => {{}};
+const renderSelectedFilePreview = () => {{}};
+const isFileImageLike = () => false;
+const document = {{ createElement: () => ({{}}) }};
+{helpers}
+{candidate_preview}
+{update_slot_preview}
+state.similarCandidates.set("01", {{
+  filename: "candidate.jpg",
+  thumb_url: "/api/thumbnail/candidate.jpg",
+  url: "/api/file/candidate.jpg",
+  is_pdf: false,
+}});
+updateSlotPreview("01");
+console.log(JSON.stringify({{
+  source: previewImage.src,
+  marked: preview.classList.contains("has-similar-candidate"),
+}}));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["source"], "/api/thumbnail/candidate.jpg")
+        self.assertTrue(result["marked"])
+
+    def test_decision_modal_accept_and_reject_resolve_only_chosen_slots(self) -> None:
+        """Catches modal controls that do not apply the existing per-slot decision paths."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        self.assertIn("function pendingSimilarCandidatePrefixes()", source)
+        self.assertIn("function renderSimilarDecisionModal()", source)
+        helpers = source[
+            source.index("function defaultSlotSource") : source.index(
+                "function selectedPhotoToken", source.index("function defaultSlotSource")
+            )
+        ]
+        decision_helpers = source[
+            source.index("function pendingSimilarCandidatePrefixes") : source.index(
+                "function selectedPhotoToken", source.index("function pendingSimilarCandidatePrefixes")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the similar decision modal contract test")
+        script = f"""
+class Element {{
+  constructor() {{
+    this.children = [];
+    this.className = "";
+    this.textContent = "";
+    this.dataset = {{}};
+    this.listeners = {{}};
+    this.classList = {{ add: () => {{}}, remove: () => {{}} }};
+  }}
+  append(...items) {{ this.children.push(...items); }}
+  appendChild(item) {{ this.children.push(item); return item; }}
+  replaceChildren(...items) {{ this.children = items; }}
+  addEventListener(name, listener) {{ this.listeners[name] = listener; }}
+  setAttribute() {{}}
+}}
+const state = {{
+  slots: [{{ prefix: "01", label: "Instrukcja 1" }}, {{ prefix: "02", label: "Instrukcja 2" }}],
+  files: new Map(),
+  loadedPhotos: new Map(),
+  slotSources: new Map(),
+  similarCandidates: new Map(),
+  similarDecisionResults: new Map(),
+  dismissedSimilarSlots: new Set(),
+  deletedSlots: new Map(),
+  userSelectedSlotSources: new Set(),
+}};
+const similarDecisionList = new Element();
+const similarDecisionContinueButton = new Element();
+const similarDecisionRejectAllButton = new Element();
+const similarDecisionModal = new Element();
+const document = {{ createElement: () => new Element() }};
+const markSlotDeletion = () => {{}};
+const renderSlot = () => {{}};
+{helpers}
+{decision_helpers}
+state.similarCandidates.set("01", {{ id: "one", filename: "one.jpg", thumb_url: "/thumb/one", source_color: "Czarny" }});
+state.similarCandidates.set("02", {{ id: "two", filename: "two.pdf", url: "/file/two", is_pdf: true, source_color: "Biały" }});
+renderSimilarDecisionModal();
+similarDecisionList.children[0].children.at(-1).children[0].listeners.click({{ preventDefault() {{}} }});
+similarDecisionList.children[1].children.at(-1).children[1].listeners.click({{ preventDefault() {{}} }});
+console.log(JSON.stringify({{
+  accepted: state.files.get("01")?.similar_candidate_id || null,
+  rejected: state.dismissedSimilarSlots.has("02"),
+  pending: pendingSimilarCandidatePrefixes(),
+  continueDisabled: similarDecisionContinueButton.disabled,
+  acceptedState: similarDecisionList.children[0].children.at(-1).children[0].textContent,
+  rejectedState: similarDecisionList.children[1].children.at(-1).children[0].textContent,
+}}));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["accepted"], "one")
+        self.assertTrue(result["rejected"])
+        self.assertEqual(result["pending"], [])
+        self.assertFalse(result["continueDisabled"])
+        self.assertEqual(result["acceptedState"], "Zachowany")
+        self.assertEqual(result["rejectedState"], "Odrzucony")
 
     def test_selected_similar_slot_uses_its_edited_id_when_settings_are_saved(self) -> None:
         """Catches an enabled per-slot checkbox retaining the ID it had at render time."""
