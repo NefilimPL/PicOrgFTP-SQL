@@ -204,6 +204,7 @@ u = "enable_sql_update"
 v = "host"
 w = "sql_query"
 SLOT_DEFS_KEY = "slot_definitions"
+SIMILAR_FILE_DETECTION_KEY = "similar_file_detection"
 SQL_COLUMN_MAP_KEY = "sql_column_map"
 SQL_AVAILABLE_COLUMNS_KEY = "sql_available_columns"
 SQL_PROFILES_KEY = "sql_profiles"
@@ -261,6 +262,10 @@ G = str
 B = ""
 
 DEFAULT_CONFIG.setdefault(SLOT_DEFS_KEY, DEFAULT_SLOT_DEFS)
+DEFAULT_CONFIG.setdefault(
+    SIMILAR_FILE_DETECTION_KEY,
+    {"enabled": False, "slot_prefixes": []},
+)
 DEFAULT_CONFIG.setdefault(
     SQL_COLUMN_MAP_KEY,
     {slot["prefix"]: slot["label"] for slot in DEFAULT_SLOT_DEFS},

@@ -38,6 +38,7 @@ from .common import (
     WEB_DISPLAY_SETTINGS_KEY,
     COLOR_FIELD_LABELS_KEY,
     PRODUCT_FIELDS_KEY,
+    SIMILAR_FILE_DETECTION_KEY,
     AK,
     SLOT_DEFS_KEY,
     TRANSLATION_API_KEY,
@@ -70,6 +71,7 @@ from .pimcore_config import (
     normalize_pimcore_settings,
 )
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
+from .similar_product_files import normalize_similar_file_settings
 from .product_fields import normalize_product_fields
 from .sql_profiles import additional_sql_profiles
 from . import settings
@@ -409,6 +411,9 @@ def _merge_raw_config(raw_config, config_copy):
     raw_slot_defs = raw_config.get(SLOT_DEFS_KEY, config_copy.get(SLOT_DEFS_KEY))
     slot_defs, _ = normalize_slot_definitions(raw_slot_defs)
     config_copy[SLOT_DEFS_KEY] = slot_defs
+    config_copy[SIMILAR_FILE_DETECTION_KEY] = normalize_similar_file_settings(
+        raw_config.get(SIMILAR_FILE_DETECTION_KEY), slot_defs
+    )
     raw_sql_map = raw_config.get(SQL_COLUMN_MAP_KEY, config_copy.get(SQL_COLUMN_MAP_KEY))
     sql_map, _ = normalize_sql_column_map(raw_sql_map, slot_defs)
     config_copy[SQL_COLUMN_MAP_KEY] = sql_map
@@ -538,6 +543,10 @@ def load_config(interactive=I):
                 ft: config_copy[ft],
                 u: config_copy[u],
                 SLOT_DEFS_KEY: config_copy.get(SLOT_DEFS_KEY),
+                SIMILAR_FILE_DETECTION_KEY: normalize_similar_file_settings(
+                    config_copy.get(SIMILAR_FILE_DETECTION_KEY),
+                    config_copy.get(SLOT_DEFS_KEY, []),
+                ),
                 SQL_COLUMN_MAP_KEY: config_copy.get(SQL_COLUMN_MAP_KEY),
                 SQL_AVAILABLE_COLUMNS_KEY: config_copy.get(SQL_AVAILABLE_COLUMNS_KEY),
                 SQL_PROFILES_KEY: _saved_sql_profiles(config_copy, {}, {}),
@@ -654,6 +663,9 @@ def load_config(interactive=I):
         raw_slot_defs = raw_config.get(SLOT_DEFS_KEY, config_copy.get(SLOT_DEFS_KEY))
         slot_defs, _ = normalize_slot_definitions(raw_slot_defs)
         config_copy[SLOT_DEFS_KEY] = slot_defs
+        config_copy[SIMILAR_FILE_DETECTION_KEY] = normalize_similar_file_settings(
+            raw_config.get(SIMILAR_FILE_DETECTION_KEY), slot_defs
+        )
         raw_sql_map = raw_config.get(SQL_COLUMN_MAP_KEY, config_copy.get(SQL_COLUMN_MAP_KEY))
         sql_map, _ = normalize_sql_column_map(raw_sql_map, slot_defs)
         config_copy[SQL_COLUMN_MAP_KEY] = sql_map
@@ -809,6 +821,7 @@ def save_config(config, raw_config=None, preserve_secrets=None):
         "smtp.password",
         email_settings["smtp"][EMAIL_SMTP_PASSWORD],
     )
+    slot_defs, _ = normalize_slot_definitions(config.get(SLOT_DEFS_KEY))
     payload = {
         H: {
             v: config[H][v],
@@ -833,7 +846,10 @@ def save_config(config, raw_config=None, preserve_secrets=None):
         w: config.get(w, ""),
         ft: config.get(ft, True),
         u: config.get(u, True),
-        SLOT_DEFS_KEY: config.get(SLOT_DEFS_KEY),
+        SLOT_DEFS_KEY: slot_defs,
+        SIMILAR_FILE_DETECTION_KEY: normalize_similar_file_settings(
+            config.get(SIMILAR_FILE_DETECTION_KEY), slot_defs
+        ),
         SQL_COLUMN_MAP_KEY: config.get(SQL_COLUMN_MAP_KEY),
         SQL_AVAILABLE_COLUMNS_KEY: _normalize_sql_columns(
             config.get(SQL_AVAILABLE_COLUMNS_KEY, [])

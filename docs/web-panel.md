@@ -49,6 +49,12 @@ http://IP_SERWERA:8000
 
 Ustawienia są widoczne tylko dla użytkowników webowych z rolą `admin`.
 
+## Pliki z podobnych produktów
+
+Administrator włącza wykrywanie w **Ustawienia -> Podobne produkty** i wybiera sloty, dla których panel ma proponować pliki. Wyszukiwanie obejmuje wyłącznie lokalne warianty koloru tego samego produktu. Znalezione kandydaty nie są zapisywane ani wysyłane automatycznie.
+
+Przy slocie znalezisko jest dostępne pod oznaczeniem **PODOBNE**, które przełącza podgląd na proponowany plik. Przycisk **Otwórz** otwiera aktualnie wybrane źródło podglądu. Dopiero **Wczytaj z podobnego** świadomie przyjmuje jeden plik do slotu; dopiero wtedy zostanie uwzględniony przy zwykłym zapisie lub przetwarzaniu produktu.
+
 ## Historia i obserwowalność administratora
 
 Widok **Historia** pokazuje przebieg operacji produktu. Przycisk **Zmiany** otwiera bezpieczny podgląd wartości przed i po operacji, zmian plików, czasu wykonania oraz identyfikatora powiązanego zadania.

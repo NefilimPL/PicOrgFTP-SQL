@@ -21,6 +21,8 @@ from fastapi.testclient import TestClient
 import pytest
 
 from picorgftp_sql import web_data
+from picorgftp_sql import common
+from picorgftp_sql.similar_product_files import SimilarFileCandidate
 from picorgftp_sql.web import active_clients
 from picorgftp_sql.web import app as web_app
 from picorgftp_sql.web.process_queue import (
@@ -42,6 +44,216 @@ def _workspace_temp(name: str) -> Path:
         shutil.rmtree(root)
     root.mkdir(parents=True)
     return root
+
+
+def _similar_product_payload() -> dict[str, str]:
+    return {
+        "name": "MAGGIORE",
+        "type_name": "KOMODA",
+        "model": "M1",
+        "color1": "WHITE",
+        "color2": "",
+        "color3": "",
+        "extra": "NO-LED",
+    }
+
+
+def test_similar_settings_round_trip_removes_unknown_slots(monkeypatch) -> None:
+    """Catches selected suggestion slots surviving after their definition is removed."""
+
+    cfg = json.loads(json.dumps(common.DEFAULT_CONFIG))
+    cfg[common.SLOT_DEFS_KEY] = [{"prefix": "01", "label": "Instrukcja"}]
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "save_config"),
+        patch.object(web_data.config, "initialize_config", return_value=cfg),
+        patch.object(web_data, "load_users", return_value=[]),
+    ):
+        snapshot = web_data.update_settings(
+            {
+                common.SIMILAR_FILE_DETECTION_KEY: {
+                    "enabled": True,
+                    "slot_prefixes": ["01", "99"],
+                }
+            }
+        )
+
+    assert snapshot[common.SIMILAR_FILE_DETECTION_KEY] == {
+        "enabled": True,
+        "slot_prefixes": ["01"],
+    }
+
+
+def test_similar_file_lookup_does_not_start_or_refresh_the_local_index() -> None:
+    """Catches a read-only suggestion request starting the persistent local index."""
+
+    cfg = json.loads(json.dumps(common.DEFAULT_CONFIG))
+    cfg[common.SIMILAR_FILE_DETECTION_KEY] = {
+        "enabled": True,
+        "slot_prefixes": ["01"],
+    }
+
+    def loaded_index_only(*, start: bool = False):
+        assert start is False
+        return None
+
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "_get_file_index", side_effect=loaded_index_only),
+        patch.object(web_data, "find_similar_file_candidates", return_value=[]),
+    ):
+        assert web_data.find_web_similar_file_candidates(_similar_product_payload()) == []
+
+
+def test_similar_file_lookup_reserves_currently_occupied_slots() -> None:
+    """Catches web lookup ignoring a loaded or manually selected target slot."""
+
+    captured: dict[str, object] = {}
+
+    def capture_lookup(*_args, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    with (
+        patch.object(web_data, "_get_file_index", return_value=None),
+        patch.object(web_data, "find_similar_file_candidates", side_effect=capture_lookup),
+    ):
+        web_data.find_web_similar_file_candidates(
+            {**_similar_product_payload(), "occupied_prefixes": ["01", "02"]}
+        )
+
+    assert captured["occupied_prefixes"] == ["01", "02"]
+
+
+def test_file_token_allows_a_resolved_equivalent_of_the_photos_root(monkeypatch) -> None:
+    """Catches preview tokens failing when a mapped photo root resolves elsewhere."""
+
+    configured_root = r"Z:\photos"
+    resolved_root = r"\\server\share\photos"
+    source = rf"{resolved_root}\BLACK\NO-LED\5901234567890_01.jpg"
+    original_realpath = web_app.os.path.realpath
+
+    def resolve_path(path: str) -> str:
+        normalized = original_realpath(path)
+        if normalized.casefold() == configured_root.casefold():
+            return resolved_root
+        return normalized
+
+    monkeypatch.setattr(web_app.settings, "l", configured_root)
+    with (
+        patch.object(web_app.os.path, "realpath", side_effect=resolve_path),
+        patch.object(web_app.os.path, "isfile", return_value=True),
+    ):
+        assert web_app._path_from_file_token(web_app._file_token(source)) == source
+
+
+def test_file_token_allows_case_variant_of_a_resolved_photos_root(monkeypatch) -> None:
+    """Catches Windows path casing rejecting a signed file inside the photos root."""
+
+    configured_root = r"C:\Photos"
+    source = r"c:\photos\BLACK\NO-LED\5901234567890_01.jpg"
+
+    def common_path(paths: list[str]) -> str:
+        if configured_root in paths:
+            return r"c:\photos"
+        return r"C:\outside"
+
+    monkeypatch.setattr(web_app.settings, "l", configured_root)
+    with (
+        patch.object(web_app.os.path, "realpath", side_effect=lambda path: path),
+        patch.object(web_app.os.path, "commonpath", side_effect=common_path),
+        patch.object(web_app.os.path, "isfile", return_value=True),
+    ):
+        assert web_app._path_from_file_token(web_app._file_token(source)) == source
+
+
+def test_similar_files_endpoint_requires_login_and_hides_source_path(monkeypatch) -> None:
+    """Catches a suggestions response that leaks a local filename path or skips auth."""
+
+    monkeypatch.setenv("PICORG_WEB_AUTH", "1")
+    with TestClient(web_app.app) as client:
+        assert client.post("/api/similar-files", json=_similar_product_payload()).status_code == 401
+
+    candidate = SimilarFileCandidate(
+        candidate_id="candidate-1",
+        source_prefix="01",
+        target_prefix="01",
+        source_path="C:/photos/BLACK/NO-LED/1_01.pdf",
+        filename="1_01.pdf",
+        source_color_segment="BLACK",
+        size_bytes=12,
+        sha256="digest",
+        is_pdf=True,
+    )
+    with (
+        patch.object(web_app, "_require_user", return_value="operator"),
+        patch.object(web_app, "find_web_similar_file_candidates", return_value=[candidate]),
+        patch.object(web_app, "_enrich_photo_payload", wraps=web_app._enrich_photo_payload),
+    ):
+        response = TestClient(web_app.app).post(
+            "/api/similar-files", json=_similar_product_payload()
+        )
+
+    assert response.status_code == 200
+    item = response.json()["candidates"][0]
+    assert item["url"].startswith("/api/file?token=")
+    assert set(item) == {
+        "id",
+        "source_prefix",
+        "target_prefix",
+        "filename",
+        "source_color",
+        "size_bytes",
+        "is_pdf",
+        "token",
+        "url",
+        "thumb_url",
+    }
+    assert "path" not in item and "C:/" not in json.dumps(item)
+
+
+def test_similar_lookup_returns_submit_ready_token_but_does_not_schedule_a_slot(
+    tmp_path, monkeypatch
+) -> None:
+    """Catches a lookup request reaching process, cache, or job-history boundaries."""
+
+    source = tmp_path / "photos" / "BLACK" / "NO-LED" / "5901234567890_01.pdf"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"%PDF-1.4\n")
+    candidate = SimilarFileCandidate(
+        candidate_id="candidate-1",
+        source_prefix="01",
+        target_prefix="01",
+        source_path=str(source),
+        filename=source.name,
+        source_color_segment="BLACK",
+        size_bytes=source.stat().st_size,
+        sha256="digest",
+        is_pdf=True,
+    )
+    monkeypatch.setattr(
+        web_app, "find_web_similar_file_candidates", lambda _payload: [candidate]
+    )
+    monkeypatch.setattr(web_app, "_require_user", lambda _request: "operator")
+
+    def unexpected_side_effect(*_args, **_kwargs):
+        raise AssertionError("a read-only similar-file lookup must not cause a side effect")
+
+    with (
+        TestClient(web_app.app) as client,
+        patch.object(web_app, "_materialize_process_form", side_effect=unexpected_side_effect),
+        patch.object(web_app, "_queue_process_job", side_effect=unexpected_side_effect),
+        patch.object(web_app, "_save_upload_cache_entry", side_effect=unexpected_side_effect),
+        patch.object(web_app, "record_job", side_effect=unexpected_side_effect),
+        patch.object(web_app, "emit_event", side_effect=unexpected_side_effect),
+        patch.object(web_app, "_write_web_event", side_effect=unexpected_side_effect),
+    ):
+        monkeypatch.setattr(web_app.settings, "l", str(tmp_path / "photos"))
+        response = client.post("/api/similar-files", json=_similar_product_payload())
+        item = response.json()["candidates"][0]
+        assert web_app._path_from_file_token(item["token"]) == str(source)
+
+    assert response.status_code == 200
 
 
 @pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])

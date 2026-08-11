@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INDEX_HTML = ROOT / "picorgftp_sql" / "web" / "static" / "index.html"
 LOGIN_HTML = ROOT / "picorgftp_sql" / "web" / "static" / "login.html"
 APP_JS = ROOT / "picorgftp_sql" / "web" / "static" / "app.js"
+APP_CSS = ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
 
 
 class _HtmlCollector(HTMLParser):
@@ -60,6 +61,866 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
+    def test_slot_settings_collect_similar_file_detection_configuration(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn('"similar_file_detection"', source)
+        self.assertIn('"Wykrywaj pliki z podobnych produktow"', source)
+        self.assertIn("similar_file_slot_prefixes", source)
+
+    def test_similar_candidate_requires_explicit_acceptance_and_has_source_button(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("function acceptSimilarCandidate(prefix)", source)
+        self.assertIn('acceptButton.textContent = "✓";', source)
+        self.assertIn('rejectButton.textContent = "×";', source)
+        self.assertIn('["similar", "POD"', source)
+        self.assertIn('source === "similar"', source)
+
+    def test_sql_badge_selects_text_copy_preview_and_only_opens_http_urls(self) -> None:
+        """SQL must be a visible copyable source state, never a blind file opener."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        badge_start = source.index("function renderSlotBadges")
+        badge_end = source.index("function isPhotoSourceLoading", badge_start)
+        badges = source[badge_start:badge_end]
+        opener_start = source.index("function loadedFileUrl")
+        opener_end = source.index("function markSlotDeletion", opener_start)
+        opener = source[opener_start:opener_end]
+
+        self.assertIn("function isHttpUrl(value)", source)
+        self.assertIn("function renderSqlPreview", source)
+        self.assertIn('state.slotSources.set(prefix, key);', badges)
+        self.assertIn("updateSlotPreview(prefix);", badges)
+        self.assertNotIn("copyTextToClipboard(sqlValue", badges)
+        self.assertIn('source === "sql"', opener)
+        self.assertIn("isHttpUrl", opener)
+
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the SQL URL contract test")
+        start = source.index("function isHttpUrl(value)")
+        end = source.index("function selectedPhotoToken", start)
+        is_http_url = source[start:end]
+        script = f"""
+{is_http_url}
+console.log(JSON.stringify({{
+  http: isHttpUrl('http://example.test/file.pdf'),
+  https: isHttpUrl('https://example.test/file.pdf'),
+  plainSql: isHttpUrl('Assembly_instruction'),
+  ftp: isHttpUrl('ftp://example.test/file.pdf'),
+}}));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {"http": True, "https": True, "plainSql": False, "ftp": False},
+        )
+
+    def test_slot_actions_are_preview_overlays_not_meta_controls(self) -> None:
+        """Preview actions stay anchored to image corners instead of consuming metadata space."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        css = APP_CSS.read_text(encoding="utf-8")
+        renderer_start = source.index("function createSlotNode")
+        renderer_end = source.index("function renderSlot(", renderer_start)
+        renderer = source[renderer_start:renderer_end]
+
+        self.assertIn('controls.className = "slot-preview-actions";', renderer)
+        self.assertIn("preview.appendChild(controls);", renderer)
+        self.assertNotIn("meta.appendChild(controls);", renderer)
+        self.assertIn(".slot-preview-actions", css)
+        self.assertIn(".slot-preview-actions .slot-fit-button {\n  top: 3px;\n  left: 3px;", css)
+        self.assertIn(".slot-preview-actions .slot-clear-button {\n  top: 3px;\n  right: 3px;", css)
+        self.assertIn(".slot-preview-actions .slot-open-button {\n  bottom: 3px;\n  left: 3px;", css)
+
+    def test_active_ftp_source_refreshes_stale_preview_before_opening(self) -> None:
+        """A stale FTP cache token must never be opened without a refresh request."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        loader_start = source.index("async function loadFtpPreview")
+        loader_end = source.index("function nextBackgroundFtpPreviewCandidate", loader_start)
+        loader = source[loader_start:loader_end]
+        opener_start = source.index("async function openSlotFile")
+        opener_end = source.index("function markSlotDeletion", opener_start)
+        opener = source[opener_start:opener_end]
+        badge_start = source.index("function renderSlotBadges")
+        badge_end = source.index("function isPhotoSourceLoading", badge_start)
+        badges = source[badge_start:badge_end]
+
+        self.assertIn("const forceRefresh = Boolean(options.forceRefresh);", loader)
+        self.assertIn("const cached = forceRefresh ? null", loader)
+        self.assertIn(
+            "await loadFtpPreview(photo, prefix, openingRequestId, { forceRefresh: true });",
+            opener,
+        )
+        self.assertIn("loadFtpPreview(photo, prefix, state.photoLoadRequestId, { forceRefresh: true })", badges)
+        self.assertIn("ftpPreviewRequests: new Map(),", source)
+        self.assertIn("const pending = state.ftpPreviewRequests.get(prefix);", loader)
+        self.assertIn("await pending;", loader)
+        self.assertIn("return loadFtpPreview(refreshedPhoto, prefix, requestId, options);", loader)
+
+    def test_ftp_refresh_does_not_change_newer_slot_state_or_open_it(self) -> None:
+        """A completed old FTP request must not override another entry or source selection."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        loader_start = source.index("async function loadFtpPreview")
+        loader_end = source.index("function nextBackgroundFtpPreviewCandidate", loader_start)
+        loader = source[loader_start:loader_end]
+        opener_start = source.index("async function openSlotFile")
+        opener_end = source.index("function markSlotDeletion", opener_start)
+        opener = source[opener_start:opener_end]
+
+        self.assertIn("const openingRequestId = state.photoLoadRequestId;", opener)
+        self.assertIn("const openingRevision = slotRevision(prefix);", opener)
+        self.assertIn("openingRequestId !== state.photoLoadRequestId", opener)
+        self.assertIn("openingRevision !== slotRevision(prefix)", opener)
+        self.assertIn('selectedSlotSource(prefix, photo) !== "ftp"', opener)
+        self.assertIn("if (state.ftpPreviewRequests.get(prefix) !== requestComplete) return;", loader)
+        self.assertNotIn('state.slotSources.set(prefix, "ftp");', loader)
+
+    def test_unaccepted_similar_candidate_is_the_current_preview_source(self) -> None:
+        """The candidate shown by default must be openable as the active POD source."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function selectedSlotSource")
+        end = source.index("function similarCandidateForSlot", start)
+        selected_source = source[start:end]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the similar source contract test")
+        script = f"""
+const state = {{ slotSources: new Map() }};
+const similarCandidateForSlot = (prefix) => prefix === '07' ? {{ url: '/api/cache/file' }} : null;
+const defaultSlotSource = () => '';
+{selected_source}
+console.log(selectedSlotSource('07', null));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(completed.stdout.strip(), "similar")
+
+    def test_filling_an_existing_product_replaces_old_similar_lookup_with_a_fresh_one(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function fillForm")
+        end = source.index("async function refreshData", start)
+        body = source[start:end]
+
+        self.assertIn("window.clearTimeout(state.similarFileLookupTimer);", body)
+        self.assertIn("scheduleSimilarFileLookup();", body)
+        self.assertLess(
+            body.index("state.similarFileLookupRequestId += 1;"),
+            body.index("scheduleSimilarFileLookup();"),
+        )
+
+    def test_accepted_similar_image_keeps_the_similar_preview_marker(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function createSlotNode")
+        end = source.index("function renderSlot(", start)
+        renderer = source[start:end]
+        selected_file_start = renderer.index("if (selectedFile) {")
+        selected_file_end = renderer.index("} else if (candidate) {", selected_file_start)
+        selected_file_branch = renderer[selected_file_start:selected_file_end]
+
+        self.assertIn(
+            'selectedSlotSource(slot.prefix, loadedPhoto) === "similar"',
+            selected_file_branch,
+        )
+        self.assertIn(
+            'preview.classList.add("has-similar-candidate");',
+            selected_file_branch,
+        )
+
+    def test_updating_an_accepted_similar_image_restores_the_preview_marker(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function updateSlotPreview")
+        end = source.index("function renderSlot(", start)
+        updater = source[start:end]
+        selected_file_start = updater.index("if (selectedFile) {")
+        selected_file_end = updater.index(
+            "if (selectedSlotSource(prefix, loadedPhoto) === \"similar\" && candidate?.is_pdf)",
+            selected_file_start,
+        )
+        selected_file_branch = updater[selected_file_start:selected_file_end]
+
+        self.assertIn(
+            'selectedSlotSource(prefix, loadedPhoto) === "similar"',
+            selected_file_branch,
+        )
+        self.assertIn(
+            'preview.classList.add("has-similar-candidate");',
+            selected_file_branch,
+        )
+
+    def test_accepting_and_dismissing_a_similar_candidate_preserves_source_semantics(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        accept_start = source.index("function acceptSimilarCandidate")
+        accept_end = source.index("function selectedPhotoToken", accept_start)
+        accept_body = source[accept_start:accept_end]
+        dismiss_start = source.index("function dismissSimilarCandidate")
+        dismiss_end = source.index("function acceptSimilarCandidate", dismiss_start)
+        dismiss_body = source[dismiss_start:dismiss_end]
+
+        self.assertIn("similar_candidate_id: candidate.id", accept_body)
+        self.assertIn('state.slotSources.set(prefix, "similar");', accept_body)
+        self.assertIn("state.dismissedSimilarSlots.add(prefix);", dismiss_body)
+        self.assertIn("state.similarCandidates.delete(prefix);", dismiss_body)
+        self.assertIn('state.slotSources.delete(prefix);', dismiss_body)
+
+    def test_similar_lookup_requires_acceptance_before_its_token_is_serialized(self) -> None:
+        """Catches lookup candidates being submitted without explicit acceptance."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        helpers = source[
+            source.index("function slotFileItem") : source.index(
+                "function slotUploadProgress"
+            )
+        ]
+        accept_start = source.index("function acceptSimilarCandidate")
+        accept = source[accept_start : source.index("function pendingSimilarCandidatePrefixes", accept_start)]
+        submit_start = source.index("function handleProductSubmitError")
+        handler_start = source.index('productForm.addEventListener("submit"')
+        submit_support = source[submit_start:handler_start]
+        submit_handler = source[handler_start : source.index("function resetCurrentDraft", handler_start)]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the similar-file submission contract test")
+        script = f"""
+const submittedForms = [];
+let submitHandler = null;
+const productForm = {{
+  elements: {{}},
+  addEventListener(name, handler) {{ if (name === "submit") submitHandler = handler; }},
+}};
+class FormData {{
+  constructor() {{ this.values = new Map(); }}
+  delete(key) {{ this.values.delete(key); }}
+  set(key, value) {{ this.values.set(key, value); }}
+  entries() {{ return this.values.entries(); }}
+}}
+const state = {{
+  slots: [{{ prefix: "01" }}],
+  files: new Map(),
+  similarCandidates: new Map(),
+  dismissedSimilarSlots: new Set(),
+  loadedPhotos: new Map(),
+  deletedSlots: new Map(),
+  slotSources: new Map(),
+}};
+const clearResult = () => {{}};
+const ensureSlotUploadsReady = () => {{}};
+const setBusy = () => {{}};
+const ensureProductListValues = async () => {{}};
+const productFieldsChangedSinceLoad = () => false;
+const hasPendingUserChanges = () => false;
+const pendingChangedSlotPrefixes = () => new Set();
+const isSlotFit = () => true;
+const startProcessStatusTicker = () => {{}};
+const stopProcessStatusTicker = () => {{}};
+const trackProcessJob = () => {{}};
+const showQueuedProcess = () => {{}};
+const resetCurrentDraft = () => {{}};
+const showError = (error) => {{ throw error; }};
+const markSlotDeletion = () => {{}};
+const renderSlot = () => {{}};
+const pendingSimilarCandidatePrefixes = () => state.files.has("01") ? [] : ["01"];
+const openSimilarDecisionModal = () => {{}};
+async function requestJson(_url, options) {{
+  submittedForms.push(Object.fromEntries(options.body.entries()));
+  return {{ job: {{}} }};
+}}
+{helpers}
+{accept}
+{submit_support}
+{submit_handler}
+(async () => {{
+  state.similarCandidates.set("01", {{
+    id: "candidate-1",
+    filename: "5901234567890_01.pdf",
+    size_bytes: 12,
+    is_pdf: true,
+    token: "signed-similar-token",
+    url: "/api/file?token=signed-similar-token",
+    thumb_url: "/api/thumbnail?token=signed-similar-token",
+  }});
+  await submitHandler({{ preventDefault() {{}} }});
+  const requestsBeforeAcceptance = submittedForms.length;
+  const filesBeforeAcceptance = state.files.size;
+  acceptSimilarCandidate("01");
+  await submitHandler({{ preventDefault() {{}} }});
+  const accepted = submittedForms.at(-1);
+  console.log(JSON.stringify({{
+    filesBeforeAcceptance,
+    requestsBeforeAcceptance,
+    acceptedToken: accepted.existing_slot_01 || null,
+    acceptedName: accepted.existing_slot_name_01 || null,
+    browserSlot: accepted.slot_01 || null,
+  }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(result["filesBeforeAcceptance"], 0)
+        self.assertEqual(result["requestsBeforeAcceptance"], 0)
+        self.assertEqual(result["acceptedToken"], "signed-similar-token")
+        self.assertEqual(result["acceptedName"], "5901234567890_01.pdf")
+        self.assertIsNone(result["browserSlot"])
+
+    def test_similar_lookup_reserves_occupied_slots_and_reports_current_errors(self) -> None:
+        """Catches a lookup that overwrites occupied slots or hides its current error."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        lookup_helpers = source[
+            source.index("function similarFileIdentityKey") : source.index(
+                "function scheduleSimilarFileLookup", source.index("function similarFileIdentityKey")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the similar-file lookup contract test")
+        script = f"""
+const state = {{
+  files: new Map([["01", {{ token: "manual" }}]]),
+  loadedPhotos: new Map([["02", {{ token: "loaded" }}]]),
+  deletedSlots: new Map(),
+  slotSources: new Map(),
+  similarCandidates: new Map(),
+  similarDecisionResults: new Map(),
+  dismissedSimilarSlots: new Set(),
+  similarFileLookupRequestId: 0,
+}};
+const formStatus = {{ textContent: "" }};
+const formPayload = () => ({{
+  name: "Simple Sideboard 100 8S", type_name: "Sideboard", model: "100",
+  color1: "WHITE", color2: "", color3: "", extra: "NO-LED",
+}});
+const normalizedIdentityValue = (value) => String(value || "").trim().toUpperCase();
+const renderSlots = () => {{}};
+let sentPayload = null;
+async function requestJson(_url, options) {{
+  sentPayload = JSON.parse(options.body);
+  throw new Error("offline");
+}}
+{lookup_helpers}
+(async () => {{
+  let thrown = null;
+  try {{
+    await lookupSimilarFiles();
+  }} catch (error) {{
+    thrown = error.message;
+  }}
+  console.log(JSON.stringify({{
+    occupied: sentPayload.occupied_prefixes,
+    status: formStatus.textContent,
+    thrown,
+  }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(result["occupied"], ["01", "02"])
+        self.assertIsNone(result["thrown"])
+        self.assertIn("Nie udalo sie sprawdzic plikow z podobnych produktow", result["status"])
+
+    def test_similar_candidate_image_preview_uses_its_signed_thumbnail(self) -> None:
+        """Catches a pending candidate deriving its thumbnail from an inactive slot source."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        renderer = source[
+            source.index("function renderSimilarCandidatePreview") : source.index(
+                "function clearSlotAssignment", source.index("function renderSimilarCandidatePreview")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the similar candidate preview contract")
+        script = f"""
+const candidate = {{
+  filename: "candidate.jpg", is_pdf: false,
+  thumb_url: "/api/thumbnail?token=signed-thumbnail",
+  url: "/api/file?token=signed-file",
+}};
+const preview = {{ classList: {{ add() {{}} }} }};
+const previewImage = {{ src: "", addEventListener() {{}} }};
+const empty = {{ textContent: "" }};
+const similarCandidateForSlot = () => candidate;
+const thumbnailUrl = () => "";
+{renderer}
+renderSimilarCandidatePreview("01", preview, previewImage, empty);
+console.log(JSON.stringify({{ src: previewImage.src }}));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(json.loads(completed.stdout)["src"], "/api/thumbnail?token=signed-thumbnail")
+
+    def test_manual_slot_file_refreshes_similar_candidate_placement(self) -> None:
+        """Catches manual upload permanently hiding a candidate instead of reallocating it."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        set_slot_file = source[
+            source.index("function setSlotFile") : source.index("function getSlotAssignment", source.index("function setSlotFile"))
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the similar candidate reallocation contract")
+        script = f"""
+const state = {{
+  files: new Map(), loadedPhotos: new Map(), slotSources: new Map(),
+  userSelectedSlotSources: new Map(), similarCandidates: new Map(),
+}};
+const formStatus = {{ textContent: "" }};
+const uploadFileValidationError = () => "";
+const bumpSlotRevision = () => {{}};
+const markSlotDeletion = () => {{}};
+const revokeFilePreviewUrl = () => {{}};
+const isProvisionalSlotPlacement = () => false;
+const createSlotFileUpload = (_prefix, file) => ({{ file }});
+const dismissSimilarCandidate = () => {{}};
+const updateSubmitButtonState = () => {{}};
+const uploadSlotFile = () => {{}};
+let refreshes = 0;
+const scheduleSimilarFileLookup = () => {{ refreshes += 1; }};
+{set_slot_file}
+setSlotFile("01", {{ name: "manual.jpg" }});
+console.log(JSON.stringify({{ refreshes }}));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(json.loads(completed.stdout)["refreshes"], 1)
+
+    def test_similar_controls_are_compact_and_slot_local(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        settings_start = source.index("function renderSettingsSlots")
+        settings_end = source.index("function renderSettingsUsers", settings_start)
+        settings = source[settings_start:settings_end]
+        slot_start = source.index("function createSlotNode")
+        slot_end = source.index("function renderSlot(", slot_start)
+        slots = source[slot_start:slot_end]
+
+        self.assertIn('similarInput.name = "similar_file_slot_prefixes";', settings)
+        self.assertNotIn('settingsFieldGroup("Podobne produkty"', settings)
+        self.assertIn('["similar", "POD"', source)
+        self.assertIn('acceptButton.textContent = "✓";', slots)
+        self.assertIn('rejectButton.textContent = "×";', slots)
+
+    def test_similar_decision_modal_exposes_preview_list_and_blocking_actions(self) -> None:
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        css = APP_CSS.read_text(encoding="utf-8")
+
+        for identifier in (
+            'id="similarDecisionModal"',
+            'id="similarDecisionList"',
+            'id="similarDecisionRejectAllButton"',
+            'id="similarDecisionContinueButton"',
+        ):
+            self.assertIn(identifier, html)
+        self.assertIn('role="dialog"', html)
+        self.assertIn('aria-modal="true"', html)
+        self.assertIn(".slot-card.slot-similar-pending", css)
+        self.assertIn("@keyframes slot-similar-pending-pulse", css)
+
+    def test_pending_similar_candidate_renders_its_thumbnail_without_selecting_pod(self) -> None:
+        """Catches an empty slot hiding a suggestion until the POD badge is clicked."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        update_start = source.index("function updateSlotPreview")
+        update_end = source.index("function createSlotNode", update_start)
+        update_slot_preview = source[update_start:update_end]
+        helpers = source[
+            source.index("function defaultSlotSource") : source.index(
+                "function selectedPhotoToken", source.index("function defaultSlotSource")
+            )
+        ]
+        candidate_preview = source[
+            source.index("function renderSimilarCandidatePreview") : source.index(
+                "function clearSlotAssignment", source.index("function renderSimilarCandidatePreview")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the similar preview contract test")
+        script = f"""
+const state = {{
+  files: new Map(),
+      loadedPhotos: new Map(),
+      slotSources: new Map(),
+      similarCandidates: new Map(),
+      similarDecisionResults: new Map(),
+      dismissedSimilarSlots: new Set(),
+  deletedSlots: new Map(),
+  ftpPreviewLoading: new Set(),
+  ftpPreviewBackgroundLoading: new Set(),
+  slotFits: new Map(),
+}};
+const classList = () => {{
+  const values = new Set();
+  return {{
+    add: (...names) => names.forEach((name) => values.add(name)),
+    remove: (...names) => names.forEach((name) => values.delete(name)),
+    contains: (name) => values.has(name),
+  }};
+}};
+const previewImage = {{
+  src: "",
+  addEventListener: () => {{}},
+  removeAttribute: () => {{}},
+}};
+const empty = {{ textContent: "" }};
+const preview = {{
+  classList: classList(),
+  querySelector: (selector) => {{
+    if (selector === "img") return previewImage;
+    if (selector === ".slot-empty") return empty;
+    return null;
+  }},
+  appendChild: () => {{}},
+}};
+const card = {{
+  dataset: {{}},
+  classList: {{ toggle: () => {{}} }},
+  querySelector: (selector) => {{
+    if (selector === ".slot-meta span") return {{ textContent: "" }};
+    if (selector === ".slot-preview") return preview;
+    if (selector === ".slot-fit-button") return null;
+    return null;
+  }},
+  querySelectorAll: () => [],
+}};
+const slotGrid = {{ querySelector: () => card }};
+const isSlotFit = () => false;
+const slotStatusText = () => "Brak pliku";
+const isPhotoSourceLoading = () => false;
+const sourceLoadingTitle = () => "";
+const renderSlots = () => {{ throw new Error("slot should already be rendered"); }};
+const renderSlotUploadOverlay = () => {{}};
+const renderSelectedFilePreview = () => {{}};
+const isFileImageLike = () => false;
+const document = {{ createElement: () => ({{}}) }};
+{helpers}
+{candidate_preview}
+{update_slot_preview}
+state.similarCandidates.set("01", {{
+  filename: "candidate.jpg",
+  thumb_url: "/api/thumbnail/candidate.jpg",
+  url: "/api/file/candidate.jpg",
+  is_pdf: false,
+}});
+updateSlotPreview("01");
+console.log(JSON.stringify({{
+  source: previewImage.src,
+  marked: preview.classList.contains("has-similar-candidate"),
+}}));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["source"], "/api/thumbnail/candidate.jpg")
+        self.assertTrue(result["marked"])
+
+    def test_decision_modal_accept_and_reject_resolve_only_chosen_slots(self) -> None:
+        """Catches modal controls that do not apply the existing per-slot decision paths."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        self.assertIn("function pendingSimilarCandidatePrefixes()", source)
+        self.assertIn("function renderSimilarDecisionModal()", source)
+        helpers = source[
+            source.index("function defaultSlotSource") : source.index(
+                "function selectedPhotoToken", source.index("function defaultSlotSource")
+            )
+        ]
+        decision_helpers = source[
+            source.index("function pendingSimilarCandidatePrefixes") : source.index(
+                "function selectedPhotoToken", source.index("function pendingSimilarCandidatePrefixes")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the similar decision modal contract test")
+        script = f"""
+class Element {{
+  constructor() {{
+    this.children = [];
+    this.className = "";
+    this.textContent = "";
+    this.dataset = {{}};
+    this.listeners = {{}};
+    this.classList = {{ add: () => {{}}, remove: () => {{}} }};
+  }}
+  append(...items) {{ this.children.push(...items); }}
+  appendChild(item) {{ this.children.push(item); return item; }}
+  replaceChildren(...items) {{ this.children = items; }}
+  addEventListener(name, listener) {{ this.listeners[name] = listener; }}
+  setAttribute() {{}}
+}}
+const state = {{
+  slots: [{{ prefix: "01", label: "Instrukcja 1" }}, {{ prefix: "02", label: "Instrukcja 2" }}],
+  files: new Map(),
+  loadedPhotos: new Map(),
+  slotSources: new Map(),
+  similarCandidates: new Map(),
+  similarDecisionResults: new Map(),
+  dismissedSimilarSlots: new Set(),
+  deletedSlots: new Map(),
+  userSelectedSlotSources: new Set(),
+}};
+const similarDecisionList = new Element();
+const similarDecisionContinueButton = new Element();
+const similarDecisionRejectAllButton = new Element();
+const similarDecisionModal = new Element();
+const document = {{ createElement: () => new Element() }};
+const markSlotDeletion = () => {{}};
+const renderSlot = () => {{}};
+{helpers}
+{decision_helpers}
+state.similarCandidates.set("01", {{ id: "one", filename: "one.jpg", thumb_url: "/thumb/one", source_color: "Czarny" }});
+state.similarCandidates.set("02", {{ id: "two", filename: "two.pdf", url: "/file/two", is_pdf: true, source_color: "Biały" }});
+renderSimilarDecisionModal();
+similarDecisionList.children[0].children.at(-1).children[0].listeners.click({{ preventDefault() {{}} }});
+similarDecisionList.children[1].children.at(-1).children[1].listeners.click({{ preventDefault() {{}} }});
+console.log(JSON.stringify({{
+  accepted: state.files.get("01")?.similar_candidate_id || null,
+  rejected: state.dismissedSimilarSlots.has("02"),
+  pending: pendingSimilarCandidatePrefixes(),
+  continueDisabled: similarDecisionContinueButton.disabled,
+  acceptedState: similarDecisionList.children[0].children.at(-1).children[0].textContent,
+  rejectedState: similarDecisionList.children[1].children.at(-1).children[0].textContent,
+}}));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["accepted"], "one")
+        self.assertTrue(result["rejected"])
+        self.assertEqual(result["pending"], [])
+        self.assertFalse(result["continueDisabled"])
+        self.assertEqual(result["acceptedState"], "Zachowany")
+        self.assertEqual(result["rejectedState"], "Odrzucony")
+
+    def test_pending_similar_candidates_block_submit_until_all_are_decided(self) -> None:
+        """A pending suggestion must open the decision modal before any submit work starts."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        self.assertIn("async function submitProductForm()", source)
+        handler_start = source.index('productForm.addEventListener("submit",')
+        handler_end = source.index("function resetCurrentDraft", handler_start)
+        submit_handler = source[handler_start:handler_end]
+        self.assertIn("pendingSimilarCandidatePrefixes()", submit_handler)
+        self.assertIn("openSimilarDecisionModal()", submit_handler)
+        self.assertIn("submitProductForm()", submit_handler)
+        self.assertNotIn('requestJson("/api/process/background"', submit_handler)
+
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the similar submit gate contract test")
+        script = f"""
+let submitHandler;
+let pending = ["01"];
+let opened = 0;
+let submitted = 0;
+const productForm = {{ addEventListener: (_name, handler) => {{ submitHandler = handler; }} }};
+const pendingSimilarCandidatePrefixes = () => pending;
+const openSimilarDecisionModal = () => {{ opened += 1; }};
+const submitProductForm = () => {{ submitted += 1; return Promise.resolve(); }};
+const handleProductSubmitError = () => {{ throw new Error("unexpected submit failure"); }};
+{submit_handler}
+(async () => {{
+  await submitHandler({{ preventDefault() {{}} }});
+  pending = [];
+  await submitHandler({{ preventDefault() {{}} }});
+  console.log(JSON.stringify({{ opened, submitted }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(json.loads(completed.stdout), {"opened": 1, "submitted": 1})
+
+    def test_reject_all_enables_continue_without_submitting_similar_token(self) -> None:
+        """Bulk rejection leaves candidates out of files, then continues through the normal submit path."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        wiring_start = source.index("similarDecisionRejectAllButton?.addEventListener")
+        wiring_end = source.index(
+            'document.querySelectorAll("[data-close-similar-decision]")', wiring_start
+        )
+        wiring = source[wiring_start:wiring_end]
+        self.assertIn("dismissSimilarCandidate(prefix)", wiring)
+        self.assertIn("similarDecisionContinueButton?.addEventListener", wiring)
+        self.assertIn("closeSimilarDecisionModal()", wiring)
+        self.assertIn("submitProductForm()", wiring)
+        self.assertIn('document.querySelectorAll("[data-close-similar-decision]")', source)
+        self.assertIn('button.addEventListener("click", closeSimilarDecisionModal)', source)
+
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the similar decision action contract test")
+        script = f"""
+const listeners = {{}};
+const similarDecisionRejectAllButton = {{ addEventListener: (name, listener) => {{ listeners.rejectAll = listener; }} }};
+const similarDecisionContinueButton = {{ addEventListener: (name, listener) => {{ listeners.continue = listener; }} }};
+const pending = new Set(["01", "02"]);
+const state = {{ files: new Map() }};
+let closed = 0;
+let submitted = 0;
+let rendered = 0;
+const pendingSimilarCandidatePrefixes = () => [...pending];
+const dismissSimilarCandidate = (prefix) => pending.delete(prefix);
+const renderSlot = () => {{ rendered += 1; }};
+const renderSimilarDecisionModal = () => {{ rendered += 1; }};
+const closeSimilarDecisionModal = () => {{ closed += 1; }};
+const submitProductForm = () => {{ submitted += 1; return Promise.resolve(); }};
+const handleProductSubmitError = () => {{ throw new Error("unexpected submit failure"); }};
+{wiring}
+(async () => {{
+  listeners.rejectAll();
+  listeners.continue();
+  await Promise.resolve();
+  console.log(JSON.stringify({{
+    pending: pendingSimilarCandidatePrefixes(),
+    serializedSimilar: [...state.files.values()].some((item) => item.similar_candidate_id),
+    closed,
+    submitted,
+  }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["pending"], [])
+        self.assertFalse(result["serializedSimilar"])
+        self.assertEqual(result["closed"], 1)
+        self.assertEqual(result["submitted"], 1)
+
+    def test_submit_rechecks_candidates_added_while_lists_are_prepared(self) -> None:
+        """Catches a late lookup candidate being serialized without a decision."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        submit_start = source.index("async function submitProductForm()")
+        submit_end = source.index('productForm.addEventListener("submit",', submit_start)
+        submit_product = source[submit_start:submit_end]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the late similar candidate contract test")
+        script = f"""
+let modalOpens = 0;
+let requests = 0;
+const state = {{ similarCandidates: new Map([['01', {{ token: 'late-token' }}]]) }};
+const clearResult = () => {{}};
+const ensureSlotUploadsReady = () => {{}};
+const setBusy = () => {{}};
+const ensureProductListValues = async () => {{}};
+const pendingSimilarCandidatePrefixes = () => [...state.similarCandidates.keys()];
+const openSimilarDecisionModal = () => {{ modalOpens += 1; }};
+const handleProductSubmitError = () => {{}};
+const productFieldsChangedSinceLoad = () => false;
+const hasPendingUserChanges = () => true;
+const pendingChangedSlotPrefixes = () => new Set();
+const FormData = class {{}};
+const requestJson = () => {{ requests += 1; return Promise.resolve({{}}); }};
+{submit_product}
+(async () => {{
+  await submitProductForm();
+  console.log(JSON.stringify({{ modalOpens, requests }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script], check=True, capture_output=True, text=True, encoding="utf-8"
+        )
+        self.assertEqual(json.loads(completed.stdout), {"modalOpens": 1, "requests": 0})
+
+    def test_similar_decision_modal_inerts_background_and_focuses_close_control(self) -> None:
+        """Catches an aria-modal dialog that still permits background slot actions."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        self.assertIn("function setSimilarDecisionBackgroundInert()", source)
+        self.assertIn("function restoreSimilarDecisionBackground()", source)
+        self.assertIn("similarDecisionCloseButton?.focus()", source)
+
+    def test_selected_similar_slot_uses_its_edited_id_when_settings_are_saved(self) -> None:
+        """Catches an enabled per-slot checkbox retaining the ID it had at render time."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.find("function selectedSimilarSlotPrefixes")
+        self.assertNotEqual(start, -1, "settings need a row-aware selected-prefix helper")
+        end = source.find("function renderSettingsSlots", start)
+        helper = source[start:end]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the slot settings contract test")
+        script = f"""
+const rows = [
+  {{ querySelector(selector) {{
+    if (selector === '[name="similar_file_slot_prefixes"]') return {{ checked: true }};
+    if (selector === '[name="prefix"]') return {{ value: "15" }};
+    return null;
+  }} }},
+];
+{helper}
+console.log(JSON.stringify(selectedSimilarSlotPrefixes(rows)));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(json.loads(completed.stdout), ["15"])
+
     def test_list_usage_modal_opens_the_selected_blocking_product(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         start = source.index("function renderListUsageModal")

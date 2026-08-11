@@ -16,6 +16,12 @@ const state = {
   slotFits: new Map(),
   defaultSlotFit: false,
   slotSources: new Map(),
+  similarCandidates: new Map(),
+  similarDecisionResults: new Map(),
+  dismissedSimilarSlots: new Set(),
+  similarFileLookupTimer: 0,
+  similarFileLookupRequestId: 0,
+  similarFileLookupKey: "",
   draggedSlotPrefix: "",
   lastLookupMs: null,
   activeSettingsTab: "app",
@@ -106,6 +112,7 @@ const state = {
   productFields: {},
   ftpPreviewLoading: new Set(),
   ftpPreviewBackgroundLoading: new Set(),
+  ftpPreviewRequests: new Map(),
   ftpPreviewCache: new Map(),
   backgroundFtpPreviewTimer: 0,
   backgroundFtpPreviewLimit: 1,
@@ -182,6 +189,7 @@ let resourceDetailsPinned = false;
 let resourceDetailsPointerInside = false;
 let historyLoadController = null;
 let historyDetailsController = null;
+let similarDecisionBackgroundState = [];
 const resourceMonitorTestState = {
   pending: false,
   message: "Nie uruchomiono testu monitora.",
@@ -332,6 +340,11 @@ const githubStatusButton = document.querySelector("#githubStatusButton");
 const githubStatusModal = document.querySelector("#githubStatusModal");
 const githubStatusOutput = document.querySelector("#githubStatusOutput");
 const githubStatusCheckedAt = document.querySelector("#githubStatusCheckedAt");
+const similarDecisionModal = document.querySelector("#similarDecisionModal");
+const similarDecisionList = document.querySelector("#similarDecisionList");
+const similarDecisionRejectAllButton = document.querySelector("#similarDecisionRejectAllButton");
+const similarDecisionContinueButton = document.querySelector("#similarDecisionContinueButton");
+const similarDecisionCloseButton = document.querySelector("#similarDecisionCloseButton");
 const submitButton = document.querySelector("#submitButton");
 const clearButton = document.querySelector("#clearButton");
 const logoutButton = document.querySelector("#logoutButton");
@@ -2101,14 +2114,222 @@ function defaultSlotSource(photo) {
 
 function selectedSlotSource(prefix, photo) {
   const selected = state.slotSources.get(prefix);
+  if (selected === "similar" && similarCandidateForSlot(prefix)) return "similar";
   if (selected === "local" && photo?.token) return "local";
   if (selected === "ftp" && (photo?.ftp_token || photo?.ftp_filename)) return "ftp";
+  if (selected === "sql" && String(photo?.sql_value || "").trim()) return "sql";
+  if (!photo && similarCandidateForSlot(prefix)) return "similar";
   return defaultSlotSource(photo);
+}
+
+function similarCandidateForSlot(prefix) {
+  if (state.dismissedSimilarSlots.has(prefix)) return null;
+  if (
+    state.slotSources.get(prefix) !== "similar" &&
+    (state.files.has(prefix) || (state.loadedPhotos.has(prefix) && !state.deletedSlots.has(prefix)))
+  ) {
+    return null;
+  }
+  return state.similarCandidates.get(prefix) || null;
+}
+
+function dismissSimilarCandidate(prefix) {
+  state.dismissedSimilarSlots.add(prefix);
+  state.similarCandidates.delete(prefix);
+  if (state.slotSources.get(prefix) === "similar") {
+    state.slotSources.delete(prefix);
+    state.userSelectedSlotSources.delete(prefix);
+  }
+}
+
+function acceptSimilarCandidate(prefix) {
+  const candidate = state.similarCandidates.get(prefix);
+  if (!candidate || state.dismissedSimilarSlots.has(prefix)) return;
+  markSlotDeletion(prefix, state.loadedPhotos.get(prefix));
+  state.files.set(prefix, {
+    file: null,
+    name: candidate.filename,
+    size: candidate.size_bytes,
+    type: candidate.is_pdf ? "application/pdf" : "",
+    token: candidate.token,
+    url: candidate.url,
+    thumb_url: candidate.thumb_url,
+    preprocessed: true,
+    uploading: false,
+    error: "",
+    similar_candidate_id: candidate.id,
+  });
+  state.slotSources.set(prefix, "similar");
+  renderSlot(prefix);
+}
+
+function pendingSimilarCandidatePrefixes() {
+  return (state.slots || [])
+    .map((slot) => String(slot.prefix || ""))
+    .filter((prefix) => Boolean(prefix) && !state.files.has(prefix) && Boolean(similarCandidateForSlot(prefix)));
+}
+
+function similarDecisionSlotLabel(prefix) {
+  const slot = (state.slots || []).find((item) => String(item.prefix) === String(prefix));
+  return slot ? `${slot.prefix} - ${slot.label}` : `Slot ${prefix}`;
+}
+
+function similarDecisionPreview(candidate) {
+  const preview = document.createElement("div");
+  preview.className = "similar-decision-preview";
+  if (candidate.is_pdf) {
+    const object = document.createElement("object");
+    object.className = "similar-decision-pdf";
+    object.type = "application/pdf";
+    object.data = candidate.url || "";
+    const fallback = document.createElement("span");
+    fallback.textContent = "Podglad PDF niedostepny";
+    object.appendChild(fallback);
+    preview.appendChild(object);
+    return preview;
+  }
+  const image = document.createElement("img");
+  const fallback = document.createElement("span");
+  image.src = candidate.thumb_url || candidate.url || "";
+  image.alt = candidate.filename ? `Podglad ${candidate.filename}` : "Podglad pliku z podobnego produktu";
+  image.loading = "lazy";
+  image.addEventListener("error", () => {
+    image.remove();
+    fallback.textContent = "Podglad niedostepny";
+    preview.appendChild(fallback);
+  });
+  preview.appendChild(image);
+  return preview;
+}
+
+function renderSimilarDecisionModal() {
+  if (!similarDecisionList) return;
+  const prefixes = pendingSimilarCandidatePrefixes();
+  for (const prefix of prefixes) {
+    if (state.similarDecisionResults.has(prefix)) continue;
+    const candidate = similarCandidateForSlot(prefix);
+    if (candidate) state.similarDecisionResults.set(prefix, { candidate, decision: "pending" });
+  }
+  similarDecisionList.replaceChildren();
+  for (const [prefix, result] of state.similarDecisionResults) {
+    const candidate = result.candidate;
+    const row = document.createElement("article");
+    const details = document.createElement("div");
+    const title = document.createElement("strong");
+    const filename = document.createElement("span");
+    const source = document.createElement("span");
+    const actions = document.createElement("div");
+    const acceptButton = document.createElement("button");
+    const rejectButton = document.createElement("button");
+    row.className = "similar-decision-row";
+    row.dataset.slotPrefix = prefix;
+    details.className = "similar-decision-details";
+    title.textContent = similarDecisionSlotLabel(prefix);
+    filename.textContent = candidate.filename || "Bez nazwy pliku";
+    source.className = "similar-decision-source";
+    source.textContent = candidate.source_color
+      ? `Źródło: podobny produkt, kolor ${candidate.source_color}`
+      : "Źródło: podobny produkt";
+    actions.className = "similar-decision-row-actions";
+    if (result.decision === "pending") {
+      acceptButton.type = "button";
+      acceptButton.className = "slot-similar-accept";
+      acceptButton.textContent = "Zachowaj";
+      acceptButton.title = "Zachowaj plik z podobnego produktu";
+      acceptButton.addEventListener("click", () => {
+        acceptSimilarCandidate(prefix);
+        result.decision = "accepted";
+        renderSimilarDecisionModal();
+      });
+      rejectButton.type = "button";
+      rejectButton.className = "slot-similar-reject";
+      rejectButton.textContent = "Odrzuć";
+      rejectButton.title = "Odrzuć plik z podobnego produktu";
+      rejectButton.addEventListener("click", () => {
+        dismissSimilarCandidate(prefix);
+        result.decision = "rejected";
+        renderSlot(prefix);
+        renderSimilarDecisionModal();
+      });
+      actions.append(acceptButton, rejectButton);
+    } else {
+      const status = document.createElement("strong");
+      status.className = `similar-decision-result ${result.decision}`;
+      status.textContent = result.decision === "accepted" ? "Zachowany" : "Odrzucony";
+      actions.appendChild(status);
+    }
+    details.append(title, filename, source);
+    row.append(similarDecisionPreview(candidate), details, actions);
+    similarDecisionList.appendChild(row);
+  }
+  if (similarDecisionRejectAllButton) similarDecisionRejectAllButton.disabled = prefixes.length === 0;
+  if (similarDecisionContinueButton) similarDecisionContinueButton.disabled = prefixes.length > 0;
+}
+
+function focusFirstPendingSimilarCandidate() {
+  const prefix = pendingSimilarCandidatePrefixes()[0];
+  if (!prefix) return;
+  const card = slotGrid.querySelector(`[data-slot-prefix="${prefix}"]`);
+  card?.scrollIntoView({
+    behavior: "smooth",
+    block: "center",
+  });
+  card?.setAttribute("tabindex", "-1");
+  card?.focus({ preventScroll: true });
+}
+
+function setSimilarDecisionBackgroundInert() {
+  if (!similarDecisionModal || similarDecisionBackgroundState.length) return;
+  similarDecisionBackgroundState = Array.from(document.body.children)
+    .filter((node) => node !== similarDecisionModal)
+    .map((node) => ({
+      node,
+      inert: node.getAttribute("inert"),
+      ariaHidden: node.getAttribute("aria-hidden"),
+    }));
+  for (const entry of similarDecisionBackgroundState) {
+    entry.node.setAttribute("inert", "");
+    entry.node.setAttribute("aria-hidden", "true");
+  }
+}
+
+function restoreSimilarDecisionBackground() {
+  for (const entry of similarDecisionBackgroundState) {
+    if (entry.inert === null) entry.node.removeAttribute("inert");
+    else entry.node.setAttribute("inert", entry.inert);
+    if (entry.ariaHidden === null) entry.node.removeAttribute("aria-hidden");
+    else entry.node.setAttribute("aria-hidden", entry.ariaHidden);
+  }
+  similarDecisionBackgroundState = [];
+}
+
+function openSimilarDecisionModal() {
+  state.similarDecisionResults.clear();
+  renderSimilarDecisionModal();
+  setSimilarDecisionBackgroundInert();
+  similarDecisionModal?.classList.add("active");
+  window.setTimeout(() => similarDecisionCloseButton?.focus(), 0);
+}
+
+function closeSimilarDecisionModal() {
+  similarDecisionModal?.classList.remove("active");
+  restoreSimilarDecisionBackground();
+  focusFirstPendingSimilarCandidate();
+}
+
+function isHttpUrl(value) {
+  try {
+    const url = new URL(String(value || "").trim());
+    return ["http:", "https:"].includes(url.protocol);
+  } catch (_error) {
+    return false;
+  }
 }
 
 function selectedPhotoToken(photo, prefix) {
   const source = selectedSlotSource(prefix, photo);
   if (source === "ftp") return photo?.ftp_token || "";
+  if (source === "sql" || source === "similar") return "";
   return photo?.token || "";
 }
 
@@ -2319,22 +2540,58 @@ async function renderSelectedFilePreview(prefix, file, preview, previewImage, em
 
 function loadedFileUrl(photo, prefix) {
   const source = selectedSlotSource(prefix, photo);
+  if (source === "similar") return similarCandidateForSlot(prefix)?.url || "";
+  if (source === "sql") {
+    const value = String(photo?.sql_value || "").trim();
+    return isHttpUrl(value) ? value : "";
+  }
   if (source === "ftp" && photo?.ftp_url) return photo.ftp_url;
   if (source === "local" && photo?.url) return photo.url;
   const token = selectedPhotoToken(photo, prefix);
   return token ? `/api/file?token=${encodeURIComponent(token)}` : "";
 }
 
+function selectedSlotSourceCanOpen(prefix, photo, file) {
+  const source = selectedSlotSource(prefix, photo);
+  if (source === "sql") return isHttpUrl(photo?.sql_value);
+  if (source === "similar") return Boolean(filePreviewUrl(prefix, file) || similarCandidateForSlot(prefix)?.url);
+  if (file) return Boolean(filePreviewUrl(prefix, file));
+  return Boolean(loadedFileUrl(photo, prefix));
+}
+
+function selectedSlotSourceCanFit(prefix, photo, file) {
+  const source = selectedSlotSource(prefix, photo);
+  if (source === "sql") return false;
+  if (source === "similar") return Boolean(similarCandidateForSlot(prefix) && !similarCandidateForSlot(prefix).is_pdf);
+  if (file) return isFileImageLike(file);
+  return Boolean(photo?.is_image && (selectedPhotoToken(photo, prefix) || photo?.ftp_filename));
+}
+
 async function openSlotFile(prefix) {
   const selectedFile = state.files.get(prefix);
+  let photo = state.loadedPhotos.get(prefix);
+  const source = selectedSlotSource(prefix, photo);
+  const openingRequestId = state.photoLoadRequestId;
+  const openingRevision = slotRevision(prefix);
+  if (source === "sql") {
+    const sqlUrl = loadedFileUrl(photo, prefix);
+    if (sqlUrl) window.open(sqlUrl, "_blank", "noopener");
+    return;
+  }
   if (selectedFile) {
     window.open(filePreviewUrl(prefix, selectedFile), "_blank", "noopener");
     return;
   }
-  let photo = state.loadedPhotos.get(prefix);
-  if (selectedSlotSource(prefix, photo) === "ftp" && photo?.ftp_filename && !photo.ftp_token) {
-    await loadFtpPreview(photo, prefix);
+  if (source === "ftp" && photo?.ftp_filename) {
+    await loadFtpPreview(photo, prefix, openingRequestId, { forceRefresh: true });
+    if (
+      openingRequestId !== state.photoLoadRequestId ||
+      openingRevision !== slotRevision(prefix)
+    ) {
+      return;
+    }
     photo = state.loadedPhotos.get(prefix);
+    if (selectedSlotSource(prefix, photo) !== "ftp") return;
   }
   const url = loadedFileUrl(photo, prefix);
   if (url) window.open(url, "_blank", "noopener");
@@ -2402,6 +2659,7 @@ function renderSlotBadges(container, photo, file, prefix) {
     ["local", "LOCAL", "Plik jest w folderze backendu"],
     ["ftp", "FTP", "Wpis dla slotu jest na FTP"],
     ["sql", "SQL", "Wpis dla slotu jest w SQL"],
+    ["similar", "POD", "Plik z podobnego produktu"],
   ];
   if (file) {
     const badge = document.createElement("span");
@@ -2412,27 +2670,28 @@ function renderSlotBadges(container, photo, file, prefix) {
   }
   for (const [key, label, title] of statuses) {
     const sqlValue = String(photo?.sql_value || "").trim();
+    const similarCandidate = similarCandidateForSlot(prefix);
     const canPreview =
       (key === "local" && photo?.token) ||
-      (key === "ftp" && photo?.ftp_filename);
-    const canCopySql = key === "sql" && Boolean(sqlValue);
-    const badge = document.createElement(canPreview || canCopySql ? "button" : "span");
-    const selected = key !== "sql" && selectedSlotSource(prefix, photo) === key;
+      (key === "ftp" && photo?.ftp_filename) ||
+      (key === "sql" && Boolean(sqlValue)) ||
+      (key === "similar" && Boolean(similarCandidate));
+    if (key === "similar" && !similarCandidate) continue;
+    const badge = document.createElement(canPreview ? "button" : "span");
+    const selected = selectedSlotSource(prefix, photo) === key;
     const loading =
       isPhotoSourceLoading(key) || (key === "ftp" && state.ftpPreviewLoading.has(prefix));
     badge.dataset.source = key;
-    badge.className = `slot-badge slot-badge-${key} ${photo && photo[key] ? "on" : ""} ${
+    badge.className = `slot-badge slot-badge-${key} ${photo && photo[key] || key === "similar" ? "on" : ""} ${
       selected ? "selected" : ""
     } ${loading ? "loading" : ""}`;
     badge.title = loading
       ? sourceLoadingTitle(key)
-      : canCopySql
-      ? "Kliknij, aby skopiowac link z SQL"
       : selected
       ? `${title} (aktywny podglad)`
       : title;
     badge.textContent = label;
-    if (canPreview || canCopySql) {
+    if (canPreview) {
       badge.type = "button";
       badge.setAttribute("aria-pressed", selected ? "true" : "false");
       if (loading) {
@@ -2440,20 +2699,16 @@ function renderSlotBadges(container, photo, file, prefix) {
       }
       badge.addEventListener("click", (event) => {
         event.stopPropagation();
-        if (canCopySql) {
-          copyTextToClipboard(sqlValue, `Skopiowano link SQL dla slotu ${prefix}.`).catch((error) => {
-            formStatus.textContent = error.message;
-          });
-          return;
-        }
         state.slotSources.set(prefix, key);
         state.userSelectedSlotSources.add(prefix);
-        if (key === "ftp" && !photo.ftp_token) {
+        if (key === "ftp") {
           if (state.ftpPreviewLoading.has(prefix)) {
             state.ftpPreviewBackgroundLoading.delete(prefix);
-            updateSlotPreview(prefix);
+            loadFtpPreview(photo, prefix, state.photoLoadRequestId, { forceRefresh: true }).catch((error) => {
+              formStatus.textContent = error.message;
+            });
           } else {
-            loadFtpPreview(photo, prefix).catch((error) => {
+            loadFtpPreview(photo, prefix, state.photoLoadRequestId, { forceRefresh: true }).catch((error) => {
               formStatus.textContent = error.message;
             });
           }
@@ -2906,12 +3161,21 @@ function applyCachedFtpPreview(photo, prefix, cached) {
 }
 
 async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestId, options = {}) {
-  if (!photo?.ftp_filename || state.ftpPreviewLoading.has(prefix)) return;
+  if (!photo?.ftp_filename) return;
+  if (state.ftpPreviewLoading.has(prefix)) {
+    const pending = state.ftpPreviewRequests.get(prefix);
+    if (!pending) return;
+    await pending;
+    if (!options.forceRefresh) return;
+    if (requestId !== state.photoLoadRequestId) return;
+    const refreshedPhoto = state.loadedPhotos.get(prefix);
+    if (!refreshedPhoto?.ftp_filename) return;
+    return loadFtpPreview(refreshedPhoto, prefix, requestId, options);
+  }
   const revision = slotRevision(prefix);
   const cacheKey = ftpPreviewCacheKey(photo, formValue("ean") || "");
-  const sourceBefore = selectedSlotSource(prefix, photo);
-  const explicitSourceBefore = state.slotSources.get(prefix);
-  const cached = cacheKey ? state.ftpPreviewCache.get(cacheKey) : null;
+  const forceRefresh = Boolean(options.forceRefresh);
+  const cached = forceRefresh ? null : cacheKey ? state.ftpPreviewCache.get(cacheKey) : null;
   if (cached) {
     setFtpPreviewCache(cacheKey, cached);
     const currentPhoto = state.loadedPhotos.get(prefix);
@@ -2925,11 +3189,6 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
     }
     const updated = applyCachedFtpPreview(currentPhoto, prefix, cached);
     state.loadedPhotos.set(prefix, updated);
-    if (!options.background || sourceBefore === "ftp") {
-      state.slotSources.set(prefix, "ftp");
-    } else if (explicitSourceBefore) {
-      state.slotSources.set(prefix, explicitSourceBefore);
-    }
     if (options.background && selectedSlotSource(prefix, updated) !== "ftp") {
       setFtpBadgeLoading(prefix, false);
     } else {
@@ -2938,6 +3197,11 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
     return;
   }
   state.ftpPreviewLoading.add(prefix);
+  let finishRequest;
+  const requestComplete = new Promise((resolve) => {
+    finishRequest = resolve;
+  });
+  state.ftpPreviewRequests.set(prefix, requestComplete);
   const background = Boolean(options.background);
   if (background) {
     state.ftpPreviewBackgroundLoading.add(prefix);
@@ -2983,17 +3247,16 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
       ftp_file_version: payload.file_version || "",
     };
     state.loadedPhotos.set(prefix, updated);
-    if (!background || sourceBefore === "ftp") {
-      state.slotSources.set(prefix, "ftp");
-    } else if (explicitSourceBefore) {
-      state.slotSources.set(prefix, explicitSourceBefore);
-    }
     if (!background) {
       formStatus.textContent = `Pobrano podglad FTP dla slotu ${prefix}.`;
     }
   } finally {
+    finishRequest();
+    if (state.ftpPreviewRequests.get(prefix) !== requestComplete) return;
     state.ftpPreviewLoading.delete(prefix);
     state.ftpPreviewBackgroundLoading.delete(prefix);
+    state.ftpPreviewRequests.delete(prefix);
+    if (requestId !== state.photoLoadRequestId || revision !== slotRevision(prefix)) return;
     const currentPhoto = state.loadedPhotos.get(prefix);
     if (background && selectedSlotSource(prefix, currentPhoto) !== "ftp") {
       setFtpBadgeLoading(prefix, false);
@@ -3065,6 +3328,10 @@ function isSlotFit(prefix) {
 
 function thumbnailUrl(photo, prefix) {
   const source = selectedSlotSource(prefix, photo);
+  if (source === "similar") {
+    const candidate = similarCandidateForSlot(prefix);
+    return candidate?.thumb_url || candidate?.url || "";
+  }
   const url =
     source === "ftp"
       ? photo?.ftp_thumb_url || photo?.ftp_url || ""
@@ -3072,6 +3339,63 @@ function thumbnailUrl(photo, prefix) {
   if (!url) return "";
   const separator = url.includes("?") ? "&" : "?";
   return `${url}${separator}fit=${isSlotFit(prefix) ? "1" : "0"}&width=260&height=180`;
+}
+
+function renderSimilarCandidatePreview(prefix, preview, previewImage, empty) {
+  const candidate = similarCandidateForSlot(prefix);
+  if (!candidate) return false;
+  preview.classList.add("has-similar-candidate");
+  if (candidate.is_pdf) {
+    const object = document.createElement("object");
+    const fallback = document.createElement("span");
+    object.className = "slot-similar-preview";
+    object.type = "application/pdf";
+    object.data = candidate.url;
+    fallback.textContent = candidate.filename || "Podglad PDF niedostepny";
+    object.appendChild(fallback);
+    preview.appendChild(object);
+    empty.textContent = candidate.filename || "Dokument PDF";
+    return true;
+  }
+  const thumb = candidate.thumb_url || candidate.url || "";
+  if (!thumb) {
+    empty.textContent = candidate.filename || "Podglad niedostepny";
+    return true;
+  }
+  previewImage.addEventListener(
+    "error",
+    () => {
+      preview.classList.remove("has-image");
+      empty.textContent = candidate.filename || "Podglad niedostepny";
+    },
+    { once: true }
+  );
+  previewImage.src = thumb;
+  preview.classList.add("has-image");
+  return true;
+}
+
+function renderSqlPreview(prefix, photo, preview, empty) {
+  const value = String(photo?.sql_value || "").trim();
+  const card = document.createElement("div");
+  const text = document.createElement("code");
+  const copyButton = document.createElement("button");
+  card.className = "slot-sql-preview";
+  text.textContent = value || "Brak wartosci SQL";
+  copyButton.type = "button";
+  copyButton.className = "slot-sql-copy-button";
+  copyButton.textContent = "Kopiuj";
+  copyButton.disabled = !value;
+  copyButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    copyTextToClipboard(value, `Skopiowano wartosc SQL dla slotu ${prefix}.`).catch((error) => {
+      formStatus.textContent = error.message;
+    });
+  });
+  card.append(text, copyButton);
+  preview.classList.add("has-sql-preview");
+  empty.textContent = "";
+  preview.appendChild(card);
 }
 
 function clearSlotAssignment(prefix, options = {}) {
@@ -3086,6 +3410,7 @@ function clearSlotAssignment(prefix, options = {}) {
   state.slotFits.delete(prefix);
   state.slotSources.delete(prefix);
   state.userSelectedSlotSources.delete(prefix);
+  dismissSimilarCandidate(prefix);
 }
 
 function setSlotFile(prefix, file, options = {}) {
@@ -3100,6 +3425,7 @@ function setSlotFile(prefix, file, options = {}) {
   state.loadedPhotos.delete(prefix);
   state.slotSources.delete(prefix);
   state.userSelectedSlotSources.delete(prefix);
+  dismissSimilarCandidate(prefix);
   if (validationError) {
     item.error = validationError;
     formStatus.textContent = `Blad uploadu slotu ${prefix}: ${item.error}`;
@@ -3107,6 +3433,7 @@ function setSlotFile(prefix, file, options = {}) {
     return item;
   }
   uploadSlotFile(prefix, item);
+  scheduleSimilarFileLookup();
   return item;
 }
 
@@ -3361,8 +3688,11 @@ function updateSlotPreview(prefix) {
   const preview = card.querySelector(".slot-preview");
   const previewImage = preview.querySelector("img");
   const empty = preview.querySelector(".slot-empty");
+  const candidate = similarCandidateForSlot(prefix);
   const fitButton = card.querySelector(".slot-fit-button");
+  const openButton = card.querySelector(".slot-open-button");
   card.dataset.activeSource = selectedSlotSource(prefix, loadedPhoto) || "";
+  card.classList.toggle("slot-similar-pending", Boolean(candidate && !selectedFile));
   detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, prefix);
   card.querySelectorAll(".slot-badge[data-source]").forEach((badge) => {
     const selected = selectedSlotSource(prefix, loadedPhoto) === badge.dataset.source;
@@ -3373,6 +3703,7 @@ function updateSlotPreview(prefix) {
       local: "Plik jest w folderze backendu",
       ftp: "Wpis dla slotu jest na FTP",
       sql: "Wpis dla slotu jest w SQL",
+      similar: "Plik z podobnego produktu",
     };
     const sqlValue = String(loadedPhoto?.sql_value || "").trim();
     badge.classList.toggle("selected", selected);
@@ -3383,27 +3714,45 @@ function updateSlotPreview(prefix) {
       badge.title = sourceLoadingTitle(badge.dataset.source);
     } else {
       badge.removeAttribute("aria-busy");
-      const baseTitle =
-        badge.dataset.source === "sql" && sqlValue
-          ? "Kliknij, aby skopiowac link z SQL"
-          : titleBySource[badge.dataset.source] || "";
+      const baseTitle = titleBySource[badge.dataset.source] || "";
       badge.title = selected ? `${baseTitle} (aktywny podglad)` : baseTitle;
     }
   });
   if (fitButton) {
     fitButton.classList.toggle("active", isSlotFit(prefix));
+    fitButton.hidden = !selectedSlotSourceCanFit(prefix, loadedPhoto, selectedFile);
   }
-  preview.classList.remove("has-image", "thumb-loading", "loaded-photo");
+  if (openButton) {
+    openButton.hidden = !selectedSlotSourceCanOpen(prefix, loadedPhoto, selectedFile);
+  }
+  preview.classList.remove("has-image", "thumb-loading", "loaded-photo", "has-similar-candidate", "has-sql-preview");
   preview.querySelector(".slot-upload-overlay")?.remove();
+  preview.querySelector(".slot-similar-preview")?.remove();
+  preview.querySelector(".slot-sql-preview")?.remove();
   previewImage.removeAttribute("src");
   empty.textContent = "Brak pliku";
+  if (selectedSlotSource(prefix, loadedPhoto) === "sql") {
+    renderSqlPreview(prefix, loadedPhoto, preview, empty);
+    return;
+  }
   if (selectedFile) {
+    if (selectedSlotSource(prefix, loadedPhoto) === "similar") {
+      preview.classList.add("has-similar-candidate");
+    }
+    if (selectedSlotSource(prefix, loadedPhoto) === "similar" && candidate?.is_pdf) {
+      renderSimilarCandidatePreview(prefix, preview, previewImage, empty);
+      return;
+    }
     if (isFileImageLike(selectedFile)) {
       renderSelectedFilePreview(prefix, selectedFile, preview, previewImage, empty);
     } else {
       empty.textContent = slotFileName(selectedFile);
     }
     renderSlotUploadOverlay(preview, selectedFile);
+    return;
+  }
+  if (candidate) {
+    renderSimilarCandidatePreview(prefix, preview, previewImage, empty);
     return;
   }
   if (!loadedPhoto) return;
@@ -3456,6 +3805,7 @@ function createSlotNode(slot) {
     const meta = node.querySelector(".slot-meta");
     const loadedPhoto = state.loadedPhotos.get(slot.prefix);
     const selectedFile = state.files.get(slot.prefix);
+    const candidate = similarCandidateForSlot(slot.prefix);
     const overlay = document.createElement("div");
     const controls = document.createElement("div");
     const fitButton = document.createElement("button");
@@ -3463,6 +3813,7 @@ function createSlotNode(slot) {
     const clearButton = document.createElement("button");
     node.dataset.slotPrefix = slot.prefix;
     node.dataset.activeSource = selectedSlotSource(slot.prefix, loadedPhoto) || "";
+    node.classList.toggle("slot-similar-pending", Boolean(candidate && !selectedFile));
 
     title.textContent = `${slot.prefix} - ${slot.label}`;
     detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, slot.prefix);
@@ -3474,12 +3825,18 @@ function createSlotNode(slot) {
     previewImage.decoding = "async";
     node.draggable = Boolean(selectedFile || loadedPhoto?.token || loadedPhoto?.ftp_token || loadedPhoto?.ftp_filename);
     renderSlotBadges(meta, loadedPhoto, selectedFile, slot.prefix);
+    if (candidate?.source_color) {
+      const sourceInfo = document.createElement("span");
+      sourceInfo.className = "slot-similar-source";
+      sourceInfo.textContent = `Podobne: kolor ${candidate.source_color}`;
+      meta.appendChild(sourceInfo);
+    }
     overlay.className = "slot-loading-overlay";
     overlay.innerHTML = `<span>${photoLoadingText()}</span><div class="progress-line"><i></i></div>`;
     if (state.photosLoading && !selectedFile && !loadedPhoto) {
       preview.appendChild(overlay);
     }
-    controls.className = "slot-controls";
+    controls.className = "slot-preview-actions";
     fitButton.type = "button";
     fitButton.className = `slot-fit-button ${isSlotFit(slot.prefix) ? "active" : ""}`;
     fitButton.textContent = "FIT";
@@ -3512,31 +3869,61 @@ function createSlotNode(slot) {
         : `Wyczyszczono slot ${slot.prefix}.`;
       renderSlot(slot.prefix);
     });
-    if (selectedFile || loadedPhoto) {
-      const hasOpenableFile =
-        Boolean(selectedFile) ||
-        Boolean(selectedPhotoToken(loadedPhoto, slot.prefix)) ||
-        Boolean(loadedPhoto?.ftp_filename);
-      const hasFittablePreview =
-        (selectedFile && isFileImageLike(selectedFile)) ||
-        (loadedPhoto?.is_image && (selectedPhotoToken(loadedPhoto, slot.prefix) || loadedPhoto?.ftp_filename));
-      if (hasFittablePreview) {
+    if (selectedFile || loadedPhoto || candidate) {
+      if (selectedSlotSourceCanFit(slot.prefix, loadedPhoto, selectedFile)) {
         controls.appendChild(fitButton);
       }
-      if (hasOpenableFile) {
+      if (selectedSlotSourceCanOpen(slot.prefix, loadedPhoto, selectedFile)) {
         controls.appendChild(openButton);
       }
       controls.appendChild(clearButton);
-      meta.appendChild(controls);
+    }
+    if (candidate && !selectedFile) {
+      const decision = document.createElement("div");
+      const acceptButton = document.createElement("button");
+      const rejectButton = document.createElement("button");
+      const label = document.createElement("span");
+      decision.className = "slot-similar-decision";
+      label.textContent = "Wymaga decyzji · z podobnego";
+      acceptButton.type = "button";
+      acceptButton.className = "slot-similar-accept";
+      acceptButton.textContent = "✓";
+      acceptButton.title = "Wczytaj plik z podobnego produktu";
+      acceptButton.setAttribute("aria-label", acceptButton.title);
+      acceptButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        acceptSimilarCandidate(slot.prefix);
+      });
+      rejectButton.type = "button";
+      rejectButton.className = "slot-similar-reject";
+      rejectButton.textContent = "×";
+      rejectButton.title = "Odrzuc sugestie z podobnego produktu";
+      rejectButton.setAttribute("aria-label", rejectButton.title);
+      rejectButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        dismissSimilarCandidate(slot.prefix);
+        renderSlot(slot.prefix);
+      });
+      decision.append(label, acceptButton, rejectButton);
+      meta.appendChild(decision);
     }
 
-    if (selectedFile) {
-      if (isFileImageLike(selectedFile)) {
+    if (selectedSlotSource(slot.prefix, loadedPhoto) === "sql") {
+      renderSqlPreview(slot.prefix, loadedPhoto, preview, empty);
+    } else if (selectedFile) {
+      if (selectedSlotSource(slot.prefix, loadedPhoto) === "similar") {
+        preview.classList.add("has-similar-candidate");
+      }
+      if (selectedSlotSource(slot.prefix, loadedPhoto) === "similar" && candidate?.is_pdf) {
+        renderSimilarCandidatePreview(slot.prefix, preview, previewImage, empty);
+      } else if (isFileImageLike(selectedFile)) {
         renderSelectedFilePreview(slot.prefix, selectedFile, preview, previewImage, empty);
       } else {
         empty.textContent = slotFileName(selectedFile);
       }
       renderSlotUploadOverlay(preview, selectedFile);
+    } else if (candidate) {
+      renderSimilarCandidatePreview(slot.prefix, preview, previewImage, empty);
     } else if (loadedPhoto) {
       preview.classList.add("loaded-photo");
       const thumb = thumbnailUrl(loadedPhoto, slot.prefix);
@@ -3564,6 +3951,9 @@ function createSlotNode(slot) {
             ? "Kliknij FTP, aby pobrac podglad"
             : slotStatusText(loadedPhoto, slot.prefix);
       }
+    }
+    if (controls.childElementCount) {
+      preview.appendChild(controls);
     }
 
     node.addEventListener("dragstart", (event) => {
@@ -7018,6 +7408,78 @@ function scheduleBackgroundFtpLookup(delay = 900) {
   }, delay);
 }
 
+function similarFileIdentityKey(fields = formPayload()) {
+  return [
+    fields.name,
+    fields.type_name,
+    fields.model,
+    fields.color1,
+    fields.color2,
+    fields.color3,
+    fields.extra,
+  ]
+    .map(normalizedIdentityValue)
+    .join("|");
+}
+
+function similarOccupiedSlotPrefixes() {
+  const occupied = new Set(state.files.keys());
+  for (const prefix of state.loadedPhotos.keys()) {
+    if (!state.deletedSlots.has(prefix)) occupied.add(prefix);
+  }
+  return Array.from(occupied).sort();
+}
+
+async function lookupSimilarFiles() {
+  const fields = formPayload();
+  const key = similarFileIdentityKey(fields);
+  if (!fields.name || !fields.type_name || !fields.model || !fields.color1) {
+    state.similarCandidates.clear();
+    renderSlots();
+    return;
+  }
+  const requestId = state.similarFileLookupRequestId + 1;
+  state.similarFileLookupRequestId = requestId;
+  let payload;
+  try {
+    payload = await requestJson("/api/similar-files", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...fields, occupied_prefixes: similarOccupiedSlotPrefixes() }),
+      timeoutMs: 15000,
+    });
+  } catch (error) {
+    if (state.similarFileLookupRequestId === requestId && similarFileIdentityKey() === key) {
+      formStatus.textContent = `Nie udalo sie sprawdzic plikow z podobnych produktow: ${error.message}`;
+    }
+    return;
+  }
+  if (state.similarFileLookupRequestId !== requestId || similarFileIdentityKey() !== key) return;
+  const acceptedCandidates = new Map(
+    Array.from(state.similarCandidates.entries()).filter(
+      ([prefix]) => state.slotSources.get(prefix) === "similar" && state.files.has(prefix)
+    )
+  );
+  state.similarCandidates.clear();
+  for (const [prefix, candidate] of acceptedCandidates) {
+    state.similarCandidates.set(prefix, candidate);
+  }
+  for (const candidate of payload.candidates || []) {
+    const prefix = String(candidate.target_prefix || "").trim();
+    if (prefix && !acceptedCandidates.has(prefix) && !state.dismissedSimilarSlots.has(prefix)) {
+      state.similarCandidates.set(prefix, candidate);
+    }
+  }
+  renderSlots();
+}
+
+function scheduleSimilarFileLookup(delay = 450) {
+  window.clearTimeout(state.similarFileLookupTimer);
+  state.similarFileLookupTimer = window.setTimeout(() => {
+    lookupSimilarFiles().catch(() => {});
+  }, delay);
+}
+
 function clearSelectedFiles() {
   for (const prefix of Array.from(state.filePreviewUrls.keys())) {
     revokeFilePreviewUrl(prefix);
@@ -7122,6 +7584,7 @@ async function loadPhotosForEntry(entry, options = {}) {
     updateRuntimeMetrics();
     renderSlotsExceptPendingUserEdits(partial ? targetPrefixes : null);
     scheduleBackgroundFtpPreviewLoad(requestId, 1500);
+    if (!partial) scheduleSimilarFileLookup();
   }
 }
 
@@ -7131,6 +7594,10 @@ function fillForm(entry, options = {}) {
   state.slotFits.clear();
   state.deletedSlots.clear();
   state.slotSources.clear();
+  state.similarCandidates.clear();
+  state.dismissedSimilarSlots.clear();
+  state.similarFileLookupRequestId += 1;
+  window.clearTimeout(state.similarFileLookupTimer);
   state.userSelectedSlotSources.clear();
   state.ftpPreviewLoading.clear();
   state.ftpPreviewBackgroundLoading.clear();
@@ -7154,6 +7621,7 @@ function fillForm(entry, options = {}) {
   setTimeout(() => {
     state.suppressAutoSearch = false;
   }, 200);
+  scheduleSimilarFileLookup();
   if (options.loadPhotos) {
     loadPhotosForEntry({ ...entry, ...formPayload() }).catch((error) => {
       formStatus.textContent = `Wpis wczytany, ale zdjecia nie: ${error.message}`;
@@ -11857,6 +12325,13 @@ function renderSettingsMail() {
   settingsOutput.appendChild(form);
 }
 
+function selectedSimilarSlotPrefixes(rows) {
+  return Array.from(rows)
+    .filter((row) => row.querySelector('[name="similar_file_slot_prefixes"]')?.checked)
+    .map((row) => String(row.querySelector('[name="prefix"]')?.value || "").trim())
+    .filter(Boolean);
+}
+
 function renderSettingsSlots() {
   ensureSqlColumnsDatalist();
   const form = document.createElement("form");
@@ -11867,7 +12342,15 @@ function renderSettingsSlots() {
     "Nazwa w web jest tylko etykieta slotu. ID trafia do EAN_ID, nazwa w pliku jest zapisywana literalnie po usunieciu znakow niedozwolonych, a pole SQL sluzy do aktualizacji bazy.";
   const list = document.createElement("div");
   const addButton = document.createElement("button");
+  const similarSettings = state.settings.similar_file_detection || {};
+  const similarEnabled = document.createElement("input");
+  const similarEnabledRow = document.createElement("label");
   list.className = "slot-settings-list";
+  similarEnabled.type = "checkbox";
+  similarEnabled.name = "similar_files_enabled";
+  similarEnabled.checked = Boolean(similarSettings.enabled);
+  similarEnabledRow.className = "check-row";
+  similarEnabledRow.append(similarEnabled, document.createTextNode("Wykrywaj pliki z podobnych produktow"));
   const nextPrefix = () => {
     const used = [...list.querySelectorAll('[name="prefix"]')]
       .map((input) => parseInt(input.value, 10))
@@ -11878,6 +12361,8 @@ function renderSettingsSlots() {
   const addSlotRow = (slot = {}) => {
     const row = document.createElement("div");
     const remove = document.createElement("button");
+    const similarOption = document.createElement("label");
+    const similarInput = document.createElement("input");
     row.className = "slot-settings-row";
     row.dataset.filenameLabelExplicit = slot.filename_label_explicit ? "1" : "0";
     row.dataset.originalLabel = slot.label || "";
@@ -11888,11 +12373,19 @@ function renderSettingsSlots() {
     remove.className = "secondary-button";
     remove.textContent = "Usun";
     remove.addEventListener("click", () => row.remove());
+    similarOption.className = "slot-similar-option";
+    similarInput.type = "checkbox";
+    similarInput.name = "similar_file_slot_prefixes";
+    similarInput.value = slot.prefix || "";
+    similarInput.checked = (similarSettings.slot_prefixes || []).includes(slot.prefix);
+    similarInput.disabled = !similarEnabled.checked;
+    similarOption.append(similarInput, document.createTextNode("Podobne"));
     row.append(
       inputField("label", "Nazwa w web", slot.label),
       inputField("prefix", "ID", slot.prefix),
       inputField("filename_label", "Nazwa w pliku", slot.filename_label || slot.label),
       column,
+      similarOption,
       remove
     );
     list.appendChild(row);
@@ -11900,6 +12393,11 @@ function renderSettingsSlots() {
   for (const slot of state.settings.slots || []) {
     addSlotRow(slot);
   }
+  similarEnabled.addEventListener("change", () => {
+    list.querySelectorAll('[name="similar_file_slot_prefixes"]').forEach((input) => {
+      input.disabled = !similarEnabled.checked;
+    });
+  });
   addButton.type = "button";
   addButton.className = "secondary-button";
   addButton.textContent = "Dodaj slot";
@@ -11913,9 +12411,12 @@ function renderSettingsSlots() {
       sql_column: "",
     });
   });
-  form.append(settingsFieldGroup("Lista slotow", note, list, actionRow(addButton, detectSqlColumnsButton())));
-  settingsSaveButton(form, () => {
-    const slots = [...form.querySelectorAll(".slot-settings-row")].map((row) => {
+  form.append(
+    settingsFieldGroup("Lista slotow", note, similarEnabledRow, list, actionRow(addButton, detectSqlColumnsButton()))
+  );
+  settingsSaveButton(form, (data) => {
+    const slotRows = [...form.querySelectorAll(".slot-settings-row")];
+    const slots = slotRows.map((row) => {
       const label = row.querySelector('[name="label"]').value;
       const filenameLabel = row.querySelector('[name="filename_label"]').value;
       const wasExplicit = row.dataset.filenameLabelExplicit === "1";
@@ -11930,7 +12431,13 @@ function renderSettingsSlots() {
         sql_column: row.querySelector('[name="sql_column"]').value,
       };
     });
-    return { slots };
+    return {
+      slots,
+      "similar_file_detection": {
+        enabled: data.has("similar_files_enabled"),
+        slot_prefixes: selectedSimilarSlotPrefixes(slotRows),
+      },
+    };
   });
   settingsOutput.appendChild(form);
 }
@@ -12343,6 +12850,43 @@ document.querySelectorAll("[data-close-modal]").forEach((button) => {
   button.addEventListener("click", closeModals);
 });
 
+similarDecisionRejectAllButton?.addEventListener("click", () => {
+  const prefixes = [...pendingSimilarCandidatePrefixes()];
+  for (const prefix of prefixes) {
+    dismissSimilarCandidate(prefix);
+    renderSlot(prefix);
+  }
+  renderSimilarDecisionModal();
+});
+
+similarDecisionContinueButton?.addEventListener("click", () => {
+  if (pendingSimilarCandidatePrefixes().length) return;
+  closeSimilarDecisionModal();
+  submitProductForm().catch(handleProductSubmitError);
+});
+
+document.querySelectorAll("[data-close-similar-decision]").forEach((button) => {
+  button.addEventListener("click", closeSimilarDecisionModal);
+});
+
+similarDecisionModal?.addEventListener("keydown", (event) => {
+  if (event.key !== "Tab") return;
+  const focusable = Array.from(
+    similarDecisionModal.querySelectorAll(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )
+  );
+  if (!focusable.length) return;
+  const currentIndex = focusable.indexOf(document.activeElement);
+  if (event.shiftKey && currentIndex <= 0) {
+    event.preventDefault();
+    focusable.at(-1)?.focus();
+  } else if (!event.shiftKey && currentIndex === focusable.length - 1) {
+    event.preventDefault();
+    focusable[0]?.focus();
+  }
+});
+
 document.querySelectorAll("[data-close-web-images]").forEach((button) => {
   button.addEventListener("click", closeWebImagesModal);
 });
@@ -12724,7 +13268,10 @@ for (const name of ["name", "type_name", "model"]) {
 productForm.elements.ean?.addEventListener("input", handlePimcoreEanInput);
 
 for (const name of trackedProductFields) {
-  productForm.elements[name]?.addEventListener("input", () => scheduleBackgroundFtpLookup());
+  productForm.elements[name]?.addEventListener("input", () => {
+    scheduleBackgroundFtpLookup();
+    scheduleSimilarFileLookup();
+  });
 }
 
 for (const name of Object.keys(fieldListKey)) {
@@ -12735,13 +13282,23 @@ for (const name of Object.keys(fieldListKey)) {
   });
 }
 
-productForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
+function handleProductSubmitError(error) {
+  stopProcessStatusTicker();
+  showError(error);
+  setBusy(false, "");
+}
+
+async function submitProductForm() {
   clearResult();
   try {
     ensureSlotUploadsReady();
     setBusy(true, "Sprawdzanie list...");
     await ensureProductListValues();
+    if (pendingSimilarCandidatePrefixes().length) {
+      setBusy(false, "");
+      openSimilarDecisionModal();
+      return;
+    }
     const identityChanged = productFieldsChangedSinceLoad();
     const updateMode = hasPendingUserChanges();
     setBusy(
@@ -12813,10 +13370,17 @@ productForm.addEventListener("submit", async (event) => {
     });
     setBusy(false, "Zadanie przyjete w tle. Mozesz uzupelniac kolejny wpis.");
   } catch (error) {
-    stopProcessStatusTicker();
-    showError(error);
-    setBusy(false, "");
+    handleProductSubmitError(error);
   }
+}
+
+productForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (pendingSimilarCandidatePrefixes().length) {
+    openSimilarDecisionModal();
+    return;
+  }
+  return submitProductForm().catch(handleProductSubmitError);
 });
 
 function resetCurrentDraft({ clearOutput = true, status = "" } = {}) {
@@ -12831,6 +13395,10 @@ function resetCurrentDraft({ clearOutput = true, status = "" } = {}) {
   state.slotFits.clear();
   state.deletedSlots.clear();
   state.slotSources.clear();
+  state.similarCandidates.clear();
+  state.dismissedSimilarSlots.clear();
+  state.similarFileLookupRequestId += 1;
+  window.clearTimeout(state.similarFileLookupTimer);
   state.userSelectedSlotSources.clear();
   state.photoSourceStatus.clear();
   state.ftpPreviewLoading.clear();

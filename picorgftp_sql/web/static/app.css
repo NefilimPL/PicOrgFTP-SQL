@@ -1907,7 +1907,7 @@ h2 {
 }
 
 .slot-settings-row {
-  grid-template-columns: minmax(140px, 1fr) 82px minmax(140px, 1fr) minmax(180px, 1fr) auto;
+  grid-template-columns: minmax(140px, 1fr) 82px minmax(140px, 1fr) minmax(180px, 1fr) auto auto;
 }
 
 .user-row {
@@ -2129,6 +2129,206 @@ h2 {
   box-shadow: inset 3px 0 0 var(--sql);
 }
 
+.slot-card[data-active-source="similar"] .slot-preview.has-similar-candidate img {
+  opacity: 0.6;
+}
+
+.slot-card.slot-similar-pending {
+  border-color: var(--sql);
+  box-shadow: 0 0 0 2px rgba(54, 126, 192, 0.28);
+  animation: slot-similar-pending-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes slot-similar-pending-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px rgba(54, 126, 192, 0.2);
+  }
+
+  50% {
+    box-shadow: 0 0 0 4px rgba(54, 126, 192, 0.48);
+  }
+}
+
+.slot-similar-decision {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  border: 1px solid var(--sql);
+  border-radius: 5px;
+  background: rgba(54, 126, 192, 0.16);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 6px;
+}
+
+.slot-similar-decision .slot-similar-accept {
+  border-color: #2d9b70;
+  background: #2d9b70;
+  color: #ffffff;
+}
+
+.slot-similar-decision .slot-similar-reject {
+  border-color: #c84d58;
+  background: #c84d58;
+  color: #ffffff;
+}
+
+.similar-decision-panel {
+  width: min(920px, calc(100vw - 32px));
+}
+
+.similar-decision-intro {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+.similar-decision-list {
+  display: grid;
+  gap: 10px;
+  min-height: 64px;
+  margin: 14px 0;
+}
+
+.similar-decision-row {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid var(--sql);
+  border-radius: 8px;
+  background: rgba(54, 126, 192, 0.08);
+}
+
+.similar-decision-preview {
+  display: grid;
+  place-items: center;
+  width: 120px;
+  height: 84px;
+  overflow: hidden;
+  border: 1px dashed var(--border);
+  border-radius: 5px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.similar-decision-preview img,
+.similar-decision-pdf {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  object-fit: contain;
+}
+
+.similar-decision-details {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.similar-decision-details span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.similar-decision-source {
+  color: var(--sql) !important;
+}
+
+.similar-decision-row-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.similar-decision-result {
+  padding: 5px 8px;
+  border: 1px solid currentColor;
+  border-radius: 5px;
+  font-size: 12px;
+}
+
+.similar-decision-result.accepted {
+  color: #2d9b70;
+}
+
+.similar-decision-result.rejected {
+  color: #c84d58;
+}
+
+.similar-decision-actions {
+  justify-content: flex-end;
+}
+
+.slot-similar-preview {
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.slot-similar-accept,
+.slot-similar-reject {
+  min-height: 26px;
+  min-width: 26px;
+  padding: 0 7px;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.slot-similar-accept {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.slot-similar-accept:hover {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.slot-similar-reject {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.slot-similar-reject:hover {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: #ffffff;
+}
+
+@media (max-width: 620px) {
+  .similar-decision-row {
+    grid-template-columns: 92px minmax(0, 1fr);
+  }
+
+  .similar-decision-preview {
+    width: 92px;
+    height: 68px;
+  }
+
+  .similar-decision-row-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+}
+
+.slot-similar-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  white-space: nowrap;
+}
+
 .slot-badges {
   display: flex;
   flex-wrap: wrap;
@@ -2234,6 +2434,38 @@ button.slot-badge.on:hover {
 
 .slot-preview.has-image .slot-empty {
   display: none;
+}
+
+.slot-preview.has-sql-preview .slot-empty {
+  display: none;
+}
+
+.slot-sql-preview {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  align-content: center;
+  gap: 10px;
+  padding: 38px 12px 40px;
+  background: var(--surface-2);
+}
+
+.slot-sql-preview code {
+  max-height: 92px;
+  overflow: auto;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.slot-sql-copy-button {
+  justify-self: start;
+  min-height: 26px;
+  padding: 0 8px;
+  font-size: 11px;
 }
 
 .slot-loading-overlay,
@@ -2350,11 +2582,43 @@ button.slot-badge.on:hover {
   color: var(--text);
 }
 
-.slot-controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 6px;
+.slot-preview-actions {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+}
+
+.slot-preview-actions button {
+  position: absolute;
+  pointer-events: auto;
+}
+
+.slot-preview-actions .slot-fit-button {
+  top: 3px;
+  left: 3px;
+}
+
+.slot-preview-actions .slot-clear-button {
+  top: 3px;
+  right: 3px;
+}
+
+.slot-preview-actions .slot-open-button {
+  bottom: 3px;
+  left: 3px;
+}
+
+.similar-decision-row-actions .slot-similar-accept {
+  border-color: #2d9b70;
+  background: #2d9b70;
+  color: #ffffff;
+}
+
+.similar-decision-row-actions .slot-similar-reject {
+  border-color: #c84d58;
+  background: #c84d58;
+  color: #ffffff;
 }
 
 .history-output,

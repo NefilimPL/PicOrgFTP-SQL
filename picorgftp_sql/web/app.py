@@ -138,6 +138,7 @@ from ..web_data import (
     discover_pimcore_folders,
     export_pimcore_submissions,
     field_suggestions,
+    find_web_similar_file_candidates,
     find_entry_by_identity,
     find_pimcore_product_by_ean,
     find_user,
@@ -1318,11 +1319,11 @@ def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
         raise HTTPException(status_code=400, detail="Niepoprawny token pliku.") from exc
     if not hmac.compare_digest(_sign(path), signature):
         raise HTTPException(status_code=403, detail="Niepoprawny podpis pliku.")
-    abs_path = os.path.abspath(path)
+    abs_path = os.path.realpath(os.path.abspath(path))
     roots = [
-        os.path.abspath(settings.l),
-        os.path.abspath(os.path.join(settings.AC, "web_ftp_cache")),
-        os.path.abspath(_upload_cache_root()),
+        os.path.realpath(os.path.abspath(settings.l)),
+        os.path.realpath(os.path.abspath(os.path.join(settings.AC, "web_ftp_cache"))),
+        os.path.realpath(os.path.abspath(_upload_cache_root())),
     ]
     allowed = False
     for root in roots:
@@ -1330,7 +1331,7 @@ def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
             common = os.path.commonpath([abs_path, root])
         except ValueError:
             continue
-        if common == root:
+        if os.path.normcase(common) == os.path.normcase(root):
             allowed = True
             break
     if not allowed:
@@ -4397,6 +4398,24 @@ def _enrich_photo_payload(photos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return enriched
 
 
+def _public_similar_candidate(candidate: Any) -> Dict[str, Any]:
+    """Return signed, public metadata for one local similar-file candidate."""
+
+    signed = _enrich_photo_payload([{"path": candidate.source_path}])[0]
+    return {
+        "id": candidate.candidate_id,
+        "source_prefix": candidate.source_prefix,
+        "target_prefix": candidate.target_prefix,
+        "filename": candidate.filename,
+        "source_color": candidate.source_color_segment,
+        "size_bytes": candidate.size_bytes,
+        "is_pdf": candidate.is_pdf,
+        "token": signed["token"],
+        "url": signed["url"],
+        "thumb_url": signed["thumb_url"],
+    }
+
+
 def _run_due_sqlite_backups_once() -> Dict[str, Any]:
     settings_payload = storage_settings.load_backup_settings()
     slots = sqlite_backup.due_schedule_slots(settings_payload)
@@ -5858,6 +5877,17 @@ def create_app() -> FastAPI:
                 if str(photo.get("prefix") or "") in requested_prefixes
             ]
         return JSONResponse({"photos": _enrich_photo_payload(photos), "source": source_key})
+
+    @app.post("/api/similar-files")
+    async def similar_files_api(request: Request) -> JSONResponse:
+        _require_user(request)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Niepoprawne dane produktu.")
+        candidates = await run_in_threadpool(find_web_similar_file_candidates, payload)
+        return JSONResponse(
+            {"candidates": [_public_similar_candidate(item) for item in candidates]}
+        )
 
     @app.get("/api/file")
     def file_preview(request: Request, token: str) -> FileResponse:
