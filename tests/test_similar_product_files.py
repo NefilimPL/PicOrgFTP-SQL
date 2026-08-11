@@ -1,3 +1,4 @@
+from picorgftp_sql import similar_product_files
 from picorgftp_sql.similar_product_files import (
     _merged_names,
     find_similar_file_candidates,
@@ -33,8 +34,8 @@ def white_product():
     }
 
 
-def _write_product_file(tmp_path, color, prefix, content, filename=None):
-    folder = tmp_path / "MAGGIORI" / "KOMODA" / "MA01" / color / "NO-LED"
+def _write_product_file(tmp_path, color, prefix, content, filename=None, extra="NO-LED"):
+    folder = tmp_path / "MAGGIORI" / "KOMODA" / "MA01" / color / extra
     folder.mkdir(parents=True, exist_ok=True)
     (folder / (filename or f"5901234567890_{prefix}_MAIN.jpg")).write_bytes(content)
 
@@ -88,6 +89,47 @@ def test_color_order_does_not_turn_the_same_multicolor_variant_into_a_candidate(
     )
 
     assert candidates == []
+
+
+def test_base_identity_finds_candidates_before_colour_and_extra_are_chosen(tmp_path):
+    _write_product_file(tmp_path, "BLACK", "01", b"black")
+    _write_product_file(tmp_path, "WHITE", "01", b"white")
+    product = {**white_product(), "color1": "", "extra": ""}
+
+    candidates = find_similar_file_candidates(
+        str(tmp_path), product, slot_defs(), enabled_slots()
+    )
+
+    assert [item.source_color_segment for item in candidates] == ["BLACK", "WHITE"]
+
+
+def test_explicit_extra_keeps_led_and_no_led_separate(tmp_path):
+    _write_product_file(tmp_path, "BLACK", "01", b"led", extra="LED")
+    _write_product_file(tmp_path, "WHITE", "01", b"no-led", extra="NO-LED")
+    product = {**white_product(), "color1": "OAK", "extra": "LED"}
+
+    candidates = find_similar_file_candidates(
+        str(tmp_path), product, slot_defs(), enabled_slots()
+    )
+
+    assert [item.source_color_segment for item in candidates] == ["BLACK"]
+
+
+def test_unchanged_candidate_uses_cached_digest(tmp_path, monkeypatch):
+    _write_product_file(tmp_path, "BLACK", "01", b"black")
+    calls = 0
+    original = similar_product_files._read_digest
+
+    def count_reads(path):
+        nonlocal calls
+        calls += 1
+        return original(path)
+
+    monkeypatch.setattr(similar_product_files, "_read_digest", count_reads)
+    find_similar_file_candidates(str(tmp_path), white_product(), slot_defs(), enabled_slots())
+    find_similar_file_candidates(str(tmp_path), white_product(), slot_defs(), enabled_slots())
+
+    assert calls == 1
 
 
 def test_normalize_similar_settings_defaults_disabled_and_removes_unknown_slots():
