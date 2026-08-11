@@ -216,17 +216,195 @@ console.log(selectedSlotSource('07', null));
         start = source.index("function fillForm")
         end = source.index("async function refreshData", start)
         body = source[start:end]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the fill-form lookup contract test")
+        script = f"""
+const state = {{
+  suppressAutoSearch: false, loadedEntryOriginal: null,
+  slotFits: new Map(), deletedSlots: new Map(), slotSources: new Map(),
+  similarCandidates: new Map(), dismissedSimilarSlots: new Set(),
+  userSelectedSlotSources: new Map(), ftpPreviewLoading: new Map(),
+  ftpPreviewBackgroundLoading: new Map(), photoSourcesLoaded: new Set(),
+  loadedPhotos: new Map(), backgroundFtpLookupKey: "",
+  backgroundFtpLookupRequestId: 0, backgroundFtpLookupTimer: 0,
+  photoLoadRequestId: 0,
+}};
+const fields = Object.fromEntries(
+  ["product_id", "name", "type_name", "model", "color1", "color2", "color3", "extra", "ean"]
+    .map((name) => [name, {{ value: "" }}])
+);
+const productForm = {{ elements: fields }};
+const formStatus = {{ textContent: "" }};
+const window = {{ clearTimeout() {{}} }};
+const setTimeout = () => 0;
+const handlePimcoreEanInput = () => {{}};
+const applyProductFieldSettings = () => {{}};
+const updateFieldWarnings = () => {{}};
+const formPayload = () => ({{ name: fields.name.value, type_name: fields.type_name.value, model: fields.model.value }});
+let cancelled = 0;
+const cancelSimilarFileLookup = () => {{ cancelled += 1; }};
+const pendingLoads = [];
+function loadPhotosForEntry() {{
+  const requestId = ++state.photoLoadRequestId;
+  state.loadedPhotos.clear();
+  let resolve;
+  const promise = new Promise((done) => {{
+    resolve = () => {{
+      if (state.photoLoadRequestId === requestId) state.loadedPhotos.set("02", {{ token: "loaded" }});
+      done();
+    }};
+  }});
+  pendingLoads.push({{ requestId, resolve }});
+  return promise;
+}}
+const scans = [];
+const startSimilarFileLookup = (options) => scans.push({{
+  immediate: options?.immediate === true,
+  occupied: Array.from(state.loadedPhotos.keys()),
+}});
+{body}
+(async () => {{
+  fillForm({{ name: "Old", type_name: "Desk", model: "A" }}, {{ loadPhotos: true }});
+  fillForm({{ name: "New", type_name: "Desk", model: "B" }}, {{ loadPhotos: true }});
+  const scansBeforePhotos = scans.length;
+  pendingLoads[0].resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  const scansAfterStalePhotos = scans.length;
+  pendingLoads[1].resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  console.log(JSON.stringify({{ cancelled, scansBeforePhotos, scansAfterStalePhotos, scans }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
 
-        self.assertIn("cancelSimilarFileLookup();", body)
-        self.assertIn("startSimilarFileLookup({ immediate: true });", body)
-        self.assertLess(
-            body.index("cancelSimilarFileLookup();"),
-            body.index("startSimilarFileLookup({ immediate: true });"),
+        self.assertEqual(result["cancelled"], 2)
+        self.assertEqual(result["scansBeforePhotos"], 0)
+        self.assertEqual(result["scansAfterStalePhotos"], 0)
+        self.assertEqual(
+            result["scans"], [{"immediate": True, "occupied": ["02"]}]
         )
-        self.assertLess(
-            body.index("loadPhotosForEntry({ ...entry, ...formPayload() })"),
-            body.index("startSimilarFileLookup({ immediate: true });"),
+
+    def test_request_json_composes_external_abort_with_timeout(self) -> None:
+        """An external cancellation signal must not disable the transport deadline."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        request_json = source[
+            source.index("async function requestJson") : source.index(
+                "function clientFailureFingerprint"
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the request timeout contract test")
+        script = f"""
+const state = {{ csrfToken: "" }};
+const window = {{ setTimeout, clearTimeout, location: {{ href: "" }} }};
+const applyClientIdentityHeader = () => {{}};
+const applyPanelRequestHeaders = () => {{}};
+const signals = [];
+function abortError() {{ return Object.assign(new Error("aborted"), {{ name: "AbortError" }}); }}
+function fetch(_path, options) {{
+  signals.push(options.signal);
+  return new Promise((_resolve, reject) => {{
+    const fallback = setTimeout(() => reject(new Error("transport still pending")), 40);
+    const abort = () => {{ clearTimeout(fallback); reject(abortError()); }};
+    if (options.signal?.aborted) abort();
+    else options.signal?.addEventListener("abort", abort, {{ once: true }});
+  }});
+}}
+{request_json}
+(async () => {{
+  const timeoutExternal = new AbortController();
+  let timeoutMessage = "";
+  try {{
+    await requestJson("/api/similar-files", {{ signal: timeoutExternal.signal, timeoutMs: 5 }});
+  }} catch (error) {{
+    timeoutMessage = error.message;
+  }}
+  const timeoutSignalAborted = signals[0]?.aborted === true;
+  const timeoutSignalComposed = signals[0] !== timeoutExternal.signal;
+
+  const cancelledExternal = new AbortController();
+  const cancelledRequest = requestJson("/api/similar-files", {{
+    signal: cancelledExternal.signal,
+    timeoutMs: 100,
+  }}).catch((error) => error.name);
+  cancelledExternal.abort();
+  const externalErrorName = await cancelledRequest;
+  console.log(JSON.stringify({{
+    timeoutMessage, timeoutSignalAborted, timeoutSignalComposed,
+    externalErrorName, externalSignalComposed: signals[1] !== cancelledExternal.signal,
+  }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
         )
+        result = json.loads(completed.stdout)
+
+        self.assertIn("Backend nie odpowiedzial", result["timeoutMessage"])
+        self.assertTrue(result["timeoutSignalAborted"])
+        self.assertTrue(result["timeoutSignalComposed"])
+        self.assertEqual(result["externalErrorName"], "AbortError")
+        self.assertTrue(result["externalSignalComposed"])
+
+    def test_manual_product_search_starts_similar_scan_before_entries_finish(self) -> None:
+        """A slow or failed entries lookup must not hold back the forced similar scan."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        search = source[
+            source.index("async function searchByProduct") : source.index(
+                "let autoSearchTimer", source.index("async function searchByProduct")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the manual product search contract test")
+        script = f"""
+const formPayload = () => ({{ name: "Desk", type_name: "Table", model: "T1" }});
+const formStatus = {{ textContent: "" }};
+const renderEntrySelect = () => {{}};
+const renderEntryModal = () => {{}};
+let rejectEntries;
+const requestJson = () => new Promise((_resolve, reject) => {{ rejectEntries = reject; }});
+let scans = 0;
+const startSimilarFileLookup = (options) => {{ if (options?.immediate) scans += 1; }};
+{search}
+(async () => {{
+  const pendingSearch = searchByProduct();
+  const scansWhileEntriesPending = scans;
+  rejectEntries(new Error("entries unavailable"));
+  let error = "";
+  try {{ await pendingSearch; }} catch (caught) {{ error = caught.message; }}
+  console.log(JSON.stringify({{ scansWhileEntriesPending, scans, error }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(result["scansWhileEntriesPending"], 1)
+        self.assertEqual(result["scans"], 1)
+        self.assertEqual(result["error"], "entries unavailable")
 
     def test_accepted_similar_image_keeps_the_similar_preview_marker(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")

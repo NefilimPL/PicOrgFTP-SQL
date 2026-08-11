@@ -567,20 +567,30 @@ async function requestJson(path, options = {}) {
   const timeoutMs = Number(options.timeoutMs || 0);
   const fetchOptions = { ...options };
   delete fetchOptions.timeoutMs;
-  const hasExternalSignal = Boolean(fetchOptions.signal);
+  const externalSignal = fetchOptions.signal || null;
   applyClientIdentityHeader(path, fetchOptions);
   applyPanelRequestHeaders(path, fetchOptions);
   let timeoutId = 0;
-  if (timeoutMs > 0 && !fetchOptions.signal) {
+  let externalAbortHandler = null;
+  let timedOut = false;
+  if (timeoutMs > 0) {
     const controller = new AbortController();
     fetchOptions.signal = controller.signal;
-    timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+    if (externalSignal) {
+      externalAbortHandler = () => controller.abort();
+      if (externalSignal.aborted) externalAbortHandler();
+      else externalSignal.addEventListener("abort", externalAbortHandler, { once: true });
+    }
+    timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
   }
   let response;
   try {
     response = await fetch(path, fetchOptions);
   } catch (error) {
-    if (error?.name === "AbortError" && hasExternalSignal) {
+    if (error?.name === "AbortError" && externalSignal && !timedOut) {
       throw error;
     }
     if (error?.name === "AbortError") {
@@ -597,6 +607,9 @@ async function requestJson(path, options = {}) {
   } finally {
     if (timeoutId) {
       window.clearTimeout(timeoutId);
+    }
+    if (externalSignal && externalAbortHandler) {
+      externalSignal.removeEventListener("abort", externalAbortHandler);
     }
   }
   const payload = await response.json().catch(() => ({}));
@@ -7695,9 +7708,17 @@ function fillForm(entry, options = {}) {
     state.suppressAutoSearch = false;
   }, 200);
   if (options.loadPhotos) {
-    loadPhotosForEntry({ ...entry, ...formPayload() }).catch((error) => {
-      formStatus.textContent = `Wpis wczytany, ale zdjecia nie: ${error.message}`;
-    });
+    const photoLoad = loadPhotosForEntry({ ...entry, ...formPayload() });
+    const photoLoadRequestId = state.photoLoadRequestId;
+    photoLoad
+      .catch((error) => {
+        formStatus.textContent = `Wpis wczytany, ale zdjecia nie: ${error.message}`;
+      })
+      .then(() => {
+        if (state.photoLoadRequestId !== photoLoadRequestId) return;
+        startSimilarFileLookup({ immediate: true });
+      });
+    return;
   }
   startSimilarFileLookup({ immediate: true });
 }
@@ -7803,6 +7824,9 @@ async function searchByProduct({ automatic = false } = {}) {
     type_name: fields.type_name,
     model: fields.model,
   });
+  if (!automatic) {
+    startSimilarFileLookup({ immediate: true });
+  }
   const payload = await requestJson(`/api/entries/search?${params.toString()}`);
   renderEntrySelect(payload.entries || []);
   if (payload.entries && payload.entries.length > 0) {
@@ -7810,7 +7834,6 @@ async function searchByProduct({ automatic = false } = {}) {
   }
   if (!automatic) {
     formStatus.textContent = `${(payload.entries || []).length} dopasowan produktu.`;
-    startSimilarFileLookup({ immediate: true });
   }
 }
 
