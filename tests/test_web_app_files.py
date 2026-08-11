@@ -167,9 +167,10 @@ def test_file_token_allows_case_variant_of_a_resolved_photos_root(monkeypatch) -
         assert web_app._path_from_file_token(web_app._file_token(source)) == source
 
 
-def test_similar_files_endpoint_requires_login_and_hides_source_path() -> None:
+def test_similar_files_endpoint_requires_login_and_hides_source_path(monkeypatch) -> None:
     """Catches a suggestions response that leaks a local filename path or skips auth."""
 
+    monkeypatch.setenv("PICORG_WEB_AUTH", "1")
     with TestClient(web_app.app) as client:
         assert client.post("/api/similar-files", json=_similar_product_payload()).status_code == 401
 
