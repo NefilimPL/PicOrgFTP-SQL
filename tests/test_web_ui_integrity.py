@@ -294,6 +294,81 @@ const startSimilarFileLookup = (options) => scans.push({{
             result["scans"], [{"immediate": True, "occupied": ["02"]}]
         )
 
+    def test_filling_without_photos_invalidates_an_old_photo_lookup(self) -> None:
+        """A completed old photo load must not search for a newly filled entry."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function fillForm")
+        end = source.index("async function refreshData", start)
+        body = source[start:end]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the fill-form lookup contract test")
+        script = f"""
+const state = {{
+  suppressAutoSearch: false, loadedEntryOriginal: null,
+  slotFits: new Map(), deletedSlots: new Map(), slotSources: new Map(),
+  similarCandidates: new Map(), dismissedSimilarSlots: new Set(),
+  userSelectedSlotSources: new Map(), ftpPreviewLoading: new Map(),
+  ftpPreviewBackgroundLoading: new Map(), photoSourcesLoaded: new Set(),
+  loadedPhotos: new Map(), backgroundFtpLookupKey: "",
+  backgroundFtpLookupRequestId: 0, backgroundFtpLookupTimer: 0,
+  photoLoadRequestId: 0,
+}};
+const fields = Object.fromEntries(
+  ["product_id", "name", "type_name", "model", "color1", "color2", "color3", "extra", "ean"]
+    .map((name) => [name, {{ value: "" }}])
+);
+const productForm = {{ elements: fields }};
+const formStatus = {{ textContent: "" }};
+const window = {{ clearTimeout() {{}} }};
+const setTimeout = () => 0;
+const handlePimcoreEanInput = () => {{}};
+const applyProductFieldSettings = () => {{}};
+const updateFieldWarnings = () => {{}};
+const formPayload = () => ({{ name: fields.name.value, type_name: fields.type_name.value, model: fields.model.value }});
+const cancelSimilarFileLookup = () => {{}};
+let resolveOldPhotoLoad;
+function loadPhotosForEntry() {{
+  const requestId = ++state.photoLoadRequestId;
+  return new Promise((resolve) => {{
+    resolveOldPhotoLoad = () => {{
+      if (state.photoLoadRequestId === requestId) state.loadedPhotos.set("02", {{ token: "old" }});
+      resolve();
+    }};
+  }});
+}}
+const scans = [];
+const startSimilarFileLookup = (options) => scans.push({{
+  immediate: options?.immediate === true,
+  product: fields.name.value,
+  occupied: Array.from(state.loadedPhotos.keys()),
+}});
+{body}
+(async () => {{
+  fillForm({{ name: "Old", type_name: "Desk", model: "A" }}, {{ loadPhotos: true }});
+  fillForm({{ name: "New", type_name: "Desk", model: "B" }}, {{ loadPhotos: false }});
+  const scansBeforeOldPhotoCompletes = scans.length;
+  resolveOldPhotoLoad();
+  await Promise.resolve();
+  await Promise.resolve();
+  console.log(JSON.stringify({{ scansBeforeOldPhotoCompletes, scans }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(result["scansBeforeOldPhotoCompletes"], 1)
+        self.assertEqual(
+            result["scans"], [{"immediate": True, "product": "New", "occupied": []}]
+        )
+
     def test_request_json_composes_external_abort_with_timeout(self) -> None:
         """An external cancellation signal must not disable the transport deadline."""
 

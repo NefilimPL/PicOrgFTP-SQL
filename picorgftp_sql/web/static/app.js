@@ -7720,6 +7720,7 @@ function fillForm(entry, options = {}) {
       });
     return;
   }
+  state.photoLoadRequestId += 1;
   startSimilarFileLookup({ immediate: true });
 }
 
