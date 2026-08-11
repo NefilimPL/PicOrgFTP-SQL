@@ -112,6 +112,7 @@ const state = {
   productFields: {},
   ftpPreviewLoading: new Set(),
   ftpPreviewBackgroundLoading: new Set(),
+  ftpPreviewRequests: new Map(),
   ftpPreviewCache: new Map(),
   backgroundFtpPreviewTimer: 0,
   backgroundFtpPreviewLimit: 1,
@@ -2579,8 +2580,8 @@ async function openSlotFile(prefix) {
     window.open(filePreviewUrl(prefix, selectedFile), "_blank", "noopener");
     return;
   }
-  if (source === "ftp" && photo?.ftp_filename && !photo.ftp_token) {
-    await loadFtpPreview(photo, prefix);
+  if (source === "ftp" && photo?.ftp_filename) {
+    await loadFtpPreview(photo, prefix, state.photoLoadRequestId, { forceRefresh: true });
     photo = state.loadedPhotos.get(prefix);
   }
   const url = loadedFileUrl(photo, prefix);
@@ -2691,12 +2692,14 @@ function renderSlotBadges(container, photo, file, prefix) {
         event.stopPropagation();
         state.slotSources.set(prefix, key);
         state.userSelectedSlotSources.add(prefix);
-        if (key === "ftp" && !photo.ftp_token) {
+        if (key === "ftp") {
           if (state.ftpPreviewLoading.has(prefix)) {
             state.ftpPreviewBackgroundLoading.delete(prefix);
-            updateSlotPreview(prefix);
+            loadFtpPreview(photo, prefix, state.photoLoadRequestId, { forceRefresh: true }).catch((error) => {
+              formStatus.textContent = error.message;
+            });
           } else {
-            loadFtpPreview(photo, prefix).catch((error) => {
+            loadFtpPreview(photo, prefix, state.photoLoadRequestId, { forceRefresh: true }).catch((error) => {
               formStatus.textContent = error.message;
             });
           }
@@ -3149,12 +3152,22 @@ function applyCachedFtpPreview(photo, prefix, cached) {
 }
 
 async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestId, options = {}) {
-  if (!photo?.ftp_filename || state.ftpPreviewLoading.has(prefix)) return;
+  if (!photo?.ftp_filename) return;
+  if (state.ftpPreviewLoading.has(prefix)) {
+    const pending = state.ftpPreviewRequests.get(prefix);
+    if (!pending) return;
+    await pending;
+    if (!options.forceRefresh) return;
+    const refreshedPhoto = state.loadedPhotos.get(prefix);
+    if (!refreshedPhoto?.ftp_filename) return;
+    return loadFtpPreview(refreshedPhoto, prefix, requestId, options);
+  }
   const revision = slotRevision(prefix);
   const cacheKey = ftpPreviewCacheKey(photo, formValue("ean") || "");
   const sourceBefore = selectedSlotSource(prefix, photo);
   const explicitSourceBefore = state.slotSources.get(prefix);
-  const cached = cacheKey ? state.ftpPreviewCache.get(cacheKey) : null;
+  const forceRefresh = Boolean(options.forceRefresh);
+  const cached = forceRefresh ? null : cacheKey ? state.ftpPreviewCache.get(cacheKey) : null;
   if (cached) {
     setFtpPreviewCache(cacheKey, cached);
     const currentPhoto = state.loadedPhotos.get(prefix);
@@ -3181,6 +3194,11 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
     return;
   }
   state.ftpPreviewLoading.add(prefix);
+  let finishRequest;
+  const requestComplete = new Promise((resolve) => {
+    finishRequest = resolve;
+  });
+  state.ftpPreviewRequests.set(prefix, requestComplete);
   const background = Boolean(options.background);
   if (background) {
     state.ftpPreviewBackgroundLoading.add(prefix);
@@ -3237,6 +3255,10 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
   } finally {
     state.ftpPreviewLoading.delete(prefix);
     state.ftpPreviewBackgroundLoading.delete(prefix);
+    finishRequest();
+    if (state.ftpPreviewRequests.get(prefix) === requestComplete) {
+      state.ftpPreviewRequests.delete(prefix);
+    }
     const currentPhoto = state.loadedPhotos.get(prefix);
     if (background && selectedSlotSource(prefix, currentPhoto) !== "ftp") {
       setFtpBadgeLoading(prefix, false);

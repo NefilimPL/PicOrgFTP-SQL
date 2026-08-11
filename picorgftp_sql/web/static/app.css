@@ -2595,18 +2595,18 @@ button.slot-badge.on:hover {
 }
 
 .slot-preview-actions .slot-fit-button {
-  top: 8px;
-  left: 8px;
+  top: 3px;
+  left: 3px;
 }
 
 .slot-preview-actions .slot-clear-button {
-  top: 8px;
-  right: 8px;
+  top: 3px;
+  right: 3px;
 }
 
 .slot-preview-actions .slot-open-button {
-  bottom: 8px;
-  left: 8px;
+  bottom: 3px;
+  left: 3px;
 }
 
 .similar-decision-row-actions .slot-similar-accept {

@@ -136,8 +136,35 @@ console.log(JSON.stringify({{
         self.assertIn("preview.appendChild(controls);", renderer)
         self.assertNotIn("meta.appendChild(controls);", renderer)
         self.assertIn(".slot-preview-actions", css)
-        self.assertIn("top: 8px", css)
-        self.assertIn("bottom: 8px", css)
+        self.assertIn(".slot-preview-actions .slot-fit-button {\n  top: 3px;\n  left: 3px;", css)
+        self.assertIn(".slot-preview-actions .slot-clear-button {\n  top: 3px;\n  right: 3px;", css)
+        self.assertIn(".slot-preview-actions .slot-open-button {\n  bottom: 3px;\n  left: 3px;", css)
+
+    def test_active_ftp_source_refreshes_stale_preview_before_opening(self) -> None:
+        """A stale FTP cache token must never be opened without a refresh request."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        loader_start = source.index("async function loadFtpPreview")
+        loader_end = source.index("function nextBackgroundFtpPreviewCandidate", loader_start)
+        loader = source[loader_start:loader_end]
+        opener_start = source.index("async function openSlotFile")
+        opener_end = source.index("function markSlotDeletion", opener_start)
+        opener = source[opener_start:opener_end]
+        badge_start = source.index("function renderSlotBadges")
+        badge_end = source.index("function isPhotoSourceLoading", badge_start)
+        badges = source[badge_start:badge_end]
+
+        self.assertIn("const forceRefresh = Boolean(options.forceRefresh);", loader)
+        self.assertIn("const cached = forceRefresh ? null", loader)
+        self.assertIn(
+            "await loadFtpPreview(photo, prefix, state.photoLoadRequestId, { forceRefresh: true });",
+            opener,
+        )
+        self.assertIn("loadFtpPreview(photo, prefix, state.photoLoadRequestId, { forceRefresh: true })", badges)
+        self.assertIn("ftpPreviewRequests: new Map(),", source)
+        self.assertIn("const pending = state.ftpPreviewRequests.get(prefix);", loader)
+        self.assertIn("await pending;", loader)
+        self.assertIn("return loadFtpPreview(refreshedPhoto, prefix, requestId, options);", loader)
 
     def test_unaccepted_similar_candidate_is_the_current_preview_source(self) -> None:
         """The candidate shown by default must be openable as the active POD source."""
