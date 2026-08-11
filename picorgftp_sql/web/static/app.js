@@ -3444,7 +3444,7 @@ function setSlotFile(prefix, file, options = {}) {
     return item;
   }
   uploadSlotFile(prefix, item);
-  scheduleSimilarFileLookup();
+  startSimilarFileLookup({ immediate: true });
   return item;
 }
 
@@ -7507,7 +7507,7 @@ async function lookupSimilarFiles() {
   const occupiedPrefixes = similarOccupiedSlotPrefixes();
   const key = similarFileIdentityKey(fields, occupiedPrefixes);
   if (!hasSimilarBaseIdentity(fields)) {
-    state.similarCandidates.clear();
+    applySimilarCandidates([]);
     cancelSimilarFileLookup();
     return;
   }

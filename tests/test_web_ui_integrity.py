@@ -571,6 +571,78 @@ function requestJson(_url, options) {{
         self.assertEqual(result["status"], "")
         self.assertGreater(result["renders"], 0)
 
+    def test_invalid_similar_identity_retains_accepted_pdf_preview_metadata(self) -> None:
+        """Clearing an ineligible lookup must remove pending candidates, not an accepted PDF."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        lookup_helpers = source[
+            source.index("function similarFileIdentityKey") : source.index(
+                "function scheduleSimilarFileLookup", source.index("function similarFileIdentityKey")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the accepted PDF identity contract test")
+        script = f"""
+const acceptedPdf = {{
+  id: "accepted-pdf", filename: "instruction.pdf", is_pdf: true,
+  token: "signed-pdf", url: "/api/file?token=signed-pdf",
+  thumb_url: "/api/thumbnail?token=signed-pdf",
+}};
+const state = {{
+  files: new Map([["01", {{ similar_candidate_id: "accepted-pdf", token: "signed-pdf" }}]]),
+  loadedPhotos: new Map(), deletedSlots: new Map(),
+  slotSources: new Map([["01", "similar"]]),
+  similarCandidates: new Map([
+    ["01", acceptedPdf],
+    ["02", {{ id: "pending", filename: "pending.jpg", is_pdf: false }}],
+  ]),
+  dismissedSimilarSlots: new Set(), similarFileLookupTimer: 0,
+  similarFileLookupRequestId: 0, similarFileLookupController: null,
+  similarFileLookupInFlight: false, similarFileLookupStartedAt: 0,
+  similarFileLookupKey: "",
+}};
+const formStatus = {{ textContent: "" }};
+const formPayload = () => ({{
+  name: "Product", type_name: "Sideboard", model: "",
+  color1: "WHITE", color2: "", color3: "", extra: "",
+}});
+const normalizedIdentityValue = (value) => String(value || "").trim().toUpperCase();
+const window = {{ clearTimeout: () => {{}} }};
+let renders = 0;
+let requests = 0;
+const renderSlots = () => {{ renders += 1; }};
+const requestJson = () => {{ requests += 1; throw new Error("request must not start"); }};
+{lookup_helpers}
+(async () => {{
+  await lookupSimilarFiles();
+  const retained = state.similarCandidates.get("01");
+  console.log(JSON.stringify({{
+    retainedId: retained?.id || null,
+    retainedPdf: retained?.is_pdf === true,
+    retainedUrl: retained?.url || null,
+    pendingRetained: state.similarCandidates.has("02"),
+    requests,
+    renders,
+  }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(result["retainedId"], "accepted-pdf")
+        self.assertTrue(result["retainedPdf"])
+        self.assertEqual(result["retainedUrl"], "/api/file?token=signed-pdf")
+        self.assertFalse(result["pendingRetained"])
+        self.assertEqual(result["requests"], 0)
+        self.assertGreater(result["renders"], 0)
+
     def test_similar_candidate_image_preview_uses_its_signed_thumbnail(self) -> None:
         """Catches a pending candidate deriving its thumbnail from an inactive slot source."""
 
@@ -607,8 +679,8 @@ console.log(JSON.stringify({{ src: previewImage.src }}));
         )
         self.assertEqual(json.loads(completed.stdout)["src"], "/api/thumbnail?token=signed-thumbnail")
 
-    def test_manual_slot_file_refreshes_similar_candidate_placement(self) -> None:
-        """Catches manual upload permanently hiding a candidate instead of reallocating it."""
+    def test_manual_slot_file_starts_immediate_similar_lookup_with_new_occupied_slot(self) -> None:
+        """Manual assignment must reallocate candidates immediately using the new occupancy."""
 
         source = APP_JS.read_text(encoding="utf-8")
         set_slot_file = source[
@@ -632,11 +704,17 @@ const createSlotFileUpload = (_prefix, file) => ({{ file }});
 const dismissSimilarCandidate = () => {{}};
 const updateSubmitButtonState = () => {{}};
 const uploadSlotFile = () => {{}};
-let refreshes = 0;
-const scheduleSimilarFileLookup = () => {{ refreshes += 1; }};
+let immediateRefreshes = 0;
+let debouncedRefreshes = 0;
+let occupiedAtRefresh = [];
+const scheduleSimilarFileLookup = () => {{ debouncedRefreshes += 1; }};
+const startSimilarFileLookup = (options) => {{
+  if (options?.immediate) immediateRefreshes += 1;
+  occupiedAtRefresh = Array.from(state.files.keys()).sort();
+}};
 {set_slot_file}
 setSlotFile("01", {{ name: "manual.jpg" }});
-console.log(JSON.stringify({{ refreshes }}));
+console.log(JSON.stringify({{ immediateRefreshes, debouncedRefreshes, occupiedAtRefresh }}));
 """
         completed = subprocess.run(
             [str(node), "-e", script],
@@ -645,7 +723,10 @@ console.log(JSON.stringify({{ refreshes }}));
             text=True,
             encoding="utf-8",
         )
-        self.assertEqual(json.loads(completed.stdout)["refreshes"], 1)
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["immediateRefreshes"], 1)
+        self.assertEqual(result["debouncedRefreshes"], 0)
+        self.assertEqual(result["occupiedAtRefresh"], ["01"])
 
     def test_similar_controls_are_compact_and_slot_local(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
