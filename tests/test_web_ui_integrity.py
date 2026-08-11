@@ -157,7 +157,7 @@ console.log(JSON.stringify({{
         self.assertIn("const forceRefresh = Boolean(options.forceRefresh);", loader)
         self.assertIn("const cached = forceRefresh ? null", loader)
         self.assertIn(
-            "await loadFtpPreview(photo, prefix, state.photoLoadRequestId, { forceRefresh: true });",
+            "await loadFtpPreview(photo, prefix, openingRequestId, { forceRefresh: true });",
             opener,
         )
         self.assertIn("loadFtpPreview(photo, prefix, state.photoLoadRequestId, { forceRefresh: true })", badges)
@@ -165,6 +165,25 @@ console.log(JSON.stringify({{
         self.assertIn("const pending = state.ftpPreviewRequests.get(prefix);", loader)
         self.assertIn("await pending;", loader)
         self.assertIn("return loadFtpPreview(refreshedPhoto, prefix, requestId, options);", loader)
+
+    def test_ftp_refresh_does_not_change_newer_slot_state_or_open_it(self) -> None:
+        """A completed old FTP request must not override another entry or source selection."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        loader_start = source.index("async function loadFtpPreview")
+        loader_end = source.index("function nextBackgroundFtpPreviewCandidate", loader_start)
+        loader = source[loader_start:loader_end]
+        opener_start = source.index("async function openSlotFile")
+        opener_end = source.index("function markSlotDeletion", opener_start)
+        opener = source[opener_start:opener_end]
+
+        self.assertIn("const openingRequestId = state.photoLoadRequestId;", opener)
+        self.assertIn("const openingRevision = slotRevision(prefix);", opener)
+        self.assertIn("openingRequestId !== state.photoLoadRequestId", opener)
+        self.assertIn("openingRevision !== slotRevision(prefix)", opener)
+        self.assertIn('selectedSlotSource(prefix, photo) !== "ftp"', opener)
+        self.assertIn("if (state.ftpPreviewRequests.get(prefix) !== requestComplete) return;", loader)
+        self.assertNotIn('state.slotSources.set(prefix, "ftp");', loader)
 
     def test_unaccepted_similar_candidate_is_the_current_preview_source(self) -> None:
         """The candidate shown by default must be openable as the active POD source."""

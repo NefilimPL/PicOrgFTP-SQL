@@ -2571,6 +2571,8 @@ async function openSlotFile(prefix) {
   const selectedFile = state.files.get(prefix);
   let photo = state.loadedPhotos.get(prefix);
   const source = selectedSlotSource(prefix, photo);
+  const openingRequestId = state.photoLoadRequestId;
+  const openingRevision = slotRevision(prefix);
   if (source === "sql") {
     const sqlUrl = loadedFileUrl(photo, prefix);
     if (sqlUrl) window.open(sqlUrl, "_blank", "noopener");
@@ -2581,8 +2583,15 @@ async function openSlotFile(prefix) {
     return;
   }
   if (source === "ftp" && photo?.ftp_filename) {
-    await loadFtpPreview(photo, prefix, state.photoLoadRequestId, { forceRefresh: true });
+    await loadFtpPreview(photo, prefix, openingRequestId, { forceRefresh: true });
+    if (
+      openingRequestId !== state.photoLoadRequestId ||
+      openingRevision !== slotRevision(prefix)
+    ) {
+      return;
+    }
     photo = state.loadedPhotos.get(prefix);
+    if (selectedSlotSource(prefix, photo) !== "ftp") return;
   }
   const url = loadedFileUrl(photo, prefix);
   if (url) window.open(url, "_blank", "noopener");
@@ -3158,14 +3167,13 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
     if (!pending) return;
     await pending;
     if (!options.forceRefresh) return;
+    if (requestId !== state.photoLoadRequestId) return;
     const refreshedPhoto = state.loadedPhotos.get(prefix);
     if (!refreshedPhoto?.ftp_filename) return;
     return loadFtpPreview(refreshedPhoto, prefix, requestId, options);
   }
   const revision = slotRevision(prefix);
   const cacheKey = ftpPreviewCacheKey(photo, formValue("ean") || "");
-  const sourceBefore = selectedSlotSource(prefix, photo);
-  const explicitSourceBefore = state.slotSources.get(prefix);
   const forceRefresh = Boolean(options.forceRefresh);
   const cached = forceRefresh ? null : cacheKey ? state.ftpPreviewCache.get(cacheKey) : null;
   if (cached) {
@@ -3181,11 +3189,6 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
     }
     const updated = applyCachedFtpPreview(currentPhoto, prefix, cached);
     state.loadedPhotos.set(prefix, updated);
-    if (!options.background || sourceBefore === "ftp") {
-      state.slotSources.set(prefix, "ftp");
-    } else if (explicitSourceBefore) {
-      state.slotSources.set(prefix, explicitSourceBefore);
-    }
     if (options.background && selectedSlotSource(prefix, updated) !== "ftp") {
       setFtpBadgeLoading(prefix, false);
     } else {
@@ -3244,21 +3247,16 @@ async function loadFtpPreview(photo, prefix, requestId = state.photoLoadRequestI
       ftp_file_version: payload.file_version || "",
     };
     state.loadedPhotos.set(prefix, updated);
-    if (!background || sourceBefore === "ftp") {
-      state.slotSources.set(prefix, "ftp");
-    } else if (explicitSourceBefore) {
-      state.slotSources.set(prefix, explicitSourceBefore);
-    }
     if (!background) {
       formStatus.textContent = `Pobrano podglad FTP dla slotu ${prefix}.`;
     }
   } finally {
+    finishRequest();
+    if (state.ftpPreviewRequests.get(prefix) !== requestComplete) return;
     state.ftpPreviewLoading.delete(prefix);
     state.ftpPreviewBackgroundLoading.delete(prefix);
-    finishRequest();
-    if (state.ftpPreviewRequests.get(prefix) === requestComplete) {
-      state.ftpPreviewRequests.delete(prefix);
-    }
+    state.ftpPreviewRequests.delete(prefix);
+    if (requestId !== state.photoLoadRequestId || revision !== slotRevision(prefix)) return;
     const currentPhoto = state.loadedPhotos.get(prefix);
     if (background && selectedSlotSource(prefix, currentPhoto) !== "ftp") {
       setFtpBadgeLoading(prefix, false);
