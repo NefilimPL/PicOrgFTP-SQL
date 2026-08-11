@@ -217,11 +217,15 @@ console.log(selectedSlotSource('07', null));
         end = source.index("async function refreshData", start)
         body = source[start:end]
 
-        self.assertIn("window.clearTimeout(state.similarFileLookupTimer);", body)
-        self.assertIn("scheduleSimilarFileLookup();", body)
+        self.assertIn("cancelSimilarFileLookup();", body)
+        self.assertIn("startSimilarFileLookup({ immediate: true });", body)
         self.assertLess(
-            body.index("state.similarFileLookupRequestId += 1;"),
-            body.index("scheduleSimilarFileLookup();"),
+            body.index("cancelSimilarFileLookup();"),
+            body.index("startSimilarFileLookup({ immediate: true });"),
+        )
+        self.assertLess(
+            body.index("loadPhotosForEntry({ ...entry, ...formPayload() })"),
+            body.index("startSimilarFileLookup({ immediate: true });"),
         )
 
     def test_accepted_similar_image_keeps_the_similar_preview_marker(self) -> None:
@@ -447,6 +451,126 @@ async function requestJson(_url, options) {{
         self.assertIsNone(result["thrown"])
         self.assertIn("Nie udalo sie sprawdzic plikow z podobnych produktow", result["status"])
 
+    def test_similar_lookup_uses_abort_signal_and_ignores_abort_error(self) -> None:
+        """A superseded transport must be cancellable without surfacing a user error."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("async function lookupSimilarFiles")
+        end = source.index("function scheduleSimilarFileLookup", start)
+        lookup = source[start:end]
+
+        self.assertIn("new AbortController()", lookup)
+        self.assertIn("signal: controller.signal", lookup)
+        self.assertIn('error.name === "AbortError"', lookup)
+
+    def test_photo_load_does_not_schedule_similar_lookup(self) -> None:
+        """Photo-source completion must not launch a second similar-file request."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("async function loadPhotosForEntry")
+        end = source.index("function fillForm", start)
+
+        self.assertNotIn("scheduleSimilarFileLookup", source[start:end])
+
+    def test_empty_slot_has_search_feedback_and_reduced_motion_css(self) -> None:
+        """Only a free slot exposes accessible lookup progress with safe motion fallback."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        css = APP_CSS.read_text(encoding="utf-8")
+
+        self.assertIn("Automatyczne wyszukiwanie podobnych plikow...", source)
+        self.assertIn("similar-searching", source)
+        self.assertIn('empty.setAttribute("role", "status")', source)
+        self.assertIn('empty.setAttribute("aria-live", "polite")', source)
+        self.assertRegex(
+            css,
+            re.compile(
+                r"\.slot-card\.similar-searching \.slot-preview\s*\{[^}]*border:\s*2px dashed",
+                re.DOTALL,
+            ),
+        )
+        self.assertIn("@media (prefers-reduced-motion: reduce)", css)
+        self.assertRegex(
+            css,
+            re.compile(
+                r"@media \(prefers-reduced-motion: reduce\)\s*\{.*?"
+                r"\.slot-card\.similar-searching \.slot-preview\s*\{[^}]*animation:\s*none",
+                re.DOTALL,
+            ),
+        )
+
+    def test_late_similar_response_cannot_replace_new_lookup_results(self) -> None:
+        """An aborted predecessor resolving late cannot render over the current lookup."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        lookup_helpers = source[
+            source.index("function similarFileIdentityKey") : source.index(
+                "function scheduleSimilarFileLookup", source.index("function similarFileIdentityKey")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the stale similar-file lookup contract test")
+        script = f"""
+const requests = [];
+let fields = {{
+  name: "Old Product", type_name: "Sideboard", model: "100",
+  color1: "WHITE", color2: "", color3: "", extra: "NO-LED",
+}};
+const state = {{
+  files: new Map(), loadedPhotos: new Map(), deletedSlots: new Map(),
+  slotSources: new Map(), similarCandidates: new Map(),
+  similarDecisionResults: new Map(), dismissedSimilarSlots: new Set(),
+  similarFileLookupRequestId: 0, similarFileLookupController: null,
+  similarFileLookupInFlight: false, similarFileLookupStartedAt: 0,
+  similarFileLookupKey: "",
+}};
+const formStatus = {{ textContent: "" }};
+const formPayload = () => ({{ ...fields }});
+const normalizedIdentityValue = (value) => String(value || "").trim().toUpperCase();
+let renders = 0;
+const renderSlots = () => {{ renders += 1; }};
+function requestJson(_url, options) {{
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {{
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  }});
+  requests.push({{ options, resolve, reject }});
+  return promise;
+}}
+{lookup_helpers}
+(async () => {{
+  const oldLookup = lookupSimilarFiles();
+  fields = {{ ...fields, name: "New Product", color1: "BLACK" }};
+  const newLookup = lookupSimilarFiles();
+  requests[1].resolve({{ candidates: [{{ target_prefix: "02", id: "new" }}] }});
+  await newLookup;
+  requests[0].resolve({{ candidates: [{{ target_prefix: "01", id: "old" }}] }});
+  await oldLookup;
+  console.log(JSON.stringify({{
+    aborted: requests[0].options.signal?.aborted === true,
+    candidates: Array.from(state.similarCandidates.values()).map((candidate) => candidate.id),
+    status: formStatus.textContent,
+    renders,
+  }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertTrue(result["aborted"])
+        self.assertEqual(result["candidates"], ["new"])
+        self.assertEqual(result["status"], "")
+        self.assertGreater(result["renders"], 0)
+
     def test_similar_candidate_image_preview_uses_its_signed_thumbnail(self) -> None:
         """Catches a pending candidate deriving its thumbnail from an inactive slot source."""
 
@@ -600,7 +724,11 @@ const previewImage = {{
   addEventListener: () => {{}},
   removeAttribute: () => {{}},
 }};
-const empty = {{ textContent: "" }};
+const empty = {{
+  textContent: "",
+  setAttribute: () => {{}},
+  removeAttribute: () => {{}},
+}};
 const preview = {{
   classList: classList(),
   querySelector: (selector) => {{

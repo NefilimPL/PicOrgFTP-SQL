@@ -21,6 +21,9 @@ const state = {
   dismissedSimilarSlots: new Set(),
   similarFileLookupTimer: 0,
   similarFileLookupRequestId: 0,
+  similarFileLookupController: null,
+  similarFileLookupInFlight: false,
+  similarFileLookupStartedAt: 0,
   similarFileLookupKey: "",
   draggedSlotPrefix: "",
   lastLookupMs: null,
@@ -2133,6 +2136,14 @@ function similarCandidateForSlot(prefix) {
   return state.similarCandidates.get(prefix) || null;
 }
 
+function isFreeSimilarSlot(prefix) {
+  return (
+    !state.files.has(prefix) &&
+    !state.loadedPhotos.has(prefix) &&
+    !similarCandidateForSlot(prefix)
+  );
+}
+
 function dismissSimilarCandidate(prefix) {
   state.dismissedSimilarSlots.add(prefix);
   state.similarCandidates.delete(prefix);
@@ -3689,10 +3700,12 @@ function updateSlotPreview(prefix) {
   const previewImage = preview.querySelector("img");
   const empty = preview.querySelector(".slot-empty");
   const candidate = similarCandidateForSlot(prefix);
+  const searching = state.similarFileLookupInFlight && isFreeSimilarSlot(prefix);
   const fitButton = card.querySelector(".slot-fit-button");
   const openButton = card.querySelector(".slot-open-button");
   card.dataset.activeSource = selectedSlotSource(prefix, loadedPhoto) || "";
   card.classList.toggle("slot-similar-pending", Boolean(candidate && !selectedFile));
+  card.classList.toggle("similar-searching", searching);
   detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, prefix);
   card.querySelectorAll(".slot-badge[data-source]").forEach((badge) => {
     const selected = selectedSlotSource(prefix, loadedPhoto) === badge.dataset.source;
@@ -3730,7 +3743,16 @@ function updateSlotPreview(prefix) {
   preview.querySelector(".slot-similar-preview")?.remove();
   preview.querySelector(".slot-sql-preview")?.remove();
   previewImage.removeAttribute("src");
-  empty.textContent = "Brak pliku";
+  empty.textContent = searching
+    ? "Automatyczne wyszukiwanie podobnych plikow..."
+    : "Brak pliku";
+  if (searching && !candidate && !selectedFile && !loadedPhoto) {
+    empty.setAttribute("role", "status");
+    empty.setAttribute("aria-live", "polite");
+  } else {
+    empty.removeAttribute("role");
+    empty.removeAttribute("aria-live");
+  }
   if (selectedSlotSource(prefix, loadedPhoto) === "sql") {
     renderSqlPreview(prefix, loadedPhoto, preview, empty);
     return;
@@ -3806,6 +3828,7 @@ function createSlotNode(slot) {
     const loadedPhoto = state.loadedPhotos.get(slot.prefix);
     const selectedFile = state.files.get(slot.prefix);
     const candidate = similarCandidateForSlot(slot.prefix);
+    const searching = state.similarFileLookupInFlight && isFreeSimilarSlot(slot.prefix);
     const overlay = document.createElement("div");
     const controls = document.createElement("div");
     const fitButton = document.createElement("button");
@@ -3814,6 +3837,7 @@ function createSlotNode(slot) {
     node.dataset.slotPrefix = slot.prefix;
     node.dataset.activeSource = selectedSlotSource(slot.prefix, loadedPhoto) || "";
     node.classList.toggle("slot-similar-pending", Boolean(candidate && !selectedFile));
+    node.classList.toggle("similar-searching", searching);
 
     title.textContent = `${slot.prefix} - ${slot.label}`;
     detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, slot.prefix);
@@ -3823,6 +3847,14 @@ function createSlotNode(slot) {
     previewImage.draggable = false;
     previewImage.loading = "lazy";
     previewImage.decoding = "async";
+    if (searching && !candidate && !selectedFile && !loadedPhoto) {
+      empty.textContent = "Automatyczne wyszukiwanie podobnych plikow...";
+      empty.setAttribute("role", "status");
+      empty.setAttribute("aria-live", "polite");
+    } else {
+      empty.removeAttribute("role");
+      empty.removeAttribute("aria-live");
+    }
     node.draggable = Boolean(selectedFile || loadedPhoto?.token || loadedPhoto?.ftp_token || loadedPhoto?.ftp_filename);
     renderSlotBadges(meta, loadedPhoto, selectedFile, slot.prefix);
     if (candidate?.source_color) {
@@ -3845,6 +3877,7 @@ function createSlotNode(slot) {
       event.stopPropagation();
       state.slotFits.set(slot.prefix, !isSlotFit(slot.prefix));
       updateSlotPreview(slot.prefix);
+      startSimilarFileLookup({ immediate: true });
     });
     openButton.type = "button";
     openButton.className = "slot-open-button";
@@ -7408,8 +7441,8 @@ function scheduleBackgroundFtpLookup(delay = 900) {
   }, delay);
 }
 
-function similarFileIdentityKey(fields = formPayload()) {
-  return [
+function similarFileIdentityKey(fields = formPayload(), occupiedPrefixes = similarOccupiedSlotPrefixes()) {
+  const formIdentity = [
     fields.name,
     fields.type_name,
     fields.model,
@@ -7420,6 +7453,7 @@ function similarFileIdentityKey(fields = formPayload()) {
   ]
     .map(normalizedIdentityValue)
     .join("|");
+  return `${formIdentity}|slots:${occupiedPrefixes.map(normalizedIdentityValue).join(",")}`;
 }
 
 function similarOccupiedSlotPrefixes() {
@@ -7430,31 +7464,11 @@ function similarOccupiedSlotPrefixes() {
   return Array.from(occupied).sort();
 }
 
-async function lookupSimilarFiles() {
-  const fields = formPayload();
-  const key = similarFileIdentityKey(fields);
-  if (!fields.name || !fields.type_name || !fields.model || !fields.color1) {
-    state.similarCandidates.clear();
-    renderSlots();
-    return;
-  }
-  const requestId = state.similarFileLookupRequestId + 1;
-  state.similarFileLookupRequestId = requestId;
-  let payload;
-  try {
-    payload = await requestJson("/api/similar-files", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...fields, occupied_prefixes: similarOccupiedSlotPrefixes() }),
-      timeoutMs: 15000,
-    });
-  } catch (error) {
-    if (state.similarFileLookupRequestId === requestId && similarFileIdentityKey() === key) {
-      formStatus.textContent = `Nie udalo sie sprawdzic plikow z podobnych produktow: ${error.message}`;
-    }
-    return;
-  }
-  if (state.similarFileLookupRequestId !== requestId || similarFileIdentityKey() !== key) return;
+function hasSimilarBaseIdentity(fields = formPayload()) {
+  return Boolean(fields.name && fields.type_name && fields.model);
+}
+
+function applySimilarCandidates(candidates) {
   const acceptedCandidates = new Map(
     Array.from(state.similarCandidates.entries()).filter(
       ([prefix]) => state.slotSources.get(prefix) === "similar" && state.files.has(prefix)
@@ -7464,7 +7478,7 @@ async function lookupSimilarFiles() {
   for (const [prefix, candidate] of acceptedCandidates) {
     state.similarCandidates.set(prefix, candidate);
   }
-  for (const candidate of payload.candidates || []) {
+  for (const candidate of candidates) {
     const prefix = String(candidate.target_prefix || "").trim();
     if (prefix && !acceptedCandidates.has(prefix) && !state.dismissedSimilarSlots.has(prefix)) {
       state.similarCandidates.set(prefix, candidate);
@@ -7473,11 +7487,72 @@ async function lookupSimilarFiles() {
   renderSlots();
 }
 
+function setSimilarFileLookupState(active, key = "") {
+  state.similarFileLookupInFlight = active;
+  state.similarFileLookupKey = active ? key : "";
+  if (active) state.similarFileLookupStartedAt = performance.now();
+  renderSlots();
+}
+
+function cancelSimilarFileLookup() {
+  window.clearTimeout(state.similarFileLookupTimer);
+  state.similarFileLookupController?.abort();
+  state.similarFileLookupController = null;
+  state.similarFileLookupRequestId += 1;
+  setSimilarFileLookupState(false);
+}
+
+async function lookupSimilarFiles() {
+  const fields = formPayload();
+  const occupiedPrefixes = similarOccupiedSlotPrefixes();
+  const key = similarFileIdentityKey(fields, occupiedPrefixes);
+  if (!hasSimilarBaseIdentity(fields)) {
+    state.similarCandidates.clear();
+    cancelSimilarFileLookup();
+    return;
+  }
+  state.similarFileLookupController?.abort();
+  const controller = new AbortController();
+  state.similarFileLookupController = controller;
+  const requestId = ++state.similarFileLookupRequestId;
+  setSimilarFileLookupState(true, key);
+  try {
+    const payload = await requestJson("/api/similar-files", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...fields, occupied_prefixes: occupiedPrefixes }),
+      signal: controller.signal,
+      timeoutMs: 15000,
+    });
+    if (state.similarFileLookupRequestId !== requestId || similarFileIdentityKey() !== key) return;
+    applySimilarCandidates(payload.candidates || []);
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    if (state.similarFileLookupRequestId === requestId && similarFileIdentityKey() === key) {
+      formStatus.textContent = `Nie udalo sie sprawdzic plikow z podobnych produktow: ${error.message}`;
+    }
+  } finally {
+    if (state.similarFileLookupRequestId === requestId) {
+      state.similarFileLookupController = null;
+      setSimilarFileLookupState(false);
+    }
+  }
+}
+
 function scheduleSimilarFileLookup(delay = 450) {
   window.clearTimeout(state.similarFileLookupTimer);
   state.similarFileLookupTimer = window.setTimeout(() => {
     lookupSimilarFiles().catch(() => {});
   }, delay);
+}
+
+function startSimilarFileLookup({ immediate = false } = {}) {
+  window.clearTimeout(state.similarFileLookupTimer);
+  if (immediate) {
+    lookupSimilarFiles().catch(() => {});
+    return;
+  }
+  scheduleSimilarFileLookup();
 }
 
 function clearSelectedFiles() {
@@ -7584,7 +7659,6 @@ async function loadPhotosForEntry(entry, options = {}) {
     updateRuntimeMetrics();
     renderSlotsExceptPendingUserEdits(partial ? targetPrefixes : null);
     scheduleBackgroundFtpPreviewLoad(requestId, 1500);
-    if (!partial) scheduleSimilarFileLookup();
   }
 }
 
@@ -7596,8 +7670,7 @@ function fillForm(entry, options = {}) {
   state.slotSources.clear();
   state.similarCandidates.clear();
   state.dismissedSimilarSlots.clear();
-  state.similarFileLookupRequestId += 1;
-  window.clearTimeout(state.similarFileLookupTimer);
+  cancelSimilarFileLookup();
   state.userSelectedSlotSources.clear();
   state.ftpPreviewLoading.clear();
   state.ftpPreviewBackgroundLoading.clear();
@@ -7621,12 +7694,12 @@ function fillForm(entry, options = {}) {
   setTimeout(() => {
     state.suppressAutoSearch = false;
   }, 200);
-  scheduleSimilarFileLookup();
   if (options.loadPhotos) {
     loadPhotosForEntry({ ...entry, ...formPayload() }).catch((error) => {
       formStatus.textContent = `Wpis wczytany, ale zdjecia nie: ${error.message}`;
     });
   }
+  startSimilarFileLookup({ immediate: true });
 }
 
 async function refreshData() {
@@ -7737,6 +7810,7 @@ async function searchByProduct({ automatic = false } = {}) {
   }
   if (!automatic) {
     formStatus.textContent = `${(payload.entries || []).length} dopasowan produktu.`;
+    startSimilarFileLookup({ immediate: true });
   }
 }
 
@@ -13397,8 +13471,7 @@ function resetCurrentDraft({ clearOutput = true, status = "" } = {}) {
   state.slotSources.clear();
   state.similarCandidates.clear();
   state.dismissedSimilarSlots.clear();
-  state.similarFileLookupRequestId += 1;
-  window.clearTimeout(state.similarFileLookupTimer);
+  cancelSimilarFileLookup();
   state.userSelectedSlotSources.clear();
   state.photoSourceStatus.clear();
   state.ftpPreviewLoading.clear();
