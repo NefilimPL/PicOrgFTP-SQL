@@ -14,8 +14,8 @@ Wyszukiwanie lokalnych plików z podobnych wariantów produktu ma rozpoczynać s
 
 Skan ma dwa progi danych:
 
-1. Po wpisaniu lub wczytaniu `nazwa`, `typ` i `model` uruchamia się wyszukiwanie wszystkich wariantów kolorystycznych oraz dodatków o tej samej tożsamości bazowej. W tym stanie bieżący wariant nie jest jeszcze znany, więc żaden wariant nie jest wykluczany.
-2. Uzupełnienie lub zmiana koloru albo dodatku uruchamia odświeżenie, które wyklucza bieżący wariant koloru i filtruje zgodny dodatek według dotychczasowych reguł.
+1. Po wpisaniu lub wczytaniu `nazwa`, `typ` i `model` uruchamia się skan, bez oczekiwania na ładowanie zdjęć oraz pozostałe pola. Brak jeszcze wybranego koloru lub dodatku nie blokuje rozpoczęcia ani przygotowania wyniku.
+2. Uzupełnienie lub zmiana koloru albo dodatku uruchamia odświeżenie. Wartości już wpisane w formularzu nadal są ścisłymi filtrami: bieżący wariant koloru jest wykluczany, a różne dodatki (na przykład LED i NO-LED) nie są wzajemnie proponowane. Puste pole nie osłabia filtra dla pola, które użytkownik już określił.
 
 Akcje `Wczytaj wpis`, `Szukaj` i `Dopasuj` wymuszają od razu skan dla bieżącego formularza. Ręczne pisanie w polach ma krótki debounce. Skan nie jest uruchamiany ani wznawiany przez zakończenie pobierania podglądów zdjęć.
 
@@ -45,7 +45,8 @@ Błąd aktualnego żądania nie usuwa plików ani wcześniej pokazanych, nadal a
 
 Testy obejmą:
 
-- skan po samej tożsamości bazowej oraz wykluczenie bieżącego wariantu po wybraniu koloru;
+- rozpoczęcie skanu po samej tożsamości bazowej oraz późniejsze zawężenie wyniku po wybraniu koloru lub dodatku;
+- rozdzielenie wariantów o różnych dodatkach, w tym LED i NO-LED;
 - wymuszenie skanu przez wczytanie, wyszukanie i dopasowanie;
 - anulowanie lub ignorowanie spóźnionej odpowiedzi po zmianie wpisu;
 - niezależność od zakończenia ładowania zdjęć;
