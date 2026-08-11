@@ -6625,18 +6625,22 @@ def create_app() -> FastAPI:
     @app.get("/api/settings/sqlite/backups")
     def settings_sqlite_backups(request: Request) -> Dict[str, Any]:
         _require_admin(request)
-        return {"items": sqlite_backup.list_backups(storage_settings.resolve_backup_dir())}
+        return {"items": sqlite_backup.list_backups(storage_settings.resolve_backup_dirs())}
 
     @app.post("/api/settings/sqlite/backup-diff")
     async def settings_sqlite_backup_diff(request: Request) -> JSONResponse:
         _require_admin(request)
         payload = await request.json()
         backup_path = str(payload.get("backup_path") if isinstance(payload, dict) else "")
-        result = await run_in_threadpool(
-            sqlite_backup.diff_databases,
-            storage_settings.resolve_sqlite_path(),
-            backup_path,
-        )
+        try:
+            result = await run_in_threadpool(
+                sqlite_backup.diff_databases,
+                storage_settings.resolve_sqlite_path(),
+                backup_path,
+                storage_settings.resolve_backup_dirs(),
+            )
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(result)
 
     @app.post("/api/settings/sqlite/restore")
@@ -6644,12 +6648,16 @@ def create_app() -> FastAPI:
         _require_admin(request)
         payload = await request.json()
         backup_path = str(payload.get("backup_path") if isinstance(payload, dict) else "")
-        result = await run_in_threadpool(
-            sqlite_backup.restore_backup,
-            storage_settings.resolve_sqlite_path(),
-            backup_path,
-            storage_settings.resolve_backup_dir(),
-        )
+        try:
+            result = await run_in_threadpool(
+                sqlite_backup.restore_backup,
+                storage_settings.resolve_sqlite_path(),
+                backup_path,
+                storage_settings.resolve_backup_dir(),
+                storage_settings.resolve_backup_dirs(),
+            )
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         config.initialize_config(interactive=False)
         result["settings"] = settings_snapshot()
         return JSONResponse(result)

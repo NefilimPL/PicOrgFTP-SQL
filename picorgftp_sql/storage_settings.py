@@ -27,6 +27,7 @@ BACKUP_DEFAULTS = {
     "hours": [],
     "max_copies": 10,
     "last_run_slots": [],
+    "archive_dirs": [],
 }
 BACKUP_WEEKDAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
 
@@ -143,6 +144,20 @@ def _normalize_backup_settings(raw: object) -> dict[str, Any]:
         max_copies = max(1, min(999, int(payload.get("max_copies", 10))))
     except (TypeError, ValueError):
         max_copies = 10
+    archive_dirs = []
+    seen_archive_dirs = set()
+    raw_archive_dirs = payload.get("archive_dirs", [])
+    if not isinstance(raw_archive_dirs, (list, tuple, set)):
+        raw_archive_dirs = []
+    for raw_dir in raw_archive_dirs:
+        resolved = _resolve_path(raw_dir)
+        if not resolved:
+            continue
+        key = os.path.normcase(resolved)
+        if key in seen_archive_dirs:
+            continue
+        archive_dirs.append(resolved)
+        seen_archive_dirs.add(key)
     return {
         "enabled": bool(payload.get("enabled", False)),
         "slots": slots,
@@ -152,6 +167,7 @@ def _normalize_backup_settings(raw: object) -> dict[str, Any]:
         "last_run_slots": [
             str(item) for item in payload.get("last_run_slots", []) if str(item).strip()
         ],
+        "archive_dirs": archive_dirs,
     }
 
 
@@ -168,6 +184,20 @@ def save_backup_settings(updates: dict[str, object]) -> dict[str, Any]:
 
 def resolve_backup_dir() -> str:
     return str(_settings_path().resolve().parent / "BACKUP")
+
+
+def resolve_backup_dirs() -> list[str]:
+    """Return the primary and explicitly registered backup archive roots."""
+
+    roots = [str(Path(resolve_backup_dir()).resolve())]
+    seen = {os.path.normcase(roots[0])}
+    for archive_dir in load_backup_settings().get("archive_dirs", []):
+        resolved = str(Path(str(archive_dir)).resolve())
+        key = os.path.normcase(resolved)
+        if key not in seen:
+            roots.append(resolved)
+            seen.add(key)
+    return roots
 
 
 def _resolve_path(value: object) -> str:

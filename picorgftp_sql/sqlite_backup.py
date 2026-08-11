@@ -9,7 +9,7 @@ import sqlite3
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 SECRET_KEYWORDS = ("password", "pass", "secret", "token", "hash", "api_key")
@@ -41,6 +41,42 @@ def _backup_name(now: datetime, reason: str) -> str:
         f"picorgftp_sql-{_utc_datetime(now).strftime('%Y%m%d-%H%M%S')}-"
         f"{safe_reason}.sqlite"
     )
+
+
+def _backup_roots(backup_dirs: Iterable[str] | str) -> list[Path]:
+    values = [backup_dirs] if isinstance(backup_dirs, str) else backup_dirs
+    roots = []
+    seen = set()
+    for value in values:
+        try:
+            root = Path(value).resolve(strict=True)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            continue
+        if not root.is_dir():
+            continue
+        key = os.path.normcase(str(root))
+        if key not in seen:
+            roots.append(root)
+            seen.add(key)
+    return roots
+
+
+def resolve_backup_path(backup_path: str, backup_dirs: Iterable[str] | str) -> Path:
+    """Resolve an existing SQLite backup only when it is under a trusted root."""
+
+    try:
+        candidate = Path(str(backup_path or "")).resolve(strict=True)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise FileNotFoundError(str(backup_path or "")) from exc
+    if candidate.suffix.lower() != ".sqlite" or not candidate.is_file():
+        raise ValueError("Wybrana kopia musi byc plikiem SQLite.")
+    for root in _backup_roots(backup_dirs):
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        return candidate
+    raise ValueError("Wybrana kopia nie znajduje sie w dozwolonym katalogu.")
 
 
 def _schema_version(path: str) -> int:
@@ -117,21 +153,26 @@ def create_backup(
     return {"ok": True, **metadata}
 
 
-def list_backups(backup_dir: str) -> list[dict[str, Any]]:
+def list_backups(backup_dirs: Iterable[str] | str) -> list[dict[str, Any]]:
     items = []
-    for db_path in Path(backup_dir).glob("*.sqlite"):
-        meta_path = db_path.with_suffix(".json")
-        metadata: dict[str, Any] = {}
-        if meta_path.exists():
+    for backup_dir in _backup_roots(backup_dirs):
+        for db_path in backup_dir.glob("*.sqlite"):
             try:
-                metadata = json.loads(meta_path.read_text(encoding="utf-8"))
-            except Exception:
-                metadata = {}
-        metadata.setdefault("backup_path", str(db_path))
-        metadata.setdefault("created_at", "")
-        metadata.setdefault("reason", "")
-        metadata.setdefault("size_bytes", db_path.stat().st_size)
-        items.append(metadata)
+                safe_path = resolve_backup_path(str(db_path), [str(backup_dir)])
+            except (ValueError, FileNotFoundError):
+                continue
+            meta_path = safe_path.with_suffix(".json")
+            metadata: dict[str, Any] = {}
+            if meta_path.is_file():
+                try:
+                    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+                except Exception:
+                    metadata = {}
+            metadata["backup_path"] = str(safe_path)
+            metadata.setdefault("created_at", "")
+            metadata.setdefault("reason", "")
+            metadata.setdefault("size_bytes", safe_path.stat().st_size)
+            items.append(metadata)
     return sorted(items, key=lambda item: str(item.get("created_at") or ""), reverse=True)
 
 
@@ -145,7 +186,10 @@ def enforce_retention(backup_dir: str, max_copies: int) -> dict[str, Any]:
     remove = candidates[keep:]
     removed = 0
     for item in remove:
-        db_path = Path(str(item["backup_path"]))
+        try:
+            db_path = resolve_backup_path(str(item["backup_path"]), backup_dir)
+        except (ValueError, FileNotFoundError):
+            continue
         for path in (db_path, db_path.with_suffix(".json")):
             try:
                 path.unlink()
@@ -202,10 +246,15 @@ def mark_schedule_slots_run(
     return updated
 
 
-def restore_backup(active_path: str, backup_path: str, backup_dir: str) -> dict[str, Any]:
+def restore_backup(
+    active_path: str,
+    backup_path: str,
+    backup_dir: str,
+    allowed_backup_dirs: Iterable[str] | None = None,
+) -> dict[str, Any]:
     pre_restore = create_backup(active_path, backup_dir, reason="pre-restore")
     active = Path(active_path)
-    source = Path(backup_path)
+    source = resolve_backup_path(backup_path, allowed_backup_dirs or [backup_dir])
     fd, temp_path = tempfile.mkstemp(
         prefix="restore_",
         suffix=".sqlite.tmp",
@@ -255,7 +304,11 @@ def _config_rows(conn: sqlite3.Connection) -> dict[str, object]:
     return {str(path): _mask_value(str(path), value) for path, value in rows}
 
 
-def diff_databases(active_path: str, backup_path: str) -> dict[str, Any]:
+def diff_databases(
+    active_path: str,
+    backup_path: str,
+    allowed_backup_dirs: Iterable[str] | str,
+) -> dict[str, Any]:
     tables = [
         "app_config_values",
         "list_values",
@@ -267,7 +320,8 @@ def diff_databases(active_path: str, backup_path: str) -> dict[str, Any]:
         "file_index_segments",
         "web_history",
     ]
-    with sqlite3.connect(active_path) as active, sqlite3.connect(backup_path) as backup:
+    safe_backup_path = resolve_backup_path(backup_path, allowed_backup_dirs)
+    with sqlite3.connect(active_path) as active, sqlite3.connect(str(safe_backup_path)) as backup:
         active_counts = {table: _table_count(active, table) for table in tables}
         backup_counts = {table: _table_count(backup, table) for table in tables}
         active_config = _config_rows(active)

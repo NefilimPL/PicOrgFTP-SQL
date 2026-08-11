@@ -61,6 +61,19 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
+    def test_thumbnail_filter_has_a_label_and_safari_safe_selection_rule(self) -> None:
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        css = APP_CSS.read_text(encoding="utf-8")
+
+        self.assertRegex(
+            html,
+            r'<label class="check-row compact-check web-image-thumbnail-filter">\s*'
+            r'<input id="webImageHideThumbnails" type="checkbox">',
+        )
+        self.assertIn("-webkit-user-select: none;", css)
+        self.assertNotIn("-webkit-user-drag:", css)
+        self.assertNotIn("min-height: auto;", css)
+
     def test_slot_settings_collect_similar_file_detection_configuration(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
 

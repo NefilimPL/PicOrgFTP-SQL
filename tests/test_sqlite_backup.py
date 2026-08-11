@@ -77,6 +77,7 @@ def test_backup_settings_roundtrip(tmp_path: Path) -> None:
                 "days": ["mon"],
                 "hours": [8, 13],
                 "max_copies": 4,
+                "archive_dirs": [str(tmp_path / "archive"), str(tmp_path / "archive")],
             }
         )
         loaded = storage_settings.load_backup_settings()
@@ -86,6 +87,55 @@ def test_backup_settings_roundtrip(tmp_path: Path) -> None:
     assert loaded["days"] == ["mon"]
     assert loaded["hours"] == [8, 13]
     assert loaded["max_copies"] == 4
+    assert loaded["archive_dirs"] == [str((tmp_path / "archive").resolve())]
+
+
+def test_restore_rejects_backup_outside_trusted_directories(tmp_path: Path) -> None:
+    active = tmp_path / "active.sqlite"
+    backup_dir = tmp_path / "BACKUP"
+    outside = tmp_path / "outside.sqlite"
+    backup_dir.mkdir()
+    _create_db(active)
+    _create_db(outside)
+
+    with pytest.raises(ValueError, match="dozwolonym katalog"):
+        sqlite_backup.restore_backup(str(active), str(outside), str(backup_dir))
+
+
+def test_restore_allows_backup_from_registered_archive_directory(tmp_path: Path) -> None:
+    active = tmp_path / "active.sqlite"
+    backup_dir = tmp_path / "BACKUP"
+    archive_dir = tmp_path / "archive"
+    backup = archive_dir / "moved.sqlite"
+    backup_dir.mkdir()
+    archive_dir.mkdir()
+    _create_db(active)
+    _create_db(backup)
+
+    result = sqlite_backup.restore_backup(
+        str(active),
+        str(backup),
+        str(backup_dir),
+        allowed_backup_dirs=[str(backup_dir), str(archive_dir)],
+    )
+
+    assert result["restored_from"] == str(backup.resolve())
+
+
+def test_list_backups_includes_registered_archive_directory(tmp_path: Path) -> None:
+    primary_dir = tmp_path / "BACKUP"
+    archive_dir = tmp_path / "archive"
+    primary_dir.mkdir()
+    archive_dir.mkdir()
+    _create_db(primary_dir / "current.sqlite")
+    _create_db(archive_dir / "moved.sqlite")
+
+    backups = sqlite_backup.list_backups([str(primary_dir), str(archive_dir)])
+
+    assert {Path(item["backup_path"]).name for item in backups} == {
+        "current.sqlite",
+        "moved.sqlite",
+    }
 
 
 def test_due_schedule_slots_respects_day_hour_and_last_run() -> None:
@@ -183,9 +233,19 @@ def test_diff_databases_masks_secret_values(tmp_path: Path) -> None:
     with sqlite3.connect(right) as conn:
         conn.execute("INSERT INTO app_config_values VALUES ('ftp.password', '\"secret\"', '2026-06-25T13:02:34.300Z')")
 
-    diff = sqlite_backup.diff_databases(str(left), str(right))
+    diff = sqlite_backup.diff_databases(str(left), str(right), [str(tmp_path)])
 
     assert diff["tables"]["app_config_values"]["added"] >= 1
     assert "secret" not in json.dumps(diff)
     assert "ftp.password" in json.dumps(diff)
     assert "present" in json.dumps(diff)
+
+
+def test_diff_databases_rejects_backup_outside_trusted_directories(tmp_path: Path) -> None:
+    active = tmp_path / "active.sqlite"
+    outside = tmp_path.parent / "outside.sqlite"
+    _create_db(active)
+    _create_db(outside)
+
+    with pytest.raises(ValueError, match="dozwolonym katalogu"):
+        sqlite_backup.diff_databases(str(active), str(outside), [str(tmp_path)])
