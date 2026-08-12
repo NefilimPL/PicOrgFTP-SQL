@@ -125,6 +125,163 @@ def test_similar_file_lookup_reserves_currently_occupied_slots() -> None:
     assert captured["occupied_prefixes"] == ["01", "02"]
 
 
+def test_web_similar_lookup_coalesces_identical_requests(monkeypatch) -> None:
+    """Catches repeated identical form lookups rediscovering the same files."""
+
+    calls = 0
+
+    def discover(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return []
+
+    monkeypatch.setattr(web_data, "find_similar_file_candidates", discover)
+    web_data.reset_similar_file_lookup_cache()
+
+    assert web_data.find_web_similar_file_candidates(_similar_product_payload()) == []
+    assert web_data.find_web_similar_file_candidates(_similar_product_payload()) == []
+    assert calls == 1
+
+
+def test_web_similar_lookup_key_changes_with_extra_and_occupied_slots(monkeypatch) -> None:
+    """Catches cache keys that omit strict extra or occupied target slots."""
+
+    calls = []
+    monkeypatch.setattr(
+        web_data, "find_similar_file_candidates", lambda *_a, **kw: calls.append(kw) or []
+    )
+    web_data.reset_similar_file_lookup_cache()
+
+    web_data.find_web_similar_file_candidates(_similar_product_payload())
+    web_data.find_web_similar_file_candidates({**_similar_product_payload(), "extra": "LED"})
+    web_data.find_web_similar_file_candidates(
+        {**_similar_product_payload(), "occupied_prefixes": ["01"]}
+    )
+
+    assert len(calls) == 3
+
+
+def test_web_similar_lookup_coalesces_simultaneous_identical_requests(monkeypatch) -> None:
+    """Catches a waiter starting a duplicate discovery while the owner is blocked."""
+
+    calls = 0
+    owner_started = threading.Event()
+    release_owner = threading.Event()
+    results: list[list[SimilarFileCandidate]] = []
+    created_flights = []
+    original_event = threading.Event
+
+    class TrackingEvent:
+        def __init__(self) -> None:
+            self._event = original_event()
+            self.wait_started = original_event()
+
+        def set(self) -> None:
+            self._event.set()
+
+        def wait(self, timeout=None) -> bool:
+            self.wait_started.set()
+            return self._event.wait(timeout)
+
+    def discover(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        owner_started.set()
+        assert release_owner.wait(timeout=2)
+        return []
+
+    monkeypatch.setattr(web_data, "find_similar_file_candidates", discover)
+    web_data.reset_similar_file_lookup_cache()
+    payload = _similar_product_payload()
+    owner = threading.Thread(
+        target=lambda: results.append(web_data.find_web_similar_file_candidates(payload))
+    )
+    waiter = threading.Thread(
+        target=lambda: results.append(web_data.find_web_similar_file_candidates(payload))
+    )
+    monkeypatch.setattr(
+        web_data.threading, "Event", lambda: created_flights.append(TrackingEvent()) or created_flights[-1]
+    )
+
+    owner.start()
+    assert owner_started.wait(timeout=2)
+    waiter.start()
+    assert created_flights[0].wait_started.wait(timeout=2)
+    release_owner.set()
+    owner.join(timeout=2)
+    waiter.join(timeout=2)
+
+    assert not owner.is_alive()
+    assert not waiter.is_alive()
+    assert results == [[], []]
+    assert calls == 1
+
+
+def test_web_similar_lookup_owner_error_wakes_waiter_and_allows_retry(monkeypatch) -> None:
+    """Catches failed owners stranding waiters or leaving a stale in-flight lookup."""
+
+    calls = 0
+    owner_started = threading.Event()
+    release_owner = threading.Event()
+    owner_errors: list[Exception] = []
+    waiter_results: list[list[SimilarFileCandidate]] = []
+    created_flights = []
+    original_event = threading.Event
+
+    class TrackingEvent:
+        def __init__(self) -> None:
+            self._event = original_event()
+            self.wait_started = original_event()
+
+        def set(self) -> None:
+            self._event.set()
+
+        def wait(self, timeout=None) -> bool:
+            self.wait_started.set()
+            return self._event.wait(timeout)
+
+    def discover(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            owner_started.set()
+            assert release_owner.wait(timeout=2)
+            raise RuntimeError("discovery failed")
+        return []
+
+    def run_owner() -> None:
+        try:
+            web_data.find_web_similar_file_candidates(payload)
+        except RuntimeError as error:
+            owner_errors.append(error)
+
+    monkeypatch.setattr(web_data, "find_similar_file_candidates", discover)
+    web_data.reset_similar_file_lookup_cache()
+    payload = _similar_product_payload()
+    owner = threading.Thread(target=run_owner)
+    waiter = threading.Thread(
+        target=lambda: waiter_results.append(web_data.find_web_similar_file_candidates(payload))
+    )
+    monkeypatch.setattr(
+        web_data.threading, "Event", lambda: created_flights.append(TrackingEvent()) or created_flights[-1]
+    )
+
+    owner.start()
+    assert owner_started.wait(timeout=2)
+    waiter.start()
+    assert created_flights[0].wait_started.wait(timeout=2)
+    release_owner.set()
+    owner.join(timeout=2)
+    waiter.join(timeout=2)
+
+    assert not owner.is_alive()
+    assert not waiter.is_alive()
+    assert [str(error) for error in owner_errors] == ["discovery failed"]
+    assert waiter_results == [[]]
+    assert calls == 2
+    assert not web_data._SIMILAR_LOOKUP_IN_FLIGHT
+
+
 def test_file_token_allows_a_resolved_equivalent_of_the_photos_root(monkeypatch) -> None:
     """Catches preview tokens failing when a mapped photo root resolves elsewhere."""
 

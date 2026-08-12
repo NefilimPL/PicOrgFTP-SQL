@@ -8,7 +8,6 @@ import os
 
 from .slot_utils import normalize_slot_prefix
 from .workflow_utils import (
-    build_color_segment,
     normalize_extra_segment,
     normalize_color_slots,
     parse_slot_filename,
@@ -111,6 +110,34 @@ def _read_digest(path: str) -> tuple[int, str] | None:
     return size, digest.hexdigest()
 
 
+class _DigestCache:
+    """Reuse digests while a file's path and metadata remain unchanged."""
+
+    def __init__(self) -> None:
+        self._digests: dict[tuple[str, int, int], tuple[int, str]] = {}
+        self._keys_by_path: dict[str, tuple[str, int, int]] = {}
+
+    def get(self, path: str) -> tuple[int, str] | None:
+        canonical = os.path.realpath(os.path.abspath(path))
+        stat = os.stat(canonical)
+        key = (canonical, stat.st_size, stat.st_mtime_ns)
+        cached = self._digests.get(key)
+        if cached is not None:
+            return cached
+
+        previous_key = self._keys_by_path.get(canonical)
+        if previous_key is not None and previous_key != key:
+            self._digests.pop(previous_key, None)
+        digest_data = _read_digest(canonical)
+        if digest_data is not None:
+            self._digests[key] = digest_data
+            self._keys_by_path[canonical] = key
+        return digest_data
+
+
+_DIGEST_CACHE = _DigestCache()
+
+
 def _color_signature(values) -> tuple[str, ...]:
     """Normalize a colour combination without making its field order significant."""
 
@@ -150,10 +177,11 @@ def find_similar_file_candidates(
     colors = normalize_color_slots(
         [_product_value(product, "color1"), _product_value(product, "color2"), _product_value(product, "color3")]
     )
-    color_segment = build_color_segment(colors)
     color_signature = _color_signature(colors)
-    extra = normalize_extra_segment(_product_value(product, "extra"))
-    if not all((name, type_name, model, color_segment)):
+    has_color_filter = bool(colors)
+    raw_extra = str(_product_value(product, "extra") or "").strip()
+    selected_extra = normalize_extra_segment(raw_extra) if raw_extra else ""
+    if not all((name, type_name, model)):
         return []
 
     root = os.path.realpath(os.path.abspath(str(base_dir or "")))
@@ -165,7 +193,7 @@ def find_similar_file_candidates(
     color_dirs = _merged_names(indexed_colors, _directory_names(identity_path))
     source_files: list[tuple[str, str, str, str]] = []
     for source_color in color_dirs:
-        if _color_signature(source_color.split("-")) == color_signature:
+        if has_color_filter and _color_signature(source_color.split("-")) == color_signature:
             continue
         color_path = _safe_child(identity_path, source_color)
         if color_path is None:
@@ -179,7 +207,7 @@ def find_similar_file_candidates(
             source_color.split("-"),
         )
         for source_extra in _merged_names(indexed_extras, _directory_names(color_path)):
-            if normalize_extra_segment(source_extra) != extra:
+            if selected_extra and normalize_extra_segment(source_extra) != selected_extra:
                 continue
             product_path = _safe_child(color_path, source_extra)
             if product_path is None:
@@ -210,7 +238,10 @@ def find_similar_file_candidates(
     for source_color, filename, source_prefix, source_path in sorted(
         source_files, key=lambda item: (item[0].casefold(), item[1].casefold())
     ):
-        digest_data = _read_digest(source_path)
+        try:
+            digest_data = _DIGEST_CACHE.get(source_path)
+        except OSError:
+            continue
         if digest_data is None:
             continue
         size_bytes, sha256 = digest_data

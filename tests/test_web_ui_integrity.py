@@ -216,13 +216,270 @@ console.log(selectedSlotSource('07', null));
         start = source.index("function fillForm")
         end = source.index("async function refreshData", start)
         body = source[start:end]
-
-        self.assertIn("window.clearTimeout(state.similarFileLookupTimer);", body)
-        self.assertIn("scheduleSimilarFileLookup();", body)
-        self.assertLess(
-            body.index("state.similarFileLookupRequestId += 1;"),
-            body.index("scheduleSimilarFileLookup();"),
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the fill-form lookup contract test")
+        script = f"""
+const state = {{
+  suppressAutoSearch: false, loadedEntryOriginal: null,
+  slotFits: new Map(), deletedSlots: new Map(), slotSources: new Map(),
+  similarCandidates: new Map(), dismissedSimilarSlots: new Set(),
+  userSelectedSlotSources: new Map(), ftpPreviewLoading: new Map(),
+  ftpPreviewBackgroundLoading: new Map(), photoSourcesLoaded: new Set(),
+  loadedPhotos: new Map(), backgroundFtpLookupKey: "",
+  backgroundFtpLookupRequestId: 0, backgroundFtpLookupTimer: 0,
+  photoLoadRequestId: 0,
+}};
+const fields = Object.fromEntries(
+  ["product_id", "name", "type_name", "model", "color1", "color2", "color3", "extra", "ean"]
+    .map((name) => [name, {{ value: "" }}])
+);
+const productForm = {{ elements: fields }};
+const formStatus = {{ textContent: "" }};
+const window = {{ clearTimeout() {{}} }};
+const setTimeout = () => 0;
+const handlePimcoreEanInput = () => {{}};
+const applyProductFieldSettings = () => {{}};
+const updateFieldWarnings = () => {{}};
+const formPayload = () => ({{ name: fields.name.value, type_name: fields.type_name.value, model: fields.model.value }});
+let cancelled = 0;
+const cancelSimilarFileLookup = () => {{ cancelled += 1; }};
+const pendingLoads = [];
+function loadPhotosForEntry() {{
+  const requestId = ++state.photoLoadRequestId;
+  state.loadedPhotos.clear();
+  let resolve;
+  const promise = new Promise((done) => {{
+    resolve = () => {{
+      if (state.photoLoadRequestId === requestId) state.loadedPhotos.set("02", {{ token: "loaded" }});
+      done();
+    }};
+  }});
+  pendingLoads.push({{ requestId, resolve }});
+  return promise;
+}}
+const scans = [];
+const startSimilarFileLookup = (options) => scans.push({{
+  immediate: options?.immediate === true,
+  occupied: Array.from(state.loadedPhotos.keys()),
+}});
+{body}
+(async () => {{
+  fillForm({{ name: "Old", type_name: "Desk", model: "A" }}, {{ loadPhotos: true }});
+  fillForm({{ name: "New", type_name: "Desk", model: "B" }}, {{ loadPhotos: true }});
+  const scansBeforePhotos = scans.length;
+  pendingLoads[0].resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  const scansAfterStalePhotos = scans.length;
+  pendingLoads[1].resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  console.log(JSON.stringify({{ cancelled, scansBeforePhotos, scansAfterStalePhotos, scans }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
         )
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(result["cancelled"], 2)
+        self.assertEqual(result["scansBeforePhotos"], 0)
+        self.assertEqual(result["scansAfterStalePhotos"], 0)
+        self.assertEqual(
+            result["scans"], [{"immediate": True, "occupied": ["02"]}]
+        )
+
+    def test_filling_without_photos_invalidates_an_old_photo_lookup(self) -> None:
+        """A completed old photo load must not search for a newly filled entry."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function fillForm")
+        end = source.index("async function refreshData", start)
+        body = source[start:end]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the fill-form lookup contract test")
+        script = f"""
+const state = {{
+  suppressAutoSearch: false, loadedEntryOriginal: null,
+  slotFits: new Map(), deletedSlots: new Map(), slotSources: new Map(),
+  similarCandidates: new Map(), dismissedSimilarSlots: new Set(),
+  userSelectedSlotSources: new Map(), ftpPreviewLoading: new Map(),
+  ftpPreviewBackgroundLoading: new Map(), photoSourcesLoaded: new Set(),
+  loadedPhotos: new Map(), backgroundFtpLookupKey: "",
+  backgroundFtpLookupRequestId: 0, backgroundFtpLookupTimer: 0,
+  photoLoadRequestId: 0,
+}};
+const fields = Object.fromEntries(
+  ["product_id", "name", "type_name", "model", "color1", "color2", "color3", "extra", "ean"]
+    .map((name) => [name, {{ value: "" }}])
+);
+const productForm = {{ elements: fields }};
+const formStatus = {{ textContent: "" }};
+const window = {{ clearTimeout() {{}} }};
+const setTimeout = () => 0;
+const handlePimcoreEanInput = () => {{}};
+const applyProductFieldSettings = () => {{}};
+const updateFieldWarnings = () => {{}};
+const formPayload = () => ({{ name: fields.name.value, type_name: fields.type_name.value, model: fields.model.value }});
+const cancelSimilarFileLookup = () => {{}};
+let resolveOldPhotoLoad;
+function loadPhotosForEntry() {{
+  const requestId = ++state.photoLoadRequestId;
+  return new Promise((resolve) => {{
+    resolveOldPhotoLoad = () => {{
+      if (state.photoLoadRequestId === requestId) state.loadedPhotos.set("02", {{ token: "old" }});
+      resolve();
+    }};
+  }});
+}}
+const scans = [];
+const startSimilarFileLookup = (options) => scans.push({{
+  immediate: options?.immediate === true,
+  product: fields.name.value,
+  occupied: Array.from(state.loadedPhotos.keys()),
+}});
+{body}
+(async () => {{
+  fillForm({{ name: "Old", type_name: "Desk", model: "A" }}, {{ loadPhotos: true }});
+  fillForm({{ name: "New", type_name: "Desk", model: "B" }}, {{ loadPhotos: false }});
+  const scansBeforeOldPhotoCompletes = scans.length;
+  resolveOldPhotoLoad();
+  await Promise.resolve();
+  await Promise.resolve();
+  console.log(JSON.stringify({{ scansBeforeOldPhotoCompletes, scans }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(result["scansBeforeOldPhotoCompletes"], 1)
+        self.assertEqual(
+            result["scans"], [{"immediate": True, "product": "New", "occupied": []}]
+        )
+
+    def test_request_json_composes_external_abort_with_timeout(self) -> None:
+        """An external cancellation signal must not disable the transport deadline."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        request_json = source[
+            source.index("async function requestJson") : source.index(
+                "function clientFailureFingerprint"
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the request timeout contract test")
+        script = f"""
+const state = {{ csrfToken: "" }};
+const window = {{ setTimeout, clearTimeout, location: {{ href: "" }} }};
+const applyClientIdentityHeader = () => {{}};
+const applyPanelRequestHeaders = () => {{}};
+const signals = [];
+function abortError() {{ return Object.assign(new Error("aborted"), {{ name: "AbortError" }}); }}
+function fetch(_path, options) {{
+  signals.push(options.signal);
+  return new Promise((_resolve, reject) => {{
+    const fallback = setTimeout(() => reject(new Error("transport still pending")), 40);
+    const abort = () => {{ clearTimeout(fallback); reject(abortError()); }};
+    if (options.signal?.aborted) abort();
+    else options.signal?.addEventListener("abort", abort, {{ once: true }});
+  }});
+}}
+{request_json}
+(async () => {{
+  const timeoutExternal = new AbortController();
+  let timeoutMessage = "";
+  try {{
+    await requestJson("/api/similar-files", {{ signal: timeoutExternal.signal, timeoutMs: 5 }});
+  }} catch (error) {{
+    timeoutMessage = error.message;
+  }}
+  const timeoutSignalAborted = signals[0]?.aborted === true;
+  const timeoutSignalComposed = signals[0] !== timeoutExternal.signal;
+
+  const cancelledExternal = new AbortController();
+  const cancelledRequest = requestJson("/api/similar-files", {{
+    signal: cancelledExternal.signal,
+    timeoutMs: 100,
+  }}).catch((error) => error.name);
+  cancelledExternal.abort();
+  const externalErrorName = await cancelledRequest;
+  console.log(JSON.stringify({{
+    timeoutMessage, timeoutSignalAborted, timeoutSignalComposed,
+    externalErrorName, externalSignalComposed: signals[1] !== cancelledExternal.signal,
+  }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertIn("Backend nie odpowiedzial", result["timeoutMessage"])
+        self.assertTrue(result["timeoutSignalAborted"])
+        self.assertTrue(result["timeoutSignalComposed"])
+        self.assertEqual(result["externalErrorName"], "AbortError")
+        self.assertTrue(result["externalSignalComposed"])
+
+    def test_manual_product_search_starts_similar_scan_before_entries_finish(self) -> None:
+        """A slow or failed entries lookup must not hold back the forced similar scan."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        search = source[
+            source.index("async function searchByProduct") : source.index(
+                "let autoSearchTimer", source.index("async function searchByProduct")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the manual product search contract test")
+        script = f"""
+const formPayload = () => ({{ name: "Desk", type_name: "Table", model: "T1" }});
+const formStatus = {{ textContent: "" }};
+const renderEntrySelect = () => {{}};
+const renderEntryModal = () => {{}};
+let rejectEntries;
+const requestJson = () => new Promise((_resolve, reject) => {{ rejectEntries = reject; }});
+let scans = 0;
+const startSimilarFileLookup = (options) => {{ if (options?.immediate) scans += 1; }};
+{search}
+(async () => {{
+  const pendingSearch = searchByProduct();
+  const scansWhileEntriesPending = scans;
+  rejectEntries(new Error("entries unavailable"));
+  let error = "";
+  try {{ await pendingSearch; }} catch (caught) {{ error = caught.message; }}
+  console.log(JSON.stringify({{ scansWhileEntriesPending, scans, error }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(result["scansWhileEntriesPending"], 1)
+        self.assertEqual(result["scans"], 1)
+        self.assertEqual(result["error"], "entries unavailable")
 
     def test_accepted_similar_image_keeps_the_similar_preview_marker(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -447,6 +704,198 @@ async function requestJson(_url, options) {{
         self.assertIsNone(result["thrown"])
         self.assertIn("Nie udalo sie sprawdzic plikow z podobnych produktow", result["status"])
 
+    def test_similar_lookup_uses_abort_signal_and_ignores_abort_error(self) -> None:
+        """A superseded transport must be cancellable without surfacing a user error."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("async function lookupSimilarFiles")
+        end = source.index("function scheduleSimilarFileLookup", start)
+        lookup = source[start:end]
+
+        self.assertIn("new AbortController()", lookup)
+        self.assertIn("signal: controller.signal", lookup)
+        self.assertIn('error.name === "AbortError"', lookup)
+
+    def test_photo_load_does_not_schedule_similar_lookup(self) -> None:
+        """Photo-source completion must not launch a second similar-file request."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("async function loadPhotosForEntry")
+        end = source.index("function fillForm", start)
+
+        self.assertNotIn("scheduleSimilarFileLookup", source[start:end])
+
+    def test_empty_slot_has_search_feedback_and_reduced_motion_css(self) -> None:
+        """Only a free slot exposes accessible lookup progress with safe motion fallback."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        css = APP_CSS.read_text(encoding="utf-8")
+
+        self.assertIn("Automatyczne wyszukiwanie podobnych plikow...", source)
+        self.assertIn("similar-searching", source)
+        self.assertIn('empty.setAttribute("role", "status")', source)
+        self.assertIn('empty.setAttribute("aria-live", "polite")', source)
+        self.assertRegex(
+            css,
+            re.compile(
+                r"\.slot-card\.similar-searching \.slot-preview\s*\{[^}]*border:\s*2px dashed",
+                re.DOTALL,
+            ),
+        )
+        self.assertIn("@media (prefers-reduced-motion: reduce)", css)
+        self.assertRegex(
+            css,
+            re.compile(
+                r"@media \(prefers-reduced-motion: reduce\)\s*\{.*?"
+                r"\.slot-card\.similar-searching \.slot-preview\s*\{[^}]*animation:\s*none",
+                re.DOTALL,
+            ),
+        )
+
+    def test_late_similar_response_cannot_replace_new_lookup_results(self) -> None:
+        """An aborted predecessor resolving late cannot render over the current lookup."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        lookup_helpers = source[
+            source.index("function similarFileIdentityKey") : source.index(
+                "function scheduleSimilarFileLookup", source.index("function similarFileIdentityKey")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the stale similar-file lookup contract test")
+        script = f"""
+const requests = [];
+let fields = {{
+  name: "Old Product", type_name: "Sideboard", model: "100",
+  color1: "WHITE", color2: "", color3: "", extra: "NO-LED",
+}};
+const state = {{
+  files: new Map(), loadedPhotos: new Map(), deletedSlots: new Map(),
+  slotSources: new Map(), similarCandidates: new Map(),
+  similarDecisionResults: new Map(), dismissedSimilarSlots: new Set(),
+  similarFileLookupRequestId: 0, similarFileLookupController: null,
+  similarFileLookupInFlight: false, similarFileLookupStartedAt: 0,
+  similarFileLookupKey: "",
+}};
+const formStatus = {{ textContent: "" }};
+const formPayload = () => ({{ ...fields }});
+const normalizedIdentityValue = (value) => String(value || "").trim().toUpperCase();
+let renders = 0;
+const renderSlots = () => {{ renders += 1; }};
+function requestJson(_url, options) {{
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {{
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  }});
+  requests.push({{ options, resolve, reject }});
+  return promise;
+}}
+{lookup_helpers}
+(async () => {{
+  const oldLookup = lookupSimilarFiles();
+  fields = {{ ...fields, name: "New Product", color1: "BLACK" }};
+  const newLookup = lookupSimilarFiles();
+  requests[1].resolve({{ candidates: [{{ target_prefix: "02", id: "new" }}] }});
+  await newLookup;
+  requests[0].resolve({{ candidates: [{{ target_prefix: "01", id: "old" }}] }});
+  await oldLookup;
+  console.log(JSON.stringify({{
+    aborted: requests[0].options.signal?.aborted === true,
+    candidates: Array.from(state.similarCandidates.values()).map((candidate) => candidate.id),
+    status: formStatus.textContent,
+    renders,
+  }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertTrue(result["aborted"])
+        self.assertEqual(result["candidates"], ["new"])
+        self.assertEqual(result["status"], "")
+        self.assertGreater(result["renders"], 0)
+
+    def test_invalid_similar_identity_retains_accepted_pdf_preview_metadata(self) -> None:
+        """Clearing an ineligible lookup must remove pending candidates, not an accepted PDF."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        lookup_helpers = source[
+            source.index("function similarFileIdentityKey") : source.index(
+                "function scheduleSimilarFileLookup", source.index("function similarFileIdentityKey")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the accepted PDF identity contract test")
+        script = f"""
+const acceptedPdf = {{
+  id: "accepted-pdf", filename: "instruction.pdf", is_pdf: true,
+  token: "signed-pdf", url: "/api/file?token=signed-pdf",
+  thumb_url: "/api/thumbnail?token=signed-pdf",
+}};
+const state = {{
+  files: new Map([["01", {{ similar_candidate_id: "accepted-pdf", token: "signed-pdf" }}]]),
+  loadedPhotos: new Map(), deletedSlots: new Map(),
+  slotSources: new Map([["01", "similar"]]),
+  similarCandidates: new Map([
+    ["01", acceptedPdf],
+    ["02", {{ id: "pending", filename: "pending.jpg", is_pdf: false }}],
+  ]),
+  dismissedSimilarSlots: new Set(), similarFileLookupTimer: 0,
+  similarFileLookupRequestId: 0, similarFileLookupController: null,
+  similarFileLookupInFlight: false, similarFileLookupStartedAt: 0,
+  similarFileLookupKey: "",
+}};
+const formStatus = {{ textContent: "" }};
+const formPayload = () => ({{
+  name: "Product", type_name: "Sideboard", model: "",
+  color1: "WHITE", color2: "", color3: "", extra: "",
+}});
+const normalizedIdentityValue = (value) => String(value || "").trim().toUpperCase();
+const window = {{ clearTimeout: () => {{}} }};
+let renders = 0;
+let requests = 0;
+const renderSlots = () => {{ renders += 1; }};
+const requestJson = () => {{ requests += 1; throw new Error("request must not start"); }};
+{lookup_helpers}
+(async () => {{
+  await lookupSimilarFiles();
+  const retained = state.similarCandidates.get("01");
+  console.log(JSON.stringify({{
+    retainedId: retained?.id || null,
+    retainedPdf: retained?.is_pdf === true,
+    retainedUrl: retained?.url || null,
+    pendingRetained: state.similarCandidates.has("02"),
+    requests,
+    renders,
+  }}));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(result["retainedId"], "accepted-pdf")
+        self.assertTrue(result["retainedPdf"])
+        self.assertEqual(result["retainedUrl"], "/api/file?token=signed-pdf")
+        self.assertFalse(result["pendingRetained"])
+        self.assertEqual(result["requests"], 0)
+        self.assertGreater(result["renders"], 0)
+
     def test_similar_candidate_image_preview_uses_its_signed_thumbnail(self) -> None:
         """Catches a pending candidate deriving its thumbnail from an inactive slot source."""
 
@@ -483,8 +932,8 @@ console.log(JSON.stringify({{ src: previewImage.src }}));
         )
         self.assertEqual(json.loads(completed.stdout)["src"], "/api/thumbnail?token=signed-thumbnail")
 
-    def test_manual_slot_file_refreshes_similar_candidate_placement(self) -> None:
-        """Catches manual upload permanently hiding a candidate instead of reallocating it."""
+    def test_manual_slot_file_starts_immediate_similar_lookup_with_new_occupied_slot(self) -> None:
+        """Manual assignment must reallocate candidates immediately using the new occupancy."""
 
         source = APP_JS.read_text(encoding="utf-8")
         set_slot_file = source[
@@ -508,11 +957,17 @@ const createSlotFileUpload = (_prefix, file) => ({{ file }});
 const dismissSimilarCandidate = () => {{}};
 const updateSubmitButtonState = () => {{}};
 const uploadSlotFile = () => {{}};
-let refreshes = 0;
-const scheduleSimilarFileLookup = () => {{ refreshes += 1; }};
+let immediateRefreshes = 0;
+let debouncedRefreshes = 0;
+let occupiedAtRefresh = [];
+const scheduleSimilarFileLookup = () => {{ debouncedRefreshes += 1; }};
+const startSimilarFileLookup = (options) => {{
+  if (options?.immediate) immediateRefreshes += 1;
+  occupiedAtRefresh = Array.from(state.files.keys()).sort();
+}};
 {set_slot_file}
 setSlotFile("01", {{ name: "manual.jpg" }});
-console.log(JSON.stringify({{ refreshes }}));
+console.log(JSON.stringify({{ immediateRefreshes, debouncedRefreshes, occupiedAtRefresh }}));
 """
         completed = subprocess.run(
             [str(node), "-e", script],
@@ -521,7 +976,10 @@ console.log(JSON.stringify({{ refreshes }}));
             text=True,
             encoding="utf-8",
         )
-        self.assertEqual(json.loads(completed.stdout)["refreshes"], 1)
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["immediateRefreshes"], 1)
+        self.assertEqual(result["debouncedRefreshes"], 0)
+        self.assertEqual(result["occupiedAtRefresh"], ["01"])
 
     def test_similar_controls_are_compact_and_slot_local(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -600,7 +1058,11 @@ const previewImage = {{
   addEventListener: () => {{}},
   removeAttribute: () => {{}},
 }};
-const empty = {{ textContent: "" }};
+const empty = {{
+  textContent: "",
+  setAttribute: () => {{}},
+  removeAttribute: () => {{}},
+}};
 const preview = {{
   classList: classList(),
   querySelector: (selector) => {{
