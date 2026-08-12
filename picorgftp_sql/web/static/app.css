@@ -2133,6 +2133,33 @@ h2 {
   opacity: 0.6;
 }
 
+.slot-card.similar-searching .slot-preview {
+  border: 2px dashed rgb(255, 72, 72);
+  animation: similar-searching-rgb 1.2s linear infinite;
+}
+
+@keyframes similar-searching-rgb {
+  0%,
+  100% {
+    border-color: rgb(255, 72, 72);
+  }
+
+  33% {
+    border-color: rgb(72, 210, 96);
+  }
+
+  66% {
+    border-color: rgb(72, 120, 255);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .slot-card.similar-searching .slot-preview {
+    border-color: rgb(72, 120, 255);
+    animation: none;
+  }
+}
+
 .slot-card.slot-similar-pending {
   border-color: var(--sql);
   box-shadow: 0 0 0 2px rgba(54, 126, 192, 0.28);

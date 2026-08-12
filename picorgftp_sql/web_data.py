@@ -84,7 +84,7 @@ from .excel_utils import (
     save_ean_entry,
     NO_EAN_PLACEHOLDER,
 )
-from .logging_utils import log_error
+from .logging_utils import log_error, log_info
 from .observability import SECRET_KEY_RE, emit_event
 from .services.ftp_service import connect_ftp, list_remote_files_for_ean, list_remote_filenames
 from .services.sql_service import (
@@ -135,7 +135,11 @@ from .services.pimcore_service import (
     update_product,
 )
 from .services.translation_service import clear_translation_cache, translate_text
-from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
+from .slot_utils import (
+    normalize_slot_definitions,
+    normalize_slot_prefix,
+    normalize_sql_column_map,
+)
 from .similar_product_files import (
     SimilarFileCandidate,
     find_similar_file_candidates,
@@ -3472,11 +3476,52 @@ def settings_snapshot() -> dict[str, object]:
     }
 
 
+SIMILAR_LOOKUP_CACHE_TTL_SECONDS = 10.0
+SIMILAR_LOOKUP_CACHE_MAX_ITEMS = 32
+_SIMILAR_LOOKUP_CACHE: dict[tuple[str, ...], tuple[float, tuple[SimilarFileCandidate, ...]]] = {}
+_SIMILAR_LOOKUP_IN_FLIGHT: dict[tuple[str, ...], threading.Event] = {}
+_SIMILAR_LOOKUP_LOCK = threading.Lock()
+
+
+def _normalized_similar_lookup_text(value: object) -> str:
+    return unicodedata.normalize("NFC", str(value or "").strip()).casefold()
+
+
+def _similar_lookup_key(
+    normalized_payload: dict[str, object], occupied_prefixes: object
+) -> tuple[str, ...]:
+    prefixes = occupied_prefixes if isinstance(occupied_prefixes, (list, tuple, set)) else ()
+    return (
+        *(
+            _normalized_similar_lookup_text(normalized_payload.get(name))
+            for name in ("name", "type_name", "model", "color1", "color2", "color3", "extra")
+        ),
+        *sorted(normalize_slot_prefix(prefix) for prefix in prefixes),
+    )
+
+
+def reset_similar_file_lookup_cache() -> None:
+    """Clear web similar-file lookup state for test isolation."""
+
+    with _SIMILAR_LOOKUP_LOCK:
+        _SIMILAR_LOOKUP_CACHE.clear()
+        _SIMILAR_LOOKUP_IN_FLIGHT.clear()
+
+
+def _log_similar_lookup(key: tuple[str, ...], started_at: float, count: int) -> None:
+    fingerprint = hashlib.sha256(repr(key).encode("utf-8")).hexdigest()[:12]
+    elapsed_ms = round((time.monotonic() - started_at) * 1000)
+    log_info(
+        f"similar_file_lookup key={fingerprint} elapsed_ms={elapsed_ms} result_count={count}"
+    )
+
+
 def find_web_similar_file_candidates(
     product_payload: dict[str, object],
 ) -> list[SimilarFileCandidate]:
     """Find local suggestions for a web product without external side effects."""
 
+    started_at = time.monotonic()
     field_settings = normalize_product_fields(
         config.CONFIG.get(PRODUCT_FIELDS_KEY),
         legacy_color_labels=config.CONFIG.get(COLOR_FIELD_LABELS_KEY),
@@ -3485,14 +3530,62 @@ def find_web_similar_file_candidates(
     occupied_prefixes = product_payload.get("occupied_prefixes", ())
     if not isinstance(occupied_prefixes, (list, tuple, set)):
         occupied_prefixes = ()
-    return find_similar_file_candidates(
-        settings.l,
-        normalized_payload,
-        normalize_slot_definitions(config.CONFIG.get(SLOT_DEFS_KEY))[0],
-        config.CONFIG.get(SIMILAR_FILE_DETECTION_KEY),
-        file_index=_get_file_index(start=False),
-        occupied_prefixes=occupied_prefixes,
-    )
+    key = _similar_lookup_key(normalized_payload, occupied_prefixes)
+
+    while True:
+        cached_result: list[SimilarFileCandidate] | None = None
+        with _SIMILAR_LOOKUP_LOCK:
+            now = time.monotonic()
+            cached = _SIMILAR_LOOKUP_CACHE.get(key)
+            if cached is not None and now - cached[0] < SIMILAR_LOOKUP_CACHE_TTL_SECONDS:
+                cached_result = list(cached[1])
+            else:
+                _SIMILAR_LOOKUP_CACHE.pop(key, None)
+                event = _SIMILAR_LOOKUP_IN_FLIGHT.get(key)
+                if event is None:
+                    event = threading.Event()
+                    _SIMILAR_LOOKUP_IN_FLIGHT[key] = event
+                    break
+        if cached_result is not None:
+            _log_similar_lookup(key, started_at, len(cached_result))
+            return cached_result
+        event.wait()
+
+    try:
+        result = tuple(
+            find_similar_file_candidates(
+                settings.l,
+                normalized_payload,
+                normalize_slot_definitions(config.CONFIG.get(SLOT_DEFS_KEY))[0],
+                config.CONFIG.get(SIMILAR_FILE_DETECTION_KEY),
+                file_index=_get_file_index(start=False),
+                occupied_prefixes=occupied_prefixes,
+            )
+        )
+    except Exception:
+        with _SIMILAR_LOOKUP_LOCK:
+            _SIMILAR_LOOKUP_IN_FLIGHT.pop(key, None)
+            event.set()
+        raise
+
+    with _SIMILAR_LOOKUP_LOCK:
+        now = time.monotonic()
+        expired = [
+            cached_key
+            for cached_key, (cached_at, _cached_result) in _SIMILAR_LOOKUP_CACHE.items()
+            if now - cached_at >= SIMILAR_LOOKUP_CACHE_TTL_SECONDS
+        ]
+        for cached_key in expired:
+            _SIMILAR_LOOKUP_CACHE.pop(cached_key, None)
+        while len(_SIMILAR_LOOKUP_CACHE) >= SIMILAR_LOOKUP_CACHE_MAX_ITEMS:
+            _SIMILAR_LOOKUP_CACHE.pop(next(iter(_SIMILAR_LOOKUP_CACHE)))
+        _SIMILAR_LOOKUP_CACHE[key] = (now, result)
+        _SIMILAR_LOOKUP_IN_FLIGHT.pop(key, None)
+        event.set()
+
+    response = list(result)
+    _log_similar_lookup(key, started_at, len(response))
+    return response
 
 
 def settings_secret_values() -> dict[str, object]:

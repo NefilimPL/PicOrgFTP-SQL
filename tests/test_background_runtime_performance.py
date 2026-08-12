@@ -356,7 +356,12 @@ async function simulateClient() {
         cwd=Path(__file__).parents[1],
         capture_output=True,
         text=True,
-        timeout=10,
+        # The Node simulation normally completes in a few seconds, but the
+        # subprocess startup and its pipe readers can be delayed on a busy CI
+        # worker while the complete pytest suite is running.  This is only a
+        # watchdog for a genuinely stuck poller; the request-budget assertions
+        # below remain the performance contract.
+        timeout=30,
         check=False,
     )
 
