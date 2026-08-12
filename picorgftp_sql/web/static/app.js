@@ -8482,6 +8482,10 @@ function collectSqliteBackupSchedule(form) {
     days,
     hours,
     max_copies: Math.max(1, Math.min(999, Number(data.get("sqlite_backup_max_copies") || 10))),
+    archive_dirs: String(data.get("sqlite_backup_archive_dirs") || "")
+      .split(/\r?\n/)
+      .map((path) => path.trim())
+      .filter(Boolean),
   };
 }
 
@@ -8781,7 +8785,17 @@ function renderSettingsApp() {
         type: "number",
         min: 1,
         max: 999,
-      })
+      }),
+      inputField(
+        "sqlite_backup_archive_dirs",
+        "Dodatkowe katalogi archiwalnych kopii",
+        (s.sqlite_backup?.archive_dirs || []).join("\n"),
+        {
+          textarea: true,
+          placeholder: "np. D:\\Archiwum\\PicOrgBACKUP",
+          description: "Po jednej zaufanej lokalizacji w wierszu. Nowe kopie nadal trafiaja do domyslnego BACKUP.",
+        }
+      )
     ),
     settingsFieldGroup("Indeks lokalny",
       checkField(

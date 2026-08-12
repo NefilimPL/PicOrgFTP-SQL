@@ -830,6 +830,19 @@ class WebSmokeCiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["items"][0]["backup_path"], "copy.sqlite")
 
+    def test_sqlite_backup_restore_rejects_path_outside_trusted_directories(self) -> None:
+        client = TestClient(web_app.app)
+        with (
+            patch.object(web_app.storage_settings, "resolve_sqlite_path", return_value="C:/Data/app.sqlite"),
+            patch.object(web_app.storage_settings, "resolve_backup_dir", return_value="C:/Data/BACKUP"),
+            patch.object(web_app.storage_settings, "resolve_backup_dirs", return_value=["C:/Data/BACKUP"]),
+            patch.object(web_app.sqlite_backup, "restore_backup", side_effect=ValueError("Wybrana kopia nie znajduje sie w dozwolonym katalogu.")),
+        ):
+            response = client.post("/api/settings/sqlite/restore", json={"backup_path": "C:/secret.sqlite"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("dozwolonym katalogu", response.json()["detail"])
+
     def test_backup_scheduler_runs_due_slots(self) -> None:
         with (
             patch.object(

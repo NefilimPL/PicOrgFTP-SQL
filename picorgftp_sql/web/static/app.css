@@ -2363,7 +2363,6 @@ h2 {
 }
 
 .slot-badge {
-  min-height: auto;
   border-radius: 4px;
   border: 1px solid transparent;
   background: var(--surface-2);
@@ -2450,7 +2449,7 @@ button.slot-badge.on:hover {
   min-height: 0;
   display: none;
   object-fit: contain;
-  -webkit-user-drag: none;
+  -webkit-user-select: none;
   user-select: none;
   pointer-events: none;
 }
@@ -2681,7 +2680,6 @@ button.slot-badge.on:hover {
 }
 
 .history-summary-row {
-  min-height: auto;
 }
 
 .history-summary-row:hover {
@@ -3944,7 +3942,6 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
   }
 
   .slots-section {
-    min-height: auto;
   }
 
   .list-editor-layout {
