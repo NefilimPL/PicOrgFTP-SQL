@@ -1487,11 +1487,12 @@ async def _save_upload_cache_entry(
     safe_stem = safe_stem[:80].strip(" .-_") or "upload"
     cache_dir = _upload_cache_dir(cache_scope)
     os.makedirs(cache_dir, exist_ok=True)
-    target_path = os.path.join(
-        cache_dir,
-        f"{safe_prefix}_{secrets.token_hex(12)}_{safe_stem}{suffix}",
+    target_path = os.fspath(
+        build_child_path(
+            cache_dir,
+            f"{safe_prefix}_{secrets.token_hex(12)}_{safe_stem}{suffix}",
+        )
     )
-    target_path = os.fspath(resolve_path_within_roots(target_path, [cache_dir]))
     max_bytes, max_pixels = _upload_limits()
     size = 0
     try:
@@ -1556,11 +1557,12 @@ def _save_web_image_cache(
     safe_stem = safe_stem[:80].strip(" .-_") or "web_image"
     cache_dir = _upload_cache_dir(cache_scope)
     os.makedirs(cache_dir, exist_ok=True)
-    target_path = os.path.join(
-        cache_dir,
-        f"{safe_prefix}_{secrets.token_hex(12)}_{safe_stem}{suffix}",
+    target_path = os.fspath(
+        build_child_path(
+            cache_dir,
+            f"{safe_prefix}_{secrets.token_hex(12)}_{safe_stem}{suffix}",
+        )
     )
-    target_path = os.fspath(resolve_path_within_roots(target_path, [cache_dir]))
     with open(target_path, "wb") as handle:
         handle.write(data)
     return target_path, len(data), safe_name, width, height
