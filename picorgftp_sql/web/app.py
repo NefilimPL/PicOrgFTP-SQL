@@ -1412,7 +1412,13 @@ def _validate_upload_image_pixels(path: str, max_pixels: int) -> tuple[int, int]
     return width, height
 
 
-async def _save_upload(upload: UploadFile, temp_dir: str, prefix: str) -> str:
+async def _save_upload(
+    upload: UploadFile,
+    temp_dir: str,
+    prefix: str,
+    *,
+    managed_root: str | None = None,
+) -> str:
     safe_name = _safe_upload_name(upload.filename, f"{prefix}.upload")
     max_bytes, max_pixels = _upload_limits()
     content_type = getattr(upload, "content_type", "")
@@ -1431,7 +1437,7 @@ async def _save_upload(upload: UploadFile, temp_dir: str, prefix: str) -> str:
             max_pixels=max_pixels,
             validate_image=validate,
             scan_file=_scan_uploaded_file,
-        ).stage(upload, temp_dir, prefix)
+        ).stage(upload, temp_dir, prefix, managed_root=managed_root)
     except UploadSizeLimitExceeded as exc:
         _raise_upload_too_large(_upload_limit_message(exc.size_bytes, exc.max_bytes))
     return staged.path
@@ -1444,7 +1450,12 @@ def _upload_prefix_from_form_key(key: str) -> str:
     return sanitize_path_segment(text) or "slot"
 
 
-async def _materialize_process_form(form: Any, temp_dir: str) -> _ProcessFormSnapshot:
+async def _materialize_process_form(
+    form: Any,
+    temp_dir: str,
+    *,
+    managed_root: str | None = None,
+) -> _ProcessFormSnapshot:
     os.makedirs(temp_dir, exist_ok=True)
     fields: Dict[str, str] = {}
     uploads: Dict[str, _QueuedUploadFile] = {}
@@ -1454,7 +1465,12 @@ async def _materialize_process_form(form: Any, temp_dir: str) -> _ProcessFormSna
         if isinstance(value, UploadFile):
             if not value.filename:
                 continue
-            path = await _save_upload(value, temp_dir, _upload_prefix_from_form_key(key_text))
+            path = await _save_upload(
+                value,
+                temp_dir,
+                _upload_prefix_from_form_key(key_text),
+                managed_root=managed_root,
+            )
             uploads[key_text] = _QueuedUploadFile(
                 path=path,
                 filename=_safe_upload_name(value.filename, os.path.basename(path)),
@@ -3607,7 +3623,11 @@ async def _stage_process_form(request: Request) -> _ProcessFormSnapshot:
     )
     try:
         form = await request.form()
-        snapshot = await _materialize_process_form(form, temp_dir)
+        snapshot = await _materialize_process_form(
+            form,
+            temp_dir,
+            managed_root=str(_PROCESS_JOB_ROOT),
+        )
     except Exception:
         _cleanup_process_job_directory(temp_dir)
         raise
