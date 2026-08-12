@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import ast
 import builtins
+import json
 import multiprocessing
+import os
 from pathlib import Path
 import runpy
+import subprocess
 import sys
 import types
 from unittest.mock import patch
@@ -124,6 +127,237 @@ def test_service_environment_resets_pyinstaller_for_frozen_child_process() -> No
     assert env["PICORG_WEB_PORT"] == "8010"
     assert env["PICORG_WEB_HOST"] == "0.0.0.0"
     assert env["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+
+
+def test_write_metadata_records_explicit_launcher_pid(tmp_path, monkeypatch) -> None:
+    """Catches dropping the PID that owns the controlled runtime tree."""
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+
+    web_manager.write_metadata(
+        8010,
+        "0.0.0.0",
+        launcher="service-run",
+        launcher_pid=101,
+    )
+
+    metadata = web_manager.read_metadata(tmp_path)
+    assert metadata["pid"] == os.getpid()
+    assert metadata["launcher_pid"] == 101
+
+
+def test_stop_web_terminates_launcher_tree_after_port_release(tmp_path, monkeypatch) -> None:
+    """Catches stopping only the server child and leaving its launcher alive."""
+    (tmp_path / ".picorg_web.pid").write_text(
+        json.dumps({"pid": 102, "launcher_pid": 101}),
+        encoding="ascii",
+    )
+    commands: list[list[str]] = []
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        web_manager,
+        "end_system_service",
+        lambda: web_manager.ActionResult(True, ""),
+    )
+    monkeypatch.setattr(
+        web_manager,
+        "get_process_command_line",
+        lambda _pid: "PicOrgFTP-SQL-WEB --service-run",
+    )
+    monkeypatch.setattr(web_manager, "get_port_listeners", lambda _port: [])
+    monkeypatch.setattr(
+        web_manager,
+        "_run_command",
+        lambda args, **_kwargs: commands.append(args)
+        or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    result = web_manager.stop_web(8010)
+
+    assert result.ok
+    assert commands[0] == ["taskkill", "/PID", "101", "/T", "/F"]
+    assert not (tmp_path / ".picorg_web.pid").exists()
+
+
+def test_stop_web_terminates_recorded_launcher_when_cim_hides_command_line(
+    tmp_path, monkeypatch
+) -> None:
+    """Catches leaving the launcher alive when Windows denies CIM command-line access."""
+    (tmp_path / ".picorg_web.pid").write_text(
+        json.dumps({"pid": 102, "launcher_pid": 101, "launcher": "start_web.ps1"}),
+        encoding="ascii",
+    )
+    commands: list[list[str]] = []
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        web_manager,
+        "end_system_service",
+        lambda: web_manager.ActionResult(True, ""),
+    )
+    monkeypatch.setattr(web_manager, "get_process_command_line", lambda _pid: "")
+    monkeypatch.setattr(web_manager, "get_port_listeners", lambda _port: [])
+    monkeypatch.setattr(
+        web_manager,
+        "_run_command",
+        lambda args, **_kwargs: commands.append(args)
+        or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    assert web_manager.stop_web(8010).ok
+
+    assert commands == [["taskkill", "/PID", "101", "/T", "/F"]]
+
+
+def test_stop_web_terminates_recorded_server_when_cim_hides_command_line(
+    tmp_path, monkeypatch
+) -> None:
+    """Catches leaving a non-frozen service process alive after CIM access fails."""
+    (tmp_path / ".picorg_web.pid").write_text(
+        json.dumps({"pid": 102, "launcher": "service-run"}),
+        encoding="ascii",
+    )
+    commands: list[list[str]] = []
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        web_manager,
+        "end_system_service",
+        lambda: web_manager.ActionResult(True, ""),
+    )
+    monkeypatch.setattr(web_manager, "get_process_command_line", lambda _pid: "")
+    monkeypatch.setattr(web_manager, "get_port_listeners", lambda _port: [])
+    monkeypatch.setattr(
+        web_manager,
+        "_run_command",
+        lambda args, **_kwargs: commands.append(args)
+        or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    assert web_manager.stop_web(8010).ok
+
+    assert commands == [["taskkill", "/PID", "102", "/T", "/F"]]
+
+
+def test_frozen_service_records_its_pyinstaller_parent_as_launcher(tmp_path, monkeypatch) -> None:
+    """Catches a frozen server persisting only its child PID."""
+    metadata_calls = []
+    fake_uvicorn = types.ModuleType("uvicorn")
+    fake_uvicorn.run = lambda *_args, **_kwargs: None
+    fake_web_app = types.ModuleType("picorgftp_sql.web.app")
+    fake_web_app.app = object()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+    monkeypatch.setattr(web_manager.os, "getppid", lambda: 123)
+    monkeypatch.setattr(
+        web_manager,
+        "write_metadata",
+        lambda _port, _host, **kwargs: metadata_calls.append(kwargs),
+    )
+    monkeypatch.setattr(web_manager, "remove_metadata_for_current_process", lambda: None)
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+    monkeypatch.setitem(sys.modules, "picorgftp_sql.web.app", fake_web_app)
+    monkeypatch.setattr(web_manager.sys, "frozen", True, raising=False)
+
+    assert web_manager.run_service_mode(8010, "0.0.0.0") == 0
+
+    assert metadata_calls == [{"launcher": "service-run", "launcher_pid": 123}]
+
+
+def test_stop_web_keeps_metadata_when_taskkill_fails(tmp_path, monkeypatch) -> None:
+    """Catches reporting shutdown success after Windows rejected taskkill."""
+    pid_path = tmp_path / ".picorg_web.pid"
+    pid_path.write_text(json.dumps({"pid": 102}), encoding="ascii")
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        web_manager,
+        "end_system_service",
+        lambda: web_manager.ActionResult(True, ""),
+    )
+    monkeypatch.setattr(
+        web_manager,
+        "get_process_command_line",
+        lambda _pid: "PicOrgFTP-SQL-WEB --service-run",
+    )
+    monkeypatch.setattr(web_manager, "get_port_listeners", lambda _port: [])
+    monkeypatch.setattr(
+        web_manager,
+        "_run_command",
+        lambda args, **_kwargs: subprocess.CompletedProcess(args, 5, "", "Access denied"),
+    )
+
+    result = web_manager.stop_web(8010)
+
+    assert not result.ok
+    assert "Access denied" in result.message
+    assert pid_path.exists()
+
+
+def test_end_system_service_reports_scheduler_error(monkeypatch) -> None:
+    """Catches silently discarding a failed request to stop the SYSTEM task."""
+    monkeypatch.setattr(web_manager, "task_exists", lambda: True)
+    monkeypatch.setattr(
+        web_manager,
+        "_run_command",
+        lambda args, **_kwargs: subprocess.CompletedProcess(args, 1, "", "Access denied"),
+    )
+
+    result = web_manager.end_system_service()
+
+    assert not result.ok
+    assert "Access denied" in result.message
+
+
+def test_stop_web_keeps_metadata_when_panel_port_stays_open(tmp_path, monkeypatch) -> None:
+    """Catches removing runtime metadata before the web listener actually exits."""
+    pid_path = tmp_path / ".picorg_web.pid"
+    pid_path.write_text(json.dumps({"pid": 102}), encoding="ascii")
+    listener = {
+        "Pid": 102,
+        "ProcessName": "PicOrgFTP-SQL-WEB",
+        "CommandLine": "PicOrgFTP-SQL-WEB --service-run",
+    }
+    listener_queries = 0
+    slept = []
+
+    def listeners(_port: int):
+        nonlocal listener_queries
+        listener_queries += 1
+        return [] if listener_queries == 1 else [listener]
+
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        web_manager,
+        "end_system_service",
+        lambda: web_manager.ActionResult(True, ""),
+    )
+    monkeypatch.setattr(
+        web_manager,
+        "get_process_command_line",
+        lambda _pid: "PicOrgFTP-SQL-WEB --service-run",
+    )
+    monkeypatch.setattr(web_manager, "get_port_listeners", listeners)
+    monkeypatch.setattr(
+        web_manager,
+        "_run_command",
+        lambda args, **_kwargs: subprocess.CompletedProcess(args, 0, "", ""),
+    )
+    monkeypatch.setattr(web_manager.time, "monotonic", lambda: 0 if not slept else 10)
+    monkeypatch.setattr(web_manager.time, "sleep", lambda seconds: slept.append(seconds))
+
+    result = web_manager.stop_web(8010)
+
+    assert not result.ok
+    assert "8010" in result.message
+    assert slept == [0.2]
+    assert pid_path.exists()
+
+
+def test_finish_close_stop_keeps_gui_open_when_server_stop_fails() -> None:
+    """Catches closing the manager after an unconfirmed server shutdown."""
+    app = _app_without_tk()
+
+    app._finish_close_stop(web_manager.ActionResult(False, "Port 8010 nadal dziala."))
+
+    assert not app.root.destroyed
+    assert app.status_var.value == "Port 8010 nadal dziala."
 
 
 def test_close_window_starts_background_check_and_shows_spinner(monkeypatch) -> None:
