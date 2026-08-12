@@ -2609,15 +2609,31 @@ button.slot-badge.on:hover {
   color: var(--text);
 }
 
-.slot-controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  width: 100%;
+.slot-preview-actions {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
 }
 
-.slot-controls .slot-open-button {
-  min-width: max-content;
+.slot-preview-actions button {
+  position: absolute;
+  pointer-events: auto;
+}
+
+.slot-preview-actions .slot-fit-button {
+  top: 3px;
+  left: 3px;
+}
+
+.slot-preview-actions .slot-clear-button {
+  top: 3px;
+  right: 3px;
+}
+
+.slot-preview-actions .slot-open-button {
+  bottom: 3px;
+  left: 3px;
 }
 
 .similar-decision-row-actions .slot-similar-accept {
@@ -3743,7 +3759,7 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
 
 .slot-meta {
   min-width: 0;
-  overflow: visible;
+  overflow: hidden;
 }
 
 .slot-meta strong,

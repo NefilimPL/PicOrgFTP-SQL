@@ -3916,7 +3916,7 @@ function createSlotNode(slot) {
     if (state.photosLoading && !selectedFile && !loadedPhoto) {
       preview.appendChild(overlay);
     }
-    controls.className = "slot-controls";
+    controls.className = "slot-preview-actions";
     fitButton.type = "button";
     fitButton.className = `slot-fit-button ${isSlotFit(slot.prefix) ? "active" : ""}`;
     fitButton.textContent = "FIT";
@@ -4031,7 +4031,9 @@ function createSlotNode(slot) {
             : slotStatusText(loadedPhoto, slot.prefix);
       }
     }
-    meta.appendChild(controls);
+    if (controls.childElementCount) {
+      preview.appendChild(controls);
+    }
 
     node.addEventListener("dragstart", (event) => {
       const assignment = getSlotAssignment(slot.prefix);

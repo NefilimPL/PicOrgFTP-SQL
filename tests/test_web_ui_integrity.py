@@ -183,8 +183,8 @@ console.log(JSON.stringify(results));
             },
         )
 
-    def test_slot_open_button_stays_outside_preview_and_keeps_full_label(self) -> None:
-        """The existing button must update in place without covering the image."""
+    def test_slot_open_button_keeps_the_original_preview_overlay(self) -> None:
+        """All slot actions keep their established preview overlay positions."""
 
         source = APP_JS.read_text(encoding="utf-8")
         css = APP_CSS.read_text(encoding="utf-8")
@@ -192,15 +192,17 @@ console.log(JSON.stringify(results));
         renderer_end = source.index("function renderSlot(", renderer_start)
         renderer = source[renderer_start:renderer_end]
 
-        self.assertIn('controls.className = "slot-controls";', renderer)
-        self.assertIn("meta.appendChild(controls);", renderer)
-        self.assertNotIn("preview.appendChild(controls);", renderer)
+        self.assertIn('controls.className = "slot-preview-actions";', renderer)
+        self.assertIn("preview.appendChild(controls);", renderer)
+        self.assertNotIn("meta.appendChild(controls);", renderer)
         self.assertIn("function updateSlotOpenButton", source)
         self.assertIn('openButton.textContent = "Otwórz";', renderer)
-        self.assertIn(".slot-controls .slot-open-button", css)
+        self.assertIn(".slot-preview-actions .slot-fit-button {\n  top: 3px;\n  left: 3px;", css)
+        self.assertIn(".slot-preview-actions .slot-clear-button {\n  top: 3px;\n  right: 3px;", css)
+        self.assertIn(".slot-preview-actions .slot-open-button {\n  bottom: 3px;\n  left: 3px;", css)
         self.assertIn("white-space: nowrap;", css)
-        self.assertRegex(css, r"\.slot-meta \{\s*min-width: 0;\s*overflow: visible;")
-        self.assertNotIn(".slot-preview-actions .slot-open-button", css)
+        self.assertNotIn(".slot-controls", css)
+        self.assertNotRegex(css, r"\.slot-meta \{\s*min-width: 0;\s*overflow: visible;")
 
     def test_active_ftp_source_refreshes_stale_preview_before_opening(self) -> None:
         """A stale FTP cache token must never be opened without a refresh request."""
