@@ -596,7 +596,8 @@ def _validate_mutating_request(request: Request) -> None:
 def _make_session_token(username: str) -> str:
     user = find_user(username) or {}
     session_version = int(user.get("session_version") or 0)
-    payload = f"session|{username}|{session_version}|{int(time.time())}|{secrets.token_hex(12)}"
+    user_id = str(user.get("id") or user.get("username") or "")
+    payload = f"session|{user_id}|{session_version}|{int(time.time())}|{secrets.token_hex(12)}"
     token = f"{payload}|{_sign(payload)}"
     return base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii")
 
