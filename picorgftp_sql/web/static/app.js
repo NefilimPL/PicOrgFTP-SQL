@@ -2575,12 +2575,47 @@ function loadedFileUrl(photo, prefix) {
   return token ? `/api/file?token=${encodeURIComponent(token)}` : "";
 }
 
-function selectedSlotSourceCanOpen(prefix, photo, file) {
+function slotOpenState(prefix, photo, file) {
   const source = selectedSlotSource(prefix, photo);
-  if (source === "sql") return isHttpUrl(photo?.sql_value);
-  if (source === "similar") return Boolean(filePreviewUrl(prefix, file) || similarCandidateForSlot(prefix)?.url);
-  if (file) return Boolean(filePreviewUrl(prefix, file));
-  return Boolean(loadedFileUrl(photo, prefix));
+  if (source === "sql") {
+    return isHttpUrl(photo?.sql_value)
+      ? { enabled: true, title: "Otwórz aktywne źródło SQL" }
+      : { enabled: false, title: "Wartość SQL nie jest linkiem HTTP/HTTPS" };
+  }
+  if (source === "ftp") {
+    if (photo?.ftp_url || photo?.ftp_token) {
+      return { enabled: true, title: "Otwórz aktywne źródło FTP" };
+    }
+    return photo?.ftp_filename
+      ? { enabled: false, title: "Pobieranie pliku FTP..." }
+      : { enabled: false, title: "Brak pliku FTP" };
+  }
+  if (source === "local") {
+    return photo?.url || photo?.token
+      ? { enabled: true, title: "Otwórz aktywne źródło LOCAL" }
+      : { enabled: false, title: "Brak lokalnego pliku" };
+  }
+  if (source === "similar") {
+    return filePreviewUrl(prefix, file) || similarCandidateForSlot(prefix)?.url
+      ? { enabled: true, title: "Otwórz aktywne źródło POD" }
+      : { enabled: false, title: "Brak pliku z podobnego produktu" };
+  }
+  if (file && filePreviewUrl(prefix, file)) {
+    return { enabled: true, title: "Otwórz wybrany plik" };
+  }
+  return { enabled: false, title: "Brak pliku do otwarcia" };
+}
+
+function selectedSlotSourceCanOpen(prefix, photo, file) {
+  return slotOpenState(prefix, photo, file).enabled;
+}
+
+function updateSlotOpenButton(button, prefix, photo, file) {
+  if (!button) return;
+  const openState = slotOpenState(prefix, photo, file);
+  button.disabled = !openState.enabled;
+  button.setAttribute("aria-disabled", openState.enabled ? "false" : "true");
+  button.title = openState.title;
 }
 
 function selectedSlotSourceCanFit(prefix, photo, file) {
@@ -3749,7 +3784,7 @@ function updateSlotPreview(prefix) {
     fitButton.hidden = !selectedSlotSourceCanFit(prefix, loadedPhoto, selectedFile);
   }
   if (openButton) {
-    openButton.hidden = !selectedSlotSourceCanOpen(prefix, loadedPhoto, selectedFile);
+    updateSlotOpenButton(openButton, prefix, loadedPhoto, selectedFile);
   }
   preview.classList.remove("has-image", "thumb-loading", "loaded-photo", "has-similar-candidate", "has-sql-preview");
   preview.querySelector(".slot-upload-overlay")?.remove();
@@ -3881,7 +3916,7 @@ function createSlotNode(slot) {
     if (state.photosLoading && !selectedFile && !loadedPhoto) {
       preview.appendChild(overlay);
     }
-    controls.className = "slot-preview-actions";
+    controls.className = "slot-controls";
     fitButton.type = "button";
     fitButton.className = `slot-fit-button ${isSlotFit(slot.prefix) ? "active" : ""}`;
     fitButton.textContent = "FIT";
@@ -3894,8 +3929,7 @@ function createSlotNode(slot) {
     });
     openButton.type = "button";
     openButton.className = "slot-open-button";
-    openButton.textContent = "Otworz";
-    openButton.title = "Otworz oryginalny plik z tego slotu";
+    openButton.textContent = "Otwórz";
     openButton.addEventListener("click", (event) => {
       event.stopPropagation();
       openSlotFile(slot.prefix).catch((error) => {
@@ -3919,11 +3953,10 @@ function createSlotNode(slot) {
       if (selectedSlotSourceCanFit(slot.prefix, loadedPhoto, selectedFile)) {
         controls.appendChild(fitButton);
       }
-      if (selectedSlotSourceCanOpen(slot.prefix, loadedPhoto, selectedFile)) {
-        controls.appendChild(openButton);
-      }
       controls.appendChild(clearButton);
     }
+    updateSlotOpenButton(openButton, slot.prefix, loadedPhoto, selectedFile);
+    controls.appendChild(openButton);
     if (candidate && !selectedFile) {
       const decision = document.createElement("div");
       const acceptButton = document.createElement("button");
@@ -3998,9 +4031,7 @@ function createSlotNode(slot) {
             : slotStatusText(loadedPhoto, slot.prefix);
       }
     }
-    if (controls.childElementCount) {
-      preview.appendChild(controls);
-    }
+    meta.appendChild(controls);
 
     node.addEventListener("dragstart", (event) => {
       const assignment = getSlotAssignment(slot.prefix);
