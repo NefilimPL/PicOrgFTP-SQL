@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-import hashlib
 from typing import Any
 
 from .pimcore_sql_service import SqlValueResult, connect_profile, execute_sql_value_query
@@ -11,13 +10,12 @@ from .pimcore_sql_service import SqlValueResult, connect_profile, execute_sql_va
 
 def _profile_key(profile: dict[str, object]) -> tuple[str, str, str, str, str]:
     password = str(profile.get("password") or "")
-    password_identity = hashlib.sha256(password.encode("utf-8")).hexdigest()
     return (
         str(profile.get("type") or "").casefold(),
         str(profile.get("host") or ""),
         str(profile.get("user") or ""),
         str(profile.get("database") or ""),
-        password_identity,
+        password,
     )
 
 
