@@ -16,6 +16,12 @@ from fastapi import HTTPException
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
+from ..path_security import (
+    PathSecurityError,
+    build_child_path,
+    resolve_path_within_roots,
+)
+
 try:  # pragma: no cover - optional runtime dependency
     from PIL import Image
 except Exception:  # pragma: no cover
@@ -56,14 +62,14 @@ def cleanup_job_directory(
 ) -> bool:
     """Remove one inactive job directory only when it is directly under its root."""
     try:
-        root = Path(managed_root).resolve(strict=False)
-        target = Path(path).resolve(strict=False)
+        root = resolve_path_within_roots(managed_root, [managed_root])
+        target = resolve_path_within_roots(path, [root])
         active = {
             Path(item).resolve(strict=False)
             for item in (active_paths or set())
             if item
         }
-    except (OSError, RuntimeError, TypeError):
+    except (OSError, RuntimeError, TypeError, PathSecurityError):
         return False
     if target.parent != root or target in active:
         return False
@@ -354,18 +360,31 @@ class UploadStagingService:
         self._validate_image = validate_image
         self._scan_file = scan_file
 
-    async def stage(self, upload: UploadFile, job_dir: str, prefix: str) -> StagedUpload:
+    async def stage(
+        self,
+        upload: UploadFile,
+        job_dir: str,
+        prefix: str,
+        *,
+        managed_root: str | None = None,
+    ) -> StagedUpload:
         original_name = os.path.basename(str(upload.filename or f"{prefix}.upload"))
         suffix = Path(original_name).suffix.lower()
         safe_prefix = "".join(
             character if character.isalnum() or character in "-_" else "_"
             for character in str(prefix)
         ).strip("._") or "upload"
-        target_path = os.path.join(job_dir, f"{safe_prefix}_{secrets.token_hex(8)}{suffix}")
+        if managed_root is not None:
+            job_path = resolve_path_within_roots(job_dir, [managed_root])
+        else:
+            job_path = resolve_path_within_roots(job_dir, [job_dir])
+        target_path = os.fspath(
+            build_child_path(job_path, f"{safe_prefix}_{secrets.token_hex(8)}{suffix}")
+        )
         size_bytes = 0
 
         try:
-            await run_in_threadpool(os.makedirs, job_dir, exist_ok=True)
+            await run_in_threadpool(os.makedirs, job_path, exist_ok=True)
             with open(target_path, "wb") as handle:
                 while True:
                     chunk = await upload.read(_CHUNK_SIZE)

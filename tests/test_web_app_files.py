@@ -324,6 +324,40 @@ def test_file_token_allows_case_variant_of_a_resolved_photos_root(monkeypatch) -
         assert web_app._path_from_file_token(web_app._file_token(source)) == source
 
 
+def test_delete_local_files_skips_path_outside_trusted_roots(tmp_path, monkeypatch) -> None:
+    """A direct caller cannot turn local cleanup into an arbitrary-file delete."""
+    photos = tmp_path / "photos"
+    outside = tmp_path / "outside.jpg"
+    photos.mkdir()
+    outside.write_bytes(b"keep")
+    monkeypatch.setattr(web_app.settings, "l", str(photos))
+
+    result = web_app._delete_local_files([{"local_path": str(outside)}], set())
+
+    assert result["deleted"] == 0
+    assert outside.exists()
+
+
+def test_file_token_rejects_signed_symlink_escaping_photos_root(tmp_path, monkeypatch) -> None:
+    """A valid signature cannot authorize a path that escapes through a link."""
+    photos = tmp_path / "photos"
+    outside = tmp_path / "outside"
+    photos.mkdir()
+    outside.mkdir()
+    secret = outside / "secret.jpg"
+    secret.write_bytes(b"secret")
+    try:
+        (photos / "escape").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symbolic links are unavailable: {exc}")
+    monkeypatch.setattr(web_app.settings, "l", str(photos))
+
+    with pytest.raises(HTTPException) as error:
+        web_app._path_from_file_token(web_app._file_token(str(photos / "escape" / secret.name)))
+
+    assert error.value.status_code == 403
+
+
 def test_similar_files_endpoint_requires_login_and_hides_source_path(monkeypatch) -> None:
     """Catches a suggestions response that leaks a local filename path or skips auth."""
 
@@ -1485,14 +1519,15 @@ class WebAppFileTests(unittest.TestCase):
             delete_file.write_bytes(b"delete")
             saved_file.write_bytes(b"saved")
 
-            result = web_app._delete_local_files(
-                [
-                    {"prefix": "03", "local_path": str(delete_file)},
-                    {"prefix": "04", "local_path": str(saved_file)},
-                    {"prefix": "05", "local_path": str(missing_file)},
-                ],
-                {str(saved_file)},
-            )
+            with patch.object(web_app.settings, "l", str(root)):
+                result = web_app._delete_local_files(
+                    [
+                        {"prefix": "03", "local_path": str(delete_file)},
+                        {"prefix": "04", "local_path": str(saved_file)},
+                        {"prefix": "05", "local_path": str(missing_file)},
+                    ],
+                    {str(saved_file)},
+                )
 
             self.assertEqual(result["deleted"], 1)
             self.assertEqual(result["skipped"], 2)
