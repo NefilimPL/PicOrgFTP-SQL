@@ -61,12 +61,38 @@ function Get-PortListenerPids {
     return $pids | Select-Object -Unique
 }
 
-function Stop-WebPid($PidValue) {
-    if (-not (Test-WebProcess $PidValue)) {
-        return $false
+function Stop-WebPid($PidValue, [switch]$AllowRecordedLauncher) {
+    $process = Get-Process -Id $PidValue -ErrorAction SilentlyContinue
+    if (-not $process) {
+        return [pscustomobject]@{ ok = $true; attempted = $false; message = "" }
     }
-    Stop-Process -Id $PidValue -Force
-    return $true
+    if (-not $AllowRecordedLauncher -and -not (Test-WebProcess $PidValue)) {
+        return [pscustomobject]@{ ok = $true; attempted = $false; message = "" }
+    }
+    try {
+        $output = @(& taskkill /PID $PidValue /T /F 2>&1)
+    } catch {
+        return [pscustomobject]@{ ok = $false; attempted = $true; message = $_.Exception.Message }
+    }
+    if ($LASTEXITCODE -eq 0) {
+        return [pscustomobject]@{ ok = $true; attempted = $true; message = "" }
+    }
+    $detail = (($output | Out-String).Trim())
+    if (-not $detail) {
+        $detail = "brak szczegolow z Windows"
+    }
+    return [pscustomobject]@{ ok = $false; attempted = $true; message = $detail }
+}
+
+function Wait-WebPortRelease {
+    $deadline = (Get-Date).AddSeconds(8)
+    while ((Get-Date) -lt $deadline) {
+        if (@(Get-PortListenerPids).Count -eq 0) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    return @(Get-PortListenerPids).Count -eq 0
 }
 
 function Read-RunMetadata {
@@ -125,31 +151,50 @@ function Remove-FirewallRuleFromMetadata($Metadata) {
 }
 
 $stopped = $false
+$failureMessages = @()
 $metadata = Read-RunMetadata
 if ($metadata -and $metadata.port) {
     $Port = [int]$metadata.port
 }
 
-if ($metadata -and $metadata.pid) {
-    $pidValue = [int]$metadata.pid
-    if (Stop-WebPid $pidValue) {
-        Write-Info "Zatrzymano panel webowy, PID $pidValue."
+$launcherStopped = $false
+if ($metadata -and $metadata.launcher_pid) {
+    $launcherPid = [int]$metadata.launcher_pid
+    $result = Stop-WebPid $launcherPid -AllowRecordedLauncher
+    if (-not $result.ok) {
+        $failureMessages += "PID launchera ${launcherPid}: $($result.message)"
+    } elseif ($result.attempted) {
+        Write-Info "Zatrzymano launcher panelu webowego, PID $launcherPid."
         $stopped = $true
+        $launcherStopped = $true
     }
-    Remove-Item -Path $PidFile -Force -ErrorAction SilentlyContinue
 }
 
-if (-not $stopped) {
-    foreach ($pidValue in Get-PortListenerPids) {
-        if (Stop-WebPid $pidValue) {
+if (-not $launcherStopped) {
+    $candidatePids = @()
+    if ($metadata -and $metadata.pid) {
+        $candidatePids += [int]$metadata.pid
+    }
+    $candidatePids += Get-PortListenerPids
+    foreach ($pidValue in @($candidatePids | Select-Object -Unique)) {
+        $result = Stop-WebPid $pidValue
+        if (-not $result.ok) {
+            $failureMessages += "PID ${pidValue}: $($result.message)"
+        } elseif ($result.attempted) {
             Write-Info "Zatrzymano panel webowy na porcie $Port, PID $pidValue."
             $stopped = $true
         }
     }
 }
 
-if (-not $stopped) {
-    Write-Info "Panel webowy nie byl uruchomiony albo na porcie $Port dziala inna usluga."
+if ($failureMessages.Count -gt 0) {
+    Write-Info "Nie udalo sie zatrzymac panelu webowego: $($failureMessages -join '; ')"
+} elseif (-not (Wait-WebPortRelease)) {
+    Write-Info "Panel webowy nadal nasluchuje na porcie $Port. Plik PID pozostaje do ponownej proby."
+} else {
+    Remove-Item -Path $PidFile -Force -ErrorAction SilentlyContinue
+    if (-not $stopped) {
+        Write-Info "Panel webowy nie byl uruchomiony albo na porcie $Port dziala inna usluga."
+    }
+    Remove-FirewallRuleFromMetadata $metadata
 }
-
-Remove-FirewallRuleFromMetadata $metadata

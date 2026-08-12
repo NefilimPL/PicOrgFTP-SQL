@@ -14,11 +14,34 @@ import sys
 import types
 from unittest.mock import patch
 
+import pytest
+
 from picorgftp_sql import web_manager
 
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB_ENTRYPOINT = ROOT / "PicOrgFTP-SQL-WEB.pyw"
+START_WEB_SCRIPT = ROOT / "tools" / "web" / "start_web.ps1"
+STOP_WEB_SCRIPT = ROOT / "tools" / "web" / "stop_web.ps1"
+
+
+def _run_powershell_harness(path: Path) -> list[str]:
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return [line for line in result.stdout.splitlines() if line.strip()]
 
 
 def test_web_entrypoint_calls_freeze_support_before_importing_manager() -> None:
@@ -68,6 +91,123 @@ def test_web_entrypoint_runs_freeze_support_before_loading_manager(
     runpy.run_path(str(WEB_ENTRYPOINT), run_name="__main__")
 
     assert calls == ["freeze_support", "web_manager_import", "main"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell starter scripts are Windows-only")
+def test_start_web_script_records_its_own_launcher_pid(tmp_path) -> None:
+    """Catches the starter writing only the child server PID to runtime metadata."""
+    source = START_WEB_SCRIPT.read_text(encoding="utf-8")
+    start = source.index("function Write-RunMetadata")
+    end = source.index("\nfunction Test-WebDeps", start)
+    write_metadata_function = source[start:end]
+    harness_path = tmp_path / "tools" / "web" / "start_web_harness.ps1"
+    harness_path.parent.mkdir(parents=True)
+    harness_path.write_text(
+        """
+$Port = 8010
+$HostAddress = "0.0.0.0"
+$PidFile = Join-Path $PSScriptRoot "..\\..\\.picorg_web.pid"
+"""
+        + write_metadata_function
+        + """
+$firewallState = [pscustomobject]@{
+    rule_name = ""
+    created = $false
+    remove_on_stop = $false
+}
+Write-RunMetadata 4242 $firewallState
+[pscustomobject]@{
+    metadata = Get-Content -Path $PidFile -Raw | ConvertFrom-Json
+    launcher_process_id = [int]$PID
+} | ConvertTo-Json -Compress
+""",
+        encoding="utf-8",
+    )
+
+    payload = json.loads(_run_powershell_harness(harness_path)[-1])
+
+    assert payload["metadata"]["pid"] == 4242
+    assert payload["metadata"]["launcher"] == "start_web.ps1"
+    assert payload["metadata"]["launcher_pid"] == payload["launcher_process_id"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell starter scripts are Windows-only")
+def test_stop_web_script_terminates_recorded_launcher_tree_first(tmp_path) -> None:
+    """Catches STOP_WEB terminating only the server child instead of its launcher tree."""
+    source = STOP_WEB_SCRIPT.read_text(encoding="utf-8")
+    prefix, separator, suffix = source.partition("\n$stopped = $false\n")
+    assert separator
+    harness_path = tmp_path / "tools" / "web" / "stop_web_harness.ps1"
+    harness_path.parent.mkdir(parents=True)
+    harness_path.write_text(
+        prefix
+        + """
+$script:stop_calls = @()
+function Read-RunMetadata {
+    return [pscustomobject]@{
+        pid = 102
+        launcher_pid = 101
+        launcher = "start_web.ps1"
+        port = 8010
+        firewall_rule_created = $false
+        firewall_remove_on_stop = $false
+        firewall_rule_name = ""
+    }
+}
+function Stop-WebPid($PidValue, [switch]$AllowRecordedLauncher) {
+    $script:stop_calls += [int]$PidValue
+    return [pscustomobject]@{ ok = $true; attempted = $true; message = "" }
+}
+function Get-PortListenerPids { return @(103) }
+function Wait-WebPortRelease { return $true }
+function Remove-FirewallRuleFromMetadata($Metadata) { }
+"""
+        + separator
+        + suffix
+        + "\n$script:stop_calls | ConvertTo-Json -Compress\n",
+        encoding="utf-8",
+    )
+
+    calls = json.loads(_run_powershell_harness(harness_path)[-1])
+
+    assert calls == 101
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell starter scripts are Windows-only")
+def test_stop_web_script_uses_taskkill_tree_option(tmp_path) -> None:
+    """Catches replacing tree shutdown with a single-process Stop-Process call."""
+    source = STOP_WEB_SCRIPT.read_text(encoding="utf-8")
+    start = source.index("function Stop-WebPid")
+    end = source.index("\nfunction Read-RunMetadata", start)
+    stop_process_function = source[start:end]
+    harness_path = tmp_path / "stop_web_tree_harness.ps1"
+    harness_path.write_text(
+        """
+$script:taskkill_args = $null
+function Get-Process { return [pscustomobject]@{ ProcessName = "powershell" } }
+function Test-WebProcess($PidValue) { return $true }
+function Stop-Process { }
+function taskkill {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+    $script:taskkill_args = $Arguments
+    $global:LASTEXITCODE = 0
+}
+"""
+        + stop_process_function
+        + """
+$result = Stop-WebPid 101
+[pscustomobject]@{
+    ok = $result.ok
+    arguments = @($script:taskkill_args)
+} | ConvertTo-Json -Compress
+""",
+        encoding="utf-8",
+    )
+
+    payload = json.loads(_run_powershell_harness(harness_path)[-1])
+
+    assert payload["ok"] is True
+    assert payload["arguments"] == ["/PID", "101", "/T", "/F"]
 
 
 class _FakeRoot:

@@ -35,6 +35,8 @@ Na Windows można użyć skryptów:
 - `START_WEB.bat` - uruchamia panel, doinstalowuje brakujące zależności webowe, otwiera przeglądarkę i pokazuje adres LAN.
 - `STOP_WEB.bat` - zatrzymuje panel uruchomiony na skonfigurowanym porcie.
 
+Po potwierdzeniu zamknięcia w lokalnym menedżerze program kończy serwer panelu oraz kontrolowane procesy launchera. Jeżeli Windows nie zwolni portu, menedżer pozostaje otwarty i pokazuje błąd, aby można było ponowić zatrzymanie.
+
 Ręczne uruchomienie backendu:
 
 ```powershell

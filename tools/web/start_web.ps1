@@ -786,6 +786,8 @@ function Remove-FirewallRuleIfNeeded($FirewallState) {
 function Write-RunMetadata($PidValue, $FirewallState) {
     $payload = [ordered]@{
         pid = [int]$PidValue
+        launcher_pid = [int]$PID
+        launcher = "start_web.ps1"
         port = [int]$Port
         host = $HostAddress
         firewall_rule_name = [string]$FirewallState.rule_name
