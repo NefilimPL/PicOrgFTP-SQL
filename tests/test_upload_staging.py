@@ -7,6 +7,7 @@ import time
 import pytest
 from fastapi import HTTPException
 
+from picorgftp_sql.path_security import PathSecurityError
 from picorgftp_sql.web import app as web_app
 from picorgftp_sql.web.upload_staging import (
     UploadStagingService,
@@ -45,6 +46,23 @@ async def test_stage_runs_validation_and_scan_off_event_loop(tmp_path) -> None:
     assert result.height == 100
     assert worker_threads
     assert all(thread_id != event_loop_thread for thread_id in worker_threads)
+
+
+@pytest.mark.anyio
+async def test_stage_rejects_job_directory_outside_managed_root(tmp_path) -> None:
+    """Catches staging into a directory that is not owned by the job root."""
+    managed_root = tmp_path / "managed"
+    outside = tmp_path / "outside"
+    managed_root.mkdir()
+    outside.mkdir()
+
+    with pytest.raises(PathSecurityError):
+        await UploadStagingService().stage(
+            upload_file("photo.jpg", jpeg_bytes()),
+            str(outside),
+            "01",
+            managed_root=str(managed_root),
+        )
 
 
 @pytest.mark.anyio
