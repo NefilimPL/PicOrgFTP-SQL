@@ -81,6 +81,7 @@ from ..notification_service import (
 )
 from ..product_fields import PRODUCT_FIELDS_KEY, normalize_product_fields
 from ..pimcore_templates import TemplateError
+from ..path_security import PathSecurityError, build_child_path, resolve_path_within_roots
 from ..services.ftp_service import sync_remote_files
 from ..services.pimcore_service import PimcoreApiError, PimcoreConflictError
 from ..services.photo_sql_batch import build_photo_sql_batch
@@ -1186,14 +1187,23 @@ def _upload_cache_root() -> str:
 
 def _upload_cache_dir(cache_scope: object = "") -> str:
     safe_scope = sanitize_path_segment(cache_scope) or "user-session"
-    return os.path.join(_upload_cache_root(), safe_scope)
+    return os.fspath(build_child_path(_upload_cache_root(), safe_scope))
+
+
+def _file_token_roots() -> list[str]:
+    return [
+        settings.l,
+        os.path.join(settings.AC, "web_ftp_cache"),
+        _upload_cache_root(),
+    ]
 
 
 def _path_is_under_root(path: str, root: str) -> bool:
     try:
-        return os.path.commonpath([os.path.abspath(path), os.path.abspath(root)]) == os.path.abspath(root)
-    except ValueError:
+        resolve_path_within_roots(path, [root])
+    except PathSecurityError:
         return False
+    return True
 
 
 def _is_upload_cache_path(path: str) -> bool:
@@ -1290,7 +1300,7 @@ def cleanup_web_upload_cache(
 
 
 def _file_token(path: str) -> str:
-    payload = os.path.abspath(path)
+    payload = os.path.realpath(os.path.abspath(path))
     token = f"{payload}|{_sign(payload)}"
     return base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii")
 
@@ -1319,26 +1329,18 @@ def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
         raise HTTPException(status_code=400, detail="Niepoprawny token pliku.") from exc
     if not hmac.compare_digest(_sign(path), signature):
         raise HTTPException(status_code=403, detail="Niepoprawny podpis pliku.")
-    abs_path = os.path.realpath(os.path.abspath(path))
-    roots = [
-        os.path.realpath(os.path.abspath(settings.l)),
-        os.path.realpath(os.path.abspath(os.path.join(settings.AC, "web_ftp_cache"))),
-        os.path.realpath(os.path.abspath(_upload_cache_root())),
-    ]
-    allowed = False
-    for root in roots:
-        try:
-            common = os.path.commonpath([abs_path, root])
-        except ValueError:
-            continue
-        if os.path.normcase(common) == os.path.normcase(root):
-            allowed = True
-            break
-    if not allowed:
-        raise HTTPException(status_code=403, detail="Plik poza katalogiem zdjec lub cache.")
-    if require_exists and not os.path.isfile(abs_path):
+    try:
+        resolved_path = os.fspath(
+            resolve_path_within_roots(
+                path,
+                _file_token_roots(),
+            )
+        )
+    except PathSecurityError as exc:
+        raise HTTPException(status_code=403, detail="Plik poza katalogiem zdjec lub cache.") from exc
+    if require_exists and not os.path.isfile(resolved_path):
         raise HTTPException(status_code=404, detail="Nie znaleziono pliku.")
-    return abs_path
+    return resolved_path
 
 
 def _resample_filter() -> Any:
@@ -1450,12 +1452,7 @@ def _upload_prefix_from_form_key(key: str) -> str:
     return sanitize_path_segment(text) or "slot"
 
 
-async def _materialize_process_form(
-    form: Any,
-    temp_dir: str,
-    *,
-    managed_root: str | None = None,
-) -> _ProcessFormSnapshot:
+async def _materialize_process_form(form: Any, temp_dir: str) -> _ProcessFormSnapshot:
     os.makedirs(temp_dir, exist_ok=True)
     fields: Dict[str, str] = {}
     uploads: Dict[str, _QueuedUploadFile] = {}
@@ -1465,12 +1462,7 @@ async def _materialize_process_form(
         if isinstance(value, UploadFile):
             if not value.filename:
                 continue
-            path = await _save_upload(
-                value,
-                temp_dir,
-                _upload_prefix_from_form_key(key_text),
-                managed_root=managed_root,
-            )
+            path = await _save_upload(value, temp_dir, _upload_prefix_from_form_key(key_text))
             uploads[key_text] = _QueuedUploadFile(
                 path=path,
                 filename=_safe_upload_name(value.filename, os.path.basename(path)),
@@ -1499,6 +1491,7 @@ async def _save_upload_cache_entry(
         cache_dir,
         f"{safe_prefix}_{secrets.token_hex(12)}_{safe_stem}{suffix}",
     )
+    target_path = os.fspath(resolve_path_within_roots(target_path, [cache_dir]))
     max_bytes, max_pixels = _upload_limits()
     size = 0
     try:
@@ -1567,6 +1560,7 @@ def _save_web_image_cache(
         cache_dir,
         f"{safe_prefix}_{secrets.token_hex(12)}_{safe_stem}{suffix}",
     )
+    target_path = os.fspath(resolve_path_within_roots(target_path, [cache_dir]))
     with open(target_path, "wb") as handle:
         handle.write(data)
     return target_path, len(data), safe_name, width, height
@@ -2133,7 +2127,15 @@ def _delete_local_files(delete_requests: List[Dict[str, Any]], saved_paths: Set[
                     {"slot": slot, "status": "skipped", "elapsed_ms": 0}
                 )
             continue
-        abs_path = os.path.abspath(path)
+        try:
+            abs_path = os.fspath(resolve_path_within_roots(path, _file_token_roots()))
+        except PathSecurityError:
+            payload["skipped"] += 1
+            if slot:
+                payload["slot_results"].append(
+                    {"slot": slot, "status": "skipped", "elapsed_ms": 0}
+                )
+            continue
         status = "skipped"
         if os.path.normcase(abs_path) in normalized_saved_paths:
             payload["skipped"] += 1
@@ -3622,12 +3624,9 @@ async def _stage_process_form(request: Request) -> _ProcessFormSnapshot:
         dir=str(_PROCESS_JOB_ROOT),
     )
     try:
+        resolve_path_within_roots(temp_dir, [_PROCESS_JOB_ROOT])
         form = await request.form()
-        snapshot = await _materialize_process_form(
-            form,
-            temp_dir,
-            managed_root=str(_PROCESS_JOB_ROOT),
-        )
+        snapshot = await _materialize_process_form(form, temp_dir)
     except Exception:
         _cleanup_process_job_directory(temp_dir)
         raise
