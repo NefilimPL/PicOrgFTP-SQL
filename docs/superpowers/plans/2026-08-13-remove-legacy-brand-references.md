@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Remove `xml.wipmebgroup.pl` and `http://10.10.0.5` from source and tests.
+- Remove the historical company-specific hosts from source and tests.
 - Keep active Pimcore integration behavior and replace its test hosts with `pimcore.example.test`.
 - Do not modify repository ownership, contributor, license, technology-integration, path-configuration, or Windows Defender discovery code.
 - Remove only `.superpowers/sdd` and `REVIEW_WYDAJNOSCI.md`; keep `docs/superpowers`.
@@ -52,7 +52,7 @@
 
 - [ ] **Step 3: Remove the migration and obsolete tests**
 
-  Delete `OLD_EXAMPLE_BASE_URL` and set `settings["base_url"] = raw_base_url`. Delete `test_incomplete_legacy_default_url_is_cleared` and `test_configured_legacy_default_url_is_preserved`, because both test only the removed historical migration. Replace every remaining `http://10.10.0.5` fixture in Pimcore tests with `http://pimcore.example.test`.
+  Delete `OLD_EXAMPLE_BASE_URL` and set `settings["base_url"] = raw_base_url`. Delete `test_incomplete_legacy_default_url_is_cleared` and `test_configured_legacy_default_url_is_preserved`, because both test only the removed historical migration. Replace every remaining company-specific fixture in Pimcore tests with `http://pimcore.example.test`.
 
 - [ ] **Step 4: Run Pimcore configuration and service tests**
 
@@ -84,7 +84,7 @@
 
 - [ ] **Step 1: Update the active SQL URL fixture**
 
-  Replace both occurrences of `https://xml.wipmebgroup.pl/img/5901234567890_03.jpg` in the existing photo test with `https://cdn.example.test/img/5901234567890_03.jpg`.
+  Replace both occurrences of the company-specific image URL in the existing photo test with `https://cdn.example.test/img/5901234567890_03.jpg`.
 
 - [ ] **Step 2: Run the focused photo test**
 
@@ -105,7 +105,7 @@
   Run:
 
   ```powershell
-  rg -n -i 'wipmeb|10\.10\.0\.5' picorgftp_sql tests
+  Search `picorgftp_sql` and `tests` for the removed company-specific hosts.
   & 'tmp_pytest\endpoint-verify\Scripts\python.exe' -m pytest tests\test_web_data_users.py tests\test_web_ui_integrity.py -q
   ```
 
@@ -145,7 +145,7 @@
 
   ```powershell
   git diff HEAD~2..HEAD -- picorgftp_sql/pimcore_config.py tests REVIEW_WYDAJNOSCI.md
-  rg -n -i 'wipmeb|10\.10\.0\.5' picorgftp_sql tests
+  Search `picorgftp_sql` and `tests` for the removed company-specific hosts.
   ```
 
   Confirm no removed literal remains and no active integration behavior was deleted.

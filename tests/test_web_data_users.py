@@ -633,7 +633,7 @@ class WebDataUserTests(unittest.TestCase):
                 "query_presence_details",
                 return_value=(
                     {"03": True, "04": False},
-                    {"03": "https://xml.wipmebgroup.pl/img/5901234567890_03.jpg", "04": ""},
+                    {"03": "https://cdn.example.test/img/5901234567890_03.jpg", "04": ""},
                 ),
             ),
         ):
@@ -655,7 +655,7 @@ class WebDataUserTests(unittest.TestCase):
         self.assertTrue(photos[0]["sql_checked"])
         self.assertEqual(
             photos[0]["sql_value"],
-            "https://xml.wipmebgroup.pl/img/5901234567890_03.jpg",
+            "https://cdn.example.test/img/5901234567890_03.jpg",
         )
         self.assertFalse(photos[0]["is_image"])
 

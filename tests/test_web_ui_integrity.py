@@ -2664,7 +2664,6 @@ async function requestJson() {{
             encoding="utf-8"
         )
 
-        self.assertNotIn("http://10.10.0.5", source)
         self.assertIn("http://twoj-adres-pimcore.example", source)
         self.assertIn("flex-wrap: wrap", css[css.index(".lookup-actions"):])
         self.assertNotIn(".lookup-actions #pimcoreEditButton {\n  min-width", css)

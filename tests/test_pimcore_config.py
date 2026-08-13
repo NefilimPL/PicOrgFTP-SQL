@@ -8,11 +8,19 @@ from picorgftp_sql.pimcore_config import (
 )
 
 
+def test_normalize_pimcore_settings_preserves_configured_base_url_without_metadata():
+    configured_url = "http://pimcore.example.test"
+
+    result = normalize_pimcore_settings({"base_url": configured_url})
+
+    assert result["base_url"] == configured_url
+
+
 def test_normalize_pimcore_settings_cleans_mappings_and_bounds_timeout():
     result = normalize_pimcore_settings(
         {
             "enabled": 1,
-            "base_url": " http://10.10.0.5/ ",
+            "base_url": " http://pimcore.example.test/ ",
             PIMCORE_API_KEY: "secret-key",
             "class_name": " Product ",
             "parent_id": "123",
@@ -32,7 +40,7 @@ def test_normalize_pimcore_settings_cleans_mappings_and_bounds_timeout():
         }
     )
 
-    assert result["base_url"] == "http://10.10.0.5"
+    assert result["base_url"] == "http://pimcore.example.test"
     assert result["timeout_seconds"] == 120
     assert result["existence_fields"] == ["EAN"]
     assert result["field_mappings"] == [
@@ -87,7 +95,7 @@ def test_guided_setup_defaults_hide_technical_choices():
 def test_complete_legacy_configuration_infers_setup_complete():
     result = normalize_pimcore_settings(
         {
-            "base_url": "http://10.10.0.5",
+            "base_url": "http://pimcore.example.test",
             "api_key": "secret",
             "class_name": "product",
             "parent_id": "6626",
@@ -286,8 +294,6 @@ def test_field_mapping_issues_validate_sql_mode_and_skip_template_parser():
     )
 
     assert issues == []
-
-
 def test_field_mapping_issues_require_sql_query_and_profile_for_sql_mode():
     issues = field_mapping_issues(
         [
@@ -349,8 +355,6 @@ def test_field_mapping_issues_accept_sql_placeholder_as_template_source():
     )
 
     assert issues == []
-
-
 def test_invalid_template_is_reported_by_mapping_validation():
     issues = field_mapping_issues(
         [
@@ -406,22 +410,3 @@ def test_field_mapping_issues_allow_same_target_for_different_languages():
     )
 
     assert issues == []
-
-
-def test_incomplete_legacy_default_url_is_cleared():
-    result = normalize_pimcore_settings({"base_url": "http://10.10.0.5"})
-
-    assert result["base_url"] == ""
-
-
-def test_configured_legacy_default_url_is_preserved():
-    result = normalize_pimcore_settings(
-        {
-            "base_url": "http://10.10.0.5",
-            "api_key": "secret",
-            "class_name": "product",
-            "parent_id": "6626",
-        }
-    )
-
-    assert result["base_url"] == "http://10.10.0.5"
