@@ -784,8 +784,10 @@ class WebSmokeCiTests(unittest.TestCase):
 
     def test_legacy_import_endpoint_switches_to_sqlite(self) -> None:
         client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
         with (
             patch.object(web_app.settings, "AC", "C:/Photos"),
+            patch.object(web_app, "_require_admin", return_value=admin),
             patch.object(web_app.storage_settings, "resolve_sqlite_path", return_value="C:/Data/app.sqlite"),
             patch.object(
                 web_app,
