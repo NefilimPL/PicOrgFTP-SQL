@@ -136,8 +136,55 @@ console.log(JSON.stringify({{
             {"http": True, "https": True, "plainSql": False, "ftp": False},
         )
 
-    def test_slot_actions_are_preview_overlays_not_meta_controls(self) -> None:
-        """Preview actions stay anchored to image corners instead of consuming metadata space."""
+    def test_slot_open_state_tracks_ready_local_ftp_and_sql_sources(self) -> None:
+        """A source change must update opening readiness without reloading the EAN."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the slot opening readiness contract test")
+        is_http_start = source.index("function isHttpUrl(value)")
+        is_http_end = source.index("function selectedPhotoToken", is_http_start)
+        default_source_start = source.index("function defaultSlotSource")
+        default_source_end = source.index("function similarCandidateForSlot", default_source_start)
+        state_start = source.index("function slotOpenState")
+        state_end = source.index("function selectedSlotSourceCanOpen", state_start)
+        script = f"""
+const state = {{ slotSources: new Map() }};
+const similarCandidateForSlot = () => null;
+{source[is_http_start:is_http_end]}
+{source[default_source_start:default_source_end]}
+{source[state_start:state_end]}
+const ftpLoading = {{ ftp: true, ftp_filename: '590776365477_14.png' }};
+const ftpReady = {{ ...ftpLoading, ftp_url: '/api/file?token=abc' }};
+const sqlUrl = {{ sql: true, sql_value: 'https://example.test/file.jpg' }};
+const sqlText = {{ sql: true, sql_value: 'nie-jest-linkiem' }};
+state.slotSources.set('14', 'ftp');
+const results = {{ ftp_loading: slotOpenState('14', ftpLoading, null), ftp_ready: slotOpenState('14', ftpReady, null) }};
+state.slotSources.set('14', 'sql');
+results.sql_url = slotOpenState('14', sqlUrl, null);
+results.sql_text = slotOpenState('14', sqlText, null);
+console.log(JSON.stringify(results));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "ftp_loading": {"enabled": False, "title": "Pobieranie pliku FTP..."},
+                "ftp_ready": {"enabled": True, "title": "Otwórz aktywne źródło FTP"},
+                "sql_url": {"enabled": True, "title": "Otwórz aktywne źródło SQL"},
+                "sql_text": {"enabled": False, "title": "Wartość SQL nie jest linkiem HTTP/HTTPS"},
+            },
+        )
+
+    def test_slot_open_button_keeps_the_original_preview_overlay(self) -> None:
+        """All slot actions keep their established preview overlay positions."""
 
         source = APP_JS.read_text(encoding="utf-8")
         css = APP_CSS.read_text(encoding="utf-8")
@@ -148,10 +195,14 @@ console.log(JSON.stringify({{
         self.assertIn('controls.className = "slot-preview-actions";', renderer)
         self.assertIn("preview.appendChild(controls);", renderer)
         self.assertNotIn("meta.appendChild(controls);", renderer)
-        self.assertIn(".slot-preview-actions", css)
+        self.assertIn("function updateSlotOpenButton", source)
+        self.assertIn('openButton.textContent = "Otwórz";', renderer)
         self.assertIn(".slot-preview-actions .slot-fit-button {\n  top: 3px;\n  left: 3px;", css)
         self.assertIn(".slot-preview-actions .slot-clear-button {\n  top: 3px;\n  right: 3px;", css)
         self.assertIn(".slot-preview-actions .slot-open-button {\n  bottom: 3px;\n  left: 3px;", css)
+        self.assertIn("white-space: nowrap;", css)
+        self.assertNotIn(".slot-controls", css)
+        self.assertNotRegex(css, r"\.slot-meta \{\s*min-width: 0;\s*overflow: visible;")
 
     def test_active_ftp_source_refreshes_stale_preview_before_opening(self) -> None:
         """A stale FTP cache token must never be opened without a refresh request."""

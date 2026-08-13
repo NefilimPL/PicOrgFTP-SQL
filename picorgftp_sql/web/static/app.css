@@ -2600,6 +2600,7 @@ button.slot-badge.on:hover {
   color: var(--text);
   padding: 0 8px;
   font-size: 11px;
+  white-space: nowrap;
 }
 
 .slot-open-button:hover {
