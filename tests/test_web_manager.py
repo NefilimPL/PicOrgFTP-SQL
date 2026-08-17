@@ -4,18 +4,44 @@ from __future__ import annotations
 
 import ast
 import builtins
+import json
 import multiprocessing
+import os
 from pathlib import Path
 import runpy
+import subprocess
 import sys
 import types
 from unittest.mock import patch
+
+import pytest
 
 from picorgftp_sql import web_manager
 
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB_ENTRYPOINT = ROOT / "PicOrgFTP-SQL-WEB.pyw"
+START_WEB_SCRIPT = ROOT / "tools" / "web" / "start_web.ps1"
+STOP_WEB_SCRIPT = ROOT / "tools" / "web" / "stop_web.ps1"
+
+
+def _run_powershell_harness(path: Path) -> list[str]:
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return [line for line in result.stdout.splitlines() if line.strip()]
 
 
 def test_web_entrypoint_calls_freeze_support_before_importing_manager() -> None:
@@ -65,6 +91,123 @@ def test_web_entrypoint_runs_freeze_support_before_loading_manager(
     runpy.run_path(str(WEB_ENTRYPOINT), run_name="__main__")
 
     assert calls == ["freeze_support", "web_manager_import", "main"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell starter scripts are Windows-only")
+def test_start_web_script_records_its_own_launcher_pid(tmp_path) -> None:
+    """Catches the starter writing only the child server PID to runtime metadata."""
+    source = START_WEB_SCRIPT.read_text(encoding="utf-8")
+    start = source.index("function Write-RunMetadata")
+    end = source.index("\nfunction Test-WebDeps", start)
+    write_metadata_function = source[start:end]
+    harness_path = tmp_path / "tools" / "web" / "start_web_harness.ps1"
+    harness_path.parent.mkdir(parents=True)
+    harness_path.write_text(
+        """
+$Port = 8010
+$HostAddress = "0.0.0.0"
+$PidFile = Join-Path $PSScriptRoot "..\\..\\.picorg_web.pid"
+"""
+        + write_metadata_function
+        + """
+$firewallState = [pscustomobject]@{
+    rule_name = ""
+    created = $false
+    remove_on_stop = $false
+}
+Write-RunMetadata 4242 $firewallState
+[pscustomobject]@{
+    metadata = Get-Content -Path $PidFile -Raw | ConvertFrom-Json
+    launcher_process_id = [int]$PID
+} | ConvertTo-Json -Compress
+""",
+        encoding="utf-8",
+    )
+
+    payload = json.loads(_run_powershell_harness(harness_path)[-1])
+
+    assert payload["metadata"]["pid"] == 4242
+    assert payload["metadata"]["launcher"] == "start_web.ps1"
+    assert payload["metadata"]["launcher_pid"] == payload["launcher_process_id"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell starter scripts are Windows-only")
+def test_stop_web_script_terminates_recorded_launcher_tree_first(tmp_path) -> None:
+    """Catches STOP_WEB terminating only the server child instead of its launcher tree."""
+    source = STOP_WEB_SCRIPT.read_text(encoding="utf-8")
+    prefix, separator, suffix = source.partition("\n$stopped = $false\n")
+    assert separator
+    harness_path = tmp_path / "tools" / "web" / "stop_web_harness.ps1"
+    harness_path.parent.mkdir(parents=True)
+    harness_path.write_text(
+        prefix
+        + """
+$script:stop_calls = @()
+function Read-RunMetadata {
+    return [pscustomobject]@{
+        pid = 102
+        launcher_pid = 101
+        launcher = "start_web.ps1"
+        port = 8010
+        firewall_rule_created = $false
+        firewall_remove_on_stop = $false
+        firewall_rule_name = ""
+    }
+}
+function Stop-WebPid($PidValue, [switch]$AllowRecordedLauncher) {
+    $script:stop_calls += [int]$PidValue
+    return [pscustomobject]@{ ok = $true; attempted = $true; message = "" }
+}
+function Get-PortListenerPids { return @(103) }
+function Wait-WebPortRelease { return $true }
+function Remove-FirewallRuleFromMetadata($Metadata) { }
+"""
+        + separator
+        + suffix
+        + "\n$script:stop_calls | ConvertTo-Json -Compress\n",
+        encoding="utf-8",
+    )
+
+    calls = json.loads(_run_powershell_harness(harness_path)[-1])
+
+    assert calls == 101
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell starter scripts are Windows-only")
+def test_stop_web_script_uses_taskkill_tree_option(tmp_path) -> None:
+    """Catches replacing tree shutdown with a single-process Stop-Process call."""
+    source = STOP_WEB_SCRIPT.read_text(encoding="utf-8")
+    start = source.index("function Stop-WebPid")
+    end = source.index("\nfunction Read-RunMetadata", start)
+    stop_process_function = source[start:end]
+    harness_path = tmp_path / "stop_web_tree_harness.ps1"
+    harness_path.write_text(
+        """
+$script:taskkill_args = $null
+function Get-Process { return [pscustomobject]@{ ProcessName = "powershell" } }
+function Test-WebProcess($PidValue) { return $true }
+function Stop-Process { }
+function taskkill {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+    $script:taskkill_args = $Arguments
+    $global:LASTEXITCODE = 0
+}
+"""
+        + stop_process_function
+        + """
+$result = Stop-WebPid 101
+[pscustomobject]@{
+    ok = $result.ok
+    arguments = @($script:taskkill_args)
+} | ConvertTo-Json -Compress
+""",
+        encoding="utf-8",
+    )
+
+    payload = json.loads(_run_powershell_harness(harness_path)[-1])
+
+    assert payload["ok"] is True
+    assert payload["arguments"] == ["/PID", "101", "/T", "/F"]
 
 
 class _FakeRoot:
@@ -124,6 +267,237 @@ def test_service_environment_resets_pyinstaller_for_frozen_child_process() -> No
     assert env["PICORG_WEB_PORT"] == "8010"
     assert env["PICORG_WEB_HOST"] == "0.0.0.0"
     assert env["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+
+
+def test_write_metadata_records_explicit_launcher_pid(tmp_path, monkeypatch) -> None:
+    """Catches dropping the PID that owns the controlled runtime tree."""
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+
+    web_manager.write_metadata(
+        8010,
+        "0.0.0.0",
+        launcher="service-run",
+        launcher_pid=101,
+    )
+
+    metadata = web_manager.read_metadata(tmp_path)
+    assert metadata["pid"] == os.getpid()
+    assert metadata["launcher_pid"] == 101
+
+
+def test_stop_web_terminates_launcher_tree_after_port_release(tmp_path, monkeypatch) -> None:
+    """Catches stopping only the server child and leaving its launcher alive."""
+    (tmp_path / ".picorg_web.pid").write_text(
+        json.dumps({"pid": 102, "launcher_pid": 101}),
+        encoding="ascii",
+    )
+    commands: list[list[str]] = []
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        web_manager,
+        "end_system_service",
+        lambda: web_manager.ActionResult(True, ""),
+    )
+    monkeypatch.setattr(
+        web_manager,
+        "get_process_command_line",
+        lambda _pid: "PicOrgFTP-SQL-WEB --service-run",
+    )
+    monkeypatch.setattr(web_manager, "get_port_listeners", lambda _port: [])
+    monkeypatch.setattr(
+        web_manager,
+        "_run_command",
+        lambda args, **_kwargs: commands.append(args)
+        or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    result = web_manager.stop_web(8010)
+
+    assert result.ok
+    assert commands[0] == ["taskkill", "/PID", "101", "/T", "/F"]
+    assert not (tmp_path / ".picorg_web.pid").exists()
+
+
+def test_stop_web_terminates_recorded_launcher_when_cim_hides_command_line(
+    tmp_path, monkeypatch
+) -> None:
+    """Catches leaving the launcher alive when Windows denies CIM command-line access."""
+    (tmp_path / ".picorg_web.pid").write_text(
+        json.dumps({"pid": 102, "launcher_pid": 101, "launcher": "start_web.ps1"}),
+        encoding="ascii",
+    )
+    commands: list[list[str]] = []
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        web_manager,
+        "end_system_service",
+        lambda: web_manager.ActionResult(True, ""),
+    )
+    monkeypatch.setattr(web_manager, "get_process_command_line", lambda _pid: "")
+    monkeypatch.setattr(web_manager, "get_port_listeners", lambda _port: [])
+    monkeypatch.setattr(
+        web_manager,
+        "_run_command",
+        lambda args, **_kwargs: commands.append(args)
+        or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    assert web_manager.stop_web(8010).ok
+
+    assert commands == [["taskkill", "/PID", "101", "/T", "/F"]]
+
+
+def test_stop_web_terminates_recorded_server_when_cim_hides_command_line(
+    tmp_path, monkeypatch
+) -> None:
+    """Catches leaving a non-frozen service process alive after CIM access fails."""
+    (tmp_path / ".picorg_web.pid").write_text(
+        json.dumps({"pid": 102, "launcher": "service-run"}),
+        encoding="ascii",
+    )
+    commands: list[list[str]] = []
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        web_manager,
+        "end_system_service",
+        lambda: web_manager.ActionResult(True, ""),
+    )
+    monkeypatch.setattr(web_manager, "get_process_command_line", lambda _pid: "")
+    monkeypatch.setattr(web_manager, "get_port_listeners", lambda _port: [])
+    monkeypatch.setattr(
+        web_manager,
+        "_run_command",
+        lambda args, **_kwargs: commands.append(args)
+        or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    assert web_manager.stop_web(8010).ok
+
+    assert commands == [["taskkill", "/PID", "102", "/T", "/F"]]
+
+
+def test_frozen_service_records_its_pyinstaller_parent_as_launcher(tmp_path, monkeypatch) -> None:
+    """Catches a frozen server persisting only its child PID."""
+    metadata_calls = []
+    fake_uvicorn = types.ModuleType("uvicorn")
+    fake_uvicorn.run = lambda *_args, **_kwargs: None
+    fake_web_app = types.ModuleType("picorgftp_sql.web.app")
+    fake_web_app.app = object()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+    monkeypatch.setattr(web_manager.os, "getppid", lambda: 123)
+    monkeypatch.setattr(
+        web_manager,
+        "write_metadata",
+        lambda _port, _host, **kwargs: metadata_calls.append(kwargs),
+    )
+    monkeypatch.setattr(web_manager, "remove_metadata_for_current_process", lambda: None)
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+    monkeypatch.setitem(sys.modules, "picorgftp_sql.web.app", fake_web_app)
+    monkeypatch.setattr(web_manager.sys, "frozen", True, raising=False)
+
+    assert web_manager.run_service_mode(8010, "0.0.0.0") == 0
+
+    assert metadata_calls == [{"launcher": "service-run", "launcher_pid": 123}]
+
+
+def test_stop_web_keeps_metadata_when_taskkill_fails(tmp_path, monkeypatch) -> None:
+    """Catches reporting shutdown success after Windows rejected taskkill."""
+    pid_path = tmp_path / ".picorg_web.pid"
+    pid_path.write_text(json.dumps({"pid": 102}), encoding="ascii")
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        web_manager,
+        "end_system_service",
+        lambda: web_manager.ActionResult(True, ""),
+    )
+    monkeypatch.setattr(
+        web_manager,
+        "get_process_command_line",
+        lambda _pid: "PicOrgFTP-SQL-WEB --service-run",
+    )
+    monkeypatch.setattr(web_manager, "get_port_listeners", lambda _port: [])
+    monkeypatch.setattr(
+        web_manager,
+        "_run_command",
+        lambda args, **_kwargs: subprocess.CompletedProcess(args, 5, "", "Access denied"),
+    )
+
+    result = web_manager.stop_web(8010)
+
+    assert not result.ok
+    assert "Access denied" in result.message
+    assert pid_path.exists()
+
+
+def test_end_system_service_reports_scheduler_error(monkeypatch) -> None:
+    """Catches silently discarding a failed request to stop the SYSTEM task."""
+    monkeypatch.setattr(web_manager, "task_exists", lambda: True)
+    monkeypatch.setattr(
+        web_manager,
+        "_run_command",
+        lambda args, **_kwargs: subprocess.CompletedProcess(args, 1, "", "Access denied"),
+    )
+
+    result = web_manager.end_system_service()
+
+    assert not result.ok
+    assert "Access denied" in result.message
+
+
+def test_stop_web_keeps_metadata_when_panel_port_stays_open(tmp_path, monkeypatch) -> None:
+    """Catches removing runtime metadata before the web listener actually exits."""
+    pid_path = tmp_path / ".picorg_web.pid"
+    pid_path.write_text(json.dumps({"pid": 102}), encoding="ascii")
+    listener = {
+        "Pid": 102,
+        "ProcessName": "PicOrgFTP-SQL-WEB",
+        "CommandLine": "PicOrgFTP-SQL-WEB --service-run",
+    }
+    listener_queries = 0
+    slept = []
+
+    def listeners(_port: int):
+        nonlocal listener_queries
+        listener_queries += 1
+        return [] if listener_queries == 1 else [listener]
+
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        web_manager,
+        "end_system_service",
+        lambda: web_manager.ActionResult(True, ""),
+    )
+    monkeypatch.setattr(
+        web_manager,
+        "get_process_command_line",
+        lambda _pid: "PicOrgFTP-SQL-WEB --service-run",
+    )
+    monkeypatch.setattr(web_manager, "get_port_listeners", listeners)
+    monkeypatch.setattr(
+        web_manager,
+        "_run_command",
+        lambda args, **_kwargs: subprocess.CompletedProcess(args, 0, "", ""),
+    )
+    monkeypatch.setattr(web_manager.time, "monotonic", lambda: 0 if not slept else 10)
+    monkeypatch.setattr(web_manager.time, "sleep", lambda seconds: slept.append(seconds))
+
+    result = web_manager.stop_web(8010)
+
+    assert not result.ok
+    assert "8010" in result.message
+    assert slept == [0.2]
+    assert pid_path.exists()
+
+
+def test_finish_close_stop_keeps_gui_open_when_server_stop_fails() -> None:
+    """Catches closing the manager after an unconfirmed server shutdown."""
+    app = _app_without_tk()
+
+    app._finish_close_stop(web_manager.ActionResult(False, "Port 8010 nadal dziala."))
+
+    assert not app.root.destroyed
+    assert app.status_var.value == "Port 8010 nadal dziala."
 
 
 def test_close_window_starts_background_check_and_shows_spinner(monkeypatch) -> None:

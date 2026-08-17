@@ -204,7 +204,13 @@ def read_metadata(root: Path | None = None) -> dict[str, Any]:
         return {}
 
 
-def write_metadata(port: int, host: str, *, launcher: str) -> None:
+def write_metadata(
+    port: int,
+    host: str,
+    *,
+    launcher: str,
+    launcher_pid: int | None = None,
+) -> None:
     root = app_root()
     payload = {
         "pid": os.getpid(),
@@ -216,6 +222,8 @@ def write_metadata(port: int, host: str, *, launcher: str) -> None:
         "firewall_rule_created": False,
         "firewall_remove_on_stop": False,
     }
+    if launcher_pid is not None and launcher_pid > 0:
+        payload["launcher_pid"] = int(launcher_pid)
     pid_file(root).write_text(json.dumps(payload, indent=2), encoding="ascii")
 
 
@@ -227,6 +235,15 @@ def remove_metadata_for_current_process() -> None:
             path.unlink()
         except OSError:
             pass
+
+
+def service_launcher_pid() -> int | None:
+    """Return the controlled parent process of a frozen service instance."""
+
+    if not getattr(sys, "frozen", False):
+        return None
+    parent_pid = _safe_int(os.getppid())
+    return parent_pid if parent_pid > 0 else None
 
 
 def get_process_command_line(pid: int) -> str:
@@ -270,6 +287,35 @@ def is_web_process(pid: int, command_line: str = "", process_name: str = "") -> 
         "--service-run",
     )
     return any(marker in text for marker in markers)
+
+
+def is_controlled_web_launcher(
+    pid: int,
+    metadata: dict[str, Any],
+    command_line: str,
+) -> bool:
+    """Return whether the recorded launcher still identifies as our runtime."""
+
+    if _safe_int(metadata.get("launcher_pid")) != pid:
+        return False
+    launcher = str(metadata.get("launcher") or "").lower()
+    if launcher in {"service-run", "start_web.ps1"}:
+        return True
+    return is_web_process(pid, command_line)
+
+
+def is_controlled_web_server(
+    pid: int,
+    metadata: dict[str, Any],
+    command_line: str,
+) -> bool:
+    """Return whether the recorded server PID belongs to our current runtime."""
+
+    if _safe_int(metadata.get("pid")) != pid:
+        return False
+    if str(metadata.get("launcher") or "").lower() in {"service-run", "start_web.ps1"}:
+        return True
+    return is_web_process(pid, command_line)
 
 
 def _parse_netstat_listeners(port: int) -> list[dict[str, Any]]:
@@ -535,13 +581,19 @@ def run_system_service() -> ActionResult:
     return ActionResult(True, "Uruchomiono zadanie uslugi systemowej.")
 
 
-def end_system_service() -> None:
+def end_system_service() -> ActionResult:
     if os.name != "nt" or not task_exists():
-        return
+        return ActionResult(True, "")
     try:
-        _run_command(["schtasks", "/End", "/TN", TASK_NAME], timeout=15)
-    except (OSError, subprocess.SubprocessError):
-        pass
+        result = _run_command(["schtasks", "/End", "/TN", TASK_NAME], timeout=15)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return ActionResult(False, str(exc))
+    if result.returncode != 0:
+        return ActionResult(
+            False,
+            (result.stderr or result.stdout or "Nie udalo sie zatrzymac uslugi systemowej.").strip(),
+        )
+    return ActionResult(True, "")
 
 
 def start_user_web(port: int, host: str) -> ActionResult:
@@ -607,27 +659,72 @@ def start_web(port: int, host: str, *, prefer_system_service: bool = True) -> Ac
     return start_user_web(port, host)
 
 
+def _wait_for_port_release(port: int, *, timeout: float = 8.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not get_port_listeners(port):
+            return True
+        time.sleep(0.2)
+    return not get_port_listeners(port)
+
+
+def _taskkill_process_tree(pid: int) -> tuple[bool, str]:
+    try:
+        result = _run_command(["taskkill", "/PID", str(pid), "/T", "/F"], timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    if result.returncode == 0:
+        return True, ""
+    detail = (result.stderr or result.stdout or "brak szczegolow z Windows").strip()
+    return False, detail
+
+
 def stop_web(port: int) -> ActionResult:
     end_system_service()
     stopped = False
     data = read_metadata()
-    candidates = []
-    if data.get("pid"):
-        candidates.append(_safe_int(data.get("pid")))
+    failures: list[str] = []
+    launcher_pid = _safe_int(data.get("launcher_pid"))
+    server_pid = _safe_int(data.get("pid"))
+    launcher_stopped = False
+
+    if launcher_pid > 0:
+        command_line = get_process_command_line(launcher_pid)
+        if is_controlled_web_launcher(launcher_pid, data, command_line):
+            launcher_stopped, detail = _taskkill_process_tree(launcher_pid)
+            if launcher_stopped:
+                stopped = True
+            else:
+                failures.append(f"PID {launcher_pid}: {detail}")
+
+    candidates = [server_pid]
     for listener in get_port_listeners(port):
         candidates.append(_safe_int(listener.get("Pid")))
-    for pid_value in sorted({pid for pid in candidates if pid > 0}):
+    for pid_value in dict.fromkeys(pid for pid in candidates if pid > 0):
+        if launcher_stopped:
+            break
         command_line = get_process_command_line(pid_value)
-        if not is_web_process(pid_value, command_line):
+        if not (
+            is_controlled_web_server(pid_value, data, command_line)
+            or is_web_process(pid_value, command_line)
+        ):
             continue
-        try:
-            if os.name == "nt":
-                _run_command(["taskkill", "/PID", str(pid_value), "/T", "/F"], timeout=10)
-            else:
+        if os.name == "nt":
+            killed, detail = _taskkill_process_tree(pid_value)
+        else:
+            try:
                 os.kill(pid_value, 15)
+                killed, detail = True, ""
+            except OSError as exc:
+                killed, detail = False, str(exc)
+        if killed:
             stopped = True
-        except (OSError, subprocess.SubprocessError):
-            pass
+        else:
+            failures.append(f"PID {pid_value}: {detail}")
+    if failures:
+        return ActionResult(False, f"Nie udalo sie zatrzymac panelu WWW: {'; '.join(failures)}")
+    if not _wait_for_port_release(port):
+        return ActionResult(False, f"Panel WWW nadal nasluchuje na porcie {port}.")
     try:
         pid_file().unlink()
     except OSError:
@@ -735,7 +832,12 @@ def run_service_mode(port: int, host: str) -> int:
     os.environ.setdefault("PICORGFTP_SQL_HEADLESS", "1")
     os.environ["PICORG_WEB_PORT"] = str(port)
     os.environ["PICORG_WEB_HOST"] = host
-    write_metadata(port, host, launcher="service-run")
+    write_metadata(
+        port,
+        host,
+        launcher="service-run",
+        launcher_pid=service_launcher_pid(),
+    )
     try:
         out_handle = out_log_path(root).open("a", encoding="utf-8", buffering=1)
         err_handle = err_log_path(root).open("a", encoding="utf-8", buffering=1)
