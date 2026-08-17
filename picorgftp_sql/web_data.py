@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 import unicodedata
+import uuid
 
 from openpyxl import Workbook
 
@@ -1089,6 +1090,7 @@ def _public_user(user: dict[str, object]) -> dict[str, object]:
     token_issued_at = _float_user_value(user.get("extension_token_issued_at"))
     token_last_used_at = _float_user_value(user.get("extension_token_last_used_at"))
     return {
+        "id": _text(user.get("id")),
         "username": _text(user.get("username")),
         "email": normalize_email_address(user.get("email")),
         "role": "admin" if _text(user.get("role")) == "admin" else "user",
@@ -1115,6 +1117,7 @@ def _public_user(user: dict[str, object]) -> dict[str, object]:
 
 def _default_admin() -> dict[str, object]:
     return {
+        "id": _new_user_id(),
         "username": "admin",
         "email": "",
         "role": "admin",
@@ -1154,12 +1157,27 @@ def _format_local_time(timestamp: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(timestamp)))
 
 
+def _new_user_id() -> str:
+    return str(uuid.uuid4())
+
+
+def _normalized_user_id(value: object) -> str:
+    try:
+        parsed = uuid.UUID(_text(value))
+    except (AttributeError, TypeError, ValueError):
+        return _new_user_id()
+    if parsed.version != 4:
+        return _new_user_id()
+    return str(parsed)
+
+
 def _normalized_user_record(item: dict[str, object]) -> dict[str, object] | None:
     username = _text(item.get("username"))
     if not username:
         return None
     role = _text(item.get("role")) or "user"
     return {
+        "id": _normalized_user_id(item.get("id")),
         "username": username,
         "email": normalize_email_address(item.get("email")),
         "role": "admin" if role == "admin" else "user",
@@ -1207,42 +1225,39 @@ def load_user_records() -> list[dict[str, object]]:
         sqlite_store = _active_sqlite_store()
         if sqlite_store is not None:
             data = sqlite_store.load_users()
-            if not data:
-                return [_default_admin()]
-            users = []
-            seen = set()
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                user = _normalized_user_record(item)
-                if not user or user["username"].lower() in seen:
-                    continue
-                users.append(user)
-                seen.add(user["username"].lower())
-            if not any(user["username"].lower() == "admin" for user in users):
-                users.insert(0, _default_admin())
-            return users
-        path = Path(settings.AC) / WEB_USERS_PATH
-        if not path.exists():
-            return [_default_admin()]
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return [_default_admin()]
-        if not isinstance(data, list):
-            return [_default_admin()]
+            changed = not bool(data)
+        else:
+            path = Path(settings.AC) / WEB_USERS_PATH
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                data = []
+            changed = not isinstance(data, list)
+            if not isinstance(data, list):
+                data = []
         users = []
-        seen = set()
+        seen_usernames = set()
+        seen_ids = set()
         for item in data:
             if not isinstance(item, dict):
+                changed = True
                 continue
             user = _normalized_user_record(item)
-            if not user or user["username"].lower() in seen:
+            if not user or user["username"].lower() in seen_usernames:
+                changed = True
                 continue
+            if user["id"] in seen_ids:
+                user["id"] = _new_user_id()
+            if _text(item.get("id")) != user["id"]:
+                changed = True
             users.append(user)
-            seen.add(user["username"].lower())
+            seen_usernames.add(user["username"].lower())
+            seen_ids.add(user["id"])
         if not any(user["username"].lower() == "admin" for user in users):
             users.insert(0, _default_admin())
+            changed = True
+        if changed:
+            _persist_user_records(users)
         return users
 
 
@@ -1252,17 +1267,21 @@ def load_users() -> list[dict[str, object]]:
     return [_public_user(user) for user in load_user_records()]
 
 
+def _persist_user_records(users: list[dict[str, object]]) -> None:
+    sqlite_store = _active_sqlite_store()
+    if sqlite_store is not None:
+        sqlite_store.save_users(users)
+        return
+    path = Path(settings.AC) / WEB_USERS_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(users, indent=4, ensure_ascii=False), encoding="utf-8")
+
+
 def save_users(users: list[dict[str, object]]) -> list[dict[str, object]]:
     """Persist local web user records."""
 
     with _USERS_LOCK:
-        sqlite_store = _active_sqlite_store()
-        if sqlite_store is not None:
-            sqlite_store.save_users(users)
-            return load_users()
-        path = Path(settings.AC) / WEB_USERS_PATH
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(users, indent=4, ensure_ascii=False), encoding="utf-8")
+        _persist_user_records(users)
         return load_users()
 
 
@@ -1380,6 +1399,22 @@ def find_user(username: str) -> dict[str, object] | None:
     return None
 
 
+def find_user_by_id(user_id: str) -> dict[str, object] | None:
+    """Return a public user by stable server-generated identifier."""
+
+    try:
+        normalized_id = uuid.UUID(_text(user_id))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if normalized_id.version != 4:
+        return None
+    candidate = str(normalized_id)
+    for user in load_user_records():
+        if hmac.compare_digest(_text(user.get("id")), candidate):
+            return _public_user(user)
+    return None
+
+
 def add_user(
     username: str,
     password: str,
@@ -1399,6 +1434,7 @@ def add_user(
         raise ValueError("Taki uzytkownik juz istnieje.")
     users.append(
         {
+            "id": _new_user_id(),
             "username": username,
             "email": email,
             "role": "admin" if _text(role) == "admin" else "user",

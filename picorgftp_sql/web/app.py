@@ -143,6 +143,7 @@ from ..web_data import (
     find_entry_by_identity,
     find_pimcore_product_by_ean,
     find_user,
+    find_user_by_id,
     find_product_photos,
     file_index_status,
     get_pimcore_product_for_edit,
@@ -593,10 +594,10 @@ def _validate_mutating_request(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Niepoprawny token CSRF.")
 
 
-def _make_session_token(username: str) -> str:
-    user = find_user(username) or {}
+def _make_session_token(user: Dict[str, Any]) -> str:
     session_version = int(user.get("session_version") or 0)
-    payload = f"session|{username}|{session_version}|{int(time.time())}|{secrets.token_hex(12)}"
+    user_id = str(user.get("id") or "")
+    payload = f"session-v2|{user_id}|{session_version}|{int(time.time())}|{secrets.token_hex(12)}"
     token = f"{payload}|{_sign(payload)}"
     return base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii")
 
@@ -620,13 +621,9 @@ def _read_session_token(token: Optional[str]) -> Optional[str]:
     if not hmac.compare_digest(_sign(payload), signature):
         return None
     parts = payload.split("|")
-    if len(parts) == 5 and parts[0] == "session":
-        _marker, username, version_raw, issued_raw, _nonce = parts
-    elif len(parts) == 3:
-        username, issued_raw, _nonce = parts
-        version_raw = "0"
-    else:
+    if len(parts) != 5 or parts[0] != "session-v2":
         return None
+    _marker, user_id, version_raw, issued_raw, _nonce = parts
     try:
         issued = int(issued_raw)
         session_version = int(version_raw)
@@ -634,12 +631,12 @@ def _read_session_token(token: Optional[str]) -> Optional[str]:
         return None
     if int(time.time()) - issued > SESSION_MAX_AGE_SECONDS:
         return None
-    user = find_user(username)
+    user = find_user_by_id(user_id)
     if not user or not user.get("enabled") or user.get("locked"):
         return None
     if int(user.get("session_version") or 0) != session_version:
         return None
-    return username
+    return str(user.get("username") or "") or None
 
 
 def _read_browser_extension_token(token: Optional[str]) -> Optional[str]:
@@ -5191,7 +5188,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=401, detail="Niepoprawny login lub haslo.")
         if not user:
             raise HTTPException(status_code=401, detail="Niepoprawny login lub haslo.")
-        session_token = _make_session_token(username)
+        session_token = _make_session_token(user)
         response = JSONResponse(
             {"ok": True, "user": user, "csrf_token": _csrf_token_for_session(session_token)}
         )

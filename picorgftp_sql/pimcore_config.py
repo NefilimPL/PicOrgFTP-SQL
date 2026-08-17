@@ -27,8 +27,6 @@ SUPPORTED_FIELD_PARSERS = {
     "checkbox": "boolean",
     "select": "text",
 }
-OLD_EXAMPLE_BASE_URL = "http://10.10.0.5"
-
 DEFAULT_PIMCORE_SETTINGS: dict[str, Any] = {
     "setup_complete": False,
     "enabled": False,
@@ -287,18 +285,7 @@ def normalize_pimcore_settings(raw: object) -> dict[str, Any]:
     source = raw if isinstance(raw, dict) else {}
     settings["enabled"] = bool(source.get("enabled", settings["enabled"]))
     raw_base_url = _text(source.get("base_url", settings["base_url"])).rstrip("/")
-    has_intentional_location = bool(
-        _text(source.get(PIMCORE_API_KEY))
-        or _text(source.get("class_id"))
-        or _text(source.get("class_name"))
-        or _text(source.get("parent_id"))
-        or source.get("setup_complete") is True
-    )
-    settings["base_url"] = (
-        ""
-        if raw_base_url == OLD_EXAMPLE_BASE_URL and not has_intentional_location
-        else raw_base_url
-    )
+    settings["base_url"] = raw_base_url
     settings[PIMCORE_API_KEY] = _text(source.get(PIMCORE_API_KEY))
     settings["class_id"] = _text(source.get("class_id"))
     settings["class_name"] = _text(source.get("class_name", settings["class_name"]))
