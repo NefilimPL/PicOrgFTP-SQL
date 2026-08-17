@@ -1794,6 +1794,7 @@ h2 {
 
 .pimcore-export-layout-row.pimcore-export-layout-selected {
   background: color-mix(in srgb, var(--accent) 15%, transparent);
+  border-color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
