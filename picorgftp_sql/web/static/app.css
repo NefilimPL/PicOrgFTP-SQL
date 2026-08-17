@@ -1770,6 +1770,44 @@ h2 {
   min-width: 0;
 }
 
+.pimcore-export-layout-panel {
+  width: min(920px, calc(100vw - 32px));
+}
+
+.pimcore-export-layout-list {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.pimcore-export-layout-row {
+  display: grid;
+  grid-template-columns: 32px 112px minmax(120px, 1fr) minmax(160px, 1fr) auto auto auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.pimcore-export-layout-row input,
+.pimcore-export-layout-row select {
+  min-width: 0;
+}
+
+.pimcore-export-layout-position,
+.pimcore-export-layout-kind {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+@media (max-width: 720px) {
+  .pimcore-export-layout-row {
+    grid-template-columns: 28px 1fr 1fr auto auto auto;
+  }
+
+  .pimcore-export-layout-kind {
+    grid-column: 2 / -1;
+  }
+}
+
 .pimcore-layout-controls {
   display: grid;
   grid-template-columns: minmax(140px, 1fr) minmax(84px, .45fr);

@@ -2595,6 +2595,17 @@ async function requestJson() {{
         self.assertNotIn("Format eksportu danych Pimcore: CSV lub XLSX", source)
         self.assertIn("pimcoreSettingsExportButton()", source)
 
+    def test_pimcore_settings_has_saved_import_export_layout_editor(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        html = INDEX_HTML.read_text(encoding="utf-8")
+
+        self.assertIn("pimcoreExportLayoutModal", html)
+        self.assertIn("pimcoreExportLayoutOpenButton", source)
+        self.assertIn("function savePimcoreExportColumns", source)
+        self.assertIn("pimcoreExportLayoutAddFieldButton", source)
+        self.assertIn("pimcoreExportLayoutAddBlankButton", source)
+        self.assertIn("export_columns", source)
+
     def test_pimcore_edit_modal_opens_before_remote_object_load(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         start = source.index("async function openPimcoreEditModal")
