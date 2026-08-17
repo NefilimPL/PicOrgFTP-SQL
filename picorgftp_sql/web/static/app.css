@@ -1818,6 +1818,7 @@ h2 {
   place-items: center;
   border-radius: 4px;
   cursor: grab;
+  -webkit-user-select: none;
   user-select: none;
 }
 
@@ -2813,9 +2814,6 @@ button.slot-badge.on:hover {
   color: var(--text);
   padding: 12px;
   text-align: left;
-}
-
-.history-summary-row {
 }
 
 .history-summary-row:hover {
@@ -4075,9 +4073,6 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
       "queue"
       "slots"
       "result";
-  }
-
-  .slots-section {
   }
 
   .list-editor-layout {
