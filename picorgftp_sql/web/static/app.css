@@ -1794,6 +1794,7 @@ h2 {
 
 .pimcore-export-layout-row.pimcore-export-layout-selected {
   background: color-mix(in srgb, var(--accent) 15%, transparent);
+  border-color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
@@ -1818,6 +1819,7 @@ h2 {
   place-items: center;
   border-radius: 4px;
   cursor: grab;
+  -webkit-user-select: none;
   user-select: none;
 }
 
@@ -2813,9 +2815,6 @@ button.slot-badge.on:hover {
   color: var(--text);
   padding: 12px;
   text-align: left;
-}
-
-.history-summary-row {
 }
 
 .history-summary-row:hover {
@@ -4075,9 +4074,6 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
       "queue"
       "slots"
       "result";
-  }
-
-  .slots-section {
   }
 
   .list-editor-layout {

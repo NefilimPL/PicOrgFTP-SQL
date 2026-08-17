@@ -61,6 +61,27 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
+    def test_pimcore_export_selection_has_a_legacy_chrome_border_fallback(self) -> None:
+        css = APP_CSS.read_text(encoding="utf-8")
+
+        self.assertRegex(
+            css,
+            r"\.pimcore-export-layout-row\.pimcore-export-layout-selected\s*\{[^}]*"
+            r"border-color:\s*var\(--accent\);\s*"
+            r"border-color:\s*color-mix\(in srgb, var\(--accent\) 55%, transparent\);",
+        )
+
+    def test_pimcore_export_drag_grip_uses_safari_safe_selection_and_has_no_empty_rules(self) -> None:
+        css = APP_CSS.read_text(encoding="utf-8")
+
+        self.assertRegex(
+            css,
+            r"\.pimcore-export-layout-grip\s*\{[^}]*"
+            r"-webkit-user-select:\s*none;[^}]*user-select:\s*none;",
+        )
+        self.assertNotRegex(css, r"\.history-summary-row\s*\{\s*\}")
+        self.assertNotRegex(css, r"\.slots-section\s*\{\s*\}")
+
     def test_thumbnail_filter_has_a_label_and_safari_safe_selection_rule(self) -> None:
         html = INDEX_HTML.read_text(encoding="utf-8")
         css = APP_CSS.read_text(encoding="utf-8")
