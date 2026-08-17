@@ -1776,20 +1776,34 @@ h2 {
 
 .pimcore-export-layout-list {
   display: grid;
-  gap: 8px;
+  gap: 0;
   margin: 16px 0;
+  min-height: 80px;
+  position: relative;
 }
 
 .pimcore-export-layout-row {
   display: grid;
-  grid-template-columns: 32px 112px minmax(120px, 1fr) minmax(160px, 1fr) auto auto auto;
+  grid-template-columns: 32px 112px minmax(120px, 1fr) minmax(160px, 1fr) auto;
   align-items: center;
   gap: 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 6px;
+}
+
+.pimcore-export-layout-row.pimcore-export-layout-selected {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
 .pimcore-export-layout-row input,
 .pimcore-export-layout-row select {
   min-width: 0;
+}
+
+.pimcore-export-layout-blank-header {
+  grid-column: 3 / 5;
 }
 
 .pimcore-export-layout-position,
@@ -1798,13 +1812,96 @@ h2 {
   font-size: 13px;
 }
 
+.pimcore-export-layout-grip {
+  align-self: stretch;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  cursor: grab;
+  user-select: none;
+}
+
+.pimcore-export-layout-grip:active {
+  cursor: grabbing;
+}
+
+.pimcore-export-layout-insert {
+  align-items: center;
+  display: flex;
+  height: 14px;
+  justify-content: center;
+  position: relative;
+}
+
+.pimcore-export-layout-insert::before {
+  background: var(--border);
+  content: "";
+  height: 1px;
+  left: 12px;
+  position: absolute;
+  right: 12px;
+}
+
+.pimcore-export-layout-insert-button {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  font-size: 16px;
+  height: 22px;
+  justify-content: center;
+  line-height: 1;
+  opacity: 0;
+  padding: 0;
+  position: relative;
+  transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease;
+  width: 22px;
+}
+
+.pimcore-export-layout-insert:hover .pimcore-export-layout-insert-button,
+.pimcore-export-layout-insert:focus-within .pimcore-export-layout-insert-button {
+  opacity: 1;
+}
+
+.pimcore-export-layout-insert-button:hover,
+.pimcore-export-layout-insert-button:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.pimcore-export-layout-drop-target::before {
+  background: var(--accent);
+  height: 3px;
+}
+
+.pimcore-export-layout-marquee {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border: 1px solid var(--accent);
+  pointer-events: none;
+  position: absolute;
+  z-index: 2;
+}
+
+.pimcore-export-layout-empty-message {
+  color: var(--text-muted);
+  margin: 12px 0;
+  text-align: center;
+}
+
 @media (max-width: 720px) {
   .pimcore-export-layout-row {
-    grid-template-columns: 28px 1fr 1fr auto auto auto;
+    grid-template-columns: 28px 1fr 1fr auto;
   }
 
   .pimcore-export-layout-kind {
     grid-column: 2 / -1;
+  }
+
+  .pimcore-export-layout-blank-header {
+    grid-column: 3;
   }
 }
 

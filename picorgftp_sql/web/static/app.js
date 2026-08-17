@@ -449,6 +449,9 @@ const pimcoreExportLayoutSaveButton = document.querySelector("#pimcoreExportLayo
 const pimcoreExportLayoutAddFieldButton = document.querySelector("#pimcoreExportLayoutAddFieldButton");
 const pimcoreExportLayoutAddBlankButton = document.querySelector("#pimcoreExportLayoutAddBlankButton");
 let pimcoreExportLayoutDraft = [];
+const pimcoreExportLayoutSelection = new Set();
+let pimcoreExportLayoutDragState = null;
+let pimcoreExportLayoutMarquee = null;
 const pimcoreMissingModal = document.querySelector("#pimcoreMissingModal");
 const pimcoreMissingMessage = document.querySelector("#pimcoreMissingMessage");
 const pimcoreMissingCreateButton = document.querySelector("#pimcoreMissingCreateButton");
@@ -11404,6 +11407,158 @@ function collectPimcoreExportColumns() {
   });
 }
 
+function pimcoreExportColumnsFromEditor() {
+  pimcoreExportLayoutDraft = collectPimcoreExportColumns();
+  return pimcoreExportLayoutDraft;
+}
+
+function clearPimcoreExportLayoutSelection() {
+  pimcoreExportLayoutSelection.clear();
+}
+
+function selectedPimcoreExportColumnIndexes() {
+  return [...pimcoreExportLayoutSelection]
+    .filter((index) => index >= 0 && index < pimcoreExportLayoutDraft.length)
+    .sort((left, right) => left - right);
+}
+
+function selectPimcoreExportColumn(index, additive = false) {
+  if (!additive) clearPimcoreExportLayoutSelection();
+  if (additive && pimcoreExportLayoutSelection.has(index)) {
+    pimcoreExportLayoutSelection.delete(index);
+  } else {
+    pimcoreExportLayoutSelection.add(index);
+  }
+}
+
+function insertPimcoreExportBlankColumn(index) {
+  pimcoreExportColumnsFromEditor();
+  const insertionIndex = Math.max(0, Math.min(index, pimcoreExportLayoutDraft.length));
+  const retainedSelection = selectedPimcoreExportColumnIndexes().map((selectedIndex) =>
+    selectedIndex >= insertionIndex ? selectedIndex + 1 : selectedIndex
+  );
+  clearPimcoreExportLayoutSelection();
+  retainedSelection.forEach((selectedIndex) => pimcoreExportLayoutSelection.add(selectedIndex));
+  pimcoreExportLayoutDraft.splice(insertionIndex, 0, { type: "blank", header: "" });
+  renderPimcoreExportLayout();
+}
+
+function pimcoreExportLayoutDropIndexIsNoop(dropIndex) {
+  const selectedIndexes = selectedPimcoreExportColumnIndexes();
+  if (!selectedIndexes.length) return true;
+  const isContiguous = selectedIndexes.every((index, offset) => index === selectedIndexes[0] + offset);
+  if (!isContiguous) return false;
+  return dropIndex >= selectedIndexes[0] && dropIndex <= selectedIndexes[selectedIndexes.length - 1] + 1;
+}
+
+function movePimcoreExportColumns(dropIndex) {
+  pimcoreExportColumnsFromEditor();
+  const selectedIndexes = selectedPimcoreExportColumnIndexes();
+  if (!selectedIndexes.length) return;
+  const selectedSet = new Set(selectedIndexes);
+  const movingColumns = selectedIndexes.map((index) => pimcoreExportLayoutDraft[index]);
+  const remainingColumns = pimcoreExportLayoutDraft.filter((_, index) => !selectedSet.has(index));
+  const adjustedDropIndex = Math.max(
+    0,
+    Math.min(dropIndex - selectedIndexes.filter((index) => index < dropIndex).length, remainingColumns.length)
+  );
+  const nextColumns = [
+    ...remainingColumns.slice(0, adjustedDropIndex),
+    ...movingColumns,
+    ...remainingColumns.slice(adjustedDropIndex),
+  ];
+  if (nextColumns.every((column, index) => column === pimcoreExportLayoutDraft[index])) return;
+  pimcoreExportLayoutDraft = nextColumns;
+  clearPimcoreExportLayoutSelection();
+  movingColumns.forEach((_, index) => pimcoreExportLayoutSelection.add(adjustedDropIndex + index));
+  renderPimcoreExportLayout();
+}
+
+function finishPimcoreExportLayoutDrag() {
+  pimcoreExportLayoutDragState = null;
+  pimcoreExportLayoutList?.classList.remove("pimcore-export-layout-dragging");
+  pimcoreExportLayoutList
+    ?.querySelectorAll(".pimcore-export-layout-drop-target")
+    .forEach((zone) => zone.classList.remove("pimcore-export-layout-drop-target"));
+}
+
+function startPimcoreExportLayoutMarquee(event) {
+  const startsOnFreeListSpace = event.target === pimcoreExportLayoutList || event.target.classList?.contains("pimcore-export-layout-insert");
+  if (!pimcoreExportLayoutList || event.button !== 0 || !startsOnFreeListSpace) return;
+  const listBounds = pimcoreExportLayoutList.getBoundingClientRect();
+  const initialSelection = event.ctrlKey ? new Set(pimcoreExportLayoutSelection) : new Set();
+  const marquee = document.createElement("div");
+  marquee.className = "pimcore-export-layout-marquee";
+  pimcoreExportLayoutList.appendChild(marquee);
+  pimcoreExportLayoutMarquee = { eventPointerId: event.pointerId, marquee, initialSelection, startX: event.clientX, startY: event.clientY };
+  pimcoreExportLayoutList.setPointerCapture?.(event.pointerId);
+
+  const update = (pointerEvent) => {
+    if (!pimcoreExportLayoutMarquee || pointerEvent.pointerId !== pimcoreExportLayoutMarquee.eventPointerId) return;
+    const left = Math.min(pimcoreExportLayoutMarquee.startX, pointerEvent.clientX);
+    const top = Math.min(pimcoreExportLayoutMarquee.startY, pointerEvent.clientY);
+    const right = Math.max(pimcoreExportLayoutMarquee.startX, pointerEvent.clientX);
+    const bottom = Math.max(pimcoreExportLayoutMarquee.startY, pointerEvent.clientY);
+    Object.assign(marquee.style, {
+      left: `${left - listBounds.left}px`,
+      top: `${top - listBounds.top}px`,
+      width: `${right - left}px`,
+      height: `${bottom - top}px`,
+    });
+    const nextSelection = new Set(pimcoreExportLayoutMarquee.initialSelection);
+    pimcoreExportLayoutList.querySelectorAll(".pimcore-export-layout-row").forEach((row) => {
+      const rowBounds = row.getBoundingClientRect();
+      const intersects = rowBounds.right >= left && rowBounds.left <= right && rowBounds.bottom >= top && rowBounds.top <= bottom;
+      if (intersects) nextSelection.add(Number(row.dataset.index));
+    });
+    clearPimcoreExportLayoutSelection();
+    nextSelection.forEach((index) => pimcoreExportLayoutSelection.add(index));
+    pimcoreExportLayoutList.querySelectorAll(".pimcore-export-layout-row").forEach((row) => {
+      row.classList.toggle("pimcore-export-layout-selected", pimcoreExportLayoutSelection.has(Number(row.dataset.index)));
+    });
+  };
+  const finish = (pointerEvent) => {
+    if (!pimcoreExportLayoutMarquee || pointerEvent.pointerId !== pimcoreExportLayoutMarquee.eventPointerId) return;
+    marquee.remove();
+    pimcoreExportLayoutMarquee = null;
+    pimcoreExportLayoutList.releasePointerCapture?.(pointerEvent.pointerId);
+    pimcoreExportLayoutList.removeEventListener("pointermove", update);
+    pimcoreExportLayoutList.removeEventListener("pointerup", finish);
+    pimcoreExportLayoutList.removeEventListener("pointercancel", finish);
+  };
+  pimcoreExportLayoutList.addEventListener("pointermove", update);
+  pimcoreExportLayoutList.addEventListener("pointerup", finish);
+  pimcoreExportLayoutList.addEventListener("pointercancel", finish);
+}
+
+function createPimcoreExportLayoutInsertZone(index) {
+  const zone = document.createElement("div");
+  const insert = document.createElement("button");
+  zone.className = "pimcore-export-layout-insert";
+  zone.dataset.dropIndex = String(index);
+  insert.type = "button";
+  insert.className = "pimcore-export-layout-insert-button";
+  insert.textContent = "+";
+  insert.title = "Wstaw pustą kolumnę w tym miejscu";
+  insert.setAttribute("aria-label", `Wstaw pustą kolumnę przed pozycją ${index + 1}`);
+  insert.addEventListener("pointerdown", (event) => event.stopPropagation());
+  insert.addEventListener("click", () => insertPimcoreExportBlankColumn(index));
+  zone.addEventListener("dragover", (event) => {
+    if (!pimcoreExportLayoutDragState || pimcoreExportLayoutDropIndexIsNoop(index)) return;
+    event.preventDefault();
+    zone.classList.add("pimcore-export-layout-drop-target");
+  });
+  zone.addEventListener("dragleave", () => zone.classList.remove("pimcore-export-layout-drop-target"));
+  zone.addEventListener("drop", (event) => {
+    if (!pimcoreExportLayoutDragState || pimcoreExportLayoutDropIndexIsNoop(index)) return;
+    event.preventDefault();
+    movePimcoreExportColumns(index);
+    finishPimcoreExportLayoutDrag();
+  });
+  zone.appendChild(insert);
+  return zone;
+}
+
 function renderPimcoreExportLayout() {
   if (!pimcoreExportLayoutList) return;
   pimcoreExportLayoutList.textContent = "";
@@ -11413,50 +11568,78 @@ function renderPimcoreExportLayout() {
       .filter((column) => column.type === "field")
       .map((column) => String(column.pimcore_field || ""))
   );
+  pimcoreExportLayoutList.className = `pimcore-export-layout-list${pimcoreExportLayoutDraft.length ? "" : " empty-state"}`;
+  pimcoreExportLayoutList.appendChild(createPimcoreExportLayoutInsertZone(0));
   if (!pimcoreExportLayoutDraft.length) {
-    pimcoreExportLayoutList.className = "pimcore-export-layout-list empty-state";
-    pimcoreExportLayoutList.textContent = "Dodaj pole Pimcore albo pustą kolumnę.";
-  } else {
-    pimcoreExportLayoutList.className = "pimcore-export-layout-list";
+    const empty = document.createElement("p");
+    empty.className = "pimcore-export-layout-empty-message";
+    empty.textContent = "Dodaj pole Pimcore albo pustą kolumnę.";
+    pimcoreExportLayoutList.appendChild(empty);
   }
   pimcoreExportLayoutDraft.forEach((column, index) => {
     const row = document.createElement("div");
     const position = document.createElement("span");
     const label = document.createElement("span");
     const header = document.createElement("input");
-    const moveUp = document.createElement("button");
-    const moveDown = document.createElement("button");
     const remove = document.createElement("button");
-    row.className = "pimcore-export-layout-row";
+    row.className = `pimcore-export-layout-row${pimcoreExportLayoutSelection.has(index) ? " pimcore-export-layout-selected" : ""}`;
     row.dataset.columnType = column.type;
+    row.dataset.index = String(index);
+    row.draggable = true;
     position.textContent = String(index + 1);
-    position.className = "pimcore-export-layout-position";
+    position.className = "pimcore-export-layout-position pimcore-export-layout-grip";
+    position.title = "Kliknij z Ctrl, aby zaznaczyć. Przeciągnij zaznaczone pozycje.";
     header.name = "export_header";
     header.value = column.header || "";
     header.placeholder = "Nagłówek kolumny";
     header.setAttribute("aria-label", `Nagłówek kolumny ${index + 1}`);
-    moveUp.type = "button";
-    moveUp.className = "ghost-button";
-    moveUp.textContent = "↑";
-    moveUp.title = "Przesuń wyżej";
-    moveUp.disabled = index === 0;
-    moveUp.addEventListener("click", () => movePimcoreExportColumn(index, -1));
-    moveDown.type = "button";
-    moveDown.className = "ghost-button";
-    moveDown.textContent = "↓";
-    moveDown.title = "Przesuń niżej";
-    moveDown.disabled = index === pimcoreExportLayoutDraft.length - 1;
-    moveDown.addEventListener("click", () => movePimcoreExportColumn(index, 1));
     remove.type = "button";
     remove.className = "ghost-button";
     remove.textContent = "Usuń";
     remove.addEventListener("click", () => {
+      pimcoreExportColumnsFromEditor();
       pimcoreExportLayoutDraft.splice(index, 1);
+      const retainedSelection = selectedPimcoreExportColumnIndexes()
+        .filter((selectedIndex) => selectedIndex !== index)
+        .map((selectedIndex) => (selectedIndex > index ? selectedIndex - 1 : selectedIndex));
+      clearPimcoreExportLayoutSelection();
+      retainedSelection.forEach((selectedIndex) => pimcoreExportLayoutSelection.add(selectedIndex));
       renderPimcoreExportLayout();
     });
+    row.addEventListener("mousedown", (event) => {
+      if (event.button !== 0 || !event.target.closest(".pimcore-export-layout-grip")) return;
+      if (event.ctrlKey) {
+        selectPimcoreExportColumn(index, true);
+      } else if (!pimcoreExportLayoutSelection.has(index)) {
+        selectPimcoreExportColumn(index);
+      }
+      row.classList.toggle("pimcore-export-layout-selected", pimcoreExportLayoutSelection.has(index));
+      if (!event.ctrlKey && pimcoreExportLayoutSelection.size === 1) {
+        pimcoreExportLayoutList.querySelectorAll(".pimcore-export-layout-row").forEach((candidate) => {
+          if (candidate !== row) candidate.classList.remove("pimcore-export-layout-selected");
+        });
+      }
+    });
+    row.addEventListener("dragstart", (event) => {
+      if (event.target.closest("button, input, select")) {
+        event.preventDefault();
+        return;
+      }
+      if (!pimcoreExportLayoutSelection.has(index)) selectPimcoreExportColumn(index);
+      pimcoreExportLayoutDragState = { indexes: selectedPimcoreExportColumnIndexes() };
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", "pimcore-export-columns");
+      pimcoreExportLayoutList.classList.add("pimcore-export-layout-dragging");
+      pimcoreExportLayoutList.querySelectorAll(".pimcore-export-layout-row").forEach((candidate) => {
+        candidate.classList.toggle("pimcore-export-layout-selected", pimcoreExportLayoutSelection.has(Number(candidate.dataset.index)));
+      });
+    });
+    row.addEventListener("dragend", finishPimcoreExportLayoutDrag);
     if (column.type === "blank") {
       label.textContent = "Pusta kolumna";
       label.className = "pimcore-export-layout-kind";
+      header.classList.add("pimcore-export-layout-blank-header");
+      row.append(position, label, header, remove);
     } else {
       const field = document.createElement("select");
       field.name = "export_pimcore_field";
@@ -11472,11 +11655,10 @@ function renderPimcoreExportLayout() {
       }
       label.textContent = "Pole Pimcore";
       label.className = "pimcore-export-layout-kind";
-      row.append(position, label, field, header, moveUp, moveDown, remove);
-      return pimcoreExportLayoutList.appendChild(row);
+      row.append(position, label, field, header, remove);
     }
-    row.append(position, label, header, moveUp, moveDown, remove);
     pimcoreExportLayoutList.appendChild(row);
+    pimcoreExportLayoutList.appendChild(createPimcoreExportLayoutInsertZone(index + 1));
   });
   if (pimcoreExportLayoutAddFieldButton) {
     pimcoreExportLayoutAddFieldButton.disabled = mappings.every((mapping) =>
@@ -11485,25 +11667,17 @@ function renderPimcoreExportLayout() {
   }
 }
 
-function movePimcoreExportColumn(index, direction) {
-  pimcoreExportLayoutDraft = collectPimcoreExportColumns();
-  const target = index + direction;
-  if (target < 0 || target >= pimcoreExportLayoutDraft.length) return;
-  [pimcoreExportLayoutDraft[index], pimcoreExportLayoutDraft[target]] = [
-    pimcoreExportLayoutDraft[target],
-    pimcoreExportLayoutDraft[index],
-  ];
-  renderPimcoreExportLayout();
-}
-
 function openPimcoreExportLayoutModal() {
   const columns = state.settings?.pimcore?.export_columns || [];
   pimcoreExportLayoutDraft = columns.map((column) => ({ ...column }));
+  clearPimcoreExportLayoutSelection();
   renderPimcoreExportLayout();
   pimcoreExportLayoutModal?.classList.add("active");
 }
 
 function closePimcoreExportLayoutModal() {
+  clearPimcoreExportLayoutSelection();
+  finishPimcoreExportLayoutDrag();
   pimcoreExportLayoutModal?.classList.remove("active");
 }
 
@@ -13333,6 +13507,7 @@ pimcoreExportXlsxButton?.addEventListener("click", () => {
 });
 pimcoreExportLayoutCloseButton?.addEventListener("click", closePimcoreExportLayoutModal);
 pimcoreExportLayoutCancelButton?.addEventListener("click", closePimcoreExportLayoutModal);
+pimcoreExportLayoutList?.addEventListener("pointerdown", startPimcoreExportLayoutMarquee);
 pimcoreExportLayoutAddFieldButton?.addEventListener("click", () => {
   pimcoreExportLayoutDraft = collectPimcoreExportColumns();
   const usedFields = new Set(
