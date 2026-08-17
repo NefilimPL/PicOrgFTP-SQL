@@ -64,6 +64,78 @@ def test_normalize_pimcore_settings_cleans_mappings_and_bounds_timeout():
     ]
 
 
+def test_normalize_pimcore_settings_builds_export_columns_from_mappings():
+    result = normalize_pimcore_settings(
+        {
+            "field_mappings": [
+                {"source": "EAN", "pimcore_field": "ean", "type": "input"},
+                {"source": "STOCK", "pimcore_field": "stock", "type": "numeric"},
+            ]
+        }
+    )
+
+    assert result["export_columns"] == [
+        {"type": "field", "pimcore_field": "ean", "header": "ean"},
+        {"type": "field", "pimcore_field": "stock", "header": "stock"},
+    ]
+
+
+def test_normalize_pimcore_settings_treats_empty_export_columns_as_default_layout():
+    result = normalize_pimcore_settings(
+        {
+            "field_mappings": [
+                {"source": "EAN", "pimcore_field": "ean", "type": "input"}
+            ],
+            "export_columns": [],
+        }
+    )
+
+    assert result["export_columns"] == [
+        {"type": "field", "pimcore_field": "ean", "header": "ean"}
+    ]
+
+
+def test_normalize_pimcore_settings_keeps_custom_export_headers_and_blank_columns():
+    result = normalize_pimcore_settings(
+        {
+            "field_mappings": [
+                {"source": "EAN", "pimcore_field": "ean", "type": "input"}
+            ],
+            "export_columns": [
+                {"type": "blank", "header": "parentId"},
+                {"type": "field", "pimcore_field": "ean", "header": "kod"},
+            ],
+        }
+    )
+
+    assert result["export_columns"] == [
+        {"type": "blank", "header": "parentId"},
+        {"type": "field", "pimcore_field": "ean", "header": "kod"},
+    ]
+
+
+def test_normalize_pimcore_settings_discards_invalid_export_field_positions():
+    result = normalize_pimcore_settings(
+        {
+            "field_mappings": [
+                {"source": "EAN", "pimcore_field": "ean", "type": "input"}
+            ],
+            "export_columns": [
+                {"type": "field", "pimcore_field": "missing", "header": "missing"},
+                {"type": "field", "pimcore_field": "ean", "header": "ean"},
+                {"type": "field", "pimcore_field": "ean", "header": "duplicate"},
+                {"type": "unexpected", "header": "ignored"},
+                {"type": "blank", "header": ""},
+            ],
+        }
+    )
+
+    assert result["export_columns"] == [
+        {"type": "field", "pimcore_field": "ean", "header": "ean"},
+        {"type": "blank", "header": ""},
+    ]
+
+
 def test_mapping_parsers_accept_polish_csv_values():
     assert parse_mapping_value(" 62,5 ", "decimal_comma") == 62.5
     assert parse_mapping_value("12", "integer") == 12

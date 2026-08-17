@@ -42,6 +42,7 @@ DEFAULT_PIMCORE_SETTINGS: dict[str, Any] = {
     "timeout_seconds": 30,
     "verify_tls": True,
     "field_mappings": [],
+    "export_columns": [],
 }
 
 
@@ -97,6 +98,52 @@ def normalize_field_mapping(raw: object, *, default_order: int = 0) -> dict[str,
         "layout_group": _clean_layout_group(raw.get("layout_group")),
         "layout_order": _layout_order(raw.get("layout_order"), default_order),
     }
+
+
+def _default_export_columns(mappings: list[dict[str, Any]]) -> list[dict[str, str]]:
+    return [
+        {
+            "type": "field",
+            "pimcore_field": _text(item.get("pimcore_field")),
+            "header": _text(item.get("pimcore_field")),
+        }
+        for item in mappings
+        if _text(item.get("pimcore_field"))
+    ]
+
+
+def _normalize_export_columns(
+    raw: object, mappings: list[dict[str, Any]]
+) -> list[dict[str, str]]:
+    if not isinstance(raw, list):
+        return []
+    available_fields = {
+        _text(item.get("pimcore_field")) for item in mappings if _text(item.get("pimcore_field"))
+    }
+    columns: list[dict[str, str]] = []
+    used_fields: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        column_type = _text(item.get("type")).lower()
+        header = _text(item.get("header"))
+        if column_type == "blank":
+            columns.append({"type": "blank", "header": header})
+            continue
+        if column_type != "field":
+            continue
+        pimcore_field = _text(item.get("pimcore_field"))
+        if pimcore_field not in available_fields or pimcore_field in used_fields:
+            continue
+        columns.append(
+            {
+                "type": "field",
+                "pimcore_field": pimcore_field,
+                "header": header or pimcore_field,
+            }
+        )
+        used_fields.add(pimcore_field)
+    return columns
 
 
 def infer_field_mapping(
@@ -316,6 +363,8 @@ def normalize_pimcore_settings(raw: object) -> dict[str, Any]:
         if normalized:
             mappings.append(normalized)
     settings["field_mappings"] = mappings
+    export_columns = _normalize_export_columns(source.get("export_columns"), mappings)
+    settings["export_columns"] = export_columns or _default_export_columns(mappings)
     ean_targets = [
         item["pimcore_field"]
         for item in mappings

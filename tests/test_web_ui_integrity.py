@@ -2595,6 +2595,35 @@ async function requestJson() {{
         self.assertNotIn("Format eksportu danych Pimcore: CSV lub XLSX", source)
         self.assertIn("pimcoreSettingsExportButton()", source)
 
+    def test_pimcore_settings_has_saved_import_export_layout_editor(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        html = INDEX_HTML.read_text(encoding="utf-8")
+
+        self.assertIn("pimcoreExportLayoutModal", html)
+        self.assertIn("pimcoreExportLayoutOpenButton", source)
+        self.assertIn("function savePimcoreExportColumns", source)
+        self.assertIn("pimcoreExportLayoutAddFieldButton", source)
+        self.assertIn("pimcoreExportLayoutAddBlankButton", source)
+        self.assertIn("export_columns", source)
+
+    def test_pimcore_export_layout_supports_between_slots_insert_and_selection(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        css = APP_CSS.read_text(encoding="utf-8")
+
+        self.assertIn("insertPimcoreExportBlankColumn", source)
+        self.assertIn("pimcoreExportLayoutSelection", source)
+        self.assertIn("pimcore-export-layout-insert", source)
+        self.assertIn("pimcore-export-layout-selected", source)
+        self.assertIn("function movePimcoreExportColumns", source)
+        self.assertIn('addEventListener("dragstart"', source)
+        self.assertIn('addEventListener("dragover"', source)
+        self.assertIn('addEventListener("drop"', source)
+        self.assertIn("else if (!pimcoreExportLayoutSelection.has(index))", source)
+        self.assertIn("const isContiguous = selectedIndexes.every", source)
+        self.assertIn(".pimcore-export-layout-insert:hover", css)
+        self.assertIn(".pimcore-export-layout-drop-target", css)
+        self.assertNotIn('moveUp.textContent = "↑"', source)
+
     def test_pimcore_edit_modal_opens_before_remote_object_load(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         start = source.index("async function openPimcoreEditModal")

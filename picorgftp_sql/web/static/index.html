@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicOrgFTP-SQL Web</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260724-list-usage-guard1">
+    <link rel="stylesheet" href="/static/app.css?v=20260817-pimcore-export-drag-selection-css1">
   </head>
   <body class="app-screen">
     <header class="topbar">
@@ -618,6 +618,27 @@
       </section>
     </div>
 
+    <div id="pimcoreExportLayoutModal" class="modal-view nested-modal">
+      <section class="modal-panel pimcore-export-layout-panel">
+        <div class="section-heading">
+          <div>
+            <h1>Układ eksportu Pimcore</h1>
+            <p class="settings-note">Kolejność na liście będzie kolejnością kolumn w CSV i XLSX.</p>
+          </div>
+          <button id="pimcoreExportLayoutCloseButton" type="button" class="ghost-button modal-close">Zamknij</button>
+        </div>
+        <div id="pimcoreExportLayoutList" class="pimcore-export-layout-list"></div>
+        <div class="heading-actions">
+          <button id="pimcoreExportLayoutAddFieldButton" type="button" class="secondary-button">Dodaj pole Pimcore</button>
+          <button id="pimcoreExportLayoutAddBlankButton" type="button" class="secondary-button">Dodaj pustą kolumnę</button>
+        </div>
+        <div class="heading-actions">
+          <button id="pimcoreExportLayoutCancelButton" type="button" class="ghost-button">Anuluj</button>
+          <button id="pimcoreExportLayoutSaveButton" type="button">Zapisz układ</button>
+        </div>
+      </section>
+    </div>
+
     <div id="pimcoreMissingModal" class="modal-view">
       <section class="modal-panel compact-modal">
         <div class="section-heading">
@@ -728,6 +749,6 @@
     <script src="/static/autocomplete.js?v=20260806-module-boundaries1"></script>
     <script src="/static/runtime-status.js?v=20260728-runtime-poll1"></script>
     <script src="/static/process-jobs.js?v=20260806-module-boundaries1"></script>
-    <script src="/static/app.js?v=20260727-product-query1"></script>
+    <script src="/static/app.js?v=20260817-pimcore-export-drag-selection-js1"></script>
   </body>
 </html>

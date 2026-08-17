@@ -2968,14 +2968,25 @@ def _pimcore_export_cell(value: object) -> object:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
-def _pimcore_submission_export_mappings() -> list[tuple[str, str]]:
+def _pimcore_submission_export_mappings() -> list[tuple[str, str, str]]:
     settings_payload = normalize_pimcore_settings(config.CONFIG.get(PIMCORE_SETTINGS_KEY))
-    columns: list[tuple[str, str]] = []
-    for mapping in settings_payload.get("field_mappings", []):
-        source = _text(mapping.get("source"))
-        if not source:
+    sources_by_field = {
+        _text(mapping.get("pimcore_field")): _text(mapping.get("source"))
+        for mapping in settings_payload.get("field_mappings", [])
+        if _text(mapping.get("pimcore_field")) and _text(mapping.get("source"))
+    }
+    columns: list[tuple[str, str, str]] = []
+    for column in settings_payload.get("export_columns", []):
+        column_type = _text(column.get("type")).lower()
+        header = _text(column.get("header"))
+        if column_type == "blank":
+            columns.append((header, "", column_type))
             continue
-        columns.append((source, _text(mapping.get("label")) or source))
+        if column_type != "field":
+            continue
+        source = sources_by_field.get(_text(column.get("pimcore_field")), "")
+        if source:
+            columns.append((header, source, column_type))
     return columns
 
 
@@ -2999,18 +3010,51 @@ def _pimcore_mapping_value(values: dict[str, object], source: str) -> object:
     return ""
 
 
+def _deduplicate_pimcore_submission_export_rows(
+    rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Keep one importable record per EAN, preferring the latest success."""
+
+    export_eans = [
+        _text(row.get("ean")) or _text(_pimcore_mapping_value(_pimcore_submission_values(row), "ean"))
+        for row in rows
+    ]
+    fallback_by_ean: dict[str, int] = {}
+    completed_by_ean: dict[str, int] = {}
+    for index, (row, ean) in enumerate(zip(rows, export_eans)):
+        normalized_ean = ean.casefold()
+        if not normalized_ean:
+            continue
+        fallback_by_ean.setdefault(normalized_ean, index)
+        if _text(row.get("status")).casefold() == "completed":
+            completed_by_ean.setdefault(normalized_ean, index)
+    selected_indexes = {
+        completed_by_ean.get(ean, fallback_index)
+        for ean, fallback_index in fallback_by_ean.items()
+    }
+    return [
+        row
+        for index, row in enumerate(rows)
+        if not export_eans[index] or index in selected_indexes
+    ]
+
+
 def _pimcore_submission_export_table(
     rows: list[dict[str, object]],
 ) -> tuple[list[str], list[list[object]]]:
     mappings = _pimcore_submission_export_mappings()
-    columns = [label for _source, label in mappings]
+    columns = [header for header, _source, _column_type in mappings]
     table_rows: list[list[object]] = []
     for row in rows:
         values = _pimcore_submission_values(row)
         table_rows.append(
             [
-                _pimcore_export_cell(_pimcore_mapping_value(values, source))
-                for source, _label in mappings
+                (
+                    ""
+                    if column_type == "blank"
+                    else _pimcore_export_cell(_pimcore_mapping_value(values, source))
+                )
+                for _header, source, column_type in mappings
             ]
         )
     return columns, table_rows
@@ -3045,6 +3089,7 @@ def export_pimcore_submissions(
         else []
     )
 
+    rows = _deduplicate_pimcore_submission_export_rows(rows)
     columns, table_rows = _pimcore_submission_export_table(rows)
 
     if fmt == "csv":

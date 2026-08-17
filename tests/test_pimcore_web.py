@@ -451,7 +451,66 @@ def test_admin_can_export_pimcore_submissions_as_json():
     export.assert_called_once()
 
 
-def test_export_pimcore_submissions_as_csv_uses_pimcore_field_labels_only():
+def test_pimcore_submission_export_rows_prefer_latest_completed_ean():
+    rows = [
+        {"ean": "5906199310317", "status": "failed", "operation_id": "new-failure"},
+        {"ean": "5900000000001", "status": "completed", "operation_id": "other-success"},
+        {"ean": "5906199310317", "status": "completed", "operation_id": "newer-success"},
+        {"ean": "5906199310317", "status": "completed", "operation_id": "older-success"},
+    ]
+
+    assert web_data._deduplicate_pimcore_submission_export_rows(rows) == [rows[1], rows[2]]
+
+
+def test_pimcore_submission_export_rows_fall_back_and_keep_blank_eans():
+    rows = [
+        {"ean": "5906199310317", "status": "conflict", "operation_id": "new-conflict"},
+        {"ean": "", "status": "completed", "operation_id": "blank-one"},
+        {"ean": "5906199310317", "status": "failed", "operation_id": "old-failure"},
+        {"ean": "", "status": "failed", "operation_id": "blank-two"},
+    ]
+
+    assert web_data._deduplicate_pimcore_submission_export_rows(rows) == [
+        rows[0],
+        rows[1],
+        rows[3],
+    ]
+
+
+def test_export_pimcore_submissions_deduplicates_ean_using_latest_completed():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"]["field_mappings"] = [
+        {"source": "EAN", "pimcore_field": "ean", "type": "input", "parser": "text"},
+        {"source": "STOCK", "pimcore_field": "stock", "type": "numeric", "parser": "integer"},
+    ]
+    store = Mock()
+    store.query_pimcore_submissions.return_value = [
+        {
+            "ean": "5906199310317",
+            "status": "failed",
+            "values": {"EAN": "5906199310317", "STOCK": "8"},
+        },
+        {
+            "ean": "5906199310317",
+            "status": "completed",
+            "values": {"EAN": "5906199310317", "STOCK": "12"},
+        },
+    ]
+
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "_active_sqlite_store", return_value=store),
+    ):
+        exported = web_data.export_pimcore_submissions(export_format="csv")
+
+    assert exported["count"] == 1
+    assert list(csv.reader(io.StringIO(exported["content"]))) == [
+        ["ean", "stock"],
+        ["5906199310317", "12"],
+    ]
+
+
+def test_export_pimcore_submissions_as_csv_uses_pimcore_field_names_by_default():
     cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
     cfg["pimcore"]["field_mappings"] = [
         {
@@ -493,13 +552,13 @@ def test_export_pimcore_submissions_as_csv_uses_pimcore_field_labels_only():
 
     assert exported["format"] == "csv"
     rows = list(csv.reader(io.StringIO(exported["content"])))
-    assert rows == [["Kod EAN", "Stan"], ["5901234567890", "12"]]
+    assert rows == [["ean", "stock"], ["5901234567890", "12"]]
     assert "operation_id" not in exported["content"]
     assert "payload" not in exported["content"]
     assert "UNMAPPED" not in exported["content"]
 
 
-def test_export_pimcore_submissions_as_xlsx_uses_pimcore_field_labels_only():
+def test_export_pimcore_submissions_as_xlsx_uses_pimcore_field_names_by_default():
     cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
     cfg["pimcore"]["field_mappings"] = [
         {
@@ -542,8 +601,75 @@ def test_export_pimcore_submissions_as_xlsx_uses_pimcore_field_labels_only():
     assert exported["format"] == "xlsx"
     workbook = load_workbook(io.BytesIO(exported["content"]))
     sheet = workbook.active
-    assert [cell.value for cell in sheet[1]] == ["Kod EAN", "Stan"]
+    assert [cell.value for cell in sheet[1]] == ["ean", "stock"]
     assert [cell.value for cell in sheet[2]] == ["5901234567890", "12"]
+
+
+def test_export_pimcore_submissions_uses_custom_import_layout_for_csv():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"]["field_mappings"] = [
+        {
+            "source": "EAN",
+            "label": "Kod EAN",
+            "pimcore_field": "ean",
+            "type": "input",
+            "parser": "text",
+        },
+        {
+            "source": "STOCK",
+            "label": "Stan",
+            "pimcore_field": "stock",
+            "type": "numeric",
+            "parser": "integer",
+        },
+    ]
+    cfg["pimcore"]["export_columns"] = [
+        {"type": "field", "pimcore_field": "stock", "header": "stock"},
+        {"type": "blank", "header": "parentId"},
+        {"type": "field", "pimcore_field": "ean", "header": "code"},
+    ]
+    store = Mock()
+    store.query_pimcore_submissions.return_value = [
+        {"values": {"EAN": "5901234567890", "STOCK": "12"}}
+    ]
+
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "_active_sqlite_store", return_value=store),
+    ):
+        exported = web_data.export_pimcore_submissions(export_format="csv")
+
+    assert list(csv.reader(io.StringIO(exported["content"]))) == [
+        ["stock", "parentId", "code"],
+        ["12", "", "5901234567890"],
+    ]
+
+
+def test_export_pimcore_submissions_uses_custom_import_layout_for_xlsx():
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    cfg["pimcore"]["field_mappings"] = [
+        {"source": "EAN", "pimcore_field": "ean", "type": "input", "parser": "text"},
+        {"source": "STOCK", "pimcore_field": "stock", "type": "numeric", "parser": "integer"},
+    ]
+    cfg["pimcore"]["export_columns"] = [
+        {"type": "field", "pimcore_field": "stock", "header": "stock"},
+        {"type": "blank", "header": "parentId"},
+        {"type": "field", "pimcore_field": "ean", "header": "code"},
+    ]
+    store = Mock()
+    store.query_pimcore_submissions.return_value = [
+        {"values": {"EAN": "5901234567890", "STOCK": "12"}}
+    ]
+
+    with (
+        patch.object(web_data.config, "CONFIG", cfg),
+        patch.object(web_data, "_active_sqlite_store", return_value=store),
+    ):
+        exported = web_data.export_pimcore_submissions(export_format="xlsx")
+
+    sheet = load_workbook(io.BytesIO(exported["content"])).active
+    assert [cell.value for cell in sheet[1]] == ["stock", "parentId", "code"]
+    assert [cell.value for cell in sheet[2]] == ["12", None, "5901234567890"]
 
 
 def test_export_pimcore_submissions_ignores_technical_blocks():
@@ -590,7 +716,7 @@ def test_export_pimcore_submissions_ignores_technical_blocks():
         exported = web_data.export_pimcore_submissions(export_format="csv")
 
     rows = list(csv.reader(io.StringIO(exported["content"])))
-    assert rows == [["Kod EAN", "Stan"], ["5901234567890", "12"]]
+    assert rows == [["ean", "stock"], ["5901234567890", "12"]]
     assert all("payload." not in column for column in rows[0])
     assert all("result." not in column for column in rows[0])
     assert all("warnings" not in column for column in rows[0])
