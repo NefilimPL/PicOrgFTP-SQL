@@ -3010,6 +3010,35 @@ def _pimcore_mapping_value(values: dict[str, object], source: str) -> object:
     return ""
 
 
+def _deduplicate_pimcore_submission_export_rows(
+    rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Keep one importable record per EAN, preferring the latest success."""
+
+    export_eans = [
+        _text(row.get("ean")) or _text(_pimcore_mapping_value(_pimcore_submission_values(row), "ean"))
+        for row in rows
+    ]
+    fallback_by_ean: dict[str, int] = {}
+    completed_by_ean: dict[str, int] = {}
+    for index, (row, ean) in enumerate(zip(rows, export_eans)):
+        normalized_ean = ean.casefold()
+        if not normalized_ean:
+            continue
+        fallback_by_ean.setdefault(normalized_ean, index)
+        if _text(row.get("status")).casefold() == "completed":
+            completed_by_ean.setdefault(normalized_ean, index)
+    selected_indexes = {
+        completed_by_ean.get(ean, fallback_index)
+        for ean, fallback_index in fallback_by_ean.items()
+    }
+    return [
+        row
+        for index, row in enumerate(rows)
+        if not export_eans[index] or index in selected_indexes
+    ]
+
+
 def _pimcore_submission_export_table(
     rows: list[dict[str, object]],
 ) -> tuple[list[str], list[list[object]]]:
@@ -3060,6 +3089,7 @@ def export_pimcore_submissions(
         else []
     )
 
+    rows = _deduplicate_pimcore_submission_export_rows(rows)
     columns, table_rows = _pimcore_submission_export_table(rows)
 
     if fmt == "csv":
