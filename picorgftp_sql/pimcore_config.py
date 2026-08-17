@@ -363,11 +363,8 @@ def normalize_pimcore_settings(raw: object) -> dict[str, Any]:
         if normalized:
             mappings.append(normalized)
     settings["field_mappings"] = mappings
-    settings["export_columns"] = (
-        _normalize_export_columns(source.get("export_columns"), mappings)
-        if "export_columns" in source
-        else _default_export_columns(mappings)
-    )
+    export_columns = _normalize_export_columns(source.get("export_columns"), mappings)
+    settings["export_columns"] = export_columns or _default_export_columns(mappings)
     ean_targets = [
         item["pimcore_field"]
         for item in mappings

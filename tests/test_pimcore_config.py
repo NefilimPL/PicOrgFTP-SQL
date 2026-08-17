@@ -80,6 +80,21 @@ def test_normalize_pimcore_settings_builds_export_columns_from_mappings():
     ]
 
 
+def test_normalize_pimcore_settings_treats_empty_export_columns_as_default_layout():
+    result = normalize_pimcore_settings(
+        {
+            "field_mappings": [
+                {"source": "EAN", "pimcore_field": "ean", "type": "input"}
+            ],
+            "export_columns": [],
+        }
+    )
+
+    assert result["export_columns"] == [
+        {"type": "field", "pimcore_field": "ean", "header": "ean"}
+    ]
+
+
 def test_normalize_pimcore_settings_keeps_custom_export_headers_and_blank_columns():
     result = normalize_pimcore_settings(
         {
