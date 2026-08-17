@@ -9,6 +9,7 @@ import shutil
 import time
 import unittest
 from unittest.mock import Mock, patch
+import uuid
 
 from picorgftp_sql import data_store, email_settings, storage_settings, web_data
 from picorgftp_sql.sqlite_store import SqliteStore
@@ -77,6 +78,36 @@ class WebDataUserTests(unittest.TestCase):
         self.assertEqual(record["email"], "")
         self.assertEqual(web_data._public_user(record)["email"], "")
 
+    def test_legacy_user_ids_are_migrated_and_persisted(self) -> None:
+        temp_dir = _workspace_temp("web_data_users_uuid_migration")
+        try:
+            users_path = temp_dir / web_data.WEB_USERS_PATH
+            users_path.write_text(
+                json.dumps([{"username": "operator", "password_hash": "hash"}]),
+                encoding="utf-8",
+            )
+            with patch.object(web_data.settings, "AC", str(temp_dir)):
+                first = web_data.find_user("operator")
+                stored = json.loads(users_path.read_text(encoding="utf-8"))
+                second = web_data.find_user("operator")
+        finally:
+            shutil.rmtree(temp_dir)
+
+        self.assertIsNotNone(first)
+        self.assertEqual(uuid.UUID(first["id"]).version, 4)
+        stored_operator = next(user for user in stored if user["username"] == "operator")
+        self.assertEqual(stored_operator["id"], first["id"])
+        self.assertEqual(second["id"], first["id"])
+
+    def test_find_user_by_id_returns_public_user(self) -> None:
+        record = web_data._default_admin()
+        with patch.object(web_data, "load_user_records", return_value=[record]):
+            user = web_data.find_user_by_id(record["id"])
+
+        self.assertIsNotNone(user)
+        self.assertEqual(user["username"], "admin")
+        self.assertEqual(user["id"], record["id"])
+
     def test_add_user_persists_normalized_email(self) -> None:
         saved_records = []
 
@@ -100,6 +131,8 @@ class WebDataUserTests(unittest.TestCase):
         )
         self.assertEqual(saved_operator["email"], "Operator@example.com")
         self.assertEqual(operator["email"], "Operator@example.com")
+        self.assertEqual(uuid.UUID(saved_operator["id"]).version, 4)
+        self.assertEqual(operator["id"], saved_operator["id"])
 
     def test_update_user_persists_normalized_email(self) -> None:
         with (
@@ -600,7 +633,7 @@ class WebDataUserTests(unittest.TestCase):
                 "query_presence_details",
                 return_value=(
                     {"03": True, "04": False},
-                    {"03": "https://xml.wipmebgroup.pl/img/5901234567890_03.jpg", "04": ""},
+                    {"03": "https://cdn.example.test/img/5901234567890_03.jpg", "04": ""},
                 ),
             ),
         ):
@@ -622,7 +655,7 @@ class WebDataUserTests(unittest.TestCase):
         self.assertTrue(photos[0]["sql_checked"])
         self.assertEqual(
             photos[0]["sql_value"],
-            "https://xml.wipmebgroup.pl/img/5901234567890_03.jpg",
+            "https://cdn.example.test/img/5901234567890_03.jpg",
         )
         self.assertFalse(photos[0]["is_image"])
 

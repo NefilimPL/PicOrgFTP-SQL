@@ -51,14 +51,14 @@ def test_client_uses_api_header_and_never_query_string():
         return FakeResponse({"success": True, "data": {"version": "6.6.11"}})
 
     client = PimcoreClient(
-        {"base_url": "http://10.10.0.5", "api_key": "secret", "timeout_seconds": 7},
+        {"base_url": "http://pimcore.example.test", "api_key": "secret", "timeout_seconds": 7},
         opener=opener,
     )
     result = client.server_info()
 
     assert result["success"] is True
     assert captured == {
-        "url": "http://10.10.0.5/webservice/rest/server-info",
+        "url": "http://pimcore.example.test/webservice/rest/server-info",
         "api_key": "secret",
         "timeout": 7,
     }
@@ -203,7 +203,7 @@ def test_object_list_uses_q_and_object_class_not_removed_parameters():
         return FakeResponse({"success": True, "data": []})
 
     client = PimcoreClient(
-        {"base_url": "http://10.10.0.5", "api_key": "secret"},
+        {"base_url": "http://pimcore.example.test", "api_key": "secret"},
         opener=opener,
     )
     client.object_list({"EAN": "5904804578169"}, object_class="product", limit=2)
@@ -751,7 +751,7 @@ def test_client_reports_status_endpoint_and_response_without_api_key():
         )
 
     client = PimcoreClient(
-        {"base_url": "http://10.10.0.5", "api_key": "secret-key"},
+        {"base_url": "http://pimcore.example.test", "api_key": "secret-key"},
         opener=opener,
     )
 
@@ -797,7 +797,7 @@ class DiagnosticClient:
 def test_settings_test_returns_individual_checks_and_missing_field_error():
     config = {
         "enabled": True,
-        "base_url": "http://10.10.0.5",
+        "base_url": "http://pimcore.example.test",
         "api_key": "secret",
         "class_name": "Product",
         "parent_id": "123",
@@ -843,7 +843,7 @@ def test_settings_test_returns_individual_checks_and_missing_field_error():
 def test_settings_test_reports_all_local_errors_without_api_key():
     report = run_settings_test(
         {
-            "base_url": "http://10.10.0.5",
+            "base_url": "http://pimcore.example.test",
             "api_key": "",
             "parent_id": "",
             "object_key_template": "{SKU}",
@@ -862,7 +862,7 @@ def test_settings_test_reports_all_local_errors_without_api_key():
 
 VALID_DIAGNOSTIC_CONFIG = {
     "enabled": True,
-    "base_url": "http://10.10.0.5",
+    "base_url": "http://pimcore.example.test",
     "api_key": "secret",
     "class_name": "Product",
     "parent_id": "123",
@@ -895,7 +895,7 @@ def test_settings_test_preserves_auth_http_status(status_code, expected_key):
     client.server_info.side_effect = error
 
     report = run_settings_test(
-        {"enabled": True, "base_url": "http://10.10.0.5", "api_key": "secret"},
+        {"enabled": True, "base_url": "http://pimcore.example.test", "api_key": "secret"},
         client=client,
     )
 
@@ -953,7 +953,7 @@ def test_settings_test_skips_remote_dependents_after_missing_class():
 def test_settings_test_marks_empty_mapping_as_error_not_success():
     report = run_settings_test(
         {
-            "base_url": "http://10.10.0.5",
+            "base_url": "http://pimcore.example.test",
             "api_key": "secret",
             "class_name": "product",
             "parent_id": "6626",
@@ -980,7 +980,7 @@ def test_api_error_keeps_sanitized_audit_detail_out_of_public_dict():
         )
 
     client = PimcoreClient(
-        {"base_url": "http://10.10.0.5", "api_key": secret},
+        {"base_url": "http://pimcore.example.test", "api_key": secret},
         opener=opener,
     )
     with pytest.raises(PimcoreApiError) as captured:
@@ -1018,7 +1018,7 @@ def test_client_reports_invalid_json_body():
             self._body = b"not-json"
 
     client = PimcoreClient(
-        {"base_url": "http://10.10.0.5", "api_key": "secret"},
+        {"base_url": "http://pimcore.example.test", "api_key": "secret"},
         opener=lambda request, timeout, context: RawResponse(),
     )
 

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -782,8 +784,10 @@ class WebSmokeCiTests(unittest.TestCase):
 
     def test_legacy_import_endpoint_switches_to_sqlite(self) -> None:
         client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
         with (
             patch.object(web_app.settings, "AC", "C:/Photos"),
+            patch.object(web_app, "_require_admin", return_value=admin),
             patch.object(web_app.storage_settings, "resolve_sqlite_path", return_value="C:/Data/app.sqlite"),
             patch.object(
                 web_app,
@@ -949,32 +953,75 @@ class WebSmokeCiTests(unittest.TestCase):
         previous = os.environ.get("PICORG_WEB_AUTH")
         os.environ["PICORG_WEB_AUTH"] = "1"
         try:
-            client = TestClient(web_app.app)
+            with tempfile.TemporaryDirectory() as temp_dir:
+                with patch.object(web_app.settings, "AC", temp_dir):
+                    client = TestClient(web_app.app)
 
-            anonymous = client.post("/api/logout")
-            self.assertEqual(anonymous.status_code, 401)
+                    anonymous = client.post("/api/logout")
+                    self.assertEqual(anonymous.status_code, 401)
 
-            login = client.post(
-                "/api/login",
-                data={"username": "admin", "password": "admin"},
-                headers={"X-Requested-With": "XMLHttpRequest"},
-            )
-            self.assertEqual(login.status_code, 200)
-            csrf_headers = {"X-PicOrg-CSRF": login.json()["csrf_token"]}
-            presence = client.get("/api/server/presence")
-            self.assertEqual(presence.status_code, 200)
-            self.assertEqual(presence.json(), {"enabled": False, "users": []})
+                    login = client.post(
+                        "/api/login",
+                        data={"username": "admin", "password": "admin"},
+                        headers={"X-Requested-With": "XMLHttpRequest"},
+                    )
+                    self.assertEqual(login.status_code, 200)
+                    csrf_headers = {"X-PicOrg-CSRF": login.json()["csrf_token"]}
+                    presence = client.get("/api/server/presence")
+                    self.assertEqual(presence.status_code, 200)
+                    self.assertEqual(presence.json(), {"enabled": False, "users": []})
 
-            forged = client.post("/api/logout", headers={"X-PicOrg-CSRF": "bad"})
-            self.assertEqual(forged.status_code, 403)
+                    forged = client.post("/api/logout", headers={"X-PicOrg-CSRF": "bad"})
+                    self.assertEqual(forged.status_code, 403)
 
-            authenticated = client.post("/api/logout", headers=csrf_headers)
-            self.assertEqual(authenticated.status_code, 200)
+                    authenticated = client.post("/api/logout", headers=csrf_headers)
+                    self.assertEqual(authenticated.status_code, 200)
         finally:
             if previous is None:
                 os.environ.pop("PICORG_WEB_AUTH", None)
             else:
                 os.environ["PICORG_WEB_AUTH"] = previous
+
+    def test_session_v2_payload_uses_user_id_not_username(self) -> None:
+        user = {
+            "id": "7c8e1b5e-4c50-4da4-9b37-51b9db4600fa",
+            "username": "operator",
+            "enabled": True,
+            "locked": False,
+            "session_version": 3,
+        }
+        with patch.object(web_app, "find_user_by_id", return_value=user):
+            token = web_app._make_session_token(user)
+            payload = (
+                base64.urlsafe_b64decode(token.encode("ascii"))
+                .decode("utf-8")
+                .rsplit("|", 1)[0]
+            )
+            resolved = web_app._read_session_token(token)
+
+        self.assertTrue(
+            payload.startswith("session-v2|7c8e1b5e-4c50-4da4-9b37-51b9db4600fa|3|")
+        )
+        self.assertNotIn("operator", payload)
+        self.assertEqual(resolved, "operator")
+
+    def test_signed_pre_v2_session_cookie_is_rejected(self) -> None:
+        payload = f"session|admin|0|{int(time.time())}|legacy-nonce"
+        token = base64.urlsafe_b64encode(
+            f"{payload}|{web_app._sign(payload)}".encode("utf-8")
+        ).decode("ascii")
+
+        with patch.object(
+            web_app,
+            "find_user",
+            return_value={
+                "username": "admin",
+                "enabled": True,
+                "locked": False,
+                "session_version": 0,
+            },
+        ):
+            self.assertIsNone(web_app._read_session_token(token))
 
     def test_security_headers_include_strict_csp(self) -> None:
         client = TestClient(web_app.app)
@@ -1130,26 +1177,30 @@ class WebSmokeCiTests(unittest.TestCase):
         previous = os.environ.get("PICORG_WEB_AUTH")
         os.environ["PICORG_WEB_AUTH"] = "1"
         try:
-            client = TestClient(web_app.app)
-            with patch.object(web_app.common, "APP_SECRET", "old-session-secret"):
-                login = client.post(
-                    "/api/login",
-                    data={"username": "admin", "password": "admin"},
-                    headers={"X-Requested-With": "XMLHttpRequest"},
-                )
-                self.assertEqual(login.status_code, 200)
-                headers = {"X-PicOrg-CSRF": login.json()["csrf_token"]}
+            with tempfile.TemporaryDirectory() as temp_dir:
+                with patch.object(web_app.settings, "AC", temp_dir):
+                    client = TestClient(web_app.app)
+                    with patch.object(web_app.common, "APP_SECRET", "old-session-secret"):
+                        login = client.post(
+                            "/api/login",
+                            data={"username": "admin", "password": "admin"},
+                            headers={"X-Requested-With": "XMLHttpRequest"},
+                        )
+                        self.assertEqual(login.status_code, 200)
+                        headers = {"X-PicOrg-CSRF": login.json()["csrf_token"]}
 
-                def fake_update_settings(_payload):
-                    web_app.common.APP_SECRET = "new-session-secret"
-                    return {"version": "test", "processing": {}}
+                        def fake_update_settings(_payload):
+                            web_app.common.APP_SECRET = "new-session-secret"
+                            return {"version": "test", "processing": {}}
 
-                with patch.object(web_app, "update_settings", side_effect=fake_update_settings):
-                    response = client.post(
-                        "/api/settings",
-                        json={"app": {"app_secret": "new-session-secret"}},
-                        headers=headers,
-                    )
+                        with patch.object(
+                            web_app, "update_settings", side_effect=fake_update_settings
+                        ):
+                            response = client.post(
+                                "/api/settings",
+                                json={"app": {"app_secret": "new-session-secret"}},
+                                headers=headers,
+                            )
 
             self.assertEqual(response.status_code, 200)
             payload = response.json()
