@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WEB_ENTRYPOINT = ROOT / "PicOrgFTP-SQL-WEB.pyw"
 START_WEB_SCRIPT = ROOT / "tools" / "web" / "start_web.ps1"
 STOP_WEB_SCRIPT = ROOT / "tools" / "web" / "stop_web.ps1"
+POWERSHELL_HARNESS_TIMEOUT_SECONDS = 60
 
 
 def _run_powershell_harness(path: Path) -> list[str]:
@@ -37,7 +38,9 @@ def _run_powershell_harness(path: Path) -> list[str]:
         ],
         capture_output=True,
         text=True,
-        timeout=20,
+        # GitHub-hosted Windows runners can take longer than 20 seconds to
+        # start a fresh Windows PowerShell process while the suite is busy.
+        timeout=POWERSHELL_HARNESS_TIMEOUT_SECONDS,
         check=False,
     )
     assert result.returncode == 0, result.stderr
