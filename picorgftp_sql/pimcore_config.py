@@ -14,6 +14,7 @@ from .pimcore_templates import (
     parse_template,
     render_mapping_templates,
 )
+from .services.image_dimensions import image_dimension_source_key
 
 PIMCORE_SETTINGS_KEY = "pimcore"
 PIMCORE_API_KEY = "api_key"
@@ -67,6 +68,59 @@ def default_pimcore_settings() -> dict[str, Any]:
     return deepcopy(DEFAULT_PIMCORE_SETTINGS)
 
 
+def _normalize_image_dimension(raw: object) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    slot = _text(raw.get("slot"))
+    dimension = _text(raw.get("dimension")).casefold()
+    if not slot or not slot.isdigit() or int(slot) <= 0:
+        return None
+    if dimension not in {"width", "depth", "height"}:
+        return None
+    confidence_raw = raw.get("minimum_text_confidence", 0.8)
+    try:
+        confidence = float(confidence_raw)
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= confidence <= 1:
+        return None
+    return {
+        "slot": str(int(slot)),
+        "dimension": dimension,
+        "minimum_text_confidence": confidence,
+    }
+
+
+def image_dimension_source_definitions(
+    mappings: object,
+) -> list[SourceDefinition]:
+    if not isinstance(mappings, list):
+        return []
+    definitions: list[SourceDefinition] = []
+    keys: set[str] = set()
+    for mapping in mappings:
+        if not isinstance(mapping, dict):
+            continue
+        config = _normalize_image_dimension(mapping.get("image_dimension"))
+        if not config:
+            continue
+        key = image_dimension_source_key(config["slot"], config["dimension"])
+        if key in keys:
+            continue
+        keys.add(key)
+        definitions.append(
+            SourceDefinition(
+                key,
+                f"Wymiar {config['dimension']} ze slotu {config['slot']}",
+                "image_dimension",
+                (key,),
+            )
+        )
+    return definitions
+
+
 def normalize_field_mapping(raw: object, *, default_order: int = 0) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
@@ -95,6 +149,7 @@ def normalize_field_mapping(raw: object, *, default_order: int = 0) -> dict[str,
         "sql_profile_id": _text(raw.get("sql_profile_id")),
         "translate": bool(raw.get("translate")),
         "target_language": _text(raw.get("target_language")) or None,
+        "image_dimension": _normalize_image_dimension(raw.get("image_dimension")),
         "layout_group": _clean_layout_group(raw.get("layout_group")),
         "layout_order": _layout_order(raw.get("layout_order"), default_order),
     }
@@ -179,6 +234,7 @@ def infer_field_mapping(
         "sql_profile_id": "",
         "translate": False,
         "target_language": None,
+        "image_dimension": None,
         "layout_group": "",
         "layout_order": 0,
     }
@@ -249,6 +305,11 @@ def field_mapping_issues(
         uses_sql_source = not is_sql_mode and _template_uses_sql_source(template)
         translate = bool(raw.get("translate"))
         target_language = _text(raw.get("target_language"))
+        image_dimension_raw = raw.get("image_dimension")
+        if image_dimension_raw is not None and not _normalize_image_dimension(
+            image_dimension_raw
+        ):
+            issues.append(f"Mapowanie {index}: niepoprawna konfiguracja wymiaru obrazu.")
         if not source:
             issues.append(f"Mapowanie {index}: brak kolumny zrodlowej.")
         elif source in sources:
@@ -305,7 +366,10 @@ def field_mapping_issues(
             for raw in raw_mappings
         ]
         sql_template_source = SourceDefinition("SQL", "SQL", "sql", ("SQL",))
-        catalog = build_source_catalog(template_mappings, [sql_template_source])
+        image_sources = image_dimension_source_definitions(raw_mappings)
+        catalog = build_source_catalog(
+            template_mappings, [sql_template_source, *image_sources]
+        )
         for index, raw in enumerate(raw_mappings, start=1):
             if not isinstance(raw, dict):
                 continue
@@ -319,8 +383,11 @@ def field_mapping_issues(
             template_mappings,
             product_values={key: "1" for key in PRODUCT_SOURCES},
             pimcore_values=generate_test_values(template_mappings),
-            extra_sources=[sql_template_source],
-            extra_values={"SQL": "1"},
+            extra_sources=[sql_template_source, *image_sources],
+            extra_values={
+                "SQL": "1",
+                **{source.key: "1" for source in image_sources},
+            },
         )
     except TemplateError as exc:
         issues.append(f"Mapowanie {index}: {exc.message}")
