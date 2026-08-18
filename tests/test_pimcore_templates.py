@@ -242,6 +242,32 @@ def test_mapping_templates_render_in_dependency_order():
     assert result.order == ("COLOR", "TITLE")
 
 
+def test_mapping_templates_keep_submitted_dependency_values_during_edit():
+    mappings = [
+        {
+            "source": "PARCEL_1_WIDTH",
+            "type": "input",
+            "value_template": "{PRODUCT:extra|keep}",
+        },
+        {
+            "source": "PARCELS_QTY",
+            "type": "input",
+            "value_template": "{PIMCORE:PARCEL_1_WIDTH|filled}",
+        },
+    ]
+
+    result = render_mapping_templates(
+        mappings,
+        product_values={"extra": ""},
+        pimcore_values={"PARCEL_1_WIDTH": "120", "PARCELS_QTY": "4"},
+        targets=["PARCELS_QTY"],
+        preserve_submitted_dependencies=True,
+    )
+
+    assert result.values["PARCELS_QTY"] == "1"
+    assert result.order == ("PARCELS_QTY",)
+
+
 def test_mapping_cycle_is_rejected_with_sources():
     mappings = [
         {"source": "A", "type": "input", "value_template": "{PIMCORE:B}"},

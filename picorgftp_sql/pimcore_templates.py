@@ -788,6 +788,7 @@ def render_mapping_templates(
     targets: Iterable[str] | None = None,
     extra_sources: Iterable[SourceDefinition] = (),
     extra_values: Mapping[str, object] | None = None,
+    preserve_submitted_dependencies: bool = False,
 ) -> RenderedMappings:
     rows = {
         str(item.get("source") or ""): dict(item)
@@ -804,10 +805,21 @@ def render_mapping_templates(
     )
     values.update(dict(extra_values or {}))
 
-    templated = [
+    configured_templated = [
         source
         for source, row in rows.items()
         if str(row.get("value_template") or "")
+    ]
+    selected = list(targets) if targets is not None else list(configured_templated)
+    selected_sources = set(selected)
+    templated = [
+        source
+        for source in configured_templated
+        if not (
+            preserve_submitted_dependencies
+            and source not in selected_sources
+            and str(pimcore_values.get(source, "")).strip()
+        )
     ]
     dependencies: dict[str, list[str]] = {}
     for source in templated:
@@ -820,7 +832,6 @@ def render_mapping_templates(
             if dependency in templated and dependency not in dependencies[source]:
                 dependencies[source].append(dependency)
 
-    selected = list(targets) if targets is not None else list(templated)
     order: list[str] = []
     active: list[str] = []
     complete: set[str] = set()
