@@ -71,6 +71,8 @@ Web EXE można zbudować w trzech wariantach:
 
 Ten sam parametr można przekazać do `Generator exe\BUILD_WEB_EXE.bat`, np. `BUILD_WEB_EXE.bat -IncludeVisionModels -IncludeVision`. Wariant z modelami jest wyraźnie większy. Wariant pobierany zapisuje model lokalnie w katalogu danych aplikacji, a po jednorazowym pobraniu działa offline.
 
+Do budowy WEB EXE bez wpisywania parametrów uruchom dwuklikiem `Generator exe\BUILD_WEB_EXE_OCR.bat`, a następnie wybierz `D` (model pobierany przy pierwszym użyciu) albo `M` (model osadzony w EXE).
+
 Te same przełączniki obsługuje lokalny generator: `build_local_exe.ps1 -IncludeVision` oraz `build_local_exe.ps1 -IncludeVision -IncludeVisionModels`.
 
 Do pracy bez wpisywania parametrów uruchom dwuklikiem `Generator exe\BUILD_LOCAL_EXE_OCR.bat`, a następnie wybierz `D` (model pobierany przy pierwszym użyciu) albo `M` (model osadzony w EXE).

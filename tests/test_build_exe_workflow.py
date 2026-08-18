@@ -14,6 +14,7 @@ EMAIL_DELIVERY = ROOT / "picorgftp_sql" / "email_delivery.py"
 BUILD_COMMON = ROOT / "Generator exe" / "build_common.ps1"
 WEB_BUILD = ROOT / "Generator exe" / "build_web_exe.ps1"
 WEB_BUILD_BATCH = ROOT / "Generator exe" / "BUILD_WEB_EXE.bat"
+WEB_OCR_BUILD_BATCH = ROOT / "Generator exe" / "BUILD_WEB_EXE_OCR.bat"
 LOCAL_BUILD = ROOT / "Generator exe" / "build_local_exe.ps1"
 LOCAL_BUILD_BATCH = ROOT / "Generator exe" / "BUILD_LOCAL_EXE.bat"
 LOCAL_OCR_BUILD_BATCH = ROOT / "Generator exe" / "BUILD_LOCAL_EXE_OCR.bat"
@@ -143,6 +144,15 @@ def test_web_build_supports_opt_in_vision_engine_and_embedded_models() -> None:
     assert "PADDLE_PDX_CACHE_HOME" in build_source
     assert "ocr_models" in build_source
     assert "%*" in batch_source
+
+
+def test_web_ocr_build_batch_offers_downloaded_and_embedded_model_variants() -> None:
+    source = WEB_OCR_BUILD_BATCH.read_text(encoding="utf-8")
+
+    assert "choice /c DM" in source
+    assert "-IncludeVision" in source
+    assert "-IncludeVision -IncludeVisionModels" in source
+    assert "build_web_exe.ps1" in source
 
 
 def test_local_build_supports_opt_in_vision_engine_and_embedded_models() -> None:
