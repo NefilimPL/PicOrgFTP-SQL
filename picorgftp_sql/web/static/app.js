@@ -425,6 +425,10 @@ const pimcoreTemplateSources = document.querySelector("#pimcoreTemplateSources")
 const pimcoreTemplateFunctions = document.querySelector("#pimcoreTemplateFunctions");
 const pimcoreTemplateTranslate = document.querySelector("#pimcoreTemplateTranslate");
 const pimcoreTemplateLanguage = document.querySelector("#pimcoreTemplateLanguage");
+const pimcoreTemplateImageEnabled = document.querySelector("#pimcoreTemplateImageEnabled");
+const pimcoreTemplateImageSlot = document.querySelector("#pimcoreTemplateImageSlot");
+const pimcoreTemplateImageKind = document.querySelector("#pimcoreTemplateImageKind");
+const pimcoreTemplateImageConfidence = document.querySelector("#pimcoreTemplateImageConfidence");
 const pimcoreTemplatePreview = document.querySelector("#pimcoreTemplatePreview");
 const pimcoreTemplateStatus = document.querySelector("#pimcoreTemplateStatus");
 const pimcoreTemplatePreviewButton = document.querySelector("#pimcoreTemplatePreviewButton");
@@ -9584,6 +9588,97 @@ function closePimcoreTemplateHelp() {
   if (pimcoreTemplateModal?.classList.contains("active")) pimcoreTemplateHelpButton?.focus();
 }
 
+function pimcoreImageDimensionFromRow(row) {
+  if (!row?.dataset.imageDimension) return null;
+  try {
+    const value = JSON.parse(row.dataset.imageDimension);
+    return value && typeof value === "object" ? value : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function setPimcoreImageDimensionRow(row, value) {
+  if (!row) return;
+  if (value) {
+    row.dataset.imageDimension = JSON.stringify(value);
+  } else {
+    delete row.dataset.imageDimension;
+  }
+}
+
+function updatePimcoreTemplateImageControls() {
+  const enabled = Boolean(pimcoreTemplateImageEnabled?.checked);
+  for (const control of [
+    pimcoreTemplateImageSlot,
+    pimcoreTemplateImageKind,
+    pimcoreTemplateImageConfidence,
+  ]) {
+    if (control) control.disabled = !enabled;
+  }
+}
+
+function renderPimcoreTemplateImageSlots(row) {
+  if (!pimcoreTemplateImageSlot) return;
+  const configured = pimcoreImageDimensionFromRow(row);
+  const selected = String(configured?.slot || "");
+  pimcoreTemplateImageSlot.replaceChildren();
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = "Wybierz slot";
+  pimcoreTemplateImageSlot.appendChild(empty);
+  const slots = [...(state.slots || [])];
+  if (selected && !slots.some((slot) => String(slot.prefix) === selected)) {
+    slots.push({ prefix: selected, label: `Slot ${selected}` });
+  }
+  for (const slot of slots) {
+    const option = document.createElement("option");
+    option.value = String(slot.prefix || "");
+    option.textContent = `${slot.label || "Slot"} (${slot.prefix || ""})`;
+    option.selected = option.value === selected;
+    pimcoreTemplateImageSlot.appendChild(option);
+  }
+  if (pimcoreTemplateImageEnabled) pimcoreTemplateImageEnabled.checked = Boolean(configured);
+  if (pimcoreTemplateImageKind) pimcoreTemplateImageKind.value = configured?.dimension || "width";
+  if (pimcoreTemplateImageConfidence) {
+    pimcoreTemplateImageConfidence.value = String(
+      Math.round(Number(configured?.minimum_text_confidence ?? 0.8) * 100)
+    );
+  }
+  updatePimcoreTemplateImageControls();
+}
+
+function pimcoreTemplateImageDimensionValues() {
+  if (!pimcoreTemplateImageEnabled?.checked) return null;
+  const slot = String(pimcoreTemplateImageSlot?.value || "").trim();
+  const dimension = String(pimcoreTemplateImageKind?.value || "").trim();
+  const confidencePercent = Number(pimcoreTemplateImageConfidence?.value);
+  if (!slot) throw new Error("Wybierz slot dla wymiaru z obrazu.");
+  if (!["width", "depth", "height"].includes(dimension)) {
+    throw new Error("Wybierz rodzaj wymiaru z obrazu.");
+  }
+  if (!Number.isFinite(confidencePercent) || confidencePercent < 0 || confidencePercent > 100) {
+    throw new Error("Minimalna pewnosc tekstu musi miescic sie od 0 do 100%.");
+  }
+  return {
+    slot,
+    dimension,
+    minimum_text_confidence: confidencePercent / 100,
+  };
+}
+
+function pimcoreSlotTokens() {
+  const tokens = {};
+  for (const slot of state.slots || []) {
+    const prefix = String(slot.prefix || "");
+    if (!prefix || state.deletedSlots.has(prefix)) continue;
+    const selected = state.files.get(prefix);
+    const token = slotFileToken(selected) || selectedPhotoToken(state.loadedPhotos.get(prefix), prefix);
+    if (token) tokens[prefix] = token;
+  }
+  return tokens;
+}
+
 function renderPimcoreTemplateTokens(row) {
   pimcoreTemplateSources.textContent = "";
   pimcoreTemplateFunctions.textContent = "";
@@ -9607,6 +9702,21 @@ function renderPimcoreTemplateTokens(row) {
       insertPimcoreTemplateText(`{PIMCORE:${mapping.source}|keep}`)
     );
     pimcoreTemplateSources.appendChild(button);
+  }
+  try {
+    const imageDimension = pimcoreTemplateImageDimensionValues();
+    if (imageDimension) {
+      const button = document.createElement("button");
+      const source = `IMAGE_DIMENSION:${imageDimension.slot}:${imageDimension.dimension.toUpperCase()}`;
+      button.type = "button";
+      button.className = "ghost-button";
+      button.textContent = "Wymiar z obrazu";
+      button.title = `{${source}|keep}`;
+      button.addEventListener("click", () => insertPimcoreTemplateText(`{${source}|keep}`));
+      pimcoreTemplateSources.appendChild(button);
+    }
+  } catch (_error) {
+    // The save/preview path displays the configuration validation message.
   }
   const group = document.createElement("button");
   group.type = "button";
@@ -9670,6 +9780,7 @@ function openPimcoreTemplateBuilder(row) {
   pimcoreTemplateTranslate.checked = row.dataset.translate === "true";
   pimcoreTemplateLanguage.value = row.dataset.targetLanguage || pimcoreTemplateLanguageForRow(row);
   pimcoreTemplateLanguage.disabled = !pimcoreTemplateTranslate.checked;
+  renderPimcoreTemplateImageSlots(row);
   pimcoreTemplateTarget.textContent = `Pole: ${pimcoreTemplateSource(row) || "nowe mapowanie"}`;
   pimcoreTemplatePreview.textContent = "Wpisz szablon i uruchom podglad.";
   pimcoreTemplateStatus.textContent = "";
@@ -9690,11 +9801,13 @@ function pimcoreTemplatePreviewPayload() {
   target.translate = pimcoreTemplateTranslate.checked;
   target.target_language =
     pimcoreTemplateLanguage.value.trim() || pimcoreTemplateLanguageForRow(row) || null;
+  target.image_dimension = pimcoreTemplateImageDimensionValues();
   return {
     mappings,
     target_source: targetSource,
     product_values: formPayload(),
     values: Object.fromEntries(mappings.map((mapping) => [mapping.source, mapping.default || ""])),
+    slot_tokens: pimcoreSlotTokens(),
   };
 }
 
@@ -9735,12 +9848,20 @@ function savePimcoreTemplateBuilder() {
     pimcoreTemplateStatus.textContent = "Podaj jezyk docelowy tlumaczenia.";
     return;
   }
+  let imageDimension;
+  try {
+    imageDimension = pimcoreTemplateImageDimensionValues();
+  } catch (error) {
+    pimcoreTemplateStatus.textContent = error.message;
+    return;
+  }
   row.dataset.valueTemplate = template;
   const sqlValues = pimcoreTemplateSqlValues();
   row.dataset.sqlQuery = sqlValues.sql_query;
   row.dataset.sqlProfileId = sqlValues.sql_profile_id;
   row.dataset.translate = translate ? "true" : "false";
   row.dataset.targetLanguage = translate ? language : "";
+  setPimcoreImageDimensionRow(row, imageDimension);
   if (translate) pimcoreTemplateLanguage.value = language;
   updatePimcoreTemplateButton(row);
   closePimcoreTemplateBuilder();
@@ -9820,6 +9941,7 @@ function pimcoreMappingRow(mapping = {}) {
   row.dataset.targetLanguage = mapping.target_language || "";
   row.dataset.sqlQuery = mapping.sql_query || "";
   row.dataset.sqlProfileId = mapping.sql_profile_id || "";
+  setPimcoreImageDimensionRow(row, mapping.image_dimension || null);
   row.className = "pimcore-mapping-row";
   const textInput = (name, value, label) => {
     const input = document.createElement("input");
@@ -9896,6 +10018,7 @@ function collectPimcoreMappings(form) {
       row.querySelector('[name="mapping_sql_profile_id"]')?.value || row.dataset.sqlProfileId || "",
     translate: row.dataset.translate === "true",
     target_language: row.dataset.targetLanguage || null,
+    image_dimension: pimcoreImageDimensionFromRow(row),
     ...collectPimcoreLayout(row, index),
   }));
 }
@@ -10030,6 +10153,7 @@ function pimcoreSimpleMappingRow(mapping = {}, fields = []) {
   row.dataset.targetLanguage = mapping.target_language || "";
   row.dataset.sqlQuery = mapping.sql_query || "";
   row.dataset.sqlProfileId = mapping.sql_profile_id || "";
+  setPimcoreImageDimensionRow(row, mapping.image_dimension || null);
   target.addEventListener("change", () => {
     if (!row.dataset.source && !label.value.trim()) {
       label.value = pimcoreSelectedMappingSource(target);
@@ -10068,6 +10192,7 @@ function collectSimplePimcoreMappings(form) {
           "",
         translate: row.dataset.translate === "true",
         target_language: row.dataset.targetLanguage || null,
+        image_dimension: pimcoreImageDimensionFromRow(row),
         ...collectPimcoreLayout(row, index),
       };
     })
@@ -10589,6 +10714,7 @@ function pimcoreSetupFieldRow(field, mappings, eanTarget) {
   row.dataset.targetLanguage = existing.target_language || "";
   row.dataset.sqlQuery = existing.sql_query || "";
   row.dataset.sqlProfileId = existing.sql_profile_id || "";
+  setPimcoreImageDimensionRow(row, existing.image_dimension || null);
   use.type = "checkbox";
   use.name = "mapping_use";
   use.checked = isEan || Boolean(existing.pimcore_field);
@@ -10645,6 +10771,7 @@ function collectPimcoreSetupMappings(container) {
           "",
         translate: row.dataset.translate === "true",
         target_language: row.dataset.targetLanguage || null,
+        image_dimension: pimcoreImageDimensionFromRow(row),
         ...collectPimcoreLayout(row, index),
       };
     });
@@ -11155,6 +11282,7 @@ async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
       mode: form.dataset.pimcoreMode || "create",
       object_id:
         form === pimcoreEditForm ? Number(state.pimcoreEditObjectId || 0) : null,
+      slot_tokens: pimcoreSlotTokens(),
     }),
   });
   const integrationContext = result.integrations || { sql_profiles: [] };
@@ -13573,6 +13701,21 @@ pimcoreTemplateTranslate?.addEventListener("change", () => {
   }
 });
 
+pimcoreTemplateImageEnabled?.addEventListener("change", () => {
+  updatePimcoreTemplateImageControls();
+  if (state.pimcoreTemplateRow) renderPimcoreTemplateTokens(state.pimcoreTemplateRow);
+});
+
+for (const control of [
+  pimcoreTemplateImageSlot,
+  pimcoreTemplateImageKind,
+  pimcoreTemplateImageConfidence,
+]) {
+  control?.addEventListener("change", () => {
+    if (state.pimcoreTemplateRow) renderPimcoreTemplateTokens(state.pimcoreTemplateRow);
+  });
+}
+
 pimcoreTemplatePreviewButton?.addEventListener("click", previewPimcoreTemplate);
 pimcoreTemplateSaveButton?.addEventListener("click", savePimcoreTemplateBuilder);
 pimcoreTemplateClearButton?.addEventListener("click", () => {
@@ -13584,6 +13727,8 @@ pimcoreTemplateClearButton?.addEventListener("click", () => {
   pimcoreTemplateTranslate.checked = false;
   pimcoreTemplateLanguage.value = "";
   pimcoreTemplateLanguage.disabled = true;
+  pimcoreTemplateImageEnabled.checked = false;
+  updatePimcoreTemplateImageControls();
   savePimcoreTemplateBuilder();
 });
 pimcoreTemplateCancelButton?.addEventListener("click", closePimcoreTemplateBuilder);

@@ -2399,6 +2399,18 @@ async function requestJson() {{
         ):
             self.assertIn(element_id, html.ids)
 
+    def test_pimcore_template_builder_has_image_dimension_controls(self) -> None:
+        html = _parse(INDEX_HTML)
+
+        for element_id in (
+            "pimcoreTemplateImageDimension",
+            "pimcoreTemplateImageEnabled",
+            "pimcoreTemplateImageSlot",
+            "pimcoreTemplateImageKind",
+            "pimcoreTemplateImageConfidence",
+        ):
+            self.assertIn(element_id, html.ids)
+
     def test_app_js_persists_and_previews_pimcore_mapping_templates(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
 
@@ -2423,6 +2435,9 @@ async function requestJson() {{
         self.assertIn('["Mnoz", "*"]', source)
         self.assertIn('["Oblicz", "oblicz()"]', source)
         self.assertIn("insertPimcoreTemplateText(token)", source)
+        self.assertIn("function pimcoreTemplateImageDimensionValues", source)
+        self.assertIn("function pimcoreSlotTokens", source)
+        self.assertIn("slot_tokens: pimcoreSlotTokens()", source)
 
     def test_runtime_pimcore_forms_load_samples_and_recalculate_saved_templates(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")

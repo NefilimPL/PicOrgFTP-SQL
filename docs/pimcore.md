@@ -30,6 +30,26 @@ Tekst i znaki poza placeholderami są kopiowane do wyniku. Grupa `(...)` znika w
 
 Dostępne funkcje: `keep`, `trim`, `normalize_spaces`, `upper`, `lower`, `title`, `capitalize`, `replace`, `default`, `substring`, `truncate`, `strip_diacritics`, `slug`, `number`, `filled`, `any_filled`, `count_filled` i `if_filled`.
 
+### Wymiary z obrazów
+
+Kreator szablonu może lokalnie odczytać szerokość, głębokość albo wysokość z rysunku wymiarowego w wybranym slocie zdjęcia. W sekcji `Wymiar z obrazu` włącz opcję, wybierz slot, rodzaj wymiaru i minimalną pewność tekstu. Domyślny próg wynosi 80%; wynik o mniejszej pewności nie wypełnia pola.
+
+Przycisk danych w kreatorze wstawia do formuły wartość w tym formacie:
+
+```text
+{IMAGE_DIMENSION:15:WIDTH|keep}
+```
+
+Liczby są zwracane bez jednostki i z kropką dziesiętną, więc `130,5 cm` staje się `130.5`. Obraz jest analizowany wyłącznie na komputerze lub serwerze, na którym działa aplikacja; nie jest wysyłany do zewnętrznego API.
+
+Jednorazowo zainstaluj lokalny OCR w środowisku aplikacji:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-vision.txt
+```
+
+Jeżeli w slocie nie ma obrazu, OCR nie jest zainstalowany, nie znaleziono wymiaru albo pewność jest niższa od progu, dane pole pozostaje puste i podgląd pokazuje odpowiedni komunikat. Pozostałe mapowania nadal są przeliczane.
+
 ### Sprawdzanie wypełnienia pól
 
 `filled` zamienia wypełnione pole na `1`, a puste pole na `0`. Dzięki temu można policzyć paczki po wpisanej szerokości:
