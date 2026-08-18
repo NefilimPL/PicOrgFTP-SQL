@@ -71,6 +71,8 @@ Web EXE można zbudować w trzech wariantach:
 
 Ten sam parametr można przekazać do `Generator exe\BUILD_WEB_EXE.bat`, np. `BUILD_WEB_EXE.bat -IncludeVisionModels -IncludeVision`. Wariant z modelami jest wyraźnie większy. Wariant pobierany zapisuje model lokalnie w katalogu danych aplikacji, a po jednorazowym pobraniu działa offline.
 
+Te same przełączniki obsługuje lokalny generator: `build_local_exe.ps1 -IncludeVision` oraz `build_local_exe.ps1 -IncludeVision -IncludeVisionModels`.
+
 ### Sprawdzanie wypełnienia pól
 
 `filled` zamienia wypełnione pole na `1`, a puste pole na `0`. Dzięki temu można policzyć paczki po wpisanej szerokości:

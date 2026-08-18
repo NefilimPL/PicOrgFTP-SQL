@@ -14,6 +14,8 @@ EMAIL_DELIVERY = ROOT / "picorgftp_sql" / "email_delivery.py"
 BUILD_COMMON = ROOT / "Generator exe" / "build_common.ps1"
 WEB_BUILD = ROOT / "Generator exe" / "build_web_exe.ps1"
 WEB_BUILD_BATCH = ROOT / "Generator exe" / "BUILD_WEB_EXE.bat"
+LOCAL_BUILD = ROOT / "Generator exe" / "build_local_exe.ps1"
+LOCAL_BUILD_BATCH = ROOT / "Generator exe" / "BUILD_LOCAL_EXE.bat"
 
 
 def workflow_source() -> str:
@@ -131,6 +133,21 @@ def test_web_build_supports_opt_in_vision_engine_and_embedded_models() -> None:
 
     assert "IncludeVisionDependencies" in common_source
     assert '"requirements-vision.txt"' in common_source
+    assert "[switch]$IncludeVision" in build_source
+    assert "[switch]$IncludeVisionModels" in build_source
+    assert "-IncludeVisionDependencies:$IncludeVision" in build_source
+    assert "IncludeVisionModels wymaga parametru -IncludeVision" in build_source
+    assert "--collect-all" in build_source
+    assert "paddleocr" in build_source
+    assert "PADDLE_PDX_CACHE_HOME" in build_source
+    assert "ocr_models" in build_source
+    assert "%*" in batch_source
+
+
+def test_local_build_supports_opt_in_vision_engine_and_embedded_models() -> None:
+    build_source = LOCAL_BUILD.read_text(encoding="utf-8")
+    batch_source = LOCAL_BUILD_BATCH.read_text(encoding="utf-8")
+
     assert "[switch]$IncludeVision" in build_source
     assert "[switch]$IncludeVisionModels" in build_source
     assert "-IncludeVisionDependencies:$IncludeVision" in build_source
