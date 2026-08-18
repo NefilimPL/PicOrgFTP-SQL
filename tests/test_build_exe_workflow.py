@@ -12,6 +12,8 @@ WEB_REQUIREMENTS = ROOT / "requirements-web.txt"
 BUILD_REQUIREMENTS = ROOT / "requirements-build.txt"
 EMAIL_DELIVERY = ROOT / "picorgftp_sql" / "email_delivery.py"
 BUILD_COMMON = ROOT / "Generator exe" / "build_common.ps1"
+WEB_BUILD = ROOT / "Generator exe" / "build_web_exe.ps1"
+WEB_BUILD_BATCH = ROOT / "Generator exe" / "BUILD_WEB_EXE.bat"
 
 
 def workflow_source() -> str:
@@ -120,6 +122,24 @@ def test_web_build_explicitly_packages_all_composition_static_assets() -> None:
         "app.js",
     ):
         assert asset in source
+
+
+def test_web_build_supports_opt_in_vision_engine_and_embedded_models() -> None:
+    common_source = BUILD_COMMON.read_text(encoding="utf-8")
+    build_source = WEB_BUILD.read_text(encoding="utf-8")
+    batch_source = WEB_BUILD_BATCH.read_text(encoding="utf-8")
+
+    assert "IncludeVisionDependencies" in common_source
+    assert '"requirements-vision.txt"' in common_source
+    assert "[switch]$IncludeVision" in build_source
+    assert "[switch]$IncludeVisionModels" in build_source
+    assert "-IncludeVisionDependencies:$IncludeVision" in build_source
+    assert "IncludeVisionModels wymaga parametru -IncludeVision" in build_source
+    assert "--collect-all" in build_source
+    assert "paddleocr" in build_source
+    assert "PADDLE_PDX_CACHE_HOME" in build_source
+    assert "ocr_models" in build_source
+    assert "%*" in batch_source
 
 
 def test_artifact_uploads_are_guarded_by_probe_and_non_fatal_per_target() -> None:

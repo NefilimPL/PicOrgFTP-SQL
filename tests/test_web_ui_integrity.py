@@ -61,6 +61,21 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
+    def test_settings_ocr_tab_has_diagnostic_controls_and_overlay_contract(self) -> None:
+        html = _parse(INDEX_HTML)
+        source = APP_JS.read_text(encoding="utf-8")
+        css = APP_CSS.read_text(encoding="utf-8")
+
+        self.assertTrue(html.has_tag("button", **{"data-settings-tab": "ocr"}))
+        self.assertIn("function renderSettingsOcr()", source)
+        self.assertIn("function renderOcrDiagnostics", source)
+        self.assertIn("/api/settings/ocr/status", source)
+        self.assertIn("/api/settings/ocr/analyze", source)
+        self.assertIn("data-ocr-overlay", source)
+        self.assertIn("model.version", source)
+        self.assertIn("%", source)
+        self.assertIn("ocr-diagnostic-overlay", css)
+
     def test_pimcore_export_selection_has_a_legacy_chrome_border_fallback(self) -> None:
         css = APP_CSS.read_text(encoding="utf-8")
 

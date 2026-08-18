@@ -50,6 +50,27 @@ Jednorazowo zainstaluj lokalny OCR w środowisku aplikacji:
 
 Jeżeli w slocie nie ma obrazu, OCR nie jest zainstalowany, nie znaleziono wymiaru albo pewność jest niższa od progu, dane pole pozostaje puste i podgląd pokazuje odpowiedni komunikat. Pozostałe mapowania nadal są przeliczane.
 
+### Tester OCR i warianty EXE
+
+Administrator może sprawdzić jakość odczytu w `Ustawienia > OCR`: wybiera obraz, ustawia próg (domyślnie 80%) i uruchamia test. Aplikacja pokazuje oryginalny obraz z prostokątami nad znalezionym tekstem; nad każdym prostokątem znajduje się procent pewności. Obok są pola szerokości, głębokości i wysokości oraz kompletna lista odczytów. Kandydat poniżej progu jest pokazany na czerwono i nie wypełnia pola wymiaru.
+
+Karta pokazuje także wersję użytego silnika PaddleOCR, nazwę i wariant modelu (`lang=en`), stan modelu oraz odnośnik do oficjalnego projektu na GitHubie. Test używa wyłącznie lokalnego silnika i tymczasowego cache uploadu aplikacji.
+
+Web EXE można zbudować w trzech wariantach:
+
+```powershell
+# Dotychczasowy, bez OCR
+.\Generator exe\build_web_exe.ps1
+
+# Silnik OCR w EXE; darmowe modele pobierają się lokalnie przy pierwszym teście
+.\Generator exe\build_web_exe.ps1 -IncludeVision
+
+# Silnik i model dołączone do EXE; gotowy do pracy offline od pierwszego uruchomienia
+.\Generator exe\build_web_exe.ps1 -IncludeVision -IncludeVisionModels
+```
+
+Ten sam parametr można przekazać do `Generator exe\BUILD_WEB_EXE.bat`, np. `BUILD_WEB_EXE.bat -IncludeVisionModels -IncludeVision`. Wariant z modelami jest wyraźnie większy. Wariant pobierany zapisuje model lokalnie w katalogu danych aplikacji, a po jednorazowym pobraniu działa offline.
+
 ### Sprawdzanie wypełnienia pól
 
 `filled` zamienia wypełnione pole na `1`, a puste pole na `0`. Dzięki temu można policzyć paczki po wpisanej szerokości:

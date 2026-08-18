@@ -13511,6 +13511,193 @@ async function runResourceMonitorTest(mode) {
   }
 }
 
+function ocrConfidenceLabel(value) {
+  return `${Math.round(Math.max(0, Math.min(1, Number(value) || 0)) * 100)}%`;
+}
+
+function ocrDimensionLabel(value) {
+  return ({ width: "Szerokosc", depth: "Glebokosc", height: "Wysokosc" })[value] || "Dodatkowe";
+}
+
+function renderOcrDiagnostics(result) {
+  const output = document.createElement("div");
+  output.className = "ocr-diagnostic-result wide-field";
+  const layout = document.createElement("div");
+  layout.className = "ocr-diagnostic-layout";
+  const stage = document.createElement("div");
+  stage.className = "ocr-diagnostic-stage";
+  const image = document.createElement("img");
+  image.className = "ocr-diagnostic-image";
+  image.alt = "Obraz analizowany przez OCR";
+  image.src = String(result.image_url || "");
+  const overlay = document.createElement("div");
+  overlay.className = "ocr-diagnostic-overlay";
+  const candidates = Array.isArray(result.candidates) ? result.candidates : [];
+  const drawOverlay = () => {
+    overlay.textContent = "";
+    const width = Number(image.naturalWidth || 0);
+    const height = Number(image.naturalHeight || 0);
+    if (!width || !height) return;
+    for (const candidate of candidates) {
+      const bbox = Array.isArray(candidate.bbox) ? candidate.bbox : [];
+      if (bbox.length !== 4) continue;
+      const [left, top, right, bottom] = bbox.map(Number);
+      if (![left, top, right, bottom].every(Number.isFinite)) continue;
+      const rectangle = document.createElement("div");
+      rectangle.className = `ocr-diagnostic-box ${candidate.accepted ? "accepted" : "rejected"}`;
+      rectangle.setAttribute("data-ocr-overlay", "true");
+      rectangle.style.left = `${Math.max(0, Math.min(100, (left / width) * 100))}%`;
+      rectangle.style.top = `${Math.max(0, Math.min(100, (top / height) * 100))}%`;
+      rectangle.style.width = `${Math.max(0.3, Math.min(100, ((right - left) / width) * 100))}%`;
+      rectangle.style.height = `${Math.max(0.3, Math.min(100, ((bottom - top) / height) * 100))}%`;
+      const label = document.createElement("span");
+      label.className = "ocr-diagnostic-confidence";
+      label.textContent = ocrConfidenceLabel(candidate.confidence);
+      rectangle.appendChild(label);
+      overlay.appendChild(rectangle);
+    }
+  };
+  image.addEventListener("load", drawOverlay);
+  stage.append(image, overlay);
+
+  const details = document.createElement("div");
+  details.className = "ocr-diagnostic-details";
+  const heading = document.createElement("h3");
+  heading.textContent = result.available ? "Wykryte wymiary" : "OCR niedostepny";
+  const dimensions = document.createElement("div");
+  dimensions.className = "ocr-diagnostic-dimensions";
+  for (const kind of ["width", "depth", "height"]) {
+    const field = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "text";
+    input.readOnly = true;
+    input.value = String(result.dimensions?.[kind] || "");
+    field.textContent = ocrDimensionLabel(kind);
+    field.appendChild(input);
+    dimensions.appendChild(field);
+  }
+  const rawHeading = document.createElement("h3");
+  rawHeading.textContent = "Wszystkie odczyty";
+  const candidateList = document.createElement("div");
+  candidateList.className = "ocr-diagnostic-candidates";
+  for (const candidate of candidates) {
+    const row = document.createElement("div");
+    row.className = `ocr-diagnostic-candidate ${candidate.accepted ? "accepted" : "rejected"}`;
+    row.textContent = `${ocrDimensionLabel(candidate.dimension)}: ${candidate.text || "—"} → ${candidate.value || "—"} (${ocrConfidenceLabel(candidate.confidence)})`;
+    candidateList.appendChild(row);
+  }
+  if (!candidates.length) {
+    const empty = document.createElement("p");
+    empty.className = "settings-note";
+    empty.textContent = String(result.message || "Nie znaleziono tekstu na obrazie.");
+    candidateList.appendChild(empty);
+  }
+  details.append(heading, dimensions, rawHeading, candidateList);
+  layout.append(stage, details);
+  output.appendChild(layout);
+  return output;
+}
+
+function renderSettingsOcr() {
+  const form = document.createElement("form");
+  form.className = "settings-form";
+  const status = document.createElement("p");
+  status.className = "settings-note wide-field";
+  status.textContent = "Pobieranie informacji o lokalnym OCR...";
+  const engineInfo = document.createElement("div");
+  engineInfo.className = "ocr-engine-info wide-field";
+  const file = inputField("ocr_test_file", "Obraz testowy", "", {
+    type: "file",
+    description: "Obraz trafia do tymczasowego cache aplikacji; nie jest zapisywany jako konfiguracja.",
+  });
+  const fileInput = file.querySelector("input");
+  fileInput.accept = "image/*";
+  const threshold = inputField("ocr_test_threshold", "Minimalna pewnosc (%)", "80", {
+    type: "number",
+    min: 0,
+    max: 100,
+    step: 1,
+    description: "Wynik ponizej progu jest widoczny, ale nie wypelnia pola wymiaru.",
+  });
+  const analyze = document.createElement("button");
+  analyze.type = "submit";
+  analyze.className = "secondary-button";
+  analyze.textContent = "Przetestuj OCR";
+  const results = document.createElement("div");
+  results.className = "wide-field";
+  form.append(
+    settingsFieldGroup("Tester OCR", status, engineInfo, file, threshold, actionRow(analyze), results)
+  );
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const selected = fileInput.files?.[0];
+    if (!selected) {
+      status.textContent = "Wybierz obraz do analizy.";
+      return;
+    }
+    const confidence = Number(threshold.querySelector("input").value || 80);
+    if (!Number.isFinite(confidence) || confidence < 0 || confidence > 100) {
+      status.textContent = "Minimalna pewnosc musi byc od 0 do 100%.";
+      return;
+    }
+    analyze.disabled = true;
+    results.textContent = "";
+    status.textContent = "Wysylanie obrazu do lokalnego testu OCR...";
+    try {
+      const upload = new FormData();
+      upload.set("prefix", "ocr-test");
+      upload.set("file", selected, selected.name || "ocr-test-image");
+      const cached = await requestJson("/api/upload-cache", { method: "POST", body: upload, timeoutMs: 120000 });
+      if (!cached.token) throw new Error("Backend nie zwrocil tokenu obrazu testowego.");
+      status.textContent = "Analiza OCR trwa...";
+      const result = await requestJson("/api/settings/ocr/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: cached.token, minimum_text_confidence: confidence / 100 }),
+        timeoutMs: 120000,
+      });
+      results.appendChild(renderOcrDiagnostics(result));
+      status.textContent = result.available
+        ? "Analiza OCR zakonczona."
+        : String(result.message || "Lokalny OCR nie jest dostepny.");
+    } catch (error) {
+      status.textContent = error.message || "Nie udalo sie wykonac analizy OCR.";
+    } finally {
+      analyze.disabled = false;
+    }
+  });
+  settingsOutput.appendChild(form);
+  requestJson("/api/settings/ocr/status")
+    .then((info) => {
+      const engine = info.engine || {};
+      const runtime = info.runtime || {};
+      const models = Array.isArray(info.models) ? info.models : [];
+      engineInfo.textContent = "";
+      const title = document.createElement("strong");
+      title.textContent = `${engine.name || "OCR"} ${engine.version || ""}`.trim();
+      const runtimeLine = document.createElement("span");
+      runtimeLine.textContent = `${runtime.name || "Runtime"}: ${runtime.version || "brak"}`;
+      const modelList = document.createElement("ul");
+      for (const model of models) {
+        const item = document.createElement("li");
+        item.textContent = `${model.name || "Model"} ${model.version ? `(${model.version})` : ""} — ${model.status || "unknown"}`;
+        modelList.appendChild(item);
+      }
+      const link = document.createElement("a");
+      link.href = String(info.github_url || "https://github.com/PaddlePaddle/PaddleOCR");
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      link.textContent = "Oficjalny projekt OCR na GitHub";
+      engineInfo.append(title, runtimeLine, modelList, link);
+      status.textContent = info.available
+        ? "Silnik OCR jest gotowy do testu."
+        : "Silnik OCR lub model nie jest jeszcze dostepny w tej instalacji.";
+    })
+    .catch((error) => {
+      status.textContent = error.message || "Nie udalo sie odczytac statusu OCR.";
+    });
+}
+
 function renderSettings() {
   if (!state.settings) {
     return;
@@ -13528,6 +13715,7 @@ function renderSettings() {
   if (state.activeSettingsTab === "ftp") renderSettingsFtp();
   if (state.activeSettingsTab === "sql") renderSettingsSql();
   if (state.activeSettingsTab === "pimcore") renderSettingsPimcore();
+  if (state.activeSettingsTab === "ocr") renderSettingsOcr();
   if (state.activeSettingsTab === "mail") renderSettingsMail();
   if (state.activeSettingsTab === "monitor") renderSettingsResourceMonitor();
   if (state.activeSettingsTab === "slots") renderSettingsSlots();

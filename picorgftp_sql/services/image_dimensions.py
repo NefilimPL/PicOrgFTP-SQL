@@ -8,8 +8,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
+from importlib import metadata, util
 import math
+import os
+from pathlib import Path
 import re
+import sys
 from typing import Iterable, Mapping, Protocol
 
 
@@ -20,6 +24,9 @@ _DIMENSION_HINTS = {
     "depth": frozenset({"d", "depth", "gleb", "glebokosc", "głęb", "głębokość"}),
     "height": frozenset({"h", "height", "wys", "wysokosc", "wysokość"}),
 }
+_OCR_ENGINE_NAME = "PaddleOCR"
+_OCR_GITHUB_URL = "https://github.com/PaddlePaddle/PaddleOCR"
+_OCR_MODEL_NAME = "English default OCR pipeline (lang=en)"
 
 
 class ImageDimensionUnavailable(RuntimeError):
@@ -62,6 +69,24 @@ class ImageDimensionResult:
     value: str
     text_confidence: float | None
     warning: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class OcrDiagnosticCandidate:
+    text: str
+    confidence: float
+    bbox: tuple[int, int, int, int]
+    dimension: str | None
+    value: str
+    accepted: bool
+
+
+@dataclass(frozen=True)
+class ImageOcrDiagnostics:
+    available: bool
+    dimensions: dict[str, str]
+    candidates: list[OcrDiagnosticCandidate]
+    message: str = ""
 
 
 class ImageDimensionRecognizer(Protocol):
@@ -177,6 +202,135 @@ def _default_recognizer() -> ImageDimensionRecognizer:
     return PaddleImageDimensionRecognizer()
 
 
+def _optional_package_version(package: str) -> str | None:
+    try:
+        return metadata.version(package)
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def image_ocr_runtime_info() -> dict[str, object]:
+    """Return display metadata without importing optional OCR packages."""
+
+    paddleocr_version = _optional_package_version("paddleocr")
+    paddle_version = _optional_package_version("paddlepaddle")
+    opencv_version = _optional_package_version("opencv-python-headless") or _optional_package_version("opencv-python")
+    available = bool(
+        paddleocr_version
+        and paddle_version
+        and opencv_version
+        and util.find_spec("paddleocr")
+        and util.find_spec("cv2")
+    )
+    model_cache_ready = _model_cache_has_content(ocr_model_cache_path())
+    return {
+        "available": available,
+        "engine": {
+            "name": _OCR_ENGINE_NAME,
+            "version": paddleocr_version or "niezainstalowany",
+        },
+        "runtime": {
+            "name": "PaddlePaddle + OpenCV",
+            "version": " / ".join(
+                value for value in (paddle_version, opencv_version) if value
+            )
+            or "niezainstalowany",
+        },
+        "models": [
+            {
+                "name": _OCR_MODEL_NAME,
+                "version": "lang=en",
+                "status": (
+                    "ready"
+                    if available and model_cache_ready
+                    else "download_on_first_use"
+                    if available
+                    else "unavailable"
+                ),
+            }
+        ],
+        "github_url": _OCR_GITHUB_URL,
+    }
+
+
+def bundled_ocr_model_cache_path() -> str | None:
+    """Return models unpacked by a PyInstaller one-file executable, if any."""
+
+    bundle_root = getattr(sys, "_MEIPASS", "")
+    if not bundle_root:
+        return None
+    candidate = Path(str(bundle_root)) / "ocr_models"
+    return str(candidate) if candidate.is_dir() else None
+
+
+def ocr_model_cache_path() -> str:
+    """Choose a stable local cache, preferring models embedded in an EXE."""
+
+    bundled = bundled_ocr_model_cache_path()
+    if bundled:
+        return bundled
+    configured = str(os.environ.get("PADDLE_PDX_CACHE_HOME") or "").strip()
+    if configured:
+        return str(Path(configured))
+    app_data = os.environ.get("LOCALAPPDATA")
+    root = Path(app_data) if app_data else Path.home() / ".cache"
+    return str(root / "PicOrgFTP-SQL" / "ocr-models")
+
+
+def _model_cache_has_content(path: str) -> bool:
+    try:
+        return Path(path).is_dir() and any(Path(path).iterdir())
+    except OSError:
+        return False
+
+
+def analyze_image_dimensions(
+    path: str,
+    minimum_text_confidence: float = 0.8,
+    *,
+    recognizer: ImageDimensionRecognizer | None = None,
+) -> ImageOcrDiagnostics:
+    """Inspect every OCR box for the settings diagnostic screen."""
+
+    threshold = float(minimum_text_confidence)
+    if not 0 <= threshold <= 1:
+        raise ValueError("Minimalna pewnosc musi byc od 0 do 1.")
+    try:
+        boxes = (recognizer or _default_recognizer()).detect(path)
+    except ImageDimensionUnavailable:
+        return ImageOcrDiagnostics(
+            available=False,
+            dimensions={dimension: "" for dimension in sorted(_DIMENSIONS)},
+            candidates=[],
+            message="Lokalny OCR nie jest zainstalowany.",
+        )
+
+    candidates: list[OcrDiagnosticCandidate] = []
+    best: dict[str, OcrDiagnosticCandidate] = {}
+    for box in boxes:
+        dimension = _normalized_hint(box.hint)
+        value = _parse_numeric_value(box.text) or ""
+        accepted = bool(dimension and value and float(box.confidence) >= threshold)
+        candidate = OcrDiagnosticCandidate(
+            text=str(box.text),
+            confidence=float(box.confidence),
+            bbox=box.bbox,
+            dimension=dimension,
+            value=value,
+            accepted=accepted,
+        )
+        candidates.append(candidate)
+        if accepted and dimension:
+            previous = best.get(dimension)
+            if previous is None or candidate.confidence > previous.confidence:
+                best[dimension] = candidate
+    return ImageOcrDiagnostics(
+        available=True,
+        dimensions={dimension: best.get(dimension, OcrDiagnosticCandidate("", 0, (0, 0, 0, 0), None, "", False)).value for dimension in sorted(_DIMENSIONS)},
+        candidates=candidates,
+    )
+
+
 def _result_for_request(
     request: ImageDimensionRequest, boxes: Iterable[OcrTextBox]
 ) -> ImageDimensionResult:
@@ -266,6 +420,11 @@ class PaddleImageDimensionRecognizer:
     """
 
     def __init__(self) -> None:
+        bundled_models = bundled_ocr_model_cache_path()
+        if bundled_models:
+            os.environ["PADDLE_PDX_CACHE_HOME"] = bundled_models
+        else:
+            os.environ.setdefault("PADDLE_PDX_CACHE_HOME", ocr_model_cache_path())
         try:
             import cv2
             from paddleocr import PaddleOCR

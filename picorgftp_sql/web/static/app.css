@@ -1323,6 +1323,117 @@ h2 {
   font-size: 13px;
 }
 
+.ocr-engine-info {
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  overflow-wrap: anywhere;
+}
+
+.ocr-engine-info span,
+.ocr-engine-info ul {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.ocr-engine-info ul {
+  padding-left: 18px;
+}
+
+.ocr-diagnostic-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(240px, 0.8fr);
+  gap: 14px;
+  align-items: start;
+  margin-top: 12px;
+}
+
+.ocr-diagnostic-stage {
+  position: relative;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+
+.ocr-diagnostic-image {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.ocr-diagnostic-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.ocr-diagnostic-box {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid #cc4040;
+}
+
+.ocr-diagnostic-box.accepted {
+  border-color: var(--accent);
+}
+
+.ocr-diagnostic-confidence {
+  position: absolute;
+  left: -2px;
+  bottom: calc(100% + 2px);
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #cc4040;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.ocr-diagnostic-box.accepted .ocr-diagnostic-confidence {
+  background: var(--accent);
+}
+
+.ocr-diagnostic-details,
+.ocr-diagnostic-dimensions,
+.ocr-diagnostic-candidates {
+  display: grid;
+  gap: 8px;
+}
+
+.ocr-diagnostic-details h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.ocr-diagnostic-dimensions label {
+  display: grid;
+  gap: 3px;
+  font-size: 13px;
+}
+
+.ocr-diagnostic-dimensions input {
+  width: 100%;
+}
+
+.ocr-diagnostic-candidate {
+  padding: 7px 8px;
+  border-left: 3px solid #cc4040;
+  background: var(--surface-2);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.ocr-diagnostic-candidate.accepted {
+  border-left-color: var(--accent);
+}
+
 .sql-profile-list,
 .pimcore-sql-mapping-controls {
   display: grid;

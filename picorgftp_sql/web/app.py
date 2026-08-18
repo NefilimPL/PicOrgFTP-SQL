@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
@@ -59,6 +59,7 @@ from ..database import connect_db
 from ..github_status import github_repository_status
 from ..history_changes import history_change_set
 from ..image_utils import fit_image_to_content
+from ..services.image_dimensions import analyze_image_dimensions, image_ocr_runtime_info
 from ..legacy_import import import_legacy_to_sqlite
 from ..logging_utils import log_error
 from ..email_settings import EMAIL_SETTINGS_KEY
@@ -5989,6 +5990,38 @@ def create_app() -> FastAPI:
     def settings_time_zones(request: Request) -> Dict[str, List[str]]:
         _require_admin(request)
         return {"time_zones": config.available_display_time_zones()}
+
+    @app.get("/api/settings/ocr/status")
+    def settings_ocr_status(request: Request) -> Dict[str, Any]:
+        _require_admin(request)
+        return image_ocr_runtime_info()
+
+    @app.post("/api/settings/ocr/analyze")
+    async def settings_ocr_analyze(request: Request) -> Dict[str, Any]:
+        _require_admin(request)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Niepoprawne dane testu OCR.")
+        token = payload.get("token")
+        if not isinstance(token, str) or not token.strip():
+            raise HTTPException(status_code=400, detail="Wymagany jest token przeslanego obrazu.")
+        raw_threshold = payload.get("minimum_text_confidence", 0.8)
+        if isinstance(raw_threshold, bool):
+            raise HTTPException(status_code=400, detail="Niepoprawny prog pewnosci OCR.")
+        try:
+            threshold = float(raw_threshold)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Niepoprawny prog pewnosci OCR.") from exc
+        if not 0 <= threshold <= 1:
+            raise HTTPException(status_code=400, detail="Prog pewnosci OCR musi byc od 0 do 1.")
+        path = _path_from_file_token(token.strip())
+        diagnostics = await run_in_threadpool(analyze_image_dimensions, path, threshold)
+        result = asdict(diagnostics)
+        result["image_url"] = _versioned_file_url(path, "/api/file", token.strip())
+        return result
 
     @app.post("/api/settings")
     async def settings_save(request: Request) -> JSONResponse:

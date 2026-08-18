@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import picorgftp_sql.services.image_dimensions as image_dimensions
+
 from picorgftp_sql.services.image_dimensions import (
     DimensionLine,
     ImageDimensionRequest,
     OcrTextBox,
+    analyze_image_dimensions,
     associate_dimension_hints,
+    bundled_ocr_model_cache_path,
+    image_ocr_runtime_info,
+    ocr_model_cache_path,
     resolve_image_dimensions,
 )
 
@@ -126,3 +132,49 @@ def test_associates_numeric_text_with_nearest_dimension_line_orientation():
 
     assert associated[0].hint == "width"
     assert associated[1].hint == "height"
+
+
+def test_diagnostics_classifies_boxes_and_applies_threshold():
+    recognizer = FakeRecognizer(
+        [
+            OcrTextBox("130,5 cm", 0.91, (4, 8, 80, 28), "width"),
+            OcrTextBox("40", 0.72, (90, 8, 120, 28), "depth"),
+            OcrTextBox("tekst", 0.96, (130, 8, 180, 28)),
+        ]
+    )
+
+    result = analyze_image_dimensions(
+        "fixture.png", minimum_text_confidence=0.8, recognizer=recognizer
+    )
+
+    assert result.available is True
+    assert result.dimensions == {"width": "130.5", "depth": "", "height": ""}
+    assert result.candidates[0].accepted is True
+    assert result.candidates[0].bbox == (4, 8, 80, 28)
+    assert result.candidates[1].accepted is False
+    assert result.candidates[1].dimension == "depth"
+    assert result.candidates[2].value == ""
+
+
+def test_ocr_runtime_info_has_stable_engine_and_github_metadata():
+    info = image_ocr_runtime_info()
+
+    assert info["engine"]["name"] == "PaddleOCR"
+    assert info["github_url"].startswith("https://github.com/")
+    assert isinstance(info["models"], list)
+    assert info["models"][0]["version"] == "lang=en"
+
+
+def test_detects_embedded_ocr_model_cache_in_pyinstaller_bundle(tmp_path, monkeypatch):
+    model_cache = tmp_path / "ocr_models"
+    model_cache.mkdir()
+    monkeypatch.setattr(image_dimensions.sys, "_MEIPASS", str(tmp_path), raising=False)
+
+    assert bundled_ocr_model_cache_path() == str(model_cache)
+
+
+def test_uses_configured_local_model_cache_when_no_bundle_is_present(tmp_path, monkeypatch):
+    monkeypatch.delattr(image_dimensions.sys, "_MEIPASS", raising=False)
+    monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(tmp_path))
+
+    assert ocr_model_cache_path() == str(tmp_path)

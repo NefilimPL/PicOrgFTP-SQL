@@ -8,6 +8,10 @@ from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
 from picorgftp_sql import web_data
+from picorgftp_sql.services.image_dimensions import (
+    ImageOcrDiagnostics,
+    OcrDiagnosticCandidate,
+)
 from picorgftp_sql.services.pimcore_service import PimcoreApiError, PimcoreConflictError
 from picorgftp_sql.services.translation_service import TranslationResult
 from picorgftp_sql.sqlite_store import SqliteStore
@@ -1799,6 +1803,52 @@ def test_template_preview_route_resolves_slot_tokens_before_rendering():
     assert response.status_code == 200
     assert response.json() == expected
     preview.assert_called_once_with(payload, image_slot_paths={"15": "C:/cache/15.png"})
+
+
+def test_ocr_analysis_uses_only_the_signed_upload_token():
+    client = TestClient(web_app.app)
+    diagnostics = ImageOcrDiagnostics(
+        available=True,
+        dimensions={"width": "130.5", "depth": "", "height": ""},
+        candidates=[
+            OcrDiagnosticCandidate(
+                "130,5 cm", 0.91, (4, 8, 80, 28), "width", "130.5", True
+            )
+        ],
+    )
+    with (
+        patch.object(web_app, "_require_admin", return_value="admin"),
+        patch.object(web_app, "_path_from_file_token", return_value="C:/cache/test.png"),
+        patch.object(web_app, "_versioned_file_url", return_value="/api/file?token=signed"),
+        patch.object(web_app, "analyze_image_dimensions", return_value=diagnostics) as analyze,
+    ):
+        response = client.post(
+            "/api/settings/ocr/analyze",
+            json={"token": "signed", "minimum_text_confidence": 0.8},
+        )
+
+    assert response.status_code == 200
+    assert "C:/cache" not in response.text
+    assert response.json()["image_url"] == "/api/file?token=signed"
+    assert response.json()["candidates"][0]["bbox"] == [4, 8, 80, 28]
+    analyze.assert_called_once_with("C:/cache/test.png", 0.8)
+
+
+def test_ocr_routes_return_runtime_status_and_reject_invalid_threshold():
+    client = TestClient(web_app.app)
+    status = {"available": False, "engine": {"name": "PaddleOCR"}}
+    with (
+        patch.object(web_app, "_require_admin", return_value="admin"),
+        patch.object(web_app, "image_ocr_runtime_info", return_value=status),
+    ):
+        status_response = client.get("/api/settings/ocr/status")
+        threshold_response = client.post(
+            "/api/settings/ocr/analyze",
+            json={"token": "signed", "minimum_text_confidence": 1.1},
+        )
+
+    assert status_response.json() == status
+    assert threshold_response.status_code == 400
 
 
 def test_admin_test_sample_route_returns_fresh_editable_values():
