@@ -9321,6 +9321,10 @@ const PIMCORE_TEMPLATE_FUNCTIONS = [
   ["Fragment", "|substring:0,10"],
   ["Skroc", '|truncate:30,"..."'],
   ["Liczba", '|number:2,","," "'],
+  ["Wypelnione (1/0)", "|filled"],
+  ["Ktorekolwiek wypelnione (1/0)", '|any_filled:"PIMCORE:inne_pole"'],
+  ["Policz wypelnione", '|count_filled:"PIMCORE:inne_pole"'],
+  ["Warunek wypelnienia", '|if_filled:"TAK","NIE"'],
 ];
 
 const PIMCORE_TEMPLATE_MATH_TOKENS = [

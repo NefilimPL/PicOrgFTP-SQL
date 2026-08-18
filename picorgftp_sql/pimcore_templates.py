@@ -308,7 +308,18 @@ def parse_template(template: object) -> tuple[object, ...]:
 
 def _case_shortcut(source: str, calls: Iterable[FunctionCall]) -> str:
     if any(
-        call.name in {"keep", "upper", "lower", "title", "capitalize"}
+        call.name
+        in {
+            "keep",
+            "upper",
+            "lower",
+            "title",
+            "capitalize",
+            "filled",
+            "any_filled",
+            "count_filled",
+            "if_filled",
+        }
         for call in calls
     ):
         return "keep"
@@ -332,7 +343,12 @@ def _strip_diacritics(value: str) -> str:
     )
 
 
-def _apply(value: str, call: FunctionCall, position: int) -> str:
+def _apply(
+    value: str,
+    call: FunctionCall,
+    position: int,
+    resolver: Callable[[str], object],
+) -> str:
     name, args = call.name, call.arguments
     known = {
         "keep",
@@ -349,6 +365,10 @@ def _apply(value: str, call: FunctionCall, position: int) -> str:
         "strip_diacritics",
         "slug",
         "number",
+        "filled",
+        "any_filled",
+        "count_filled",
+        "if_filled",
     }
     if name not in known:
         raise TemplateError(
@@ -400,6 +420,14 @@ def _apply(value: str, call: FunctionCall, position: int) -> str:
                 .replace(".", decimal_separator)
                 .replace("\x00", group_separator)
             )
+        if name == "filled" and not args:
+            return "1" if value.strip() else "0"
+        if name in {"any_filled", "count_filled"}:
+            values = (value, *(str(resolver(source) or "") for source in args))
+            count = sum(bool(item.strip()) for item in values)
+            return str(int(bool(count))) if name == "any_filled" else str(count)
+        if name == "if_filled" and len(args) == 2:
+            return args[0] if value.strip() else args[1]
     except (InvalidOperation, TypeError, ValueError) as exc:
         raise TemplateError(
             "invalid_arguments",
@@ -595,9 +623,14 @@ def render_template(template: object, resolver: Callable[[str], object]) -> str:
             elif isinstance(node, PlaceholderNode):
                 value = str(resolver(node.source) or "")
                 for call in node.functions:
-                    value = _apply(value, call, node.position)
+                    value = _apply(value, call, node.position, resolver)
                 shortcut = _case_shortcut(node.source, node.functions)
-                value = _apply(value, FunctionCall(shortcut, ()), node.position)
+                value = _apply(
+                    value,
+                    FunctionCall(shortcut, ()),
+                    node.position,
+                    resolver,
+                )
                 output.append(value)
                 resolved.append(value)
             elif isinstance(node, GroupNode):

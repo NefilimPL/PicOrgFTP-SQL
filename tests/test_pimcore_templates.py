@@ -116,6 +116,55 @@ def test_render_template_calculates_calc_alias():
     ) == "10"
 
 
+@pytest.mark.parametrize(
+    ("template", "values", "expected"),
+    [
+        ("{WIDTH|filled}", {"width": "120"}, "1"),
+        ("{WIDTH|filled}", {"width": " \t "}, "0"),
+        (
+            '{DEPTH|any_filled:"HEIGHT","WEIGHT","WIDTH"}',
+            {"depth": "", "height": "", "weight": "4", "width": ""},
+            "1",
+        ),
+        (
+            '{DEPTH|count_filled:"HEIGHT","WEIGHT","WIDTH"}',
+            {"depth": "10", "height": " ", "weight": "4", "width": "20"},
+            "3",
+        ),
+        ('{WIDTH|if_filled:"TAK","NIE"}', {"width": "120"}, "TAK"),
+        ('{WIDTH|if_filled:"TAK","NIE"}', {"width": ""}, "NIE"),
+    ],
+)
+def test_render_template_supports_presence_functions(template, values, expected):
+    assert render_template(template, resolver(values)) == expected
+
+
+def test_render_template_counts_eleven_parcels_by_filled_width():
+    template = "+".join(
+        f"{{PIMCORE:parcel_{index}_width|filled}}" for index in range(1, 12)
+    )
+    values = {
+        f"pimcore:parcel_{index}_width": "120" if index in {1, 2} else ""
+        for index in range(1, 12)
+    }
+
+    assert render_template(template, resolver(values)) == "2"
+
+
+@pytest.mark.parametrize(
+    ("template", "code"),
+    [
+        ('{WIDTH|filled:"nie"}', "invalid_arguments"),
+        ('{WIDTH|if_filled:"TAK"}', "invalid_arguments"),
+    ],
+)
+def test_presence_functions_validate_arguments(template, code):
+    with pytest.raises(TemplateError) as captured:
+        render_template(template, resolver({"width": "120"}))
+
+    assert captured.value.code == code
+
+
 def test_render_template_rejects_text_inside_oblicz_block():
     with pytest.raises(TemplateError) as captured:
         render_template(

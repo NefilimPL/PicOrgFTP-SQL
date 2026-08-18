@@ -28,7 +28,23 @@ Przykład szablonu:
 
 Tekst i znaki poza placeholderami są kopiowane do wyniku. Grupa `(...)` znika w całości, jeżeli któryś zawarty w niej placeholder jest pusty. Wielkość zapisu aliasu steruje wielkością liter (`{NAZWA}`, `{Nazwa}`, `{nazwa}`), a funkcje dopisuje się po `|`, np. `{Nazwa|trim|upper}`.
 
-Dostępne funkcje: `keep`, `trim`, `normalize_spaces`, `upper`, `lower`, `title`, `capitalize`, `replace`, `default`, `substring`, `truncate`, `strip_diacritics`, `slug` i `number`.
+Dostępne funkcje: `keep`, `trim`, `normalize_spaces`, `upper`, `lower`, `title`, `capitalize`, `replace`, `default`, `substring`, `truncate`, `strip_diacritics`, `slug`, `number`, `filled`, `any_filled`, `count_filled` i `if_filled`.
+
+### Sprawdzanie wypełnienia pól
+
+`filled` zamienia wypełnione pole na `1`, a puste pole na `0`. Dzięki temu można policzyć paczki po wpisanej szerokości:
+
+```text
+{PIMCORE:parcel_1_width|filled}+{PIMCORE:parcel_2_width|filled}+{PIMCORE:parcel_3_width|filled}+{PIMCORE:parcel_4_width|filled}+{PIMCORE:parcel_5_width|filled}+{PIMCORE:parcel_6_width|filled}+{PIMCORE:parcel_7_width|filled}+{PIMCORE:parcel_8_width|filled}+{PIMCORE:parcel_9_width|filled}+{PIMCORE:parcel_10_width|filled}+{PIMCORE:parcel_11_width|filled}
+```
+
+`any_filled` zwraca `1`, gdy jego pole lub któreś z dodatkowych pól ma wartość. Dodatkowe źródła wpisuje się w cudzysłowach. Przykład dla paczki, która ma być liczona po dowolnym wymiarze:
+
+```text
+{PIMCORE:parcel_1_depth|any_filled:"PIMCORE:parcel_1_height","PIMCORE:parcel_1_weight","PIMCORE:parcel_1_width"}
+```
+
+`count_filled` liczy wszystkie wypełnione pola w tej samej składni. `if_filled:"tekst gdy jest","tekst gdy brak"` zwraca jeden z dwóch tekstów zależnie od tego, czy dane pole jest wypełnione.
 
 ## Testy i zapis
 
