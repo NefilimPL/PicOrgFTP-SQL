@@ -1340,6 +1340,17 @@ def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
     return resolved_path
 
 
+def _image_slot_paths_from_payload(payload: object) -> dict[str, str]:
+    raw = payload.get("slot_tokens", {}) if isinstance(payload, dict) else {}
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail="Niepoprawna mapa tokenow slotow.")
+    return {
+        str(slot).strip(): _path_from_file_token(str(token))
+        for slot, token in raw.items()
+        if str(slot).strip() and str(token).strip()
+    }
+
+
 def _resample_filter() -> Any:
     if Image is not None and hasattr(Image, "Resampling"):
         return Image.Resampling.LANCZOS
@@ -6204,7 +6215,9 @@ def create_app() -> FastAPI:
         _require_admin(request)
         payload = await request.json()
         try:
-            result = await run_in_threadpool(preview_pimcore_template, payload)
+            image_slot_paths = _image_slot_paths_from_payload(payload)
+            kwargs = {"image_slot_paths": image_slot_paths} if image_slot_paths else {}
+            result = await run_in_threadpool(preview_pimcore_template, payload, **kwargs)
         except (TemplateError, ValueError) as exc:
             raise HTTPException(
                 status_code=400,
@@ -6447,12 +6460,15 @@ def create_app() -> FastAPI:
         else:
             object_id = None
         try:
+            image_slot_paths = _image_slot_paths_from_payload(source)
+            kwargs = {"image_slot_paths": image_slot_paths} if image_slot_paths else {}
             result = await run_in_threadpool(
                 render_saved_pimcore_templates,
                 source.get("product_values"),
                 source.get("values"),
                 source.get("targets"),
                 mode,
+                **kwargs,
             )
         except (TemplateError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

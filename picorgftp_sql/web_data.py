@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import base64
@@ -108,6 +109,7 @@ from .pimcore_config import (
     PIMCORE_API_KEY,
     PIMCORE_SETTINGS_KEY,
     field_mapping_issues,
+    image_dimension_source_definitions,
     normalize_pimcore_settings,
 )
 from .pimcore_operations import PimcoreOperationRegistry, redact_pimcore_log_value
@@ -134,6 +136,11 @@ from .services.pimcore_service import (
     run_settings_test,
     run_test_create,
     update_product,
+)
+from .services.image_dimensions import (
+    ImageDimensionRequest,
+    image_dimension_source_key,
+    resolve_image_dimensions,
 )
 from .services.translation_service import clear_translation_cache, translate_text
 from .slot_utils import (
@@ -2210,6 +2217,7 @@ def _render_templates(
     *,
     fill_missing_product_values: bool = False,
     mode: str = "create",
+    image_slot_paths: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     with SqlExecutionContext(execute_query=execute_sql_value_query) as sql_context:
         return _render_templates_with_sql_context(
@@ -2219,6 +2227,7 @@ def _render_templates(
             targets,
             fill_missing_product_values=fill_missing_product_values,
             mode=mode,
+            image_slot_paths=image_slot_paths,
             sql_context=sql_context,
         )
 
@@ -2231,6 +2240,7 @@ def _render_templates_with_sql_context(
     *,
     fill_missing_product_values: bool = False,
     mode: str = "create",
+    image_slot_paths: Mapping[str, str] | None = None,
     sql_context: SqlExecutionContext,
 ) -> dict[str, object]:
     submitted = dict(values) if isinstance(values, dict) else {}
@@ -2274,6 +2284,40 @@ def _render_templates_with_sql_context(
     extra_sources: list[SourceDefinition] = []
     extra_values: dict[str, object] = {}
     sql_profile_results: list[dict[str, object]] = []
+    image_requests: list[ImageDimensionRequest] = []
+    for mapping in mappings_list:
+        image_dimension = mapping.get("image_dimension")
+        if not isinstance(image_dimension, dict):
+            continue
+        source_key = image_dimension_source_key(
+            str(image_dimension.get("slot") or ""),
+            str(image_dimension.get("dimension") or ""),
+        )
+        try:
+            uses_image_dimension = source_key in placeholder_sources(
+                mapping.get("value_template")
+            )
+        except TemplateError:
+            uses_image_dimension = False
+        if not uses_image_dimension:
+            continue
+        image_requests.append(
+            ImageDimensionRequest(
+                str(image_dimension["slot"]),
+                str(image_dimension["dimension"]),
+                float(image_dimension["minimum_text_confidence"]),
+            )
+        )
+    image_sources = image_dimension_source_definitions(mappings_list)
+    if image_sources:
+        extra_sources.extend(image_sources)
+    if image_requests:
+        image_values, image_warnings = resolve_image_dimensions(
+            image_requests,
+            image_slot_paths or {},
+        )
+        extra_values.update(image_values)
+        warnings.extend(image_warnings)
     for source in sql_template_sources:
         mapping = mappings[source]
         required = bool(mapping.get("required"))
@@ -2439,7 +2483,11 @@ def _render_templates_with_sql_context(
     }
 
 
-def preview_pimcore_template(payload: object) -> dict[str, object]:
+def preview_pimcore_template(
+    payload: object,
+    *,
+    image_slot_paths: Mapping[str, str] | None = None,
+) -> dict[str, object]:
     source = payload if isinstance(payload, dict) else {}
     settings_payload = normalize_pimcore_settings(
         {"field_mappings": source.get("mappings", [])}
@@ -2454,6 +2502,7 @@ def preview_pimcore_template(payload: object) -> dict[str, object]:
         [target],
         fill_missing_product_values=True,
         mode="preview",
+        image_slot_paths=image_slot_paths,
     )
 
 
@@ -2475,6 +2524,8 @@ def render_saved_pimcore_templates(
     values: object,
     targets: object,
     mode: str = "create",
+    *,
+    image_slot_paths: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     settings_payload = _active_pimcore_runtime_settings()
     selected = [str(item) for item in targets] if isinstance(targets, list) else None
@@ -2484,6 +2535,7 @@ def render_saved_pimcore_templates(
         values,
         selected,
         mode=mode,
+        image_slot_paths=image_slot_paths,
     )
 
 

@@ -1746,6 +1746,61 @@ def test_template_preview_fills_missing_product_placeholders_from_saved_entry():
     assert result["values"]["TITLE"] == "Vivo - Komoda"
 
 
+def test_template_preview_renders_configured_image_dimension(monkeypatch):
+    monkeypatch.setattr(
+        web_data,
+        "resolve_image_dimensions",
+        lambda _requests, _paths: ({"IMAGE_DIMENSION:15:WIDTH": "130.5"}, []),
+        raising=False,
+    )
+
+    result = web_data.preview_pimcore_template(
+        {
+            "mappings": [
+                {
+                    "source": "WIDTH",
+                    "pimcore_field": "width",
+                    "type": "input",
+                    "value_template": "{IMAGE_DIMENSION:15:WIDTH|keep}",
+                    "image_dimension": {
+                        "slot": "15",
+                        "dimension": "width",
+                        "minimum_text_confidence": 0.8,
+                    },
+                }
+            ],
+            "target_source": "WIDTH",
+            "product_values": {},
+            "values": {},
+        },
+        image_slot_paths={"15": "dimension.png"},
+    )
+
+    assert result["values"]["WIDTH"] == "130.5"
+
+
+def test_template_preview_route_resolves_slot_tokens_before_rendering():
+    client = TestClient(web_app.app)
+    payload = {
+        "mappings": [],
+        "target_source": "WIDTH",
+        "product_values": {},
+        "values": {},
+        "slot_tokens": {"15": "signed-15"},
+    }
+    expected = {"values": {"WIDTH": "130.5"}, "warnings": []}
+    with (
+        patch.object(web_app, "_require_admin", return_value="admin"),
+        patch.object(web_app, "_path_from_file_token", return_value="C:/cache/15.png"),
+        patch.object(web_app, "preview_pimcore_template", return_value=expected) as preview,
+    ):
+        response = client.post("/api/settings/pimcore/template-preview", json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    preview.assert_called_once_with(payload, image_slot_paths={"15": "C:/cache/15.png"})
+
+
 def test_admin_test_sample_route_returns_fresh_editable_values():
     client = TestClient(web_app.app)
     expected = {
