@@ -2391,6 +2391,10 @@ async function requestJson() {{
             "pimcoreTemplateLanguage",
             "pimcoreTemplatePreviewButton",
             "pimcoreTemplateSaveButton",
+            "pimcoreTemplateHelpButton",
+            "pimcoreTemplateHelpModal",
+            "pimcoreTemplateHelpCloseButton",
+            "pimcoreTemplateHelpContent",
         ):
             self.assertIn(element_id, html.ids)
 
@@ -2400,6 +2404,9 @@ async function requestJson() {{
         self.assertIn("function openPimcoreTemplateBuilder", source)
         self.assertIn("function previewPimcoreTemplate", source)
         self.assertIn("function insertPimcoreTemplateFunction", source)
+        self.assertIn("function openPimcoreTemplateHelp", source)
+        self.assertIn("function closePimcoreTemplateHelp", source)
+        self.assertIn("TEMPLATE_FUNCTION_HELP", source)
         self.assertIn("/api/settings/pimcore/template-preview", source)
         self.assertIn("row.dataset.valueTemplate", source)
         self.assertIn("row.dataset.translate", source)

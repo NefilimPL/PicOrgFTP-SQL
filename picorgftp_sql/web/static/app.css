@@ -3213,6 +3213,65 @@ button.slot-badge.on:hover {
   font-size: 12px;
 }
 
+.pimcore-template-functions-heading {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.pimcore-template-functions-heading h2 {
+  margin: 0;
+}
+
+.modal-view.pimcore-template-help-modal.active {
+  z-index: 50;
+}
+
+.pimcore-template-help-panel {
+  max-height: min(820px, calc(100vh - 32px));
+  max-width: 920px;
+  width: min(920px, calc(100vw - 32px));
+}
+
+.pimcore-template-help-content {
+  display: grid;
+  gap: 16px;
+  max-height: min(650px, calc(100vh - 190px));
+  overflow: auto;
+  padding-right: 6px;
+}
+
+.pimcore-template-help-section {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.pimcore-template-help-section h2 {
+  margin: 0 0 10px;
+}
+
+.pimcore-template-help-section dl {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.pimcore-template-help-section dt {
+  font-weight: 700;
+}
+
+.pimcore-template-help-section dd {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.pimcore-template-help-section code {
+  overflow-wrap: anywhere;
+}
+
 .pimcore-template-result {
   display: grid;
   gap: 8px;

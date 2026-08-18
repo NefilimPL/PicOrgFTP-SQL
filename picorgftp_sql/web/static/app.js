@@ -431,6 +431,10 @@ const pimcoreTemplatePreviewButton = document.querySelector("#pimcoreTemplatePre
 const pimcoreTemplateSaveButton = document.querySelector("#pimcoreTemplateSaveButton");
 const pimcoreTemplateClearButton = document.querySelector("#pimcoreTemplateClearButton");
 const pimcoreTemplateCancelButton = document.querySelector("#pimcoreTemplateCancelButton");
+const pimcoreTemplateHelpButton = document.querySelector("#pimcoreTemplateHelpButton");
+const pimcoreTemplateHelpModal = document.querySelector("#pimcoreTemplateHelpModal");
+const pimcoreTemplateHelpCloseButton = document.querySelector("#pimcoreTemplateHelpCloseButton");
+const pimcoreTemplateHelpContent = document.querySelector("#pimcoreTemplateHelpContent");
 const pimcoreHistoryModal = document.querySelector("#pimcoreHistoryModal");
 const pimcoreHistoryFilters = document.querySelector("#pimcoreHistoryFilters");
 const pimcoreHistoryOutput = document.querySelector("#pimcoreHistoryOutput");
@@ -9335,6 +9339,49 @@ const PIMCORE_TEMPLATE_MATH_TOKENS = [
   ["Dziel", "/"],
 ];
 
+const TEMPLATE_FUNCTION_HELP = [
+  {
+    title: "Podstawy",
+    items: [
+      ["Placeholder", "Wstawia wartosc pola; wielkosc zapisu nazwy steruje wielkoscia liter wyniku.", "{NAZWA} / {Nazwa} / {nazwa}"],
+      ["Grupa warunkowa", "Tekst w nawiasach znika, gdy ktorykolwiek placeholder w grupie jest pusty.", "{NAZWA}( - {MODEL|trim})"],
+      ["Oblicz / calc", "Liczy wyrazenie z liczb i placeholderow.", "oblicz({PIMCORE:parcel_1_weight|keep}+2)"],
+      ["SQL", "Wstawia wynik zapytania SQL ustawionego dla mapowania.", "{SQL|keep}"],
+    ],
+  },
+  {
+    title: "Tekst i liczby",
+    items: [
+      ["keep", "Nie zmienia wartosci ani wielkosci liter.", "{NAZWA|keep}"],
+      ["trim / normalize_spaces", "Usuwa skrajne spacje albo laczy wiele bialych znakow w jedna spacje.", "{MODEL|trim|normalize_spaces}"],
+      ["upper / lower / title / capitalize", "Wielkie, male, kazde slowo albo pierwsza litera.", "{MODEL|trim|upper}"],
+      ["replace", "Zamienia wskazany tekst na inny.", '{MODEL|replace:"_"," "}' ],
+      ["default", "Zwraca wartosc awaryjna, gdy pole jest puste.", '{MODEL|trim|default:"brak"}' ],
+      ["substring / truncate", "Wycina fragment albo skraca tekst; truncate moze dostac dopisek.", '{MODEL|substring:0,8} / {NAZWA|truncate:20,"..."}' ],
+      ["strip_diacritics / slug", "Usuwa polskie znaki albo tworzy identyfikator z myslnikami.", "{NAZWA|strip_diacritics|slug}"],
+      ["number", "Formatuje liczbe: miejsca po przecinku, separator dziesietny i tysiecy.", '{PIMCORE:CENA|number:2,","," "}' ],
+    ],
+  },
+  {
+    title: "Wypelnienie pol",
+    items: [
+      ["filled", "Zwraca 1 dla wypelnionego pola albo 0 dla pustego.", "{PIMCORE:parcel_1_width|filled}"],
+      ["any_filled", "Zwraca 1, gdy biezace pole lub ktorekolwiek dodatkowe pole ma wartosc.", '{PIMCORE:parcel_1_depth|any_filled:"PIMCORE:parcel_1_height","PIMCORE:parcel_1_weight","PIMCORE:parcel_1_width"}' ],
+      ["count_filled", "Liczy wypelnione pola: biezace oraz wskazane w argumentach.", '{PIMCORE:parcel_1_depth|count_filled:"PIMCORE:parcel_1_height","PIMCORE:parcel_1_weight","PIMCORE:parcel_1_width"}' ],
+      ["if_filled", "Wybiera pierwszy albo drugi tekst zaleznie od tego, czy pole ma wartosc.", '{PIMCORE:parcel_1_width|if_filled:"TAK","NIE"}' ],
+    ],
+  },
+  {
+    title: "Gotowe kombinacje",
+    items: [
+      ["Liczba paczek po szerokosci", "Kazda wpisana szerokosc daje 1; suma zwraca liczbe paczek.", "{PIMCORE:parcel_1_width|filled}+{PIMCORE:parcel_2_width|filled}+{PIMCORE:parcel_3_width|filled}"],
+      ["Opcjonalny model", "Model pojawia sie tylko wtedy, gdy istnieje; jest przyciety i ma wielkie litery.", "{NAZWA|trim|title}( - {MODEL|trim|upper})"],
+      ["Czy paczka ma dane", "Wystarczy jedno z czterech pol wymiaru, aby wynik wynosil 1.", '{PIMCORE:parcel_1_depth|any_filled:"PIMCORE:parcel_1_height","PIMCORE:parcel_1_weight","PIMCORE:parcel_1_width"}' ],
+      ["Nazwa awaryjna do slug", "Gdy modelu brak, uzywa slowa produkt, potem tworzy slug.", '{MODEL|trim|default:"produkt"|slug}' ],
+    ],
+  },
+];
+
 function pimcoreFieldLanguage(value = {}) {
   return String(value?.language || "").trim();
 }
@@ -9477,6 +9524,42 @@ function insertPimcoreTemplateFunction(token) {
 
 function insertPimcoreTemplateSqlToken() {
   insertPimcoreTemplateText("{SQL|keep}");
+}
+
+function renderPimcoreTemplateHelp() {
+  if (!pimcoreTemplateHelpContent || pimcoreTemplateHelpContent.childElementCount) return;
+  for (const section of TEMPLATE_FUNCTION_HELP) {
+    const element = document.createElement("section");
+    element.className = "pimcore-template-help-section";
+    const heading = document.createElement("h2");
+    heading.textContent = section.title;
+    const list = document.createElement("dl");
+    for (const [name, description, example] of section.items) {
+      const term = document.createElement("dt");
+      term.textContent = name;
+      const detail = document.createElement("dd");
+      const text = document.createElement("span");
+      text.textContent = description;
+      const code = document.createElement("code");
+      code.textContent = example;
+      detail.append(text, code);
+      list.append(term, detail);
+    }
+    element.append(heading, list);
+    pimcoreTemplateHelpContent.appendChild(element);
+  }
+}
+
+function openPimcoreTemplateHelp() {
+  if (!pimcoreTemplateHelpModal) return;
+  renderPimcoreTemplateHelp();
+  pimcoreTemplateHelpModal.classList.add("active");
+  pimcoreTemplateHelpCloseButton?.focus();
+}
+
+function closePimcoreTemplateHelp() {
+  pimcoreTemplateHelpModal?.classList.remove("active");
+  if (pimcoreTemplateModal?.classList.contains("active")) pimcoreTemplateHelpButton?.focus();
 }
 
 function renderPimcoreTemplateTokens(row) {
@@ -9643,6 +9726,7 @@ function savePimcoreTemplateBuilder() {
 
 function closePimcoreTemplateBuilder() {
   pimcoreTemplateModal?.classList.remove("active");
+  pimcoreTemplateHelpModal?.classList.remove("active");
   if (pimcoreTemplateSqlControls) pimcoreTemplateSqlControls.textContent = "";
   state.pimcoreTemplateRow = null;
 }
@@ -13481,6 +13565,8 @@ pimcoreTemplateClearButton?.addEventListener("click", () => {
   savePimcoreTemplateBuilder();
 });
 pimcoreTemplateCancelButton?.addEventListener("click", closePimcoreTemplateBuilder);
+pimcoreTemplateHelpButton?.addEventListener("click", openPimcoreTemplateHelp);
+pimcoreTemplateHelpCloseButton?.addEventListener("click", closePimcoreTemplateHelp);
 
 pimcoreHistoryCloseButton?.addEventListener("click", () => {
   if (pimcoreHistoryModal) {
