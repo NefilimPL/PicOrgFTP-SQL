@@ -431,6 +431,11 @@ const pimcoreTemplatePreviewButton = document.querySelector("#pimcoreTemplatePre
 const pimcoreTemplateSaveButton = document.querySelector("#pimcoreTemplateSaveButton");
 const pimcoreTemplateClearButton = document.querySelector("#pimcoreTemplateClearButton");
 const pimcoreTemplateCancelButton = document.querySelector("#pimcoreTemplateCancelButton");
+const pimcoreTemplateHelpButton = document.querySelector("#pimcoreTemplateHelpButton");
+const pimcoreTemplateHelpModal = document.querySelector("#pimcoreTemplateHelpModal");
+const pimcoreTemplateHelpCloseButton = document.querySelector("#pimcoreTemplateHelpCloseButton");
+const pimcoreTemplateHelpList = document.querySelector("#pimcoreTemplateHelpList");
+const pimcoreTemplateHelpDetail = document.querySelector("#pimcoreTemplateHelpDetail");
 const pimcoreHistoryModal = document.querySelector("#pimcoreHistoryModal");
 const pimcoreHistoryFilters = document.querySelector("#pimcoreHistoryFilters");
 const pimcoreHistoryOutput = document.querySelector("#pimcoreHistoryOutput");
@@ -9321,6 +9326,10 @@ const PIMCORE_TEMPLATE_FUNCTIONS = [
   ["Fragment", "|substring:0,10"],
   ["Skroc", '|truncate:30,"..."'],
   ["Liczba", '|number:2,","," "'],
+  ["Wypelnione (1/0)", "|filled"],
+  ["Ktorekolwiek wypelnione (1/0)", '|any_filled:"PIMCORE:inne_pole"'],
+  ["Policz wypelnione", '|count_filled:"PIMCORE:inne_pole"'],
+  ["Warunek wypelnienia", '|if_filled:"TAK","NIE"'],
 ];
 
 const PIMCORE_TEMPLATE_MATH_TOKENS = [
@@ -9329,6 +9338,31 @@ const PIMCORE_TEMPLATE_MATH_TOKENS = [
   ["Odejmij", "-"],
   ["Mnoz", "*"],
   ["Dziel", "/"],
+];
+
+const TEMPLATE_FUNCTION_HELP = [
+  ["Podstawy", "Placeholder", "{NAZWA}", "Placeholder pobiera wartosc jednego pola. Wpisz go w nawiasach klamrowych; nie wpisuj wartosci recznie w miejsce nazwy pola.", [["Rozny zapis nazwy", "{NAZWA} / {Nazwa} / {nazwa}", "Ten sam tekst zostanie zwrocony wielkimi literami, z pierwsza wielka litera albo malymi literami."], ["Pole Pimcore", "{PIMCORE:parcel_1_width|keep}", "Wstawia szerokosc pierwszej paczki bez zmiany zapisu."]]],
+  ["Podstawy", "Grupa warunkowa (...)", "({MODEL})", "Grupa jest przydatna dla dodatku, ktory ma zniknac razem ze znakiem obok. Gdy ktorykolwiek placeholder wewnatrz jest pusty, cala grupa nie pojawi sie w wyniku.", [["Model opcjonalny", "{NAZWA}( - {MODEL|trim})", "Dla pustego modelu zostanie tylko nazwa; myslnik nie zostanie sam."], ["Dwa kolory", "{KOLOR 1}( / {KOLOR 2})", "Drugi kolor i ukosnik pojawia sie tylko wtedy, gdy drugi kolor istnieje."]]],
+  ["Podstawy", "oblicz / calc", "oblicz(wyrazenie)", "Liczy dzialania na liczbach: +, -, * i /. W srodku uzywaj tylko liczb, nawiasow i pol zawierajacych liczby; tekst nie moze byc liczony.", [["Proste dodawanie", "oblicz({PIMCORE:parcel_1_weight|keep}+{PIMCORE:parcel_2_weight|keep})", "Dodaje dwie wagi."], ["Nawiasy i mnozenie", "calc(({PIMCORE:A|keep}+{PIMCORE:B|keep})*4)", "Najpierw dodaje A i B, potem mnozy wynik przez 4."]]],
+  ["Podstawy", "SQL", "{SQL|keep}", "SQL nie jest zwyklym tekstem. Dziala tylko w mapowaniu, dla ktorego skonfigurowano zapytanie SQL i profil; do wyniku trafia pierwsza wartosc zwrocona przez zapytanie.", [["Wstawienie wyniku", "Kod: {SQL|keep}", "Dopisuje wynik SQL za etykieta Kod:."], ["Wartosc awaryjna", '{SQL|trim|default:"brak danych"}', "Gdy zapytanie zwroci pusty tekst, pokazuje brak danych."]]],
+  ["Tekst", "keep", "|keep", "keep oznacza: zostaw wartosc dokladnie tak, jak przyszla. Uzyj go, gdy nie chcesz automatycznej zmiany wielkosci liter.", [["Kod", "{PIMCORE:CN_Code|keep}", "Kod AB-12 pozostanie AB-12."], ["Model", "Model: {MODEL|keep}", "Wstawia model bez formatowania."]]],
+  ["Tekst", "trim", "|trim", "trim usuwa spacje tylko z poczatku i konca. Nie usuwa spacji pomiedzy wyrazami.", [["Czyszczenie modelu", "{MODEL|trim}", "Wartosc '  M-20  ' staje sie 'M-20'."], ["Z wartoscia awaryjna", '{MODEL|trim|default:"brak modelu"}', "Puste lub same spacje dadza brak modelu."]]],
+  ["Tekst", "normalize_spaces", "|normalize_spaces", "Zamienia kilka kolejnych spacji, tabulatory i nowe linie na jedna spacje. Przydaje sie po danych wklejonych z roznych zrodel.", [["Nazwa", "{NAZWA|normalize_spaces}", "'Stol   dębowy' staje sie 'Stol dębowy'."], ["Z wielkimi literami", "{NAZWA|normalize_spaces|upper}", "Najpierw porzadkuje odstepy, potem zmienia litery."]]],
+  ["Tekst", "upper", "|upper", "upper zamienia wszystkie litery na WIELKIE. Cyfry, spacje i znaki specjalne pozostaja bez zmian.", [["Kod wielkimi literami", "{MODEL|trim|upper}", "Wartosc 'm-20' staje sie 'M-20'."], ["Nazwa produktu", "{NAZWA|upper}", "Wartosc 'Stol debowy' staje sie 'STOL DEBOWY'."]]],
+  ["Tekst", "lower", "|lower", "lower zamienia wszystkie litery na male. Uzyj go, gdy dane maja byc zawsze zapisywane jednym, malym formatem.", [["Kod malymi literami", "{MODEL|lower}", "Wartosc 'M-20' staje sie 'm-20'."], ["Adres e-mail", "{EMAIL|trim|lower}", "Wartosc ' BIURO@FIRMA.PL ' staje sie 'biuro@firma.pl'."]]],
+  ["Tekst", "title", "|title", "title ustawia pierwsza litere kazdego slowa jako wielka, a pozostale jako male. Najlepiej sprawdza sie przy nazwach i opisach, nie przy kodach technicznych.", [["Nazwa produktu", "{NAZWA|title}", "Wartosc 'STOL DEBOWY' staje sie 'Stol Debowy'."], ["Po uporzadkowaniu spacji", "{NAZWA|normalize_spaces|title}", "Wartosc '  krzeslo   biurowe ' staje sie 'Krzeslo Biurowe'."]]],
+  ["Tekst", "capitalize", "|capitalize", "capitalize ustawia wielka tylko pierwsza litere calej wartosci, a wszystkie pozostale litery zmienia na male. Rozni sie od title, ktore poprawia kazde slowo.", [["Jeden opis", "{OPIS|capitalize}", "Wartosc 'NOWA DOSTAWA' staje sie 'Nowa dostawa'."], ["Po oczyszczeniu", "{MODEL|trim|capitalize}", "Wartosc '  mODEL TEST  ' staje sie 'Model test'."]]],
+  ["Tekst", "replace", '|replace:"stary","nowy"', "replace zamienia doslownie jeden fragment tekstu na drugi. Pierwszy argument to szukany tekst, drugi to jego zastepstwo; oba wpisuj w cudzyslowach.", [["Podkreslnik na spacje", '{MODEL|replace:"_"," "}', "'M_20' staje sie 'M 20'."], ["Usuniecie tekstu", '{MODEL|replace:"-OLD",""}', "Usuwa koncowke -OLD z modelu."]]],
+  ["Tekst", "default", '|default:"wartosc"', "default daje wartosc zapasowa tylko wtedy, gdy pole jest puste. Gdy pole ma dane, zwraca jego prawdziwa wartosc i ignoruje zapas.", [["Brak modelu", '{MODEL|default:"brak"}', "Pusty model wyswietli brak."], ["Slug z zapasem", '{MODEL|trim|default:"produkt"|slug}', "Pusty model da produkt, a nie pusty wynik."]]],
+  ["Tekst", "substring", "|substring:poczatek,dlugosc", "substring wycina fragment tekstu. Pierwsza liczba zaczyna liczenie od zera, a druga okresla liczbe znakow; druga jest opcjonalna.", [["Pierwsze 8 znakow", "{MODEL|substring:0,8}", "Z M-123456789 zostawi M-123456."], ["Od trzeciego znaku", "{MODEL|substring:2}", "Z AB-123 zostawi -123."]]],
+  ["Tekst", "truncate", '|truncate:dlugosc,"dopisek"', "truncate skroci tekst tylko wtedy, gdy jest za dlugi. Opcjonalny dopisek, np. ..., jest doklejany po obcietej wartosci.", [["Krotka nazwa", "{NAZWA|truncate:20}", "Tekst dluzszy niz 20 znakow zostanie obciety."], ["Kropki po skroceniu", '{NAZWA|truncate:20,"..."}', "Po obcietej nazwie pojawia sie ... ."]]],
+  ["Tekst", "strip_diacritics", "|strip_diacritics", "Usuwa polskie znaki i inne znaki diakrytyczne, ale nie zmienia pozostalej tresci. Jest dobry, gdy system docelowy nie akceptuje znakow narodowych.", [["Polskie znaki", "{NAZWA|strip_diacritics}", "'żółć' staje sie 'zolc'."], ["Z kodem", "{MODEL|trim|strip_diacritics|upper}", "Najpierw czysci spacje i znaki, potem daje wielkie litery."]]],
+  ["Tekst", "slug", "|slug", "slug tworzy bezpieczny tekst malymi literami, ze slowami polaczonymi myslnikami. Usuwa znaki specjalne, wiec nadaje sie np. na fragment adresu lub klucza.", [["Nazwa produktu", "{NAZWA|slug}", "'Stol Dębowy 120 cm' staje sie 'stol-debowy-120-cm'."], ["Wartosc awaryjna", '{MODEL|default:"produkt"|slug}', "Pusty model daje bezpieczne produkt."]]],
+  ["Tekst", "number", '|number:miejsca,"przecinek","tysiace"', "number formatuje liczbe do czytelnej postaci. Podaj kolejno liczbe miejsc po przecinku, separator dziesietny i opcjonalny separator tysiecy.", [["Cena PL", '{PIMCORE:CENA|number:2,","," "}', "1234,5 staje sie 1 234,50."], ["Liczba calkowita", '{PIMCORE:SZTUKI|number:0,"."," "}', "12500 staje sie 12 500."]]],
+  ["Paczki i warunki", "filled", "|filled", "filled zwraca 1, gdy pole ma jakakolwiek wartosc, albo 0, gdy jest puste. To nie zwraca szerokosci; jest przeznaczone do liczenia wpisanych paczek.", [["Jedna paczka", "{PIMCORE:parcel_1_width|filled}", "Wpisane 120 daje 1, puste pole daje 0."], ["Suma paczek", "{PIMCORE:parcel_1_width|filled}+{PIMCORE:parcel_2_width|filled}", "Dwie wpisane szerokosci dadza 2."]]],
+  ["Paczki i warunki", "any_filled", '|any_filled:"PIMCORE:inne_pole"', "any_filled zwraca 1, gdy biezace pole albo przynajmniej jedno wskazane dodatkowe pole ma dane. Nazwy dodatkowych pol wpisuj w cudzyslowach.", [["Dowolny wymiar", '{PIMCORE:parcel_1_depth|any_filled:"PIMCORE:parcel_1_height","PIMCORE:parcel_1_width"}', "Sama wysokosc lub sama szerokosc wystarczy, aby wynik byl 1."], ["Stan danych", '{PIMCORE:EAN|any_filled:"PIMCORE:CN_Code"}', "Zwraca 1, gdy istnieje EAN albo kod CN."]]],
+  ["Paczki i warunki", "count_filled", '|count_filled:"PIMCORE:inne_pole"', "count_filled liczy, ile pol jest naprawde wypelnionych. W przeciwienstwie do any_filled wynik moze byc 0, 1, 2 i wiecej.", [["Kompletnosc wymiarow", '{PIMCORE:parcel_1_depth|count_filled:"PIMCORE:parcel_1_height","PIMCORE:parcel_1_width"}', "Trzy wypelnione wymiary dadza 3."], ["Dwa identyfikatory", '{PIMCORE:EAN|count_filled:"PIMCORE:CN_Code"}', "Gdy oba istnieja, wynik to 2."]]],
+  ["Paczki i warunki", "if_filled", '|if_filled:"gdy jest","gdy brak"', "if_filled wybiera jeden z dwoch tekstow. Pierwszy pojawia sie dla wypelnionego pola, drugi dla pustego; oba teksty wpisuj w cudzyslowach.", [["Prosty status", '{PIMCORE:parcel_1_width|if_filled:"JEST PACZKA","BRAK PACZKI"}', "Pokazuje czy paczka ma szerokosc."], ["Etykieta CN", '{PIMCORE:CN_Code|if_filled:"kod CN podany","kod CN brak"}', "Daje czytelny komunikat zamiast surowej wartosci."]]],
 ];
 
 function pimcoreFieldLanguage(value = {}) {
@@ -9473,6 +9507,81 @@ function insertPimcoreTemplateFunction(token) {
 
 function insertPimcoreTemplateSqlToken() {
   insertPimcoreTemplateText("{SQL|keep}");
+}
+
+function pimcoreTemplateHelpTextElement(tagName, value, className = "") {
+  const element = document.createElement(tagName);
+  if (className) element.className = className;
+  element.textContent = value;
+  return element;
+}
+
+function selectPimcoreTemplateHelp(index) {
+  if (!pimcoreTemplateHelpList || !pimcoreTemplateHelpDetail) return;
+  const item = TEMPLATE_FUNCTION_HELP[index];
+  if (!item) return;
+  const [category, name, syntax, description, examples] = item;
+
+  for (const button of pimcoreTemplateHelpList.querySelectorAll("button[data-help-index]")) {
+    const isActive = Number(button.dataset.helpIndex) === index;
+    button.classList.toggle("active", isActive);
+    button.setAttribute("aria-current", isActive ? "true" : "false");
+  }
+
+  pimcoreTemplateHelpDetail.replaceChildren();
+  const categoryLabel = pimcoreTemplateHelpTextElement("p", category, "pimcore-template-help-category");
+  const heading = pimcoreTemplateHelpTextElement("h2", name);
+  const introduction = pimcoreTemplateHelpTextElement("p", description, "pimcore-template-help-description");
+  const syntaxHeading = pimcoreTemplateHelpTextElement("h3", "Skladnia");
+  const syntaxBlock = pimcoreTemplateHelpTextElement("pre", syntax, "pimcore-template-help-syntax");
+  const examplesHeading = pimcoreTemplateHelpTextElement("h3", "Przyklady");
+  const examplesBox = document.createElement("div");
+  examplesBox.className = "pimcore-template-help-examples";
+
+  examples.forEach(([title, template, outcome], exampleIndex) => {
+    const example = document.createElement("section");
+    example.className = "pimcore-template-help-example";
+    const exampleHeading = pimcoreTemplateHelpTextElement("h4", `Przyklad ${exampleIndex + 1}: ${title}`);
+    const templateLabel = pimcoreTemplateHelpTextElement("span", "Wpisz do szablonu", "pimcore-template-help-example-label");
+    const templateBlock = pimcoreTemplateHelpTextElement("pre", template, "pimcore-template-help-example-template");
+    const outcomeLabel = pimcoreTemplateHelpTextElement("span", "Co sie stanie", "pimcore-template-help-example-label");
+    const outcomeText = pimcoreTemplateHelpTextElement("p", outcome);
+    example.append(exampleHeading, templateLabel, templateBlock, outcomeLabel, outcomeText);
+    examplesBox.appendChild(example);
+  });
+
+  pimcoreTemplateHelpDetail.append(categoryLabel, heading, introduction, syntaxHeading, syntaxBlock, examplesHeading, examplesBox);
+}
+
+function renderPimcoreTemplateHelp() {
+  if (!pimcoreTemplateHelpList || !pimcoreTemplateHelpDetail || pimcoreTemplateHelpList.childElementCount) return;
+  let previousCategory = "";
+  TEMPLATE_FUNCTION_HELP.forEach(([category, name], index) => {
+    if (category !== previousCategory) {
+      pimcoreTemplateHelpList.appendChild(pimcoreTemplateHelpTextElement("p", category, "pimcore-template-help-list-group"));
+      previousCategory = category;
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ghost-button pimcore-template-help-list-button";
+    button.dataset.helpIndex = String(index);
+    button.textContent = name;
+    button.addEventListener("click", () => selectPimcoreTemplateHelp(index));
+    pimcoreTemplateHelpList.appendChild(button);
+  });
+  selectPimcoreTemplateHelp(0);
+}
+
+function openPimcoreTemplateHelp() {
+  if (!pimcoreTemplateHelpModal) return;
+  renderPimcoreTemplateHelp();
+  pimcoreTemplateHelpModal.classList.add("active");
+  pimcoreTemplateHelpCloseButton?.focus();
+}
+
+function closePimcoreTemplateHelp() {
+  pimcoreTemplateHelpModal?.classList.remove("active");
+  if (pimcoreTemplateModal?.classList.contains("active")) pimcoreTemplateHelpButton?.focus();
 }
 
 function renderPimcoreTemplateTokens(row) {
@@ -9639,6 +9748,7 @@ function savePimcoreTemplateBuilder() {
 
 function closePimcoreTemplateBuilder() {
   pimcoreTemplateModal?.classList.remove("active");
+  pimcoreTemplateHelpModal?.classList.remove("active");
   if (pimcoreTemplateSqlControls) pimcoreTemplateSqlControls.textContent = "";
   state.pimcoreTemplateRow = null;
 }
@@ -13477,6 +13587,8 @@ pimcoreTemplateClearButton?.addEventListener("click", () => {
   savePimcoreTemplateBuilder();
 });
 pimcoreTemplateCancelButton?.addEventListener("click", closePimcoreTemplateBuilder);
+pimcoreTemplateHelpButton?.addEventListener("click", openPimcoreTemplateHelp);
+pimcoreTemplateHelpCloseButton?.addEventListener("click", closePimcoreTemplateHelp);
 
 pimcoreHistoryCloseButton?.addEventListener("click", () => {
   if (pimcoreHistoryModal) {

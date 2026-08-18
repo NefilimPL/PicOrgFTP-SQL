@@ -3213,6 +3213,159 @@ button.slot-badge.on:hover {
   font-size: 12px;
 }
 
+.pimcore-template-functions-heading {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.pimcore-template-functions-heading h2 {
+  margin: 0;
+}
+
+.modal-view.pimcore-template-help-modal.active {
+  z-index: 50;
+}
+
+.pimcore-template-help-panel {
+  max-height: min(820px, calc(100vh - 32px));
+  max-width: 1120px;
+  width: min(1120px, calc(100vw - 32px));
+}
+
+.pimcore-template-help-layout {
+  display: grid;
+  grid-template-columns: minmax(210px, 0.36fr) minmax(0, 1fr);
+  gap: 16px;
+  max-height: min(650px, calc(100vh - 190px));
+}
+
+.pimcore-template-help-list,
+.pimcore-template-help-detail {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  min-width: 0;
+  overflow: auto;
+}
+
+.pimcore-template-help-list {
+  align-content: start;
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+}
+
+.pimcore-template-help-list-group {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  margin: 10px 4px 2px;
+  text-transform: uppercase;
+}
+
+.pimcore-template-help-list-group:first-child {
+  margin-top: 2px;
+}
+
+.pimcore-template-help-list-button {
+  justify-content: flex-start;
+  text-align: left;
+  width: 100%;
+}
+
+.pimcore-template-help-list-button.active {
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+  color: var(--accent);
+}
+
+.pimcore-template-help-detail {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  margin: 0;
+  padding: 20px;
+}
+
+.pimcore-template-help-detail h2,
+.pimcore-template-help-detail h3,
+.pimcore-template-help-detail h4,
+.pimcore-template-help-detail p {
+  margin: 0;
+}
+
+.pimcore-template-help-detail h2 {
+  font-size: 24px;
+}
+
+.pimcore-template-help-category,
+.pimcore-template-help-example-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.pimcore-template-help-description {
+  line-height: 1.6;
+}
+
+.pimcore-template-help-syntax,
+.pimcore-template-help-example-template {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  font: 13px/1.5 Consolas, "Courier New", monospace;
+  margin: 0;
+  padding: 10px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.pimcore-template-help-examples {
+  display: grid;
+  gap: 12px;
+}
+
+.pimcore-template-help-example {
+  background: color-mix(in srgb, var(--surface) 86%, var(--accent) 14%);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+}
+
+.pimcore-template-help-example h4 {
+  font-size: 15px;
+}
+
+.pimcore-template-help-example p {
+  line-height: 1.5;
+}
+
+@media (max-width: 720px) {
+  .pimcore-template-help-layout {
+    grid-template-columns: 1fr;
+    max-height: min(680px, calc(100vh - 160px));
+  }
+
+  .pimcore-template-help-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    max-height: 240px;
+  }
+
+  .pimcore-template-help-list-group {
+    grid-column: 1 / -1;
+  }
+}
+
 .pimcore-template-result {
   display: grid;
   gap: 8px;

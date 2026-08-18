@@ -2333,6 +2333,7 @@ def _render_templates_with_sql_context(
         targets=targets,
         extra_sources=extra_sources,
         extra_values=extra_values,
+        preserve_submitted_dependencies=mode == "edit",
     )
     translation_settings = config.CONFIG.get(TRANSLATION_SETTINGS_KEY, {}) or {}
     independent_translation_operations = [

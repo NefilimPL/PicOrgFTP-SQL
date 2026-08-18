@@ -552,7 +552,10 @@
           <aside>
             <h2>Dostepne dane</h2>
             <div id="pimcoreTemplateSources" class="pimcore-template-tokens"></div>
-            <h2>Funkcje</h2>
+            <div class="pimcore-template-functions-heading">
+              <h2>Funkcje</h2>
+              <button id="pimcoreTemplateHelpButton" type="button" class="ghost-button">Pomoc do funkcji</button>
+            </div>
             <div id="pimcoreTemplateFunctions" class="pimcore-template-tokens"></div>
             <p class="settings-note">Funkcje dopisuj wewnatrz placeholdera, np. {NAZWA|trim|upper}. Dostepne sa tez replace, default, substring, truncate, strip_diacritics, slug i number.</p>
           </aside>
@@ -568,6 +571,22 @@
         <div class="heading-actions">
           <button id="pimcoreTemplateSaveButton" type="button">Zastosuj do pola</button>
           <button id="pimcoreTemplateClearButton" type="button" class="ghost-button">Usun szablon</button>
+        </div>
+      </section>
+    </div>
+
+    <div id="pimcoreTemplateHelpModal" class="modal-view nested-modal pimcore-template-help-modal" role="dialog" aria-modal="true" aria-labelledby="pimcoreTemplateHelpTitle">
+      <section class="manager-panel pimcore-template-help-panel">
+        <div class="section-heading">
+          <div>
+            <h1 id="pimcoreTemplateHelpTitle">Pomoc do szablonow Pimcore</h1>
+            <span>Opis skladni i gotowe przyklady.</span>
+          </div>
+          <button id="pimcoreTemplateHelpCloseButton" type="button" class="ghost-button modal-close">Zamknij</button>
+        </div>
+        <div class="pimcore-template-help-layout">
+          <nav id="pimcoreTemplateHelpList" class="pimcore-template-help-list" aria-label="Lista funkcji"></nav>
+          <article id="pimcoreTemplateHelpDetail" class="pimcore-template-help-detail" aria-live="polite"></article>
         </div>
       </section>
     </div>
