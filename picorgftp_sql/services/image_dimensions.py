@@ -54,6 +54,7 @@ class OcrTextBox:
     confidence: float
     bbox: tuple[int, int, int, int]
     hint: str | None = None
+    angle: float | None = None
 
 
 @dataclass(frozen=True)
@@ -157,6 +158,23 @@ def _line_dimension(line: DimensionLine) -> str | None:
     return None
 
 
+def _text_angle_dimension(angle: float | None) -> str | None:
+    """Map the orientation of a dimension label to its measured axis."""
+
+    if angle is None or not math.isfinite(float(angle)):
+        return None
+    normalized = abs(float(angle)) % 180
+    if normalized > 90:
+        normalized = 180 - normalized
+    if normalized <= 15:
+        return "width"
+    if normalized >= 75:
+        return "height"
+    if 20 <= normalized <= 70:
+        return "depth"
+    return None
+
+
 def _distance_to_segment(x: float, y: float, line: DimensionLine) -> float:
     delta_x = line.x2 - line.x1
     delta_y = line.y2 - line.y1
@@ -183,6 +201,10 @@ def associate_dimension_hints(
     for box in boxes:
         if _normalized_hint(box.hint) or _parse_numeric_value(box.text) is None:
             associated.append(box)
+            continue
+        angle_dimension = _text_angle_dimension(box.angle)
+        if angle_dimension:
+            associated.append(replace(box, hint=angle_dimension))
             continue
         left, top, right, bottom = box.bbox
         center_x = (left + right) / 2
@@ -464,7 +486,16 @@ class PaddleImageDimensionRecognizer:
         # PaddleOCR enables oneDNN by default on CPU.  PaddlePaddle 3.3 can
         # fail on OCR model PIR attributes in that backend, so prefer the
         # standard CPU executor for reliable local dimension extraction.
-        self._ocr = PaddleOCR(lang="en", enable_mkldnn=False)
+        # Dimension drawings do not need document rotation, unwarping or
+        # text-line orientation. Disabling them makes OCR faster and preserves
+        # recognition coordinates relative to the uploaded original image.
+        self._ocr = PaddleOCR(
+            lang="en",
+            enable_mkldnn=False,
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+        )
 
     def detect(self, path: str) -> list[OcrTextBox]:  # pragma: no cover - optional runtime
         raw = self._ocr.predict(path)
@@ -478,12 +509,19 @@ class PaddleImageDimensionRecognizer:
             for text, score, polygon in zip(texts, scores, polygons):
                 xs = [int(point[0]) for point in polygon]
                 ys = [int(point[1]) for point in polygon]
+                angle = None
+                if len(polygon) >= 2:
+                    delta_x = float(polygon[1][0]) - float(polygon[0][0])
+                    delta_y = float(polygon[1][1]) - float(polygon[0][1])
+                    if delta_x or delta_y:
+                        angle = math.degrees(math.atan2(delta_y, delta_x))
                 boxes.append(
                     OcrTextBox(
                         str(text),
                         float(score),
                         (min(xs), min(ys), max(xs), max(ys)),
                         None,
+                        angle,
                     )
                 )
         image = self._cv2.imread(path)

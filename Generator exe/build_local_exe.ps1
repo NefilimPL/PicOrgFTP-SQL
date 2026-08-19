@@ -49,7 +49,7 @@ if ($IncludeVisionModels) {
     $VisionModelCache = Join-Path $WorkPath "ocr-model-cache"
     New-Item -ItemType Directory -Path $VisionModelCache -Force | Out-Null
     $env:PADDLE_PDX_CACHE_HOME = $VisionModelCache
-    Invoke-Native $Python "-c" "from paddleocr import PaddleOCR; PaddleOCR(lang='en')"
+    Invoke-Native $Python "-c" "from paddleocr import PaddleOCR; PaddleOCR(lang='en', enable_mkldnn=False, use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False)"
     if (-not (Test-Path -LiteralPath $VisionModelCache -PathType Container)) {
         throw "Nie znaleziono lokalnego cache modeli OCR po przygotowaniu builda."
     }

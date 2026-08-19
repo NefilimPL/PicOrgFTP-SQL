@@ -46,7 +46,13 @@ def test_paddle_recognizer_disables_mkldnn_for_cpu_predictor(tmp_path, monkeypat
 
     image_dimensions.PaddleImageDimensionRecognizer()
 
-    assert received_kwargs == {"lang": "en", "enable_mkldnn": False}
+    assert received_kwargs == {
+        "lang": "en",
+        "enable_mkldnn": False,
+        "use_doc_orientation_classify": False,
+        "use_doc_unwarping": False,
+        "use_textline_orientation": False,
+    }
 
 
 def test_resolves_decimal_comma_value_when_ocr_confidence_meets_threshold():
@@ -156,6 +162,18 @@ def test_associates_numeric_text_with_nearest_dimension_line_orientation():
 
     assert associated[0].hint == "width"
     assert associated[1].hint == "height"
+
+
+def test_associates_dimension_from_the_orientation_of_ocr_text_without_lines():
+    boxes = [
+        OcrTextBox("123,4", 0.99, (100, 30, 180, 50), angle=3),
+        OcrTextBox("40", 0.98, (200, 50, 240, 80), angle=38),
+        OcrTextBox("75,2", 0.99, (30, 100, 50, 180), angle=89),
+    ]
+
+    associated = associate_dimension_hints(boxes, [])
+
+    assert [box.hint for box in associated] == ["width", "depth", "height"]
 
 
 def test_diagnostics_classifies_boxes_and_applies_threshold():

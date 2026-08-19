@@ -146,6 +146,9 @@ def test_web_build_supports_opt_in_vision_engine_and_embedded_models() -> None:
     assert "pypdfium2" in build_source
     assert "PADDLE_PDX_CACHE_HOME" in build_source
     assert "ocr_models" in build_source
+    assert "use_doc_orientation_classify=False" in build_source
+    assert "use_doc_unwarping=False" in build_source
+    assert "use_textline_orientation=False" in build_source
     assert "%*" in batch_source
 
 
@@ -183,6 +186,9 @@ def test_local_build_supports_opt_in_vision_engine_and_embedded_models() -> None
     assert "pypdfium2" in build_source
     assert "PADDLE_PDX_CACHE_HOME" in build_source
     assert "ocr_models" in build_source
+    assert "use_doc_orientation_classify=False" in build_source
+    assert "use_doc_unwarping=False" in build_source
+    assert "use_textline_orientation=False" in build_source
     assert "%*" in batch_source
 
 
