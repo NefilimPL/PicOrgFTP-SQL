@@ -176,6 +176,31 @@ def test_associates_dimension_from_the_orientation_of_ocr_text_without_lines():
     assert [box.hint for box in associated] == ["width", "depth", "height"]
 
 
+def test_associates_a_tall_dimension_label_as_height_when_ocr_angle_is_flat():
+    box = OcrTextBox("52,4 cm", 0.65, (710, 180, 735, 300), angle=0)
+
+    associated = associate_dimension_hints([box], [])
+
+    assert associated[0].hint == "height"
+
+
+def test_diagnostics_rejects_weight_and_prefers_a_dimension_with_units():
+    recognizer = FakeRecognizer(
+        [
+            OcrTextBox("2 kg", 0.99, (100, 120, 150, 145), "width"),
+            OcrTextBox("53,9 cm", 0.90, (20, 20, 180, 45), "width"),
+        ]
+    )
+
+    result = analyze_image_dimensions(
+        "fixture.png", minimum_text_confidence=0.8, recognizer=recognizer
+    )
+
+    assert result.dimensions["width"] == "53.9"
+    assert result.candidates[0].accepted is False
+    assert result.candidates[1].accepted is True
+
+
 def test_diagnostics_classifies_boxes_and_applies_threshold():
     recognizer = FakeRecognizer(
         [

@@ -13519,6 +13519,25 @@ function ocrDimensionLabel(value) {
   return ({ width: "Szerokosc", depth: "Glebokosc", height: "Wysokosc" })[value] || "Dodatkowe";
 }
 
+function renderOcrLivePreview(file) {
+  const stage = document.createElement("div");
+  stage.className = "ocr-diagnostic-stage ocr-diagnostic-live-preview";
+  const image = document.createElement("img");
+  image.className = "ocr-diagnostic-image";
+  image.alt = "Obraz oczekujacy na wynik OCR";
+  const status = document.createElement("p");
+  status.className = "ocr-diagnostic-live-status";
+  status.textContent = "Ladowanie modelu OCR...";
+  const objectUrl = URL.createObjectURL(file);
+  image.src = objectUrl;
+  stage.append(image, status);
+  return {
+    element: stage,
+    setStatus(message) { status.textContent = message; },
+    dispose() { URL.revokeObjectURL(objectUrl); },
+  };
+}
+
 function renderOcrDiagnostics(result) {
   const output = document.createElement("div");
   output.className = "ocr-diagnostic-result wide-field";
@@ -13538,6 +13557,7 @@ function renderOcrDiagnostics(result) {
     const width = Number(image.naturalWidth || 0);
     const height = Number(image.naturalHeight || 0);
     if (!width || !height) return;
+    const labelRows = [];
     for (const candidate of candidates) {
       const bbox = Array.isArray(candidate.bbox) ? candidate.bbox : [];
       if (bbox.length !== 4) continue;
@@ -13553,6 +13573,10 @@ function renderOcrDiagnostics(result) {
       const label = document.createElement("span");
       label.className = "ocr-diagnostic-confidence";
       label.textContent = ocrConfidenceLabel(candidate.confidence);
+      const collidingLabels = labelRows.filter((row) => Math.abs(row.top - top) < 28 && Math.abs(row.left - left) < 90);
+      label.style.left = `${-2 + collidingLabels.length * 42}px`;
+      label.setAttribute("data-ocr-label-offset", String(collidingLabels.length));
+      labelRows.push({ left, top });
       rectangle.appendChild(label);
       overlay.appendChild(rectangle);
     }
@@ -13642,6 +13666,7 @@ function renderSettingsOcr() {
     }
     analyze.disabled = true;
     results.textContent = "";
+    let livePreview = null;
     status.textContent = "Wysylanie obrazu do lokalnego testu OCR...";
     try {
       const upload = new FormData();
@@ -13649,13 +13674,18 @@ function renderSettingsOcr() {
       upload.set("file", selected, selected.name || "ocr-test-image");
       const cached = await requestJson("/api/upload-cache", { method: "POST", body: upload, timeoutMs: 120000 });
       if (!cached.token) throw new Error("Backend nie zwrocil tokenu obrazu testowego.");
-      status.textContent = "Analiza OCR trwa...";
+      livePreview = renderOcrLivePreview(selected);
+      results.appendChild(livePreview.element);
+      livePreview.setStatus("Wykrywanie tekstu i linii wymiarowych...");
+      status.textContent = "Analiza OCR trwa — podglad obrazu jest gotowy.";
       const result = await requestJson("/api/settings/ocr/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token: cached.token, minimum_text_confidence: confidence / 100 }),
         timeoutMs: 120000,
       });
+      livePreview.dispose();
+      results.textContent = "";
       results.appendChild(renderOcrDiagnostics(result));
       status.textContent = result.available
         ? "Analiza OCR zakonczona."
@@ -13663,6 +13693,7 @@ function renderSettingsOcr() {
     } catch (error) {
       status.textContent = error.message || "Nie udalo sie wykonac analizy OCR.";
     } finally {
+      livePreview?.dispose();
       analyze.disabled = false;
     }
   });

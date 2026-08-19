@@ -18,7 +18,9 @@ from typing import Iterable, Mapping, Protocol
 
 
 _DIMENSIONS = frozenset({"width", "depth", "height"})
-_NUMBER_PATTERN = re.compile(r"(?<![\d.,])\d+(?:[.,]\d+)?")
+_NUMBER_PATTERN = re.compile(r"(?<![\d.,])\d+(?:[.,]\d+)*")
+_DIMENSION_UNIT_PATTERN = re.compile(r"(?<![a-z])(?:mm|cm)(?![a-z])", re.IGNORECASE)
+_WEIGHT_UNIT_PATTERN = re.compile(r"(?<![a-z])kg(?![a-z])", re.IGNORECASE)
 _DIMENSION_HINTS = {
     "width": frozenset({"w", "width", "szer", "szerokosc", "szerokość"}),
     "depth": frozenset({"d", "depth", "gleb", "glebokosc", "głęb", "głębokość"}),
@@ -122,13 +124,28 @@ def _parse_numeric_value(value: str) -> str | None:
     if not match:
         return None
     try:
-        parsed = Decimal(match.group(0).replace(",", "."))
+        token = match.group(0).strip(".,")
+        parts = [part for part in re.split(r"[.,]", token) if part]
+        if not parts:
+            return None
+        normalized_token = parts[0]
+        if len(parts) > 1:
+            normalized_token += "." + "".join(parts[1:])
+        parsed = Decimal(normalized_token)
     except InvalidOperation:
         return None
     if not parsed.is_finite() or parsed <= 0:
         return None
     normalized = format(parsed.normalize(), "f")
     return normalized.rstrip("0").rstrip(".") if "." in normalized else normalized
+
+
+def _is_weight_text(value: str) -> bool:
+    return bool(_WEIGHT_UNIT_PATTERN.search(str(value or "")))
+
+
+def _has_dimension_unit(value: str) -> bool:
+    return bool(_DIMENSION_UNIT_PATTERN.search(str(value or "")))
 
 
 def _candidate_for_dimension(
@@ -139,10 +156,14 @@ def _candidate_for_dimension(
         for box in boxes
         if _normalized_hint(box.hint) == dimension
         and _parse_numeric_value(box.text) is not None
+        and not _is_weight_text(box.text)
     ]
     if not candidates:
         return None
-    return max(candidates, key=lambda item: float(item.confidence))
+    return max(
+        candidates,
+        key=lambda item: (_has_dimension_unit(item.text), float(item.confidence)),
+    )
 
 
 def _line_dimension(line: DimensionLine) -> str | None:
@@ -175,6 +196,13 @@ def _text_angle_dimension(angle: float | None) -> str | None:
     return None
 
 
+def _box_shape_dimension(box: OcrTextBox) -> str | None:
+    left, top, right, bottom = box.bbox
+    width = max(1, right - left)
+    height = max(1, bottom - top)
+    return "height" if height >= width * 1.35 else None
+
+
 def _distance_to_segment(x: float, y: float, line: DimensionLine) -> float:
     delta_x = line.x2 - line.x1
     delta_y = line.y2 - line.y1
@@ -199,8 +227,15 @@ def associate_dimension_hints(
     usable_lines = [line for line in lines if _line_dimension(line)]
     associated: list[OcrTextBox] = []
     for box in boxes:
+        if _is_weight_text(box.text):
+            associated.append(replace(box, hint=None))
+            continue
         if _normalized_hint(box.hint) or _parse_numeric_value(box.text) is None:
             associated.append(box)
+            continue
+        shape_dimension = _box_shape_dimension(box)
+        if shape_dimension:
+            associated.append(replace(box, hint=shape_dimension))
             continue
         angle_dimension = _text_angle_dimension(box.angle)
         if angle_dimension:
@@ -362,7 +397,12 @@ def analyze_image_dimensions(
     for box in boxes:
         dimension = _normalized_hint(box.hint)
         value = _parse_numeric_value(box.text) or ""
-        accepted = bool(dimension and value and float(box.confidence) >= threshold)
+        accepted = bool(
+            dimension
+            and value
+            and not _is_weight_text(box.text)
+            and float(box.confidence) >= threshold
+        )
         candidate = OcrDiagnosticCandidate(
             text=str(box.text),
             confidence=float(box.confidence),

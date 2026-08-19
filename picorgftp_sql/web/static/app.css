@@ -1361,6 +1361,23 @@ h2 {
   background: var(--surface-2);
 }
 
+.ocr-diagnostic-live-preview {
+  min-height: 160px;
+}
+
+.ocr-diagnostic-live-status {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  margin: 0;
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  color: var(--text);
+  font-size: 13px;
+}
+
 .ocr-diagnostic-image {
   display: block;
   width: 100%;

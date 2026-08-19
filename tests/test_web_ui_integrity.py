@@ -69,12 +69,14 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertTrue(html.has_tag("button", **{"data-settings-tab": "ocr"}))
         self.assertIn("function renderSettingsOcr()", source)
         self.assertIn("function renderOcrDiagnostics", source)
+        self.assertIn("function renderOcrLivePreview", source)
         self.assertIn("/api/settings/ocr/status", source)
         self.assertIn("/api/settings/ocr/analyze", source)
         self.assertIn("data-ocr-overlay", source)
         self.assertIn("model.version", source)
         self.assertIn("%", source)
         self.assertIn("ocr-diagnostic-overlay", css)
+        self.assertIn("ocr-diagnostic-live-status", css)
 
     def test_pimcore_export_selection_has_a_legacy_chrome_border_fallback(self) -> None:
         css = APP_CSS.read_text(encoding="utf-8")
