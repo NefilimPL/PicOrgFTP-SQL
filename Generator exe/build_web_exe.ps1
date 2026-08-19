@@ -42,7 +42,7 @@ $env:PYINSTALLER_BUILD = "1"
 $WebStaticDataArguments = Get-WebStaticDataArguments -RepoRoot $RepoRoot
 $VisionPyInstallerArguments = @()
 if ($IncludeVision) {
-    foreach ($package in @("paddleocr", "paddle", "cv2")) {
+    foreach ($package in @("paddleocr", "paddlex", "paddle", "cv2")) {
         $VisionPyInstallerArguments += "--collect-all"
         $VisionPyInstallerArguments += $package
     }

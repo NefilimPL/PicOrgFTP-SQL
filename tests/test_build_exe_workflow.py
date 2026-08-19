@@ -141,6 +141,7 @@ def test_web_build_supports_opt_in_vision_engine_and_embedded_models() -> None:
     assert "IncludeVisionModels wymaga parametru -IncludeVision" in build_source
     assert "--collect-all" in build_source
     assert "paddleocr" in build_source
+    assert "paddlex" in build_source
     assert "PADDLE_PDX_CACHE_HOME" in build_source
     assert "ocr_models" in build_source
     assert "%*" in batch_source
@@ -165,6 +166,7 @@ def test_local_build_supports_opt_in_vision_engine_and_embedded_models() -> None
     assert "IncludeVisionModels wymaga parametru -IncludeVision" in build_source
     assert "--collect-all" in build_source
     assert "paddleocr" in build_source
+    assert "paddlex" in build_source
     assert "PADDLE_PDX_CACHE_HOME" in build_source
     assert "ocr_models" in build_source
     assert "%*" in batch_source

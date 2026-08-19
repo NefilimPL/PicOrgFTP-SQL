@@ -4,6 +4,7 @@ import picorgftp_sql.services.image_dimensions as image_dimensions
 
 from picorgftp_sql.services.image_dimensions import (
     DimensionLine,
+    ImageDimensionUnavailable,
     ImageDimensionRequest,
     OcrTextBox,
     analyze_image_dimensions,
@@ -154,6 +155,50 @@ def test_diagnostics_classifies_boxes_and_applies_threshold():
     assert result.candidates[1].accepted is False
     assert result.candidates[1].dimension == "depth"
     assert result.candidates[2].value == ""
+
+
+def test_diagnostics_returns_a_message_instead_of_raising_when_ocr_is_broken():
+    class BrokenRecognizer:
+        def detect(self, _path: str) -> list[OcrTextBox]:
+            raise RuntimeError("The pipeline (OCR) does not exist")
+
+    result = analyze_image_dimensions("fixture.png", recognizer=BrokenRecognizer())
+
+    assert result.available is False
+    assert result.candidates == []
+    assert "pipeline" in result.message
+
+
+def test_diagnostics_keeps_the_ocr_unavailable_message():
+    class UnavailableRecognizer:
+        def detect(self, _path: str) -> list[OcrTextBox]:
+            raise ImageDimensionUnavailable("Brak konfiguracji pipeline OCR.")
+
+    result = analyze_image_dimensions("fixture.png", recognizer=UnavailableRecognizer())
+
+    assert result.available is False
+    assert result.message == "Brak konfiguracji pipeline OCR."
+
+
+def test_template_resolution_returns_a_warning_when_ocr_initialization_crashes():
+    class BrokenRecognizer:
+        def detect(self, _path: str) -> list[OcrTextBox]:
+            raise RuntimeError("The pipeline (OCR) does not exist")
+
+    values, warnings = resolve_image_dimensions(
+        [ImageDimensionRequest("15", "width", 0.8)],
+        {"15": "fixture.png"},
+        recognizer=BrokenRecognizer(),
+    )
+
+    assert values == {"IMAGE_DIMENSION:15:WIDTH": ""}
+    assert warnings == [
+        {
+            "code": "ocr_unavailable",
+            "slot": "15",
+            "message": "Lokalny OCR jest niedostepny.",
+        }
+    ]
 
 
 def test_ocr_runtime_info_has_stable_engine_and_github_metadata():

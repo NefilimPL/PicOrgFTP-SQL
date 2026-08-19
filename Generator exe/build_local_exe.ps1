@@ -40,7 +40,7 @@ $env:PICORGFTP_SQL_HEADLESS = "1"
 $env:PYINSTALLER_BUILD = "1"
 $VisionPyInstallerArguments = @()
 if ($IncludeVision) {
-    foreach ($package in @("paddleocr", "paddle", "cv2")) {
+    foreach ($package in @("paddleocr", "paddlex", "paddle", "cv2")) {
         $VisionPyInstallerArguments += "--collect-all"
         $VisionPyInstallerArguments += $package
     }

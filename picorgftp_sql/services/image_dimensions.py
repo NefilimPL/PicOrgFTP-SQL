@@ -297,12 +297,19 @@ def analyze_image_dimensions(
         raise ValueError("Minimalna pewnosc musi byc od 0 do 1.")
     try:
         boxes = (recognizer or _default_recognizer()).detect(path)
-    except ImageDimensionUnavailable:
+    except ImageDimensionUnavailable as exc:
         return ImageOcrDiagnostics(
             available=False,
             dimensions={dimension: "" for dimension in sorted(_DIMENSIONS)},
             candidates=[],
-            message="Lokalny OCR nie jest zainstalowany.",
+            message=str(exc).strip() or "Lokalny OCR nie jest zainstalowany.",
+        )
+    except Exception as exc:
+        return ImageOcrDiagnostics(
+            available=False,
+            dimensions={dimension: "" for dimension in sorted(_DIMENSIONS)},
+            candidates=[],
+            message=f"Nie udalo sie uruchomic lokalnego OCR: {exc}",
         )
 
     candidates: list[OcrDiagnosticCandidate] = []
@@ -393,14 +400,14 @@ def resolve_image_dimensions(
             if active_recognizer is None:
                 active_recognizer = _default_recognizer()
             boxes = active_recognizer.detect(path)
-        except ImageDimensionUnavailable:
+        except Exception:
             for request in slot_requests:
                 values[image_dimension_source_key(slot, request.dimension)] = ""
             warnings.append(
                 _warning(
                     "ocr_unavailable",
                     slot,
-                    "Lokalny OCR nie jest zainstalowany.",
+                    "Lokalny OCR jest niedostepny.",
                 )
             )
             continue

@@ -134,6 +134,7 @@ function Test-BuildEnvironment {
         $imports += @(
             "import cv2",
             "import paddle",
+            "import paddlex",
             "import paddleocr"
         )
     }
