@@ -204,6 +204,70 @@ def test_unit_labels_fall_back_to_box_shape_and_prefer_outer_dimensions():
     assert result.dimensions == {"width": "75", "depth": "36", "height": "61"}
 
 
+def test_unitless_dimension_labels_use_geometry_when_ocr_angle_is_uncertain():
+    boxes = associate_dimension_hints(
+        [
+            OcrTextBox("80", 1.0, (400, 40, 480, 62), angle=17),
+            OcrTextBox("80", 1.0, (125, 85, 165, 125), angle=45),
+            OcrTextBox("78", 1.0, (690, 160, 712, 250), angle=73),
+        ],
+        [],
+    )
+
+    result = analyze_image_dimensions(
+        "fixture.png", minimum_text_confidence=0.8, recognizer=FakeRecognizer(boxes)
+    )
+
+    assert [box.hint for box in boxes] == ["width", "depth", "height"]
+    assert result.dimensions == {"width": "80", "depth": "80", "height": "78"}
+
+
+def test_restores_decimal_separator_only_when_crop_has_a_small_middle_glyph():
+    components = [
+        (0, 1, 9, 18, 102),
+        (11, 15, 3, 4, 10),
+        (17, 1, 9, 18, 100),
+    ]
+
+    assert image_dimensions._restore_lost_decimal_separator("36", components) == "3,6"
+    assert image_dimensions._restore_lost_decimal_separator("80", components[:1] + components[2:]) == "80"
+
+
+def test_collects_glyphs_from_the_upscaled_ocr_crop():
+    class FakeImage:
+        shape = (40, 50, 3)
+
+        def __getitem__(self, _slice):
+            return self
+
+    class FakeCv2:
+        COLOR_BGR2GRAY = 1
+        INTER_CUBIC = 2
+        THRESH_BINARY_INV = 4
+        THRESH_OTSU = 8
+
+        @staticmethod
+        def cvtColor(image, _mode):
+            return image
+
+        @staticmethod
+        def resize(image, _size, interpolation):
+            assert interpolation == 2
+            return image
+
+        @staticmethod
+        def threshold(image, _threshold, _maximum, _mode):
+            return 0, image
+
+        @staticmethod
+        def connectedComponentsWithStats(_image, _connectivity):
+            return 4, None, [(0, 0, 1, 1, 0), (0, 1, 9, 18, 102), (11, 15, 3, 4, 10), (17, 1, 9, 18, 100)], None
+
+    assert image_dimensions._text_components_from_crop(
+        FakeImage(), (2, 3, 28, 24), FakeCv2()
+    ) == [(0, 1, 9, 18, 102), (11, 15, 3, 4, 10), (17, 1, 9, 18, 100)]
+
+
 def test_diagnostics_rejects_weight_and_prefers_a_dimension_with_units():
     recognizer = FakeRecognizer(
         [

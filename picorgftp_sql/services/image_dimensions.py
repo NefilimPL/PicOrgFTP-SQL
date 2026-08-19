@@ -140,6 +140,79 @@ def _parse_numeric_value(value: str) -> str | None:
     return normalized.rstrip("0").rstrip(".") if "." in normalized else normalized
 
 
+def _restore_lost_decimal_separator(
+    text: str, components: Iterable[tuple[int, int, int, int, int]]
+) -> str:
+    """Restore a decimal only when the cropped image contains its small glyph."""
+
+    source = str(text or "")
+    match = _NUMBER_PATTERN.search(source)
+    if not match:
+        return source
+    token = match.group(0)
+    if len(token) != 2 or not token.isdigit():
+        return source
+    glyphs = [
+        tuple(int(value) for value in component)
+        for component in components
+        if len(component) == 5 and int(component[4]) > 0
+    ]
+    if len(glyphs) < 3:
+        return source
+    digit_glyphs = sorted(glyphs, key=lambda item: item[4], reverse=True)[:2]
+    left_digit, right_digit = sorted(
+        digit_glyphs, key=lambda item: item[0] + item[2] / 2
+    )
+    left_center = left_digit[0] + left_digit[2] / 2
+    right_center = right_digit[0] + right_digit[2] / 2
+    minimum_digit_area = min(left_digit[4], right_digit[4])
+    minimum_digit_height = min(left_digit[3], right_digit[3])
+    marker_found = any(
+        component not in digit_glyphs
+        and left_center < component[0] + component[2] / 2 < right_center
+        and component[4] <= minimum_digit_area * 0.45
+        and component[3] <= minimum_digit_height * 0.5
+        for component in glyphs
+    )
+    if not marker_found:
+        return source
+    return f"{source[:match.start()]}{token[0]},{token[1:]}{source[match.end():]}"
+
+
+def _text_components_from_crop(
+    image: object, bbox: tuple[int, int, int, int], cv2: object
+) -> list[tuple[int, int, int, int, int]]:
+    """Return glyph components from an enlarged OCR crop without another OCR run."""
+
+    try:
+        image_height, image_width = image.shape[:2]
+        left, top, right, bottom = bbox
+        left, right = max(0, left), min(int(image_width), right)
+        top, bottom = max(0, top), min(int(image_height), bottom)
+        if right - left < 2 or bottom - top < 2:
+            return []
+        crop = image[top:bottom, left:right]
+        gray = (
+            cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            if len(crop.shape) == 3
+            else crop
+        )
+        if gray.shape[0] >= gray.shape[1] * 1.35 and hasattr(cv2, "ROTATE_90_CLOCKWISE"):
+            gray = cv2.rotate(gray, cv2.ROTATE_90_CLOCKWISE)
+        enlarged = cv2.resize(
+            gray,
+            (max(1, gray.shape[1] * 4), max(1, gray.shape[0] * 4)),
+            interpolation=cv2.INTER_CUBIC,
+        )
+        _, binary = cv2.threshold(
+            enlarged, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU
+        )
+        _, _, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+        return [tuple(int(value) for value in component) for component in stats[1:]]
+    except Exception:
+        return []
+
+
 def _is_weight_text(value: str) -> bool:
     return bool(_WEIGHT_UNIT_PATTERN.search(str(value or "")))
 
@@ -203,11 +276,15 @@ def _text_angle_dimension(angle: float | None) -> str | None:
     return None
 
 
-def _box_shape_dimension(box: OcrTextBox) -> str | None:
+def _box_shape_dimension(box: OcrTextBox, *, include_width: bool = False) -> str | None:
     left, top, right, bottom = box.bbox
     width = max(1, right - left)
     height = max(1, bottom - top)
-    return "height" if height >= width * 1.35 else None
+    if height >= width * 1.35:
+        return "height"
+    if include_width and width >= height * 1.35:
+        return "width"
+    return None
 
 
 def _unit_box_fallback_dimension(box: OcrTextBox) -> str | None:
@@ -271,6 +348,10 @@ def associate_dimension_hints(
         center_x = (left + right) / 2
         center_y = (top + bottom) / 2
         if not usable_lines:
+            fallback_shape_dimension = _box_shape_dimension(box, include_width=True)
+            if fallback_shape_dimension:
+                associated.append(replace(box, hint=fallback_shape_dimension))
+                continue
             associated.append(box)
             continue
         closest = min(
@@ -593,6 +674,18 @@ class PaddleImageDimensionRecognizer:
         image = self._cv2.imread(path)
         if image is None:
             return boxes
+        refined_boxes: list[OcrTextBox] = []
+        for box in boxes:
+            number = _NUMBER_PATTERN.search(box.text)
+            if number and len(number.group(0)) == 2 and number.group(0).isdigit():
+                text = _restore_lost_decimal_separator(
+                    box.text,
+                    _text_components_from_crop(image, box.bbox, self._cv2),
+                )
+                refined_boxes.append(replace(box, text=text))
+            else:
+                refined_boxes.append(box)
+        boxes = refined_boxes
         gray = self._cv2.cvtColor(image, self._cv2.COLOR_BGR2GRAY)
         edges = self._cv2.Canny(gray, 50, 150)
         raw_lines = self._cv2.HoughLinesP(
