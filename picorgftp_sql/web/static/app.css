@@ -1394,6 +1394,7 @@ h2 {
   position: absolute;
   box-sizing: border-box;
   border: 2px solid #cc4040;
+  transition: opacity 120ms ease, border-color 120ms ease;
 }
 
 .ocr-diagnostic-box.accepted {
@@ -1415,6 +1416,16 @@ h2 {
 
 .ocr-diagnostic-box.accepted .ocr-diagnostic-confidence {
   background: var(--accent);
+}
+
+.ocr-diagnostic-focus-active .ocr-diagnostic-box.ocr-muted {
+  opacity: 0;
+}
+
+.ocr-diagnostic-focus-active .ocr-diagnostic-box.ocr-focused {
+  z-index: 2;
+  border-color: #ffd24a;
+  box-shadow: 0 0 0 9999px rgb(0 0 0 / 62%);
 }
 
 .ocr-diagnostic-details,
@@ -1445,10 +1456,17 @@ h2 {
   background: var(--surface-2);
   font-size: 13px;
   overflow-wrap: anywhere;
+  cursor: default;
 }
 
 .ocr-diagnostic-candidate.accepted {
   border-left-color: var(--accent);
+}
+
+.ocr-diagnostic-candidate.ocr-focused,
+.ocr-diagnostic-candidate:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .sql-profile-list,

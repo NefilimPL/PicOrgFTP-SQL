@@ -13552,13 +13552,22 @@ function renderOcrDiagnostics(result) {
   const overlay = document.createElement("div");
   overlay.className = "ocr-diagnostic-overlay";
   const candidates = Array.isArray(result.candidates) ? result.candidates : [];
+  const setOcrCandidateFocus = (candidateIndex = null) => {
+    const activeIndex = candidateIndex === null ? "" : String(candidateIndex);
+    stage.classList.toggle("ocr-diagnostic-focus-active", Boolean(activeIndex));
+    output.querySelectorAll("[data-ocr-candidate-index]").forEach((element) => {
+      const focused = Boolean(activeIndex) && element.dataset.ocrCandidateIndex === activeIndex;
+      element.classList.toggle("ocr-focused", focused);
+      element.classList.toggle("ocr-muted", Boolean(activeIndex) && !focused);
+    });
+  };
   const drawOverlay = () => {
     overlay.textContent = "";
     const width = Number(image.naturalWidth || 0);
     const height = Number(image.naturalHeight || 0);
     if (!width || !height) return;
     const labelRows = [];
-    for (const candidate of candidates) {
+    for (const [candidateIndex, candidate] of candidates.entries()) {
       const bbox = Array.isArray(candidate.bbox) ? candidate.bbox : [];
       if (bbox.length !== 4) continue;
       const [left, top, right, bottom] = bbox.map(Number);
@@ -13566,6 +13575,7 @@ function renderOcrDiagnostics(result) {
       const rectangle = document.createElement("div");
       rectangle.className = `ocr-diagnostic-box ${candidate.accepted ? "accepted" : "rejected"}`;
       rectangle.setAttribute("data-ocr-overlay", "true");
+      rectangle.setAttribute("data-ocr-candidate-index", String(candidateIndex));
       rectangle.style.left = `${Math.max(0, Math.min(100, (left / width) * 100))}%`;
       rectangle.style.top = `${Math.max(0, Math.min(100, (top / height) * 100))}%`;
       rectangle.style.width = `${Math.max(0.3, Math.min(100, ((right - left) / width) * 100))}%`;
@@ -13604,10 +13614,16 @@ function renderOcrDiagnostics(result) {
   rawHeading.textContent = "Wszystkie odczyty";
   const candidateList = document.createElement("div");
   candidateList.className = "ocr-diagnostic-candidates";
-  for (const candidate of candidates) {
+  for (const [candidateIndex, candidate] of candidates.entries()) {
     const row = document.createElement("div");
     row.className = `ocr-diagnostic-candidate ${candidate.accepted ? "accepted" : "rejected"}`;
+    row.tabIndex = 0;
+    row.setAttribute("data-ocr-candidate-index", String(candidateIndex));
     row.textContent = `${ocrDimensionLabel(candidate.dimension)}: ${candidate.text || "—"} → ${candidate.value || "—"} (${ocrConfidenceLabel(candidate.confidence)})`;
+    row.addEventListener("mouseenter", () => setOcrCandidateFocus(candidateIndex));
+    row.addEventListener("mouseleave", () => setOcrCandidateFocus());
+    row.addEventListener("focus", () => setOcrCandidateFocus(candidateIndex));
+    row.addEventListener("blur", () => setOcrCandidateFocus());
     candidateList.appendChild(row);
   }
   if (!candidates.length) {

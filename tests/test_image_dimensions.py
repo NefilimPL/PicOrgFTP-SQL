@@ -184,6 +184,26 @@ def test_associates_a_tall_dimension_label_as_height_when_ocr_angle_is_flat():
     assert associated[0].hint == "height"
 
 
+def test_unit_labels_fall_back_to_box_shape_and_prefer_outer_dimensions():
+    boxes = associate_dimension_hints(
+        [
+            OcrTextBox("75 cm", 0.99, (100, 20, 220, 48), angle=17),
+            OcrTextBox("74 cm", 0.99, (120, 65, 235, 92), angle=17),
+            OcrTextBox("36 cm", 0.99, (35, 35, 72, 72), angle=17),
+            OcrTextBox("61 cm", 0.88, (700, 200, 728, 320), angle=17),
+            OcrTextBox("44 cm", 0.94, (650, 220, 678, 315), angle=17),
+        ],
+        [],
+    )
+
+    result = analyze_image_dimensions(
+        "fixture.png", minimum_text_confidence=0.8, recognizer=FakeRecognizer(boxes)
+    )
+
+    assert [box.hint for box in boxes] == ["width", "width", "depth", "height", "height"]
+    assert result.dimensions == {"width": "75", "depth": "36", "height": "61"}
+
+
 def test_diagnostics_rejects_weight_and_prefers_a_dimension_with_units():
     recognizer = FakeRecognizer(
         [

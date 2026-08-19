@@ -160,10 +160,17 @@ def _candidate_for_dimension(
     ]
     if not candidates:
         return None
-    return max(
-        candidates,
-        key=lambda item: (_has_dimension_unit(item.text), float(item.confidence)),
-    )
+    return max(candidates, key=_dimension_candidate_rank)
+
+
+def _dimension_candidate_rank(item: OcrTextBox | OcrDiagnosticCandidate) -> tuple[int, Decimal, float]:
+    """Prefer explicit, outer dimension labels over internal measurements."""
+
+    try:
+        magnitude = Decimal(_parse_numeric_value(item.text) or "0")
+    except InvalidOperation:
+        magnitude = Decimal(0)
+    return (_has_dimension_unit(item.text), magnitude, float(item.confidence))
 
 
 def _line_dimension(line: DimensionLine) -> str | None:
@@ -203,6 +210,21 @@ def _box_shape_dimension(box: OcrTextBox) -> str | None:
     return "height" if height >= width * 1.35 else None
 
 
+def _unit_box_fallback_dimension(box: OcrTextBox) -> str | None:
+    """Classify a cm/mm label when OCR did not preserve its text angle."""
+
+    if not _has_dimension_unit(box.text):
+        return None
+    left, top, right, bottom = box.bbox
+    width = max(1, right - left)
+    height = max(1, bottom - top)
+    if width >= height * 1.35:
+        return "width"
+    if height >= width * 1.35:
+        return "height"
+    return "depth"
+
+
 def _distance_to_segment(x: float, y: float, line: DimensionLine) -> float:
     delta_x = line.x2 - line.x1
     delta_y = line.y2 - line.y1
@@ -240,6 +262,10 @@ def associate_dimension_hints(
         angle_dimension = _text_angle_dimension(box.angle)
         if angle_dimension:
             associated.append(replace(box, hint=angle_dimension))
+            continue
+        unit_fallback_dimension = _unit_box_fallback_dimension(box)
+        if unit_fallback_dimension:
+            associated.append(replace(box, hint=unit_fallback_dimension))
             continue
         left, top, right, bottom = box.bbox
         center_x = (left + right) / 2
@@ -414,7 +440,7 @@ def analyze_image_dimensions(
         candidates.append(candidate)
         if accepted and dimension:
             previous = best.get(dimension)
-            if previous is None or candidate.confidence > previous.confidence:
+            if previous is None or _dimension_candidate_rank(candidate) > _dimension_candidate_rank(previous):
                 best[dimension] = candidate
     return ImageOcrDiagnostics(
         available=True,
