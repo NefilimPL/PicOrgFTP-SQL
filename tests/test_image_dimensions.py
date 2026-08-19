@@ -232,6 +232,9 @@ def test_ocr_runtime_info_does_not_treat_cache_control_directories_as_models(
         if package == "paddlex"
         else object(),
     )
+    monkeypatch.setattr(
+        image_dimensions, "_paddlex_ocr_core_is_available", lambda: True
+    )
 
     info = image_ocr_runtime_info()
 

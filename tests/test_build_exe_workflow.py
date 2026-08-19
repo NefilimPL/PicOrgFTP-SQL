@@ -156,7 +156,8 @@ def test_vision_build_installs_paddlex_ocr_core_without_headless_opencv() -> Non
     assert "paddlex[ocr-core]" in source
     assert "opencv-contrib-python==4.10.0.84" in source
     assert "opencv-python-headless" not in source
-    assert '"uninstall"' in common_source
+    assert '"uninstall" "--yes" "opencv-python" "opencv-python-headless" "opencv-contrib-python"' in common_source
+    assert '"import cv2; assert cv2.IMREAD_COLOR"' in common_source
 
 
 def test_web_ocr_build_batch_offers_downloaded_and_embedded_model_variants() -> None:
