@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sys
+import types
+
 import picorgftp_sql.services.image_dimensions as image_dimensions
 
 from picorgftp_sql.services.image_dimensions import (
@@ -24,6 +27,26 @@ class FakeRecognizer:
     def detect(self, _path: str) -> list[OcrTextBox]:
         self.calls += 1
         return self.boxes
+
+
+def test_paddle_recognizer_disables_mkldnn_for_cpu_predictor(tmp_path, monkeypatch):
+    received_kwargs: dict[str, object] = {}
+
+    class FakePaddleOCR:
+        def __init__(self, **kwargs: object) -> None:
+            received_kwargs.update(kwargs)
+
+    monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(tmp_path))
+    monkeypatch.setitem(sys.modules, "cv2", types.ModuleType("cv2"))
+    monkeypatch.setitem(
+        sys.modules,
+        "paddleocr",
+        types.SimpleNamespace(PaddleOCR=FakePaddleOCR),
+    )
+
+    image_dimensions.PaddleImageDimensionRecognizer()
+
+    assert received_kwargs == {"lang": "en", "enable_mkldnn": False}
 
 
 def test_resolves_decimal_comma_value_when_ocr_confidence_meets_threshold():

@@ -461,7 +461,10 @@ class PaddleImageDimensionRecognizer:
         except ImportError as exc:  # pragma: no cover - runtime optionality
             raise ImageDimensionUnavailable from exc
         self._cv2 = cv2
-        self._ocr = PaddleOCR(lang="en")
+        # PaddleOCR enables oneDNN by default on CPU.  PaddlePaddle 3.3 can
+        # fail on OCR model PIR attributes in that backend, so prefer the
+        # standard CPU executor for reliable local dimension extraction.
+        self._ocr = PaddleOCR(lang="en", enable_mkldnn=False)
 
     def detect(self, path: str) -> list[OcrTextBox]:  # pragma: no cover - optional runtime
         raw = self._ocr.predict(path)
