@@ -10,6 +10,7 @@ WORKFLOW = ROOT / ".github" / "workflows" / "build-exe.yml"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 WEB_REQUIREMENTS = ROOT / "requirements-web.txt"
 BUILD_REQUIREMENTS = ROOT / "requirements-build.txt"
+VISION_REQUIREMENTS = ROOT / "requirements-vision.txt"
 EMAIL_DELIVERY = ROOT / "picorgftp_sql" / "email_delivery.py"
 BUILD_COMMON = ROOT / "Generator exe" / "build_common.ps1"
 WEB_BUILD = ROOT / "Generator exe" / "build_web_exe.ps1"
@@ -142,9 +143,20 @@ def test_web_build_supports_opt_in_vision_engine_and_embedded_models() -> None:
     assert "--collect-all" in build_source
     assert "paddleocr" in build_source
     assert "paddlex" in build_source
+    assert "pypdfium2" in build_source
     assert "PADDLE_PDX_CACHE_HOME" in build_source
     assert "ocr_models" in build_source
     assert "%*" in batch_source
+
+
+def test_vision_build_installs_paddlex_ocr_core_without_headless_opencv() -> None:
+    source = VISION_REQUIREMENTS.read_text(encoding="utf-8")
+    common_source = BUILD_COMMON.read_text(encoding="utf-8")
+
+    assert "paddlex[ocr-core]" in source
+    assert "opencv-contrib-python==4.10.0.84" in source
+    assert "opencv-python-headless" not in source
+    assert '"uninstall"' in common_source
 
 
 def test_web_ocr_build_batch_offers_downloaded_and_embedded_model_variants() -> None:
@@ -167,6 +179,7 @@ def test_local_build_supports_opt_in_vision_engine_and_embedded_models() -> None
     assert "--collect-all" in build_source
     assert "paddleocr" in build_source
     assert "paddlex" in build_source
+    assert "pypdfium2" in build_source
     assert "PADDLE_PDX_CACHE_HOME" in build_source
     assert "ocr_models" in build_source
     assert "%*" in batch_source

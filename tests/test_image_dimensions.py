@@ -262,6 +262,26 @@ def test_ocr_runtime_info_requires_the_paddlex_ocr_pipeline_configuration(
     assert info["available"] is False
 
 
+def test_ocr_runtime_info_requires_paddlex_ocr_core_dependencies(monkeypatch):
+    monkeypatch.setattr(
+        image_dimensions, "_optional_package_version", lambda _package: "1.0"
+    )
+    monkeypatch.setattr(image_dimensions.util, "find_spec", lambda _package: object())
+    monkeypatch.setattr(
+        image_dimensions, "_paddlex_ocr_pipeline_is_available", lambda: True
+    )
+    monkeypatch.setattr(
+        image_dimensions,
+        "_paddlex_ocr_core_is_available",
+        lambda: False,
+        raising=False,
+    )
+
+    info = image_ocr_runtime_info()
+
+    assert info["available"] is False
+
+
 def test_detects_embedded_ocr_model_cache_in_pyinstaller_bundle(tmp_path, monkeypatch):
     model_cache = tmp_path / "ocr_models"
     model_cache.mkdir()

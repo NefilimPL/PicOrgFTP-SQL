@@ -71,6 +71,7 @@ function Install-BuildDependencies {
         Invoke-Native $Python "-m" "pip" "install" "--disable-pip-version-check" "-r" (Join-Path $RepoRoot "requirements-web.txt")
     }
     if ($IncludeVisionDependencies) {
+        Invoke-Native $Python "-m" "pip" "uninstall" "--yes" "opencv-python" "opencv-python-headless"
         Invoke-Native $Python "-m" "pip" "install" "--disable-pip-version-check" "-r" (Join-Path $RepoRoot "requirements-vision.txt")
     }
 }
@@ -133,9 +134,15 @@ function Test-BuildEnvironment {
     if ($IncludeVisionDependencies) {
         $imports += @(
             "import cv2",
+            "import bidi",
+            "import imagesize",
             "import paddle",
             "import paddlex",
             "import paddleocr"
+            "import pyclipper",
+            "import pypdfium2",
+            "import shapely",
+            "from paddlex.utils.deps import is_extra_available; assert is_extra_available('ocr-core')"
         )
     }
 

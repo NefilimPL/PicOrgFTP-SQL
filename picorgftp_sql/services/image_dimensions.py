@@ -217,8 +217,17 @@ def _paddlex_ocr_pipeline_is_available() -> bool:
     ).is_file()
 
 
+def _paddlex_ocr_core_is_available() -> bool:
+    try:
+        from paddlex.utils.deps import is_extra_available
+
+        return bool(is_extra_available("ocr-core"))
+    except Exception:
+        return False
+
+
 def image_ocr_runtime_info() -> dict[str, object]:
-    """Return display metadata without importing optional OCR packages."""
+    """Return OCR display metadata without initializing an OCR model."""
 
     paddleocr_version = _optional_package_version("paddleocr")
     paddle_version = _optional_package_version("paddlepaddle")
@@ -230,6 +239,7 @@ def image_ocr_runtime_info() -> dict[str, object]:
         and util.find_spec("paddleocr")
         and util.find_spec("cv2")
         and _paddlex_ocr_pipeline_is_available()
+        and _paddlex_ocr_core_is_available()
     )
     model_cache_ready = _model_cache_has_content(ocr_model_cache_path())
     return {
