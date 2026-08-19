@@ -680,7 +680,12 @@ def _taskkill_process_tree(pid: int) -> tuple[bool, str]:
 
 
 def stop_web(port: int) -> ActionResult:
-    end_system_service()
+    system_stop = end_system_service()
+    if not system_stop.ok:
+        return ActionResult(
+            False,
+            f"Nie udalo sie zatrzymac uslugi SYSTEM: {system_stop.message}",
+        )
     stopped = False
     data = read_metadata()
     failures: list[str] = []
@@ -823,6 +828,27 @@ def open_as_admin() -> ActionResult:
     if int(rc) <= 32:
         return ActionResult(False, "System odrzucil uruchomienie jako administrator.")
     return ActionResult(True, "Uruchomiono nowe okno jako administrator.")
+
+
+def stop_web_as_admin(port: int) -> ActionResult:
+    if os.name != "nt":
+        return ActionResult(False, "Zatrzymywanie jako administrator jest dostepne tylko na Windows.")
+    root = app_root()
+    if getattr(sys, "frozen", False):
+        file_path = str(Path(sys.executable).resolve())
+        params = subprocess.list2cmdline(["--stop-panel", "--port", str(int(port))])
+    else:
+        file_path = _pythonw_executable()
+        params = subprocess.list2cmdline(
+            [str(root / "PicOrgFTP-SQL-WEB.pyw"), "--stop-panel", "--port", str(int(port))]
+        )
+    try:
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", file_path, params, str(root), 1)
+    except Exception as exc:
+        return ActionResult(False, f"Nie udalo sie poprosic o uprawnienia administratora: {exc}")
+    if int(rc) <= 32:
+        return ActionResult(False, "System odrzucil uruchomienie zatrzymania jako administrator.")
+    return ActionResult(True, "Potwierdz UAC: panel zostanie zatrzymany jako administrator.")
 
 
 def run_service_mode(port: int, host: str) -> int:
@@ -1145,6 +1171,11 @@ class WebManagerApp:
 
     def stop(self) -> None:
         port = self._port()
+        if task_exists() and not is_admin():
+            result = stop_web_as_admin(port)
+            self.status_override_until = time.time() + 12
+            self.status_var.set(result.message)
+            return
         self._run_action(lambda: stop_web(port))
 
     def restart(self) -> None:
@@ -1429,11 +1460,14 @@ class WebManagerApp:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--service-run", action="store_true")
+    parser.add_argument("--stop-panel", action="store_true")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--host", default=DEFAULT_HOST)
     args = parser.parse_args(argv)
     if args.service_run:
         return run_service_mode(args.port, args.host)
+    if args.stop_panel:
+        return 0 if stop_web(args.port).ok else 1
     WebManagerApp().run()
     return 0
 

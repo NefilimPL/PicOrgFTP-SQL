@@ -448,6 +448,63 @@ def test_end_system_service_reports_scheduler_error(monkeypatch) -> None:
     assert "Access denied" in result.message
 
 
+def test_stop_web_returns_system_service_failure_without_claiming_success(
+    tmp_path, monkeypatch
+) -> None:
+    """Catches discarding an access error from schtasks /End."""
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        web_manager,
+        "end_system_service",
+        lambda: web_manager.ActionResult(False, "Access denied"),
+    )
+
+    result = web_manager.stop_web(8010)
+
+    assert not result.ok
+    assert "Access denied" in result.message
+
+
+def test_manager_stop_requests_an_elevated_stop_for_a_system_service(monkeypatch) -> None:
+    """Catches a non-admin manager trying to taskkill a SYSTEM-owned process."""
+    app = _app_without_tk()
+    normal_actions = []
+    elevated_ports = []
+    app._run_action = lambda action: normal_actions.append(action)
+    monkeypatch.setattr(web_manager, "task_exists", lambda: True)
+    monkeypatch.setattr(web_manager, "is_admin", lambda: False)
+    monkeypatch.setattr(
+        web_manager,
+        "stop_web_as_admin",
+        lambda port: elevated_ports.append(port)
+        or web_manager.ActionResult(True, "Potwierdz UAC."),
+        raising=False,
+    )
+
+    app.stop()
+
+    assert elevated_ports == [8010]
+    assert normal_actions == []
+    assert app.status_var.value == "Potwierdz UAC."
+
+
+def test_main_stop_panel_mode_stops_the_panel_without_opening_the_gui(monkeypatch) -> None:
+    """Catches an elevated EXE opening a second manager instead of stopping the task."""
+    stopped_ports = []
+    monkeypatch.setattr(
+        web_manager,
+        "stop_web",
+        lambda port: stopped_ports.append(port) or web_manager.ActionResult(True, ""),
+    )
+    try:
+        exit_code = web_manager.main(["--stop-panel", "--port", "8123"])
+    except SystemExit:
+        exit_code = None
+
+    assert exit_code == 0
+    assert stopped_ports == [8123]
+
+
 def test_stop_web_keeps_metadata_when_panel_port_stays_open(tmp_path, monkeypatch) -> None:
     """Catches removing runtime metadata before the web listener actually exits."""
     pid_path = tmp_path / ".picorg_web.pid"
