@@ -13689,9 +13689,12 @@ function renderSettingsOcr() {
       link.rel = "noreferrer";
       link.textContent = "Oficjalny projekt OCR na GitHub";
       engineInfo.append(title, runtimeLine, modelList, link);
-      status.textContent = info.available
-        ? "Silnik OCR jest gotowy do testu."
-        : "Silnik OCR lub model nie jest jeszcze dostepny w tej instalacji.";
+      const modelReady = models.some((model) => model.status === "ready");
+      status.textContent = !info.available
+        ? "Silnik OCR nie jest dostepny w tej instalacji."
+        : modelReady
+          ? "Silnik OCR i model sa gotowe do testu."
+          : "Silnik OCR jest zainstalowany; model zostanie pobrany przy pierwszym tescie.";
     })
     .catch((error) => {
       status.textContent = error.message || "Nie udalo sie odczytac statusu OCR.";

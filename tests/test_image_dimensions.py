@@ -210,6 +210,58 @@ def test_ocr_runtime_info_has_stable_engine_and_github_metadata():
     assert info["models"][0]["version"] == "lang=en"
 
 
+def test_ocr_runtime_info_does_not_treat_cache_control_directories_as_models(
+    tmp_path, monkeypatch
+):
+    for name in ("func_ret", "locks", "temp"):
+        (tmp_path / name).mkdir()
+    package_root = tmp_path / "paddlex"
+    pipeline_config = package_root / "configs" / "pipelines" / "OCR.yaml"
+    pipeline_config.parent.mkdir(parents=True)
+    pipeline_config.touch()
+    package_origin = package_root / "__init__.py"
+    package_origin.touch()
+    monkeypatch.setattr(image_dimensions, "ocr_model_cache_path", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        image_dimensions, "_optional_package_version", lambda _package: "1.0"
+    )
+    monkeypatch.setattr(
+        image_dimensions.util,
+        "find_spec",
+        lambda package: type("Spec", (), {"origin": str(package_origin)})()
+        if package == "paddlex"
+        else object(),
+    )
+
+    info = image_ocr_runtime_info()
+
+    assert info["available"] is True
+    assert info["models"][0]["status"] == "download_on_first_use"
+
+
+def test_ocr_runtime_info_requires_the_paddlex_ocr_pipeline_configuration(
+    tmp_path, monkeypatch
+):
+    package_root = tmp_path / "paddlex"
+    package_root.mkdir()
+    package_origin = package_root / "__init__.py"
+    package_origin.touch()
+    monkeypatch.setattr(
+        image_dimensions, "_optional_package_version", lambda _package: "1.0"
+    )
+    monkeypatch.setattr(
+        image_dimensions.util,
+        "find_spec",
+        lambda package: type("Spec", (), {"origin": str(package_origin)})()
+        if package == "paddlex"
+        else object(),
+    )
+
+    info = image_ocr_runtime_info()
+
+    assert info["available"] is False
+
+
 def test_detects_embedded_ocr_model_cache_in_pyinstaller_bundle(tmp_path, monkeypatch):
     model_cache = tmp_path / "ocr_models"
     model_cache.mkdir()

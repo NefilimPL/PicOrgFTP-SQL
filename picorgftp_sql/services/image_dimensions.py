@@ -209,6 +209,14 @@ def _optional_package_version(package: str) -> str | None:
         return None
 
 
+def _paddlex_ocr_pipeline_is_available() -> bool:
+    spec = util.find_spec("paddlex")
+    origin = str(getattr(spec, "origin", "") or "").strip()
+    return bool(origin) and (
+        Path(origin).parent / "configs" / "pipelines" / "OCR.yaml"
+    ).is_file()
+
+
 def image_ocr_runtime_info() -> dict[str, object]:
     """Return display metadata without importing optional OCR packages."""
 
@@ -221,6 +229,7 @@ def image_ocr_runtime_info() -> dict[str, object]:
         and opencv_version
         and util.find_spec("paddleocr")
         and util.find_spec("cv2")
+        and _paddlex_ocr_pipeline_is_available()
     )
     model_cache_ready = _model_cache_has_content(ocr_model_cache_path())
     return {
@@ -279,7 +288,11 @@ def ocr_model_cache_path() -> str:
 
 def _model_cache_has_content(path: str) -> bool:
     try:
-        return Path(path).is_dir() and any(Path(path).iterdir())
+        model_root = Path(path) / "official_models"
+        return model_root.is_dir() and any(
+            candidate.is_dir() and any(candidate.iterdir())
+            for candidate in model_root.iterdir()
+        )
     except OSError:
         return False
 
