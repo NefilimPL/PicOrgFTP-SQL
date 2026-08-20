@@ -13608,6 +13608,12 @@ function renderOcrDiagnostics(result) {
     input.value = String(result.dimensions?.[kind] || "");
     field.textContent = ocrDimensionLabel(kind);
     field.appendChild(input);
+    const attempt = document.createElement("small");
+    attempt.className = "ocr-diagnostic-attempt";
+    attempt.textContent = String(
+      result.attempts?.[kind] || "OCR nie przekazal informacji o probie przypisania."
+    );
+    field.appendChild(attempt);
     dimensions.appendChild(field);
   }
   const rawHeading = document.createElement("h3");
@@ -13616,10 +13622,10 @@ function renderOcrDiagnostics(result) {
   candidateList.className = "ocr-diagnostic-candidates";
   for (const [candidateIndex, candidate] of candidates.entries()) {
     const row = document.createElement("div");
-    row.className = `ocr-diagnostic-candidate ${candidate.accepted ? "accepted" : "rejected"}`;
+    row.className = `ocr-diagnostic-candidate ${candidate.accepted ? "accepted" : "rejected"}${candidate.selected ? " selected" : ""}`;
     row.tabIndex = 0;
     row.setAttribute("data-ocr-candidate-index", String(candidateIndex));
-    row.textContent = `${ocrDimensionLabel(candidate.dimension)}: ${candidate.text || "—"} → ${candidate.value || "—"} (${ocrConfidenceLabel(candidate.confidence)})`;
+    row.textContent = `${ocrDimensionLabel(candidate.dimension)}: ${candidate.text || "—"} → ${candidate.value || "—"} (${ocrConfidenceLabel(candidate.confidence)}) — ${candidate.reason || "Brak szczegolowego powodu."}`;
     row.addEventListener("mouseenter", () => setOcrCandidateFocus(candidateIndex));
     row.addEventListener("mouseleave", () => setOcrCandidateFocus());
     row.addEventListener("focus", () => setOcrCandidateFocus(candidateIndex));

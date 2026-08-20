@@ -6,7 +6,7 @@ standard web application can operate without ML dependencies installed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from decimal import Decimal, InvalidOperation
 from importlib import metadata, util
 import math
@@ -25,6 +25,16 @@ _DIMENSION_HINTS = {
     "width": frozenset({"w", "width", "szer", "szerokosc", "szerokość"}),
     "depth": frozenset({"d", "depth", "gleb", "glebokosc", "głęb", "głębokość"}),
     "height": frozenset({"h", "height", "wys", "wysokosc", "wysokość"}),
+}
+_DIMENSION_LABELS = {
+    "width": "szerokosci",
+    "depth": "glebokosci",
+    "height": "wysokosci",
+}
+_DIMENSION_NOMINATIVE_LABELS = {
+    "width": "szerokosc",
+    "depth": "glebokosc",
+    "height": "wysokosc",
 }
 _OCR_ENGINE_NAME = "PaddleOCR"
 _OCR_GITHUB_URL = "https://github.com/PaddlePaddle/PaddleOCR"
@@ -82,6 +92,8 @@ class OcrDiagnosticCandidate:
     dimension: str | None
     value: str
     accepted: bool
+    reason: str = ""
+    selected: bool = False
 
 
 @dataclass(frozen=True)
@@ -90,6 +102,7 @@ class ImageOcrDiagnostics:
     dimensions: dict[str, str]
     candidates: list[OcrDiagnosticCandidate]
     message: str = ""
+    attempts: dict[str, str] = field(default_factory=dict)
 
 
 class ImageDimensionRecognizer(Protocol):
@@ -300,14 +313,14 @@ def _candidate_for_dimension(
     return max(candidates, key=_dimension_candidate_rank)
 
 
-def _dimension_candidate_rank(item: OcrTextBox | OcrDiagnosticCandidate) -> tuple[int, Decimal, float]:
-    """Prefer explicit, outer dimension labels over internal measurements."""
+def _dimension_candidate_rank(item: OcrTextBox | OcrDiagnosticCandidate) -> tuple[Decimal, int, float]:
+    """Always select the largest detected value for one dimension."""
 
     try:
         magnitude = Decimal(_parse_numeric_value(item.text) or "0")
     except InvalidOperation:
         magnitude = Decimal(0)
-    return (_has_dimension_unit(item.text), magnitude, float(item.confidence))
+    return (magnitude, _has_dimension_unit(item.text), float(item.confidence))
 
 
 def _line_dimension(line: DimensionLine) -> str | None:
@@ -564,7 +577,7 @@ def analyze_image_dimensions(
         )
 
     candidates: list[OcrDiagnosticCandidate] = []
-    best: dict[str, OcrDiagnosticCandidate] = {}
+    best_indexes: dict[str, int] = {}
     for box in boxes:
         dimension = _normalized_hint(box.hint)
         value = _parse_numeric_value(box.text) or ""
@@ -574,6 +587,21 @@ def analyze_image_dimensions(
             and not _is_weight_text(box.text)
             and float(box.confidence) >= threshold
         )
+        if dimension is None:
+            reason = (
+                "Nie rozpoznano rodzaju wymiaru na podstawie orientacji tekstu ani linii wymiarowej."
+            )
+        elif not value:
+            reason = "Nie rozpoznano dodatniej wartosci liczbowej."
+        elif _is_weight_text(box.text):
+            reason = "Odrzucono: odczyt zawiera jednostke masy, a nie wymiar."
+        elif float(box.confidence) < threshold:
+            reason = (
+                f"Odrzucono: pewnosc {_display_confidence(float(box.confidence))}% "
+                f"jest ponizej progu {_display_confidence(threshold)}%."
+            )
+        else:
+            reason = f"Kandydat do {_DIMENSION_LABELS[dimension]}."
         candidate = OcrDiagnosticCandidate(
             text=str(box.text),
             confidence=float(box.confidence),
@@ -581,23 +609,77 @@ def analyze_image_dimensions(
             dimension=dimension,
             value=value,
             accepted=accepted,
+            reason=reason,
         )
         candidates.append(candidate)
         if accepted and dimension:
-            previous = best.get(dimension)
-            if previous is None or _dimension_candidate_rank(candidate) > _dimension_candidate_rank(previous):
-                best[dimension] = candidate
+            previous_index = best_indexes.get(dimension)
+            if (
+                previous_index is None
+                or _dimension_candidate_rank(candidate)
+                > _dimension_candidate_rank(candidates[previous_index])
+            ):
+                best_indexes[dimension] = len(candidates) - 1
+
+    selected_indexes = set(best_indexes.values())
+    selected_candidates: list[OcrDiagnosticCandidate] = []
+    for index, candidate in enumerate(candidates):
+        if index in selected_indexes:
+            selected_candidates.append(
+                replace(
+                    candidate,
+                    reason=(
+                        f"Wybrano jako {_DIMENSION_NOMINATIVE_LABELS[candidate.dimension]}."
+                    ),
+                    selected=True,
+                )
+            )
+        elif candidate.accepted and candidate.dimension:
+            chosen = candidates[best_indexes[candidate.dimension]]
+            selected_candidates.append(
+                replace(
+                    candidate,
+                    reason=(
+                        f"Odrzucono: dla {_DIMENSION_LABELS[candidate.dimension]} "
+                        f"wybrano wieksza wartosc {chosen.value}."
+                    ),
+                )
+            )
+        else:
+            selected_candidates.append(candidate)
+
+    attempts: dict[str, str] = {}
+    for dimension in sorted(_DIMENSIONS):
+        selected_index = best_indexes.get(dimension)
+        if selected_index is not None:
+            attempts[dimension] = (
+                f"Wybrano {candidates[selected_index].value} jako "
+                f"{_DIMENSION_NOMINATIVE_LABELS[dimension]}."
+            )
+        else:
+            attempts[dimension] = (
+                f"OCR przeanalizowal {len(candidates)} odczyt"
+                f"{'y' if len(candidates) != 1 else ''}, ale nie przypisal zadnego do "
+                f"{_DIMENSION_LABELS[dimension]}."
+            )
     return ImageOcrDiagnostics(
         available=True,
-        dimensions={dimension: best.get(dimension, OcrDiagnosticCandidate("", 0, (0, 0, 0, 0), None, "", False)).value for dimension in sorted(_DIMENSIONS)},
-        candidates=candidates,
+        dimensions={
+            dimension: candidates[best_indexes[dimension]].value
+            if dimension in best_indexes
+            else ""
+            for dimension in sorted(_DIMENSIONS)
+        },
+        candidates=selected_candidates,
+        attempts=attempts,
     )
 
 
 def _result_for_request(
     request: ImageDimensionRequest, boxes: Iterable[OcrTextBox]
 ) -> ImageDimensionResult:
-    candidate = _candidate_for_dimension(boxes, request.dimension)
+    detected_boxes = list(boxes)
+    candidate = _candidate_for_dimension(detected_boxes, request.dimension)
     if candidate is None:
         return ImageDimensionResult(
             "",
@@ -605,7 +687,9 @@ def _result_for_request(
             _warning(
                 "image_dimension_not_found",
                 request.slot,
-                f"Nie znaleziono wymiaru {request.dimension} na obrazie slotu {request.slot}.",
+                f"OCR przeanalizowal {len(detected_boxes)} odczyt"
+                f"{'y' if len(detected_boxes) != 1 else ''} w slocie {request.slot}, "
+                f"ale nie przypisal zadnego do {_DIMENSION_LABELS[request.dimension]}.",
             ),
         )
     confidence = float(candidate.confidence)

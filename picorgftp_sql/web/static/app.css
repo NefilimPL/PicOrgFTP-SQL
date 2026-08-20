@@ -1450,6 +1450,12 @@ h2 {
   width: 100%;
 }
 
+.ocr-diagnostic-attempt {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .ocr-diagnostic-candidate {
   padding: 7px 8px;
   border-left: 3px solid #cc4040;
@@ -1461,6 +1467,10 @@ h2 {
 
 .ocr-diagnostic-candidate.accepted {
   border-left-color: var(--accent);
+}
+
+.ocr-diagnostic-candidate.selected {
+  background: color-mix(in srgb, var(--accent) 13%, var(--surface-2));
 }
 
 .ocr-diagnostic-candidate.ocr-focused,

@@ -105,6 +105,25 @@ def test_reports_missing_slot_without_calling_ocr():
     assert recognizer.calls == 0
 
 
+def test_template_resolution_confirms_ocr_attempt_when_no_dimension_was_assigned():
+    values, warnings = resolve_image_dimensions(
+        [ImageDimensionRequest("15", "height", 0.8)],
+        {"15": "fixture.png"},
+        recognizer=FakeRecognizer([OcrTextBox("80 cm", 0.99, (10, 10, 40, 40))]),
+    )
+
+    assert values == {"IMAGE_DIMENSION:15:HEIGHT": ""}
+    assert warnings == [
+        {
+            "code": "image_dimension_not_found",
+            "slot": "15",
+            "message": (
+                "OCR przeanalizowal 1 odczyt w slocie 15, ale nie przypisal zadnego do wysokosci."
+            ),
+        }
+    ]
+
+
 def test_uses_dimension_hint_to_select_height_value():
     recognizer = FakeRecognizer(
         [
@@ -413,6 +432,48 @@ def test_diagnostics_classifies_boxes_and_applies_threshold():
     assert result.candidates[1].accepted is False
     assert result.candidates[1].dimension == "depth"
     assert result.candidates[2].value == ""
+
+
+def test_diagnostics_explains_unclassified_ocr_and_each_dimension_attempt():
+    result = analyze_image_dimensions(
+        "fixture.png",
+        minimum_text_confidence=0.8,
+        recognizer=FakeRecognizer(
+            [OcrTextBox("80 cm", 0.99, (10, 10, 40, 40))]
+        ),
+    )
+
+    assert result.dimensions == {"width": "", "depth": "", "height": ""}
+    assert result.candidates[0].reason == (
+        "Nie rozpoznano rodzaju wymiaru na podstawie orientacji tekstu ani linii wymiarowej."
+    )
+    assert result.attempts["width"] == (
+        "OCR przeanalizowal 1 odczyt, ale nie przypisal zadnego do szerokosci."
+    )
+    assert result.attempts["height"] == (
+        "OCR przeanalizowal 1 odczyt, ale nie przypisal zadnego do wysokosci."
+    )
+
+
+def test_diagnostics_always_selects_the_largest_value_for_one_dimension():
+    result = analyze_image_dimensions(
+        "fixture.png",
+        minimum_text_confidence=0.8,
+        recognizer=FakeRecognizer(
+            [
+                OcrTextBox("46 cm", 0.99, (10, 10, 30, 120), "height"),
+                OcrTextBox("80", 0.81, (40, 10, 60, 140), "height"),
+            ]
+        ),
+    )
+
+    assert result.dimensions["height"] == "80"
+    assert result.candidates[0].selected is False
+    assert result.candidates[0].reason == (
+        "Odrzucono: dla wysokosci wybrano wieksza wartosc 80."
+    )
+    assert result.candidates[1].selected is True
+    assert result.attempts["height"] == "Wybrano 80 jako wysokosc."
 
 
 def test_diagnostics_returns_a_message_instead_of_raising_when_ocr_is_broken():
