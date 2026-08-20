@@ -1256,14 +1256,14 @@ class WebManagerApp:
         self.refreshing = False
         self._refresh_account_rows()
         if status.get("error"):
-            if time.time() >= self.status_override_until:
+            if not self.close_check_in_progress and time.time() >= self.status_override_until:
                 self.status_var.set(f"Status: blad odswiezania: {status['error']}")
             if self.pending_refresh:
                 self.pending_refresh = False
                 self.request_refresh()
             return
 
-        if time.time() >= self.status_override_until:
+        if not self.close_check_in_progress and time.time() >= self.status_override_until:
             if status["running"]:
                 self.status_var.set("Status: dziala")
             elif status["listeners"]:
@@ -1418,7 +1418,19 @@ class WebManagerApp:
 
     def _stop_web_for_close_worker(self, port: int) -> None:
         try:
-            result = stop_web(port)
+            if task_exists() and not is_admin():
+                elevated = stop_web_as_admin(port)
+                if not elevated.ok:
+                    result = elevated
+                elif _wait_for_port_release(port, timeout=45.0):
+                    result = ActionResult(True, "Zatrzymano panel webowy jako administrator.")
+                else:
+                    result = ActionResult(
+                        False,
+                        f"Panel WWW nadal nasluchuje na porcie {port}. Potwierdz UAC i sprobuj ponownie.",
+                    )
+            else:
+                result = stop_web(port)
         except Exception as exc:
             result = ActionResult(False, str(exc))
         self.root.after(0, lambda: self._finish_close_stop(result))

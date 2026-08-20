@@ -626,6 +626,7 @@ def test_finish_close_check_stops_running_web_panel_in_background_when_user_conf
 
     monkeypatch.setattr(web_manager.threading, "Thread", FakeThread)
     monkeypatch.setattr(web_manager, "confirm_close_running_web_panel", lambda: True, raising=False)
+    monkeypatch.setattr(web_manager, "task_exists", lambda: False)
     monkeypatch.setattr(
         web_manager,
         "stop_web",
@@ -651,3 +652,70 @@ def test_finish_close_check_stops_running_web_panel_in_background_when_user_conf
     assert app.root.destroyed
     assert not app.close_check_in_progress
     assert app.close_progress.stopped == 2
+
+
+def test_close_stop_requests_elevation_for_a_system_service(monkeypatch) -> None:
+    app = _app_without_tk()
+    elevated_ports = []
+    normal_ports = []
+
+    monkeypatch.setattr(web_manager, "task_exists", lambda: True)
+    monkeypatch.setattr(web_manager, "is_admin", lambda: False)
+    monkeypatch.setattr(
+        web_manager,
+        "stop_web_as_admin",
+        lambda port: elevated_ports.append(port) or web_manager.ActionResult(True, "Potwierdz UAC."),
+    )
+    monkeypatch.setattr(web_manager, "stop_web", lambda port: normal_ports.append(port))
+    monkeypatch.setattr(web_manager, "_wait_for_port_release", lambda _port, **_kwargs: True)
+
+    app._stop_web_for_close_worker(8010)
+
+    assert elevated_ports == [8010]
+    assert normal_ports == []
+    assert app.root.destroyed
+
+
+def test_status_refresh_does_not_replace_stopping_feedback_while_close_is_active():
+    app = _app_without_tk()
+    app._refresh_account_rows = lambda: None
+    app._set_rows = lambda *_args: None
+    app.service_var = _FakeStringVar()
+    app.autostart_var = _FakeStringVar()
+    app.urls_list = types.SimpleNamespace(delete=lambda *_args: None, insert=lambda *_args: None)
+    app.listeners_tree = object()
+    app.users_tree = object()
+    app.refreshing = True
+    app.pending_refresh = False
+    app.close_check_in_progress = True
+    app.status_override_until = 0
+    app.status_var.set("Zatrzymuje panel WWW...")
+
+    app._apply_status(
+        {
+            "running": True,
+            "listeners": [],
+            "task_exists": True,
+            "task_enabled": True,
+            "admin": False,
+            "urls": [],
+            "clients": [],
+            "connections": [],
+        }
+    )
+
+    assert app.status_var.value == "Zatrzymuje panel WWW..."
+
+
+def test_status_refresh_error_does_not_replace_stopping_feedback_while_close_is_active():
+    app = _app_without_tk()
+    app._refresh_account_rows = lambda: None
+    app.refreshing = True
+    app.pending_refresh = False
+    app.close_check_in_progress = True
+    app.status_override_until = 0
+    app.status_var.set("Zatrzymuje panel WWW...")
+
+    app._apply_status({"error": "connection reset"})
+
+    assert app.status_var.value == "Zatrzymuje panel WWW..."
