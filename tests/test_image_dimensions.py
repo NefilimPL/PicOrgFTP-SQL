@@ -395,6 +395,40 @@ def test_paddle_recognizer_uses_crop_retry_for_incomplete_unit_label():
     assert boxes[0].confidence == 0.91
 
 
+def test_paddle_recognizer_classifies_ocr_boxes_when_opencv_cannot_read_the_image():
+    class FakeCv2:
+        @staticmethod
+        def imread(_path):
+            return None
+
+    class FakeOcr:
+        @staticmethod
+        def predict(_path):
+            return [
+                {
+                    "res": {
+                        "rec_texts": ["80 cm", "46 cm"],
+                        "rec_scores": [0.99, 0.97],
+                        "rec_polys": [
+                            [[10, 20], [110, 20], [110, 45], [10, 45]],
+                            [[30, 60], [52, 60], [52, 190], [30, 190]],
+                        ],
+                    }
+                }
+            ]
+
+    recognizer = object.__new__(image_dimensions.PaddleImageDimensionRecognizer)
+    recognizer._cv2 = FakeCv2()
+    recognizer._ocr = FakeOcr()
+
+    boxes = recognizer.detect("fixture.png")
+
+    assert [(box.text, box.hint) for box in boxes] == [
+        ("80 cm", "width"),
+        ("46 cm", "height"),
+    ]
+
+
 def test_diagnostics_rejects_weight_and_prefers_a_dimension_with_units():
     recognizer = FakeRecognizer(
         [

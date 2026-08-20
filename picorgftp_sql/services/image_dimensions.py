@@ -821,7 +821,7 @@ class PaddleImageDimensionRecognizer:
                 )
         image = self._cv2.imread(path)
         if image is None:
-            return boxes
+            return associate_dimension_hints(boxes, [])
         boxes = [
             _retry_low_confidence_dimension_label(
                 box, image, self._cv2, self._ocr.predict
