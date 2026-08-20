@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 import re
 import sys
-from typing import Iterable, Mapping, Protocol
+from typing import Callable, Iterable, Mapping, Protocol
 
 
 _DIMENSIONS = frozenset({"width", "depth", "height"})
@@ -211,6 +211,70 @@ def _text_components_from_crop(
         return [tuple(int(value) for value in component) for component in stats[1:]]
     except Exception:
         return []
+
+
+def _retry_low_confidence_dimension_label(
+    box: OcrTextBox,
+    image: object,
+    cv2: object,
+    predict: Callable[[object], Iterable[object]],
+) -> OcrTextBox:
+    """Retry one incomplete cm/mm label on a rotated, enlarged crop."""
+
+    original_number = _NUMBER_PATTERN.search(box.text)
+    if (
+        float(box.confidence) >= 0.8
+        or not _has_dimension_unit(box.text)
+        or _is_weight_text(box.text)
+        or not original_number
+        or len(re.sub(r"[^0-9]", "", original_number.group(0))) != 1
+    ):
+        return box
+    try:
+        image_height, image_width = image.shape[:2]
+        left, top, right, bottom = box.bbox
+        padding = max(4, round(max(right - left, bottom - top) * 0.35))
+        left, right = max(0, left - padding), min(int(image_width), right + padding)
+        top, bottom = max(0, top - padding), min(int(image_height), bottom + padding)
+        crop = image[top:bottom, left:right]
+        if crop.shape[0] >= crop.shape[1] * 1.35:
+            crop = cv2.rotate(crop, cv2.ROTATE_90_CLOCKWISE)
+        enlarged = cv2.resize(
+            crop,
+            (max(1, crop.shape[1] * 4), max(1, crop.shape[0] * 4)),
+            interpolation=cv2.INTER_CUBIC,
+        )
+        retries: list[tuple[str, float]] = []
+        for page in predict(enlarged):
+            payload = page.json if hasattr(page, "json") else page
+            result = payload.get("res", payload) if isinstance(payload, dict) else {}
+            texts = result.get("rec_texts", []) if isinstance(result, dict) else []
+            scores = result.get("rec_scores", []) if isinstance(result, dict) else []
+            for text, score in zip(texts, scores):
+                candidate = str(text)
+                candidate_number = _NUMBER_PATTERN.search(candidate)
+                if (
+                    not candidate_number
+                    or not _has_dimension_unit(candidate)
+                    or _is_weight_text(candidate)
+                ):
+                    continue
+                confidence = float(score)
+                digit_count = len(re.sub(r"[^0-9]", "", candidate_number.group(0)))
+                if digit_count > 1 and confidence > float(box.confidence):
+                    retries.append((candidate, confidence))
+        if retries:
+            text, confidence = max(
+                retries,
+                key=lambda candidate: (
+                    len(re.sub(r"[^0-9]", "", _NUMBER_PATTERN.search(candidate[0]).group(0))),
+                    candidate[1],
+                ),
+            )
+            return replace(box, text=text, confidence=confidence)
+    except Exception:
+        pass
+    return box
 
 
 def _is_weight_text(value: str) -> bool:
@@ -674,6 +738,12 @@ class PaddleImageDimensionRecognizer:
         image = self._cv2.imread(path)
         if image is None:
             return boxes
+        boxes = [
+            _retry_low_confidence_dimension_label(
+                box, image, self._cv2, self._ocr.predict
+            )
+            for box in boxes
+        ]
         refined_boxes: list[OcrTextBox] = []
         for box in boxes:
             number = _NUMBER_PATTERN.search(box.text)

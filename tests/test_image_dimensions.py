@@ -268,6 +268,114 @@ def test_collects_glyphs_from_the_upscaled_ocr_crop():
     ) == [(0, 1, 9, 18, 102), (11, 15, 3, 4, 10), (17, 1, 9, 18, 100)]
 
 
+def test_retries_a_low_confidence_unit_label_when_crop_recovers_missing_digit():
+    class FakeCrop:
+        shape = (80, 20, 3)
+
+    class FakeImage:
+        shape = (160, 160, 3)
+
+        def __getitem__(self, _slice):
+            return FakeCrop()
+
+    class FakeCv2:
+        ROTATE_90_CLOCKWISE = 1
+        INTER_CUBIC = 2
+
+        @staticmethod
+        def rotate(image, _mode):
+            return image
+
+        @staticmethod
+        def resize(image, _size, interpolation):
+            assert interpolation == 2
+            return image
+
+    class FakeOcr:
+        def predict(self, _image):
+            return [
+                {
+                    "res": {
+                        "rec_texts": ["73 cm"],
+                        "rec_scores": [0.91],
+                    }
+                }
+            ]
+
+    original = OcrTextBox("3 cm", 0.76, (70, 20, 92, 120))
+
+    recovered = image_dimensions._retry_low_confidence_dimension_label(
+        original, FakeImage(), FakeCv2(), FakeOcr().predict
+    )
+
+    assert recovered.text == "73 cm"
+    assert recovered.confidence == 0.91
+
+
+def test_paddle_recognizer_uses_crop_retry_for_incomplete_unit_label():
+    class FakeCrop:
+        shape = (80, 20, 3)
+
+    class FakeImage:
+        shape = (160, 160, 3)
+
+        def __getitem__(self, _slice):
+            return FakeCrop()
+
+    class FakeCv2:
+        COLOR_BGR2GRAY = 1
+        ROTATE_90_CLOCKWISE = 2
+        INTER_CUBIC = 3
+
+        @staticmethod
+        def imread(_path):
+            return FakeImage()
+
+        @staticmethod
+        def cvtColor(image, _mode):
+            return image
+
+        @staticmethod
+        def rotate(image, _mode):
+            return image
+
+        @staticmethod
+        def resize(image, _size, interpolation):
+            assert interpolation == 3
+            return image
+
+        @staticmethod
+        def Canny(_image, _low, _high):
+            return object()
+
+        @staticmethod
+        def HoughLinesP(*_args, **_kwargs):
+            return None
+
+    class FakeOcr:
+        def predict(self, source):
+            if isinstance(source, str):
+                return [
+                    {
+                        "res": {
+                            "rec_texts": ["3 cm"],
+                            "rec_scores": [0.76],
+                            "rec_polys": [[[70, 20], [92, 20], [92, 120], [70, 120]]],
+                        }
+                    }
+                ]
+            return [{"res": {"rec_texts": ["73 cm"], "rec_scores": [0.91]}}]
+
+    recognizer = object.__new__(image_dimensions.PaddleImageDimensionRecognizer)
+    recognizer._cv2 = FakeCv2()
+    recognizer._ocr = FakeOcr()
+
+    boxes = recognizer.detect("fixture.png")
+
+    assert boxes[0].text == "73 cm"
+    assert boxes[0].confidence == 0.91
+
+
 def test_diagnostics_rejects_weight_and_prefers_a_dimension_with_units():
     recognizer = FakeRecognizer(
         [
