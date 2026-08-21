@@ -2468,6 +2468,25 @@ h2 {
   animation: similar-searching-rgb 1.2s linear infinite;
 }
 
+.slot-card.ocr-collecting .slot-preview {
+  border: 2px solid rgb(72, 120, 255);
+  animation: ocr-collecting-rgb 1.2s linear infinite;
+}
+
+@keyframes ocr-collecting-rgb {
+  0%,
+  100% { border-color: rgb(255, 72, 72); }
+  33% { border-color: rgb(72, 210, 96); }
+  66% { border-color: rgb(72, 120, 255); }
+}
+
+.slot-ocr-state {
+  color: var(--muted);
+  display: block;
+  font-size: 11px;
+  margin-top: 3px;
+}
+
 @keyframes similar-searching-rgb {
   0%,
   100% {
@@ -2486,6 +2505,10 @@ h2 {
 @media (prefers-reduced-motion: reduce) {
   .slot-card.similar-searching .slot-preview {
     border-color: rgb(72, 120, 255);
+    animation: none;
+  }
+
+  .slot-card.ocr-collecting .slot-preview {
     animation: none;
   }
 }

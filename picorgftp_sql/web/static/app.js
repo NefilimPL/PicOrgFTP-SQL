@@ -964,6 +964,7 @@ function slotFileItem(value) {
     file_version: "",
     preprocessed: false,
     cache_timing: null,
+    ocr_state: "",
     client_preprocess_ms: 0,
     progress: 0,
     uploading: false,
@@ -3019,7 +3020,8 @@ function uploadSlotFile(prefix, item) {
   item.thumb_url = "";
   item.file_version = "";
   item.preprocessed = false;
-  item.client_preprocess_ms = 0;
+    item.client_preprocess_ms = 0;
+    item.ocr_state = "";
   item.original_size = Number(file.size || item.size || 0);
   refreshFileItemSlots(item);
   const sendUpload = (uploadFile, clientPreprocessed = false) => {
@@ -3066,6 +3068,7 @@ function uploadSlotFile(prefix, item) {
     item.preprocessed = Boolean(payload.preprocessed || clientPreprocessed);
     item.client_preprocess_ms = item.client_preprocess_ms || 0;
     item.cache_timing = payload.timing || null;
+    item.ocr_state = payload.ocr_state || "";
     item.name = payload.name || item.name;
     item.size = Number(payload.size_bytes || item.size || 0);
     item.progress = 100;
@@ -3752,6 +3755,24 @@ function relocateProvisionalSlotFile(prefix) {
   return [prefix, targetPrefix];
 }
 
+function updateOcrSlotIndicator(card, selectedFile, loadedPhoto) {
+  const state = String(selectedFile?.ocr_state || loadedPhoto?.ocr_state || "");
+  const collecting = state === "scanning";
+  card.classList.toggle("ocr-collecting", collecting);
+  let indicator = card.querySelector(".slot-ocr-state");
+  if (!collecting) {
+    indicator?.remove();
+    return;
+  }
+  if (!indicator) {
+    indicator = document.createElement("span");
+    indicator.className = "slot-ocr-state";
+    card.querySelector(".slot-meta")?.appendChild(indicator);
+  }
+  indicator.textContent = "OCR zbiera wartosci";
+  indicator.title = "Szybkie wykrywanie wartosci liczbowych trwa w tle.";
+}
+
 function updateSlotPreview(prefix) {
   const card = slotGrid.querySelector(`[data-slot-prefix="${prefix}"]`);
   if (!card) {
@@ -3769,6 +3790,9 @@ function updateSlotPreview(prefix) {
   const fitButton = card.querySelector(".slot-fit-button");
   const openButton = card.querySelector(".slot-open-button");
   card.dataset.activeSource = selectedSlotSource(prefix, loadedPhoto) || "";
+  if (typeof updateOcrSlotIndicator === "function") {
+    updateOcrSlotIndicator(card, selectedFile, loadedPhoto);
+  }
   card.classList.toggle("slot-similar-pending", Boolean(candidate && !selectedFile));
   card.classList.toggle("similar-searching", searching);
   detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, prefix);
@@ -3901,6 +3925,7 @@ function createSlotNode(slot) {
     const clearButton = document.createElement("button");
     node.dataset.slotPrefix = slot.prefix;
     node.dataset.activeSource = selectedSlotSource(slot.prefix, loadedPhoto) || "";
+    updateOcrSlotIndicator(node, selectedFile, loadedPhoto);
     node.classList.toggle("slot-similar-pending", Boolean(candidate && !selectedFile));
     node.classList.toggle("similar-searching", searching);
 
