@@ -27,3 +27,19 @@ def test_scheduler_pauses_above_hard_cpu_limit():
     )
 
     assert scheduler.run_once() == "cpu_pause"
+
+
+def test_scheduler_does_not_claim_a_crop_above_configured_ocr_cpu_limit():
+    claimed = []
+    scheduler = OcrQueueScheduler(
+        settings=lambda: {"background_enabled": True, "idle_seconds": 0, "max_cpu_percent": 50, "pause_cpu_percent": 85},
+        has_active_requests=lambda: False,
+        last_activity=lambda: 0,
+        cpu_percent=lambda: 60,
+        claim_job=lambda: claimed.append(True),
+        process_job=lambda _job: None,
+        now=lambda: 100,
+    )
+
+    assert scheduler.run_once() == "cpu_limit"
+    assert claimed == []

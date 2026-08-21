@@ -36,8 +36,11 @@ class OcrQueueScheduler:
             return "busy"
         if self._now() - self._last_activity() < float(settings.get("idle_seconds", 0)):
             return "idle_wait"
-        if self._cpu_percent() >= float(settings.get("pause_cpu_percent", 100)):
+        cpu_percent = self._cpu_percent()
+        if cpu_percent >= float(settings.get("pause_cpu_percent", 100)):
             return "cpu_pause"
+        if cpu_percent >= float(settings.get("max_cpu_percent", 100)):
+            return "cpu_limit"
         job = self._claim_job()
         if job is None:
             return "empty"
