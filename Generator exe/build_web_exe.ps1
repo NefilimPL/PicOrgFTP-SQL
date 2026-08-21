@@ -15,8 +15,9 @@ $VenvDir = Join-Path $RepoRoot ".venv-build"
 $Python = Join-Path $VenvDir "Scripts\python.exe"
 $IconDir = Join-Path $ScriptDir ".icons"
 $IconPath = Join-Path $IconDir "PIC_WEB.ico"
-$WorkPath = Join-Path $RepoRoot "build\web-exe"
-$VersionInfoPath = Join-Path $WorkPath "PicOrgFTP-SQL-WEB.version.txt"
+$BuildName = if ($IncludeVisionModels) { "PicOrgFTP-SQL-WEB-OCR" } elseif ($IncludeVision) { "PicOrgFTP-SQL-WEB-OCR-ONLINE" } else { "PicOrgFTP-SQL-WEB" }
+$WorkPath = Join-Path $RepoRoot ("build\\web-exe-" + $BuildName)
+$VersionInfoPath = Join-Path $WorkPath ($BuildName + ".version.txt")
 
 Set-Location $RepoRoot
 . (Join-Path $ScriptDir "build_common.ps1")
@@ -34,13 +35,17 @@ Invoke-Native $Python "-c" "from PIL import Image; Image.open(r'pic\PIC_WEB.png'
 Invoke-Native $Python "tools\generate_windows_version_info.py" `
     --output $VersionInfoPath `
     --file-description "PicOrgFTP-SQL web manager" `
-    --internal-name "PicOrgFTP-SQL-WEB" `
-    --original-filename "PicOrgFTP-SQL-WEB.exe"
+    --internal-name $BuildName `
+    --original-filename ($BuildName + ".exe")
 
 $env:PICORGFTP_SQL_HEADLESS = "1"
 $env:PYINSTALLER_BUILD = "1"
 $WebStaticDataArguments = Get-WebStaticDataArguments -RepoRoot $RepoRoot
 $VisionPyInstallerArguments = @()
+if (-not $IncludeVision) {
+    $VisionPyInstallerArguments += "--runtime-hook"
+    $VisionPyInstallerArguments += (Join-Path $ScriptDir "disable_ocr_runtime.py")
+}
 if ($IncludeVision) {
     foreach ($package in @("paddleocr", "paddlex", "paddle", "cv2", "bidi", "imagesize", "pyclipper", "pypdfium2", "shapely")) {
         $VisionPyInstallerArguments += "--collect-all"
@@ -60,7 +65,7 @@ if ($IncludeVisionModels) {
 }
 
 Invoke-Native $Python "-m" "PyInstaller" "--noconfirm" "--clean" "--log-level=WARN" `
-    --name PicOrgFTP-SQL-WEB `
+    --name $BuildName `
     --noconsole `
     --onefile `
     --distpath $ScriptDir `
@@ -85,4 +90,4 @@ Invoke-Native $Python "-m" "PyInstaller" "--noconfirm" "--clean" "--log-level=WA
     --add-data "pic\PIC_WEB.png;pic" `
     PicOrgFTP-SQL-WEB.pyw
 
-Write-Host "OK. Wynik: $ScriptDir\PicOrgFTP-SQL-WEB.exe"
+Write-Host "OK. Wynik: $ScriptDir\$BuildName.exe"

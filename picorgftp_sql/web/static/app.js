@@ -13672,8 +13672,13 @@ function renderSettings() {
   }
   settingsOutput.textContent = "";
   document.querySelectorAll(".settings-tab").forEach((button) => {
+    const isOcrTab = button.dataset.settingsTab === "ocr";
+    button.hidden = isOcrTab && state.settings.ocr_available === false;
     button.classList.toggle("active", button.dataset.settingsTab === state.activeSettingsTab);
   });
+  if (state.settings.ocr_available === false && state.activeSettingsTab === "ocr") {
+    state.activeSettingsTab = "app";
+  }
   settingsStatus.textContent = state.settings.windows_admin
     ? "Proces backendu ma uprawnienia administratora Windows. Rola web admin jest niezalezna."
     : "Proces backendu dziala bez uprawnien administratora Windows. Rola web admin jest niezalezna.";

@@ -1,13 +1,4 @@
-param(
-    [switch]$IncludeVision,
-    [switch]$IncludeVisionModels
-)
-
 $ErrorActionPreference = "Stop"
-
-if ($IncludeVisionModels -and -not $IncludeVision) {
-    throw "IncludeVisionModels wymaga parametru -IncludeVision."
-}
 
 $ScriptDir = $PSScriptRoot
 $RepoRoot = Resolve-Path (Join-Path $ScriptDir "..")
@@ -24,8 +15,7 @@ Set-Location $RepoRoot
 Initialize-BuildEnvironment `
     -RepoRoot $RepoRoot `
     -VenvDir $VenvDir `
-    -Python $Python `
-    -IncludeVisionDependencies:$IncludeVision
+    -Python $Python
 
 New-Item -ItemType Directory -Path $IconDir -Force | Out-Null
 New-Item -ItemType Directory -Path $WorkPath -Force | Out-Null
@@ -38,25 +28,6 @@ Invoke-Native $Python "tools\generate_windows_version_info.py" `
 
 $env:PICORGFTP_SQL_HEADLESS = "1"
 $env:PYINSTALLER_BUILD = "1"
-$VisionPyInstallerArguments = @()
-if ($IncludeVision) {
-    foreach ($package in @("paddleocr", "paddlex", "paddle", "cv2", "bidi", "imagesize", "pyclipper", "pypdfium2", "shapely")) {
-        $VisionPyInstallerArguments += "--collect-all"
-        $VisionPyInstallerArguments += $package
-    }
-}
-if ($IncludeVisionModels) {
-    $VisionModelCache = Join-Path $WorkPath "ocr-model-cache"
-    New-Item -ItemType Directory -Path $VisionModelCache -Force | Out-Null
-    $env:PADDLE_PDX_CACHE_HOME = $VisionModelCache
-    Invoke-Native $Python "-c" "from paddleocr import PaddleOCR; PaddleOCR(lang='en', enable_mkldnn=False, use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False)"
-    if (-not (Test-Path -LiteralPath $VisionModelCache -PathType Container)) {
-        throw "Nie znaleziono lokalnego cache modeli OCR po przygotowaniu builda."
-    }
-    $VisionPyInstallerArguments += "--add-data"
-    $VisionPyInstallerArguments += "$VisionModelCache;ocr_models"
-}
-
 Invoke-Native $Python "-m" "PyInstaller" "--noconfirm" "--clean" "--log-level=WARN" `
     --name PicOrgFTP-SQL `
     --noconsole `
@@ -68,7 +39,6 @@ Invoke-Native $Python "-m" "PyInstaller" "--noconfirm" "--clean" "--log-level=WA
     --collect-submodules mysql.connector `
     --collect-data mysql.connector `
     --collect-data certifi `
-    @VisionPyInstallerArguments `
     --add-data "picorgftp_sql\Localization;picorgftp_sql\Localization" `
     --add-data "picorgftp_sql\VERSION;picorgftp_sql" `
     --add-data "pic\PIC_LOCAL.png;pic" `

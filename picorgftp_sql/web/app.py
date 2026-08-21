@@ -215,6 +215,19 @@ MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _UPLOAD_CACHE_LAST_CLEANUP = 0.0
 _OCR_COLLECTION_LOCK = threading.Lock()
 _OCR_COLLECTION_PATHS: set[str] = set()
+OCR_FEATURE_ENABLED = os.getenv("PICORGFTP_SQL_OCR_ENABLED", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
+
+def _require_ocr_feature() -> None:
+    """Reject OCR-only routes in the lightweight web distribution."""
+
+    if not OCR_FEATURE_ENABLED:
+        raise HTTPException(status_code=404, detail="OCR nie jest dostepny w tym wydaniu.")
 _BROWSER_EXTENSION_IMPORTS: Dict[str, List[Dict[str, Any]]] = {}
 _BROWSER_EXTENSION_IMPORTS_LOCK = threading.Lock()
 _PROCESS_JOB_RETENTION_SECONDS = 6 * 60 * 60
@@ -1341,6 +1354,8 @@ def _image_sha256(path: str) -> str:
 def _schedule_ocr_value_collection(slot: object, path: str) -> str:
     """Start a non-blocking cache fill only for an admin-enabled OCR slot."""
 
+    if not OCR_FEATURE_ENABLED:
+        return "disabled"
     enabled_slots = normalize_ocr_settings(
         config.CONFIG.get(OCR_SETTINGS_KEY, {})
     ).get("enabled_slots", [])
@@ -6046,6 +6061,7 @@ def create_app() -> FastAPI:
     def settings_api(request: Request) -> Dict[str, Any]:
         user = _require_admin(request)
         payload = settings_snapshot()
+        payload["ocr_available"] = OCR_FEATURE_ENABLED
         payload["current_user"] = user
         return payload
 
@@ -6057,11 +6073,13 @@ def create_app() -> FastAPI:
     @app.get("/api/settings/ocr/status")
     def settings_ocr_status(request: Request) -> Dict[str, Any]:
         _require_admin(request)
+        _require_ocr_feature()
         return image_ocr_runtime_info()
 
     @app.post("/api/settings/ocr/analyze")
     async def settings_ocr_analyze(request: Request) -> Dict[str, Any]:
         _require_admin(request)
+        _require_ocr_feature()
         try:
             payload = await request.json()
         except Exception:
@@ -6082,6 +6100,7 @@ def create_app() -> FastAPI:
         """Validate an entered Pimcore value against cached, signed image slots."""
 
         _require_admin(request)
+        _require_ocr_feature()
         try:
             payload = await request.json()
         except Exception:
@@ -6151,6 +6170,7 @@ def create_app() -> FastAPI:
     @app.get("/api/ocr/slots")
     def ocr_slots(request: Request) -> Dict[str, Any]:
         _require_admin(request)
+        _require_ocr_feature()
         enabled = set(
             normalize_ocr_settings(config.CONFIG.get(OCR_SETTINGS_KEY, {})).get(
                 "enabled_slots", []
@@ -6171,6 +6191,7 @@ def create_app() -> FastAPI:
     @app.get("/api/ocr/jobs")
     def ocr_jobs(request: Request) -> Dict[str, Any]:
         _require_admin(request)
+        _require_ocr_feature()
         return {
             "jobs": [
                 {
@@ -6191,6 +6212,7 @@ def create_app() -> FastAPI:
         """Persist an explicit user acceptance for one value and image set."""
 
         _require_admin(request)
+        _require_ocr_feature()
         try:
             payload = await request.json()
         except Exception:

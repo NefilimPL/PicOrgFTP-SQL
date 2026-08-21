@@ -16,9 +16,10 @@ BUILD_COMMON = ROOT / "Generator exe" / "build_common.ps1"
 WEB_BUILD = ROOT / "Generator exe" / "build_web_exe.ps1"
 WEB_BUILD_BATCH = ROOT / "Generator exe" / "BUILD_WEB_EXE.bat"
 WEB_OCR_BUILD_BATCH = ROOT / "Generator exe" / "BUILD_WEB_EXE_OCR.bat"
+OCR_DISABLE_HOOK = ROOT / "Generator exe" / "disable_ocr_runtime.py"
 LOCAL_BUILD = ROOT / "Generator exe" / "build_local_exe.ps1"
 LOCAL_BUILD_BATCH = ROOT / "Generator exe" / "BUILD_LOCAL_EXE.bat"
-LOCAL_OCR_BUILD_BATCH = ROOT / "Generator exe" / "BUILD_LOCAL_EXE_OCR.bat"
+ALL_BUILD_BATCH = ROOT / "Generator exe" / "BUILD_ALL_EXE.bat"
 
 
 def workflow_source() -> str:
@@ -65,6 +66,7 @@ def test_build_job_uses_selected_runner_or_github_hosted_fallback() -> None:
     assert "fail-fast: false" in build_job
     assert "target: local" in build_job
     assert "target: web" in build_job
+    assert "target: web-ocr" in build_job
     assert "JSON.stringify('windows-latest')" in source
 
 
@@ -149,7 +151,7 @@ def test_web_build_supports_opt_in_vision_engine_and_embedded_models() -> None:
     assert "use_doc_orientation_classify=False" in build_source
     assert "use_doc_unwarping=False" in build_source
     assert "use_textline_orientation=False" in build_source
-    assert "%*" in batch_source
+    assert "%*" not in batch_source
 
 
 def test_vision_build_installs_paddlex_ocr_core_without_headless_opencv() -> None:
@@ -163,42 +165,45 @@ def test_vision_build_installs_paddlex_ocr_core_without_headless_opencv() -> Non
     assert '"import cv2; assert cv2.IMREAD_COLOR"' in common_source
 
 
-def test_web_ocr_build_batch_offers_downloaded_and_embedded_model_variants() -> None:
+def test_four_batch_entry_points_match_the_supported_build_variants() -> None:
     source = WEB_OCR_BUILD_BATCH.read_text(encoding="utf-8")
+    all_source = ALL_BUILD_BATCH.read_text(encoding="utf-8")
 
-    assert "choice /c DM" in source
-    assert "-IncludeVision" in source
+    assert "choice /c DM" not in source
     assert "-IncludeVision -IncludeVisionModels" in source
     assert "build_web_exe.ps1" in source
+    assert "build_all_exe.ps1" in all_source
+    assert not (ROOT / "Generator exe" / "BUILD_LOCAL_EXE_OCR.bat").exists()
 
 
-def test_local_build_supports_opt_in_vision_engine_and_embedded_models() -> None:
+def test_local_build_is_plain_without_an_ocr_build_variant() -> None:
     build_source = LOCAL_BUILD.read_text(encoding="utf-8")
     batch_source = LOCAL_BUILD_BATCH.read_text(encoding="utf-8")
 
-    assert "[switch]$IncludeVision" in build_source
-    assert "[switch]$IncludeVisionModels" in build_source
-    assert "-IncludeVisionDependencies:$IncludeVision" in build_source
-    assert "IncludeVisionModels wymaga parametru -IncludeVision" in build_source
-    assert "--collect-all" in build_source
-    assert "paddleocr" in build_source
-    assert "paddlex" in build_source
-    assert "pypdfium2" in build_source
-    assert "PADDLE_PDX_CACHE_HOME" in build_source
-    assert "ocr_models" in build_source
-    assert "use_doc_orientation_classify=False" in build_source
-    assert "use_doc_unwarping=False" in build_source
-    assert "use_textline_orientation=False" in build_source
-    assert "%*" in batch_source
+    assert "IncludeVision" not in build_source
+    assert "IncludeVision" not in batch_source
 
 
-def test_local_ocr_build_batch_offers_downloaded_and_embedded_model_variants() -> None:
-    source = LOCAL_OCR_BUILD_BATCH.read_text(encoding="utf-8")
+def test_workflow_defines_exactly_three_supported_builds() -> None:
+    source = workflow_source()
 
-    assert "choice /c DM" in source
-    assert "-IncludeVision" in source
-    assert "-IncludeVision -IncludeVisionModels" in source
-    assert "build_local_exe.ps1" in source
+    assert source.count("target: local") == 1
+    assert source.count("target: web\n") == 1
+    assert source.count("target: web-ocr") == 1
+    assert "web EXE without OCR" in source
+    assert "web EXE with offline OCR" in source
+
+
+def test_plain_web_build_disables_ocr_at_runtime() -> None:
+    build_source = WEB_BUILD.read_text(encoding="utf-8")
+    workflow_source_text = workflow_source()
+
+    assert OCR_DISABLE_HOOK.read_text(encoding="utf-8").count(
+        'PICORGFTP_SQL_OCR_ENABLED"] = "0"'
+    ) == 1
+    assert "--runtime-hook" in build_source
+    assert "disable_ocr_runtime.py" in build_source
+    assert "Generator exe/disable_ocr_runtime.py" in workflow_source_text
 
 
 def test_artifact_uploads_are_guarded_by_probe_and_non_fatal_per_target() -> None:
