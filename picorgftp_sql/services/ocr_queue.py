@@ -18,6 +18,7 @@ class OcrQueueScheduler:
         cpu_percent: Callable[[], float],
         claim_job: Callable[[], dict[str, object] | None],
         process_job: Callable[[dict[str, object]], Any],
+        requeue_job: Callable[[dict[str, object]], Any] | None = None,
         now: Callable[[], float],
     ) -> None:
         self._settings = settings
@@ -26,6 +27,7 @@ class OcrQueueScheduler:
         self._cpu_percent = cpu_percent
         self._claim_job = claim_job
         self._process_job = process_job
+        self._requeue_job = requeue_job or (lambda _job: None)
         self._now = now
 
     def run_once(self) -> str:
@@ -45,4 +47,7 @@ class OcrQueueScheduler:
         if job is None:
             return "empty"
         self._process_job(job)
+        if self._has_active_requests():
+            self._requeue_job(job)
+            return "requeued"
         return "processed"

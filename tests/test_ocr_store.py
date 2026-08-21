@@ -50,3 +50,16 @@ def test_ocr_crop_job_is_claimed_once_and_completed(tmp_path):
     assert store.claim_ocr_crop_job() is None
     store.complete_ocr_crop_job(job["id"], [{"text": "120", "comparison": "120"}])
     assert store.list_ocr_crop_jobs()[0]["status"] == "completed"
+
+
+def test_ocr_crop_job_can_return_to_pending_when_user_activity_resumes(tmp_path):
+    store = initialized_store(tmp_path)
+    job_id = store.enqueue_ocr_crop_job({"image_hash": "a" * 64, "bbox": [1, 2, 3, 4]})
+
+    claimed = store.claim_ocr_crop_job()
+    store.requeue_ocr_crop_job(job_id)
+    resumed = store.claim_ocr_crop_job()
+
+    assert claimed is not None
+    assert resumed is not None
+    assert resumed["id"] == job_id

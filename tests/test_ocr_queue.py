@@ -43,3 +43,22 @@ def test_scheduler_does_not_claim_a_crop_above_configured_ocr_cpu_limit():
 
     assert scheduler.run_once() == "cpu_limit"
     assert claimed == []
+
+
+def test_scheduler_requeues_claimed_crop_when_user_becomes_active():
+    activity = {"active": False}
+    requeued = []
+    job = {"id": "ocr-1"}
+    scheduler = OcrQueueScheduler(
+        settings=lambda: {"background_enabled": True, "idle_seconds": 0, "max_cpu_percent": 50, "pause_cpu_percent": 85},
+        has_active_requests=lambda: activity["active"],
+        last_activity=lambda: 0,
+        cpu_percent=lambda: 10,
+        claim_job=lambda: job,
+        process_job=lambda _job: activity.update(active=True),
+        requeue_job=lambda item: requeued.append(item),
+        now=lambda: 100,
+    )
+
+    assert scheduler.run_once() == "requeued"
+    assert requeued == [job]

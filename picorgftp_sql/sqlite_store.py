@@ -3858,6 +3858,16 @@ class SqliteStore:
                 (_json_dumps(values), _now_iso(), _text(job_id)),
             )
 
+    def requeue_ocr_crop_job(self, job_id: str) -> None:
+        """Return an interrupted processing job to the durable pending queue."""
+
+        self.initialize()
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE ocr_crop_jobs SET status = 'pending', updated_at = ? WHERE id = ? AND status = 'processing'",
+                (_now_iso(), _text(job_id)),
+            )
+
     def list_ocr_crop_jobs(self) -> list[dict[str, object]]:
         self.initialize()
         with self.connection() as conn:
