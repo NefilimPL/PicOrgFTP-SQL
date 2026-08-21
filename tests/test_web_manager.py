@@ -379,6 +379,50 @@ def test_stop_web_terminates_recorded_server_when_cim_hides_command_line(
     assert commands == [["taskkill", "/PID", "102", "/T", "/F"]]
 
 
+def test_stop_web_kills_the_listener_before_ending_the_system_task(tmp_path, monkeypatch) -> None:
+    """Catches blocking on schtasks /End while Uvicorn still owns the panel port."""
+
+    (tmp_path / ".picorg_web.pid").write_text(
+        json.dumps({"pid": 102, "launcher": "service-run"}), encoding="ascii"
+    )
+    events: list[str] = []
+    listener = {
+        "Pid": 102,
+        "ProcessName": "PicOrgFTP-SQL-WEB",
+        "CommandLine": "PicOrgFTP-SQL-WEB --service-run",
+    }
+    listener_queries = 0
+
+    def listeners(_port: int):
+        nonlocal listener_queries
+        listener_queries += 1
+        return [listener] if listener_queries == 1 else []
+
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+    monkeypatch.setattr(web_manager, "get_port_listeners", listeners)
+    monkeypatch.setattr(
+        web_manager,
+        "get_process_command_line",
+        lambda _pid: "PicOrgFTP-SQL-WEB --service-run",
+    )
+    monkeypatch.setattr(
+        web_manager,
+        "end_system_service",
+        lambda: events.append("end") or web_manager.ActionResult(True, ""),
+    )
+    monkeypatch.setattr(
+        web_manager,
+        "_run_command",
+        lambda args, **_kwargs: events.append("kill")
+        or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    result = web_manager.stop_web(8010)
+
+    assert result.ok
+    assert events == ["kill", "end"]
+
+
 def test_frozen_service_records_its_pyinstaller_parent_as_launcher(tmp_path, monkeypatch) -> None:
     """Catches a frozen server persisting only its child PID."""
     metadata_calls = []

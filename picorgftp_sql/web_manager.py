@@ -698,12 +698,6 @@ def _taskkill_process_tree(pid: int) -> tuple[bool, str]:
 
 
 def stop_web(port: int) -> ActionResult:
-    system_stop = end_system_service()
-    if not system_stop.ok:
-        return ActionResult(
-            False,
-            f"Nie udalo sie zatrzymac uslugi SYSTEM: {system_stop.message}",
-        )
     stopped = False
     data = read_metadata()
     failures: list[str] = []
@@ -746,6 +740,12 @@ def stop_web(port: int) -> ActionResult:
             failures.append(f"PID {pid_value}: {detail}")
     if failures:
         return ActionResult(False, f"Nie udalo sie zatrzymac panelu WWW: {'; '.join(failures)}")
+    system_stop = end_system_service()
+    if not system_stop.ok:
+        return ActionResult(
+            False,
+            f"Nie udalo sie zatrzymac uslugi SYSTEM: {system_stop.message}",
+        )
     if not _wait_for_port_release(port):
         return ActionResult(False, f"Panel WWW nadal nasluchuje na porcie {port}.")
     try:
