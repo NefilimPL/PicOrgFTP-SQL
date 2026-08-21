@@ -36,3 +36,17 @@ def test_ocr_approval_requires_same_image_hash_set(tmp_path):
 
     assert store.has_ocr_approval("WIDTH", "120", ["hash-a"])
     assert not store.has_ocr_approval("WIDTH", "120", ["hash-b"])
+
+
+def test_ocr_crop_job_is_claimed_once_and_completed(tmp_path):
+    store = initialized_store(tmp_path)
+    store.enqueue_ocr_crop_job(
+        {"image_hash": "hash-a", "bbox": [1, 2, 30, 20], "thumbnail_path": "crop.png"}
+    )
+
+    job = store.claim_ocr_crop_job()
+
+    assert job["image_hash"] == "hash-a"
+    assert store.claim_ocr_crop_job() is None
+    store.complete_ocr_crop_job(job["id"], [{"text": "120", "comparison": "120"}])
+    assert store.list_ocr_crop_jobs()[0]["status"] == "completed"
