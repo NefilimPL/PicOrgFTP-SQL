@@ -3,6 +3,7 @@ from picorgftp_sql.pimcore_config import (
     PIMCORE_SETTINGS_KEY,
     field_mapping_issues,
     infer_field_mapping,
+    normalize_field_mapping,
     normalize_pimcore_settings,
     parse_mapping_value,
 )
@@ -58,7 +59,7 @@ def test_normalize_pimcore_settings_cleans_mappings_and_bounds_timeout():
             "sql_profile_id": "",
             "translate": False,
             "target_language": None,
-            "image_dimension": None,
+            "ocr_validation": False,
             "layout_group": "",
             "layout_order": 0,
         }
@@ -81,26 +82,17 @@ def test_normalize_pimcore_settings_builds_export_columns_from_mappings():
     ]
 
 
-def test_normalize_mapping_adds_default_image_dimension_confidence():
-    result = normalize_pimcore_settings(
+def test_normalize_mapping_discards_legacy_dimension_property():
+    mapping = normalize_field_mapping(
         {
-            "field_mappings": [
-                {
-                    "source": "WIDTH",
-                    "pimcore_field": "width",
-                    "type": "input",
-                    "value_template": "{IMAGE_DIMENSION:15:WIDTH|keep}",
-                    "image_dimension": {"slot": 15, "dimension": "width"},
-                }
-            ]
+            "source": "WIDTH",
+            "pimcore_field": "width",
+            "image_dimension": {"slot": "15", "dimension": "width"},
         }
     )
 
-    assert result["field_mappings"][0]["image_dimension"] == {
-        "slot": "15",
-        "dimension": "width",
-        "minimum_text_confidence": 0.8,
-    }
+    assert mapping["ocr_validation"] is False
+    assert "image_dimension" not in mapping
 
 
 def test_mapping_validation_rejects_unconfigured_image_source():
@@ -271,7 +263,7 @@ def test_infer_field_mapping_uses_class_type_and_locks_ean():
         "sql_profile_id": "",
         "translate": False,
         "target_language": None,
-        "image_dimension": None,
+        "ocr_validation": False,
         "layout_group": "",
         "layout_order": 0,
     }

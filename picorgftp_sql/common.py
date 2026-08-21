@@ -3,6 +3,7 @@
 from .pimcore_config import PIMCORE_SETTINGS_KEY, default_pimcore_settings
 from .product_fields import PRODUCT_FIELDS_KEY, default_product_fields
 from .email_settings import EMAIL_SETTINGS_KEY, default_email_settings
+from .ocr_settings import OCR_SETTINGS_KEY, default_ocr_settings
 
 ################################ Aktualne ustawienia startowe aplikacji ################################
 # --- Konfigurowalne ustawienia ---
@@ -372,6 +373,7 @@ DEFAULT_CONFIG.setdefault(
 )
 DEFAULT_CONFIG.setdefault(PIMCORE_SETTINGS_KEY, default_pimcore_settings())
 DEFAULT_CONFIG.setdefault(EMAIL_SETTINGS_KEY, default_email_settings())
+DEFAULT_CONFIG.setdefault(OCR_SETTINGS_KEY, default_ocr_settings())
 
 import sys
 import os as A

@@ -73,6 +73,7 @@ from .pimcore_config import (
 from .slot_utils import normalize_slot_definitions, normalize_sql_column_map
 from .similar_product_files import normalize_similar_file_settings
 from .product_fields import normalize_product_fields
+from .ocr_settings import OCR_SETTINGS_KEY, normalize_ocr_settings
 from .sql_profiles import additional_sql_profiles
 from . import settings
 
@@ -414,6 +415,9 @@ def _merge_raw_config(raw_config, config_copy):
     config_copy[SIMILAR_FILE_DETECTION_KEY] = normalize_similar_file_settings(
         raw_config.get(SIMILAR_FILE_DETECTION_KEY), slot_defs
     )
+    config_copy[OCR_SETTINGS_KEY] = normalize_ocr_settings(
+        raw_config.get(OCR_SETTINGS_KEY, config_copy.get(OCR_SETTINGS_KEY, {}))
+    )
     raw_sql_map = raw_config.get(SQL_COLUMN_MAP_KEY, config_copy.get(SQL_COLUMN_MAP_KEY))
     sql_map, _ = normalize_sql_column_map(raw_sql_map, slot_defs)
     config_copy[SQL_COLUMN_MAP_KEY] = sql_map
@@ -666,6 +670,9 @@ def load_config(interactive=I):
         config_copy[SIMILAR_FILE_DETECTION_KEY] = normalize_similar_file_settings(
             raw_config.get(SIMILAR_FILE_DETECTION_KEY), slot_defs
         )
+        config_copy[OCR_SETTINGS_KEY] = normalize_ocr_settings(
+            raw_config.get(OCR_SETTINGS_KEY, config_copy.get(OCR_SETTINGS_KEY, {}))
+        )
         raw_sql_map = raw_config.get(SQL_COLUMN_MAP_KEY, config_copy.get(SQL_COLUMN_MAP_KEY))
         sql_map, _ = normalize_sql_column_map(raw_sql_map, slot_defs)
         config_copy[SQL_COLUMN_MAP_KEY] = sql_map
@@ -850,6 +857,7 @@ def save_config(config, raw_config=None, preserve_secrets=None):
         SIMILAR_FILE_DETECTION_KEY: normalize_similar_file_settings(
             config.get(SIMILAR_FILE_DETECTION_KEY), slot_defs
         ),
+        OCR_SETTINGS_KEY: normalize_ocr_settings(config.get(OCR_SETTINGS_KEY, {})),
         SQL_COLUMN_MAP_KEY: config.get(SQL_COLUMN_MAP_KEY),
         SQL_AVAILABLE_COLUMNS_KEY: _normalize_sql_columns(
             config.get(SQL_AVAILABLE_COLUMNS_KEY, [])
