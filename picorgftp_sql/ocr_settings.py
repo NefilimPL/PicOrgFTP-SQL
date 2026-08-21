@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .services.ocr_profiles import normalize_ocr_profile_ids
+
 
 OCR_SETTINGS_KEY = "ocr"
 DEFAULT_OCR_SETTINGS: dict[str, object] = {
@@ -10,6 +12,7 @@ DEFAULT_OCR_SETTINGS: dict[str, object] = {
     "idle_seconds": 5,
     "max_cpu_percent": 35,
     "pause_cpu_percent": 85,
+    "model_profiles": ["fast"],
 }
 
 
@@ -43,10 +46,12 @@ def normalize_ocr_settings(value: object) -> dict[str, object]:
     idle = _bounded_int(raw.get("idle_seconds"), 5, 0, 3600)
     maximum = _bounded_int(raw.get("max_cpu_percent"), 35, 0, 100)
     pause = max(maximum, _bounded_int(raw.get("pause_cpu_percent"), 85, 0, 100))
+    profiles = normalize_ocr_profile_ids(raw.get("model_profiles")) or ["fast"]
     return {
         "enabled_slots": slots,
         "background_enabled": bool(raw.get("background_enabled", False)),
         "idle_seconds": idle,
         "max_cpu_percent": maximum,
         "pause_cpu_percent": pause,
+        "model_profiles": profiles,
     }

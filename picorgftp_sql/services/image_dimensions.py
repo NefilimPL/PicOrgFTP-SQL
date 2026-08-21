@@ -17,6 +17,7 @@ import sys
 from typing import Callable, Iterable, Mapping, Protocol
 
 from .ocr_values import comparison_key
+from .ocr_profiles import ocr_profile
 
 
 _DIMENSIONS = frozenset({"width", "depth", "height"})
@@ -821,7 +822,7 @@ class PaddleImageDimensionRecognizer:
     dependencies have been installed from requirements-vision.txt.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, profile_id: object = "fast") -> None:
         bundled_models = bundled_ocr_model_cache_path()
         if bundled_models:
             os.environ["PADDLE_PDX_CACHE_HOME"] = bundled_models
@@ -833,6 +834,7 @@ class PaddleImageDimensionRecognizer:
         except ImportError as exc:  # pragma: no cover - runtime optionality
             raise ImageDimensionUnavailable from exc
         self._cv2 = cv2
+        self.profile = ocr_profile(profile_id)
         # PaddleOCR enables oneDNN by default on CPU.  PaddlePaddle 3.3 can
         # fail on OCR model PIR attributes in that backend, so prefer the
         # standard CPU executor for reliable local dimension extraction.
@@ -840,7 +842,8 @@ class PaddleImageDimensionRecognizer:
         # text-line orientation. Disabling them makes OCR faster and preserves
         # recognition coordinates relative to the uploaded original image.
         self._ocr = PaddleOCR(
-            lang="en",
+            text_detection_model_name=self.profile.detector_model,
+            text_recognition_model_name=self.profile.recognizer_model,
             enable_mkldnn=False,
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,

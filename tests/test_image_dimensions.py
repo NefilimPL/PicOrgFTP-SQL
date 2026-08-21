@@ -48,12 +48,34 @@ def test_paddle_recognizer_disables_mkldnn_for_cpu_predictor(tmp_path, monkeypat
     image_dimensions.PaddleImageDimensionRecognizer()
 
     assert received_kwargs == {
-        "lang": "en",
+        "text_detection_model_name": "PP-OCRv5_mobile_det",
+        "text_recognition_model_name": "PP-OCRv5_mobile_rec",
         "enable_mkldnn": False,
         "use_doc_orientation_classify": False,
         "use_doc_unwarping": False,
         "use_textline_orientation": False,
     }
+
+
+def test_paddle_recognizer_uses_selected_offline_performance_profile(tmp_path, monkeypatch):
+    received_kwargs: dict[str, object] = {}
+
+    class FakePaddleOCR:
+        def __init__(self, **kwargs: object) -> None:
+            received_kwargs.update(kwargs)
+
+    monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(tmp_path))
+    monkeypatch.setitem(sys.modules, "cv2", types.ModuleType("cv2"))
+    monkeypatch.setitem(
+        sys.modules,
+        "paddleocr",
+        types.SimpleNamespace(PaddleOCR=FakePaddleOCR),
+    )
+
+    image_dimensions.PaddleImageDimensionRecognizer(profile_id="accurate")
+
+    assert received_kwargs["text_detection_model_name"] == "PP-OCRv5_server_det"
+    assert received_kwargs["text_recognition_model_name"] == "PP-OCRv5_server_rec"
 
 
 def test_resolves_decimal_comma_value_when_ocr_confidence_meets_threshold():
