@@ -60,6 +60,11 @@ from ..github_status import github_repository_status
 from ..history_changes import history_change_set
 from ..image_utils import fit_image_to_content
 from ..services.image_dimensions import analyze_image_dimensions, image_ocr_runtime_info
+from ..services.ocr_values import (
+    comparison_key,
+    normalize_entered_ocr_value,
+    ocr_values_match,
+)
 from ..legacy_import import import_legacy_to_sqlite
 from ..logging_utils import log_error
 from ..email_settings import EMAIL_SETTINGS_KEY
@@ -1317,6 +1322,16 @@ def _versioned_file_url(path: str, endpoint: str, token: str) -> str:
     if version:
         url = f"{url}&v={version}"
     return url
+
+
+def _image_sha256(path: str) -> str:
+    """Return a stable content key without retaining browser-visible paths."""
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
@@ -6022,6 +6037,113 @@ def create_app() -> FastAPI:
         result = asdict(diagnostics)
         result["image_url"] = _versioned_file_url(path, "/api/file", token.strip())
         return result
+
+    @app.post("/api/ocr/validate")
+    async def ocr_validate(request: Request) -> Dict[str, Any]:
+        """Validate an entered Pimcore value against cached, signed image slots."""
+
+        _require_admin(request)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Niepoprawne dane walidacji OCR.")
+        field_id = str(payload.get("field_id") or "").strip()
+        if not field_id:
+            raise HTTPException(status_code=400, detail="Wymagany jest identyfikator pola.")
+        raw_tokens = payload.get("slot_tokens")
+        if not isinstance(raw_tokens, list):
+            raise HTTPException(status_code=400, detail="Wymagana jest lista slotow OCR.")
+        tokens = [str(token).strip() for token in raw_tokens if str(token).strip()]
+        if not tokens:
+            raise HTTPException(status_code=400, detail="Wymagany jest co najmniej jeden slot OCR.")
+        value = normalize_entered_ocr_value(payload.get("value"))
+        comparison = comparison_key(value)
+        store = observability_store()
+        image_hashes: list[str] = []
+        images: list[dict[str, object]] = []
+        pending = False
+        all_values: list[dict[str, object]] = []
+        for ordinal, token in enumerate(tokens):
+            path = _path_from_file_token(token)
+            image_hash = await run_in_threadpool(_image_sha256, path)
+            image_hashes.append(image_hash)
+            scan = store.get_ocr_scan(image_hash)
+            if scan is None or str(scan.get("state") or "") != "completed":
+                pending = True
+            values = list(scan.get("values") or []) if isinstance(scan, dict) else []
+            safe_values = [
+                {
+                    "text": str(item.get("text") or ""),
+                    "comparison": str(item.get("comparison") or ""),
+                    "confidence": float(item.get("confidence") or 0),
+                    "bbox": list(item.get("bbox") or []),
+                }
+                for item in values
+                if isinstance(item, dict)
+            ]
+            all_values.extend(safe_values)
+            images.append(
+                {
+                    "slot_index": ordinal,
+                    "state": str(scan.get("state") or "missing") if isinstance(scan, dict) else "missing",
+                    "values": safe_values,
+                }
+            )
+        matches = bool(comparison) and any(
+            ocr_values_match(value, item["text"])
+            for item in all_values
+        )
+        approved = bool(comparison) and store.has_ocr_approval(
+            field_id, comparison, image_hashes
+        )
+        mismatch = bool(all_values) and not pending and not matches and not approved
+        return {
+            "value": value,
+            "comparison": comparison,
+            "matches": matches,
+            "approved": approved,
+            "pending": pending,
+            "mismatch": mismatch,
+            "images": images,
+        }
+
+    @app.post("/api/ocr/approval")
+    async def ocr_approval(request: Request) -> Dict[str, Any]:
+        """Persist an explicit user acceptance for one value and image set."""
+
+        _require_admin(request)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Niepoprawne dane potwierdzenia OCR.")
+        field_id = str(payload.get("field_id") or "").strip()
+        if not field_id:
+            raise HTTPException(status_code=400, detail="Wymagany jest identyfikator pola.")
+        raw_tokens = payload.get("slot_tokens")
+        if not isinstance(raw_tokens, list):
+            raise HTTPException(status_code=400, detail="Wymagana jest lista slotow OCR.")
+        tokens = [str(token).strip() for token in raw_tokens if str(token).strip()]
+        if not tokens:
+            raise HTTPException(status_code=400, detail="Wymagany jest co najmniej jeden slot OCR.")
+        value = normalize_entered_ocr_value(payload.get("value"))
+        comparison = comparison_key(value)
+        if not comparison:
+            raise HTTPException(status_code=400, detail="Wartosc nie zawiera liczby do potwierdzenia.")
+        image_hashes = [
+            await run_in_threadpool(_image_sha256, _path_from_file_token(token))
+            for token in tokens
+        ]
+        await run_in_threadpool(
+            observability_store().record_ocr_approval,
+            field_id,
+            comparison,
+            image_hashes,
+        )
+        return {"ok": True, "value": value, "comparison": comparison}
 
     @app.post("/api/settings")
     async def settings_save(request: Request) -> JSONResponse:

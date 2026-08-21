@@ -109,7 +109,6 @@ from .pimcore_config import (
     PIMCORE_API_KEY,
     PIMCORE_SETTINGS_KEY,
     field_mapping_issues,
-    image_dimension_source_definitions,
     normalize_pimcore_settings,
 )
 from .pimcore_operations import PimcoreOperationRegistry, redact_pimcore_log_value
@@ -136,11 +135,6 @@ from .services.pimcore_service import (
     run_settings_test,
     run_test_create,
     update_product,
-)
-from .services.image_dimensions import (
-    ImageDimensionRequest,
-    image_dimension_source_key,
-    resolve_image_dimensions,
 )
 from .services.translation_service import clear_translation_cache, translate_text
 from .slot_utils import (
@@ -2284,40 +2278,6 @@ def _render_templates_with_sql_context(
     extra_sources: list[SourceDefinition] = []
     extra_values: dict[str, object] = {}
     sql_profile_results: list[dict[str, object]] = []
-    image_requests: list[ImageDimensionRequest] = []
-    for mapping in mappings_list:
-        image_dimension = mapping.get("image_dimension")
-        if not isinstance(image_dimension, dict):
-            continue
-        source_key = image_dimension_source_key(
-            str(image_dimension.get("slot") or ""),
-            str(image_dimension.get("dimension") or ""),
-        )
-        try:
-            uses_image_dimension = source_key in placeholder_sources(
-                mapping.get("value_template")
-            )
-        except TemplateError:
-            uses_image_dimension = False
-        if not uses_image_dimension:
-            continue
-        image_requests.append(
-            ImageDimensionRequest(
-                str(image_dimension["slot"]),
-                str(image_dimension["dimension"]),
-                float(image_dimension["minimum_text_confidence"]),
-            )
-        )
-    image_sources = image_dimension_source_definitions(mappings_list)
-    if image_sources:
-        extra_sources.extend(image_sources)
-    if image_requests:
-        image_values, image_warnings = resolve_image_dimensions(
-            image_requests,
-            image_slot_paths or {},
-        )
-        extra_values.update(image_values)
-        warnings.extend(image_warnings)
     for source in sql_template_sources:
         mapping = mappings[source]
         required = bool(mapping.get("required"))

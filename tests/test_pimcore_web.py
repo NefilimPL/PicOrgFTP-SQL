@@ -1750,39 +1750,6 @@ def test_template_preview_fills_missing_product_placeholders_from_saved_entry():
     assert result["values"]["TITLE"] == "Vivo - Komoda"
 
 
-def test_template_preview_renders_configured_image_dimension(monkeypatch):
-    monkeypatch.setattr(
-        web_data,
-        "resolve_image_dimensions",
-        lambda _requests, _paths: ({"IMAGE_DIMENSION:15:WIDTH": "130.5"}, []),
-        raising=False,
-    )
-
-    result = web_data.preview_pimcore_template(
-        {
-            "mappings": [
-                {
-                    "source": "WIDTH",
-                    "pimcore_field": "width",
-                    "type": "input",
-                    "value_template": "{IMAGE_DIMENSION:15:WIDTH|keep}",
-                    "image_dimension": {
-                        "slot": "15",
-                        "dimension": "width",
-                        "minimum_text_confidence": 0.8,
-                    },
-                }
-            ],
-            "target_source": "WIDTH",
-            "product_values": {},
-            "values": {},
-        },
-        image_slot_paths={"15": "dimension.png"},
-    )
-
-    assert result["values"]["WIDTH"] == "130.5"
-
-
 def test_template_preview_route_resolves_slot_tokens_before_rendering():
     client = TestClient(web_app.app)
     payload = {
@@ -1849,6 +1816,82 @@ def test_ocr_routes_return_runtime_status_and_reject_invalid_threshold():
 
     assert status_response.json() == status
     assert threshold_response.status_code == 400
+
+
+def test_ocr_validation_compares_cached_signed_slot_images_without_exposing_paths(tmp_path):
+    from picorgftp_sql.sqlite_store import SqliteStore
+
+    store = SqliteStore(str(tmp_path / "ocr.sqlite"))
+    store.initialize()
+    store.upsert_ocr_scan(
+        "a" * 64,
+        [
+            {
+                "text": "120,4 mm",
+                "comparison": "120",
+                "confidence": 0.91,
+                "bbox": [4, 8, 80, 28],
+            }
+        ],
+        "completed",
+    )
+    client = TestClient(web_app.app)
+    with (
+        patch.object(web_app, "_require_admin", return_value={"username": "admin"}),
+        patch.object(web_app, "_path_from_file_token", return_value="C:/cache/15.png"),
+        patch.object(web_app, "_image_sha256", return_value="a" * 64),
+        patch.object(web_app, "observability_store", return_value=store),
+    ):
+        response = client.post(
+            "/api/ocr/validate",
+            json={
+                "field_id": "WIDTH",
+                "value": "120,8",
+                "slot_tokens": ["signed-slot-token"],
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["value"] == "120.8"
+    assert payload["comparison"] == "120"
+    assert payload["matches"] is True
+    assert payload["mismatch"] is False
+    assert payload["images"][0]["values"][0]["bbox"] == [4, 8, 80, 28]
+    assert "C:/cache" not in response.text
+
+
+def test_ocr_approval_suppresses_a_cached_value_mismatch(tmp_path):
+    from picorgftp_sql.sqlite_store import SqliteStore
+
+    store = SqliteStore(str(tmp_path / "ocr.sqlite"))
+    store.initialize()
+    store.upsert_ocr_scan(
+        "b" * 64,
+        [{"text": "120/140", "comparison": "120?140", "confidence": 0.9, "bbox": [1, 2, 3, 4]}],
+        "completed",
+    )
+    client = TestClient(web_app.app)
+    with (
+        patch.object(web_app, "_require_admin", return_value={"username": "admin"}),
+        patch.object(web_app, "_path_from_file_token", return_value="C:/cache/15.png"),
+        patch.object(web_app, "_image_sha256", return_value="b" * 64),
+        patch.object(web_app, "observability_store", return_value=store),
+    ):
+        approval = client.post(
+            "/api/ocr/approval",
+            json={"field_id": "WIDTH", "value": "220", "slot_tokens": ["signed-slot-token"]},
+        )
+        validation = client.post(
+            "/api/ocr/validate",
+            json={"field_id": "WIDTH", "value": "220", "slot_tokens": ["signed-slot-token"]},
+        )
+
+    assert approval.status_code == 200
+    assert validation.status_code == 200
+    assert validation.json()["matches"] is False
+    assert validation.json()["approved"] is True
+    assert validation.json()["mismatch"] is False
 
 
 def test_admin_test_sample_route_returns_fresh_editable_values():
