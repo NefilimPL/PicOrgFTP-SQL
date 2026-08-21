@@ -1,0 +1,57 @@
+"""Global settings for the optional local OCR value collector."""
+
+from __future__ import annotations
+
+from .services.ocr_profiles import normalize_ocr_profile_ids
+
+
+OCR_SETTINGS_KEY = "ocr"
+DEFAULT_OCR_SETTINGS: dict[str, object] = {
+    "enabled_slots": [],
+    "background_enabled": False,
+    "idle_seconds": 5,
+    "max_cpu_percent": 35,
+    "pause_cpu_percent": 85,
+    "model_profiles": ["fast"],
+}
+
+
+def default_ocr_settings() -> dict[str, object]:
+    """Return a fresh default settings payload."""
+
+    return dict(DEFAULT_OCR_SETTINGS)
+
+
+def _bounded_int(value: object, default: int, minimum: int, maximum: int) -> int:
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def normalize_ocr_settings(value: object) -> dict[str, object]:
+    """Return bounded, serializable OCR settings from an arbitrary payload."""
+
+    raw = value if isinstance(value, dict) else {}
+    raw_slots = raw.get("enabled_slots", [])
+    slots: list[str] = []
+    if isinstance(raw_slots, list):
+        for raw_slot in raw_slots:
+            slot = str(raw_slot or "").strip()
+            if slot and slot not in slots:
+                slots.append(slot)
+    idle = _bounded_int(raw.get("idle_seconds"), 5, 0, 3600)
+    maximum = _bounded_int(raw.get("max_cpu_percent"), 35, 0, 100)
+    pause = max(maximum, _bounded_int(raw.get("pause_cpu_percent"), 85, 0, 100))
+    profiles = normalize_ocr_profile_ids(raw.get("model_profiles")) or ["fast"]
+    return {
+        "enabled_slots": slots,
+        "background_enabled": bool(raw.get("background_enabled", False)),
+        "idle_seconds": idle,
+        "max_cpu_percent": maximum,
+        "pause_cpu_percent": pause,
+        "model_profiles": profiles,
+    }

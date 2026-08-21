@@ -95,6 +95,7 @@ def normalize_field_mapping(raw: object, *, default_order: int = 0) -> dict[str,
         "sql_profile_id": _text(raw.get("sql_profile_id")),
         "translate": bool(raw.get("translate")),
         "target_language": _text(raw.get("target_language")) or None,
+        "ocr_validation": bool(raw.get("ocr_validation", False)),
         "layout_group": _clean_layout_group(raw.get("layout_group")),
         "layout_order": _layout_order(raw.get("layout_order"), default_order),
     }
@@ -179,6 +180,7 @@ def infer_field_mapping(
         "sql_profile_id": "",
         "translate": False,
         "target_language": None,
+        "ocr_validation": False,
         "layout_group": "",
         "layout_order": 0,
     }

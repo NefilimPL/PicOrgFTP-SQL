@@ -61,13 +61,20 @@ function Install-BuildDependencies {
         [string]$Python,
         [Parameter(Mandatory = $true)]
         [string]$RepoRoot,
-        [switch]$IncludeWebDependencies
+        [switch]$IncludeWebDependencies,
+        [switch]$IncludeVisionDependencies
     )
 
     Invoke-Native $Python "-m" "pip" "install" "--disable-pip-version-check" "pyinstaller>=6.6,<7"
     Invoke-Native $Python "-m" "pip" "install" "--disable-pip-version-check" "-r" (Join-Path $RepoRoot "requirements-build.txt")
     if ($IncludeWebDependencies) {
         Invoke-Native $Python "-m" "pip" "install" "--disable-pip-version-check" "-r" (Join-Path $RepoRoot "requirements-web.txt")
+    }
+    if ($IncludeVisionDependencies) {
+        # The OpenCV wheels all own the cv2 package. Remove all variants so
+        # pip must restore cv2.pyd from the selected contrib wheel below.
+        Invoke-Native $Python "-m" "pip" "uninstall" "--yes" "opencv-python" "opencv-python-headless" "opencv-contrib-python"
+        Invoke-Native $Python "-m" "pip" "install" "--disable-pip-version-check" "-r" (Join-Path $RepoRoot "requirements-vision.txt")
     }
 }
 
@@ -105,7 +112,8 @@ function Test-BuildEnvironment {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Python,
-        [switch]$IncludeWebDependencies
+        [switch]$IncludeWebDependencies,
+        [switch]$IncludeVisionDependencies
     )
 
     $imports = @(
@@ -123,6 +131,20 @@ function Test-BuildEnvironment {
             "import multipart",
             "import starlette",
             "import uvicorn"
+        )
+    }
+    if ($IncludeVisionDependencies) {
+        $imports += @(
+            "import cv2; assert cv2.IMREAD_COLOR",
+            "import bidi",
+            "import imagesize",
+            "import paddle",
+            "import paddlex",
+            "import paddleocr"
+            "import pyclipper",
+            "import pypdfium2",
+            "import shapely",
+            "from paddlex.utils.deps import is_extra_available; assert is_extra_available('ocr-core')"
         )
     }
 
@@ -145,7 +167,8 @@ function Initialize-BuildEnvironment {
         [string]$VenvDir,
         [Parameter(Mandatory = $true)]
         [string]$Python,
-        [switch]$IncludeWebDependencies
+        [switch]$IncludeWebDependencies,
+        [switch]$IncludeVisionDependencies
     )
 
     for ($attempt = 1; $attempt -le 2; $attempt++) {
@@ -160,9 +183,13 @@ function Initialize-BuildEnvironment {
         Install-BuildDependencies `
             -Python $Python `
             -RepoRoot $RepoRoot `
-            -IncludeWebDependencies:$IncludeWebDependencies
+            -IncludeWebDependencies:$IncludeWebDependencies `
+            -IncludeVisionDependencies:$IncludeVisionDependencies
 
-        if (Test-BuildEnvironment -Python $Python -IncludeWebDependencies:$IncludeWebDependencies) {
+        if (Test-BuildEnvironment `
+            -Python $Python `
+            -IncludeWebDependencies:$IncludeWebDependencies `
+            -IncludeVisionDependencies:$IncludeVisionDependencies) {
             return
         }
 

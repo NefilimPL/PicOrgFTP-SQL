@@ -107,7 +107,9 @@ jobs:
           - target: local
             name: desktop EXE
           - target: web
-            name: web EXE and ZIP
+            name: web EXE without OCR
+          - target: web-ocr
+            name: web EXE with offline OCR
 
     steps:
       - name: Checkout
@@ -263,8 +265,12 @@ jobs:
         run: |
           & $env:PICORGFTP_SQL_PYTHON -m pip install --upgrade pip
           & $env:PICORGFTP_SQL_PYTHON -m pip install -r requirements-build.txt
-          if ("${{ matrix.target }}" -eq "web") {
+          if ("${{ matrix.target }}" -ne "local") {
             & $env:PICORGFTP_SQL_PYTHON -m pip install -r requirements-web.txt
+          }
+          if ("${{ matrix.target }}" -eq "web-ocr") {
+            & $env:PICORGFTP_SQL_PYTHON -m pip uninstall --yes opencv-python opencv-python-headless opencv-contrib-python
+            & $env:PICORGFTP_SQL_PYTHON -m pip install -r requirements-vision.txt
           }
 
       - name: Prepare Windows icons
@@ -313,12 +319,29 @@ jobs:
           Copy-Item -Path "picorgftp_sql/VERSION" -Destination "dist/output/VERSION" -Force
 
       - name: Build web manager EXE with PyInstaller
-        if: matrix.target == 'web'
+        if: matrix.target != 'local'
         shell: pwsh
         env:
           PICORGFTP_SQL_HEADLESS: "1"
           PYINSTALLER_BUILD: "1"
         run: |
+          $ocrArguments = @()
+          if ("${{ matrix.target }}" -eq "web-ocr") {
+            $modelCache = Join-Path $env:RUNNER_TEMP "picorgftp-sql-ocr-model-cache-${{ github.run_id }}-${{ github.run_attempt }}"
+            New-Item -ItemType Directory -Path $modelCache -Force | Out-Null
+            $env:PADDLE_PDX_CACHE_HOME = $modelCache
+            & $env:PICORGFTP_SQL_PYTHON -c "from paddleocr import PaddleOCR; PaddleOCR(lang='en', enable_mkldnn=False, use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False)"
+            if ($LASTEXITCODE -ne 0) { throw "Nie udalo sie przygotowac lokalnych modeli OCR." }
+            foreach ($package in @("paddleocr", "paddlex", "paddle", "cv2", "bidi", "imagesize", "pyclipper", "pypdfium2", "shapely")) {
+              $ocrArguments += "--collect-all"
+              $ocrArguments += $package
+            }
+            $ocrArguments += "--add-data"
+            $ocrArguments += "$modelCache;ocr_models"
+          } else {
+            $ocrArguments += "--runtime-hook"
+            $ocrArguments += "Generator exe/disable_ocr_runtime.py"
+          }
           & $env:PICORGFTP_SQL_PYTHON -m PyInstaller --noconfirm --clean --log-level=WARN `
             --name PicOrgFTP-SQL-WEB `
             --noconsole `
@@ -337,6 +360,7 @@ jobs:
             --collect-submodules PIL `
             --collect-data mysql.connector `
             --collect-data certifi `
+            @ocrArguments `
             --add-data "picorgftp_sql/web/static;picorgftp_sql/web/static" `
             --add-data "picorgftp_sql/browser_extension;picorgftp_sql/browser_extension" `
             --add-data "picorgftp_sql/Localization;picorgftp_sql/Localization" `
@@ -345,10 +369,10 @@ jobs:
             PicOrgFTP-SQL-WEB.pyw
 
       - name: Package web runtime
-        if: matrix.target == 'web'
+        if: matrix.target != 'local'
         shell: pwsh
         run: |
-          $webRoot = "dist/web/PicOrgFTP-SQL-web"
+          $webRoot = "dist/web/PicOrgFTP-SQL-web-${{ matrix.target }}"
           Remove-Item -Path "dist/web" -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $webRoot -Force | Out-Null
           Copy-Item -Path "dist/output/PicOrgFTP-SQL-WEB.exe" -Destination "$webRoot/PicOrgFTP-SQL-WEB.exe" -Force
@@ -356,7 +380,7 @@ jobs:
           Copy-Item -Path "pic" -Destination "$webRoot/pic" -Recurse -Force
           Copy-Item -Path "tools" -Destination "$webRoot/tools" -Recurse -Force
           Copy-Item -Path "requirements-web.txt", "START_WEB.bat", "STOP_WEB.bat", "README.md", "LICENSE", "PicOrgFTP-SQL-WEB.pyw" -Destination $webRoot -Force
-          $zipPath = "dist/web/PicOrgFTP-SQL-web-$env:PICORGFTP_SQL_ASSET_VERSION.zip"
+          $zipPath = "dist/web/PicOrgFTP-SQL-web-${{ matrix.target }}-$env:PICORGFTP_SQL_ASSET_VERSION.zip"
           Compress-Archive -Path "$webRoot/*" -DestinationPath $zipPath -Force
 
       - name: Prepare local release asset
@@ -367,12 +391,12 @@ jobs:
           Copy-Item -Path "dist/output/PicOrgFTP-SQL.exe" -Destination "dist/release/PicOrgFTP-SQL-$env:PICORGFTP_SQL_ASSET_VERSION.exe" -Force
 
       - name: Prepare web release assets
-        if: github.event_name == 'release' && matrix.target == 'web'
+        if: github.event_name == 'release' && matrix.target != 'local'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path "dist/release" -Force | Out-Null
-          Copy-Item -Path "dist/output/PicOrgFTP-SQL-WEB.exe" -Destination "dist/release/PicOrgFTP-SQL-WEB-$env:PICORGFTP_SQL_ASSET_VERSION.exe" -Force
-          Copy-Item -Path "dist/web/PicOrgFTP-SQL-web-$env:PICORGFTP_SQL_ASSET_VERSION.zip" -Destination "dist/release/PicOrgFTP-SQL-web-$env:PICORGFTP_SQL_ASSET_VERSION.zip" -Force
+          Copy-Item -Path "dist/output/PicOrgFTP-SQL-WEB.exe" -Destination "dist/release/PicOrgFTP-SQL-WEB-${{ matrix.target }}-$env:PICORGFTP_SQL_ASSET_VERSION.exe" -Force
+          Copy-Item -Path "dist/web/PicOrgFTP-SQL-web-${{ matrix.target }}-$env:PICORGFTP_SQL_ASSET_VERSION.zip" -Destination "dist/release/PicOrgFTP-SQL-web-${{ matrix.target }}-$env:PICORGFTP_SQL_ASSET_VERSION.zip" -Force
 
       - name: Prepare artifact upload probe
         shell: pwsh
@@ -402,21 +426,21 @@ jobs:
 
       - name: Upload web EXE artifact
         id: upload-web-exe
-        if: matrix.target == 'web' && steps.artifact-probe.outcome == 'success'
+        if: matrix.target != 'local' && steps.artifact-probe.outcome == 'success'
         uses: actions/upload-artifact@v7
         continue-on-error: true
         with:
-          name: PicOrgFTP-SQL-web-exe
+          name: PicOrgFTP-SQL-web-exe-${{ matrix.target }}
           path: dist/output/PicOrgFTP-SQL-WEB.exe
           retention-days: 7
 
       - name: Upload web artifact
         id: upload-web
-        if: matrix.target == 'web' && steps.artifact-probe.outcome == 'success'
+        if: matrix.target != 'local' && steps.artifact-probe.outcome == 'success'
         uses: actions/upload-artifact@v7
         continue-on-error: true
         with:
-          name: PicOrgFTP-SQL-web
+          name: PicOrgFTP-SQL-web-${{ matrix.target }}
           path: dist/web/*.zip
           retention-days: 7
 
@@ -433,7 +457,7 @@ jobs:
           "Artifact upload was skipped or failed for PicOrgFTP-SQL-windows. The EXE build completed; check upload-artifact logs for quota or permission details." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
       - name: Report failed web artifact upload
-        if: matrix.target == 'web' && steps.artifact-probe.outcome == 'success' && (steps.upload-web-exe.outcome != 'success' || steps.upload-web.outcome != 'success')
+        if: matrix.target != 'local' && steps.artifact-probe.outcome == 'success' && (steps.upload-web-exe.outcome != 'success' || steps.upload-web.outcome != 'success')
         shell: pwsh
         run: |
           "Artifact upload was skipped or partially failed for web outputs. The EXE build completed; check upload-artifact logs for quota or permission details." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
@@ -482,7 +506,7 @@ jobs:
 
       - name: Publish web assets to release
         id: publish-web-release-assets
-        if: github.event_name == 'release' && matrix.target == 'web'
+        if: github.event_name == 'release' && matrix.target != 'local'
         continue-on-error: true
         uses: actions/github-script@v9
         with:
@@ -493,8 +517,8 @@ jobs:
             const { owner, repo } = context.repo;
             const release_id = context.payload.release.id;
             const assetPaths = [
-              `dist/release/PicOrgFTP-SQL-WEB-${process.env.PICORGFTP_SQL_ASSET_VERSION}.exe`,
-              `dist/release/PicOrgFTP-SQL-web-${process.env.PICORGFTP_SQL_ASSET_VERSION}.zip`,
+              `dist/release/PicOrgFTP-SQL-WEB-${{ matrix.target }}-${process.env.PICORGFTP_SQL_ASSET_VERSION}.exe`,
+              `dist/release/PicOrgFTP-SQL-web-${{ matrix.target }}-${process.env.PICORGFTP_SQL_ASSET_VERSION}.zip`,
             ];
             const existingAssets = await github.paginate(
               github.rest.repos.listReleaseAssets,
@@ -530,7 +554,7 @@ jobs:
           "Release asset upload was skipped or failed for the local EXE. The EXE build completed; check GitHub API upload logs for quota or permission details." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
       - name: Report skipped web release asset upload
-        if: github.event_name == 'release' && matrix.target == 'web' && steps.publish-web-release-assets.outcome != 'success'
+        if: github.event_name == 'release' && matrix.target != 'local' && steps.publish-web-release-assets.outcome != 'success'
         shell: pwsh
         run: |
           "Release asset upload was skipped or failed for web outputs. The EXE build completed; check GitHub API upload logs for quota or permission details." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append

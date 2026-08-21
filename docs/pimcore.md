@@ -30,6 +30,37 @@ Tekst i znaki poza placeholderami są kopiowane do wyniku. Grupa `(...)` znika w
 
 Dostępne funkcje: `keep`, `trim`, `normalize_spaces`, `upper`, `lower`, `title`, `capitalize`, `replace`, `default`, `substring`, `truncate`, `strip_diacritics`, `slug`, `number`, `filled`, `any_filled`, `count_filled` i `if_filled`.
 
+### Walidacja OCR
+
+Przy mapowaniu pola zaznacz `Porównuj wynik z OCR`, aby kontrolować ręcznie wpisaną albo wyliczoną wartość względem wszystkich aktualnie wybranych slotów OCR. Porównanie normalizuje przecinek do kropki, ignoruje część po separatorze dziesiętnym i traktuje każdy znak specjalny jako `?`: `120/140` oraz `120-140` są więc zgodne, a `120--140` pozostaje odrębnym `120??140`.
+
+Gdy gotowy wynik OCR nie pasuje, pole jest oznaczone na czerwono. Podpowiedź pokazuje wszystkie wartości znalezione na zdjęciach, a przyciski ✓ i × odpowiednio potwierdzają wpis albo przywracają poprzednią wartość (lub czyszczą nowe pole). Obraz jest analizowany wyłącznie lokalnie; nie trafia do zewnętrznego API.
+
+Jednorazowo zainstaluj lokalny OCR w środowisku aplikacji:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-vision.txt
+```
+
+Jeżeli w slocie nie ma obrazu albo OCR nie jest dostępny, wynik pozostaje bez automatycznego potwierdzenia. OCR zbiera wszystkie wartości liczbowe ze wskazanych slotów; nie przypisuje ich do szerokości, głębokości ani wysokości.
+
+### Tester OCR i warianty EXE
+
+Administrator może sprawdzić jakość odczytu w `Ustawienia > OCR`, wskazać sloty do zbierania danych i uruchomić test obrazu. Aplikacja pokazuje oryginalny obraz z prostokątami nad znalezionym tekstem, procentem pewności oraz kompletną listą odczytów. W tym miejscu ustawia się także okres bezczynności użytkowników i limity CPU dla kolejki dopracowywania wycinków.
+
+Karta pokazuje także wersję użytego silnika PaddleOCR, nazwę i wariant modelu (`lang=en`), stan modelu oraz odnośnik do oficjalnego projektu na GitHubie. Test używa wyłącznie lokalnego silnika i tymczasowego cache uploadu aplikacji.
+
+Są cztery proste pliki BAT do budowania:
+
+```powershell
+.\Generator exe\BUILD_ALL_EXE.bat
+.\Generator exe\BUILD_LOCAL_EXE.bat
+.\Generator exe\BUILD_WEB_EXE.bat
+.\Generator exe\BUILD_WEB_EXE_OCR.bat
+```
+
+`BUILD_ALL_EXE` buduje wszystkie trzy wydania. `BUILD_LOCAL_EXE` tworzy lokalny EXE bez OCR. `BUILD_WEB_EXE` tworzy lżejsze web EXE bez funkcji, interfejsu i zależności OCR. `BUILD_WEB_EXE_OCR` tworzy web EXE z silnikiem i modelami OCR osadzonymi w paczce, gotowy do pracy offline. Wariant offline jest wyraźnie większy.
+
 ### Sprawdzanie wypełnienia pól
 
 `filled` zamienia wypełnione pole na `1`, a puste pole na `0`. Dzięki temu można policzyć paczki po wpisanej szerokości:

@@ -650,6 +650,24 @@ def start_web(port: int, host: str, *, prefer_system_service: bool = True) -> Ac
     ]
     if web_listeners and check_http_health(port).get("ok"):
         return ActionResult(True, "Panel webowy juz dziala.")
+    if listeners:
+        if not web_listeners:
+            pids = ", ".join(str(_safe_int(item.get("Pid"))) for item in listeners)
+            return ActionResult(
+                False,
+                f"Port {port} jest zajety przez inny proces (PID: {pids}). Nie uruchomiono drugiej instancji panelu.",
+            )
+        stopped = stop_web(port)
+        if not stopped.ok:
+            return ActionResult(
+                False,
+                f"Nie mozna zrestartowac nieodpowiadajacego panelu na porcie {port}: {stopped.message}",
+            )
+        if get_port_listeners(port):
+            return ActionResult(
+                False,
+                f"Port {port} nadal jest zajety po zatrzymaniu panelu. Nie uruchomiono drugiej instancji.",
+            )
     if prefer_system_service and task_exists():
         result = run_system_service()
         if result.ok and wait_web_ready(port):
@@ -680,7 +698,6 @@ def _taskkill_process_tree(pid: int) -> tuple[bool, str]:
 
 
 def stop_web(port: int) -> ActionResult:
-    end_system_service()
     stopped = False
     data = read_metadata()
     failures: list[str] = []
@@ -697,16 +714,21 @@ def stop_web(port: int) -> ActionResult:
             else:
                 failures.append(f"PID {launcher_pid}: {detail}")
 
+    listeners_by_pid: dict[int, dict[str, Any]] = {}
     candidates = [server_pid]
     for listener in get_port_listeners(port):
+        listener_pid = _safe_int(listener.get("Pid"))
+        if listener_pid > 0:
+            listeners_by_pid[listener_pid] = listener
         candidates.append(_safe_int(listener.get("Pid")))
     for pid_value in dict.fromkeys(pid for pid in candidates if pid > 0):
         if launcher_stopped:
             break
         command_line = get_process_command_line(pid_value)
+        process_name = str(listeners_by_pid.get(pid_value, {}).get("ProcessName") or "")
         if not (
             is_controlled_web_server(pid_value, data, command_line)
-            or is_web_process(pid_value, command_line)
+            or is_web_process(pid_value, command_line, process_name)
         ):
             continue
         if os.name == "nt":
@@ -723,6 +745,12 @@ def stop_web(port: int) -> ActionResult:
             failures.append(f"PID {pid_value}: {detail}")
     if failures:
         return ActionResult(False, f"Nie udalo sie zatrzymac panelu WWW: {'; '.join(failures)}")
+    system_stop = end_system_service()
+    if not system_stop.ok:
+        return ActionResult(
+            False,
+            f"Nie udalo sie zatrzymac uslugi SYSTEM: {system_stop.message}",
+        )
     if not _wait_for_port_release(port):
         return ActionResult(False, f"Panel WWW nadal nasluchuje na porcie {port}.")
     try:
@@ -823,6 +851,27 @@ def open_as_admin() -> ActionResult:
     if int(rc) <= 32:
         return ActionResult(False, "System odrzucil uruchomienie jako administrator.")
     return ActionResult(True, "Uruchomiono nowe okno jako administrator.")
+
+
+def stop_web_as_admin(port: int) -> ActionResult:
+    if os.name != "nt":
+        return ActionResult(False, "Zatrzymywanie jako administrator jest dostepne tylko na Windows.")
+    root = app_root()
+    if getattr(sys, "frozen", False):
+        file_path = str(Path(sys.executable).resolve())
+        params = subprocess.list2cmdline(["--stop-panel", "--port", str(int(port))])
+    else:
+        file_path = _pythonw_executable()
+        params = subprocess.list2cmdline(
+            [str(root / "PicOrgFTP-SQL-WEB.pyw"), "--stop-panel", "--port", str(int(port))]
+        )
+    try:
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", file_path, params, str(root), 1)
+    except Exception as exc:
+        return ActionResult(False, f"Nie udalo sie poprosic o uprawnienia administratora: {exc}")
+    if int(rc) <= 32:
+        return ActionResult(False, "System odrzucil uruchomienie zatrzymania jako administrator.")
+    return ActionResult(True, "Potwierdz UAC: panel zostanie zatrzymany jako administrator.")
 
 
 def run_service_mode(port: int, host: str) -> int:
@@ -1145,6 +1194,11 @@ class WebManagerApp:
 
     def stop(self) -> None:
         port = self._port()
+        if task_exists() and not is_admin():
+            result = stop_web_as_admin(port)
+            self.status_override_until = time.time() + 12
+            self.status_var.set(result.message)
+            return
         self._run_action(lambda: stop_web(port))
 
     def restart(self) -> None:
@@ -1225,14 +1279,14 @@ class WebManagerApp:
         self.refreshing = False
         self._refresh_account_rows()
         if status.get("error"):
-            if time.time() >= self.status_override_until:
+            if not self.close_check_in_progress and time.time() >= self.status_override_until:
                 self.status_var.set(f"Status: blad odswiezania: {status['error']}")
             if self.pending_refresh:
                 self.pending_refresh = False
                 self.request_refresh()
             return
 
-        if time.time() >= self.status_override_until:
+        if not self.close_check_in_progress and time.time() >= self.status_override_until:
             if status["running"]:
                 self.status_var.set("Status: dziala")
             elif status["listeners"]:
@@ -1387,7 +1441,19 @@ class WebManagerApp:
 
     def _stop_web_for_close_worker(self, port: int) -> None:
         try:
-            result = stop_web(port)
+            if task_exists() and not is_admin():
+                elevated = stop_web_as_admin(port)
+                if not elevated.ok:
+                    result = elevated
+                elif _wait_for_port_release(port, timeout=8.0):
+                    result = ActionResult(True, "Zatrzymano panel webowy jako administrator.")
+                else:
+                    result = ActionResult(
+                        False,
+                        f"Panel WWW nadal nasluchuje na porcie {port}. Potwierdz UAC i sprobuj ponownie.",
+                    )
+            else:
+                result = stop_web(port)
         except Exception as exc:
             result = ActionResult(False, str(exc))
         self.root.after(0, lambda: self._finish_close_stop(result))
@@ -1429,11 +1495,14 @@ class WebManagerApp:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--service-run", action="store_true")
+    parser.add_argument("--stop-panel", action="store_true")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--host", default=DEFAULT_HOST)
     args = parser.parse_args(argv)
     if args.service_run:
         return run_service_mode(args.port, args.host)
+    if args.stop_panel:
+        return 0 if stop_web(args.port).ok else 1
     WebManagerApp().run()
     return 0
 

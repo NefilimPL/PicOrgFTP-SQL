@@ -1,4 +1,13 @@
+param(
+    [switch]$IncludeVision,
+    [switch]$IncludeVisionModels
+)
+
 $ErrorActionPreference = "Stop"
+
+if ($IncludeVisionModels -and -not $IncludeVision) {
+    throw "IncludeVisionModels wymaga parametru -IncludeVision."
+}
 
 $ScriptDir = $PSScriptRoot
 $RepoRoot = Resolve-Path (Join-Path $ScriptDir "..")
@@ -6,8 +15,9 @@ $VenvDir = Join-Path $RepoRoot ".venv-build"
 $Python = Join-Path $VenvDir "Scripts\python.exe"
 $IconDir = Join-Path $ScriptDir ".icons"
 $IconPath = Join-Path $IconDir "PIC_WEB.ico"
-$WorkPath = Join-Path $RepoRoot "build\web-exe"
-$VersionInfoPath = Join-Path $WorkPath "PicOrgFTP-SQL-WEB.version.txt"
+$BuildName = if ($IncludeVisionModels) { "PicOrgFTP-SQL-WEB-OCR" } elseif ($IncludeVision) { "PicOrgFTP-SQL-WEB-OCR-ONLINE" } else { "PicOrgFTP-SQL-WEB" }
+$WorkPath = Join-Path $RepoRoot ("build\\web-exe-" + $BuildName)
+$VersionInfoPath = Join-Path $WorkPath ($BuildName + ".version.txt")
 
 Set-Location $RepoRoot
 . (Join-Path $ScriptDir "build_common.ps1")
@@ -16,7 +26,8 @@ Initialize-BuildEnvironment `
     -RepoRoot $RepoRoot `
     -VenvDir $VenvDir `
     -Python $Python `
-    -IncludeWebDependencies
+    -IncludeWebDependencies `
+    -IncludeVisionDependencies:$IncludeVision
 
 New-Item -ItemType Directory -Path $IconDir -Force | Out-Null
 New-Item -ItemType Directory -Path $WorkPath -Force | Out-Null
@@ -24,15 +35,37 @@ Invoke-Native $Python "-c" "from PIL import Image; Image.open(r'pic\PIC_WEB.png'
 Invoke-Native $Python "tools\generate_windows_version_info.py" `
     --output $VersionInfoPath `
     --file-description "PicOrgFTP-SQL web manager" `
-    --internal-name "PicOrgFTP-SQL-WEB" `
-    --original-filename "PicOrgFTP-SQL-WEB.exe"
+    --internal-name $BuildName `
+    --original-filename ($BuildName + ".exe")
 
 $env:PICORGFTP_SQL_HEADLESS = "1"
 $env:PYINSTALLER_BUILD = "1"
 $WebStaticDataArguments = Get-WebStaticDataArguments -RepoRoot $RepoRoot
+$VisionPyInstallerArguments = @()
+if (-not $IncludeVision) {
+    $VisionPyInstallerArguments += "--runtime-hook"
+    $VisionPyInstallerArguments += (Join-Path $ScriptDir "disable_ocr_runtime.py")
+}
+if ($IncludeVision) {
+    foreach ($package in @("paddleocr", "paddlex", "paddle", "cv2", "bidi", "imagesize", "pyclipper", "pypdfium2", "shapely")) {
+        $VisionPyInstallerArguments += "--collect-all"
+        $VisionPyInstallerArguments += $package
+    }
+}
+if ($IncludeVisionModels) {
+    $VisionModelCache = Join-Path $WorkPath "ocr-model-cache"
+    New-Item -ItemType Directory -Path $VisionModelCache -Force | Out-Null
+    $env:PADDLE_PDX_CACHE_HOME = $VisionModelCache
+    Invoke-Native $Python "-c" "from paddleocr import PaddleOCR; profiles=(('PP-OCRv5_mobile_det','PP-OCRv5_mobile_rec'),('PP-OCRv5_server_det','PP-OCRv5_server_rec')); [PaddleOCR(text_detection_model_name=det, text_recognition_model_name=rec, enable_mkldnn=False, use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False) for det, rec in profiles]"
+    if (-not (Test-Path -LiteralPath $VisionModelCache -PathType Container)) {
+        throw "Nie znaleziono lokalnego cache modeli OCR po przygotowaniu builda."
+    }
+    $VisionPyInstallerArguments += "--add-data"
+    $VisionPyInstallerArguments += "$VisionModelCache;ocr_models"
+}
 
 Invoke-Native $Python "-m" "PyInstaller" "--noconfirm" "--clean" "--log-level=WARN" `
-    --name PicOrgFTP-SQL-WEB `
+    --name $BuildName `
     --noconsole `
     --onefile `
     --distpath $ScriptDir `
@@ -49,6 +82,7 @@ Invoke-Native $Python "-m" "PyInstaller" "--noconfirm" "--clean" "--log-level=WA
     --collect-submodules PIL `
     --collect-data mysql.connector `
     --collect-data certifi `
+    @VisionPyInstallerArguments `
     @WebStaticDataArguments `
     --add-data "picorgftp_sql\browser_extension;picorgftp_sql\browser_extension" `
     --add-data "picorgftp_sql\Localization;picorgftp_sql\Localization" `
@@ -56,4 +90,4 @@ Invoke-Native $Python "-m" "PyInstaller" "--noconfirm" "--clean" "--log-level=WA
     --add-data "pic\PIC_WEB.png;pic" `
     PicOrgFTP-SQL-WEB.pyw
 
-Write-Host "OK. Wynik: $ScriptDir\PicOrgFTP-SQL-WEB.exe"
+Write-Host "OK. Wynik: $ScriptDir\$BuildName.exe"

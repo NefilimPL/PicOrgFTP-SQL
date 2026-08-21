@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import base64
@@ -110,6 +111,7 @@ from .pimcore_config import (
     field_mapping_issues,
     normalize_pimcore_settings,
 )
+from .ocr_settings import OCR_SETTINGS_KEY, normalize_ocr_settings
 from .pimcore_operations import PimcoreOperationRegistry, redact_pimcore_log_value
 from .pimcore_templates import (
     PRODUCT_SOURCES,
@@ -2210,6 +2212,7 @@ def _render_templates(
     *,
     fill_missing_product_values: bool = False,
     mode: str = "create",
+    image_slot_paths: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     with SqlExecutionContext(execute_query=execute_sql_value_query) as sql_context:
         return _render_templates_with_sql_context(
@@ -2219,6 +2222,7 @@ def _render_templates(
             targets,
             fill_missing_product_values=fill_missing_product_values,
             mode=mode,
+            image_slot_paths=image_slot_paths,
             sql_context=sql_context,
         )
 
@@ -2231,6 +2235,7 @@ def _render_templates_with_sql_context(
     *,
     fill_missing_product_values: bool = False,
     mode: str = "create",
+    image_slot_paths: Mapping[str, str] | None = None,
     sql_context: SqlExecutionContext,
 ) -> dict[str, object]:
     submitted = dict(values) if isinstance(values, dict) else {}
@@ -2439,7 +2444,11 @@ def _render_templates_with_sql_context(
     }
 
 
-def preview_pimcore_template(payload: object) -> dict[str, object]:
+def preview_pimcore_template(
+    payload: object,
+    *,
+    image_slot_paths: Mapping[str, str] | None = None,
+) -> dict[str, object]:
     source = payload if isinstance(payload, dict) else {}
     settings_payload = normalize_pimcore_settings(
         {"field_mappings": source.get("mappings", [])}
@@ -2454,6 +2463,7 @@ def preview_pimcore_template(payload: object) -> dict[str, object]:
         [target],
         fill_missing_product_values=True,
         mode="preview",
+        image_slot_paths=image_slot_paths,
     )
 
 
@@ -2475,6 +2485,8 @@ def render_saved_pimcore_templates(
     values: object,
     targets: object,
     mode: str = "create",
+    *,
+    image_slot_paths: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     settings_payload = _active_pimcore_runtime_settings()
     selected = [str(item) for item in targets] if isinstance(targets, list) else None
@@ -2484,6 +2496,7 @@ def render_saved_pimcore_templates(
         values,
         selected,
         mode=mode,
+        image_slot_paths=image_slot_paths,
     )
 
 
@@ -3212,6 +3225,7 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
     web_display_payload = payload.get(WEB_DISPLAY_SETTINGS_KEY)
     translation_payload = payload.get(TRANSLATION_SETTINGS_KEY)
     pimcore_payload = payload.get(PIMCORE_SETTINGS_KEY)
+    ocr_payload = payload.get(OCR_SETTINGS_KEY)
     email_payload = payload.get(EMAIL_SETTINGS_KEY)
     previous_entra_identity = ("", "")
     updated_entra_identity = ("", "")
@@ -3330,6 +3344,12 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
         if not _text(pimcore_payload.get(PIMCORE_API_KEY)):
             merged[PIMCORE_API_KEY] = current[PIMCORE_API_KEY]
         cfg[PIMCORE_SETTINGS_KEY] = normalize_pimcore_settings(merged)
+
+    if isinstance(ocr_payload, dict):
+        current_ocr = normalize_ocr_settings(cfg.get(OCR_SETTINGS_KEY, {}))
+        merged_ocr = dict(current_ocr)
+        merged_ocr.update(ocr_payload)
+        cfg[OCR_SETTINGS_KEY] = normalize_ocr_settings(merged_ocr)
 
     if isinstance(email_payload, dict):
         current_email = normalize_email_settings(cfg.get(EMAIL_SETTINGS_KEY))
@@ -3544,6 +3564,7 @@ def settings_snapshot() -> dict[str, object]:
             legacy_color_labels=cfg.get(COLOR_FIELD_LABELS_KEY),
         ),
         "pimcore": pimcore_public,
+        OCR_SETTINGS_KEY: normalize_ocr_settings(cfg.get(OCR_SETTINGS_KEY, {})),
         EMAIL_SETTINGS_KEY: public_email_settings(cfg.get(EMAIL_SETTINGS_KEY)),
         "slots": [
             {

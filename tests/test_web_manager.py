@@ -379,6 +379,83 @@ def test_stop_web_terminates_recorded_server_when_cim_hides_command_line(
     assert commands == [["taskkill", "/PID", "102", "/T", "/F"]]
 
 
+def test_stop_web_kills_the_listener_before_ending_the_system_task(tmp_path, monkeypatch) -> None:
+    """Catches blocking on schtasks /End while Uvicorn still owns the panel port."""
+
+    (tmp_path / ".picorg_web.pid").write_text(
+        json.dumps({"pid": 102, "launcher": "service-run"}), encoding="ascii"
+    )
+    events: list[str] = []
+    listener = {
+        "Pid": 102,
+        "ProcessName": "PicOrgFTP-SQL-WEB",
+        "CommandLine": "PicOrgFTP-SQL-WEB --service-run",
+    }
+    listener_queries = 0
+
+    def listeners(_port: int):
+        nonlocal listener_queries
+        listener_queries += 1
+        return [listener] if listener_queries == 1 else []
+
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+    monkeypatch.setattr(web_manager, "get_port_listeners", listeners)
+    monkeypatch.setattr(
+        web_manager,
+        "get_process_command_line",
+        lambda _pid: "PicOrgFTP-SQL-WEB --service-run",
+    )
+    monkeypatch.setattr(
+        web_manager,
+        "end_system_service",
+        lambda: events.append("end") or web_manager.ActionResult(True, ""),
+    )
+    monkeypatch.setattr(
+        web_manager,
+        "_run_command",
+        lambda args, **_kwargs: events.append("kill")
+        or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    result = web_manager.stop_web(8010)
+
+    assert result.ok
+    assert events == ["kill", "end"]
+
+
+def test_stop_web_kills_a_listener_identified_only_by_process_name(tmp_path, monkeypatch) -> None:
+    """Catches leaving the panel alive when CIM hides its command line."""
+
+    events: list[str] = []
+    listener = {"Pid": 102, "ProcessName": "PicOrgFTP-SQL-WEB", "CommandLine": ""}
+    listener_queries = 0
+
+    def listeners(_port: int):
+        nonlocal listener_queries
+        listener_queries += 1
+        return [listener] if listener_queries == 1 else []
+
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+    monkeypatch.setattr(web_manager, "get_port_listeners", listeners)
+    monkeypatch.setattr(web_manager, "get_process_command_line", lambda _pid: "")
+    monkeypatch.setattr(
+        web_manager,
+        "end_system_service",
+        lambda: events.append("end") or web_manager.ActionResult(True, ""),
+    )
+    monkeypatch.setattr(
+        web_manager,
+        "_run_command",
+        lambda args, **_kwargs: events.append("kill")
+        or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    result = web_manager.stop_web(8010)
+
+    assert result.ok
+    assert events == ["kill", "end"]
+
+
 def test_frozen_service_records_its_pyinstaller_parent_as_launcher(tmp_path, monkeypatch) -> None:
     """Catches a frozen server persisting only its child PID."""
     metadata_calls = []
@@ -446,6 +523,113 @@ def test_end_system_service_reports_scheduler_error(monkeypatch) -> None:
 
     assert not result.ok
     assert "Access denied" in result.message
+
+
+def test_stop_web_returns_system_service_failure_without_claiming_success(
+    tmp_path, monkeypatch
+) -> None:
+    """Catches discarding an access error from schtasks /End."""
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        web_manager,
+        "end_system_service",
+        lambda: web_manager.ActionResult(False, "Access denied"),
+    )
+
+    result = web_manager.stop_web(8010)
+
+    assert not result.ok
+    assert "Access denied" in result.message
+
+
+def test_start_web_reclaims_an_unhealthy_picorg_listener_before_restart(monkeypatch) -> None:
+    """Catches starting a second Uvicorn process while the first owns the port."""
+
+    events: list[str] = []
+    listener = {
+        "Pid": 102,
+        "ProcessName": "PicOrgFTP-SQL-WEB",
+        "CommandLine": "PicOrgFTP-SQL-WEB --service-run",
+    }
+    listener_queries = 0
+
+    def listeners(_port: int):
+        nonlocal listener_queries
+        listener_queries += 1
+        return [listener] if listener_queries == 1 else []
+
+    monkeypatch.setattr(web_manager, "get_port_listeners", listeners)
+    monkeypatch.setattr(web_manager, "check_http_health", lambda _port: {"ok": False})
+    monkeypatch.setattr(
+        web_manager,
+        "stop_web",
+        lambda _port: events.append("stop") or web_manager.ActionResult(True, "Zatrzymano."),
+    )
+    monkeypatch.setattr(web_manager, "task_exists", lambda: False)
+    monkeypatch.setattr(
+        web_manager,
+        "start_user_web",
+        lambda _port, _host: events.append("start") or web_manager.ActionResult(True, "Uruchomiono."),
+    )
+
+    result = web_manager.start_web(8010, "0.0.0.0")
+
+    assert result.ok
+    assert events == ["stop", "start"]
+
+
+def test_start_web_refuses_to_start_on_a_busy_non_picorg_port(monkeypatch) -> None:
+    """Catches launching Uvicorn against an unrelated process that owns the configured port."""
+
+    listener = {"Pid": 102, "ProcessName": "nginx", "CommandLine": "nginx: master process"}
+    monkeypatch.setattr(web_manager, "get_port_listeners", lambda _port: [listener])
+    monkeypatch.setattr(web_manager, "task_exists", lambda: False)
+    monkeypatch.setattr(web_manager, "start_user_web", lambda *_args: pytest.fail("must not start"))
+
+    result = web_manager.start_web(8010, "0.0.0.0")
+
+    assert not result.ok
+    assert "8010" in result.message
+
+
+def test_manager_stop_requests_an_elevated_stop_for_a_system_service(monkeypatch) -> None:
+    """Catches a non-admin manager trying to taskkill a SYSTEM-owned process."""
+    app = _app_without_tk()
+    normal_actions = []
+    elevated_ports = []
+    app._run_action = lambda action: normal_actions.append(action)
+    monkeypatch.setattr(web_manager, "task_exists", lambda: True)
+    monkeypatch.setattr(web_manager, "is_admin", lambda: False)
+    monkeypatch.setattr(
+        web_manager,
+        "stop_web_as_admin",
+        lambda port: elevated_ports.append(port)
+        or web_manager.ActionResult(True, "Potwierdz UAC."),
+        raising=False,
+    )
+
+    app.stop()
+
+    assert elevated_ports == [8010]
+    assert normal_actions == []
+    assert app.status_var.value == "Potwierdz UAC."
+
+
+def test_main_stop_panel_mode_stops_the_panel_without_opening_the_gui(monkeypatch) -> None:
+    """Catches an elevated EXE opening a second manager instead of stopping the task."""
+    stopped_ports = []
+    monkeypatch.setattr(
+        web_manager,
+        "stop_web",
+        lambda port: stopped_ports.append(port) or web_manager.ActionResult(True, ""),
+    )
+    try:
+        exit_code = web_manager.main(["--stop-panel", "--port", "8123"])
+    except SystemExit:
+        exit_code = None
+
+    assert exit_code == 0
+    assert stopped_ports == [8123]
 
 
 def test_stop_web_keeps_metadata_when_panel_port_stays_open(tmp_path, monkeypatch) -> None:
@@ -569,6 +753,7 @@ def test_finish_close_check_stops_running_web_panel_in_background_when_user_conf
 
     monkeypatch.setattr(web_manager.threading, "Thread", FakeThread)
     monkeypatch.setattr(web_manager, "confirm_close_running_web_panel", lambda: True, raising=False)
+    monkeypatch.setattr(web_manager, "task_exists", lambda: False)
     monkeypatch.setattr(
         web_manager,
         "stop_web",
@@ -594,3 +779,94 @@ def test_finish_close_check_stops_running_web_panel_in_background_when_user_conf
     assert app.root.destroyed
     assert not app.close_check_in_progress
     assert app.close_progress.stopped == 2
+
+
+def test_close_stop_requests_elevation_for_a_system_service(monkeypatch) -> None:
+    app = _app_without_tk()
+    elevated_ports = []
+    normal_ports = []
+
+    monkeypatch.setattr(web_manager, "task_exists", lambda: True)
+    monkeypatch.setattr(web_manager, "is_admin", lambda: False)
+    monkeypatch.setattr(
+        web_manager,
+        "stop_web_as_admin",
+        lambda port: elevated_ports.append(port) or web_manager.ActionResult(True, "Potwierdz UAC."),
+    )
+    monkeypatch.setattr(web_manager, "stop_web", lambda port: normal_ports.append(port))
+    monkeypatch.setattr(web_manager, "_wait_for_port_release", lambda _port, **_kwargs: True)
+
+    app._stop_web_for_close_worker(8010)
+
+    assert elevated_ports == [8010]
+    assert normal_ports == []
+    assert app.root.destroyed
+
+
+def test_close_stop_limits_wait_for_elevated_process_termination(monkeypatch) -> None:
+    """Catches keeping the manager open for 45 seconds after an elevated force-stop."""
+
+    app = _app_without_tk()
+    wait_timeouts: list[float] = []
+    monkeypatch.setattr(web_manager, "task_exists", lambda: True)
+    monkeypatch.setattr(web_manager, "is_admin", lambda: False)
+    monkeypatch.setattr(
+        web_manager,
+        "stop_web_as_admin",
+        lambda _port: web_manager.ActionResult(True, "Potwierdz UAC."),
+    )
+    monkeypatch.setattr(
+        web_manager,
+        "_wait_for_port_release",
+        lambda _port, *, timeout: wait_timeouts.append(timeout) or True,
+    )
+
+    app._stop_web_for_close_worker(8010)
+
+    assert wait_timeouts == [8.0]
+    assert app.root.destroyed
+
+
+def test_status_refresh_does_not_replace_stopping_feedback_while_close_is_active():
+    app = _app_without_tk()
+    app._refresh_account_rows = lambda: None
+    app._set_rows = lambda *_args: None
+    app.service_var = _FakeStringVar()
+    app.autostart_var = _FakeStringVar()
+    app.urls_list = types.SimpleNamespace(delete=lambda *_args: None, insert=lambda *_args: None)
+    app.listeners_tree = object()
+    app.users_tree = object()
+    app.refreshing = True
+    app.pending_refresh = False
+    app.close_check_in_progress = True
+    app.status_override_until = 0
+    app.status_var.set("Zatrzymuje panel WWW...")
+
+    app._apply_status(
+        {
+            "running": True,
+            "listeners": [],
+            "task_exists": True,
+            "task_enabled": True,
+            "admin": False,
+            "urls": [],
+            "clients": [],
+            "connections": [],
+        }
+    )
+
+    assert app.status_var.value == "Zatrzymuje panel WWW..."
+
+
+def test_status_refresh_error_does_not_replace_stopping_feedback_while_close_is_active():
+    app = _app_without_tk()
+    app._refresh_account_rows = lambda: None
+    app.refreshing = True
+    app.pending_refresh = False
+    app.close_check_in_progress = True
+    app.status_override_until = 0
+    app.status_var.set("Zatrzymuje panel WWW...")
+
+    app._apply_status({"error": "connection reset"})
+
+    assert app.status_var.value == "Zatrzymuje panel WWW..."

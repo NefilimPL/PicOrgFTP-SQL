@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import os
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -8,6 +9,10 @@ from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
 from picorgftp_sql import web_data
+from picorgftp_sql.services.image_dimensions import (
+    ImageOcrDiagnostics,
+    OcrDiagnosticCandidate,
+)
 from picorgftp_sql.services.pimcore_service import PimcoreApiError, PimcoreConflictError
 from picorgftp_sql.services.translation_service import TranslationResult
 from picorgftp_sql.sqlite_store import SqliteStore
@@ -85,6 +90,35 @@ def test_update_settings_clears_translation_cache_after_accepted_update():
     assert cfg["translation"]["provider"] == "mymemory"
     assert cfg["translation"]["api_key"] == "saved-secret"
     clear_cache.assert_called_once()
+
+
+def test_update_settings_persists_bounded_ocr_collection_limits(monkeypatch):
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    monkeypatch.setattr(web_data.config, "CONFIG", cfg)
+    monkeypatch.setattr(web_data, "save_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(web_data.config, "initialize_config", lambda **_kwargs: None)
+    monkeypatch.setattr(web_data, "settings_snapshot", lambda: {"ocr": cfg["ocr"]})
+
+    result = web_data.update_settings(
+        {
+            "ocr": {
+                "enabled_slots": ["15", "15", "16"],
+                "background_enabled": True,
+                "idle_seconds": -5,
+                "max_cpu_percent": 75,
+                "pause_cpu_percent": 20,
+            }
+        }
+    )
+
+    assert result["ocr"] == {
+        "enabled_slots": ["15", "16"],
+        "background_enabled": True,
+        "idle_seconds": 0,
+        "max_cpu_percent": 75,
+        "pause_cpu_percent": 75,
+        "model_profiles": ["fast"],
+    }
 
 
 def test_parse_csv_headers_supports_semicolon_and_quoted_labels():
@@ -1744,6 +1778,247 @@ def test_template_preview_fills_missing_product_placeholders_from_saved_entry():
         result = web_data.preview_pimcore_template(payload)
 
     assert result["values"]["TITLE"] == "Vivo - Komoda"
+
+
+def test_template_preview_route_resolves_slot_tokens_before_rendering():
+    client = TestClient(web_app.app)
+    payload = {
+        "mappings": [],
+        "target_source": "WIDTH",
+        "product_values": {},
+        "values": {},
+        "slot_tokens": {"15": "signed-15"},
+    }
+    expected = {"values": {"WIDTH": "130.5"}, "warnings": []}
+    with (
+        patch.object(web_app, "_require_admin", return_value="admin"),
+        patch.object(web_app, "_path_from_file_token", return_value="C:/cache/15.png"),
+        patch.object(web_app, "preview_pimcore_template", return_value=expected) as preview,
+    ):
+        response = client.post("/api/settings/pimcore/template-preview", json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    preview.assert_called_once_with(payload, image_slot_paths={"15": "C:/cache/15.png"})
+
+
+def test_ocr_analysis_uses_only_the_signed_upload_token_without_a_confidence_threshold():
+    client = TestClient(web_app.app)
+    diagnostics = ImageOcrDiagnostics(
+        available=True,
+        dimensions={"width": "130.5", "depth": "", "height": ""},
+        candidates=[
+            OcrDiagnosticCandidate(
+                "130,5 cm", 0.91, (4, 8, 80, 28), "width", "130.5", True
+            )
+        ],
+    )
+    with (
+        patch.object(web_app, "_require_admin", return_value="admin"),
+        patch.object(web_app, "_path_from_file_token", return_value="C:/cache/test.png"),
+        patch.object(web_app, "_versioned_file_url", return_value="/api/file?token=signed"),
+        patch.object(web_app, "analyze_image_values", return_value=diagnostics) as analyze,
+    ):
+        response = client.post(
+            "/api/settings/ocr/analyze",
+            json={"token": "signed"},
+        )
+
+    assert response.status_code == 200
+    assert "C:/cache" not in response.text
+    assert response.json()["image_url"] == "/api/file?token=signed"
+    assert response.json()["candidates"][0]["bbox"] == [4, 8, 80, 28]
+    analyze.assert_called_once_with("C:/cache/test.png")
+
+
+def test_ocr_status_route_returns_runtime_status():
+    client = TestClient(web_app.app)
+    status = {"available": False, "engine": {"name": "PaddleOCR"}}
+    with (
+        patch.object(web_app, "_require_admin", return_value="admin"),
+        patch.object(web_app, "image_ocr_runtime_info", return_value=status),
+    ):
+        status_response = client.get("/api/settings/ocr/status")
+
+    assert status_response.json() == status
+
+
+def test_ocr_validation_compares_cached_signed_slot_images_without_exposing_paths(tmp_path):
+    from picorgftp_sql.sqlite_store import SqliteStore
+
+    store = SqliteStore(str(tmp_path / "ocr.sqlite"))
+    store.initialize()
+    store.upsert_ocr_scan(
+        "a" * 64,
+        [
+            {
+                "text": "120,4 mm",
+                "comparison": "120",
+                "confidence": 0.91,
+                "bbox": [4, 8, 80, 28],
+            }
+        ],
+        "completed",
+    )
+    client = TestClient(web_app.app)
+    with (
+        patch.object(web_app, "_require_admin", return_value={"username": "admin"}),
+        patch.object(web_app, "_path_from_file_token", return_value="C:/cache/15.png"),
+        patch.object(web_app, "_image_sha256", return_value="a" * 64),
+        patch.object(web_app, "observability_store", return_value=store),
+    ):
+        response = client.post(
+            "/api/ocr/validate",
+            json={
+                "field_id": "WIDTH",
+                "value": "120,8",
+                "slot_tokens": ["signed-slot-token"],
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["value"] == "120.8"
+    assert payload["comparison"] == "120"
+    assert payload["matches"] is True
+    assert payload["mismatch"] is False
+    assert payload["images"][0]["values"][0]["bbox"] == [4, 8, 80, 28]
+    assert "C:/cache" not in response.text
+
+
+def test_ocr_scan_route_returns_cached_boxes_for_a_signed_slot_image(tmp_path):
+    from picorgftp_sql.sqlite_store import SqliteStore
+
+    store = SqliteStore(str(tmp_path / "ocr.sqlite"))
+    store.initialize()
+    store.upsert_ocr_scan(
+        "c" * 64,
+        [
+            {
+                "text": "120/140",
+                "comparison": "120?140",
+                "confidence": 0.91,
+                "bbox": [1, 2, 30, 20],
+            }
+        ],
+        "completed",
+    )
+    client = TestClient(web_app.app)
+    with (
+        patch.object(web_app, "_require_user", return_value="operator"),
+        patch.object(web_app, "_path_from_file_token", return_value="C:/cache/15.png"),
+        patch.object(web_app, "_image_sha256", return_value="c" * 64),
+        patch.object(web_app, "observability_store", return_value=store),
+    ):
+        response = client.get("/api/ocr/scan", params={"token": "signed-slot"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "state": "completed",
+        "values": [
+            {
+                "text": "120/140",
+                "comparison": "120?140",
+                "confidence": 0.91,
+                "bbox": [1, 2, 30, 20],
+            }
+        ],
+    }
+
+
+def test_ocr_approval_suppresses_a_cached_value_mismatch(tmp_path):
+    from picorgftp_sql.sqlite_store import SqliteStore
+
+    store = SqliteStore(str(tmp_path / "ocr.sqlite"))
+    store.initialize()
+    store.upsert_ocr_scan(
+        "b" * 64,
+        [{"text": "120/140", "comparison": "120?140", "confidence": 0.9, "bbox": [1, 2, 3, 4]}],
+        "completed",
+    )
+    client = TestClient(web_app.app)
+    with (
+        patch.object(web_app, "_require_admin", return_value={"username": "admin"}),
+        patch.object(web_app, "_path_from_file_token", return_value="C:/cache/15.png"),
+        patch.object(web_app, "_image_sha256", return_value="b" * 64),
+        patch.object(web_app, "observability_store", return_value=store),
+    ):
+        approval = client.post(
+            "/api/ocr/approval",
+            json={"field_id": "WIDTH", "value": "220", "slot_tokens": ["signed-slot-token"]},
+        )
+        validation = client.post(
+            "/api/ocr/validate",
+            json={"field_id": "WIDTH", "value": "220", "slot_tokens": ["signed-slot-token"]},
+        )
+
+    assert approval.status_code == 200
+    assert validation.status_code == 200
+    assert validation.json()["matches"] is False
+    assert validation.json()["approved"] is True
+    assert validation.json()["mismatch"] is False
+
+
+def test_selected_ocr_slot_starts_background_value_collection(monkeypatch):
+    calls = []
+
+    class ImmediateThread:
+        def __init__(self, *, target, daemon, name):
+            self.target = target
+            self.daemon = daemon
+            self.name = name
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setitem(web_app.config.CONFIG, "ocr", {"enabled_slots": ["15"]})
+    monkeypatch.setattr(web_app.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(
+        web_app,
+        "collect_image_values",
+        lambda path, *, store, analyze, enqueue_crops=None: calls.append(
+            (path, store, analyze, enqueue_crops)
+        ),
+        raising=False,
+    )
+    store = object()
+    monkeypatch.setattr(web_app, "observability_store", lambda: store)
+
+    status = web_app._schedule_ocr_value_collection("15", "C:/cache/15.png")
+
+    assert status == "scanning"
+    assert calls == [
+        (
+            os.path.realpath(os.path.abspath("C:/cache/15.png")),
+            store,
+            web_app.analyze_image_values,
+            calls[0][3],
+        )
+    ]
+    assert callable(calls[0][3])
+
+
+def test_admin_can_read_ocr_slots_and_background_queue(tmp_path, monkeypatch):
+    store = SqliteStore(str(tmp_path / "ocr.sqlite"))
+    store.enqueue_ocr_crop_job({"image_hash": "a" * 64, "bbox": [1, 2, 3, 4]})
+    monkeypatch.setitem(web_app.config.CONFIG, "ocr", {"enabled_slots": ["15"]})
+    monkeypatch.setitem(web_app.config.CONFIG, "slot_definitions", [
+        {"prefix": "15", "label": "Front"}, {"prefix": "16", "label": "Bok"}
+    ])
+    client = TestClient(web_app.app)
+    with (
+        patch.object(web_app, "_require_admin", return_value={"username": "admin"}),
+        patch.object(web_app, "observability_store", return_value=store),
+    ):
+        slots = client.get("/api/ocr/slots")
+        jobs = client.get("/api/ocr/jobs")
+
+    assert slots.json()["slots"] == [
+        {"prefix": "15", "label": "Front", "enabled": True},
+        {"prefix": "16", "label": "Bok", "enabled": False},
+    ]
+    assert jobs.json()["jobs"][0]["status"] == "pending"
+    assert "thumbnail_path" not in jobs.text
 
 
 def test_admin_test_sample_route_returns_fresh_editable_values():

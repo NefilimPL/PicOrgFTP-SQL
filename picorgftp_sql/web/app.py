@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
@@ -59,6 +59,20 @@ from ..database import connect_db
 from ..github_status import github_repository_status
 from ..history_changes import history_change_set
 from ..image_utils import fit_image_to_content
+from ..services.image_dimensions import analyze_image_values, image_ocr_runtime_info
+from ..services.ocr_cache import (
+    collect_image_values,
+    enqueue_ocr_crop_jobs,
+    restore_crop_bbox,
+)
+from ..services.ocr_queue import OcrQueueScheduler
+from ..services.ocr_worker import OcrQueueWorker
+from ..services.ocr_values import (
+    comparison_key,
+    normalize_entered_ocr_value,
+    ocr_values_match,
+)
+from ..ocr_settings import OCR_SETTINGS_KEY, normalize_ocr_settings
 from ..legacy_import import import_legacy_to_sqlite
 from ..logging_utils import log_error
 from ..email_settings import EMAIL_SETTINGS_KEY
@@ -81,6 +95,7 @@ from ..notification_service import (
 )
 from ..product_fields import PRODUCT_FIELDS_KEY, normalize_product_fields
 from ..pimcore_templates import TemplateError
+from ..file_tokens import FileTokenRegistry
 from ..path_security import PathSecurityError, build_child_path, resolve_path_within_roots
 from ..services.ftp_service import sync_remote_files
 from ..services.pimcore_service import PimcoreApiError, PimcoreConflictError
@@ -205,6 +220,33 @@ WEB_UPLOAD_CACHE_CLEAN_INTERVAL_SECONDS = 30 * 60
 CSRF_HEADER = "x-picorg-csrf"
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _UPLOAD_CACHE_LAST_CLEANUP = 0.0
+_OCR_COLLECTION_LOCK = threading.Lock()
+_OCR_COLLECTION_PATHS: set[str] = set()
+OCR_FEATURE_ENABLED = os.getenv("PICORGFTP_SQL_OCR_ENABLED", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
+
+def _require_ocr_feature() -> None:
+    """Reject OCR-only routes in the lightweight web distribution."""
+
+    if not OCR_FEATURE_ENABLED:
+        raise HTTPException(status_code=404, detail="OCR nie jest dostepny w tym wydaniu.")
+
+
+def _ocr_cpu_percent() -> float:
+    """Read the shared host sample without taking an extra CPU measurement."""
+
+    host = _RESOURCE_MONITOR.latest_public_snapshot().get("host", {})
+    if not isinstance(host, dict):
+        return 0.0
+    try:
+        return max(0.0, min(100.0, float(host.get("cpu_percent", 0.0))))
+    except (TypeError, ValueError):
+        return 0.0
 _BROWSER_EXTENSION_IMPORTS: Dict[str, List[Dict[str, Any]]] = {}
 _BROWSER_EXTENSION_IMPORTS_LOCK = threading.Lock()
 _PROCESS_JOB_RETENTION_SECONDS = 6 * 60 * 60
@@ -214,6 +256,7 @@ _PROCESS_JOB_ROOT = Path(tempfile.gettempdir()) / "picorg_web_process_jobs"
 # Active work is never discarded; only the newest terminal jobs stay in memory.
 _PROCESS_JOB_MAX_COMPLETED = 200
 _PROCESS_QUEUE = ProcessQueueService()
+_FILE_TOKEN_REGISTRY = FileTokenRegistry()
 
 
 class _ProcessQueueReference:
@@ -1182,6 +1225,12 @@ def _upload_cache_root() -> str:
     return os.path.join(settings.AC, "web_upload_cache")
 
 
+def _ocr_crop_root() -> str:
+    """Durable enlarged crops used by the idle OCR refinement queue."""
+
+    return os.path.join(settings.AC, "ocr_crop_cache")
+
+
 def _upload_cache_dir(cache_scope: object = "") -> str:
     safe_scope = sanitize_path_segment(cache_scope) or "user-session"
     return os.fspath(build_child_path(_upload_cache_root(), safe_scope))
@@ -1192,6 +1241,7 @@ def _file_token_roots() -> list[str]:
         settings.l,
         os.path.join(settings.AC, "web_ftp_cache"),
         _upload_cache_root(),
+        _ocr_crop_root(),
     ]
 
 
@@ -1297,9 +1347,11 @@ def cleanup_web_upload_cache(
 
 
 def _file_token(path: str) -> str:
-    payload = os.path.realpath(os.path.abspath(path))
-    token = f"{payload}|{_sign(payload)}"
-    return base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii")
+    try:
+        trusted_path = os.fspath(resolve_path_within_roots(path, _file_token_roots()))
+    except PathSecurityError as exc:
+        raise HTTPException(status_code=403, detail="Plik poza katalogiem zdjec lub cache.") from exc
+    return _FILE_TOKEN_REGISTRY.issue(trusted_path)
 
 
 def _file_version(path: str) -> str:
@@ -1318,26 +1370,81 @@ def _versioned_file_url(path: str, endpoint: str, token: str) -> str:
     return url
 
 
-def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
-    try:
-        decoded = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
-        path, signature = decoded.rsplit("|", 1)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="Niepoprawny token pliku.") from exc
-    if not hmac.compare_digest(_sign(path), signature):
-        raise HTTPException(status_code=403, detail="Niepoprawny podpis pliku.")
-    try:
-        resolved_path = os.fspath(
-            resolve_path_within_roots(
-                path,
-                _file_token_roots(),
+def _image_sha256(path: str) -> str:
+    """Return a stable content key without retaining browser-visible paths."""
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _schedule_ocr_value_collection(slot: object, path: str) -> str:
+    """Start a non-blocking cache fill only for an admin-enabled OCR slot."""
+
+    if not OCR_FEATURE_ENABLED:
+        return "disabled"
+    enabled_slots = normalize_ocr_settings(
+        config.CONFIG.get(OCR_SETTINGS_KEY, {})
+    ).get("enabled_slots", [])
+    if str(slot or "").strip() not in enabled_slots:
+        return "disabled"
+    canonical_path = os.path.realpath(os.path.abspath(path))
+    with _OCR_COLLECTION_LOCK:
+        if canonical_path in _OCR_COLLECTION_PATHS:
+            return "scanning"
+        _OCR_COLLECTION_PATHS.add(canonical_path)
+
+    def collect() -> None:
+        try:
+            collect_image_values(
+                canonical_path,
+                store=observability_store(),
+                analyze=analyze_image_values,
+                enqueue_crops=lambda image_hash, diagnostics: enqueue_ocr_crop_jobs(
+                    canonical_path,
+                    image_hash=image_hash,
+                    diagnostics=diagnostics,
+                    store=observability_store(),
+                    crop_dir=_ocr_crop_root(),
+                ),
             )
+        except Exception as exc:
+            log_error(f"OCR value collection failed: {exc}\n{traceback.format_exc()}")
+        finally:
+            with _OCR_COLLECTION_LOCK:
+                _OCR_COLLECTION_PATHS.discard(canonical_path)
+
+    threading.Thread(
+        target=collect,
+        daemon=True,
+        name="picorg-ocr-collect",
+    ).start()
+    return "scanning"
+
+
+def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
+    path = _FILE_TOKEN_REGISTRY.resolve(token)
+    if path is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Token pliku wygasl. Odswiez liste zdjec i sprobuj ponownie.",
         )
-    except PathSecurityError as exc:
-        raise HTTPException(status_code=403, detail="Plik poza katalogiem zdjec lub cache.") from exc
-    if require_exists and not os.path.isfile(resolved_path):
+    if require_exists and not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="Nie znaleziono pliku.")
-    return resolved_path
+    return path
+
+
+def _image_slot_paths_from_payload(payload: object) -> dict[str, str]:
+    raw = payload.get("slot_tokens", {}) if isinstance(payload, dict) else {}
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail="Niepoprawna mapa tokenow slotow.")
+    return {
+        str(slot).strip(): _path_from_file_token(str(token))
+        for slot, token in raw.items()
+        if str(slot).strip() and str(token).strip()
+    }
 
 
 def _resample_filter() -> Any:
@@ -4391,12 +4498,16 @@ def _enrich_photo_payload(photos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         path = str(photo.get("path") or "")
         ftp_path = str(photo.get("ftp_path") or "")
         if path:
+            item["ocr_state"] = _schedule_ocr_value_collection(
+                photo.get("prefix"), path
+            )
             token = _file_token(path)
             item["token"] = token
             item["file_version"] = _file_version(path)
             item["url"] = _versioned_file_url(path, "/api/file", token)
             item["thumb_url"] = _versioned_file_url(path, "/api/thumbnail", token)
         else:
+            item["ocr_state"] = "disabled"
             item["token"] = ""
             item["file_version"] = ""
             item["url"] = ""
@@ -4943,6 +5054,72 @@ def create_app() -> FastAPI:
         active_clients_provider=lambda: _runtime_active_clients_summary(),
         clock=lambda: _utc_now_iso(),
     )
+    app.state.ocr_activity_lock = threading.Lock()
+    app.state.ocr_active_requests = 0
+    app.state.ocr_last_activity = time.monotonic()
+    app.state.ocr_queue_stop = threading.Event()
+    app.state.ocr_queue_thread = None
+
+    def _ocr_has_active_requests() -> bool:
+        with app.state.ocr_activity_lock:
+            return bool(app.state.ocr_active_requests)
+
+    def _ocr_last_activity() -> float:
+        with app.state.ocr_activity_lock:
+            return float(app.state.ocr_last_activity)
+
+    def _process_ocr_crop_job(job: dict[str, object]) -> None:
+        """Refine a persisted crop, keeping the result attached to its image hash."""
+
+        job_id = str(job.get("id") or "")
+        image_hash = str(job.get("image_hash") or "")
+        crop_path = str(job.get("thumbnail_path") or "")
+        if not job_id:
+            return
+        values: list[dict[str, object]] = []
+        source_bbox = list(job.get("bbox") or [])
+        if crop_path and os.path.isfile(crop_path):
+            diagnostics = analyze_image_values(crop_path)
+            values = [
+                {
+                    "text": str(candidate.text),
+                    "comparison": str(candidate.value),
+                    "confidence": float(candidate.confidence),
+                    "bbox": (
+                        restore_crop_bbox(candidate.bbox, source_bbox)
+                        if len(source_bbox) == 4
+                        else list(candidate.bbox)
+                    ),
+                }
+                for candidate in diagnostics.candidates
+                if candidate.accepted and str(candidate.value).strip()
+            ]
+        store = observability_store()
+        store.complete_ocr_crop_job(job_id, values)
+        existing = store.get_ocr_scan(image_hash) if image_hash else None
+        if isinstance(existing, dict):
+            combined = list(existing.get("values") or []) + values
+            store.upsert_ocr_scan(image_hash, combined, "completed")
+
+    def _run_ocr_queue_once() -> str:
+        ocr_settings = normalize_ocr_settings(
+            config.CONFIG.get(OCR_SETTINGS_KEY, {})
+        )
+        if not bool(ocr_settings.get("background_enabled")):
+            return "disabled"
+        scheduler = OcrQueueScheduler(
+            settings=lambda: ocr_settings,
+            has_active_requests=_ocr_has_active_requests,
+            last_activity=_ocr_last_activity,
+            cpu_percent=_ocr_cpu_percent,
+            claim_job=observability_store().claim_ocr_crop_job,
+            process_job=_process_ocr_crop_job,
+            requeue_job=lambda job: observability_store().requeue_ocr_crop_job(
+                str(job.get("id") or "")
+            ),
+            now=time.monotonic,
+        )
+        return scheduler.run_once()
 
     @app.exception_handler(Exception)
     async def _unhandled_application_error(
@@ -5025,6 +5202,20 @@ def create_app() -> FastAPI:
         _record_active_client(request, getattr(response, "status_code", 0))
         return response
 
+    @app.middleware("http")
+    async def _prioritize_interactive_work(request: Request, call_next):
+        with app.state.ocr_activity_lock:
+            app.state.ocr_active_requests += 1
+            app.state.ocr_last_activity = time.monotonic()
+        try:
+            return await call_next(request)
+        finally:
+            with app.state.ocr_activity_lock:
+                app.state.ocr_active_requests = max(
+                    0, app.state.ocr_active_requests - 1
+                )
+                app.state.ocr_last_activity = time.monotonic()
+
     @app.on_event("startup")
     def _startup() -> None:
         os.environ.setdefault("PICORGFTP_SQL_HEADLESS", "1")
@@ -5032,6 +5223,19 @@ def create_app() -> FastAPI:
         app.state.runtime_info = runtime_info
         _ensure_active_client_registry()
         _RESOURCE_MONITOR.start()
+        if OCR_FEATURE_ENABLED:
+            app.state.ocr_queue_stop.clear()
+            worker = OcrQueueWorker(
+                run_once=_run_ocr_queue_once,
+                poll_seconds=0.5,
+                stop_event=app.state.ocr_queue_stop,
+            )
+            app.state.ocr_queue_thread = threading.Thread(
+                target=worker.run,
+                name="picorg-ocr-queue",
+                daemon=True,
+            )
+            app.state.ocr_queue_thread.start()
         cleanup_web_ftp_cache(force=True)
         cleanup_web_upload_cache(force=True)
         try:
@@ -5043,6 +5247,11 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
+        app.state.ocr_queue_stop.set()
+        queue_thread = app.state.ocr_queue_thread
+        if queue_thread is not None and queue_thread is not threading.current_thread():
+            queue_thread.join(timeout=2.0)
+        app.state.ocr_queue_thread = None
         _RESOURCE_MONITOR.stop()
         stop_notification_worker()
         _stop_backup_scheduler()
@@ -5608,6 +5817,7 @@ def create_app() -> FastAPI:
             except OSError:
                 size = 0
         token = _file_token(path)
+        ocr_state = _schedule_ocr_value_collection(prefix, path)
         return {
             "token": token,
             "name": _safe_upload_name(display_name, os.path.basename(path)),
@@ -5624,6 +5834,7 @@ def create_app() -> FastAPI:
                 "mode": _upload_processing_mode(),
             },
             "antivirus_scan": _upload_scan_result(path),
+            "ocr_state": ocr_state,
         }
 
     @app.options("/api/browser-extension/{path:path}")
@@ -5723,6 +5934,7 @@ def create_app() -> FastAPI:
                 "mode": _upload_processing_mode(),
             },
             "antivirus_scan": _upload_scan_result(path),
+            "ocr_state": _schedule_ocr_value_collection(prefix, path),
         }
         item = {
             "source_url": source_url,
@@ -5800,6 +6012,7 @@ def create_app() -> FastAPI:
             except OSError:
                 size = 0
         token = _file_token(path)
+        ocr_state = _schedule_ocr_value_collection(prefix, path)
         return {
             "token": token,
             "name": _safe_upload_name(display_name, os.path.basename(path)),
@@ -5810,6 +6023,7 @@ def create_app() -> FastAPI:
             "file_version": _file_version(path),
             "url": _versioned_file_url(path, "/api/file", token),
             "thumb_url": _versioned_file_url(path, "/api/thumbnail", token),
+            "ocr_state": ocr_state,
             "timing": {
                 "total_ms": _elapsed_ms(started),
                 "save_ms": save_ms,
@@ -5971,6 +6185,7 @@ def create_app() -> FastAPI:
     def settings_api(request: Request) -> Dict[str, Any]:
         user = _require_admin(request)
         payload = settings_snapshot()
+        payload["ocr_available"] = OCR_FEATURE_ENABLED
         payload["current_user"] = user
         return payload
 
@@ -5978,6 +6193,219 @@ def create_app() -> FastAPI:
     def settings_time_zones(request: Request) -> Dict[str, List[str]]:
         _require_admin(request)
         return {"time_zones": config.available_display_time_zones()}
+
+    @app.get("/api/settings/ocr/status")
+    def settings_ocr_status(request: Request) -> Dict[str, Any]:
+        _require_admin(request)
+        _require_ocr_feature()
+        return image_ocr_runtime_info()
+
+    @app.post("/api/settings/ocr/analyze")
+    async def settings_ocr_analyze(request: Request) -> Dict[str, Any]:
+        _require_admin(request)
+        _require_ocr_feature()
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Niepoprawne dane testu OCR.")
+        token = payload.get("token")
+        if not isinstance(token, str) or not token.strip():
+            raise HTTPException(status_code=400, detail="Wymagany jest token przeslanego obrazu.")
+        path = _path_from_file_token(token.strip())
+        diagnostics = await run_in_threadpool(analyze_image_values, path)
+        result = asdict(diagnostics)
+        result["image_url"] = _versioned_file_url(path, "/api/file", token.strip())
+        return result
+
+    @app.get("/api/ocr/scan")
+    async def ocr_scan(request: Request, token: str) -> Dict[str, Any]:
+        """Return cached numeric OCR boxes for a signed slot image."""
+
+        _require_user(request)
+        _require_ocr_feature()
+        signed_token = str(token or "").strip()
+        if not signed_token:
+            raise HTTPException(status_code=400, detail="Wymagany jest token obrazu.")
+        path = _path_from_file_token(signed_token)
+        image_hash = await run_in_threadpool(_image_sha256, path)
+        scan = observability_store().get_ocr_scan(image_hash)
+        values = list(scan.get("values") or []) if isinstance(scan, dict) else []
+        return {
+            "state": str(scan.get("state") or "missing") if isinstance(scan, dict) else "missing",
+            "values": [
+                {
+                    "text": str(item.get("text") or ""),
+                    "comparison": str(item.get("comparison") or ""),
+                    "confidence": float(item.get("confidence") or 0),
+                    "bbox": list(item.get("bbox") or []),
+                }
+                for item in values
+                if isinstance(item, dict)
+            ],
+        }
+
+    @app.post("/api/ocr/validate")
+    async def ocr_validate(request: Request) -> Dict[str, Any]:
+        """Validate an entered Pimcore value against cached, signed image slots."""
+
+        _require_admin(request)
+        _require_ocr_feature()
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Niepoprawne dane walidacji OCR.")
+        field_id = str(payload.get("field_id") or "").strip()
+        if not field_id:
+            raise HTTPException(status_code=400, detail="Wymagany jest identyfikator pola.")
+        raw_tokens = payload.get("slot_tokens")
+        if not isinstance(raw_tokens, list):
+            raise HTTPException(status_code=400, detail="Wymagana jest lista slotow OCR.")
+        tokens = [str(token).strip() for token in raw_tokens if str(token).strip()]
+        if not tokens:
+            raise HTTPException(status_code=400, detail="Wymagany jest co najmniej jeden slot OCR.")
+        value = normalize_entered_ocr_value(payload.get("value"))
+        comparison = comparison_key(value)
+        store = observability_store()
+        image_hashes: list[str] = []
+        images: list[dict[str, object]] = []
+        pending = False
+        all_values: list[dict[str, object]] = []
+        for ordinal, token in enumerate(tokens):
+            path = _path_from_file_token(token)
+            image_hash = await run_in_threadpool(_image_sha256, path)
+            image_hashes.append(image_hash)
+            scan = store.get_ocr_scan(image_hash)
+            if scan is None or str(scan.get("state") or "") != "completed":
+                pending = True
+            values = list(scan.get("values") or []) if isinstance(scan, dict) else []
+            safe_values = [
+                {
+                    "text": str(item.get("text") or ""),
+                    "comparison": str(item.get("comparison") or ""),
+                    "confidence": float(item.get("confidence") or 0),
+                    "bbox": list(item.get("bbox") or []),
+                }
+                for item in values
+                if isinstance(item, dict)
+            ]
+            all_values.extend(safe_values)
+            images.append(
+                {
+                    "slot_index": ordinal,
+                    "state": str(scan.get("state") or "missing") if isinstance(scan, dict) else "missing",
+                    "values": safe_values,
+                }
+            )
+        matches = bool(comparison) and any(
+            ocr_values_match(value, item["text"])
+            for item in all_values
+        )
+        approved = bool(comparison) and store.has_ocr_approval(
+            field_id, comparison, image_hashes
+        )
+        mismatch = bool(all_values) and not pending and not matches and not approved
+        return {
+            "value": value,
+            "comparison": comparison,
+            "matches": matches,
+            "approved": approved,
+            "pending": pending,
+            "mismatch": mismatch,
+            "images": images,
+        }
+
+    @app.get("/api/ocr/slots")
+    def ocr_slots(request: Request) -> Dict[str, Any]:
+        _require_admin(request)
+        _require_ocr_feature()
+        enabled = set(
+            normalize_ocr_settings(config.CONFIG.get(OCR_SETTINGS_KEY, {})).get(
+                "enabled_slots", []
+            )
+        )
+        return {
+            "slots": [
+                {
+                    "prefix": str(slot.get("prefix") or ""),
+                    "label": str(slot.get("label") or ""),
+                    "enabled": str(slot.get("prefix") or "") in enabled,
+                }
+                for slot in config.CONFIG.get(common.SLOT_DEFS_KEY, [])
+                if isinstance(slot, dict) and str(slot.get("prefix") or "")
+            ]
+        }
+
+    @app.get("/api/ocr/jobs")
+    def ocr_jobs(request: Request) -> Dict[str, Any]:
+        _require_admin(request)
+        _require_ocr_feature()
+
+        def public_job(job: dict[str, object]) -> dict[str, object]:
+            thumbnail_path = str(job.get("thumbnail_path") or "")
+            thumbnail_url = ""
+            if thumbnail_path and os.path.isfile(thumbnail_path):
+                try:
+                    token = _file_token(thumbnail_path)
+                    thumbnail_url = _versioned_file_url(
+                        thumbnail_path, "/api/file", token
+                    )
+                except HTTPException:
+                    pass
+            return {
+                "id": str(job.get("id") or ""),
+                "image_hash": str(job.get("image_hash") or ""),
+                "bbox": list(job.get("bbox") or []),
+                "status": str(job.get("status") or ""),
+                "created_at": str(job.get("created_at") or ""),
+                "updated_at": str(job.get("updated_at") or ""),
+                "result": list(job.get("result") or []),
+                "thumbnail_url": thumbnail_url,
+            }
+
+        return {
+            "jobs": [public_job(job) for job in observability_store().list_ocr_crop_jobs()]
+        }
+
+    @app.post("/api/ocr/approval")
+    async def ocr_approval(request: Request) -> Dict[str, Any]:
+        """Persist an explicit user acceptance for one value and image set."""
+
+        _require_admin(request)
+        _require_ocr_feature()
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Niepoprawne dane potwierdzenia OCR.")
+        field_id = str(payload.get("field_id") or "").strip()
+        if not field_id:
+            raise HTTPException(status_code=400, detail="Wymagany jest identyfikator pola.")
+        raw_tokens = payload.get("slot_tokens")
+        if not isinstance(raw_tokens, list):
+            raise HTTPException(status_code=400, detail="Wymagana jest lista slotow OCR.")
+        tokens = [str(token).strip() for token in raw_tokens if str(token).strip()]
+        if not tokens:
+            raise HTTPException(status_code=400, detail="Wymagany jest co najmniej jeden slot OCR.")
+        value = normalize_entered_ocr_value(payload.get("value"))
+        comparison = comparison_key(value)
+        if not comparison:
+            raise HTTPException(status_code=400, detail="Wartosc nie zawiera liczby do potwierdzenia.")
+        image_hashes = [
+            await run_in_threadpool(_image_sha256, _path_from_file_token(token))
+            for token in tokens
+        ]
+        await run_in_threadpool(
+            observability_store().record_ocr_approval,
+            field_id,
+            comparison,
+            image_hashes,
+        )
+        return {"ok": True, "value": value, "comparison": comparison}
 
     @app.post("/api/settings")
     async def settings_save(request: Request) -> JSONResponse:
@@ -6204,7 +6632,9 @@ def create_app() -> FastAPI:
         _require_admin(request)
         payload = await request.json()
         try:
-            result = await run_in_threadpool(preview_pimcore_template, payload)
+            image_slot_paths = _image_slot_paths_from_payload(payload)
+            kwargs = {"image_slot_paths": image_slot_paths} if image_slot_paths else {}
+            result = await run_in_threadpool(preview_pimcore_template, payload, **kwargs)
         except (TemplateError, ValueError) as exc:
             raise HTTPException(
                 status_code=400,
@@ -6447,12 +6877,15 @@ def create_app() -> FastAPI:
         else:
             object_id = None
         try:
+            image_slot_paths = _image_slot_paths_from_payload(source)
+            kwargs = {"image_slot_paths": image_slot_paths} if image_slot_paths else {}
             result = await run_in_threadpool(
                 render_saved_pimcore_templates,
                 source.get("product_values"),
                 source.get("values"),
                 source.get("targets"),
                 mode,
+                **kwargs,
             )
         except (TemplateError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -12,7 +12,10 @@ $VersionInfoPath = Join-Path $WorkPath "PicOrgFTP-SQL.version.txt"
 Set-Location $RepoRoot
 . (Join-Path $ScriptDir "build_common.ps1")
 
-Initialize-BuildEnvironment -RepoRoot $RepoRoot -VenvDir $VenvDir -Python $Python
+Initialize-BuildEnvironment `
+    -RepoRoot $RepoRoot `
+    -VenvDir $VenvDir `
+    -Python $Python
 
 New-Item -ItemType Directory -Path $IconDir -Force | Out-Null
 New-Item -ItemType Directory -Path $WorkPath -Force | Out-Null
@@ -25,7 +28,6 @@ Invoke-Native $Python "tools\generate_windows_version_info.py" `
 
 $env:PICORGFTP_SQL_HEADLESS = "1"
 $env:PYINSTALLER_BUILD = "1"
-
 Invoke-Native $Python "-m" "PyInstaller" "--noconfirm" "--clean" "--log-level=WARN" `
     --name PicOrgFTP-SQL `
     --noconsole `

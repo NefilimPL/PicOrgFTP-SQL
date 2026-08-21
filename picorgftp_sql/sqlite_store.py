@@ -43,7 +43,7 @@ from .sqlite_connection import (
     try_enable_wal,
 )
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 _WAL_FALLBACK_LOGGER = logging.getLogger("picorgftp_sql.sqlite.wal")
 _WAL_FALLBACK_LOGGER.setLevel(logging.WARNING)
 _WAL_FALLBACK_LOGGER.propagate = False
@@ -1589,6 +1589,45 @@ class SqliteStore:
                     next_attempt_at TEXT NOT NULL DEFAULT '',
                     claim_token TEXT NOT NULL DEFAULT ''
                 );
+
+                CREATE TABLE IF NOT EXISTS ocr_image_scans (
+                    image_hash TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS ocr_detected_values (
+                    image_hash TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    comparison TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    bbox_json TEXT NOT NULL,
+                    PRIMARY KEY (image_hash, ordinal),
+                    FOREIGN KEY (image_hash) REFERENCES ocr_image_scans(image_hash)
+                );
+
+                CREATE TABLE IF NOT EXISTS ocr_validation_approvals (
+                    field_id TEXT NOT NULL,
+                    comparison TEXT NOT NULL,
+                    image_hashes_json TEXT NOT NULL,
+                    approved_at TEXT NOT NULL,
+                    PRIMARY KEY (field_id, comparison, image_hashes_json)
+                );
+
+                CREATE TABLE IF NOT EXISTS ocr_crop_jobs (
+                    id TEXT PRIMARY KEY,
+                    image_hash TEXT NOT NULL,
+                    bbox_json TEXT NOT NULL,
+                    thumbnail_path TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'completed', 'error')),
+                    result_json TEXT NOT NULL DEFAULT '[]',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_ocr_crop_jobs_pending
+                    ON ocr_crop_jobs(status, created_at);
                 """
             )
             segment_columns = {
@@ -3676,6 +3715,167 @@ class SqliteStore:
                 cursor = conn.execute(f"DELETE FROM {table}")
                 deleted[table] = max(0, cursor.rowcount)
         return deleted
+
+    def upsert_ocr_scan(
+        self, image_hash: str, values: list[dict[str, object]], state: str
+    ) -> None:
+        """Persist the current values found for one immutable image hash."""
+
+        self.initialize()
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO ocr_image_scans (image_hash, state, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(image_hash) DO UPDATE SET
+                    state = excluded.state, updated_at = excluded.updated_at
+                """,
+                (str(image_hash), str(state), _now_iso()),
+            )
+            conn.execute("DELETE FROM ocr_detected_values WHERE image_hash = ?", (str(image_hash),))
+            for ordinal, value in enumerate(values):
+                bbox = value.get("bbox", []) if isinstance(value, dict) else []
+                conn.execute(
+                    """
+                    INSERT INTO ocr_detected_values
+                    (image_hash, ordinal, text, comparison, confidence, bbox_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(image_hash), ordinal,
+                        _text(value.get("text") if isinstance(value, dict) else ""),
+                        _text(value.get("comparison") if isinstance(value, dict) else ""),
+                        float(value.get("confidence", 0) if isinstance(value, dict) else 0),
+                        _json_dumps(bbox if isinstance(bbox, list) else []),
+                    ),
+                )
+
+    def get_ocr_scan(self, image_hash: str) -> dict[str, object] | None:
+        """Return a scan with values in stable discovery order."""
+
+        self.initialize()
+        with self.connection() as conn:
+            scan = conn.execute(
+                "SELECT image_hash, state, updated_at FROM ocr_image_scans WHERE image_hash = ?",
+                (str(image_hash),),
+            ).fetchone()
+            if scan is None:
+                return None
+            rows = conn.execute(
+                """SELECT text, comparison, confidence, bbox_json
+                   FROM ocr_detected_values WHERE image_hash = ? ORDER BY ordinal""",
+                (str(image_hash),),
+            ).fetchall()
+        return {
+            **dict(scan),
+            "values": [
+                {
+                    "text": _text(row["text"]),
+                    "comparison": _text(row["comparison"]),
+                    "confidence": float(row["confidence"] or 0),
+                    "bbox": _json_loads(row["bbox_json"], []),
+                }
+                for row in rows
+            ],
+        }
+
+    @staticmethod
+    def _ocr_approval_hashes(image_hashes: list[object]) -> str:
+        return _json_dumps(sorted({_text(value) for value in image_hashes if _text(value)}))
+
+    def record_ocr_approval(
+        self, field_id: str, comparison: str, image_hashes: list[object]
+    ) -> None:
+        self.initialize()
+        with self.connection() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO ocr_validation_approvals
+                   (field_id, comparison, image_hashes_json, approved_at) VALUES (?, ?, ?, ?)""",
+                (_text(field_id), _text(comparison), self._ocr_approval_hashes(image_hashes), _now_iso()),
+            )
+
+    def has_ocr_approval(
+        self, field_id: str, comparison: str, image_hashes: list[object]
+    ) -> bool:
+        self.initialize()
+        with self.connection() as conn:
+            row = conn.execute(
+                """SELECT 1 FROM ocr_validation_approvals
+                   WHERE field_id = ? AND comparison = ? AND image_hashes_json = ?""",
+                (_text(field_id), _text(comparison), self._ocr_approval_hashes(image_hashes)),
+            ).fetchone()
+        return row is not None
+
+    def enqueue_ocr_crop_job(self, payload: dict[str, object]) -> str:
+        """Persist an OCR crop task and return its opaque identifier."""
+
+        self.initialize()
+        job_id = _text(payload.get("id")) or f"ocr-{uuid.uuid4().hex}"
+        now = _now_iso()
+        with self.connection() as conn:
+            conn.execute(
+                """INSERT INTO ocr_crop_jobs
+                   (id, image_hash, bbox_json, thumbnail_path, status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, 'pending', ?, ?)""",
+                (
+                    job_id,
+                    _text(payload.get("image_hash")),
+                    _json_dumps(payload.get("bbox") if isinstance(payload.get("bbox"), list) else []),
+                    _text(payload.get("thumbnail_path")), now, now,
+                ),
+            )
+        return job_id
+
+    def claim_ocr_crop_job(self) -> dict[str, object] | None:
+        """Atomically claim the oldest available OCR crop task."""
+
+        self.initialize()
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM ocr_crop_jobs WHERE status = 'pending' ORDER BY created_at, id LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            updated = conn.execute(
+                "UPDATE ocr_crop_jobs SET status = 'processing', updated_at = ? WHERE id = ? AND status = 'pending'",
+                (_now_iso(), row["id"]),
+            )
+            if updated.rowcount != 1:
+                return None
+            payload = dict(row)
+        payload["status"] = "processing"
+        payload["bbox"] = _json_loads(payload.pop("bbox_json"), [])
+        payload["result"] = _json_loads(payload.pop("result_json"), [])
+        return payload
+
+    def complete_ocr_crop_job(self, job_id: str, values: list[dict[str, object]]) -> None:
+        """Store refined values and mark a claimed crop task completed."""
+
+        self.initialize()
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE ocr_crop_jobs SET status = 'completed', result_json = ?, updated_at = ? WHERE id = ?",
+                (_json_dumps(values), _now_iso(), _text(job_id)),
+            )
+
+    def requeue_ocr_crop_job(self, job_id: str) -> None:
+        """Return an interrupted processing job to the durable pending queue."""
+
+        self.initialize()
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE ocr_crop_jobs SET status = 'pending', updated_at = ? WHERE id = ? AND status = 'processing'",
+                (_now_iso(), _text(job_id)),
+            )
+
+    def list_ocr_crop_jobs(self) -> list[dict[str, object]]:
+        self.initialize()
+        with self.connection() as conn:
+            rows = conn.execute("SELECT * FROM ocr_crop_jobs ORDER BY created_at, id").fetchall()
+        return [
+            {**dict(row), "bbox": _json_loads(row["bbox_json"], []), "result": _json_loads(row["result_json"], [])}
+            for row in rows
+        ]
 
     def load_config(self) -> dict[str, Any]:
         """Return the stored config payload."""

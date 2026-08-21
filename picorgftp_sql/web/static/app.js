@@ -425,6 +425,7 @@ const pimcoreTemplateSources = document.querySelector("#pimcoreTemplateSources")
 const pimcoreTemplateFunctions = document.querySelector("#pimcoreTemplateFunctions");
 const pimcoreTemplateTranslate = document.querySelector("#pimcoreTemplateTranslate");
 const pimcoreTemplateLanguage = document.querySelector("#pimcoreTemplateLanguage");
+const pimcoreTemplateOcrValidation = document.querySelector("#pimcoreTemplateOcrValidation");
 const pimcoreTemplatePreview = document.querySelector("#pimcoreTemplatePreview");
 const pimcoreTemplateStatus = document.querySelector("#pimcoreTemplateStatus");
 const pimcoreTemplatePreviewButton = document.querySelector("#pimcoreTemplatePreviewButton");
@@ -963,6 +964,7 @@ function slotFileItem(value) {
     file_version: "",
     preprocessed: false,
     cache_timing: null,
+    ocr_state: "",
     client_preprocess_ms: 0,
     progress: 0,
     uploading: false,
@@ -2642,6 +2644,93 @@ function selectedSlotSourceCanFit(prefix, photo, file) {
   return Boolean(photo?.is_image && (selectedPhotoToken(photo, prefix) || photo?.ftp_filename));
 }
 
+function openOcrImageWindow() {
+  const popup = window.open("", "_blank");
+  if (popup) {
+    try {
+      popup.opener = null;
+    } catch (_error) {
+      // Some browser security modes expose a read-only opener property.
+    }
+  }
+  return popup;
+}
+
+function showPlainImageInOcrWindow(popup, url) {
+  if (popup && !popup.closed) {
+    popup.location.href = url;
+    popup.focus();
+    return;
+  }
+  window.open(url, "_blank", "noopener");
+}
+
+function appendOcrBoxesToOpenedImage(stage, image, values) {
+  const width = Number(image.naturalWidth || 0);
+  const height = Number(image.naturalHeight || 0);
+  if (!width || !height) return;
+  for (const value of values) {
+    const [left, top, right, bottom] = Array.isArray(value?.bbox) ? value.bbox.map(Number) : [];
+    if (![left, top, right, bottom].every(Number.isFinite)) continue;
+    const box = image.ownerDocument.createElement("div");
+    const label = image.ownerDocument.createElement("span");
+    box.className = "ocr-slot-open-box";
+    label.className = "ocr-slot-open-label";
+    box.style.left = `${Math.max(0, Math.min(100, (left / width) * 100))}%`;
+    box.style.top = `${Math.max(0, Math.min(100, (top / height) * 100))}%`;
+    box.style.width = `${Math.max(0, Math.min(100, ((right - left) / width) * 100))}%`;
+    box.style.height = `${Math.max(0, Math.min(100, ((bottom - top) / height) * 100))}%`;
+    label.textContent = `${String(value?.text || "?")} · ${ocrConfidenceLabel(value?.confidence)}`;
+    box.appendChild(label);
+    stage.appendChild(box);
+  }
+}
+
+async function openOcrAnnotatedImage(url, token, popup = null) {
+  if (!token) {
+    showPlainImageInOcrWindow(popup, url);
+    return;
+  }
+  let scan;
+  try {
+    scan = await requestJson(`/api/ocr/scan?token=${encodeURIComponent(token)}`);
+  } catch (_error) {
+    showPlainImageInOcrWindow(popup, url);
+    return;
+  }
+  const values = Array.isArray(scan?.values) ? scan.values : [];
+  if (!popup || popup.closed || !values.length) {
+    showPlainImageInOcrWindow(popup, url);
+    return;
+  }
+  const doc = popup.document;
+  doc.open();
+  doc.write("<!doctype html><title>Podglad OCR</title><meta charset=\"utf-8\">");
+  doc.close();
+  const style = doc.createElement("style");
+  style.textContent = ".ocr-slot-open-page{margin:0;background:#151922;color:#eef2ff;font:14px system-ui,sans-serif}.ocr-slot-open-header{padding:12px 16px}.ocr-slot-open-stage{position:relative;display:inline-block;line-height:0;max-width:100%}.ocr-slot-open-image{display:block;max-width:100%;height:auto}.ocr-slot-open-overlay{position:absolute;inset:0;pointer-events:none}.ocr-slot-open-box{position:absolute;box-sizing:border-box;border:2px solid #48d260}.ocr-slot-open-label{position:absolute;left:-2px;bottom:calc(100% + 2px);padding:2px 5px;border-radius:4px;background:#48d260;color:#111827;font-size:12px;font-weight:700;line-height:1.25;white-space:nowrap}.ocr-slot-open-wrap{padding:0 16px 16px}";
+  doc.head.appendChild(style);
+  const header = doc.createElement("div");
+  const wrap = doc.createElement("div");
+  const stage = doc.createElement("div");
+  const overlay = doc.createElement("div");
+  const image = doc.createElement("img");
+  header.className = "ocr-slot-open-header";
+  wrap.className = "ocr-slot-open-wrap";
+  stage.className = "ocr-slot-open-stage";
+  overlay.className = "ocr-slot-open-overlay";
+  image.className = "ocr-slot-open-image";
+  header.textContent = `OCR: ${values.length} wykrytych wartosci`;
+  image.alt = "Podglad obrazu z wynikami OCR";
+  image.addEventListener("load", () => appendOcrBoxesToOpenedImage(overlay, image, values), { once: true });
+  image.src = url;
+  stage.append(image, overlay);
+  wrap.appendChild(stage);
+  doc.body.className = "ocr-slot-open-page";
+  doc.body.append(header, wrap);
+  popup.focus();
+}
+
 async function openSlotFile(prefix) {
   const selectedFile = state.files.get(prefix);
   let photo = state.loadedPhotos.get(prefix);
@@ -2657,6 +2746,7 @@ async function openSlotFile(prefix) {
     window.open(filePreviewUrl(prefix, selectedFile), "_blank", "noopener");
     return;
   }
+  const ocrPopup = openOcrImageWindow();
   if (source === "ftp" && photo?.ftp_filename) {
     await loadFtpPreview(photo, prefix, openingRequestId, { forceRefresh: true });
     if (
@@ -2669,7 +2759,7 @@ async function openSlotFile(prefix) {
     if (selectedSlotSource(prefix, photo) !== "ftp") return;
   }
   const url = loadedFileUrl(photo, prefix);
-  if (url) window.open(url, "_blank", "noopener");
+  if (url) await openOcrAnnotatedImage(url, selectedPhotoToken(photo, prefix), ocrPopup);
 }
 
 function markSlotDeletion(prefix, photo) {
@@ -3018,7 +3108,8 @@ function uploadSlotFile(prefix, item) {
   item.thumb_url = "";
   item.file_version = "";
   item.preprocessed = false;
-  item.client_preprocess_ms = 0;
+    item.client_preprocess_ms = 0;
+    item.ocr_state = "";
   item.original_size = Number(file.size || item.size || 0);
   refreshFileItemSlots(item);
   const sendUpload = (uploadFile, clientPreprocessed = false) => {
@@ -3065,6 +3156,7 @@ function uploadSlotFile(prefix, item) {
     item.preprocessed = Boolean(payload.preprocessed || clientPreprocessed);
     item.client_preprocess_ms = item.client_preprocess_ms || 0;
     item.cache_timing = payload.timing || null;
+    item.ocr_state = payload.ocr_state || "";
     item.name = payload.name || item.name;
     item.size = Number(payload.size_bytes || item.size || 0);
     item.progress = 100;
@@ -3751,6 +3843,24 @@ function relocateProvisionalSlotFile(prefix) {
   return [prefix, targetPrefix];
 }
 
+function updateOcrSlotIndicator(card, selectedFile, loadedPhoto) {
+  const state = String(selectedFile?.ocr_state || loadedPhoto?.ocr_state || "");
+  const collecting = state === "scanning";
+  card.classList.toggle("ocr-collecting", collecting);
+  let indicator = card.querySelector(".slot-ocr-state");
+  if (!collecting) {
+    indicator?.remove();
+    return;
+  }
+  if (!indicator) {
+    indicator = document.createElement("span");
+    indicator.className = "slot-ocr-state";
+    card.querySelector(".slot-meta")?.appendChild(indicator);
+  }
+  indicator.textContent = "OCR zbiera wartosci";
+  indicator.title = "Szybkie wykrywanie wartosci liczbowych trwa w tle.";
+}
+
 function updateSlotPreview(prefix) {
   const card = slotGrid.querySelector(`[data-slot-prefix="${prefix}"]`);
   if (!card) {
@@ -3768,6 +3878,9 @@ function updateSlotPreview(prefix) {
   const fitButton = card.querySelector(".slot-fit-button");
   const openButton = card.querySelector(".slot-open-button");
   card.dataset.activeSource = selectedSlotSource(prefix, loadedPhoto) || "";
+  if (typeof updateOcrSlotIndicator === "function") {
+    updateOcrSlotIndicator(card, selectedFile, loadedPhoto);
+  }
   card.classList.toggle("slot-similar-pending", Boolean(candidate && !selectedFile));
   card.classList.toggle("similar-searching", searching);
   detail.textContent = selectedFile ? fileLabel(selectedFile) : slotStatusText(loadedPhoto, prefix);
@@ -3900,6 +4013,7 @@ function createSlotNode(slot) {
     const clearButton = document.createElement("button");
     node.dataset.slotPrefix = slot.prefix;
     node.dataset.activeSource = selectedSlotSource(slot.prefix, loadedPhoto) || "";
+    updateOcrSlotIndicator(node, selectedFile, loadedPhoto);
     node.classList.toggle("slot-similar-pending", Boolean(candidate && !selectedFile));
     node.classList.toggle("similar-searching", searching);
 
@@ -9584,6 +9698,26 @@ function closePimcoreTemplateHelp() {
   if (pimcoreTemplateModal?.classList.contains("active")) pimcoreTemplateHelpButton?.focus();
 }
 
+function pimcoreOcrValidationFromRow(row) {
+  return row?.dataset.ocrValidation === "true";
+}
+
+function setPimcoreOcrValidationRow(row, value) {
+  if (row) row.dataset.ocrValidation = value ? "true" : "false";
+}
+
+function pimcoreSlotTokens() {
+  const tokens = {};
+  for (const slot of state.slots || []) {
+    const prefix = String(slot.prefix || "");
+    if (!prefix || state.deletedSlots.has(prefix)) continue;
+    const selected = state.files.get(prefix);
+    const token = slotFileToken(selected) || selectedPhotoToken(state.loadedPhotos.get(prefix), prefix);
+    if (token) tokens[prefix] = token;
+  }
+  return tokens;
+}
+
 function renderPimcoreTemplateTokens(row) {
   pimcoreTemplateSources.textContent = "";
   pimcoreTemplateFunctions.textContent = "";
@@ -9670,6 +9804,7 @@ function openPimcoreTemplateBuilder(row) {
   pimcoreTemplateTranslate.checked = row.dataset.translate === "true";
   pimcoreTemplateLanguage.value = row.dataset.targetLanguage || pimcoreTemplateLanguageForRow(row);
   pimcoreTemplateLanguage.disabled = !pimcoreTemplateTranslate.checked;
+  pimcoreTemplateOcrValidation.checked = pimcoreOcrValidationFromRow(row);
   pimcoreTemplateTarget.textContent = `Pole: ${pimcoreTemplateSource(row) || "nowe mapowanie"}`;
   pimcoreTemplatePreview.textContent = "Wpisz szablon i uruchom podglad.";
   pimcoreTemplateStatus.textContent = "";
@@ -9690,11 +9825,13 @@ function pimcoreTemplatePreviewPayload() {
   target.translate = pimcoreTemplateTranslate.checked;
   target.target_language =
     pimcoreTemplateLanguage.value.trim() || pimcoreTemplateLanguageForRow(row) || null;
+  target.ocr_validation = pimcoreTemplateOcrValidation.checked;
   return {
     mappings,
     target_source: targetSource,
     product_values: formPayload(),
     values: Object.fromEntries(mappings.map((mapping) => [mapping.source, mapping.default || ""])),
+    slot_tokens: pimcoreSlotTokens(),
   };
 }
 
@@ -9741,6 +9878,7 @@ function savePimcoreTemplateBuilder() {
   row.dataset.sqlProfileId = sqlValues.sql_profile_id;
   row.dataset.translate = translate ? "true" : "false";
   row.dataset.targetLanguage = translate ? language : "";
+  setPimcoreOcrValidationRow(row, pimcoreTemplateOcrValidation.checked);
   if (translate) pimcoreTemplateLanguage.value = language;
   updatePimcoreTemplateButton(row);
   closePimcoreTemplateBuilder();
@@ -9820,6 +9958,7 @@ function pimcoreMappingRow(mapping = {}) {
   row.dataset.targetLanguage = mapping.target_language || "";
   row.dataset.sqlQuery = mapping.sql_query || "";
   row.dataset.sqlProfileId = mapping.sql_profile_id || "";
+  setPimcoreOcrValidationRow(row, mapping.ocr_validation);
   row.className = "pimcore-mapping-row";
   const textInput = (name, value, label) => {
     const input = document.createElement("input");
@@ -9896,6 +10035,7 @@ function collectPimcoreMappings(form) {
       row.querySelector('[name="mapping_sql_profile_id"]')?.value || row.dataset.sqlProfileId || "",
     translate: row.dataset.translate === "true",
     target_language: row.dataset.targetLanguage || null,
+    ocr_validation: pimcoreOcrValidationFromRow(row),
     ...collectPimcoreLayout(row, index),
   }));
 }
@@ -10030,6 +10170,7 @@ function pimcoreSimpleMappingRow(mapping = {}, fields = []) {
   row.dataset.targetLanguage = mapping.target_language || "";
   row.dataset.sqlQuery = mapping.sql_query || "";
   row.dataset.sqlProfileId = mapping.sql_profile_id || "";
+  setPimcoreOcrValidationRow(row, mapping.ocr_validation);
   target.addEventListener("change", () => {
     if (!row.dataset.source && !label.value.trim()) {
       label.value = pimcoreSelectedMappingSource(target);
@@ -10068,6 +10209,7 @@ function collectSimplePimcoreMappings(form) {
           "",
         translate: row.dataset.translate === "true",
         target_language: row.dataset.targetLanguage || null,
+        ocr_validation: pimcoreOcrValidationFromRow(row),
         ...collectPimcoreLayout(row, index),
       };
     })
@@ -10589,6 +10731,7 @@ function pimcoreSetupFieldRow(field, mappings, eanTarget) {
   row.dataset.targetLanguage = existing.target_language || "";
   row.dataset.sqlQuery = existing.sql_query || "";
   row.dataset.sqlProfileId = existing.sql_profile_id || "";
+  setPimcoreOcrValidationRow(row, existing.ocr_validation);
   use.type = "checkbox";
   use.name = "mapping_use";
   use.checked = isEan || Boolean(existing.pimcore_field);
@@ -10645,6 +10788,7 @@ function collectPimcoreSetupMappings(container) {
           "",
         translate: row.dataset.translate === "true",
         target_language: row.dataset.targetLanguage || null,
+        ocr_validation: pimcoreOcrValidationFromRow(row),
         ...collectPimcoreLayout(row, index),
       };
     });
@@ -10932,7 +11076,15 @@ function populatePimcoreRuntimeForm(
           mapping.source === "EAN" && legacyEanIds[idPrefix]
             ? legacyEanIds[idPrefix]
             : `${idPrefix}-${String(mapping.source || "field").replace(/[^A-Za-z0-9_-]/g, "-")}`;
-        input.addEventListener("input", () => updatePimcoreRuntimeFieldChangeState(input));
+        input.addEventListener("input", () => {
+          if (mapping.ocr_validation) input.value = input.value.replace(/,/g, ".");
+          updatePimcoreRuntimeFieldChangeState(input);
+        });
+        if (mapping.ocr_validation) {
+          input.addEventListener("change", () => {
+            validatePimcoreOcrFields(form, schema, [mapping.source]).catch(() => {});
+          });
+        }
         fieldRow.className = "pimcore-runtime-field-row";
         fieldRow.appendChild(input);
         if (allowRecalculate && mapping.value_template) {
@@ -10972,7 +11124,10 @@ function pimcoreRuntimeWarnings(warnings = []) {
 
 function clearPimcoreRuntimeConflict(field) {
   if (!field) return;
-  field.classList.remove("pimcore-runtime-conflict", "pimcore-runtime-pulse");
+  field.classList.remove("pimcore-runtime-pulse");
+  if (!field.classList.contains("pimcore-runtime-ocr-mismatch")) {
+    field.classList.remove("pimcore-runtime-conflict");
+  }
   const info = field.querySelector(".pimcore-runtime-calculated");
   if (info) info.hidden = true;
 }
@@ -11116,6 +11271,97 @@ function updatePimcoreRuntimeCalculatedState(form, result = {}) {
   updatePimcoreEditSubmitState();
 }
 
+function clearPimcoreOcrMismatch(field) {
+  if (!field) return;
+  field.classList.remove("pimcore-runtime-ocr-mismatch");
+  field.querySelector(".pimcore-runtime-ocr")?.remove();
+  const input = field.querySelector("input");
+  if (
+    !Object.prototype.hasOwnProperty.call(input?.dataset || {}, "calculatedValue") ||
+    String(input?.value ?? "") === String(input?.dataset.calculatedValue ?? "")
+  ) {
+    field.classList.remove("pimcore-runtime-conflict");
+  }
+}
+
+function renderPimcoreOcrMismatch(form, mapping, input, result) {
+  const field = input.closest(".pimcore-runtime-field");
+  if (!field) return;
+  clearPimcoreOcrMismatch(field);
+  if (!result?.mismatch) return;
+  field.classList.add("pimcore-runtime-conflict", "pimcore-runtime-ocr-mismatch");
+  const info = document.createElement("span");
+  info.className = "pimcore-runtime-ocr";
+  const text = document.createElement("span");
+  const values = (result.images || []).flatMap((image) => image.values || [])
+    .map((item) => String(item.text || "")).filter(Boolean);
+  text.textContent = "Wartosc nie pasuje do OCR.";
+  text.title = values.length ? `Wykryte wartosci: ${[...new Set(values)].join(", ")}` : "Brak wykrytych wartosci.";
+  const accept = document.createElement("button");
+  accept.type = "button";
+  accept.className = "ghost-button pimcore-runtime-action-button pimcore-runtime-apply-action";
+  accept.textContent = "✓";
+  accept.title = "Potwierdz wprowadzona wartosc";
+  accept.addEventListener("click", async () => {
+    accept.disabled = true;
+    try {
+      await requestJson("/api/ocr/approval", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          field_id: mapping.pimcore_field || mapping.source,
+          value: input.value,
+          slot_tokens: Object.values(pimcoreSlotTokens()),
+        }),
+      });
+      clearPimcoreOcrMismatch(field);
+      updatePimcoreRuntimeFieldChangeState(input, { userInput: false });
+    } catch (error) {
+      accept.disabled = false;
+      text.textContent = error.message || "Nie udalo sie potwierdzic wartosci.";
+    }
+  });
+  const reject = document.createElement("button");
+  reject.type = "button";
+  reject.className = "ghost-button pimcore-runtime-action-button pimcore-runtime-undo-action";
+  reject.textContent = "×";
+  reject.title = "Cofnij zmiane lub wyczysc pole";
+  reject.addEventListener("click", () => {
+    input.value = input.dataset.originalValue || "";
+    clearPimcoreOcrMismatch(field);
+    updatePimcoreRuntimeFieldChangeState(input, { userInput: false });
+  });
+  info.append(text, pimcoreRuntimeActions(accept, reject));
+  field.appendChild(info);
+}
+
+async function validatePimcoreOcrFields(form, schema, targets = null) {
+  if (state.settings?.ocr_available === false) return;
+  const selected = Array.isArray(targets) ? new Set(targets) : null;
+  const slotTokens = Object.values(pimcoreSlotTokens());
+  if (!slotTokens.length) return;
+  const mappings = (schema || []).filter((mapping) => (
+    mapping?.ocr_validation && (!selected || selected.has(mapping.source))
+  ));
+  await Promise.all(mappings.map(async (mapping) => {
+    const input = form.elements[mapping.source];
+    if (!input) return;
+    input.value = input.value.replace(/,/g, ".");
+    const result = await requestJson("/api/ocr/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        field_id: mapping.pimcore_field || mapping.source,
+        value: input.value,
+        slot_tokens: slotTokens,
+      }),
+    });
+    renderPimcoreOcrMismatch(form, mapping, input, result);
+  }));
+  updatePimcoreCreateSubmitState();
+  updatePimcoreEditSubmitState();
+}
+
 function pimcoreRuntimeRecalculateStatus(form, result = {}) {
   const warnings = pimcoreRuntimeWarnings(result.warnings);
   if (warnings) return warnings;
@@ -11155,6 +11401,7 @@ async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
       mode: form.dataset.pimcoreMode || "create",
       object_id:
         form === pimcoreEditForm ? Number(state.pimcoreEditObjectId || 0) : null,
+      slot_tokens: pimcoreSlotTokens(),
     }),
   });
   const integrationContext = result.integrations || { sql_profiles: [] };
@@ -11178,6 +11425,7 @@ async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
     }
   }
   updatePimcoreRuntimeCalculatedState(form, result);
+  await validatePimcoreOcrFields(form, schema, selected);
   return result;
 }
 
@@ -13383,14 +13631,412 @@ async function runResourceMonitorTest(mode) {
   }
 }
 
+function ocrConfidenceLabel(value) {
+  return `${Math.round(Math.max(0, Math.min(1, Number(value) || 0)) * 100)}%`;
+}
+
+async function renderOcrLivePreview(file) {
+  const stage = document.createElement("div");
+  stage.className = "ocr-diagnostic-stage ocr-diagnostic-live-preview";
+  const preview = document.createElement("canvas");
+  preview.className = "ocr-diagnostic-image";
+  preview.setAttribute("role", "img");
+  preview.setAttribute("aria-label", "Obraz oczekujacy na wynik OCR");
+  const status = document.createElement("p");
+  status.className = "ocr-diagnostic-live-status";
+  status.textContent = "Ladowanie modelu OCR...";
+  let bitmap = null;
+  try {
+    bitmap = await createImageBitmap(file);
+    preview.width = bitmap.width;
+    preview.height = bitmap.height;
+    const context = preview.getContext("2d");
+    if (!context) throw new Error("Brak kontekstu rysowania podgladu.");
+    context.drawImage(bitmap, 0, 0);
+  } catch (_error) {
+    preview.hidden = true;
+    status.textContent = "Podglad obrazu nie jest dostepny, ale analiza OCR trwa dalej.";
+  } finally {
+    bitmap?.close();
+  }
+  stage.append(preview, status);
+  return {
+    element: stage,
+    setStatus(message) { status.textContent = message; },
+    dispose() {},
+  };
+}
+
+function renderOcrDiagnostics(result) {
+  const output = document.createElement("div");
+  output.className = "ocr-diagnostic-result wide-field";
+  const layout = document.createElement("div");
+  layout.className = "ocr-diagnostic-layout";
+  const stage = document.createElement("div");
+  stage.className = "ocr-diagnostic-stage";
+  const image = document.createElement("img");
+  image.className = "ocr-diagnostic-image";
+  image.alt = "Obraz analizowany przez OCR";
+  image.src = String(result.image_url || "");
+  const overlay = document.createElement("div");
+  overlay.className = "ocr-diagnostic-overlay";
+  const candidates = Array.isArray(result.candidates) ? result.candidates : [];
+  const setOcrCandidateFocus = (candidateIndex = null) => {
+    const activeIndex = candidateIndex === null ? "" : String(candidateIndex);
+    stage.classList.toggle("ocr-diagnostic-focus-active", Boolean(activeIndex));
+    output.querySelectorAll("[data-ocr-candidate-index]").forEach((element) => {
+      const focused = Boolean(activeIndex) && element.dataset.ocrCandidateIndex === activeIndex;
+      element.classList.toggle("ocr-focused", focused);
+      element.classList.toggle("ocr-muted", Boolean(activeIndex) && !focused);
+    });
+  };
+  const drawOverlay = () => {
+    overlay.textContent = "";
+    const width = Number(image.naturalWidth || 0);
+    const height = Number(image.naturalHeight || 0);
+    if (!width || !height) return;
+    const labelRows = [];
+    for (const [candidateIndex, candidate] of candidates.entries()) {
+      const bbox = Array.isArray(candidate.bbox) ? candidate.bbox : [];
+      if (bbox.length !== 4) continue;
+      const [left, top, right, bottom] = bbox.map(Number);
+      if (![left, top, right, bottom].every(Number.isFinite)) continue;
+      const rectangle = document.createElement("div");
+      rectangle.className = `ocr-diagnostic-box ${candidate.accepted ? "accepted" : "rejected"}`;
+      rectangle.setAttribute("data-ocr-overlay", "true");
+      rectangle.setAttribute("data-ocr-candidate-index", String(candidateIndex));
+      rectangle.style.left = `${Math.max(0, Math.min(100, (left / width) * 100))}%`;
+      rectangle.style.top = `${Math.max(0, Math.min(100, (top / height) * 100))}%`;
+      rectangle.style.width = `${Math.max(0.3, Math.min(100, ((right - left) / width) * 100))}%`;
+      rectangle.style.height = `${Math.max(0.3, Math.min(100, ((bottom - top) / height) * 100))}%`;
+      const label = document.createElement("span");
+      label.className = "ocr-diagnostic-confidence";
+      label.textContent = ocrConfidenceLabel(candidate.confidence);
+      const collidingLabels = labelRows.filter((row) => Math.abs(row.top - top) < 28 && Math.abs(row.left - left) < 90);
+      label.style.left = `${-2 + collidingLabels.length * 42}px`;
+      label.setAttribute("data-ocr-label-offset", String(collidingLabels.length));
+      labelRows.push({ left, top });
+      rectangle.appendChild(label);
+      overlay.appendChild(rectangle);
+    }
+  };
+  image.addEventListener("load", drawOverlay);
+  stage.append(image, overlay);
+
+  const details = document.createElement("div");
+  details.className = "ocr-diagnostic-details";
+  const heading = document.createElement("h3");
+  heading.textContent = result.available ? "Wykryte wartosci" : "OCR niedostepny";
+  const rawHeading = document.createElement("h3");
+  rawHeading.textContent = "Wszystkie odczyty";
+  const candidateList = document.createElement("div");
+  candidateList.className = "ocr-diagnostic-candidates";
+  for (const [candidateIndex, candidate] of candidates.entries()) {
+    const row = document.createElement("div");
+    row.className = `ocr-diagnostic-candidate ${candidate.accepted ? "accepted" : "rejected"}${candidate.selected ? " selected" : ""}`;
+    row.tabIndex = 0;
+    row.setAttribute("data-ocr-candidate-index", String(candidateIndex));
+    row.textContent = `${candidate.text || "—"} → ${candidate.value || "—"} (${ocrConfidenceLabel(candidate.confidence)}) — ${candidate.reason || "Brak szczegolowego powodu."}`;
+    row.addEventListener("mouseenter", () => setOcrCandidateFocus(candidateIndex));
+    row.addEventListener("mouseleave", () => setOcrCandidateFocus());
+    row.addEventListener("focus", () => setOcrCandidateFocus(candidateIndex));
+    row.addEventListener("blur", () => setOcrCandidateFocus());
+    candidateList.appendChild(row);
+  }
+  if (!candidates.length) {
+    const empty = document.createElement("p");
+    empty.className = "settings-note";
+    empty.textContent = String(result.message || "Nie znaleziono tekstu na obrazie.");
+    candidateList.appendChild(empty);
+  }
+  details.append(heading, rawHeading, candidateList);
+  layout.append(stage, details);
+  output.appendChild(layout);
+  return output;
+}
+
+function renderOcrBackgroundQueue(jobs) {
+  const queue = document.createElement("div");
+  queue.className = "ocr-background-queue wide-field";
+  const heading = document.createElement("h3");
+  heading.textContent = "Kolejka dopracowywania OCR";
+  const items = Array.isArray(jobs) ? jobs : [];
+  if (!items.length) {
+    const empty = document.createElement("p");
+    empty.className = "settings-note";
+    empty.textContent = "Brak oczekujacych lub aktualnie skanowanych wycinkow.";
+    queue.append(heading, empty);
+    return queue;
+  }
+  const list = document.createElement("div");
+  list.className = "ocr-background-queue-list";
+  for (const job of items) {
+    const card = document.createElement("article");
+    card.className = `ocr-background-queue-item status-${String(job.status || "pending")}`;
+    if (job.thumbnail_url) {
+      const image = document.createElement("img");
+      image.src = String(job.thumbnail_url);
+      image.alt = "Wycinek oczekujacy na OCR";
+      card.appendChild(image);
+    }
+    const details = document.createElement("div");
+    const state = String(job.status || "pending");
+    details.textContent = state === "processing"
+      ? "Skanowanie w tle"
+      : state === "pending"
+        ? "Oczekuje na bezczynnosc uzytkownikow"
+        : state === "completed"
+          ? "Zakonczono"
+          : state;
+    card.appendChild(details);
+    list.appendChild(card);
+  }
+  queue.append(heading, list);
+  return queue;
+}
+
+function renderSettingsOcr() {
+  const form = document.createElement("form");
+  form.className = "settings-form";
+  const ocrSettings = state.settings?.ocr || {};
+  const status = document.createElement("p");
+  status.className = "settings-note wide-field";
+  status.textContent = "Pobieranie informacji o lokalnym OCR...";
+  const engineInfo = document.createElement("div");
+  engineInfo.className = "ocr-engine-info wide-field";
+  const file = inputField("ocr_test_file", "Obraz testowy", "", {
+    type: "file",
+    description: "Obraz trafia do tymczasowego cache aplikacji; nie jest zapisywany jako konfiguracja.",
+  });
+  const fileInput = file.querySelector("input");
+  fileInput.accept = "image/*";
+  const idleSeconds = inputField("ocr_idle_seconds", "Czas bez aktywnosci (s)", ocrSettings.idle_seconds ?? 5, {
+    type: "number",
+    min: 0,
+    max: 3600,
+    step: 1,
+    description: "Tyle czasu OCR czeka przed wznowieniem kolejki w tle.",
+  });
+  const maxCpu = inputField("ocr_max_cpu_percent", "Maksymalne uzycie CPU (%)", ocrSettings.max_cpu_percent ?? 35, {
+    type: "number", min: 0, max: 100, step: 1,
+    description: "Twardy limit CPU dla procesu OCR. Nie obciaza procesu panelu WWW.",
+  });
+  const pauseCpu = inputField("ocr_pause_cpu_percent", "Nie uruchamiaj powyzej CPU (%)", ocrSettings.pause_cpu_percent ?? 85, {
+    type: "number", min: 0, max: 100, step: 1,
+    description: "Przed startem kolejnego zadania OCR sprawdzane jest aktualne uzycie calego systemu.",
+  });
+  const background = checkField(
+    "ocr_background_enabled",
+    "Wlacz kolejke dopracowywania OCR w tle",
+    Boolean(ocrSettings.background_enabled),
+    "Kolejka dziala dopiero po okresie bez aktywnosci uzytkownika."
+  );
+  const profiles = document.createElement("div");
+  profiles.className = "ocr-profile-options wide-field";
+  const profileHeading = document.createElement("div");
+  const profileTitle = document.createElement("strong");
+  const profileHelp = document.createElement("span");
+  profileTitle.textContent = "Mechanizm OCR";
+  profileHelp.textContent = "Wybierz szybszy, dokladniejszy albo oba lokalnie dostepne profile. Aplikacja niczego nie pobiera podczas pracy.";
+  profileHeading.className = "ocr-profile-options-heading";
+  profileHeading.append(profileTitle, profileHelp);
+  profiles.appendChild(profileHeading);
+  const selectedProfiles = new Set((ocrSettings.model_profiles || ["fast"]).map(String));
+  const profileDefinitions = [
+    { id: "fast", title: "Szybki", description: "PP-OCRv5 Mobile — najszybszy odczyt." },
+    { id: "accurate", title: "Dokladny", description: "PP-OCRv5 Server — wolniejszy, z wieksza szansa na trudny odczyt." },
+  ];
+  const profileCards = new Map();
+  for (const profile of profileDefinitions) {
+    const card = document.createElement("label");
+    const input = document.createElement("input");
+    const details = document.createElement("span");
+    const title = document.createElement("strong");
+    const description = document.createElement("small");
+    const availability = document.createElement("em");
+    card.className = "ocr-profile-card";
+    input.type = "checkbox";
+    input.name = "ocr_model_profile";
+    input.value = profile.id;
+    input.checked = selectedProfiles.has(profile.id);
+    title.textContent = profile.title;
+    description.textContent = profile.description;
+    availability.textContent = "Sprawdzanie dostepnosci...";
+    details.append(title, description, availability);
+    card.append(input, details);
+    profiles.appendChild(card);
+    profileCards.set(profile.id, { card, input, availability });
+  }
+  const slotsHeading = document.createElement("div");
+  const slotsTitle = document.createElement("strong");
+  const slotsCount = document.createElement("span");
+  slotsHeading.className = "ocr-slot-list-heading wide-field";
+  slotsTitle.textContent = "Sloty objete kolejka";
+  slotsHeading.append(slotsTitle, slotsCount);
+  const slots = document.createElement("div");
+  slots.className = "settings-slot-list ocr-slot-grid wide-field";
+  const enabledSlots = new Set((ocrSettings.enabled_slots || []).map(String));
+  const updateSelectedSlotCount = () => {
+    const selected = slots.querySelectorAll('input[name="ocr_enabled_slot"]:checked').length;
+    slotsCount.textContent = `${selected} z ${(state.settings?.slots || []).length} zaznaczonych`;
+  };
+  for (const slot of state.settings?.slots || []) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.name = "ocr_enabled_slot";
+    input.value = String(slot.prefix || "");
+    input.checked = enabledSlots.has(input.value);
+    input.addEventListener("change", updateSelectedSlotCount);
+    label.append(input, document.createTextNode(` ${slot.label || "Slot"}`));
+    const code = document.createElement("small");
+    code.textContent = input.value;
+    label.appendChild(code);
+    slots.appendChild(label);
+  }
+  updateSelectedSlotCount();
+  const analyze = document.createElement("button");
+  analyze.type = "button";
+  analyze.className = "secondary-button";
+  analyze.textContent = "Przetestuj OCR";
+  const results = document.createElement("div");
+  results.className = "wide-field";
+  const queueOutput = document.createElement("div");
+  queueOutput.className = "wide-field";
+  const collection = settingsFieldGroup(
+    "Zbieranie wartosci OCR",
+    background,
+    idleSeconds,
+    maxCpu,
+    pauseCpu,
+    profiles,
+    slotsHeading,
+    slots
+  );
+  collection.classList.add("ocr-collection-settings");
+  form.append(
+    collection,
+    settingsFieldGroup("Tester OCR", status, engineInfo, file, actionRow(analyze), results),
+    queueOutput
+  );
+  analyze.addEventListener("click", async () => {
+    const selected = fileInput.files?.[0];
+    if (!selected) {
+      status.textContent = "Wybierz obraz do analizy.";
+      return;
+    }
+    analyze.disabled = true;
+    results.textContent = "";
+    let livePreview = null;
+    status.textContent = "Wysylanie obrazu do lokalnego testu OCR...";
+    try {
+      const upload = new FormData();
+      upload.set("prefix", "ocr-test");
+      upload.set("file", selected, selected.name || "ocr-test-image");
+      const cached = await requestJson("/api/upload-cache", { method: "POST", body: upload, timeoutMs: 120000 });
+      if (!cached.token) throw new Error("Backend nie zwrocil tokenu obrazu testowego.");
+      livePreview = await renderOcrLivePreview(selected);
+      results.appendChild(livePreview.element);
+      livePreview.setStatus("Wykrywanie wartosci liczbowych...");
+      status.textContent = "Analiza OCR trwa — podglad obrazu jest gotowy.";
+      const result = await requestJson("/api/settings/ocr/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: cached.token }),
+        timeoutMs: 120000,
+      });
+      livePreview.dispose();
+      results.textContent = "";
+      results.appendChild(renderOcrDiagnostics(result));
+      status.textContent = result.available
+        ? "Analiza OCR zakonczona."
+        : String(result.message || "Lokalny OCR nie jest dostepny.");
+    } catch (error) {
+      status.textContent = error.message || "Nie udalo sie wykonac analizy OCR.";
+    } finally {
+      livePreview?.dispose();
+      analyze.disabled = false;
+    }
+  });
+  settingsSaveButton(form, (data) => ({
+    ocr: {
+      enabled_slots: [...form.querySelectorAll('[name="ocr_enabled_slot"]:checked')].map((input) => input.value),
+      model_profiles: [...form.querySelectorAll('[name="ocr_model_profile"]:checked')].map((input) => input.value),
+      background_enabled: data.has("ocr_background_enabled"),
+      idle_seconds: data.get("ocr_idle_seconds"),
+      max_cpu_percent: data.get("ocr_max_cpu_percent"),
+      pause_cpu_percent: data.get("ocr_pause_cpu_percent"),
+    },
+  }));
+  settingsOutput.appendChild(form);
+  requestJson("/api/settings/ocr/status")
+    .then((info) => {
+      const engine = info.engine || {};
+      const runtime = info.runtime || {};
+      const models = Array.isArray(info.models) ? info.models : [];
+      const modelStatuses = new Map(models.map((model) => [String(model.id || ""), model]));
+      for (const profile of profileDefinitions) {
+        const controls = profileCards.get(profile.id);
+        const model = modelStatuses.get(profile.id);
+        if (!controls) continue;
+        const available = model?.status === "ready";
+        controls.input.disabled = !available;
+        if (!available) controls.input.checked = false;
+        controls.card.classList.toggle("unavailable", !available);
+        controls.availability.textContent = available
+          ? "Dostepny lokalnie"
+          : "Niedostepny lokalnie";
+      }
+      engineInfo.textContent = "";
+      const title = document.createElement("strong");
+      title.textContent = `${engine.name || "OCR"} ${engine.version || ""}`.trim();
+      const runtimeLine = document.createElement("span");
+      runtimeLine.textContent = `${runtime.name || "Runtime"}: ${runtime.version || "brak"}`;
+      const modelList = document.createElement("ul");
+      for (const model of models) {
+        const item = document.createElement("li");
+        item.textContent = `${model.name || "Model"} ${model.version ? `(${model.version})` : ""} — ${model.status || "unknown"}`;
+        modelList.appendChild(item);
+      }
+      const link = document.createElement("a");
+      link.href = String(info.github_url || "https://github.com/PaddlePaddle/PaddleOCR");
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      link.textContent = "Oficjalny projekt OCR na GitHub";
+      engineInfo.append(title, runtimeLine, modelList, link);
+      const modelReady = models.some((model) => model.status === "ready");
+      status.textContent = !info.available
+        ? "Silnik OCR nie jest dostepny w tej instalacji."
+        : modelReady
+          ? "Silnik OCR i model sa gotowe do testu."
+          : "Silnik OCR jest zainstalowany, ale wybrany profil nie jest dostepny lokalnie.";
+    })
+    .catch((error) => {
+      status.textContent = error.message || "Nie udalo sie odczytac statusu OCR.";
+    });
+  requestJson("/api/ocr/jobs")
+    .then((payload) => queueOutput.appendChild(renderOcrBackgroundQueue(payload.jobs)))
+    .catch((error) => {
+      const note = document.createElement("p");
+      note.className = "settings-note";
+      note.textContent = error.message || "Nie udalo sie odczytac kolejki OCR.";
+      queueOutput.appendChild(note);
+    });
+}
+
 function renderSettings() {
   if (!state.settings) {
     return;
   }
   settingsOutput.textContent = "";
   document.querySelectorAll(".settings-tab").forEach((button) => {
+    const isOcrTab = button.dataset.settingsTab === "ocr";
+    button.hidden = isOcrTab && state.settings.ocr_available === false;
     button.classList.toggle("active", button.dataset.settingsTab === state.activeSettingsTab);
   });
+  if (state.settings.ocr_available === false && state.activeSettingsTab === "ocr") {
+    state.activeSettingsTab = "app";
+  }
   settingsStatus.textContent = state.settings.windows_admin
     ? "Proces backendu ma uprawnienia administratora Windows. Rola web admin jest niezalezna."
     : "Proces backendu dziala bez uprawnien administratora Windows. Rola web admin jest niezalezna.";
@@ -13400,6 +14046,7 @@ function renderSettings() {
   if (state.activeSettingsTab === "ftp") renderSettingsFtp();
   if (state.activeSettingsTab === "sql") renderSettingsSql();
   if (state.activeSettingsTab === "pimcore") renderSettingsPimcore();
+  if (state.activeSettingsTab === "ocr") renderSettingsOcr();
   if (state.activeSettingsTab === "mail") renderSettingsMail();
   if (state.activeSettingsTab === "monitor") renderSettingsResourceMonitor();
   if (state.activeSettingsTab === "slots") renderSettingsSlots();
@@ -13584,6 +14231,7 @@ pimcoreTemplateClearButton?.addEventListener("click", () => {
   pimcoreTemplateTranslate.checked = false;
   pimcoreTemplateLanguage.value = "";
   pimcoreTemplateLanguage.disabled = true;
+  pimcoreTemplateOcrValidation.checked = false;
   savePimcoreTemplateBuilder();
 });
 pimcoreTemplateCancelButton?.addEventListener("click", closePimcoreTemplateBuilder);
