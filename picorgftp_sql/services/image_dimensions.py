@@ -16,6 +16,8 @@ import re
 import sys
 from typing import Callable, Iterable, Mapping, Protocol
 
+from .ocr_values import comparison_key
+
 
 _DIMENSIONS = frozenset({"width", "depth", "height"})
 _NUMBER_PATTERN = re.compile(r"(?<![\d.,])\d+(?:[.,]\d+)*")
@@ -672,6 +674,59 @@ def analyze_image_dimensions(
         },
         candidates=selected_candidates,
         attempts=attempts,
+    )
+
+
+def analyze_image_values(
+    path: str,
+    *,
+    recognizer: ImageDimensionRecognizer | None = None,
+) -> ImageOcrDiagnostics:
+    """Return every OCR candidate with a numeric comparison key.
+
+    This deliberately does not classify candidates as width, depth or height.
+    The original OCR text remains available for display while ``value`` is used
+    only for normalized comparisons.
+    """
+
+    try:
+        boxes = (recognizer or _default_recognizer()).detect(path)
+    except ImageDimensionUnavailable as exc:
+        return ImageOcrDiagnostics(
+            available=False,
+            dimensions={},
+            candidates=[],
+            message=str(exc).strip() or "Lokalny OCR nie jest zainstalowany.",
+        )
+    except Exception as exc:
+        return ImageOcrDiagnostics(
+            available=False,
+            dimensions={},
+            candidates=[],
+            message=f"Nie udalo sie uruchomic lokalnego OCR: {exc}",
+        )
+
+    candidates = [
+        OcrDiagnosticCandidate(
+            text=str(box.text),
+            confidence=float(box.confidence),
+            bbox=box.bbox,
+            dimension=None,
+            value=comparison_key(box.text),
+            accepted=bool(comparison_key(box.text)),
+            reason=(
+                "Wykryto wartosc liczbowa."
+                if comparison_key(box.text)
+                else "Odczyt nie zawiera liczby."
+            ),
+        )
+        for box in boxes
+    ]
+    return ImageOcrDiagnostics(
+        available=True,
+        dimensions={},
+        candidates=candidates,
+        message="" if candidates else "Nie znaleziono tekstu na obrazie.",
     )
 
 

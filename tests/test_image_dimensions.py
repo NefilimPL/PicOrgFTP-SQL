@@ -11,6 +11,7 @@ from picorgftp_sql.services.image_dimensions import (
     ImageDimensionRequest,
     OcrTextBox,
     analyze_image_dimensions,
+    analyze_image_values,
     associate_dimension_hints,
     bundled_ocr_model_cache_path,
     image_ocr_runtime_info,
@@ -466,6 +467,25 @@ def test_diagnostics_classifies_boxes_and_applies_threshold():
     assert result.candidates[1].accepted is False
     assert result.candidates[1].dimension == "depth"
     assert result.candidates[2].value == ""
+
+
+def test_value_diagnostics_keeps_every_numeric_ocr_box_without_dimension_assignment():
+    result = analyze_image_values(
+        "fixture.png",
+        recognizer=FakeRecognizer(
+            [
+                OcrTextBox("120/140 mm", 0.91, (4, 8, 80, 28), "width"),
+                OcrTextBox("tekst", 0.96, (90, 8, 120, 28)),
+                OcrTextBox("120--140", 0.72, (130, 8, 180, 28), "height"),
+            ]
+        ),
+    )
+
+    assert result.available is True
+    assert result.dimensions == {}
+    assert [candidate.value for candidate in result.candidates] == ["120?140", "", "120??140"]
+    assert [candidate.accepted for candidate in result.candidates] == [True, False, True]
+    assert all(candidate.dimension is None for candidate in result.candidates)
 
 
 def test_diagnostics_explains_unclassified_ocr_and_each_dimension_attempt():

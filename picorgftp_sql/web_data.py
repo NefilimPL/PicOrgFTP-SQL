@@ -111,6 +111,7 @@ from .pimcore_config import (
     field_mapping_issues,
     normalize_pimcore_settings,
 )
+from .ocr_settings import OCR_SETTINGS_KEY, normalize_ocr_settings
 from .pimcore_operations import PimcoreOperationRegistry, redact_pimcore_log_value
 from .pimcore_templates import (
     PRODUCT_SOURCES,
@@ -3224,6 +3225,7 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
     web_display_payload = payload.get(WEB_DISPLAY_SETTINGS_KEY)
     translation_payload = payload.get(TRANSLATION_SETTINGS_KEY)
     pimcore_payload = payload.get(PIMCORE_SETTINGS_KEY)
+    ocr_payload = payload.get(OCR_SETTINGS_KEY)
     email_payload = payload.get(EMAIL_SETTINGS_KEY)
     previous_entra_identity = ("", "")
     updated_entra_identity = ("", "")
@@ -3342,6 +3344,12 @@ def update_settings(payload: dict[str, object]) -> dict[str, object]:
         if not _text(pimcore_payload.get(PIMCORE_API_KEY)):
             merged[PIMCORE_API_KEY] = current[PIMCORE_API_KEY]
         cfg[PIMCORE_SETTINGS_KEY] = normalize_pimcore_settings(merged)
+
+    if isinstance(ocr_payload, dict):
+        current_ocr = normalize_ocr_settings(cfg.get(OCR_SETTINGS_KEY, {}))
+        merged_ocr = dict(current_ocr)
+        merged_ocr.update(ocr_payload)
+        cfg[OCR_SETTINGS_KEY] = normalize_ocr_settings(merged_ocr)
 
     if isinstance(email_payload, dict):
         current_email = normalize_email_settings(cfg.get(EMAIL_SETTINGS_KEY))
@@ -3556,6 +3564,7 @@ def settings_snapshot() -> dict[str, object]:
             legacy_color_labels=cfg.get(COLOR_FIELD_LABELS_KEY),
         ),
         "pimcore": pimcore_public,
+        OCR_SETTINGS_KEY: normalize_ocr_settings(cfg.get(OCR_SETTINGS_KEY, {})),
         EMAIL_SETTINGS_KEY: public_email_settings(cfg.get(EMAIL_SETTINGS_KEY)),
         "slots": [
             {

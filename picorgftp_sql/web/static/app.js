@@ -425,10 +425,7 @@ const pimcoreTemplateSources = document.querySelector("#pimcoreTemplateSources")
 const pimcoreTemplateFunctions = document.querySelector("#pimcoreTemplateFunctions");
 const pimcoreTemplateTranslate = document.querySelector("#pimcoreTemplateTranslate");
 const pimcoreTemplateLanguage = document.querySelector("#pimcoreTemplateLanguage");
-const pimcoreTemplateImageEnabled = document.querySelector("#pimcoreTemplateImageEnabled");
-const pimcoreTemplateImageSlot = document.querySelector("#pimcoreTemplateImageSlot");
-const pimcoreTemplateImageKind = document.querySelector("#pimcoreTemplateImageKind");
-const pimcoreTemplateImageConfidence = document.querySelector("#pimcoreTemplateImageConfidence");
+const pimcoreTemplateOcrValidation = document.querySelector("#pimcoreTemplateOcrValidation");
 const pimcoreTemplatePreview = document.querySelector("#pimcoreTemplatePreview");
 const pimcoreTemplateStatus = document.querySelector("#pimcoreTemplateStatus");
 const pimcoreTemplatePreviewButton = document.querySelector("#pimcoreTemplatePreviewButton");
@@ -9588,83 +9585,12 @@ function closePimcoreTemplateHelp() {
   if (pimcoreTemplateModal?.classList.contains("active")) pimcoreTemplateHelpButton?.focus();
 }
 
-function pimcoreImageDimensionFromRow(row) {
-  if (!row?.dataset.imageDimension) return null;
-  try {
-    const value = JSON.parse(row.dataset.imageDimension);
-    return value && typeof value === "object" ? value : null;
-  } catch (_error) {
-    return null;
-  }
+function pimcoreOcrValidationFromRow(row) {
+  return row?.dataset.ocrValidation === "true";
 }
 
-function setPimcoreImageDimensionRow(row, value) {
-  if (!row) return;
-  if (value) {
-    row.dataset.imageDimension = JSON.stringify(value);
-  } else {
-    delete row.dataset.imageDimension;
-  }
-}
-
-function updatePimcoreTemplateImageControls() {
-  const enabled = Boolean(pimcoreTemplateImageEnabled?.checked);
-  for (const control of [
-    pimcoreTemplateImageSlot,
-    pimcoreTemplateImageKind,
-    pimcoreTemplateImageConfidence,
-  ]) {
-    if (control) control.disabled = !enabled;
-  }
-}
-
-function renderPimcoreTemplateImageSlots(row) {
-  if (!pimcoreTemplateImageSlot) return;
-  const configured = pimcoreImageDimensionFromRow(row);
-  const selected = String(configured?.slot || "");
-  pimcoreTemplateImageSlot.replaceChildren();
-  const empty = document.createElement("option");
-  empty.value = "";
-  empty.textContent = "Wybierz slot";
-  pimcoreTemplateImageSlot.appendChild(empty);
-  const slots = [...(state.slots || [])];
-  if (selected && !slots.some((slot) => String(slot.prefix) === selected)) {
-    slots.push({ prefix: selected, label: `Slot ${selected}` });
-  }
-  for (const slot of slots) {
-    const option = document.createElement("option");
-    option.value = String(slot.prefix || "");
-    option.textContent = `${slot.label || "Slot"} (${slot.prefix || ""})`;
-    option.selected = option.value === selected;
-    pimcoreTemplateImageSlot.appendChild(option);
-  }
-  if (pimcoreTemplateImageEnabled) pimcoreTemplateImageEnabled.checked = Boolean(configured);
-  if (pimcoreTemplateImageKind) pimcoreTemplateImageKind.value = configured?.dimension || "width";
-  if (pimcoreTemplateImageConfidence) {
-    pimcoreTemplateImageConfidence.value = String(
-      Math.round(Number(configured?.minimum_text_confidence ?? 0.8) * 100)
-    );
-  }
-  updatePimcoreTemplateImageControls();
-}
-
-function pimcoreTemplateImageDimensionValues() {
-  if (!pimcoreTemplateImageEnabled?.checked) return null;
-  const slot = String(pimcoreTemplateImageSlot?.value || "").trim();
-  const dimension = String(pimcoreTemplateImageKind?.value || "").trim();
-  const confidencePercent = Number(pimcoreTemplateImageConfidence?.value);
-  if (!slot) throw new Error("Wybierz slot dla wymiaru z obrazu.");
-  if (!["width", "depth", "height"].includes(dimension)) {
-    throw new Error("Wybierz rodzaj wymiaru z obrazu.");
-  }
-  if (!Number.isFinite(confidencePercent) || confidencePercent < 0 || confidencePercent > 100) {
-    throw new Error("Minimalna pewnosc tekstu musi miescic sie od 0 do 100%.");
-  }
-  return {
-    slot,
-    dimension,
-    minimum_text_confidence: confidencePercent / 100,
-  };
+function setPimcoreOcrValidationRow(row, value) {
+  if (row) row.dataset.ocrValidation = value ? "true" : "false";
 }
 
 function pimcoreSlotTokens() {
@@ -9702,21 +9628,6 @@ function renderPimcoreTemplateTokens(row) {
       insertPimcoreTemplateText(`{PIMCORE:${mapping.source}|keep}`)
     );
     pimcoreTemplateSources.appendChild(button);
-  }
-  try {
-    const imageDimension = pimcoreTemplateImageDimensionValues();
-    if (imageDimension) {
-      const button = document.createElement("button");
-      const source = `IMAGE_DIMENSION:${imageDimension.slot}:${imageDimension.dimension.toUpperCase()}`;
-      button.type = "button";
-      button.className = "ghost-button";
-      button.textContent = "Wymiar z obrazu";
-      button.title = `{${source}|keep}`;
-      button.addEventListener("click", () => insertPimcoreTemplateText(`{${source}|keep}`));
-      pimcoreTemplateSources.appendChild(button);
-    }
-  } catch (_error) {
-    // The save/preview path displays the configuration validation message.
   }
   const group = document.createElement("button");
   group.type = "button";
@@ -9780,7 +9691,7 @@ function openPimcoreTemplateBuilder(row) {
   pimcoreTemplateTranslate.checked = row.dataset.translate === "true";
   pimcoreTemplateLanguage.value = row.dataset.targetLanguage || pimcoreTemplateLanguageForRow(row);
   pimcoreTemplateLanguage.disabled = !pimcoreTemplateTranslate.checked;
-  renderPimcoreTemplateImageSlots(row);
+  pimcoreTemplateOcrValidation.checked = pimcoreOcrValidationFromRow(row);
   pimcoreTemplateTarget.textContent = `Pole: ${pimcoreTemplateSource(row) || "nowe mapowanie"}`;
   pimcoreTemplatePreview.textContent = "Wpisz szablon i uruchom podglad.";
   pimcoreTemplateStatus.textContent = "";
@@ -9801,7 +9712,7 @@ function pimcoreTemplatePreviewPayload() {
   target.translate = pimcoreTemplateTranslate.checked;
   target.target_language =
     pimcoreTemplateLanguage.value.trim() || pimcoreTemplateLanguageForRow(row) || null;
-  target.image_dimension = pimcoreTemplateImageDimensionValues();
+  target.ocr_validation = pimcoreTemplateOcrValidation.checked;
   return {
     mappings,
     target_source: targetSource,
@@ -9848,20 +9759,13 @@ function savePimcoreTemplateBuilder() {
     pimcoreTemplateStatus.textContent = "Podaj jezyk docelowy tlumaczenia.";
     return;
   }
-  let imageDimension;
-  try {
-    imageDimension = pimcoreTemplateImageDimensionValues();
-  } catch (error) {
-    pimcoreTemplateStatus.textContent = error.message;
-    return;
-  }
   row.dataset.valueTemplate = template;
   const sqlValues = pimcoreTemplateSqlValues();
   row.dataset.sqlQuery = sqlValues.sql_query;
   row.dataset.sqlProfileId = sqlValues.sql_profile_id;
   row.dataset.translate = translate ? "true" : "false";
   row.dataset.targetLanguage = translate ? language : "";
-  setPimcoreImageDimensionRow(row, imageDimension);
+  setPimcoreOcrValidationRow(row, pimcoreTemplateOcrValidation.checked);
   if (translate) pimcoreTemplateLanguage.value = language;
   updatePimcoreTemplateButton(row);
   closePimcoreTemplateBuilder();
@@ -9941,7 +9845,7 @@ function pimcoreMappingRow(mapping = {}) {
   row.dataset.targetLanguage = mapping.target_language || "";
   row.dataset.sqlQuery = mapping.sql_query || "";
   row.dataset.sqlProfileId = mapping.sql_profile_id || "";
-  setPimcoreImageDimensionRow(row, mapping.image_dimension || null);
+  setPimcoreOcrValidationRow(row, mapping.ocr_validation);
   row.className = "pimcore-mapping-row";
   const textInput = (name, value, label) => {
     const input = document.createElement("input");
@@ -10018,7 +9922,7 @@ function collectPimcoreMappings(form) {
       row.querySelector('[name="mapping_sql_profile_id"]')?.value || row.dataset.sqlProfileId || "",
     translate: row.dataset.translate === "true",
     target_language: row.dataset.targetLanguage || null,
-    image_dimension: pimcoreImageDimensionFromRow(row),
+    ocr_validation: pimcoreOcrValidationFromRow(row),
     ...collectPimcoreLayout(row, index),
   }));
 }
@@ -10153,7 +10057,7 @@ function pimcoreSimpleMappingRow(mapping = {}, fields = []) {
   row.dataset.targetLanguage = mapping.target_language || "";
   row.dataset.sqlQuery = mapping.sql_query || "";
   row.dataset.sqlProfileId = mapping.sql_profile_id || "";
-  setPimcoreImageDimensionRow(row, mapping.image_dimension || null);
+  setPimcoreOcrValidationRow(row, mapping.ocr_validation);
   target.addEventListener("change", () => {
     if (!row.dataset.source && !label.value.trim()) {
       label.value = pimcoreSelectedMappingSource(target);
@@ -10192,7 +10096,7 @@ function collectSimplePimcoreMappings(form) {
           "",
         translate: row.dataset.translate === "true",
         target_language: row.dataset.targetLanguage || null,
-        image_dimension: pimcoreImageDimensionFromRow(row),
+        ocr_validation: pimcoreOcrValidationFromRow(row),
         ...collectPimcoreLayout(row, index),
       };
     })
@@ -10714,7 +10618,7 @@ function pimcoreSetupFieldRow(field, mappings, eanTarget) {
   row.dataset.targetLanguage = existing.target_language || "";
   row.dataset.sqlQuery = existing.sql_query || "";
   row.dataset.sqlProfileId = existing.sql_profile_id || "";
-  setPimcoreImageDimensionRow(row, existing.image_dimension || null);
+  setPimcoreOcrValidationRow(row, existing.ocr_validation);
   use.type = "checkbox";
   use.name = "mapping_use";
   use.checked = isEan || Boolean(existing.pimcore_field);
@@ -10771,7 +10675,7 @@ function collectPimcoreSetupMappings(container) {
           "",
         translate: row.dataset.translate === "true",
         target_language: row.dataset.targetLanguage || null,
-        image_dimension: pimcoreImageDimensionFromRow(row),
+        ocr_validation: pimcoreOcrValidationFromRow(row),
         ...collectPimcoreLayout(row, index),
       };
     });
@@ -13515,10 +13419,6 @@ function ocrConfidenceLabel(value) {
   return `${Math.round(Math.max(0, Math.min(1, Number(value) || 0)) * 100)}%`;
 }
 
-function ocrDimensionLabel(value) {
-  return ({ width: "Szerokosc", depth: "Glebokosc", height: "Wysokosc" })[value] || "Dodatkowe";
-}
-
 function renderOcrLivePreview(file) {
   const stage = document.createElement("div");
   stage.className = "ocr-diagnostic-stage ocr-diagnostic-live-preview";
@@ -13597,25 +13497,7 @@ function renderOcrDiagnostics(result) {
   const details = document.createElement("div");
   details.className = "ocr-diagnostic-details";
   const heading = document.createElement("h3");
-  heading.textContent = result.available ? "Wykryte wymiary" : "OCR niedostepny";
-  const dimensions = document.createElement("div");
-  dimensions.className = "ocr-diagnostic-dimensions";
-  for (const kind of ["width", "depth", "height"]) {
-    const field = document.createElement("label");
-    const input = document.createElement("input");
-    input.type = "text";
-    input.readOnly = true;
-    input.value = String(result.dimensions?.[kind] || "");
-    field.textContent = ocrDimensionLabel(kind);
-    field.appendChild(input);
-    const attempt = document.createElement("small");
-    attempt.className = "ocr-diagnostic-attempt";
-    attempt.textContent = String(
-      result.attempts?.[kind] || "OCR nie przekazal informacji o probie przypisania."
-    );
-    field.appendChild(attempt);
-    dimensions.appendChild(field);
-  }
+  heading.textContent = result.available ? "Wykryte wartosci" : "OCR niedostepny";
   const rawHeading = document.createElement("h3");
   rawHeading.textContent = "Wszystkie odczyty";
   const candidateList = document.createElement("div");
@@ -13625,7 +13507,7 @@ function renderOcrDiagnostics(result) {
     row.className = `ocr-diagnostic-candidate ${candidate.accepted ? "accepted" : "rejected"}${candidate.selected ? " selected" : ""}`;
     row.tabIndex = 0;
     row.setAttribute("data-ocr-candidate-index", String(candidateIndex));
-    row.textContent = `${ocrDimensionLabel(candidate.dimension)}: ${candidate.text || "—"} → ${candidate.value || "—"} (${ocrConfidenceLabel(candidate.confidence)}) — ${candidate.reason || "Brak szczegolowego powodu."}`;
+    row.textContent = `${candidate.text || "—"} → ${candidate.value || "—"} (${ocrConfidenceLabel(candidate.confidence)}) — ${candidate.reason || "Brak szczegolowego powodu."}`;
     row.addEventListener("mouseenter", () => setOcrCandidateFocus(candidateIndex));
     row.addEventListener("mouseleave", () => setOcrCandidateFocus());
     row.addEventListener("focus", () => setOcrCandidateFocus(candidateIndex));
@@ -13638,7 +13520,7 @@ function renderOcrDiagnostics(result) {
     empty.textContent = String(result.message || "Nie znaleziono tekstu na obrazie.");
     candidateList.appendChild(empty);
   }
-  details.append(heading, dimensions, rawHeading, candidateList);
+  details.append(heading, rawHeading, candidateList);
   layout.append(stage, details);
   output.appendChild(layout);
   return output;
@@ -13647,6 +13529,7 @@ function renderOcrDiagnostics(result) {
 function renderSettingsOcr() {
   const form = document.createElement("form");
   form.className = "settings-form";
+  const ocrSettings = state.settings?.ocr || {};
   const status = document.createElement("p");
   status.className = "settings-note wide-field";
   status.textContent = "Pobieranie informacji o lokalnym OCR...";
@@ -13658,32 +13541,52 @@ function renderSettingsOcr() {
   });
   const fileInput = file.querySelector("input");
   fileInput.accept = "image/*";
-  const threshold = inputField("ocr_test_threshold", "Minimalna pewnosc (%)", "80", {
+  const idleSeconds = inputField("ocr_idle_seconds", "Czas bez aktywnosci (s)", ocrSettings.idle_seconds ?? 5, {
     type: "number",
     min: 0,
-    max: 100,
+    max: 3600,
     step: 1,
-    description: "Wynik ponizej progu jest widoczny, ale nie wypelnia pola wymiaru.",
+    description: "Tyle czasu OCR czeka przed wznowieniem kolejki w tle.",
   });
+  const maxCpu = inputField("ocr_max_cpu_percent", "Maksymalne uzycie CPU (%)", ocrSettings.max_cpu_percent ?? 35, {
+    type: "number", min: 0, max: 100, step: 1,
+  });
+  const pauseCpu = inputField("ocr_pause_cpu_percent", "Wstrzymaj kolejke powyzej CPU (%)", ocrSettings.pause_cpu_percent ?? 85, {
+    type: "number", min: 0, max: 100, step: 1,
+  });
+  const background = checkField(
+    "ocr_background_enabled",
+    "Wlacz kolejke dopracowywania OCR w tle",
+    Boolean(ocrSettings.background_enabled),
+    "Kolejka dziala dopiero po okresie bez aktywnosci uzytkownika."
+  );
+  const slots = document.createElement("div");
+  slots.className = "settings-slot-list";
+  const enabledSlots = new Set((ocrSettings.enabled_slots || []).map(String));
+  for (const slot of state.settings?.slots || []) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.name = "ocr_enabled_slot";
+    input.value = String(slot.prefix || "");
+    input.checked = enabledSlots.has(input.value);
+    label.append(input, document.createTextNode(` ${slot.label || "Slot"} (${input.value})`));
+    slots.appendChild(label);
+  }
   const analyze = document.createElement("button");
-  analyze.type = "submit";
+  analyze.type = "button";
   analyze.className = "secondary-button";
   analyze.textContent = "Przetestuj OCR";
   const results = document.createElement("div");
   results.className = "wide-field";
   form.append(
-    settingsFieldGroup("Tester OCR", status, engineInfo, file, threshold, actionRow(analyze), results)
+    settingsFieldGroup("Zbieranie wartosci OCR", background, idleSeconds, maxCpu, pauseCpu, slots),
+    settingsFieldGroup("Tester OCR", status, engineInfo, file, actionRow(analyze), results)
   );
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
+  analyze.addEventListener("click", async () => {
     const selected = fileInput.files?.[0];
     if (!selected) {
       status.textContent = "Wybierz obraz do analizy.";
-      return;
-    }
-    const confidence = Number(threshold.querySelector("input").value || 80);
-    if (!Number.isFinite(confidence) || confidence < 0 || confidence > 100) {
-      status.textContent = "Minimalna pewnosc musi byc od 0 do 100%.";
       return;
     }
     analyze.disabled = true;
@@ -13698,12 +13601,12 @@ function renderSettingsOcr() {
       if (!cached.token) throw new Error("Backend nie zwrocil tokenu obrazu testowego.");
       livePreview = renderOcrLivePreview(selected);
       results.appendChild(livePreview.element);
-      livePreview.setStatus("Wykrywanie tekstu i linii wymiarowych...");
+      livePreview.setStatus("Wykrywanie wartosci liczbowych...");
       status.textContent = "Analiza OCR trwa — podglad obrazu jest gotowy.";
       const result = await requestJson("/api/settings/ocr/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: cached.token, minimum_text_confidence: confidence / 100 }),
+        body: JSON.stringify({ token: cached.token }),
         timeoutMs: 120000,
       });
       livePreview.dispose();
@@ -13719,6 +13622,15 @@ function renderSettingsOcr() {
       analyze.disabled = false;
     }
   });
+  settingsSaveButton(form, (data) => ({
+    ocr: {
+      enabled_slots: [...form.querySelectorAll('[name="ocr_enabled_slot"]:checked')].map((input) => input.value),
+      background_enabled: data.has("ocr_background_enabled"),
+      idle_seconds: data.get("ocr_idle_seconds"),
+      max_cpu_percent: data.get("ocr_max_cpu_percent"),
+      pause_cpu_percent: data.get("ocr_pause_cpu_percent"),
+    },
+  }));
   settingsOutput.appendChild(form);
   requestJson("/api/settings/ocr/status")
     .then((info) => {
@@ -13945,21 +13857,6 @@ pimcoreTemplateTranslate?.addEventListener("change", () => {
   }
 });
 
-pimcoreTemplateImageEnabled?.addEventListener("change", () => {
-  updatePimcoreTemplateImageControls();
-  if (state.pimcoreTemplateRow) renderPimcoreTemplateTokens(state.pimcoreTemplateRow);
-});
-
-for (const control of [
-  pimcoreTemplateImageSlot,
-  pimcoreTemplateImageKind,
-  pimcoreTemplateImageConfidence,
-]) {
-  control?.addEventListener("change", () => {
-    if (state.pimcoreTemplateRow) renderPimcoreTemplateTokens(state.pimcoreTemplateRow);
-  });
-}
-
 pimcoreTemplatePreviewButton?.addEventListener("click", previewPimcoreTemplate);
 pimcoreTemplateSaveButton?.addEventListener("click", savePimcoreTemplateBuilder);
 pimcoreTemplateClearButton?.addEventListener("click", () => {
@@ -13971,8 +13868,7 @@ pimcoreTemplateClearButton?.addEventListener("click", () => {
   pimcoreTemplateTranslate.checked = false;
   pimcoreTemplateLanguage.value = "";
   pimcoreTemplateLanguage.disabled = true;
-  pimcoreTemplateImageEnabled.checked = false;
-  updatePimcoreTemplateImageControls();
+  pimcoreTemplateOcrValidation.checked = false;
   savePimcoreTemplateBuilder();
 });
 pimcoreTemplateCancelButton?.addEventListener("click", closePimcoreTemplateBuilder);

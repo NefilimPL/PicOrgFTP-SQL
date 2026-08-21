@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import os
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -89,6 +90,34 @@ def test_update_settings_clears_translation_cache_after_accepted_update():
     assert cfg["translation"]["provider"] == "mymemory"
     assert cfg["translation"]["api_key"] == "saved-secret"
     clear_cache.assert_called_once()
+
+
+def test_update_settings_persists_bounded_ocr_collection_limits(monkeypatch):
+    cfg = json.loads(json.dumps(web_data.config.DEFAULT_CONFIG))
+    monkeypatch.setattr(web_data.config, "CONFIG", cfg)
+    monkeypatch.setattr(web_data, "save_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(web_data.config, "initialize_config", lambda **_kwargs: None)
+    monkeypatch.setattr(web_data, "settings_snapshot", lambda: {"ocr": cfg["ocr"]})
+
+    result = web_data.update_settings(
+        {
+            "ocr": {
+                "enabled_slots": ["15", "15", "16"],
+                "background_enabled": True,
+                "idle_seconds": -5,
+                "max_cpu_percent": 75,
+                "pause_cpu_percent": 20,
+            }
+        }
+    )
+
+    assert result["ocr"] == {
+        "enabled_slots": ["15", "16"],
+        "background_enabled": True,
+        "idle_seconds": 0,
+        "max_cpu_percent": 75,
+        "pause_cpu_percent": 75,
+    }
 
 
 def test_parse_csv_headers_supports_semicolon_and_quoted_labels():
@@ -1772,7 +1801,7 @@ def test_template_preview_route_resolves_slot_tokens_before_rendering():
     preview.assert_called_once_with(payload, image_slot_paths={"15": "C:/cache/15.png"})
 
 
-def test_ocr_analysis_uses_only_the_signed_upload_token():
+def test_ocr_analysis_uses_only_the_signed_upload_token_without_a_confidence_threshold():
     client = TestClient(web_app.app)
     diagnostics = ImageOcrDiagnostics(
         available=True,
@@ -1787,21 +1816,21 @@ def test_ocr_analysis_uses_only_the_signed_upload_token():
         patch.object(web_app, "_require_admin", return_value="admin"),
         patch.object(web_app, "_path_from_file_token", return_value="C:/cache/test.png"),
         patch.object(web_app, "_versioned_file_url", return_value="/api/file?token=signed"),
-        patch.object(web_app, "analyze_image_dimensions", return_value=diagnostics) as analyze,
+        patch.object(web_app, "analyze_image_values", return_value=diagnostics) as analyze,
     ):
         response = client.post(
             "/api/settings/ocr/analyze",
-            json={"token": "signed", "minimum_text_confidence": 0.8},
+            json={"token": "signed"},
         )
 
     assert response.status_code == 200
     assert "C:/cache" not in response.text
     assert response.json()["image_url"] == "/api/file?token=signed"
     assert response.json()["candidates"][0]["bbox"] == [4, 8, 80, 28]
-    analyze.assert_called_once_with("C:/cache/test.png", 0.8)
+    analyze.assert_called_once_with("C:/cache/test.png")
 
 
-def test_ocr_routes_return_runtime_status_and_reject_invalid_threshold():
+def test_ocr_status_route_returns_runtime_status():
     client = TestClient(web_app.app)
     status = {"available": False, "engine": {"name": "PaddleOCR"}}
     with (
@@ -1809,13 +1838,8 @@ def test_ocr_routes_return_runtime_status_and_reject_invalid_threshold():
         patch.object(web_app, "image_ocr_runtime_info", return_value=status),
     ):
         status_response = client.get("/api/settings/ocr/status")
-        threshold_response = client.post(
-            "/api/settings/ocr/analyze",
-            json={"token": "signed", "minimum_text_confidence": 1.1},
-        )
 
     assert status_response.json() == status
-    assert threshold_response.status_code == 400
 
 
 def test_ocr_validation_compares_cached_signed_slot_images_without_exposing_paths(tmp_path):
@@ -1892,6 +1916,37 @@ def test_ocr_approval_suppresses_a_cached_value_mismatch(tmp_path):
     assert validation.json()["matches"] is False
     assert validation.json()["approved"] is True
     assert validation.json()["mismatch"] is False
+
+
+def test_selected_ocr_slot_starts_background_value_collection(monkeypatch):
+    calls = []
+
+    class ImmediateThread:
+        def __init__(self, *, target, daemon, name):
+            self.target = target
+            self.daemon = daemon
+            self.name = name
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setitem(web_app.config.CONFIG, "ocr", {"enabled_slots": ["15"]})
+    monkeypatch.setattr(web_app.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(
+        web_app,
+        "collect_image_values",
+        lambda path, *, store, analyze: calls.append((path, store, analyze)),
+        raising=False,
+    )
+    store = object()
+    monkeypatch.setattr(web_app, "observability_store", lambda: store)
+
+    status = web_app._schedule_ocr_value_collection("15", "C:/cache/15.png")
+
+    assert status == "scanning"
+    assert calls == [
+        (os.path.realpath(os.path.abspath("C:/cache/15.png")), store, web_app.analyze_image_values)
+    ]
 
 
 def test_admin_test_sample_route_returns_fresh_editable_values():

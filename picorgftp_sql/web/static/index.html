@@ -541,29 +541,10 @@
             <p class="settings-note">
               Tekst i znaki poza nawiasami sa wstawiane bez zmian. Grupa w nawiasach, np. (/{KOLOR 2}), znika, gdy jej placeholder jest pusty. Wielkosc nazwy placeholdera ustala wielkosc wyniku.
             </p>
-            <fieldset id="pimcoreTemplateImageDimension" class="pimcore-template-translation">
-              <legend>Wymiar z obrazu</legend>
-              <label><input id="pimcoreTemplateImageEnabled" type="checkbox"> Uzyj wymiaru rozpoznanego lokalnie</label>
-              <label>
-                Slot
-                <select id="pimcoreTemplateImageSlot"></select>
-              </label>
-              <label>
-                Rodzaj
-                <select id="pimcoreTemplateImageKind">
-                  <option value="width">Szerokosc</option>
-                  <option value="depth">Glebokosc</option>
-                  <option value="height">Wysokosc</option>
-                </select>
-              </label>
-              <label>
-                Minimalna pewnosc tekstu (%)
-                <input id="pimcoreTemplateImageConfidence" type="number" min="0" max="100" step="1" value="80">
-              </label>
-            </fieldset>
             <div id="pimcoreTemplateSqlControls" class="pimcore-template-sql-controls"></div>
             <div class="pimcore-template-translation">
               <label><input id="pimcoreTemplateTranslate" type="checkbox"> Przetlumacz gotowy wynik</label>
+              <label><input id="pimcoreTemplateOcrValidation" type="checkbox"> Porownuj wynik z OCR</label>
               <label>
                 Jezyk docelowy
                 <input id="pimcoreTemplateLanguage" type="text" maxlength="16" placeholder="np. en, de, pl">

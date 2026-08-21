@@ -59,12 +59,14 @@ from ..database import connect_db
 from ..github_status import github_repository_status
 from ..history_changes import history_change_set
 from ..image_utils import fit_image_to_content
-from ..services.image_dimensions import analyze_image_dimensions, image_ocr_runtime_info
+from ..services.image_dimensions import analyze_image_values, image_ocr_runtime_info
+from ..services.ocr_cache import collect_image_values
 from ..services.ocr_values import (
     comparison_key,
     normalize_entered_ocr_value,
     ocr_values_match,
 )
+from ..ocr_settings import OCR_SETTINGS_KEY, normalize_ocr_settings
 from ..legacy_import import import_legacy_to_sqlite
 from ..logging_utils import log_error
 from ..email_settings import EMAIL_SETTINGS_KEY
@@ -211,6 +213,8 @@ WEB_UPLOAD_CACHE_CLEAN_INTERVAL_SECONDS = 30 * 60
 CSRF_HEADER = "x-picorg-csrf"
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _UPLOAD_CACHE_LAST_CLEANUP = 0.0
+_OCR_COLLECTION_LOCK = threading.Lock()
+_OCR_COLLECTION_PATHS: set[str] = set()
 _BROWSER_EXTENSION_IMPORTS: Dict[str, List[Dict[str, Any]]] = {}
 _BROWSER_EXTENSION_IMPORTS_LOCK = threading.Lock()
 _PROCESS_JOB_RETENTION_SECONDS = 6 * 60 * 60
@@ -1332,6 +1336,41 @@ def _image_sha256(path: str) -> str:
         while chunk := source.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _schedule_ocr_value_collection(slot: object, path: str) -> str:
+    """Start a non-blocking cache fill only for an admin-enabled OCR slot."""
+
+    enabled_slots = normalize_ocr_settings(
+        config.CONFIG.get(OCR_SETTINGS_KEY, {})
+    ).get("enabled_slots", [])
+    if str(slot or "").strip() not in enabled_slots:
+        return "disabled"
+    canonical_path = os.path.realpath(os.path.abspath(path))
+    with _OCR_COLLECTION_LOCK:
+        if canonical_path in _OCR_COLLECTION_PATHS:
+            return "scanning"
+        _OCR_COLLECTION_PATHS.add(canonical_path)
+
+    def collect() -> None:
+        try:
+            collect_image_values(
+                canonical_path,
+                store=observability_store(),
+                analyze=analyze_image_values,
+            )
+        except Exception as exc:
+            log_error(f"OCR value collection failed: {exc}\n{traceback.format_exc()}")
+        finally:
+            with _OCR_COLLECTION_LOCK:
+                _OCR_COLLECTION_PATHS.discard(canonical_path)
+
+    threading.Thread(
+        target=collect,
+        daemon=True,
+        name="picorg-ocr-collect",
+    ).start()
+    return "scanning"
 
 
 def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
@@ -4418,12 +4457,16 @@ def _enrich_photo_payload(photos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         path = str(photo.get("path") or "")
         ftp_path = str(photo.get("ftp_path") or "")
         if path:
+            item["ocr_state"] = _schedule_ocr_value_collection(
+                photo.get("prefix"), path
+            )
             token = _file_token(path)
             item["token"] = token
             item["file_version"] = _file_version(path)
             item["url"] = _versioned_file_url(path, "/api/file", token)
             item["thumb_url"] = _versioned_file_url(path, "/api/thumbnail", token)
         else:
+            item["ocr_state"] = "disabled"
             item["token"] = ""
             item["file_version"] = ""
             item["url"] = ""
@@ -5635,6 +5678,7 @@ def create_app() -> FastAPI:
             except OSError:
                 size = 0
         token = _file_token(path)
+        ocr_state = _schedule_ocr_value_collection(prefix, path)
         return {
             "token": token,
             "name": _safe_upload_name(display_name, os.path.basename(path)),
@@ -5651,6 +5695,7 @@ def create_app() -> FastAPI:
                 "mode": _upload_processing_mode(),
             },
             "antivirus_scan": _upload_scan_result(path),
+            "ocr_state": ocr_state,
         }
 
     @app.options("/api/browser-extension/{path:path}")
@@ -5750,6 +5795,7 @@ def create_app() -> FastAPI:
                 "mode": _upload_processing_mode(),
             },
             "antivirus_scan": _upload_scan_result(path),
+            "ocr_state": _schedule_ocr_value_collection(prefix, path),
         }
         item = {
             "source_url": source_url,
@@ -5827,6 +5873,7 @@ def create_app() -> FastAPI:
             except OSError:
                 size = 0
         token = _file_token(path)
+        ocr_state = _schedule_ocr_value_collection(prefix, path)
         return {
             "token": token,
             "name": _safe_upload_name(display_name, os.path.basename(path)),
@@ -5837,6 +5884,7 @@ def create_app() -> FastAPI:
             "file_version": _file_version(path),
             "url": _versioned_file_url(path, "/api/file", token),
             "thumb_url": _versioned_file_url(path, "/api/thumbnail", token),
+            "ocr_state": ocr_state,
             "timing": {
                 "total_ms": _elapsed_ms(started),
                 "save_ms": save_ms,
@@ -6023,17 +6071,8 @@ def create_app() -> FastAPI:
         token = payload.get("token")
         if not isinstance(token, str) or not token.strip():
             raise HTTPException(status_code=400, detail="Wymagany jest token przeslanego obrazu.")
-        raw_threshold = payload.get("minimum_text_confidence", 0.8)
-        if isinstance(raw_threshold, bool):
-            raise HTTPException(status_code=400, detail="Niepoprawny prog pewnosci OCR.")
-        try:
-            threshold = float(raw_threshold)
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail="Niepoprawny prog pewnosci OCR.") from exc
-        if not 0 <= threshold <= 1:
-            raise HTTPException(status_code=400, detail="Prog pewnosci OCR musi byc od 0 do 1.")
         path = _path_from_file_token(token.strip())
-        diagnostics = await run_in_threadpool(analyze_image_dimensions, path, threshold)
+        diagnostics = await run_in_threadpool(analyze_image_values, path)
         result = asdict(diagnostics)
         result["image_url"] = _versioned_file_url(path, "/api/file", token.strip())
         return result

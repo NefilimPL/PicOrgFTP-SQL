@@ -3769,7 +3769,12 @@ class SqliteStore:
         return {
             **dict(scan),
             "values": [
-                {**dict(row), "bbox": _json_loads(row["bbox_json"], [])}
+                {
+                    "text": _text(row["text"]),
+                    "comparison": _text(row["comparison"]),
+                    "confidence": float(row["confidence"] or 0),
+                    "bbox": _json_loads(row["bbox_json"], []),
+                }
                 for row in rows
             ],
         }
