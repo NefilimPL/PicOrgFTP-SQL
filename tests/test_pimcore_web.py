@@ -1935,7 +1935,9 @@ def test_selected_ocr_slot_starts_background_value_collection(monkeypatch):
     monkeypatch.setattr(
         web_app,
         "collect_image_values",
-        lambda path, *, store, analyze: calls.append((path, store, analyze)),
+        lambda path, *, store, analyze, enqueue_crops=None: calls.append(
+            (path, store, analyze, enqueue_crops)
+        ),
         raising=False,
     )
     store = object()
@@ -1945,8 +1947,14 @@ def test_selected_ocr_slot_starts_background_value_collection(monkeypatch):
 
     assert status == "scanning"
     assert calls == [
-        (os.path.realpath(os.path.abspath("C:/cache/15.png")), store, web_app.analyze_image_values)
+        (
+            os.path.realpath(os.path.abspath("C:/cache/15.png")),
+            store,
+            web_app.analyze_image_values,
+            calls[0][3],
+        )
     ]
+    assert callable(calls[0][3])
 
 
 def test_admin_can_read_ocr_slots_and_background_queue(tmp_path, monkeypatch):

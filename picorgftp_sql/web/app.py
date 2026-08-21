@@ -60,7 +60,7 @@ from ..github_status import github_repository_status
 from ..history_changes import history_change_set
 from ..image_utils import fit_image_to_content
 from ..services.image_dimensions import analyze_image_values, image_ocr_runtime_info
-from ..services.ocr_cache import collect_image_values
+from ..services.ocr_cache import collect_image_values, enqueue_ocr_crop_jobs
 from ..services.ocr_queue import OcrQueueScheduler
 from ..services.ocr_worker import OcrQueueWorker
 from ..services.ocr_values import (
@@ -1219,6 +1219,12 @@ def _upload_cache_root() -> str:
     return os.path.join(settings.AC, "web_upload_cache")
 
 
+def _ocr_crop_root() -> str:
+    """Durable enlarged crops used by the idle OCR refinement queue."""
+
+    return os.path.join(settings.AC, "ocr_crop_cache")
+
+
 def _upload_cache_dir(cache_scope: object = "") -> str:
     safe_scope = sanitize_path_segment(cache_scope) or "user-session"
     return os.fspath(build_child_path(_upload_cache_root(), safe_scope))
@@ -1229,6 +1235,7 @@ def _file_token_roots() -> list[str]:
         settings.l,
         os.path.join(settings.AC, "web_ftp_cache"),
         _upload_cache_root(),
+        _ocr_crop_root(),
     ]
 
 
@@ -1387,6 +1394,13 @@ def _schedule_ocr_value_collection(slot: object, path: str) -> str:
                 canonical_path,
                 store=observability_store(),
                 analyze=analyze_image_values,
+                enqueue_crops=lambda image_hash, diagnostics: enqueue_ocr_crop_jobs(
+                    canonical_path,
+                    image_hash=image_hash,
+                    diagnostics=diagnostics,
+                    store=observability_store(),
+                    crop_dir=_ocr_crop_root(),
+                ),
             )
         except Exception as exc:
             log_error(f"OCR value collection failed: {exc}\n{traceback.format_exc()}")

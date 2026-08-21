@@ -3810,7 +3810,7 @@ class SqliteStore:
         """Persist an OCR crop task and return its opaque identifier."""
 
         self.initialize()
-        job_id = f"ocr-{uuid.uuid4().hex}"
+        job_id = _text(payload.get("id")) or f"ocr-{uuid.uuid4().hex}"
         now = _now_iso()
         with self.connection() as conn:
             conn.execute(
