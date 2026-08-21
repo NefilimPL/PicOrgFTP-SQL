@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ntpath
 import os
 from collections.abc import Iterable
 from pathlib import Path
@@ -12,7 +13,10 @@ class PathSecurityError(ValueError):
 
 
 def _canonical_path(path: str | os.PathLike[str]) -> str:
-    return os.path.realpath(os.path.abspath(os.fspath(path)))
+    canonical = os.path.realpath(os.path.abspath(os.fspath(path)))
+    if canonical.startswith("\\\\") or (len(canonical) >= 2 and canonical[1] == ":"):
+        return ntpath.normcase(canonical)
+    return os.path.normcase(canonical)
 
 
 def resolve_path_within_roots(
@@ -26,11 +30,8 @@ def resolve_path_within_roots(
     target = _canonical_path(path)
     for root in roots:
         trusted_root = _canonical_path(root)
-        try:
-            common = os.path.commonpath([target, trusted_root])
-        except ValueError:
-            continue
-        if os.path.normcase(common) != os.path.normcase(trusted_root):
+        trusted_prefix = trusted_root if trusted_root.endswith(os.sep) else trusted_root + os.sep
+        if target != trusted_root and not target.startswith(trusted_prefix):
             continue
         if require_exists and not os.path.exists(target):
             raise PathSecurityError("path does not exist")
