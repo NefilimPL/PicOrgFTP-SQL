@@ -46,7 +46,11 @@ class OcrQueueScheduler:
         job = self._claim_job()
         if job is None:
             return "empty"
-        self._process_job(job)
+        try:
+            self._process_job(job)
+        except Exception:
+            self._requeue_job(job)
+            return "requeued_error"
         if self._has_active_requests():
             self._requeue_job(job)
             return "requeued"

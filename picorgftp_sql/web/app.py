@@ -61,6 +61,8 @@ from ..history_changes import history_change_set
 from ..image_utils import fit_image_to_content
 from ..services.image_dimensions import analyze_image_values, image_ocr_runtime_info
 from ..services.ocr_cache import collect_image_values
+from ..services.ocr_queue import OcrQueueScheduler
+from ..services.ocr_worker import OcrQueueWorker
 from ..services.ocr_values import (
     comparison_key,
     normalize_entered_ocr_value,
@@ -228,6 +230,18 @@ def _require_ocr_feature() -> None:
 
     if not OCR_FEATURE_ENABLED:
         raise HTTPException(status_code=404, detail="OCR nie jest dostepny w tym wydaniu.")
+
+
+def _ocr_cpu_percent() -> float:
+    """Read the shared host sample without taking an extra CPU measurement."""
+
+    host = _RESOURCE_MONITOR.latest_public_snapshot().get("host", {})
+    if not isinstance(host, dict):
+        return 0.0
+    try:
+        return max(0.0, min(100.0, float(host.get("cpu_percent", 0.0))))
+    except (TypeError, ValueError):
+        return 0.0
 _BROWSER_EXTENSION_IMPORTS: Dict[str, List[Dict[str, Any]]] = {}
 _BROWSER_EXTENSION_IMPORTS_LOCK = threading.Lock()
 _PROCESS_JOB_RETENTION_SECONDS = 6 * 60 * 60
@@ -5028,6 +5042,64 @@ def create_app() -> FastAPI:
         active_clients_provider=lambda: _runtime_active_clients_summary(),
         clock=lambda: _utc_now_iso(),
     )
+    app.state.ocr_activity_lock = threading.Lock()
+    app.state.ocr_active_requests = 0
+    app.state.ocr_last_activity = time.monotonic()
+    app.state.ocr_queue_stop = threading.Event()
+    app.state.ocr_queue_thread = None
+
+    def _ocr_has_active_requests() -> bool:
+        with app.state.ocr_activity_lock:
+            return bool(app.state.ocr_active_requests)
+
+    def _ocr_last_activity() -> float:
+        with app.state.ocr_activity_lock:
+            return float(app.state.ocr_last_activity)
+
+    def _process_ocr_crop_job(job: dict[str, object]) -> None:
+        """Refine a persisted crop, keeping the result attached to its image hash."""
+
+        job_id = str(job.get("id") or "")
+        image_hash = str(job.get("image_hash") or "")
+        crop_path = str(job.get("thumbnail_path") or "")
+        if not job_id:
+            return
+        values: list[dict[str, object]] = []
+        if crop_path and os.path.isfile(crop_path):
+            diagnostics = analyze_image_values(crop_path)
+            values = [
+                {
+                    "text": str(candidate.text),
+                    "comparison": str(candidate.value),
+                    "confidence": float(candidate.confidence),
+                    "bbox": list(candidate.bbox),
+                }
+                for candidate in diagnostics.candidates
+                if candidate.accepted and str(candidate.value).strip()
+            ]
+        store = observability_store()
+        store.complete_ocr_crop_job(job_id, values)
+        existing = store.get_ocr_scan(image_hash) if image_hash else None
+        if isinstance(existing, dict):
+            combined = list(existing.get("values") or []) + values
+            store.upsert_ocr_scan(image_hash, combined, "completed")
+
+    def _run_ocr_queue_once() -> str:
+        scheduler = OcrQueueScheduler(
+            settings=lambda: normalize_ocr_settings(
+                config.CONFIG.get(OCR_SETTINGS_KEY, {})
+            ),
+            has_active_requests=_ocr_has_active_requests,
+            last_activity=_ocr_last_activity,
+            cpu_percent=_ocr_cpu_percent,
+            claim_job=observability_store().claim_ocr_crop_job,
+            process_job=_process_ocr_crop_job,
+            requeue_job=lambda job: observability_store().requeue_ocr_crop_job(
+                str(job.get("id") or "")
+            ),
+            now=time.monotonic,
+        )
+        return scheduler.run_once()
 
     @app.exception_handler(Exception)
     async def _unhandled_application_error(
@@ -5110,6 +5182,20 @@ def create_app() -> FastAPI:
         _record_active_client(request, getattr(response, "status_code", 0))
         return response
 
+    @app.middleware("http")
+    async def _prioritize_interactive_work(request: Request, call_next):
+        with app.state.ocr_activity_lock:
+            app.state.ocr_active_requests += 1
+            app.state.ocr_last_activity = time.monotonic()
+        try:
+            return await call_next(request)
+        finally:
+            with app.state.ocr_activity_lock:
+                app.state.ocr_active_requests = max(
+                    0, app.state.ocr_active_requests - 1
+                )
+                app.state.ocr_last_activity = time.monotonic()
+
     @app.on_event("startup")
     def _startup() -> None:
         os.environ.setdefault("PICORGFTP_SQL_HEADLESS", "1")
@@ -5117,6 +5203,19 @@ def create_app() -> FastAPI:
         app.state.runtime_info = runtime_info
         _ensure_active_client_registry()
         _RESOURCE_MONITOR.start()
+        if OCR_FEATURE_ENABLED:
+            app.state.ocr_queue_stop.clear()
+            worker = OcrQueueWorker(
+                run_once=_run_ocr_queue_once,
+                poll_seconds=0.5,
+                stop_event=app.state.ocr_queue_stop,
+            )
+            app.state.ocr_queue_thread = threading.Thread(
+                target=worker.run,
+                name="picorg-ocr-queue",
+                daemon=True,
+            )
+            app.state.ocr_queue_thread.start()
         cleanup_web_ftp_cache(force=True)
         cleanup_web_upload_cache(force=True)
         try:
@@ -5128,6 +5227,11 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
+        app.state.ocr_queue_stop.set()
+        queue_thread = app.state.ocr_queue_thread
+        if queue_thread is not None and queue_thread is not threading.current_thread():
+            queue_thread.join(timeout=2.0)
+        app.state.ocr_queue_thread = None
         _RESOURCE_MONITOR.stop()
         stop_notification_worker()
         _stop_backup_scheduler()
