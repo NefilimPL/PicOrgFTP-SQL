@@ -70,6 +70,8 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("function renderSettingsOcr()", source)
         self.assertIn("function renderOcrDiagnostics", source)
         self.assertIn("function renderOcrLivePreview", source)
+        self.assertIn('const preview = document.createElement("canvas")', source)
+        self.assertIn("await renderOcrLivePreview(selected)", source)
         self.assertIn("data-ocr-candidate-index", source)
         self.assertIn("setOcrCandidateFocus", source)
         self.assertIn("ocr-diagnostic-focus-active", css)

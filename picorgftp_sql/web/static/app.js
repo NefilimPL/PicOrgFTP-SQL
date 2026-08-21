@@ -13635,22 +13635,35 @@ function ocrConfidenceLabel(value) {
   return `${Math.round(Math.max(0, Math.min(1, Number(value) || 0)) * 100)}%`;
 }
 
-function renderOcrLivePreview(file) {
+async function renderOcrLivePreview(file) {
   const stage = document.createElement("div");
   stage.className = "ocr-diagnostic-stage ocr-diagnostic-live-preview";
-  const image = document.createElement("img");
-  image.className = "ocr-diagnostic-image";
-  image.alt = "Obraz oczekujacy na wynik OCR";
+  const preview = document.createElement("canvas");
+  preview.className = "ocr-diagnostic-image";
+  preview.setAttribute("role", "img");
+  preview.setAttribute("aria-label", "Obraz oczekujacy na wynik OCR");
   const status = document.createElement("p");
   status.className = "ocr-diagnostic-live-status";
   status.textContent = "Ladowanie modelu OCR...";
-  const objectUrl = URL.createObjectURL(file);
-  image.src = objectUrl;
-  stage.append(image, status);
+  let bitmap = null;
+  try {
+    bitmap = await createImageBitmap(file);
+    preview.width = bitmap.width;
+    preview.height = bitmap.height;
+    const context = preview.getContext("2d");
+    if (!context) throw new Error("Brak kontekstu rysowania podgladu.");
+    context.drawImage(bitmap, 0, 0);
+  } catch (_error) {
+    preview.hidden = true;
+    status.textContent = "Podglad obrazu nie jest dostepny, ale analiza OCR trwa dalej.";
+  } finally {
+    bitmap?.close();
+  }
+  stage.append(preview, status);
   return {
     element: stage,
     setStatus(message) { status.textContent = message; },
-    dispose() { URL.revokeObjectURL(objectUrl); },
+    dispose() {},
   };
 }
 
@@ -13858,7 +13871,7 @@ function renderSettingsOcr() {
       upload.set("file", selected, selected.name || "ocr-test-image");
       const cached = await requestJson("/api/upload-cache", { method: "POST", body: upload, timeoutMs: 120000 });
       if (!cached.token) throw new Error("Backend nie zwrocil tokenu obrazu testowego.");
-      livePreview = renderOcrLivePreview(selected);
+      livePreview = await renderOcrLivePreview(selected);
       results.appendChild(livePreview.element);
       livePreview.setStatus("Wykrywanie wartosci liczbowych...");
       status.textContent = "Analiza OCR trwa — podglad obrazu jest gotowy.";
