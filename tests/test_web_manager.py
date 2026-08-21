@@ -423,6 +423,39 @@ def test_stop_web_kills_the_listener_before_ending_the_system_task(tmp_path, mon
     assert events == ["kill", "end"]
 
 
+def test_stop_web_kills_a_listener_identified_only_by_process_name(tmp_path, monkeypatch) -> None:
+    """Catches leaving the panel alive when CIM hides its command line."""
+
+    events: list[str] = []
+    listener = {"Pid": 102, "ProcessName": "PicOrgFTP-SQL-WEB", "CommandLine": ""}
+    listener_queries = 0
+
+    def listeners(_port: int):
+        nonlocal listener_queries
+        listener_queries += 1
+        return [listener] if listener_queries == 1 else []
+
+    monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
+    monkeypatch.setattr(web_manager, "get_port_listeners", listeners)
+    monkeypatch.setattr(web_manager, "get_process_command_line", lambda _pid: "")
+    monkeypatch.setattr(
+        web_manager,
+        "end_system_service",
+        lambda: events.append("end") or web_manager.ActionResult(True, ""),
+    )
+    monkeypatch.setattr(
+        web_manager,
+        "_run_command",
+        lambda args, **_kwargs: events.append("kill")
+        or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    result = web_manager.stop_web(8010)
+
+    assert result.ok
+    assert events == ["kill", "end"]
+
+
 def test_frozen_service_records_its_pyinstaller_parent_as_launcher(tmp_path, monkeypatch) -> None:
     """Catches a frozen server persisting only its child PID."""
     metadata_calls = []

@@ -13819,9 +13819,11 @@ function renderSettingsOcr() {
   });
   const maxCpu = inputField("ocr_max_cpu_percent", "Maksymalne uzycie CPU (%)", ocrSettings.max_cpu_percent ?? 35, {
     type: "number", min: 0, max: 100, step: 1,
+    description: "Twardy limit CPU dla procesu OCR. Nie obciaza procesu panelu WWW.",
   });
-  const pauseCpu = inputField("ocr_pause_cpu_percent", "Wstrzymaj kolejke powyzej CPU (%)", ocrSettings.pause_cpu_percent ?? 85, {
+  const pauseCpu = inputField("ocr_pause_cpu_percent", "Nie uruchamiaj powyzej CPU (%)", ocrSettings.pause_cpu_percent ?? 85, {
     type: "number", min: 0, max: 100, step: 1,
+    description: "Przed startem kolejnego zadania OCR sprawdzane jest aktualne uzycie calego systemu.",
   });
   const background = checkField(
     "ocr_background_enabled",
@@ -13829,9 +13831,55 @@ function renderSettingsOcr() {
     Boolean(ocrSettings.background_enabled),
     "Kolejka dziala dopiero po okresie bez aktywnosci uzytkownika."
   );
+  const profiles = document.createElement("div");
+  profiles.className = "ocr-profile-options wide-field";
+  const profileHeading = document.createElement("div");
+  const profileTitle = document.createElement("strong");
+  const profileHelp = document.createElement("span");
+  profileTitle.textContent = "Mechanizm OCR";
+  profileHelp.textContent = "Wybierz szybszy, dokladniejszy albo oba lokalnie dostepne profile. Aplikacja niczego nie pobiera podczas pracy.";
+  profileHeading.className = "ocr-profile-options-heading";
+  profileHeading.append(profileTitle, profileHelp);
+  profiles.appendChild(profileHeading);
+  const selectedProfiles = new Set((ocrSettings.model_profiles || ["fast"]).map(String));
+  const profileDefinitions = [
+    { id: "fast", title: "Szybki", description: "PP-OCRv5 Mobile — najszybszy odczyt." },
+    { id: "accurate", title: "Dokladny", description: "PP-OCRv5 Server — wolniejszy, z wieksza szansa na trudny odczyt." },
+  ];
+  const profileCards = new Map();
+  for (const profile of profileDefinitions) {
+    const card = document.createElement("label");
+    const input = document.createElement("input");
+    const details = document.createElement("span");
+    const title = document.createElement("strong");
+    const description = document.createElement("small");
+    const availability = document.createElement("em");
+    card.className = "ocr-profile-card";
+    input.type = "checkbox";
+    input.name = "ocr_model_profile";
+    input.value = profile.id;
+    input.checked = selectedProfiles.has(profile.id);
+    title.textContent = profile.title;
+    description.textContent = profile.description;
+    availability.textContent = "Sprawdzanie dostepnosci...";
+    details.append(title, description, availability);
+    card.append(input, details);
+    profiles.appendChild(card);
+    profileCards.set(profile.id, { card, input, availability });
+  }
+  const slotsHeading = document.createElement("div");
+  const slotsTitle = document.createElement("strong");
+  const slotsCount = document.createElement("span");
+  slotsHeading.className = "ocr-slot-list-heading wide-field";
+  slotsTitle.textContent = "Sloty objete kolejka";
+  slotsHeading.append(slotsTitle, slotsCount);
   const slots = document.createElement("div");
-  slots.className = "settings-slot-list";
+  slots.className = "settings-slot-list ocr-slot-grid wide-field";
   const enabledSlots = new Set((ocrSettings.enabled_slots || []).map(String));
+  const updateSelectedSlotCount = () => {
+    const selected = slots.querySelectorAll('input[name="ocr_enabled_slot"]:checked').length;
+    slotsCount.textContent = `${selected} z ${(state.settings?.slots || []).length} zaznaczonych`;
+  };
   for (const slot of state.settings?.slots || []) {
     const label = document.createElement("label");
     const input = document.createElement("input");
@@ -13839,9 +13887,14 @@ function renderSettingsOcr() {
     input.name = "ocr_enabled_slot";
     input.value = String(slot.prefix || "");
     input.checked = enabledSlots.has(input.value);
-    label.append(input, document.createTextNode(` ${slot.label || "Slot"} (${input.value})`));
+    input.addEventListener("change", updateSelectedSlotCount);
+    label.append(input, document.createTextNode(` ${slot.label || "Slot"}`));
+    const code = document.createElement("small");
+    code.textContent = input.value;
+    label.appendChild(code);
     slots.appendChild(label);
   }
+  updateSelectedSlotCount();
   const analyze = document.createElement("button");
   analyze.type = "button";
   analyze.className = "secondary-button";
@@ -13850,8 +13903,19 @@ function renderSettingsOcr() {
   results.className = "wide-field";
   const queueOutput = document.createElement("div");
   queueOutput.className = "wide-field";
+  const collection = settingsFieldGroup(
+    "Zbieranie wartosci OCR",
+    background,
+    idleSeconds,
+    maxCpu,
+    pauseCpu,
+    profiles,
+    slotsHeading,
+    slots
+  );
+  collection.classList.add("ocr-collection-settings");
   form.append(
-    settingsFieldGroup("Zbieranie wartosci OCR", background, idleSeconds, maxCpu, pauseCpu, slots),
+    collection,
     settingsFieldGroup("Tester OCR", status, engineInfo, file, actionRow(analyze), results),
     queueOutput
   );
@@ -13897,6 +13961,7 @@ function renderSettingsOcr() {
   settingsSaveButton(form, (data) => ({
     ocr: {
       enabled_slots: [...form.querySelectorAll('[name="ocr_enabled_slot"]:checked')].map((input) => input.value),
+      model_profiles: [...form.querySelectorAll('[name="ocr_model_profile"]:checked')].map((input) => input.value),
       background_enabled: data.has("ocr_background_enabled"),
       idle_seconds: data.get("ocr_idle_seconds"),
       max_cpu_percent: data.get("ocr_max_cpu_percent"),
@@ -13909,6 +13974,19 @@ function renderSettingsOcr() {
       const engine = info.engine || {};
       const runtime = info.runtime || {};
       const models = Array.isArray(info.models) ? info.models : [];
+      const modelStatuses = new Map(models.map((model) => [String(model.id || ""), model]));
+      for (const profile of profileDefinitions) {
+        const controls = profileCards.get(profile.id);
+        const model = modelStatuses.get(profile.id);
+        if (!controls) continue;
+        const available = model?.status === "ready";
+        controls.input.disabled = !available;
+        if (!available) controls.input.checked = false;
+        controls.card.classList.toggle("unavailable", !available);
+        controls.availability.textContent = available
+          ? "Dostepny lokalnie"
+          : "Niedostepny lokalnie";
+      }
       engineInfo.textContent = "";
       const title = document.createElement("strong");
       title.textContent = `${engine.name || "OCR"} ${engine.version || ""}`.trim();
@@ -13931,7 +14009,7 @@ function renderSettingsOcr() {
         ? "Silnik OCR nie jest dostepny w tej instalacji."
         : modelReady
           ? "Silnik OCR i model sa gotowe do testu."
-          : "Silnik OCR jest zainstalowany; model zostanie pobrany przy pierwszym tescie.";
+          : "Silnik OCR jest zainstalowany, ale wybrany profil nie jest dostepny lokalnie.";
     })
     .catch((error) => {
       status.textContent = error.message || "Nie udalo sie odczytac statusu OCR.";

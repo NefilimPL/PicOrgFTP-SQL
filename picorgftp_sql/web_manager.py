@@ -714,16 +714,21 @@ def stop_web(port: int) -> ActionResult:
             else:
                 failures.append(f"PID {launcher_pid}: {detail}")
 
+    listeners_by_pid: dict[int, dict[str, Any]] = {}
     candidates = [server_pid]
     for listener in get_port_listeners(port):
+        listener_pid = _safe_int(listener.get("Pid"))
+        if listener_pid > 0:
+            listeners_by_pid[listener_pid] = listener
         candidates.append(_safe_int(listener.get("Pid")))
     for pid_value in dict.fromkeys(pid for pid in candidates if pid > 0):
         if launcher_stopped:
             break
         command_line = get_process_command_line(pid_value)
+        process_name = str(listeners_by_pid.get(pid_value, {}).get("ProcessName") or "")
         if not (
             is_controlled_web_server(pid_value, data, command_line)
-            or is_web_process(pid_value, command_line)
+            or is_web_process(pid_value, command_line, process_name)
         ):
             continue
         if os.name == "nt":

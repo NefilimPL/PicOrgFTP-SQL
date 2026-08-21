@@ -17,7 +17,7 @@ import sys
 from typing import Callable, Iterable, Mapping, Protocol
 
 from .ocr_values import comparison_key
-from .ocr_profiles import ocr_profile
+from .ocr_profiles import available_ocr_profiles, ocr_profile
 
 
 _DIMENSIONS = frozenset({"width", "depth", "height"})
@@ -41,7 +41,6 @@ _DIMENSION_NOMINATIVE_LABELS = {
 }
 _OCR_ENGINE_NAME = "PaddleOCR"
 _OCR_GITHUB_URL = "https://github.com/PaddlePaddle/PaddleOCR"
-_OCR_MODEL_NAME = "English default OCR pipeline (lang=en)"
 
 
 class ImageDimensionUnavailable(RuntimeError):
@@ -501,16 +500,13 @@ def image_ocr_runtime_info() -> dict[str, object]:
         },
         "models": [
             {
-                "name": _OCR_MODEL_NAME,
+                "id": profile.id,
+                "name": profile.label,
                 "version": "lang=en",
-                "status": (
-                    "ready"
-                    if available and model_cache_ready
-                    else "download_on_first_use"
-                    if available
-                    else "unavailable"
-                ),
+                "description": profile.description,
+                "status": "ready" if available and model_cache_ready else "unavailable",
             }
+            for profile in available_ocr_profiles()
         ],
         "github_url": _OCR_GITHUB_URL,
     }

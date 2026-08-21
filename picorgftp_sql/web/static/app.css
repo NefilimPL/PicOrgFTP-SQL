@@ -1344,6 +1344,108 @@ h2 {
   padding-left: 18px;
 }
 
+.ocr-collection-settings {
+  grid-template-columns: minmax(230px, 1.35fr) repeat(3, minmax(165px, 1fr));
+}
+
+.ocr-collection-settings > .check-row {
+  align-self: stretch;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.ocr-profile-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ocr-profile-options-heading {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 3px;
+}
+
+.ocr-profile-options-heading span,
+.ocr-profile-card small,
+.ocr-profile-card em,
+.ocr-slot-list-heading span,
+.ocr-slot-grid small {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.ocr-profile-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+.ocr-profile-card > span {
+  display: grid;
+  gap: 3px;
+}
+
+.ocr-profile-card.unavailable {
+  opacity: 0.62;
+  cursor: not-allowed;
+}
+
+.ocr-slot-list-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 4px;
+}
+
+.ocr-slot-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.ocr-slot-grid label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+.ocr-slot-grid label small {
+  grid-column: 2;
+}
+
+@media (max-width: 760px) {
+  .ocr-collection-settings,
+  .ocr-profile-options {
+    grid-template-columns: 1fr;
+  }
+
+  .ocr-slot-grid {
+    grid-template-columns: 1fr;
+    max-height: 300px;
+  }
+}
+
 .ocr-diagnostic-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.4fr) minmax(240px, 0.8fr);

@@ -634,7 +634,8 @@ def test_ocr_runtime_info_does_not_treat_cache_control_directories_as_models(
     info = image_ocr_runtime_info()
 
     assert info["available"] is True
-    assert info["models"][0]["status"] == "download_on_first_use"
+    assert info["models"][0]["id"] == "fast"
+    assert info["models"][0]["status"] == "unavailable"
 
 
 def test_ocr_runtime_info_requires_the_paddlex_ocr_pipeline_configuration(

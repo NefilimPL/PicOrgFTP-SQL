@@ -95,6 +95,7 @@ from ..notification_service import (
 )
 from ..product_fields import PRODUCT_FIELDS_KEY, normalize_product_fields
 from ..pimcore_templates import TemplateError
+from ..file_tokens import FileTokenRegistry
 from ..path_security import PathSecurityError, build_child_path, resolve_path_within_roots
 from ..services.ftp_service import sync_remote_files
 from ..services.pimcore_service import PimcoreApiError, PimcoreConflictError
@@ -255,6 +256,7 @@ _PROCESS_JOB_ROOT = Path(tempfile.gettempdir()) / "picorg_web_process_jobs"
 # Active work is never discarded; only the newest terminal jobs stay in memory.
 _PROCESS_JOB_MAX_COMPLETED = 200
 _PROCESS_QUEUE = ProcessQueueService()
+_FILE_TOKEN_REGISTRY = FileTokenRegistry()
 
 
 class _ProcessQueueReference:
@@ -1345,9 +1347,11 @@ def cleanup_web_upload_cache(
 
 
 def _file_token(path: str) -> str:
-    payload = os.path.realpath(os.path.abspath(path))
-    token = f"{payload}|{_sign(payload)}"
-    return base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii")
+    try:
+        trusted_path = os.fspath(resolve_path_within_roots(path, _file_token_roots()))
+    except PathSecurityError as exc:
+        raise HTTPException(status_code=403, detail="Plik poza katalogiem zdjec lub cache.") from exc
+    return _FILE_TOKEN_REGISTRY.issue(trusted_path)
 
 
 def _file_version(path: str) -> str:
@@ -1421,25 +1425,15 @@ def _schedule_ocr_value_collection(slot: object, path: str) -> str:
 
 
 def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
-    try:
-        decoded = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
-        path, signature = decoded.rsplit("|", 1)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="Niepoprawny token pliku.") from exc
-    if not hmac.compare_digest(_sign(path), signature):
-        raise HTTPException(status_code=403, detail="Niepoprawny podpis pliku.")
-    try:
-        resolved_path = os.fspath(
-            resolve_path_within_roots(
-                path,
-                _file_token_roots(),
-            )
+    path = _FILE_TOKEN_REGISTRY.resolve(token)
+    if path is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Token pliku wygasl. Odswiez liste zdjec i sprobuj ponownie.",
         )
-    except PathSecurityError as exc:
-        raise HTTPException(status_code=403, detail="Plik poza katalogiem zdjec lub cache.") from exc
-    if require_exists and not os.path.isfile(resolved_path):
+    if require_exists and not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="Nie znaleziono pliku.")
-    return resolved_path
+    return path
 
 
 def _image_slot_paths_from_payload(payload: object) -> dict[str, str]:
