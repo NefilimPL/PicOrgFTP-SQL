@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
 import queue
+import tempfile
 import threading
 import unittest
 from unittest.mock import patch
@@ -296,6 +297,8 @@ class _HeadlessStartupApp(App):
 @contextmanager
 def _headless_app_environment():
     with ExitStack() as stack:
+        image_root = stack.enter_context(tempfile.TemporaryDirectory())
+        stack.enter_context(patch.object(app_module, "l", image_root))
         stack.enter_context(patch.object(app_module.BU.Tk, "__init__", return_value=None))
         stack.enter_context(patch.object(app_module.C, "Style", return_value=_StyleStub()))
         stack.enter_context(patch.object(app_module.F, "StringVar", _VariableStub))
