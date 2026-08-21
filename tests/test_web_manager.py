@@ -465,6 +465,56 @@ def test_stop_web_returns_system_service_failure_without_claiming_success(
     assert "Access denied" in result.message
 
 
+def test_start_web_reclaims_an_unhealthy_picorg_listener_before_restart(monkeypatch) -> None:
+    """Catches starting a second Uvicorn process while the first owns the port."""
+
+    events: list[str] = []
+    listener = {
+        "Pid": 102,
+        "ProcessName": "PicOrgFTP-SQL-WEB",
+        "CommandLine": "PicOrgFTP-SQL-WEB --service-run",
+    }
+    listener_queries = 0
+
+    def listeners(_port: int):
+        nonlocal listener_queries
+        listener_queries += 1
+        return [listener] if listener_queries == 1 else []
+
+    monkeypatch.setattr(web_manager, "get_port_listeners", listeners)
+    monkeypatch.setattr(web_manager, "check_http_health", lambda _port: {"ok": False})
+    monkeypatch.setattr(
+        web_manager,
+        "stop_web",
+        lambda _port: events.append("stop") or web_manager.ActionResult(True, "Zatrzymano."),
+    )
+    monkeypatch.setattr(web_manager, "task_exists", lambda: False)
+    monkeypatch.setattr(
+        web_manager,
+        "start_user_web",
+        lambda _port, _host: events.append("start") or web_manager.ActionResult(True, "Uruchomiono."),
+    )
+
+    result = web_manager.start_web(8010, "0.0.0.0")
+
+    assert result.ok
+    assert events == ["stop", "start"]
+
+
+def test_start_web_refuses_to_start_on_a_busy_non_picorg_port(monkeypatch) -> None:
+    """Catches launching Uvicorn against an unrelated process that owns the configured port."""
+
+    listener = {"Pid": 102, "ProcessName": "nginx", "CommandLine": "nginx: master process"}
+    monkeypatch.setattr(web_manager, "get_port_listeners", lambda _port: [listener])
+    monkeypatch.setattr(web_manager, "task_exists", lambda: False)
+    monkeypatch.setattr(web_manager, "start_user_web", lambda *_args: pytest.fail("must not start"))
+
+    result = web_manager.start_web(8010, "0.0.0.0")
+
+    assert not result.ok
+    assert "8010" in result.message
+
+
 def test_manager_stop_requests_an_elevated_stop_for_a_system_service(monkeypatch) -> None:
     """Catches a non-admin manager trying to taskkill a SYSTEM-owned process."""
     app = _app_without_tk()
@@ -673,6 +723,30 @@ def test_close_stop_requests_elevation_for_a_system_service(monkeypatch) -> None
 
     assert elevated_ports == [8010]
     assert normal_ports == []
+    assert app.root.destroyed
+
+
+def test_close_stop_limits_wait_for_elevated_process_termination(monkeypatch) -> None:
+    """Catches keeping the manager open for 45 seconds after an elevated force-stop."""
+
+    app = _app_without_tk()
+    wait_timeouts: list[float] = []
+    monkeypatch.setattr(web_manager, "task_exists", lambda: True)
+    monkeypatch.setattr(web_manager, "is_admin", lambda: False)
+    monkeypatch.setattr(
+        web_manager,
+        "stop_web_as_admin",
+        lambda _port: web_manager.ActionResult(True, "Potwierdz UAC."),
+    )
+    monkeypatch.setattr(
+        web_manager,
+        "_wait_for_port_release",
+        lambda _port, *, timeout: wait_timeouts.append(timeout) or True,
+    )
+
+    app._stop_web_for_close_worker(8010)
+
+    assert wait_timeouts == [8.0]
     assert app.root.destroyed
 
 

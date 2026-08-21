@@ -650,6 +650,24 @@ def start_web(port: int, host: str, *, prefer_system_service: bool = True) -> Ac
     ]
     if web_listeners and check_http_health(port).get("ok"):
         return ActionResult(True, "Panel webowy juz dziala.")
+    if listeners:
+        if not web_listeners:
+            pids = ", ".join(str(_safe_int(item.get("Pid"))) for item in listeners)
+            return ActionResult(
+                False,
+                f"Port {port} jest zajety przez inny proces (PID: {pids}). Nie uruchomiono drugiej instancji panelu.",
+            )
+        stopped = stop_web(port)
+        if not stopped.ok:
+            return ActionResult(
+                False,
+                f"Nie mozna zrestartowac nieodpowiadajacego panelu na porcie {port}: {stopped.message}",
+            )
+        if get_port_listeners(port):
+            return ActionResult(
+                False,
+                f"Port {port} nadal jest zajety po zatrzymaniu panelu. Nie uruchomiono drugiej instancji.",
+            )
     if prefer_system_service and task_exists():
         result = run_system_service()
         if result.ok and wait_web_ready(port):
@@ -1422,7 +1440,7 @@ class WebManagerApp:
                 elevated = stop_web_as_admin(port)
                 if not elevated.ok:
                     result = elevated
-                elif _wait_for_port_release(port, timeout=45.0):
+                elif _wait_for_port_release(port, timeout=8.0):
                     result = ActionResult(True, "Zatrzymano panel webowy jako administrator.")
                 else:
                     result = ActionResult(
