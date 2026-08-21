@@ -13526,6 +13526,46 @@ function renderOcrDiagnostics(result) {
   return output;
 }
 
+function renderOcrBackgroundQueue(jobs) {
+  const queue = document.createElement("div");
+  queue.className = "ocr-background-queue wide-field";
+  const heading = document.createElement("h3");
+  heading.textContent = "Kolejka dopracowywania OCR";
+  const items = Array.isArray(jobs) ? jobs : [];
+  if (!items.length) {
+    const empty = document.createElement("p");
+    empty.className = "settings-note";
+    empty.textContent = "Brak oczekujacych lub aktualnie skanowanych wycinkow.";
+    queue.append(heading, empty);
+    return queue;
+  }
+  const list = document.createElement("div");
+  list.className = "ocr-background-queue-list";
+  for (const job of items) {
+    const card = document.createElement("article");
+    card.className = `ocr-background-queue-item status-${String(job.status || "pending")}`;
+    if (job.thumbnail_url) {
+      const image = document.createElement("img");
+      image.src = String(job.thumbnail_url);
+      image.alt = "Wycinek oczekujacy na OCR";
+      card.appendChild(image);
+    }
+    const details = document.createElement("div");
+    const state = String(job.status || "pending");
+    details.textContent = state === "processing"
+      ? "Skanowanie w tle"
+      : state === "pending"
+        ? "Oczekuje na bezczynnosc uzytkownikow"
+        : state === "completed"
+          ? "Zakonczono"
+          : state;
+    card.appendChild(details);
+    list.appendChild(card);
+  }
+  queue.append(heading, list);
+  return queue;
+}
+
 function renderSettingsOcr() {
   const form = document.createElement("form");
   form.className = "settings-form";
@@ -13579,9 +13619,12 @@ function renderSettingsOcr() {
   analyze.textContent = "Przetestuj OCR";
   const results = document.createElement("div");
   results.className = "wide-field";
+  const queueOutput = document.createElement("div");
+  queueOutput.className = "wide-field";
   form.append(
     settingsFieldGroup("Zbieranie wartosci OCR", background, idleSeconds, maxCpu, pauseCpu, slots),
-    settingsFieldGroup("Tester OCR", status, engineInfo, file, actionRow(analyze), results)
+    settingsFieldGroup("Tester OCR", status, engineInfo, file, actionRow(analyze), results),
+    queueOutput
   );
   analyze.addEventListener("click", async () => {
     const selected = fileInput.files?.[0];
@@ -13663,6 +13706,14 @@ function renderSettingsOcr() {
     })
     .catch((error) => {
       status.textContent = error.message || "Nie udalo sie odczytac statusu OCR.";
+    });
+  requestJson("/api/ocr/jobs")
+    .then((payload) => queueOutput.appendChild(renderOcrBackgroundQueue(payload.jobs)))
+    .catch((error) => {
+      const note = document.createElement("p");
+      note.className = "settings-note";
+      note.textContent = error.message || "Nie udalo sie odczytac kolejki OCR.";
+      queueOutput.appendChild(note);
     });
 }
 

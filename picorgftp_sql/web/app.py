@@ -6296,19 +6296,31 @@ def create_app() -> FastAPI:
     def ocr_jobs(request: Request) -> Dict[str, Any]:
         _require_admin(request)
         _require_ocr_feature()
+
+        def public_job(job: dict[str, object]) -> dict[str, object]:
+            thumbnail_path = str(job.get("thumbnail_path") or "")
+            thumbnail_url = ""
+            if thumbnail_path and os.path.isfile(thumbnail_path):
+                try:
+                    token = _file_token(thumbnail_path)
+                    thumbnail_url = _versioned_file_url(
+                        thumbnail_path, "/api/file", token
+                    )
+                except HTTPException:
+                    pass
+            return {
+                "id": str(job.get("id") or ""),
+                "image_hash": str(job.get("image_hash") or ""),
+                "bbox": list(job.get("bbox") or []),
+                "status": str(job.get("status") or ""),
+                "created_at": str(job.get("created_at") or ""),
+                "updated_at": str(job.get("updated_at") or ""),
+                "result": list(job.get("result") or []),
+                "thumbnail_url": thumbnail_url,
+            }
+
         return {
-            "jobs": [
-                {
-                    "id": str(job.get("id") or ""),
-                    "image_hash": str(job.get("image_hash") or ""),
-                    "bbox": list(job.get("bbox") or []),
-                    "status": str(job.get("status") or ""),
-                    "created_at": str(job.get("created_at") or ""),
-                    "updated_at": str(job.get("updated_at") or ""),
-                    "result": list(job.get("result") or []),
-                }
-                for job in observability_store().list_ocr_crop_jobs()
-            ]
+            "jobs": [public_job(job) for job in observability_store().list_ocr_crop_jobs()]
         }
 
     @app.post("/api/ocr/approval")

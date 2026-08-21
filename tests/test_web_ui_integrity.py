@@ -81,6 +81,8 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("%", source)
         self.assertIn("ocr-diagnostic-overlay", css)
         self.assertIn("ocr-diagnostic-live-status", css)
+        self.assertIn('requestJson("/api/ocr/jobs")', source)
+        self.assertIn("ocr-background-queue", css)
 
     def test_pimcore_export_selection_has_a_legacy_chrome_border_fallback(self) -> None:
         css = APP_CSS.read_text(encoding="utf-8")
