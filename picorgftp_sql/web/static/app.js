@@ -10988,7 +10988,15 @@ function populatePimcoreRuntimeForm(
           mapping.source === "EAN" && legacyEanIds[idPrefix]
             ? legacyEanIds[idPrefix]
             : `${idPrefix}-${String(mapping.source || "field").replace(/[^A-Za-z0-9_-]/g, "-")}`;
-        input.addEventListener("input", () => updatePimcoreRuntimeFieldChangeState(input));
+        input.addEventListener("input", () => {
+          if (mapping.ocr_validation) input.value = input.value.replace(/,/g, ".");
+          updatePimcoreRuntimeFieldChangeState(input);
+        });
+        if (mapping.ocr_validation) {
+          input.addEventListener("change", () => {
+            validatePimcoreOcrFields(form, schema, [mapping.source]).catch(() => {});
+          });
+        }
         fieldRow.className = "pimcore-runtime-field-row";
         fieldRow.appendChild(input);
         if (allowRecalculate && mapping.value_template) {
@@ -11028,7 +11036,10 @@ function pimcoreRuntimeWarnings(warnings = []) {
 
 function clearPimcoreRuntimeConflict(field) {
   if (!field) return;
-  field.classList.remove("pimcore-runtime-conflict", "pimcore-runtime-pulse");
+  field.classList.remove("pimcore-runtime-pulse");
+  if (!field.classList.contains("pimcore-runtime-ocr-mismatch")) {
+    field.classList.remove("pimcore-runtime-conflict");
+  }
   const info = field.querySelector(".pimcore-runtime-calculated");
   if (info) info.hidden = true;
 }
@@ -11172,6 +11183,97 @@ function updatePimcoreRuntimeCalculatedState(form, result = {}) {
   updatePimcoreEditSubmitState();
 }
 
+function clearPimcoreOcrMismatch(field) {
+  if (!field) return;
+  field.classList.remove("pimcore-runtime-ocr-mismatch");
+  field.querySelector(".pimcore-runtime-ocr")?.remove();
+  const input = field.querySelector("input");
+  if (
+    !Object.prototype.hasOwnProperty.call(input?.dataset || {}, "calculatedValue") ||
+    String(input?.value ?? "") === String(input?.dataset.calculatedValue ?? "")
+  ) {
+    field.classList.remove("pimcore-runtime-conflict");
+  }
+}
+
+function renderPimcoreOcrMismatch(form, mapping, input, result) {
+  const field = input.closest(".pimcore-runtime-field");
+  if (!field) return;
+  clearPimcoreOcrMismatch(field);
+  if (!result?.mismatch) return;
+  field.classList.add("pimcore-runtime-conflict", "pimcore-runtime-ocr-mismatch");
+  const info = document.createElement("span");
+  info.className = "pimcore-runtime-ocr";
+  const text = document.createElement("span");
+  const values = (result.images || []).flatMap((image) => image.values || [])
+    .map((item) => String(item.text || "")).filter(Boolean);
+  text.textContent = "Wartosc nie pasuje do OCR.";
+  text.title = values.length ? `Wykryte wartosci: ${[...new Set(values)].join(", ")}` : "Brak wykrytych wartosci.";
+  const accept = document.createElement("button");
+  accept.type = "button";
+  accept.className = "ghost-button pimcore-runtime-action-button pimcore-runtime-apply-action";
+  accept.textContent = "✓";
+  accept.title = "Potwierdz wprowadzona wartosc";
+  accept.addEventListener("click", async () => {
+    accept.disabled = true;
+    try {
+      await requestJson("/api/ocr/approval", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          field_id: mapping.pimcore_field || mapping.source,
+          value: input.value,
+          slot_tokens: Object.values(pimcoreSlotTokens()),
+        }),
+      });
+      clearPimcoreOcrMismatch(field);
+      updatePimcoreRuntimeFieldChangeState(input, { userInput: false });
+    } catch (error) {
+      accept.disabled = false;
+      text.textContent = error.message || "Nie udalo sie potwierdzic wartosci.";
+    }
+  });
+  const reject = document.createElement("button");
+  reject.type = "button";
+  reject.className = "ghost-button pimcore-runtime-action-button pimcore-runtime-undo-action";
+  reject.textContent = "×";
+  reject.title = "Cofnij zmiane lub wyczysc pole";
+  reject.addEventListener("click", () => {
+    input.value = input.dataset.originalValue || "";
+    clearPimcoreOcrMismatch(field);
+    updatePimcoreRuntimeFieldChangeState(input, { userInput: false });
+  });
+  info.append(text, pimcoreRuntimeActions(accept, reject));
+  field.appendChild(info);
+}
+
+async function validatePimcoreOcrFields(form, schema, targets = null) {
+  if (state.settings?.ocr_available === false) return;
+  const selected = Array.isArray(targets) ? new Set(targets) : null;
+  const slotTokens = Object.values(pimcoreSlotTokens());
+  if (!slotTokens.length) return;
+  const mappings = (schema || []).filter((mapping) => (
+    mapping?.ocr_validation && (!selected || selected.has(mapping.source))
+  ));
+  await Promise.all(mappings.map(async (mapping) => {
+    const input = form.elements[mapping.source];
+    if (!input) return;
+    input.value = input.value.replace(/,/g, ".");
+    const result = await requestJson("/api/ocr/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        field_id: mapping.pimcore_field || mapping.source,
+        value: input.value,
+        slot_tokens: slotTokens,
+      }),
+    });
+    renderPimcoreOcrMismatch(form, mapping, input, result);
+  }));
+  updatePimcoreCreateSubmitState();
+  updatePimcoreEditSubmitState();
+}
+
 function pimcoreRuntimeRecalculateStatus(form, result = {}) {
   const warnings = pimcoreRuntimeWarnings(result.warnings);
   if (warnings) return warnings;
@@ -11235,6 +11337,7 @@ async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
     }
   }
   updatePimcoreRuntimeCalculatedState(form, result);
+  await validatePimcoreOcrFields(form, schema, selected);
   return result;
 }
 

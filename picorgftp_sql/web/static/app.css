@@ -2487,6 +2487,21 @@ h2 {
   margin-top: 3px;
 }
 
+.pimcore-runtime-ocr-mismatch {
+  border-color: var(--error, #b91c1c);
+  box-shadow: 0 0 0 2px rgba(185, 28, 28, 0.18);
+}
+
+.pimcore-runtime-ocr {
+  align-items: center;
+  color: var(--error, #b91c1c);
+  display: flex;
+  font-size: 12px;
+  gap: 6px;
+  justify-content: space-between;
+  margin-top: 5px;
+}
+
 @keyframes similar-searching-rgb {
   0%,
   100% {
