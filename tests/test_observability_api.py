@@ -54,6 +54,9 @@ def api_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     database_path = tmp_path / "app.sqlite"
     monkeypatch.setattr(web_app.settings, "AC", str(tmp_path))
     monkeypatch.setattr(
+        web_app.settings, "LISTS_WORKBOOK_PATH", str(tmp_path / "lists.xlsx")
+    )
+    monkeypatch.setattr(
         web_app.storage_settings, "resolve_sqlite_path", lambda: str(database_path)
     )
     data_store.reset_active_store_cache()
@@ -1937,6 +1940,33 @@ def test_resource_monitor_lifecycle_runs_once_and_in_runtime_order(
         "notification.stop"
     )
     assert data_store.get_sqlite_store(database_path) is not cached_store
+
+
+def test_disabled_ocr_queue_does_not_open_the_store_during_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _StoreProbe:
+        @property
+        def claim_ocr_crop_job(self):
+            store_opened.set()
+            return lambda: None
+
+    store_opened = threading.Event()
+    monkeypatch.setitem(web_app.config.CONFIG, "ocr", {"background_enabled": False})
+    monkeypatch.setattr(web_app, "initialize_application_runtime", lambda **_kwargs: {})
+    monkeypatch.setattr(web_app, "cleanup_web_ftp_cache", lambda **_kwargs: None)
+    monkeypatch.setattr(web_app, "cleanup_web_upload_cache", lambda **_kwargs: None)
+    monkeypatch.setattr(web_app, "_prune_live_events_if_due", lambda **_kwargs: None)
+    monkeypatch.setattr(web_app, "_start_backup_scheduler", lambda: None)
+    monkeypatch.setattr(web_app, "_stop_backup_scheduler", lambda: None)
+    monkeypatch.setattr(web_app, "start_notification_worker", lambda: None)
+    monkeypatch.setattr(web_app, "stop_notification_worker", lambda: None)
+    monkeypatch.setattr(web_app, "observability_store", lambda: _StoreProbe())
+
+    with TestClient(web_app.create_app()):
+        store_opened.wait(timeout=0.2)
+
+    assert not store_opened.is_set()
 
 
 def test_health_is_critical_when_job_processor_is_shutdown_even_if_storage_is_online(

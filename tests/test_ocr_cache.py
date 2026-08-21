@@ -2,7 +2,11 @@ from picorgftp_sql.services.image_dimensions import (
     ImageOcrDiagnostics,
     OcrDiagnosticCandidate,
 )
-from picorgftp_sql.services.ocr_cache import collect_image_values, image_content_hash
+from picorgftp_sql.services.ocr_cache import (
+    collect_image_values,
+    image_content_hash,
+    restore_crop_bbox,
+)
 from picorgftp_sql.services.ocr_cache import enqueue_ocr_crop_jobs
 from picorgftp_sql.sqlite_store import SqliteStore
 
@@ -101,3 +105,10 @@ def test_collect_image_values_passes_fresh_diagnostics_to_crop_queue_callback(tm
     )
 
     assert queued == [(image_content_hash(str(image)), diagnostics)]
+
+
+def test_restore_crop_bbox_maps_upscaled_refinement_coordinates_to_source_image():
+    assert restore_crop_bbox(
+        [4, 8, 80, 40],
+        [10, 12, 40, 30],
+    ) == [11, 14, 30, 22]

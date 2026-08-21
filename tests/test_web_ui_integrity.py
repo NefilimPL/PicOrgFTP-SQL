@@ -88,6 +88,10 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn('requestJson("/api/ocr/validate"', source)
         self.assertIn('requestJson("/api/ocr/approval"', source)
         self.assertIn("pimcore-runtime-ocr-mismatch", css)
+        self.assertIn("function openOcrAnnotatedImage", source)
+        self.assertIn('requestJson(`/api/ocr/scan?token=${encodeURIComponent(token)}`)', source)
+        self.assertIn("ocr-slot-open-overlay", css)
+        self.assertIn('overlay.className = "ocr-slot-open-overlay";', source)
 
     def test_pimcore_export_selection_has_a_legacy_chrome_border_fallback(self) -> None:
         css = APP_CSS.read_text(encoding="utf-8")

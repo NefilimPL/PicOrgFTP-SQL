@@ -2644,6 +2644,93 @@ function selectedSlotSourceCanFit(prefix, photo, file) {
   return Boolean(photo?.is_image && (selectedPhotoToken(photo, prefix) || photo?.ftp_filename));
 }
 
+function openOcrImageWindow() {
+  const popup = window.open("", "_blank");
+  if (popup) {
+    try {
+      popup.opener = null;
+    } catch (_error) {
+      // Some browser security modes expose a read-only opener property.
+    }
+  }
+  return popup;
+}
+
+function showPlainImageInOcrWindow(popup, url) {
+  if (popup && !popup.closed) {
+    popup.location.href = url;
+    popup.focus();
+    return;
+  }
+  window.open(url, "_blank", "noopener");
+}
+
+function appendOcrBoxesToOpenedImage(stage, image, values) {
+  const width = Number(image.naturalWidth || 0);
+  const height = Number(image.naturalHeight || 0);
+  if (!width || !height) return;
+  for (const value of values) {
+    const [left, top, right, bottom] = Array.isArray(value?.bbox) ? value.bbox.map(Number) : [];
+    if (![left, top, right, bottom].every(Number.isFinite)) continue;
+    const box = image.ownerDocument.createElement("div");
+    const label = image.ownerDocument.createElement("span");
+    box.className = "ocr-slot-open-box";
+    label.className = "ocr-slot-open-label";
+    box.style.left = `${Math.max(0, Math.min(100, (left / width) * 100))}%`;
+    box.style.top = `${Math.max(0, Math.min(100, (top / height) * 100))}%`;
+    box.style.width = `${Math.max(0, Math.min(100, ((right - left) / width) * 100))}%`;
+    box.style.height = `${Math.max(0, Math.min(100, ((bottom - top) / height) * 100))}%`;
+    label.textContent = `${String(value?.text || "?")} · ${ocrConfidenceLabel(value?.confidence)}`;
+    box.appendChild(label);
+    stage.appendChild(box);
+  }
+}
+
+async function openOcrAnnotatedImage(url, token, popup = null) {
+  if (!token) {
+    showPlainImageInOcrWindow(popup, url);
+    return;
+  }
+  let scan;
+  try {
+    scan = await requestJson(`/api/ocr/scan?token=${encodeURIComponent(token)}`);
+  } catch (_error) {
+    showPlainImageInOcrWindow(popup, url);
+    return;
+  }
+  const values = Array.isArray(scan?.values) ? scan.values : [];
+  if (!popup || popup.closed || !values.length) {
+    showPlainImageInOcrWindow(popup, url);
+    return;
+  }
+  const doc = popup.document;
+  doc.open();
+  doc.write("<!doctype html><title>Podglad OCR</title><meta charset=\"utf-8\">");
+  doc.close();
+  const style = doc.createElement("style");
+  style.textContent = ".ocr-slot-open-page{margin:0;background:#151922;color:#eef2ff;font:14px system-ui,sans-serif}.ocr-slot-open-header{padding:12px 16px}.ocr-slot-open-stage{position:relative;display:inline-block;line-height:0;max-width:100%}.ocr-slot-open-image{display:block;max-width:100%;height:auto}.ocr-slot-open-overlay{position:absolute;inset:0;pointer-events:none}.ocr-slot-open-box{position:absolute;box-sizing:border-box;border:2px solid #48d260}.ocr-slot-open-label{position:absolute;left:-2px;bottom:calc(100% + 2px);padding:2px 5px;border-radius:4px;background:#48d260;color:#111827;font-size:12px;font-weight:700;line-height:1.25;white-space:nowrap}.ocr-slot-open-wrap{padding:0 16px 16px}";
+  doc.head.appendChild(style);
+  const header = doc.createElement("div");
+  const wrap = doc.createElement("div");
+  const stage = doc.createElement("div");
+  const overlay = doc.createElement("div");
+  const image = doc.createElement("img");
+  header.className = "ocr-slot-open-header";
+  wrap.className = "ocr-slot-open-wrap";
+  stage.className = "ocr-slot-open-stage";
+  overlay.className = "ocr-slot-open-overlay";
+  image.className = "ocr-slot-open-image";
+  header.textContent = `OCR: ${values.length} wykrytych wartosci`;
+  image.alt = "Podglad obrazu z wynikami OCR";
+  image.addEventListener("load", () => appendOcrBoxesToOpenedImage(overlay, image, values), { once: true });
+  image.src = url;
+  stage.append(image, overlay);
+  wrap.appendChild(stage);
+  doc.body.className = "ocr-slot-open-page";
+  doc.body.append(header, wrap);
+  popup.focus();
+}
+
 async function openSlotFile(prefix) {
   const selectedFile = state.files.get(prefix);
   let photo = state.loadedPhotos.get(prefix);
@@ -2659,6 +2746,7 @@ async function openSlotFile(prefix) {
     window.open(filePreviewUrl(prefix, selectedFile), "_blank", "noopener");
     return;
   }
+  const ocrPopup = openOcrImageWindow();
   if (source === "ftp" && photo?.ftp_filename) {
     await loadFtpPreview(photo, prefix, openingRequestId, { forceRefresh: true });
     if (
@@ -2671,7 +2759,7 @@ async function openSlotFile(prefix) {
     if (selectedSlotSource(prefix, photo) !== "ftp") return;
   }
   const url = loadedFileUrl(photo, prefix);
-  if (url) window.open(url, "_blank", "noopener");
+  if (url) await openOcrAnnotatedImage(url, selectedPhotoToken(photo, prefix), ocrPopup);
 }
 
 function markSlotDeletion(prefix, photo) {

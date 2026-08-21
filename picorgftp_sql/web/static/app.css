@@ -2487,6 +2487,10 @@ h2 {
   margin-top: 3px;
 }
 
+.ocr-slot-open-overlay {
+  position: relative;
+}
+
 .pimcore-runtime-ocr-mismatch {
   border-color: var(--error, #b91c1c);
   box-shadow: 0 0 0 2px rgba(185, 28, 28, 0.18);

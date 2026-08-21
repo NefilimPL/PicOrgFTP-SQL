@@ -1885,6 +1885,46 @@ def test_ocr_validation_compares_cached_signed_slot_images_without_exposing_path
     assert "C:/cache" not in response.text
 
 
+def test_ocr_scan_route_returns_cached_boxes_for_a_signed_slot_image(tmp_path):
+    from picorgftp_sql.sqlite_store import SqliteStore
+
+    store = SqliteStore(str(tmp_path / "ocr.sqlite"))
+    store.initialize()
+    store.upsert_ocr_scan(
+        "c" * 64,
+        [
+            {
+                "text": "120/140",
+                "comparison": "120?140",
+                "confidence": 0.91,
+                "bbox": [1, 2, 30, 20],
+            }
+        ],
+        "completed",
+    )
+    client = TestClient(web_app.app)
+    with (
+        patch.object(web_app, "_require_user", return_value="operator"),
+        patch.object(web_app, "_path_from_file_token", return_value="C:/cache/15.png"),
+        patch.object(web_app, "_image_sha256", return_value="c" * 64),
+        patch.object(web_app, "observability_store", return_value=store),
+    ):
+        response = client.get("/api/ocr/scan", params={"token": "signed-slot"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "state": "completed",
+        "values": [
+            {
+                "text": "120/140",
+                "comparison": "120?140",
+                "confidence": 0.91,
+                "bbox": [1, 2, 30, 20],
+            }
+        ],
+    }
+
+
 def test_ocr_approval_suppresses_a_cached_value_mismatch(tmp_path):
     from picorgftp_sql.sqlite_store import SqliteStore
 

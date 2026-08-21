@@ -41,6 +41,31 @@ def image_content_hash(path: str) -> str:
     return digest.hexdigest()
 
 
+def restore_crop_bbox(
+    bbox: list[int] | tuple[int, int, int, int],
+    crop_bbox: list[int] | tuple[int, int, int, int],
+    *,
+    upscale_factor: int = 4,
+) -> list[int]:
+    """Map a bounding box from an enlarged crop back to source-image pixels."""
+
+    factor = max(1, int(upscale_factor))
+    crop_left, crop_top, crop_right, crop_bottom = (int(value) for value in crop_bbox)
+    left, top, right, bottom = (int(value) for value in bbox)
+    restored = [
+        crop_left + round(left / factor),
+        crop_top + round(top / factor),
+        crop_left + round(right / factor),
+        crop_top + round(bottom / factor),
+    ]
+    return [
+        max(crop_left, min(crop_right, restored[0])),
+        max(crop_top, min(crop_bottom, restored[1])),
+        max(crop_left, min(crop_right, restored[2])),
+        max(crop_top, min(crop_bottom, restored[3])),
+    ]
+
+
 def collect_image_values(
     path: str,
     *,

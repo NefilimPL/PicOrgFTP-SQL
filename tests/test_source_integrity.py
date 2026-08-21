@@ -122,10 +122,10 @@ class SourceIntegrityTests(unittest.TestCase):
         renderer_start = source.index("function renderSettingsResourceMonitor")
         updater_start = source.index("function updateResourceMonitorTestUi", renderer_start)
         runner_start = source.index("async function runResourceMonitorTest", updater_start)
-        settings_start = source.index("function renderSettings()", runner_start)
+        runner_end = source.index("function ocrConfidenceLabel", runner_start)
         renderer_source = source[renderer_start:updater_start]
         updater_source = source[updater_start:runner_start]
-        runner_source = source[runner_start:settings_start]
+        runner_source = source[runner_start:runner_end]
 
         self.assertIn("const resourceMonitorTestState", source[:renderer_start])
         self.assertLess(

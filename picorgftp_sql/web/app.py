@@ -60,7 +60,11 @@ from ..github_status import github_repository_status
 from ..history_changes import history_change_set
 from ..image_utils import fit_image_to_content
 from ..services.image_dimensions import analyze_image_values, image_ocr_runtime_info
-from ..services.ocr_cache import collect_image_values, enqueue_ocr_crop_jobs
+from ..services.ocr_cache import (
+    collect_image_values,
+    enqueue_ocr_crop_jobs,
+    restore_crop_bbox,
+)
 from ..services.ocr_queue import OcrQueueScheduler
 from ..services.ocr_worker import OcrQueueWorker
 from ..services.ocr_values import (
@@ -5079,6 +5083,7 @@ def create_app() -> FastAPI:
         if not job_id:
             return
         values: list[dict[str, object]] = []
+        source_bbox = list(job.get("bbox") or [])
         if crop_path and os.path.isfile(crop_path):
             diagnostics = analyze_image_values(crop_path)
             values = [
@@ -5086,7 +5091,11 @@ def create_app() -> FastAPI:
                     "text": str(candidate.text),
                     "comparison": str(candidate.value),
                     "confidence": float(candidate.confidence),
-                    "bbox": list(candidate.bbox),
+                    "bbox": (
+                        restore_crop_bbox(candidate.bbox, source_bbox)
+                        if len(source_bbox) == 4
+                        else list(candidate.bbox)
+                    ),
                 }
                 for candidate in diagnostics.candidates
                 if candidate.accepted and str(candidate.value).strip()
@@ -5099,10 +5108,13 @@ def create_app() -> FastAPI:
             store.upsert_ocr_scan(image_hash, combined, "completed")
 
     def _run_ocr_queue_once() -> str:
+        ocr_settings = normalize_ocr_settings(
+            config.CONFIG.get(OCR_SETTINGS_KEY, {})
+        )
+        if not bool(ocr_settings.get("background_enabled")):
+            return "disabled"
         scheduler = OcrQueueScheduler(
-            settings=lambda: normalize_ocr_settings(
-                config.CONFIG.get(OCR_SETTINGS_KEY, {})
-            ),
+            settings=lambda: ocr_settings,
             has_active_requests=_ocr_has_active_requests,
             last_activity=_ocr_last_activity,
             cpu_percent=_ocr_cpu_percent,
@@ -6212,6 +6224,33 @@ def create_app() -> FastAPI:
         result = asdict(diagnostics)
         result["image_url"] = _versioned_file_url(path, "/api/file", token.strip())
         return result
+
+    @app.get("/api/ocr/scan")
+    async def ocr_scan(request: Request, token: str) -> Dict[str, Any]:
+        """Return cached numeric OCR boxes for a signed slot image."""
+
+        _require_user(request)
+        _require_ocr_feature()
+        signed_token = str(token or "").strip()
+        if not signed_token:
+            raise HTTPException(status_code=400, detail="Wymagany jest token obrazu.")
+        path = _path_from_file_token(signed_token)
+        image_hash = await run_in_threadpool(_image_sha256, path)
+        scan = observability_store().get_ocr_scan(image_hash)
+        values = list(scan.get("values") or []) if isinstance(scan, dict) else []
+        return {
+            "state": str(scan.get("state") or "missing") if isinstance(scan, dict) else "missing",
+            "values": [
+                {
+                    "text": str(item.get("text") or ""),
+                    "comparison": str(item.get("comparison") or ""),
+                    "confidence": float(item.get("confidence") or 0),
+                    "bbox": list(item.get("bbox") or []),
+                }
+                for item in values
+                if isinstance(item, dict)
+            ],
+        }
 
     @app.post("/api/ocr/validate")
     async def ocr_validate(request: Request) -> Dict[str, Any]:
