@@ -1949,6 +1949,29 @@ def test_selected_ocr_slot_starts_background_value_collection(monkeypatch):
     ]
 
 
+def test_admin_can_read_ocr_slots_and_background_queue(tmp_path, monkeypatch):
+    store = SqliteStore(str(tmp_path / "ocr.sqlite"))
+    store.enqueue_ocr_crop_job({"image_hash": "a" * 64, "bbox": [1, 2, 3, 4]})
+    monkeypatch.setitem(web_app.config.CONFIG, "ocr", {"enabled_slots": ["15"]})
+    monkeypatch.setitem(web_app.config.CONFIG, "slot_definitions", [
+        {"prefix": "15", "label": "Front"}, {"prefix": "16", "label": "Bok"}
+    ])
+    client = TestClient(web_app.app)
+    with (
+        patch.object(web_app, "_require_admin", return_value={"username": "admin"}),
+        patch.object(web_app, "observability_store", return_value=store),
+    ):
+        slots = client.get("/api/ocr/slots")
+        jobs = client.get("/api/ocr/jobs")
+
+    assert slots.json()["slots"] == [
+        {"prefix": "15", "label": "Front", "enabled": True},
+        {"prefix": "16", "label": "Bok", "enabled": False},
+    ]
+    assert jobs.json()["jobs"][0]["status"] == "pending"
+    assert "thumbnail_path" not in jobs.text
+
+
 def test_admin_test_sample_route_returns_fresh_editable_values():
     client = TestClient(web_app.app)
     expected = {

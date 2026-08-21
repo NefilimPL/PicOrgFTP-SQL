@@ -6148,6 +6148,44 @@ def create_app() -> FastAPI:
             "images": images,
         }
 
+    @app.get("/api/ocr/slots")
+    def ocr_slots(request: Request) -> Dict[str, Any]:
+        _require_admin(request)
+        enabled = set(
+            normalize_ocr_settings(config.CONFIG.get(OCR_SETTINGS_KEY, {})).get(
+                "enabled_slots", []
+            )
+        )
+        return {
+            "slots": [
+                {
+                    "prefix": str(slot.get("prefix") or ""),
+                    "label": str(slot.get("label") or ""),
+                    "enabled": str(slot.get("prefix") or "") in enabled,
+                }
+                for slot in config.CONFIG.get(common.SLOT_DEFS_KEY, [])
+                if isinstance(slot, dict) and str(slot.get("prefix") or "")
+            ]
+        }
+
+    @app.get("/api/ocr/jobs")
+    def ocr_jobs(request: Request) -> Dict[str, Any]:
+        _require_admin(request)
+        return {
+            "jobs": [
+                {
+                    "id": str(job.get("id") or ""),
+                    "image_hash": str(job.get("image_hash") or ""),
+                    "bbox": list(job.get("bbox") or []),
+                    "status": str(job.get("status") or ""),
+                    "created_at": str(job.get("created_at") or ""),
+                    "updated_at": str(job.get("updated_at") or ""),
+                    "result": list(job.get("result") or []),
+                }
+                for job in observability_store().list_ocr_crop_jobs()
+            ]
+        }
+
     @app.post("/api/ocr/approval")
     async def ocr_approval(request: Request) -> Dict[str, Any]:
         """Persist an explicit user acceptance for one value and image set."""
