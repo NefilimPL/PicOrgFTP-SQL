@@ -1,0 +1,96 @@
+"""One dispatch path for live OCR tester work and persistent OCR jobs."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Protocol
+
+from .ocr_progress import OcrProgressRegistry, OcrRunSnapshot
+from .ocr_resource_policy import OcrResourcePolicy, ResourceTelemetry
+
+
+class OcrWorker(Protocol):
+    def start(self) -> None: ...
+
+    def submit(self, *, run_id: str, path: str, profile_ids: list[object]) -> None: ...
+
+    def poll_events(self) -> list[dict[str, object]]: ...
+
+    def cancel(self, run_id: str) -> None: ...
+
+
+class OcrExecutionService:
+    """Translate worker messages into browser-safe ordered OCR snapshots."""
+
+    def __init__(
+        self,
+        *,
+        worker: OcrWorker,
+        registry: OcrProgressRegistry,
+        settings: Callable[[], dict[str, object]],
+        telemetry: Callable[[], ResourceTelemetry],
+    ) -> None:
+        self._worker = worker
+        self._registry = registry
+        self._settings = settings
+        self._telemetry = telemetry
+
+    def start(self) -> None:
+        self._worker.start()
+
+    def submit_test(self, *, path: str) -> str:
+        settings = self._settings()
+        run_id = self._registry.create_run(kind="test", job_id=None)
+        decision = OcrResourcePolicy(settings).before_stage(self._telemetry())
+        if decision.action == "defer":
+            self._registry.publish(
+                run_id,
+                "paused",
+                reason=decision.reason,
+                retry_after_seconds=decision.retry_after_seconds,
+            )
+            self._registry.finalize(run_id, state="paused")
+            return run_id
+        profiles = settings.get("model_profiles")
+        selected = [str(item) for item in profiles] if isinstance(profiles, list) else []
+        if not selected:
+            self._registry.publish(run_id, "error", message="No OCR profile selected.")
+            self._registry.finalize(run_id, state="error", error="No OCR profile selected.")
+            return run_id
+        self._registry.publish(run_id, "queued", stage="waiting_for_worker")
+        self._worker.submit(run_id=run_id, path=str(path), profile_ids=selected)
+        return run_id
+
+    def pump(self) -> None:
+        """Move all currently available child-process messages into the registry."""
+
+        for event in self._worker.poll_events():
+            run_id = str(event.get("run_id") or "")
+            kind = str(event.get("kind") or "")
+            if not run_id or not kind:
+                continue
+            payload = {
+                str(key): value
+                for key, value in event.items()
+                if key not in {"kind", "run_id"}
+            }
+            try:
+                self._registry.publish(run_id, kind, **payload)
+                if kind == "result":
+                    diagnostics = payload.get("diagnostics")
+                    result = diagnostics if isinstance(diagnostics, dict) else {}
+                    self._registry.finalize(run_id, state="completed", result=result)
+                elif kind == "error":
+                    self._registry.finalize(
+                        run_id, state="error", error=str(payload.get("message") or "OCR error")
+                    )
+            except KeyError:
+                continue
+
+    def snapshot(self, run_id: str, *, after_sequence: int = 0) -> OcrRunSnapshot:
+        self.pump()
+        return self._registry.snapshot(run_id, after_sequence=after_sequence)
+
+    def cancel(self, run_id: str) -> None:
+        self._registry.request_cancel(run_id)
+        self._worker.cancel(run_id)

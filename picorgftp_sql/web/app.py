@@ -67,6 +67,10 @@ from ..services.ocr_cache import (
 )
 from ..services.ocr_queue import OcrQueueLease, OcrQueueScheduler
 from ..services.ocr_worker import OcrQueueWorker
+from ..services.ocr_worker_process import OcrWorkerProcess
+from ..services.ocr_execution_service import OcrExecutionService
+from ..services.ocr_progress import OcrProgressRegistry
+from ..services.ocr_resource_policy import ResourceTelemetry
 from ..services.ocr_values import (
     comparison_key,
     normalize_entered_ocr_value,
@@ -5066,6 +5070,8 @@ def create_app() -> FastAPI:
     app.state.ocr_last_activity = time.monotonic()
     app.state.ocr_queue_stop = threading.Event()
     app.state.ocr_queue_thread = None
+    app.state.ocr_execution_service = None
+    app.state.ocr_execution_worker = None
 
     def _ocr_has_active_requests() -> bool:
         with app.state.ocr_activity_lock:
@@ -5076,6 +5082,30 @@ def create_app() -> FastAPI:
             return float(app.state.ocr_last_activity)
 
     app.state.ocr_queue_lease = OcrQueueLease(last_activity=_ocr_last_activity)
+
+    def _ocr_resource_telemetry() -> ResourceTelemetry:
+        snapshot = _RESOURCE_MONITOR.latest_public_snapshot()
+        host = snapshot.get("host") if isinstance(snapshot, dict) else {}
+        host = host if isinstance(host, dict) else {}
+
+        def number(key: str) -> float:
+            try:
+                return float(host.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        return ResourceTelemetry(
+            cpu_percent=number("cpu_percent"),
+            memory_used_bytes=int(number("memory_used_bytes")),
+            memory_total_bytes=int(number("memory_total_bytes")),
+            disk_busy_percent=number("disk_busy_percent"),
+        )
+
+    def _ocr_execution_service() -> OcrExecutionService:
+        service = app.state.ocr_execution_service
+        if service is None:
+            raise HTTPException(status_code=503, detail="Proces OCR nie jest jeszcze gotowy.")
+        return service
 
     def _process_ocr_crop_job(job: dict[str, object]) -> None:
         """Refine a persisted crop, keeping the result attached to its image hash."""
@@ -5234,6 +5264,21 @@ def create_app() -> FastAPI:
         _ensure_active_client_registry()
         _RESOURCE_MONITOR.start()
         if OCR_FEATURE_ENABLED:
+            ocr_settings = normalize_ocr_settings(config.CONFIG.get(OCR_SETTINGS_KEY, {}))
+            ocr_worker = OcrWorkerProcess(
+                cpu_percent=int(ocr_settings.get("max_cpu_percent") or 35)
+            )
+            execution_service = OcrExecutionService(
+                worker=ocr_worker,
+                registry=OcrProgressRegistry(store=observability_store()),
+                settings=lambda: normalize_ocr_settings(
+                    config.CONFIG.get(OCR_SETTINGS_KEY, {})
+                ),
+                telemetry=_ocr_resource_telemetry,
+            )
+            execution_service.start()
+            app.state.ocr_execution_worker = ocr_worker
+            app.state.ocr_execution_service = execution_service
             app.state.ocr_queue_stop.clear()
             worker = OcrQueueWorker(
                 run_once=_run_ocr_queue_once,
@@ -5258,6 +5303,11 @@ def create_app() -> FastAPI:
     @app.on_event("shutdown")
     def _shutdown() -> None:
         app.state.ocr_queue_stop.set()
+        worker = app.state.ocr_execution_worker
+        if worker is not None:
+            worker.stop(timeout=5)
+        app.state.ocr_execution_worker = None
+        app.state.ocr_execution_service = None
         queue_thread = app.state.ocr_queue_thread
         if queue_thread is not None and queue_thread is not threading.current_thread():
             queue_thread.join(timeout=2.0)
@@ -6230,6 +6280,52 @@ def create_app() -> FastAPI:
         result = asdict(diagnostics)
         result["image_url"] = _versioned_file_url(path, "/api/file", token.strip())
         return result
+
+    @app.post("/api/settings/ocr/runs", status_code=202)
+    async def settings_ocr_start_run(request: Request) -> Dict[str, Any]:
+        """Start an ephemeral OCR tester run and return immediately for live polling."""
+
+        _require_admin(request)
+        _require_ocr_feature()
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        token = payload.get("token") if isinstance(payload, dict) else None
+        if not isinstance(token, str) or not token.strip():
+            raise HTTPException(status_code=400, detail="Wymagany jest token przeslanego obrazu.")
+        path = _path_from_file_token(token.strip())
+        run_id = _ocr_execution_service().submit_test(path=path)
+        return {
+            "run_id": run_id,
+            "state": "started",
+            "events_url": f"/api/settings/ocr/runs/{run_id}",
+            "cancel_url": f"/api/settings/ocr/runs/{run_id}/cancel",
+        }
+
+    @app.get("/api/settings/ocr/runs/{run_id}")
+    def settings_ocr_run_snapshot(
+        request: Request, run_id: str, after_sequence: int = 0
+    ) -> Dict[str, Any]:
+        _require_admin(request)
+        _require_ocr_feature()
+        try:
+            snapshot = _ocr_execution_service().snapshot(
+                run_id, after_sequence=max(0, int(after_sequence))
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Nie znaleziono testu OCR.") from exc
+        return asdict(snapshot)
+
+    @app.post("/api/settings/ocr/runs/{run_id}/cancel")
+    def settings_ocr_cancel_run(request: Request, run_id: str) -> Dict[str, Any]:
+        _require_admin(request)
+        _require_ocr_feature()
+        try:
+            _ocr_execution_service().cancel(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Nie znaleziono testu OCR.") from exc
+        return {"run_id": run_id, "state": "cancellation_requested"}
 
     @app.get("/api/ocr/scan")
     async def ocr_scan(request: Request, token: str) -> Dict[str, Any]:

@@ -13,6 +13,7 @@ from picorgftp_sql.services.image_dimensions import (
     ImageOcrDiagnostics,
     OcrDiagnosticCandidate,
 )
+from picorgftp_sql.services.ocr_progress import OcrRunSnapshot
 from picorgftp_sql.services.pimcore_service import PimcoreApiError, PimcoreConflictError
 from picorgftp_sql.services.translation_service import TranslationResult
 from picorgftp_sql.sqlite_store import SqliteStore
@@ -1854,6 +1855,55 @@ def test_ocr_status_route_returns_runtime_status():
         status_response = client.get("/api/settings/ocr/status")
 
     assert status_response.json() == status
+
+
+def test_ocr_run_routes_start_then_return_incremental_live_snapshot():
+    client = TestClient(web_app.app)
+
+    class _Service:
+        def __init__(self) -> None:
+            self.cancelled: list[str] = []
+
+        def submit_test(self, *, path: str) -> str:
+            assert path == "C:/cache/test.png"
+            return "run-1"
+
+        def snapshot(self, run_id: str, *, after_sequence: int = 0):
+            assert (run_id, after_sequence) == ("run-1", 2)
+            return OcrRunSnapshot(
+                run_id="run-1",
+                kind="test",
+                job_id=None,
+                state="running",
+                latest_sequence=3,
+                cancel_requested=False,
+                events=[],
+                result=None,
+                error=None,
+            )
+
+        def cancel(self, run_id: str) -> None:
+            self.cancelled.append(run_id)
+
+    service = _Service()
+    previous = getattr(web_app.app.state, "ocr_execution_service", None)
+    web_app.app.state.ocr_execution_service = service
+    try:
+        with (
+            patch.object(web_app, "_require_admin", return_value="admin"),
+            patch.object(web_app, "_path_from_file_token", return_value="C:/cache/test.png"),
+        ):
+            started = client.post("/api/settings/ocr/runs", json={"token": "signed"})
+            snapshot = client.get("/api/settings/ocr/runs/run-1?after_sequence=2")
+            cancelled = client.post("/api/settings/ocr/runs/run-1/cancel")
+    finally:
+        web_app.app.state.ocr_execution_service = previous
+
+    assert started.status_code == 202
+    assert started.json()["run_id"] == "run-1"
+    assert snapshot.json()["latest_sequence"] == 3
+    assert cancelled.status_code == 200
+    assert service.cancelled == ["run-1"]
 
 
 def test_ocr_validation_compares_cached_signed_slot_images_without_exposing_paths(tmp_path):
