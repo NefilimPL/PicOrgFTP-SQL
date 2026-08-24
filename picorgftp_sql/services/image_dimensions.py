@@ -17,7 +17,7 @@ import sys
 from typing import Callable, Iterable, Mapping, Protocol
 
 from .ocr_values import comparison_key
-from .ocr_profiles import available_ocr_profiles, ocr_profile
+from .ocr_profiles import available_ocr_profiles, normalize_ocr_profile_ids, ocr_profile
 
 
 _DIMENSIONS = frozenset({"width", "depth", "height"})
@@ -441,8 +441,49 @@ def associate_dimension_hints(
     return associated
 
 
-def _default_recognizer() -> ImageDimensionRecognizer:
-    return PaddleImageDimensionRecognizer()
+class MultiProfileImageDimensionRecognizer:
+    """Run every selected local OCR profile and merge their text boxes."""
+
+    def __init__(
+        self,
+        profile_ids: Iterable[object],
+        *,
+        recognizer_factory: Callable[[object], ImageDimensionRecognizer] | None = None,
+    ) -> None:
+        self._profile_ids = normalize_ocr_profile_ids(list(profile_ids)) or ["fast"]
+        self._recognizer_factory = recognizer_factory or PaddleImageDimensionRecognizer
+
+    @staticmethod
+    def _box_key(box: OcrTextBox) -> tuple[str, tuple[int, int, int, int]]:
+        text = str(box.text or "").strip().casefold()
+        return text, box.bbox
+
+    def detect(self, path: str) -> list[OcrTextBox]:
+        boxes: list[OcrTextBox] = []
+        positions: dict[tuple[str, tuple[int, int, int, int]], int] = {}
+        failures: list[str] = []
+        for profile_id in self._profile_ids:
+            try:
+                detected = self._recognizer_factory(profile_id).detect(path)
+            except Exception as exc:
+                message = str(exc).strip()
+                failures.append(message or f"Nie udalo sie uruchomic profilu OCR {profile_id}.")
+                continue
+            for box in detected:
+                key = self._box_key(box)
+                existing_index = positions.get(key)
+                if existing_index is None:
+                    positions[key] = len(boxes)
+                    boxes.append(box)
+                elif box.confidence > boxes[existing_index].confidence:
+                    boxes[existing_index] = box
+        if boxes or not failures:
+            return boxes
+        raise ImageDimensionUnavailable("; ".join(failures))
+
+
+def _default_recognizer(profile_ids: Iterable[object] | None = None) -> ImageDimensionRecognizer:
+    return MultiProfileImageDimensionRecognizer(profile_ids or ["fast"])
 
 
 def _optional_package_version(package: str) -> str | None:
@@ -474,12 +515,13 @@ def image_ocr_runtime_info() -> dict[str, object]:
 
     paddleocr_version = _optional_package_version("paddleocr")
     paddle_version = _optional_package_version("paddlepaddle")
-    opencv_version = _optional_package_version("opencv-python-headless") or _optional_package_version("opencv-python")
+    opencv_version = (
+        _optional_package_version("opencv-python-headless")
+        or _optional_package_version("opencv-python")
+        or _optional_package_version("opencv-contrib-python")
+    )
     available = bool(
-        paddleocr_version
-        and paddle_version
-        and opencv_version
-        and util.find_spec("paddleocr")
+        util.find_spec("paddleocr")
         and util.find_spec("cv2")
         and _paddlex_ocr_pipeline_is_available()
         and _paddlex_ocr_core_is_available()
@@ -687,6 +729,7 @@ def analyze_image_values(
     path: str,
     *,
     recognizer: ImageDimensionRecognizer | None = None,
+    profile_ids: Iterable[object] | None = None,
 ) -> ImageOcrDiagnostics:
     """Return every OCR candidate with a numeric comparison key.
 
@@ -696,7 +739,7 @@ def analyze_image_values(
     """
 
     try:
-        boxes = (recognizer or _default_recognizer()).detect(path)
+        boxes = (recognizer or _default_recognizer(profile_ids)).detect(path)
     except ImageDimensionUnavailable as exc:
         return ImageOcrDiagnostics(
             available=False,

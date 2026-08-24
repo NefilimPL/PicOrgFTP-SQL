@@ -1802,7 +1802,7 @@ def test_template_preview_route_resolves_slot_tokens_before_rendering():
     preview.assert_called_once_with(payload, image_slot_paths={"15": "C:/cache/15.png"})
 
 
-def test_ocr_analysis_uses_only_the_signed_upload_token_without_a_confidence_threshold():
+def test_ocr_analysis_uses_the_signed_upload_token_and_configured_profiles(monkeypatch):
     client = TestClient(web_app.app)
     diagnostics = ImageOcrDiagnostics(
         available=True,
@@ -1812,6 +1812,11 @@ def test_ocr_analysis_uses_only_the_signed_upload_token_without_a_confidence_thr
                 "130,5 cm", 0.91, (4, 8, 80, 28), "width", "130.5", True
             )
         ],
+    )
+    monkeypatch.setattr(
+        web_app.config,
+        "CONFIG",
+        {web_app.OCR_SETTINGS_KEY: {"model_profiles": ["accurate", "fast"]}},
     )
     with (
         patch.object(web_app, "_require_admin", return_value="admin"),
@@ -1828,7 +1833,9 @@ def test_ocr_analysis_uses_only_the_signed_upload_token_without_a_confidence_thr
     assert "C:/cache" not in response.text
     assert response.json()["image_url"] == "/api/file?token=signed"
     assert response.json()["candidates"][0]["bbox"] == [4, 8, 80, 28]
-    analyze.assert_called_once_with("C:/cache/test.png")
+    analyze.assert_called_once_with(
+        "C:/cache/test.png", profile_ids=["accurate", "fast"]
+    )
 
 
 def test_ocr_status_route_returns_runtime_status():
@@ -1991,7 +1998,7 @@ def test_selected_ocr_slot_starts_background_value_collection(monkeypatch):
         (
             os.path.realpath(os.path.abspath("C:/cache/15.png")),
             store,
-            web_app.analyze_image_values,
+            web_app._analyze_image_values_with_configured_profiles,
             calls[0][3],
         )
     ]

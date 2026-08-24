@@ -1380,6 +1380,13 @@ def _image_sha256(path: str) -> str:
     return digest.hexdigest()
 
 
+def _analyze_image_values_with_configured_profiles(path: str) -> ImageOcrDiagnostics:
+    """Use the same selected OCR profiles for testing and slot collection."""
+
+    settings = normalize_ocr_settings(config.CONFIG.get(OCR_SETTINGS_KEY, {}))
+    return analyze_image_values(path, profile_ids=settings.get("model_profiles", ["fast"]))
+
+
 def _schedule_ocr_value_collection(slot: object, path: str) -> str:
     """Start a non-blocking cache fill only for an admin-enabled OCR slot."""
 
@@ -1401,7 +1408,7 @@ def _schedule_ocr_value_collection(slot: object, path: str) -> str:
             collect_image_values(
                 canonical_path,
                 store=observability_store(),
-                analyze=analyze_image_values,
+                analyze=_analyze_image_values_with_configured_profiles,
                 enqueue_crops=lambda image_hash, diagnostics: enqueue_ocr_crop_jobs(
                     canonical_path,
                     image_hash=image_hash,
@@ -5079,7 +5086,7 @@ def create_app() -> FastAPI:
         values: list[dict[str, object]] = []
         source_bbox = list(job.get("bbox") or [])
         if crop_path and os.path.isfile(crop_path):
-            diagnostics = analyze_image_values(crop_path)
+            diagnostics = _analyze_image_values_with_configured_profiles(crop_path)
             values = [
                 {
                     "text": str(candidate.text),
@@ -6214,7 +6221,9 @@ def create_app() -> FastAPI:
         if not isinstance(token, str) or not token.strip():
             raise HTTPException(status_code=400, detail="Wymagany jest token przeslanego obrazu.")
         path = _path_from_file_token(token.strip())
-        diagnostics = await run_in_threadpool(analyze_image_values, path)
+        diagnostics = await run_in_threadpool(
+            _analyze_image_values_with_configured_profiles, path
+        )
         result = asdict(diagnostics)
         result["image_url"] = _versioned_file_url(path, "/api/file", token.strip())
         return result

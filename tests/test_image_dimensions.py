@@ -78,6 +78,63 @@ def test_paddle_recognizer_uses_selected_offline_performance_profile(tmp_path, m
     assert received_kwargs["text_recognition_model_name"] == "PP-OCRv5_server_rec"
 
 
+def test_multi_profile_recognizer_combines_profiles_and_keeps_the_best_duplicate():
+    """A regression in the profile runner must not silently use only fast OCR."""
+
+    created_profiles: list[str] = []
+
+    class ProfileRecognizer:
+        def __init__(self, profile_id: str) -> None:
+            created_profiles.append(profile_id)
+
+        def detect(self, _path: str) -> list[OcrTextBox]:
+            if created_profiles[-1] == "fast":
+                return [
+                    OcrTextBox("120 mm", 0.72, (4, 8, 80, 28)),
+                    OcrTextBox("70 mm", 0.89, (90, 8, 160, 28)),
+                ]
+            return [
+                OcrTextBox("120 mm", 0.96, (4, 8, 80, 28)),
+                OcrTextBox("45 mm", 0.91, (170, 8, 240, 28)),
+            ]
+
+    recognizer = image_dimensions.MultiProfileImageDimensionRecognizer(
+        ["fast", "accurate"],
+        recognizer_factory=ProfileRecognizer,
+    )
+
+    boxes = recognizer.detect("fixture.png")
+
+    assert created_profiles == ["fast", "accurate"]
+    assert boxes == [
+        OcrTextBox("120 mm", 0.96, (4, 8, 80, 28)),
+        OcrTextBox("70 mm", 0.89, (90, 8, 160, 28)),
+        OcrTextBox("45 mm", 0.91, (170, 8, 240, 28)),
+    ]
+
+
+def test_multi_profile_recognizer_keeps_distinct_text_at_the_same_position():
+    """Different units are competing OCR readings, not duplicate boxes."""
+
+    class ProfileRecognizer:
+        def __init__(self, profile_id: str) -> None:
+            self.profile_id = profile_id
+
+        def detect(self, _path: str) -> list[OcrTextBox]:
+            text = "120 mm" if self.profile_id == "fast" else "120 cm"
+            return [OcrTextBox(text, 0.91, (4, 8, 80, 28))]
+
+    recognizer = image_dimensions.MultiProfileImageDimensionRecognizer(
+        ["fast", "accurate"],
+        recognizer_factory=ProfileRecognizer,
+    )
+
+    assert recognizer.detect("fixture.png") == [
+        OcrTextBox("120 mm", 0.91, (4, 8, 80, 28)),
+        OcrTextBox("120 cm", 0.91, (4, 8, 80, 28)),
+    ]
+
+
 def test_resolves_decimal_comma_value_when_ocr_confidence_meets_threshold():
     recognizer = FakeRecognizer(
         [OcrTextBox("130,5 cm", 0.92, (0, 0, 80, 20), "width")]
@@ -603,6 +660,52 @@ def test_ocr_runtime_info_has_stable_engine_and_github_metadata():
     assert info["github_url"].startswith("https://github.com/")
     assert isinstance(info["models"], list)
     assert info["models"][0]["version"] == "lang=en"
+
+
+def test_ocr_runtime_info_accepts_the_opencv_contrib_runtime_used_by_the_exe(
+    monkeypatch,
+):
+    versions = {
+        "paddleocr": "3.7.0",
+        "paddlepaddle": "3.3.1",
+        "opencv-contrib-python": "4.10.0.84",
+    }
+    monkeypatch.setattr(
+        image_dimensions,
+        "_optional_package_version",
+        lambda package: versions.get(package),
+    )
+    monkeypatch.setattr(image_dimensions.util, "find_spec", lambda _package: object())
+    monkeypatch.setattr(
+        image_dimensions, "_paddlex_ocr_pipeline_is_available", lambda: True
+    )
+    monkeypatch.setattr(
+        image_dimensions, "_paddlex_ocr_core_is_available", lambda: True
+    )
+
+    info = image_ocr_runtime_info()
+
+    assert info["available"] is True
+    assert info["runtime"]["version"] == "3.3.1 / 4.10.0.84"
+
+
+def test_ocr_runtime_info_uses_packaged_modules_when_pyinstaller_omits_metadata(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        image_dimensions, "_optional_package_version", lambda _package: None
+    )
+    monkeypatch.setattr(image_dimensions.util, "find_spec", lambda _package: object())
+    monkeypatch.setattr(
+        image_dimensions, "_paddlex_ocr_pipeline_is_available", lambda: True
+    )
+    monkeypatch.setattr(
+        image_dimensions, "_paddlex_ocr_core_is_available", lambda: True
+    )
+
+    info = image_ocr_runtime_info()
+
+    assert info["available"] is True
 
 
 def test_ocr_runtime_info_does_not_treat_cache_control_directories_as_models(
