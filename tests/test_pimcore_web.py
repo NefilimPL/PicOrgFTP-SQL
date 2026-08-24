@@ -1892,6 +1892,41 @@ def test_slot_ocr_analysis_uses_running_execution_service_when_available(monkeyp
     assert diagnostics.candidates[0].value == "120"
 
 
+def test_ocr_startup_cleanup_discards_unfinished_crops_and_removes_their_cache(
+    tmp_path, monkeypatch
+):
+    """A restarted application must not resume OCR crop work from a prior run."""
+
+    crop_root = tmp_path / "ocr_crop_cache"
+    crop_root.mkdir()
+    stale_crop = crop_root / "stale.png"
+    stale_crop.write_bytes(b"crop")
+
+    class _Store:
+        def clear_ocr_crop_queue(self):
+            return [str(stale_crop)]
+
+    monkeypatch.setattr(web_app, "observability_store", lambda: _Store())
+    monkeypatch.setattr(web_app, "_ocr_crop_root", lambda: str(crop_root))
+
+    assert web_app._clear_ocr_crop_queue_on_startup() == 1
+    assert not stale_crop.exists()
+
+
+def test_ocr_startup_cleanup_does_not_block_app_when_store_is_unavailable(
+    monkeypatch,
+):
+    """An unavailable optional OCR queue store must not prevent web startup."""
+
+    monkeypatch.setattr(
+        web_app,
+        "observability_store",
+        lambda: (_ for _ in ()).throw(OSError("unavailable store")),
+    )
+
+    assert web_app._clear_ocr_crop_queue_on_startup() == 0
+
+
 def test_ocr_status_route_returns_runtime_status():
     client = TestClient(web_app.app)
     status = {"available": False, "engine": {"name": "PaddleOCR"}}
@@ -1902,6 +1937,24 @@ def test_ocr_status_route_returns_runtime_status():
         status_response = client.get("/api/settings/ocr/status")
 
     assert status_response.json() == status
+
+
+def test_ocr_progress_poll_is_not_counted_as_a_new_user_action():
+    """Polling live OCR progress must not continuously extend the crop lease."""
+
+    polling_request = type(
+        "Request",
+        (),
+        {"method": "GET", "url": type("Url", (), {"path": "/api/settings/ocr/runs/run-1"})()},
+    )()
+    user_action = type(
+        "Request",
+        (),
+        {"method": "POST", "url": type("Url", (), {"path": "/api/settings/ocr/runs"})()},
+    )()
+
+    assert web_app._is_ocr_progress_poll(polling_request) is True
+    assert web_app._is_ocr_progress_poll(user_action) is False
 
 
 def test_ocr_run_routes_start_then_return_incremental_live_snapshot():

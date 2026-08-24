@@ -380,6 +380,7 @@ def test_similar_files_endpoint_requires_login_and_hides_source_path(monkeypatch
         patch.object(web_app, "_require_user", return_value="operator"),
         patch.object(web_app, "find_web_similar_file_candidates", return_value=[candidate]),
         patch.object(web_app, "_enrich_photo_payload", wraps=web_app._enrich_photo_payload),
+        patch.object(web_app.settings, "l", "C:/photos"),
     ):
         response = TestClient(web_app.app).post(
             "/api/similar-files", json=_similar_product_payload()
@@ -1011,13 +1012,12 @@ class WebAppFileTests(unittest.TestCase):
             processed.mkdir()
             target = processed / "old.jpg"
             target.write_bytes(b"old")
-            token = web_app._file_token(str(target))
-            target.unlink()
-
             with (
                 patch.object(web_app.settings, "l", str(processed)),
                 patch.object(web_app.settings, "AC", str(temp_dir)),
             ):
+                token = web_app._file_token(str(target))
+                target.unlink()
                 self.assertEqual(
                     Path(web_app._path_from_file_token(token, require_exists=False)),
                     target,
@@ -1036,12 +1036,11 @@ class WebAppFileTests(unittest.TestCase):
             upload_cache.mkdir(parents=True)
             target = upload_cache / "01_cached.jpg"
             target.write_bytes(b"cached")
-            token = web_app._file_token(str(target))
-
             with (
                 patch.object(web_app.settings, "l", str(processed)),
                 patch.object(web_app.settings, "AC", str(temp_dir)),
             ):
+                token = web_app._file_token(str(target))
                 self.assertEqual(Path(web_app._path_from_file_token(token)), target)
         finally:
             shutil.rmtree(temp_dir)
@@ -2325,10 +2324,10 @@ class WebAppFileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
             photo_path = Path(temp_dir) / "5901234567890_03.jpg"
             photo_path.write_bytes(b"first")
-
-            first = web_app._enrich_photo_payload([{"prefix": "03", "path": str(photo_path)}])[0]
-            photo_path.write_bytes(b"changed-content")
-            second = web_app._enrich_photo_payload([{"prefix": "03", "path": str(photo_path)}])[0]
+            with patch.object(web_app.settings, "l", temp_dir):
+                first = web_app._enrich_photo_payload([{"prefix": "03", "path": str(photo_path)}])[0]
+                photo_path.write_bytes(b"changed-content")
+                second = web_app._enrich_photo_payload([{"prefix": "03", "path": str(photo_path)}])[0]
 
         self.assertIn("&v=", first["url"])
         self.assertIn("&v=", first["thumb_url"])

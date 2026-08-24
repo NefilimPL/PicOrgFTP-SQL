@@ -1710,6 +1710,31 @@ def test_product_query_indexes_work_with_raw_sqlite_maintenance_connections(
         conn.execute("VACUUM")
 
 
+def test_clear_ocr_crop_queue_removes_unfinished_jobs_but_keeps_completed_history(
+    tmp_path: Path,
+) -> None:
+    """A restart must discard work waiting in the OCR crop queue."""
+
+    store = SqliteStore(str(tmp_path / "data.sqlite"))
+    completed_id = store.enqueue_ocr_crop_job(
+        {"image_hash": "completed", "bbox": [1, 2, 3, 4], "thumbnail_path": "done.png"}
+    )
+    assert store.claim_ocr_crop_job()["id"] == completed_id
+    store.complete_ocr_crop_job(completed_id, [])
+    pending_id = store.enqueue_ocr_crop_job(
+        {"image_hash": "pending", "bbox": [5, 6, 7, 8], "thumbnail_path": "pending.png"}
+    )
+    processing_id = store.enqueue_ocr_crop_job(
+        {"image_hash": "processing", "bbox": [5, 6, 7, 8], "thumbnail_path": "processing.png"}
+    )
+    assert store.claim_ocr_crop_job()["id"] == pending_id
+
+    cleared = store.clear_ocr_crop_queue()
+
+    assert sorted(cleared) == ["pending.png", "processing.png"]
+    assert [job["id"] for job in store.list_ocr_crop_jobs()] == [completed_id]
+
+
 def test_product_query_key_backfill_skips_current_schema_database(
     tmp_path: Path, monkeypatch
 ) -> None:

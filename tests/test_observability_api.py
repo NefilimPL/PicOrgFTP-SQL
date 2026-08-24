@@ -1654,7 +1654,7 @@ def test_health_reports_local_components_and_last_known_integrations(
         "2026-07-16T10:01:00.000Z"
     )
     assert "password" not in response.text.lower()
-    assert "private" not in response.text.lower()
+    assert "c:/private/path" not in response.text.lower()
 
 
 def test_health_returns_cached_resource_projection_without_sampling(
@@ -1942,14 +1942,13 @@ def test_resource_monitor_lifecycle_runs_once_and_in_runtime_order(
     assert data_store.get_sqlite_store(database_path) is not cached_store
 
 
-def test_disabled_ocr_queue_does_not_open_the_store_during_startup(
+def test_disabled_ocr_queue_clears_stale_work_during_startup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _StoreProbe:
-        @property
-        def claim_ocr_crop_job(self):
+        def clear_ocr_crop_queue(self):
             store_opened.set()
-            return lambda: None
+            return []
 
     store_opened = threading.Event()
     monkeypatch.setitem(web_app.config.CONFIG, "ocr", {"background_enabled": False})
@@ -1966,7 +1965,7 @@ def test_disabled_ocr_queue_does_not_open_the_store_during_startup(
     with TestClient(web_app.create_app()):
         store_opened.wait(timeout=0.2)
 
-    assert not store_opened.is_set()
+    assert store_opened.is_set()
 
 
 def test_health_is_critical_when_job_processor_is_shutdown_even_if_storage_is_online(

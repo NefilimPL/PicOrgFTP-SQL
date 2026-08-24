@@ -1263,6 +1263,26 @@ def _path_is_under_root(path: str, root: str) -> bool:
     return True
 
 
+def _clear_ocr_crop_queue_on_startup() -> int:
+    """Discard unfinished OCR crops and their trusted cache files on restart."""
+
+    try:
+        crop_paths = list(observability_store().clear_ocr_crop_queue())
+    except Exception as exc:
+        log_error(f"OCR startup queue cleanup skipped: {exc}")
+        return 0
+    crop_root = _ocr_crop_root()
+    for crop_path in crop_paths:
+        if not _path_is_under_root(crop_path, crop_root):
+            continue
+        try:
+            if os.path.isfile(crop_path):
+                os.remove(crop_path)
+        except OSError as exc:
+            log_error(f"OCR startup crop cleanup failed: {exc}")
+    return len(crop_paths)
+
+
 def _is_upload_cache_path(path: str) -> bool:
     return bool(path and _path_is_under_root(path, _upload_cache_root()))
 
@@ -1358,7 +1378,10 @@ def cleanup_web_upload_cache(
 
 def _file_token(path: str) -> str:
     try:
-        trusted_path = os.fspath(resolve_path_within_roots(path, _file_token_roots()))
+        # Validate using a case-insensitive canonical path, but retain the
+        # filesystem spelling for APIs which return the original local path.
+        resolve_path_within_roots(path, _file_token_roots())
+        trusted_path = os.path.realpath(os.path.abspath(os.fspath(path)))
     except PathSecurityError as exc:
         raise HTTPException(status_code=403, detail="Plik poza katalogiem zdjec lub cache.") from exc
     return _FILE_TOKEN_REGISTRY.issue(trusted_path)
@@ -5089,6 +5112,15 @@ def _public_incident_delivery(raw: object) -> Dict[str, Any]:
     }
 
 
+def _is_ocr_progress_poll(request: Request) -> bool:
+    """Return whether a request merely reads the live OCR run status."""
+
+    return (
+        request.method.upper() == "GET"
+        and request.url.path.startswith("/api/settings/ocr/runs/")
+    )
+
+
 def create_app() -> FastAPI:
     """Create the LAN web backend."""
 
@@ -5291,9 +5323,11 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def _prioritize_interactive_work(request: Request, call_next):
+        is_progress_poll = _is_ocr_progress_poll(request)
         with app.state.ocr_activity_lock:
             app.state.ocr_active_requests += 1
-            app.state.ocr_last_activity = time.monotonic()
+            if not is_progress_poll:
+                app.state.ocr_last_activity = time.monotonic()
         try:
             return await call_next(request)
         finally:
@@ -5301,7 +5335,8 @@ def create_app() -> FastAPI:
                 app.state.ocr_active_requests = max(
                     0, app.state.ocr_active_requests - 1
                 )
-                app.state.ocr_last_activity = time.monotonic()
+                if not is_progress_poll:
+                    app.state.ocr_last_activity = time.monotonic()
 
     @app.on_event("startup")
     def _startup() -> None:
@@ -5312,6 +5347,7 @@ def create_app() -> FastAPI:
         _ensure_active_client_registry()
         _RESOURCE_MONITOR.start()
         if OCR_FEATURE_ENABLED:
+            _clear_ocr_crop_queue_on_startup()
             ocr_settings = normalize_ocr_settings(config.CONFIG.get(OCR_SETTINGS_KEY, {}))
             ocr_worker = OcrWorkerProcess(
                 cpu_percent=int(ocr_settings.get("max_cpu_percent") or 35)

@@ -3890,6 +3890,24 @@ class SqliteStore:
                 (_now_iso(), _text(job_id)),
             )
 
+    def clear_ocr_crop_queue(self) -> list[str]:
+        """Discard unfinished OCR crop jobs after an application restart.
+
+        Completed jobs are retained as audit history.  The returned crop paths
+        let the web application remove only the no-longer-needed cache files.
+        """
+
+        self.initialize()
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT thumbnail_path FROM ocr_crop_jobs
+                   WHERE status IN ('pending', 'processing')"""
+            ).fetchall()
+            conn.execute(
+                "DELETE FROM ocr_crop_jobs WHERE status IN ('pending', 'processing')"
+            )
+        return [str(row["thumbnail_path"] or "") for row in rows if row["thumbnail_path"]]
+
     def list_ocr_crop_jobs(self) -> list[dict[str, object]]:
         self.initialize()
         with self.connection() as conn:
