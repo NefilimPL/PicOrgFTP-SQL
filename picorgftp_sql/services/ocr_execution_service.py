@@ -13,7 +13,14 @@ from .ocr_resource_policy import OcrResourcePolicy, ResourceTelemetry
 class OcrWorker(Protocol):
     def start(self) -> None: ...
 
-    def submit(self, *, run_id: str, path: str, profile_ids: list[object]) -> None: ...
+    def submit(
+        self,
+        *,
+        run_id: str,
+        path: str,
+        profile_ids: list[object],
+        resource_settings: dict[str, object] | None = None,
+    ) -> None: ...
 
     def update_telemetry(self, telemetry: ResourceTelemetry) -> None: ...
 
@@ -22,6 +29,8 @@ class OcrWorker(Protocol):
     def cancel(self, run_id: str) -> None: ...
 
     def update_limits(self, *, cpu_percent: int) -> None: ...
+
+    def status(self) -> dict[str, object]: ...
 
 
 class OcrExecutionService:
@@ -41,6 +50,7 @@ class OcrExecutionService:
         self._settings = settings
         self._telemetry = telemetry
         self._on_worker_ready = on_worker_ready
+        self._inflight_run_ids: set[str] = set()
 
     def start(self) -> None:
         self._worker.start()
@@ -81,6 +91,7 @@ class OcrExecutionService:
             self._registry.finalize(run_id, state="error", error="No OCR profile selected.")
             return run_id
         self._registry.publish(run_id, "queued", stage="waiting_for_worker")
+        self._inflight_run_ids.add(run_id)
         self._worker.submit(
             run_id=run_id,
             path=str(path),
@@ -111,15 +122,18 @@ class OcrExecutionService:
             try:
                 self._registry.publish(run_id, kind, **payload)
                 if kind == "result":
+                    self._inflight_run_ids.discard(run_id)
                     diagnostics = payload.get("diagnostics")
                     result = diagnostics if isinstance(diagnostics, dict) else {}
                     self._registry.finalize(run_id, state="completed", result=result)
                 elif kind == "error":
+                    self._inflight_run_ids.discard(run_id)
                     self._registry.finalize(
                         run_id, state="error", error=str(payload.get("message") or "OCR error")
                     )
             except KeyError:
                 continue
+        self._finalize_runs_for_stopped_worker()
 
     def snapshot(self, run_id: str, *, after_sequence: int = 0) -> OcrRunSnapshot:
         self.pump()
@@ -140,3 +154,25 @@ class OcrExecutionService:
     def cancel(self, run_id: str) -> None:
         self._registry.request_cancel(run_id)
         self._worker.cancel(run_id)
+
+    def _finalize_runs_for_stopped_worker(self) -> None:
+        status_method = getattr(self._worker, "status", None)
+        if not callable(status_method):
+            return
+        try:
+            status = status_method()
+        except Exception:
+            return
+        if not isinstance(status, dict) or status.get("alive") is not False:
+            return
+        exit_code = status.get("exit_code")
+        suffix = f" (kod {exit_code})." if isinstance(exit_code, int) else "."
+        message = "Proces OCR zakonczyl sie przed rozpoczeciem zadania" + suffix
+        for run_id in tuple(self._inflight_run_ids):
+            try:
+                self._registry.publish(run_id, "error", message=message)
+                self._registry.finalize(run_id, state="error", error=message)
+            except KeyError:
+                pass
+            finally:
+                self._inflight_run_ids.discard(run_id)

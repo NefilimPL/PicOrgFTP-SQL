@@ -89,7 +89,8 @@ def test_worker_process_forwards_a_serializable_job_result():
     finally:
         worker.stop(timeout=5)
 
-    assert any(event["kind"] == "stage_started" for event in events)
+    started = next(event for event in events if event["kind"] == "stage_started")
+    assert isinstance(started["worker_pid"], int)
     result = next(event for event in events if event["kind"] == "result")
     assert result["run_id"] == "run-1"
     assert result["diagnostics"]["available"] is False

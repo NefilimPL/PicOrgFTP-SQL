@@ -6,6 +6,8 @@ from picorgftp_sql.services.ocr_resource_policy import ResourceTelemetry
 class _FakeWorker:
     def __init__(self) -> None:
         self.started = False
+        self.alive = True
+        self.exit_code: int | None = None
         self.submissions: list[dict[str, object]] = []
         self.events: list[dict[str, object]] = []
         self.cancelled: list[str] = []
@@ -30,6 +32,9 @@ class _FakeWorker:
 
     def update_telemetry(self, telemetry: ResourceTelemetry) -> None:
         self.telemetry.append(telemetry)
+
+    def status(self) -> dict[str, object]:
+        return {"pid": 4321, "alive": self.alive, "exit_code": self.exit_code}
 
 
 def _telemetry(cpu: float = 10) -> ResourceTelemetry:
@@ -123,6 +128,25 @@ def test_execution_service_registers_worker_pid_from_ready_event():
     service.pump()
 
     assert registered == [4321]
+
+
+def test_execution_service_fails_a_run_when_the_ocr_worker_exits_before_it_starts():
+    worker = _FakeWorker()
+    worker.alive = False
+    worker.exit_code = 23
+    service = OcrExecutionService(
+        worker=worker,
+        registry=OcrProgressRegistry(),
+        settings=lambda: {"model_profiles": ["fast"], "pause_cpu_percent": 85},
+        telemetry=lambda: _telemetry(),
+    )
+
+    run_id = service.submit_test(path="C:/cache/test.png")
+
+    snapshot = service.snapshot(run_id)
+
+    assert snapshot.state == "error"
+    assert snapshot.error == "Proces OCR zakonczyl sie przed rozpoczeciem zadania (kod 23)."
 
 
 def test_execution_service_uses_the_same_worker_pipeline_for_background_job():

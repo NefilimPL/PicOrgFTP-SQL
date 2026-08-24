@@ -86,13 +86,20 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("ocr_max_memory_gb", source)
         self.assertIn("ocr_max_disk_busy_percent", source)
         self.assertIn(
-            'selectField("ocr_max_memory_mode", "Limit RAM", ocrSettings.max_memory_mode || "percent", [\n'
+            'selectField("ocr_max_memory_mode", "Miekki prog RAM systemu", ocrSettings.max_memory_mode || "percent", [\n'
             '    ["percent", "Procent calego RAM"],\n'
             '    ["gigabytes", "GB aktualnego uzycia"],',
             source,
         )
         self.assertIn("Aktualne uzycie RAM", source)
+        self.assertIn('"Miekki prog RAM systemu"', source)
+        self.assertIn(
+            '"OCR sprawdza uzycie przed kazdym etapem i czeka przed rozpoczeciem kolejnego; nie przerywa etapu, ktory juz trwa."',
+            source,
+        )
         self.assertIn("Aktualna aktywnosc dysku", source)
+        self.assertIn('"Proces OCR"', source)
+        self.assertIn('"Zadanie przekazane do procesu OCR; oczekiwanie na rozpoczecie etapu."', source)
         self.assertIn("data-ocr-overlay", source)
         self.assertIn("model.version", source)
         self.assertIn("%", source)

@@ -6243,6 +6243,12 @@ function renderResourceDetails(resources = {}) {
     ["Backend odczyt dysku", formatResourceDetail(backend.disk_read_bytes_per_second, ioDetail, backend)],
     ["Backend zapis dysku", formatResourceDetail(backend.disk_write_bytes_per_second, ioDetail, backend)],
     ["Backend I/O", formatResourceDetail(backend.disk_io_bytes_per_second, ioDetail, backend)],
+    [
+      "Proces OCR",
+      backend.ocr_worker_registered
+        ? `PID ${backend.ocr_worker_pid || "brak"} — lokalny worker OCR`
+        : "niepotwierdzony",
+    ],
     ["Aktywne zadania", formatResourceDetail(backend.active_jobs, String, backend)],
     ["Zadania w kolejce", formatResourceDetail(backend.queued_jobs, String, backend)],
     ["Aktywni w ostatnich 3 min", formatResourceDetail(backend.active_clients, String, backend)],
@@ -13667,7 +13673,9 @@ async function renderOcrLivePreview(file) {
     showEvent(event) {
       const kind = String(event?.kind || "");
       const payload = event?.payload || {};
-      if (kind === "candidate_regions") {
+      if (kind === "queued") {
+        status.textContent = "Zadanie przekazane do procesu OCR; oczekiwanie na rozpoczecie etapu.";
+      } else if (kind === "candidate_regions") {
         const regions = Array.isArray(payload.regions) ? payload.regions : [];
         for (const region of regions) this.drawBox(region?.bbox, "#3aa6ff", "Szybki");
         status.textContent = `Szybki model wykryl ${regions.length} sektorow.`;
@@ -13677,7 +13685,9 @@ async function renderOcrLivePreview(file) {
       } else if (kind === "throttled" || kind === "paused") {
         status.textContent = `OCR wstrzymany: ${payload.reason || payload.resource || "limit zasobow"}.`;
       } else if (kind === "stage_started") {
-        status.textContent = `Etap OCR: ${payload.stage || "przetwarzanie"}.`;
+        const workerPid = Number(payload.worker_pid || 0);
+        const worker = workerPid > 0 ? `Proces OCR (PID ${workerPid})` : "Proces OCR";
+        status.textContent = `${worker} rozpoczal etap: ${payload.stage || "przetwarzanie"}.`;
       }
     },
     drawBox(rawBbox, color, label) {
@@ -13855,13 +13865,13 @@ function renderSettingsOcr() {
     type: "number", min: 0, max: 100, step: 1,
     description: "Przed startem kolejnego zadania OCR sprawdzane jest aktualne uzycie calego systemu.",
   });
-  const memoryMode = selectField("ocr_max_memory_mode", "Limit RAM", ocrSettings.max_memory_mode || "percent", [
+  const memoryMode = selectField("ocr_max_memory_mode", "Miekki prog RAM systemu", ocrSettings.max_memory_mode || "percent", [
     ["percent", "Procent calego RAM"],
     ["gigabytes", "GB aktualnego uzycia"],
   ]);
   const maxMemoryPercent = inputField("ocr_max_memory_percent", "Aktualne uzycie RAM (%)", ocrSettings.max_memory_percent ?? 30, {
     type: "range", min: 1, max: 100, step: 1,
-    description: "Po przekroczeniu OCR konczy biezacy etap i zwalnia tempo przed kolejnym.",
+    description: "OCR sprawdza uzycie przed kazdym etapem i czeka przed rozpoczeciem kolejnego; nie przerywa etapu, ktory juz trwa.",
   });
   const maxMemoryGb = inputField("ocr_max_memory_gb", "Aktualne uzycie RAM (GB)", ocrSettings.max_memory_gb ?? 4, {
     type: "number", min: 0.1, max: 1024, step: 0.1,
@@ -14013,7 +14023,7 @@ function renderSettingsOcr() {
       if (!cached.token) throw new Error("Backend nie zwrocil tokenu obrazu testowego.");
       livePreview = await renderOcrLivePreview(selected);
       results.appendChild(livePreview.element);
-      livePreview.setStatus("Oczekiwanie na proces OCR...");
+      livePreview.setStatus("Wysylanie zadania do procesu OCR...");
       status.textContent = "Analiza OCR trwa — sektory i wycinki beda pokazywane na zywo.";
       const started = await requestJson("/api/settings/ocr/runs", {
         method: "POST",
@@ -14023,6 +14033,7 @@ function renderSettingsOcr() {
       });
       activeRunId = String(started.run_id || "");
       if (!activeRunId) throw new Error("Backend nie zwrocil identyfikatora testu OCR.");
+      livePreview.setStatus("Zadanie przekazane do procesu OCR; oczekiwanie na rozpoczecie etapu.");
       let sequence = 0;
       let finalSnapshot = null;
       while (!finalSnapshot) {

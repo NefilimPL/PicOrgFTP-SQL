@@ -56,6 +56,7 @@ def _worker_main(commands: Any, events: Any, cpu_percent: int, telemetry: Any) -
                     "kind": "stage_started",
                     "run_id": run_id,
                     "stage": "full_image",
+                    "worker_pid": os.getpid(),
                 }
             )
             try:
@@ -146,6 +147,22 @@ class OcrWorkerProcess:
     @property
     def pid(self) -> int | None:
         return int(self._process.pid) if self._process and self._process.pid else None
+
+    def status(self) -> dict[str, object]:
+        """Return serializable liveness details for UI progress supervision."""
+
+        process = self._process
+        if process is None:
+            return {"pid": None, "alive": False, "exit_code": None}
+        try:
+            alive = bool(process.is_alive())
+        except Exception:
+            alive = False
+        return {
+            "pid": self.pid,
+            "alive": alive,
+            "exit_code": getattr(process, "exitcode", None),
+        }
 
     def start(self) -> None:
         if self._process is not None and self._process.is_alive():
