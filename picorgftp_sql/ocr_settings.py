@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from .services.ocr_profiles import normalize_ocr_profile_ids
 
 
@@ -12,6 +14,10 @@ DEFAULT_OCR_SETTINGS: dict[str, object] = {
     "idle_seconds": 5,
     "max_cpu_percent": 35,
     "pause_cpu_percent": 85,
+    "max_memory_mode": "percent",
+    "max_memory_percent": 30,
+    "max_memory_gb": 4.0,
+    "max_disk_busy_percent": 80,
     "model_profiles": ["fast"],
 }
 
@@ -32,6 +38,18 @@ def _bounded_int(value: object, default: int, minimum: int, maximum: int) -> int
     return max(minimum, min(maximum, parsed))
 
 
+def _bounded_float(value: object, default: float, minimum: float) -> float:
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed < minimum:
+            raise ValueError
+    except (TypeError, ValueError):
+        parsed = default
+    return parsed
+
+
 def normalize_ocr_settings(value: object) -> dict[str, object]:
     """Return bounded, serializable OCR settings from an arbitrary payload."""
 
@@ -46,6 +64,12 @@ def normalize_ocr_settings(value: object) -> dict[str, object]:
     idle = _bounded_int(raw.get("idle_seconds"), 5, 0, 3600)
     maximum = _bounded_int(raw.get("max_cpu_percent"), 35, 0, 100)
     pause = max(maximum, _bounded_int(raw.get("pause_cpu_percent"), 85, 0, 100))
+    memory_mode = raw.get("max_memory_mode")
+    if memory_mode not in {"percent", "gigabytes"}:
+        memory_mode = "percent"
+    memory_percent = _bounded_int(raw.get("max_memory_percent"), 30, 1, 100)
+    memory_gb = _bounded_float(raw.get("max_memory_gb"), 4.0, 0.1)
+    disk_busy = _bounded_int(raw.get("max_disk_busy_percent"), 80, 0, 100)
     profiles = normalize_ocr_profile_ids(raw.get("model_profiles")) or ["fast"]
     return {
         "enabled_slots": slots,
@@ -53,5 +77,9 @@ def normalize_ocr_settings(value: object) -> dict[str, object]:
         "idle_seconds": idle,
         "max_cpu_percent": maximum,
         "pause_cpu_percent": pause,
+        "max_memory_mode": memory_mode,
+        "max_memory_percent": memory_percent,
+        "max_memory_gb": memory_gb,
+        "max_disk_busy_percent": disk_busy,
         "model_profiles": profiles,
     }
