@@ -638,6 +638,38 @@ def test_ocr_runtime_info_does_not_treat_cache_control_directories_as_models(
     assert info["models"][0]["status"] == "unavailable"
 
 
+def test_ocr_runtime_info_marks_only_complete_offline_profiles_as_ready(
+    tmp_path, monkeypatch
+):
+    """A generic Paddle cache must not advertise a missing selected profile."""
+    profile_root = tmp_path / "official_models"
+    (profile_root / "PP-OCRv5_mobile_det").mkdir(parents=True)
+    (profile_root / "PP-OCRv5_mobile_rec").mkdir()
+    for directory in profile_root.iterdir():
+        (directory / "model.yml").touch()
+    package_root = tmp_path / "paddlex"
+    pipeline_config = package_root / "configs" / "pipelines" / "OCR.yaml"
+    pipeline_config.parent.mkdir(parents=True)
+    pipeline_config.touch()
+    package_origin = package_root / "__init__.py"
+    package_origin.touch()
+    monkeypatch.setattr(image_dimensions, "ocr_model_cache_path", lambda: str(tmp_path))
+    monkeypatch.setattr(image_dimensions, "_optional_package_version", lambda _package: "1.0")
+    monkeypatch.setattr(
+        image_dimensions.util,
+        "find_spec",
+        lambda package: type("Spec", (), {"origin": str(package_origin)})()
+        if package == "paddlex"
+        else object(),
+    )
+    monkeypatch.setattr(image_dimensions, "_paddlex_ocr_core_is_available", lambda: True)
+
+    info = image_ocr_runtime_info()
+    states = {model["id"]: model["status"] for model in info["models"]}
+
+    assert states == {"fast": "ready", "accurate": "unavailable"}
+
+
 def test_ocr_runtime_info_requires_the_paddlex_ocr_pipeline_configuration(
     tmp_path, monkeypatch
 ):

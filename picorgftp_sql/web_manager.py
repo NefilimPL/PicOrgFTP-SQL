@@ -16,7 +16,7 @@ import threading
 import time
 import webbrowser
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 from urllib.error import URLError
 from urllib.request import urlopen
 
@@ -421,12 +421,25 @@ def check_http_health(port: int, *, timeout: float = 1.5) -> dict[str, Any]:
         return {"ok": False, "error": str(exc)}
 
 
-def wait_web_ready(port: int, *, timeout: float = 20.0) -> bool:
+def wait_web_ready(
+    port: int,
+    *,
+    timeout: float = 20.0,
+    progress: Callable[[str], None] | None = None,
+) -> bool:
     deadline = time.time() + timeout
+    attempt = 0
     while time.time() < deadline:
+        attempt += 1
         if check_http_health(port, timeout=1.0).get("ok"):
+            if progress is not None:
+                progress("Backend WWW odpowiada.")
             return True
+        if progress is not None:
+            progress(f"Oczekiwanie na backend WWW (proba {attempt})...")
         time.sleep(0.5)
+    if progress is not None:
+        progress("Backend WWW nie odpowiedzial w limicie czasu.")
     return False
 
 
@@ -596,12 +609,19 @@ def end_system_service() -> ActionResult:
     return ActionResult(True, "")
 
 
-def start_user_web(port: int, host: str) -> ActionResult:
+def start_user_web(
+    port: int,
+    host: str,
+    *,
+    progress: Callable[[str], None] | None = None,
+) -> ActionResult:
     root = app_root()
     log_dir(root).mkdir(parents=True, exist_ok=True)
     ensure_firewall_rule(port)
     env = service_environment(port, host)
     args = service_command_parts(port, host)
+    if progress is not None:
+        progress("Uruchamiam proces panelu WWW...")
     out_handle = out_log_path(root).open("a", encoding="utf-8", buffering=1)
     err_handle = err_log_path(root).open("a", encoding="utf-8", buffering=1)
     try:
@@ -623,7 +643,7 @@ def start_user_web(port: int, host: str) -> ActionResult:
             err_handle.close()
         except OSError:
             pass
-    if wait_web_ready(port):
+    if wait_web_ready(port, progress=progress):
         return ActionResult(True, "Panel webowy zostal uruchomiony.")
     exit_code = process.poll()
     if exit_code is not None:
@@ -637,7 +657,15 @@ def start_user_web(port: int, host: str) -> ActionResult:
     )
 
 
-def start_web(port: int, host: str, *, prefer_system_service: bool = True) -> ActionResult:
+def start_web(
+    port: int,
+    host: str,
+    *,
+    prefer_system_service: bool = True,
+    progress: Callable[[str], None] | None = None,
+) -> ActionResult:
+    if progress is not None:
+        progress("Sprawdzam port i poprzedni proces panelu WWW...")
     listeners = get_port_listeners(port)
     web_listeners = [
         item
@@ -657,6 +685,8 @@ def start_web(port: int, host: str, *, prefer_system_service: bool = True) -> Ac
                 False,
                 f"Port {port} jest zajety przez inny proces (PID: {pids}). Nie uruchomiono drugiej instancji panelu.",
             )
+        if progress is not None:
+            progress("Zatrzymuje nieodpowiadajacy proces panelu WWW...")
         stopped = stop_web(port)
         if not stopped.ok:
             return ActionResult(
@@ -669,12 +699,14 @@ def start_web(port: int, host: str, *, prefer_system_service: bool = True) -> Ac
                 f"Port {port} nadal jest zajety po zatrzymaniu panelu. Nie uruchomiono drugiej instancji.",
             )
     if prefer_system_service and task_exists():
+        if progress is not None:
+            progress("Uruchamiam usluge SYSTEM...")
         result = run_system_service()
-        if result.ok and wait_web_ready(port):
+        if result.ok and wait_web_ready(port, progress=progress):
             return ActionResult(True, "Panel webowy dziala jako usluga systemowa.")
         if result.ok:
             return ActionResult(False, "Uruchomiono usluge, ale strona nie odpowiedziala w limicie czasu.")
-    return start_user_web(port, host)
+    return start_user_web(port, host, progress=progress)
 
 
 def _wait_for_port_release(port: int, *, timeout: float = 8.0) -> bool:
@@ -1190,7 +1222,14 @@ class WebManagerApp:
     def start(self) -> None:
         port = self._port()
         host = self._host()
-        self._run_action(lambda: start_web(port, host, prefer_system_service=True))
+        self._run_action(
+            lambda: start_web(
+                port,
+                host,
+                prefer_system_service=True,
+                progress=lambda message: self.root.after(0, self.status_var.set, message),
+            )
+        )
 
     def stop(self) -> None:
         port = self._port()
@@ -1206,9 +1245,15 @@ class WebManagerApp:
         host = self._host()
 
         def action() -> ActionResult:
+            self.root.after(0, self.status_var.set, "Zatrzymuje poprzedni proces panelu WWW...")
             stop_web(port)
             time.sleep(1)
-            return start_web(port, host, prefer_system_service=True)
+            return start_web(
+                port,
+                host,
+                prefer_system_service=True,
+                progress=lambda message: self.root.after(0, self.status_var.set, message),
+            )
 
         self._run_action(action)
 

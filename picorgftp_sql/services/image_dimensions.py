@@ -484,7 +484,7 @@ def image_ocr_runtime_info() -> dict[str, object]:
         and _paddlex_ocr_pipeline_is_available()
         and _paddlex_ocr_core_is_available()
     )
-    model_cache_ready = _model_cache_has_content(ocr_model_cache_path())
+    model_cache_path = ocr_model_cache_path()
     return {
         "available": available,
         "engine": {
@@ -504,7 +504,11 @@ def image_ocr_runtime_info() -> dict[str, object]:
                 "name": profile.label,
                 "version": "lang=en",
                 "description": profile.description,
-                "status": "ready" if available and model_cache_ready else "unavailable",
+                "status": (
+                    "ready"
+                    if available and _model_cache_has_profile(model_cache_path, profile)
+                    else "unavailable"
+                ),
             }
             for profile in available_ocr_profiles()
         ],
@@ -536,12 +540,17 @@ def ocr_model_cache_path() -> str:
     return str(root / "PicOrgFTP-SQL" / "ocr-models")
 
 
-def _model_cache_has_content(path: str) -> bool:
+def _model_cache_has_profile(path: str, profile: object) -> bool:
+    """Return whether both locally configured model directories are populated."""
     try:
         model_root = Path(path) / "official_models"
-        return model_root.is_dir() and any(
-            candidate.is_dir() and any(candidate.iterdir())
-            for candidate in model_root.iterdir()
+        detector = str(getattr(profile, "detector_model", ""))
+        recognizer = str(getattr(profile, "recognizer_model", ""))
+        if not detector or not recognizer:
+            return False
+        return all(
+            (model_root / model_name).is_dir() and any((model_root / model_name).iterdir())
+            for model_name in (detector, recognizer)
         )
     except OSError:
         return False

@@ -569,7 +569,8 @@ def test_start_web_reclaims_an_unhealthy_picorg_listener_before_restart(monkeypa
     monkeypatch.setattr(
         web_manager,
         "start_user_web",
-        lambda _port, _host: events.append("start") or web_manager.ActionResult(True, "Uruchomiono."),
+        lambda _port, _host, **_kwargs: events.append("start")
+        or web_manager.ActionResult(True, "Uruchomiono."),
     )
 
     result = web_manager.start_web(8010, "0.0.0.0")
@@ -590,6 +591,17 @@ def test_start_web_refuses_to_start_on_a_busy_non_picorg_port(monkeypatch) -> No
 
     assert not result.ok
     assert "8010" in result.message
+
+
+def test_wait_web_ready_reports_each_startup_probe(monkeypatch) -> None:
+    """The manager must show progress instead of appearing frozen during startup."""
+    checks = iter([{"ok": False}, {"ok": True}])
+    messages: list[str] = []
+    monkeypatch.setattr(web_manager, "check_http_health", lambda *_args, **_kwargs: next(checks))
+    monkeypatch.setattr(web_manager.time, "sleep", lambda _seconds: None)
+
+    assert web_manager.wait_web_ready(8010, timeout=2, progress=messages.append)
+    assert messages == ["Oczekiwanie na backend WWW (proba 1)...", "Backend WWW odpowiada."]
 
 
 def test_manager_stop_requests_an_elevated_stop_for_a_system_service(monkeypatch) -> None:
