@@ -10,6 +10,7 @@ class _FakeWorker:
         self.events: list[dict[str, object]] = []
         self.cancelled: list[str] = []
         self.cpu_limits: list[int] = []
+        self.telemetry = []
 
     def start(self) -> None:
         self.started = True
@@ -26,6 +27,9 @@ class _FakeWorker:
 
     def update_limits(self, *, cpu_percent: int) -> None:
         self.cpu_limits.append(cpu_percent)
+
+    def update_telemetry(self, telemetry: ResourceTelemetry) -> None:
+        self.telemetry.append(telemetry)
 
 
 def _telemetry(cpu: float = 10) -> ResourceTelemetry:
@@ -55,7 +59,12 @@ def test_execution_service_submits_selected_profiles_and_forwards_live_events():
 
     assert worker.started is True
     assert worker.submissions == [
-        {"run_id": run_id, "path": "C:/cache/test.png", "profile_ids": ["accurate", "fast"]}
+        {
+            "run_id": run_id,
+            "path": "C:/cache/test.png",
+            "profile_ids": ["accurate", "fast"],
+            "resource_settings": {"model_profiles": ["accurate", "fast"], "pause_cpu_percent": 85},
+        }
     ]
     assert worker.cpu_limits == [35]
     snapshot = service.snapshot(run_id)
@@ -114,3 +123,19 @@ def test_execution_service_registers_worker_pid_from_ready_event():
     service.pump()
 
     assert registered == [4321]
+
+
+def test_execution_service_uses_the_same_worker_pipeline_for_background_job():
+    worker = _FakeWorker()
+    service = OcrExecutionService(
+        worker=worker,
+        registry=OcrProgressRegistry(),
+        settings=lambda: {"model_profiles": ["fast"], "pause_cpu_percent": 85},
+        telemetry=lambda: _telemetry(),
+    )
+
+    run_id = service.submit_queue(job_id="ocr-1", path="C:/cache/crop.png")
+
+    assert worker.submissions[0]["run_id"] == run_id
+    assert worker.submissions[0]["path"] == "C:/cache/crop.png"
+    assert service.snapshot(run_id).kind == "queue"

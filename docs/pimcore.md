@@ -46,7 +46,9 @@ Jeżeli w slocie nie ma obrazu albo OCR nie jest dostępny, wynik pozostaje bez 
 
 ### Tester OCR i warianty EXE
 
-Administrator może sprawdzić jakość odczytu w `Ustawienia > OCR`, wskazać sloty do zbierania danych i uruchomić test obrazu. Aplikacja pokazuje oryginalny obraz z prostokątami nad znalezionym tekstem, procentem pewności oraz kompletną listą odczytów. W tym miejscu ustawia się także okres bezczynności użytkowników i limity CPU dla kolejki dopracowywania wycinków.
+Administrator może sprawdzić jakość odczytu w `Ustawienia > OCR`, wskazać sloty do zbierania danych i uruchomić test obrazu. Tester pokazuje na żywo sektory wykryte przez profil szybki oraz kolejne wycinki przekazywane do profilu dokładnego; można poprosić o zatrzymanie po bezpiecznym zakończeniu bieżącego etapu. Ten sam proces OCR obsługuje tester, początkowe skanowanie slotów i dopracowywanie wycinków.
+
+Limit CPU jest twardym limitem procesu OCR przez Windows Job Object i obowiązuje przez całą pracę modelu. Próg `Nie uruchamiaj powyżej CPU` jest niezależną bramką dla następnego etapu/zadania. RAM można ustawić jako procent lub GB **aktualnego użycia**, a aktywność dysku jako procent czasu I/O (nie zajętego miejsca). Przekroczenie RAM/dysku spowalnia OCR między etapami; uruchomione wywołanie modelu nie jest brutalnie przerywane. Kolejka działa od ostatniej aktywności użytkownika przez 60 minut i każde zakończone zadanie dodaje następne 30 minut.
 
 Karta pokazuje także wersję użytego silnika PaddleOCR, nazwę i wariant modelu (`lang=en`), stan modelu oraz odnośnik do oficjalnego projektu na GitHubie. Test używa wyłącznie lokalnego silnika i tymczasowego cache uploadu aplikacji.
 

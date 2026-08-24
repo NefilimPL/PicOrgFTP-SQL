@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import time
 from typing import Protocol
 
 from .ocr_progress import OcrProgressRegistry, OcrRunSnapshot
@@ -13,6 +14,8 @@ class OcrWorker(Protocol):
     def start(self) -> None: ...
 
     def submit(self, *, run_id: str, path: str, profile_ids: list[object]) -> None: ...
+
+    def update_telemetry(self, telemetry: ResourceTelemetry) -> None: ...
 
     def poll_events(self) -> list[dict[str, object]]: ...
 
@@ -43,15 +46,25 @@ class OcrExecutionService:
         self._worker.start()
 
     def submit_test(self, *, path: str) -> str:
+        return self._submit(kind="test", job_id=None, path=path)
+
+    def submit_queue(self, *, job_id: str, path: str) -> str:
+        """Submit a persisted crop through the exact same controlled pipeline."""
+
+        return self._submit(kind="queue", job_id=job_id, path=path)
+
+    def _submit(self, *, kind: str, job_id: str | None, path: str) -> str:
         settings = self._settings()
-        run_id = self._registry.create_run(kind="test", job_id=None)
+        run_id = self._registry.create_run(kind=kind, job_id=job_id)
+        telemetry = self._telemetry()
+        self._worker.update_telemetry(telemetry)
         try:
             self._worker.update_limits(
                 cpu_percent=int(settings.get("max_cpu_percent") or 35)
             )
         except (TypeError, ValueError):
             self._worker.update_limits(cpu_percent=35)
-        decision = OcrResourcePolicy(settings).before_stage(self._telemetry())
+        decision = OcrResourcePolicy(settings).before_stage(telemetry)
         if decision.action == "defer":
             self._registry.publish(
                 run_id,
@@ -68,12 +81,18 @@ class OcrExecutionService:
             self._registry.finalize(run_id, state="error", error="No OCR profile selected.")
             return run_id
         self._registry.publish(run_id, "queued", stage="waiting_for_worker")
-        self._worker.submit(run_id=run_id, path=str(path), profile_ids=selected)
+        self._worker.submit(
+            run_id=run_id,
+            path=str(path),
+            profile_ids=selected,
+            resource_settings=settings,
+        )
         return run_id
 
     def pump(self) -> None:
         """Move all currently available child-process messages into the registry."""
 
+        self._worker.update_telemetry(self._telemetry())
         for event in self._worker.poll_events():
             run_id = str(event.get("run_id") or "")
             kind = str(event.get("kind") or "")
@@ -105,6 +124,18 @@ class OcrExecutionService:
     def snapshot(self, run_id: str, *, after_sequence: int = 0) -> OcrRunSnapshot:
         self.pump()
         return self._registry.snapshot(run_id, after_sequence=after_sequence)
+
+    def wait_for_terminal(self, run_id: str, *, timeout_seconds: float) -> OcrRunSnapshot:
+        """Wait in a queue thread while the isolated worker continues independently."""
+
+        deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+        while True:
+            snapshot = self.snapshot(run_id)
+            if snapshot.state in {"completed", "error", "cancelled", "paused"}:
+                return snapshot
+            if time.monotonic() >= deadline:
+                raise TimeoutError("OCR worker did not finish before queue timeout.")
+            time.sleep(0.1)
 
     def cancel(self, run_id: str) -> None:
         self._registry.request_cancel(run_id)

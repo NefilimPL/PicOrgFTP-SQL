@@ -59,7 +59,12 @@ from ..database import connect_db
 from ..github_status import github_repository_status
 from ..history_changes import history_change_set
 from ..image_utils import fit_image_to_content
-from ..services.image_dimensions import analyze_image_values, image_ocr_runtime_info
+from ..services.image_dimensions import (
+    ImageOcrDiagnostics,
+    OcrDiagnosticCandidate,
+    analyze_image_values,
+    image_ocr_runtime_info,
+)
 from ..services.ocr_cache import (
     collect_image_values,
     enqueue_ocr_crop_jobs,
@@ -226,6 +231,7 @@ MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _UPLOAD_CACHE_LAST_CLEANUP = 0.0
 _OCR_COLLECTION_LOCK = threading.Lock()
 _OCR_COLLECTION_PATHS: set[str] = set()
+_OCR_EXECUTION_SERVICE: OcrExecutionService | None = None
 OCR_FEATURE_ENABLED = os.getenv("PICORGFTP_SQL_OCR_ENABLED", "1").strip().lower() not in {
     "0",
     "false",
@@ -1387,6 +1393,36 @@ def _image_sha256(path: str) -> str:
 def _analyze_image_values_with_configured_profiles(path: str) -> ImageOcrDiagnostics:
     """Use the same selected OCR profiles for testing and slot collection."""
 
+    service = _OCR_EXECUTION_SERVICE
+    if service is not None:
+        run_id = service.submit_queue(
+            job_id=f"scan-{secrets.token_hex(12)}", path=path
+        )
+        snapshot = service.wait_for_terminal(run_id, timeout_seconds=30 * 60)
+        if snapshot.state != "completed":
+            return ImageOcrDiagnostics(False, {}, [], snapshot.error or snapshot.state)
+        result = snapshot.result if isinstance(snapshot.result, dict) else {}
+        raw_candidates = result.get("candidates") if isinstance(result, dict) else []
+        candidates = [
+            OcrDiagnosticCandidate(
+                text=str(item.get("text") or ""),
+                confidence=float(item.get("confidence") or 0),
+                bbox=tuple(int(value) for value in list(item.get("bbox") or [])[:4]),
+                dimension=(str(item.get("dimension")) if item.get("dimension") else None),
+                value=str(item.get("value") or ""),
+                accepted=bool(item.get("accepted")),
+                reason=str(item.get("reason") or ""),
+                selected=bool(item.get("selected")),
+            )
+            for item in raw_candidates
+            if isinstance(item, dict) and len(list(item.get("bbox") or [])) == 4
+        ]
+        return ImageOcrDiagnostics(
+            available=bool(result.get("available")),
+            dimensions=dict(result.get("dimensions") or {}),
+            candidates=candidates,
+            message=str(result.get("message") or ""),
+        )
     settings = normalize_ocr_settings(config.CONFIG.get(OCR_SETTINGS_KEY, {}))
     return analyze_image_values(path, profile_ids=settings.get("model_profiles", ["fast"]))
 
@@ -5118,20 +5154,31 @@ def create_app() -> FastAPI:
         values: list[dict[str, object]] = []
         source_bbox = list(job.get("bbox") or [])
         if crop_path and os.path.isfile(crop_path):
-            diagnostics = _analyze_image_values_with_configured_profiles(crop_path)
+            run_id = _ocr_execution_service().submit_queue(
+                job_id=job_id, path=crop_path
+            )
+            snapshot = _ocr_execution_service().wait_for_terminal(
+                run_id, timeout_seconds=30 * 60
+            )
+            if snapshot.state != "completed":
+                raise RuntimeError(snapshot.error or f"OCR crop state: {snapshot.state}")
+            result = snapshot.result if isinstance(snapshot.result, dict) else {}
+            candidates = result.get("candidates") if isinstance(result, dict) else []
             values = [
                 {
-                    "text": str(candidate.text),
-                    "comparison": str(candidate.value),
-                    "confidence": float(candidate.confidence),
+                    "text": str(candidate.get("text") or ""),
+                    "comparison": str(candidate.get("value") or ""),
+                    "confidence": float(candidate.get("confidence") or 0),
                     "bbox": (
-                        restore_crop_bbox(candidate.bbox, source_bbox)
+                        restore_crop_bbox(candidate.get("bbox") or [], source_bbox)
                         if len(source_bbox) == 4
-                        else list(candidate.bbox)
+                        else list(candidate.get("bbox") or [])
                     ),
                 }
-                for candidate in diagnostics.candidates
-                if candidate.accepted and str(candidate.value).strip()
+                for candidate in candidates
+                if isinstance(candidate, dict)
+                and bool(candidate.get("accepted"))
+                and str(candidate.get("value") or "").strip()
             ]
         store = observability_store()
         store.complete_ocr_crop_job(job_id, values)
@@ -5258,6 +5305,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def _startup() -> None:
+        global _OCR_EXECUTION_SERVICE
         os.environ.setdefault("PICORGFTP_SQL_HEADLESS", "1")
         runtime_info = initialize_application_runtime(interactive=False)
         app.state.runtime_info = runtime_info
@@ -5280,6 +5328,7 @@ def create_app() -> FastAPI:
             execution_service.start()
             app.state.ocr_execution_worker = ocr_worker
             app.state.ocr_execution_service = execution_service
+            _OCR_EXECUTION_SERVICE = execution_service
             app.state.ocr_queue_stop.clear()
             worker = OcrQueueWorker(
                 run_once=_run_ocr_queue_once,
@@ -5303,12 +5352,14 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
+        global _OCR_EXECUTION_SERVICE
         app.state.ocr_queue_stop.set()
         worker = app.state.ocr_execution_worker
         if worker is not None:
             worker.stop(timeout=5)
         app.state.ocr_execution_worker = None
         app.state.ocr_execution_service = None
+        _OCR_EXECUTION_SERVICE = None
         queue_thread = app.state.ocr_queue_thread
         if queue_thread is not None and queue_thread is not threading.current_thread():
             queue_thread.join(timeout=2.0)

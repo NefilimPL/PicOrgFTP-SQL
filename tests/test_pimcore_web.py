@@ -1845,6 +1845,53 @@ def test_ocr_analysis_uses_the_signed_upload_token_and_configured_profiles(monke
     )
 
 
+def test_slot_ocr_analysis_uses_running_execution_service_when_available(monkeypatch):
+    class _Service:
+        def submit_queue(self, *, job_id: str, path: str) -> str:
+            assert job_id.startswith("scan-")
+            assert path == "C:/cache/slot.png"
+            return "run-1"
+
+        def wait_for_terminal(self, run_id: str, *, timeout_seconds: float):
+            assert (run_id, timeout_seconds) == ("run-1", 30 * 60)
+            return OcrRunSnapshot(
+                run_id="run-1",
+                kind="queue",
+                job_id="scan-1",
+                state="completed",
+                latest_sequence=1,
+                cancel_requested=False,
+                events=[],
+                result={
+                    "available": True,
+                    "dimensions": {},
+                    "message": "",
+                    "candidates": [
+                        {
+                            "text": "120",
+                            "confidence": 0.9,
+                            "bbox": [1, 2, 30, 20],
+                            "dimension": None,
+                            "value": "120",
+                            "accepted": True,
+                            "reason": "Wykryto wartosc liczbowa.",
+                            "selected": False,
+                        }
+                    ],
+                },
+                error=None,
+            )
+
+    monkeypatch.setattr(web_app, "_OCR_EXECUTION_SERVICE", _Service())
+
+    diagnostics = web_app._analyze_image_values_with_configured_profiles(
+        "C:/cache/slot.png"
+    )
+
+    assert diagnostics.available is True
+    assert diagnostics.candidates[0].value == "120"
+
+
 def test_ocr_status_route_returns_runtime_status():
     client = TestClient(web_app.app)
     status = {"available": False, "engine": {"name": "PaddleOCR"}}

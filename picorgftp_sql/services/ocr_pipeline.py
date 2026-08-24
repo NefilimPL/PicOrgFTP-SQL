@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import time
 from typing import Protocol
 
 from PIL import Image
@@ -14,11 +15,35 @@ from .ocr_profiles import normalize_ocr_profile_ids
 
 
 ProgressCallback = Callable[..., None]
+StagePolicy = Callable[[str], object]
 
 
 def _emit(callback: ProgressCallback | None, kind: str, **payload: object) -> None:
     if callback is not None:
         callback(kind, **payload)
+
+
+def _wait_for_stage(
+    callback: StagePolicy | None,
+    stage: str,
+    emit: ProgressCallback | None,
+    sleeper: Callable[[float], None],
+) -> None:
+    if callback is None:
+        return
+    while True:
+        decision = callback(stage)
+        action = str(getattr(decision, "action", "run"))
+        if action == "run":
+            return
+        reason = str(getattr(decision, "reason", "resource_limit"))
+        retry = max(0.05, float(getattr(decision, "retry_after_seconds", 1.0)))
+        if action == "throttle":
+            _emit(emit, "throttled", stage=stage, resource=reason, retry_after_seconds=retry)
+            sleeper(retry)
+            continue
+        _emit(emit, "paused", stage=stage, reason=reason, retry_after_seconds=retry)
+        raise RuntimeError(f"OCR stage deferred: {reason}")
 
 
 def _merge_boxes(boxes: Iterable[OcrTextBox]) -> list[OcrTextBox]:
@@ -64,6 +89,8 @@ def run_ocr_pipeline(
     profile_ids: Iterable[object],
     recognizer_factory: Callable[[object], ImageDimensionRecognizer] | None = None,
     on_event: ProgressCallback | None = None,
+    before_stage: StagePolicy | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> list[OcrTextBox]:
     """Run selected profiles, restricting accurate OCR to fast-detected regions."""
 
@@ -75,11 +102,13 @@ def run_ocr_pipeline(
     all_boxes: list[OcrTextBox] = []
 
     if profiles == ["accurate"]:
+        _wait_for_stage(before_stage, "accurate_full_image", on_event, sleeper)
         _emit(on_event, "stage_started", stage="accurate_full_image", model="accurate")
         boxes = factory("accurate").detect(source_path)
         _emit(on_event, "stage_finished", stage="accurate_full_image", model="accurate")
         return _merge_boxes(boxes)
 
+    _wait_for_stage(before_stage, "fast_full_image", on_event, sleeper)
     _emit(on_event, "stage_started", stage="fast_full_image", model="fast")
     fast_boxes = factory("fast").detect(source_path)
     all_boxes.extend(fast_boxes)
@@ -102,6 +131,7 @@ def run_ocr_pipeline(
         regions = [bbox for box in fast_boxes if (bbox := _bounded_bbox(box, source))]
         total = len(regions)
         for index, region in enumerate(regions, start=1):
+            _wait_for_stage(before_stage, "accurate_crop", on_event, sleeper)
             _emit(
                 on_event,
                 "crop_started",
