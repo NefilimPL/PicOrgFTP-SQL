@@ -9,6 +9,7 @@ class _FakeWorker:
         self.submissions: list[dict[str, object]] = []
         self.events: list[dict[str, object]] = []
         self.cancelled: list[str] = []
+        self.cpu_limits: list[int] = []
 
     def start(self) -> None:
         self.started = True
@@ -22,6 +23,9 @@ class _FakeWorker:
 
     def cancel(self, run_id: str) -> None:
         self.cancelled.append(run_id)
+
+    def update_limits(self, *, cpu_percent: int) -> None:
+        self.cpu_limits.append(cpu_percent)
 
 
 def _telemetry(cpu: float = 10) -> ResourceTelemetry:
@@ -53,6 +57,7 @@ def test_execution_service_submits_selected_profiles_and_forwards_live_events():
     assert worker.submissions == [
         {"run_id": run_id, "path": "C:/cache/test.png", "profile_ids": ["accurate", "fast"]}
     ]
+    assert worker.cpu_limits == [35]
     snapshot = service.snapshot(run_id)
     assert snapshot.state == "completed"
     assert [(event.kind, event.payload["stage"]) for event in snapshot.events[:2]] == [

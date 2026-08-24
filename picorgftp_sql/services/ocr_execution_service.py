@@ -18,6 +18,8 @@ class OcrWorker(Protocol):
 
     def cancel(self, run_id: str) -> None: ...
 
+    def update_limits(self, *, cpu_percent: int) -> None: ...
+
 
 class OcrExecutionService:
     """Translate worker messages into browser-safe ordered OCR snapshots."""
@@ -41,6 +43,12 @@ class OcrExecutionService:
     def submit_test(self, *, path: str) -> str:
         settings = self._settings()
         run_id = self._registry.create_run(kind="test", job_id=None)
+        try:
+            self._worker.update_limits(
+                cpu_percent=int(settings.get("max_cpu_percent") or 35)
+            )
+        except (TypeError, ValueError):
+            self._worker.update_limits(cpu_percent=35)
         decision = OcrResourcePolicy(settings).before_stage(self._telemetry())
         if decision.action == "defer":
             self._registry.publish(

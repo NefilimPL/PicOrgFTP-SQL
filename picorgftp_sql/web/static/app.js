@@ -13646,11 +13646,12 @@ async function renderOcrLivePreview(file) {
   status.className = "ocr-diagnostic-live-status";
   status.textContent = "Ladowanie modelu OCR...";
   let bitmap = null;
+  let context = null;
   try {
     bitmap = await createImageBitmap(file);
     preview.width = bitmap.width;
     preview.height = bitmap.height;
-    const context = preview.getContext("2d");
+    context = preview.getContext("2d");
     if (!context) throw new Error("Brak kontekstu rysowania podgladu.");
     context.drawImage(bitmap, 0, 0);
   } catch (_error) {
@@ -13663,6 +13664,35 @@ async function renderOcrLivePreview(file) {
   return {
     element: stage,
     setStatus(message) { status.textContent = message; },
+    showEvent(event) {
+      const kind = String(event?.kind || "");
+      const payload = event?.payload || {};
+      if (kind === "candidate_regions") {
+        const regions = Array.isArray(payload.regions) ? payload.regions : [];
+        for (const region of regions) this.drawBox(region?.bbox, "#3aa6ff", "Szybki");
+        status.textContent = `Szybki model wykryl ${regions.length} sektorow.`;
+      } else if (kind === "crop_started") {
+        this.drawBox(payload.bbox, "#ffd24a", "Dokladny");
+        status.textContent = `Dokladny model skanuje wycinek ${payload.crop_index || 1}/${payload.crop_total || 1}.`;
+      } else if (kind === "throttled" || kind === "paused") {
+        status.textContent = `OCR wstrzymany: ${payload.reason || payload.resource || "limit zasobow"}.`;
+      } else if (kind === "stage_started") {
+        status.textContent = `Etap OCR: ${payload.stage || "przetwarzanie"}.`;
+      }
+    },
+    drawBox(rawBbox, color, label) {
+      if (!context || preview.hidden || !Array.isArray(rawBbox) || rawBbox.length !== 4) return;
+      const [left, top, right, bottom] = rawBbox.map(Number);
+      if (![left, top, right, bottom].every(Number.isFinite)) return;
+      context.save();
+      context.strokeStyle = color;
+      context.lineWidth = Math.max(2, Math.round(Math.min(preview.width, preview.height) / 300));
+      context.strokeRect(left, top, Math.max(1, right - left), Math.max(1, bottom - top));
+      context.fillStyle = color;
+      context.font = `${Math.max(12, Math.round(preview.width / 60))}px sans-serif`;
+      context.fillText(label, left + 2, Math.max(14, top - 4));
+      context.restore();
+    },
     dispose() {},
   };
 }
@@ -13825,6 +13855,29 @@ function renderSettingsOcr() {
     type: "number", min: 0, max: 100, step: 1,
     description: "Przed startem kolejnego zadania OCR sprawdzane jest aktualne uzycie calego systemu.",
   });
+  const memoryMode = selectField("ocr_max_memory_mode", "Limit RAM", ocrSettings.max_memory_mode || "percent", [
+    { value: "percent", label: "Procent calego RAM" },
+    { value: "gigabytes", label: "GB aktualnego uzycia" },
+  ]);
+  const maxMemoryPercent = inputField("ocr_max_memory_percent", "Aktualne uzycie RAM (%)", ocrSettings.max_memory_percent ?? 30, {
+    type: "range", min: 1, max: 100, step: 1,
+    description: "Po przekroczeniu OCR konczy biezacy etap i zwalnia tempo przed kolejnym.",
+  });
+  const maxMemoryGb = inputField("ocr_max_memory_gb", "Aktualne uzycie RAM (GB)", ocrSettings.max_memory_gb ?? 4, {
+    type: "number", min: 0.1, max: 1024, step: 0.1,
+    description: "Alternatywa dla procentu; dotyczy uzycia, nie pojemnosci dysku.",
+  });
+  const maxDiskBusy = inputField("ocr_max_disk_busy_percent", "Aktualna aktywnosc dysku (%)", ocrSettings.max_disk_busy_percent ?? 80, {
+    type: "range", min: 0, max: 100, step: 1,
+    description: "Przy wysokiej aktywnosci dysku OCR zwalnia miedzy etapami zamiast przerywac odczyt.",
+  });
+  const updateMemoryMode = () => {
+    const useGb = memoryMode.querySelector("select")?.value === "gigabytes";
+    maxMemoryPercent.hidden = useGb;
+    maxMemoryGb.hidden = !useGb;
+  };
+  memoryMode.querySelector("select")?.addEventListener("change", updateMemoryMode);
+  updateMemoryMode();
   const background = checkField(
     "ocr_background_enabled",
     "Wlacz kolejke dopracowywania OCR w tle",
@@ -13899,6 +13952,11 @@ function renderSettingsOcr() {
   analyze.type = "button";
   analyze.className = "secondary-button";
   analyze.textContent = "Przetestuj OCR";
+  const cancelAnalyze = document.createElement("button");
+  cancelAnalyze.type = "button";
+  cancelAnalyze.className = "secondary-button";
+  cancelAnalyze.textContent = "Zatrzymaj po etapie";
+  cancelAnalyze.hidden = true;
   const results = document.createElement("div");
   results.className = "wide-field";
   const queueOutput = document.createElement("div");
@@ -13909,6 +13967,10 @@ function renderSettingsOcr() {
     idleSeconds,
     maxCpu,
     pauseCpu,
+    memoryMode,
+    maxMemoryPercent,
+    maxMemoryGb,
+    maxDiskBusy,
     profiles,
     slotsHeading,
     slots
@@ -13916,7 +13978,7 @@ function renderSettingsOcr() {
   collection.classList.add("ocr-collection-settings");
   form.append(
     collection,
-    settingsFieldGroup("Tester OCR", status, engineInfo, file, actionRow(analyze), results),
+    settingsFieldGroup("Tester OCR", status, engineInfo, file, actionRow(analyze, cancelAnalyze), results),
     queueOutput
   );
   analyze.addEventListener("click", async () => {
@@ -13928,6 +13990,20 @@ function renderSettingsOcr() {
     analyze.disabled = true;
     results.textContent = "";
     let livePreview = null;
+    let activeRunId = "";
+    let cancelled = false;
+    cancelAnalyze.hidden = false;
+    cancelAnalyze.onclick = async () => {
+      if (!activeRunId || cancelled) return;
+      cancelled = true;
+      cancelAnalyze.disabled = true;
+      try {
+        await requestJson(`/api/settings/ocr/runs/${encodeURIComponent(activeRunId)}/cancel`, { method: "POST" });
+        status.textContent = "Anulowanie zostanie wykonane po biezacym etapie OCR.";
+      } catch (error) {
+        status.textContent = error.message || "Nie udalo sie anulowac OCR.";
+      }
+    };
     status.textContent = "Wysylanie obrazu do lokalnego testu OCR...";
     try {
       const upload = new FormData();
@@ -13937,25 +14013,46 @@ function renderSettingsOcr() {
       if (!cached.token) throw new Error("Backend nie zwrocil tokenu obrazu testowego.");
       livePreview = await renderOcrLivePreview(selected);
       results.appendChild(livePreview.element);
-      livePreview.setStatus("Wykrywanie wartosci liczbowych...");
-      status.textContent = "Analiza OCR trwa — podglad obrazu jest gotowy.";
-      const result = await requestJson("/api/settings/ocr/analyze", {
+      livePreview.setStatus("Oczekiwanie na proces OCR...");
+      status.textContent = "Analiza OCR trwa — sektory i wycinki beda pokazywane na zywo.";
+      const started = await requestJson("/api/settings/ocr/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token: cached.token }),
-        timeoutMs: 120000,
+        timeoutMs: 30000,
       });
+      activeRunId = String(started.run_id || "");
+      if (!activeRunId) throw new Error("Backend nie zwrocil identyfikatora testu OCR.");
+      let sequence = 0;
+      let finalSnapshot = null;
+      while (!finalSnapshot) {
+        const snapshot = await requestJson(`/api/settings/ocr/runs/${encodeURIComponent(activeRunId)}?after_sequence=${sequence}`, { timeoutMs: 30000 });
+        sequence = Math.max(sequence, Number(snapshot.latest_sequence) || 0);
+        for (const event of Array.isArray(snapshot.events) ? snapshot.events : []) {
+          livePreview.showEvent(event);
+        }
+        if (["completed", "error", "cancelled", "paused"].includes(String(snapshot.state || ""))) {
+          finalSnapshot = snapshot;
+          break;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 600));
+      }
       livePreview.dispose();
       results.textContent = "";
+      const result = { ...(finalSnapshot.result || {}), image_url: URL.createObjectURL(selected) };
       results.appendChild(renderOcrDiagnostics(result));
-      status.textContent = result.available
+      status.textContent = finalSnapshot.state === "paused"
+        ? "Test OCR wstrzymany przez prog uruchomienia zasobow."
+        : result.available
         ? "Analiza OCR zakonczona."
-        : String(result.message || "Lokalny OCR nie jest dostepny.");
+        : String(result.message || finalSnapshot.error || "Lokalny OCR nie jest dostepny.");
     } catch (error) {
       status.textContent = error.message || "Nie udalo sie wykonac analizy OCR.";
     } finally {
       livePreview?.dispose();
       analyze.disabled = false;
+      cancelAnalyze.hidden = true;
+      cancelAnalyze.disabled = false;
     }
   });
   settingsSaveButton(form, (data) => ({
@@ -13966,6 +14063,10 @@ function renderSettingsOcr() {
       idle_seconds: data.get("ocr_idle_seconds"),
       max_cpu_percent: data.get("ocr_max_cpu_percent"),
       pause_cpu_percent: data.get("ocr_pause_cpu_percent"),
+      max_memory_mode: data.get("ocr_max_memory_mode"),
+      max_memory_percent: data.get("ocr_max_memory_percent"),
+      max_memory_gb: data.get("ocr_max_memory_gb"),
+      max_disk_busy_percent: data.get("ocr_max_disk_busy_percent"),
     },
   }));
   settingsOutput.appendChild(form);
