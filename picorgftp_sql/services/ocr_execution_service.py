@@ -31,11 +31,13 @@ class OcrExecutionService:
         registry: OcrProgressRegistry,
         settings: Callable[[], dict[str, object]],
         telemetry: Callable[[], ResourceTelemetry],
+        on_worker_ready: Callable[[int], None] | None = None,
     ) -> None:
         self._worker = worker
         self._registry = registry
         self._settings = settings
         self._telemetry = telemetry
+        self._on_worker_ready = on_worker_ready
 
     def start(self) -> None:
         self._worker.start()
@@ -75,6 +77,11 @@ class OcrExecutionService:
         for event in self._worker.poll_events():
             run_id = str(event.get("run_id") or "")
             kind = str(event.get("kind") or "")
+            if kind == "ready" and self._on_worker_ready is not None:
+                try:
+                    self._on_worker_ready(int(event.get("pid") or 0))
+                except (TypeError, ValueError):
+                    pass
             if not run_id or not kind:
                 continue
             payload = {

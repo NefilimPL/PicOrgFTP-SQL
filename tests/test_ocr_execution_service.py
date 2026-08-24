@@ -97,3 +97,20 @@ def test_execution_service_requests_safe_boundary_cancellation():
 
     assert worker.cancelled == [run_id]
     assert service.snapshot(run_id).cancel_requested is True
+
+
+def test_execution_service_registers_worker_pid_from_ready_event():
+    worker = _FakeWorker()
+    registered: list[int] = []
+    service = OcrExecutionService(
+        worker=worker,
+        registry=OcrProgressRegistry(),
+        settings=lambda: {"model_profiles": ["fast"], "pause_cpu_percent": 85},
+        telemetry=lambda: _telemetry(),
+        on_worker_ready=registered.append,
+    )
+    worker.events = [{"kind": "ready", "pid": 4321}]
+
+    service.pump()
+
+    assert registered == [4321]
