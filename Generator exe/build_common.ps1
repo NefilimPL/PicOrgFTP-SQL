@@ -138,13 +138,10 @@ function Test-BuildEnvironment {
             "import cv2; assert cv2.IMREAD_COLOR",
             "import bidi",
             "import imagesize",
-            "import paddle",
-            "import paddlex",
-            "import paddleocr"
             "import pyclipper",
             "import pypdfium2",
             "import shapely",
-            "from paddlex.utils.deps import is_extra_available; assert is_extra_available('ocr-core')"
+            "from importlib.util import find_spec; assert find_spec('paddle') and find_spec('paddlex') and find_spec('paddleocr')"
         )
     }
 

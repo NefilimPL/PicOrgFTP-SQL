@@ -56,7 +56,30 @@ if ($IncludeVisionModels) {
     $VisionModelCache = Join-Path $WorkPath "ocr-model-cache"
     New-Item -ItemType Directory -Path $VisionModelCache -Force | Out-Null
     $env:PADDLE_PDX_CACHE_HOME = $VisionModelCache
-    Invoke-Native $Python "-c" "from paddleocr import PaddleOCR; profiles=(('PP-OCRv5_mobile_det','PP-OCRv5_mobile_rec'),('PP-OCRv5_server_det','PP-OCRv5_server_rec')); [PaddleOCR(text_detection_model_name=det, text_recognition_model_name=rec, enable_mkldnn=False, use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False) for det, rec in profiles]"
+    $PrepareVisionModels = @"
+import os
+from picorgftp_sql.services.image_dimensions import _model_cache_has_profile
+from picorgftp_sql.services.ocr_profiles import available_ocr_profiles
+
+cache = os.environ['PADDLE_PDX_CACHE_HOME']
+profiles = available_ocr_profiles()
+missing = [profile for profile in profiles if not _model_cache_has_profile(cache, profile)]
+if missing:
+    from paddleocr import PaddleOCR
+    for profile in missing:
+        PaddleOCR(
+            text_detection_model_name=profile.detector_model,
+            text_recognition_model_name=profile.recognizer_model,
+            enable_mkldnn=False,
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+        )
+missing = [profile.id for profile in profiles if not _model_cache_has_profile(cache, profile)]
+if missing:
+    raise RuntimeError('Brakuje modeli OCR po przygotowaniu builda: ' + ', '.join(missing))
+"@
+    Invoke-Native $Python "-c" $PrepareVisionModels
     if (-not (Test-Path -LiteralPath $VisionModelCache -PathType Container)) {
         throw "Nie znaleziono lokalnego cache modeli OCR po przygotowaniu builda."
     }

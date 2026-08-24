@@ -148,10 +148,9 @@ def test_web_build_supports_opt_in_vision_engine_and_embedded_models() -> None:
     assert "pypdfium2" in build_source
     assert "PADDLE_PDX_CACHE_HOME" in build_source
     assert "ocr_models" in build_source
-    assert "PP-OCRv5_mobile_det" in build_source
-    assert "PP-OCRv5_mobile_rec" in build_source
-    assert "PP-OCRv5_server_det" in build_source
-    assert "PP-OCRv5_server_rec" in build_source
+    assert "available_ocr_profiles" in build_source
+    assert "_model_cache_has_profile" in build_source
+    assert "Brakuje modeli OCR po przygotowaniu builda" in build_source
     assert "use_doc_orientation_classify=False" in build_source
     assert "use_doc_unwarping=False" in build_source
     assert "use_textline_orientation=False" in build_source
@@ -167,6 +166,7 @@ def test_vision_build_installs_paddlex_ocr_core_without_headless_opencv() -> Non
     assert "opencv-python-headless" not in source
     assert '"uninstall" "--yes" "opencv-python" "opencv-python-headless" "opencv-contrib-python"' in common_source
     assert '"import cv2; assert cv2.IMREAD_COLOR"' in common_source
+    assert "find_spec('paddleocr')" in common_source
 
 
 def test_four_batch_entry_points_match_the_supported_build_variants() -> None:
