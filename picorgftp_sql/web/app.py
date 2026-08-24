@@ -65,7 +65,7 @@ from ..services.ocr_cache import (
     enqueue_ocr_crop_jobs,
     restore_crop_bbox,
 )
-from ..services.ocr_queue import OcrQueueScheduler
+from ..services.ocr_queue import OcrQueueLease, OcrQueueScheduler
 from ..services.ocr_worker import OcrQueueWorker
 from ..services.ocr_values import (
     comparison_key,
@@ -5075,6 +5075,8 @@ def create_app() -> FastAPI:
         with app.state.ocr_activity_lock:
             return float(app.state.ocr_last_activity)
 
+    app.state.ocr_queue_lease = OcrQueueLease(last_activity=_ocr_last_activity)
+
     def _process_ocr_crop_job(job: dict[str, object]) -> None:
         """Refine a persisted crop, keeping the result attached to its image hash."""
 
@@ -5124,6 +5126,7 @@ def create_app() -> FastAPI:
             requeue_job=lambda job: observability_store().requeue_ocr_crop_job(
                 str(job.get("id") or "")
             ),
+            lease=app.state.ocr_queue_lease,
             now=time.monotonic,
         )
         return scheduler.run_once()

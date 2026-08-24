@@ -1,4 +1,4 @@
-from picorgftp_sql.services.ocr_queue import OcrQueueScheduler
+from picorgftp_sql.services.ocr_queue import OcrQueueLease, OcrQueueScheduler
 from picorgftp_sql.services.ocr_worker import OcrQueueWorker
 
 
@@ -30,20 +30,38 @@ def test_scheduler_pauses_above_hard_cpu_limit():
     assert scheduler.run_once() == "cpu_pause"
 
 
-def test_scheduler_does_not_claim_a_crop_above_configured_ocr_cpu_limit():
+def test_scheduler_claims_a_crop_above_cpu_target_when_admission_gate_is_not_hit():
     claimed = []
     scheduler = OcrQueueScheduler(
         settings=lambda: {"background_enabled": True, "idle_seconds": 0, "max_cpu_percent": 50, "pause_cpu_percent": 85},
         has_active_requests=lambda: False,
         last_activity=lambda: 0,
         cpu_percent=lambda: 60,
-        claim_job=lambda: claimed.append(True),
+        claim_job=lambda: claimed.append(True) or {"id": "ocr-1"},
         process_job=lambda _job: None,
         now=lambda: 100,
     )
 
-    assert scheduler.run_once() == "cpu_limit"
-    assert claimed == []
+    assert scheduler.run_once() == "processed"
+    assert claimed == [True]
+
+
+def test_queue_lease_starts_from_latest_user_activity_and_extends_after_successes():
+    activity = [100.0]
+    lease = OcrQueueLease(last_activity=lambda: activity[0])
+    settings = {
+        "queue_lease_minutes": 60,
+        "queue_success_extension_minutes": 30,
+    }
+
+    assert lease.allows(now=3_699, settings=settings) is True
+    assert lease.allows(now=3_701, settings=settings) is False
+
+    lease.record_success()
+    assert lease.allows(now=5_400, settings=settings) is True
+
+    activity[0] = 5_000
+    assert lease.allows(now=8_601, settings=settings) is False
 
 
 def test_scheduler_requeues_claimed_crop_when_user_becomes_active():

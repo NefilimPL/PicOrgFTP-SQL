@@ -18,6 +18,8 @@ DEFAULT_OCR_SETTINGS: dict[str, object] = {
     "max_memory_percent": 30,
     "max_memory_gb": 4.0,
     "max_disk_busy_percent": 80,
+    "queue_lease_minutes": 60,
+    "queue_success_extension_minutes": 30,
     "model_profiles": ["fast"],
 }
 
@@ -70,6 +72,10 @@ def normalize_ocr_settings(value: object) -> dict[str, object]:
     memory_percent = _bounded_int(raw.get("max_memory_percent"), 30, 1, 100)
     memory_gb = _bounded_float(raw.get("max_memory_gb"), 4.0, 0.1)
     disk_busy = _bounded_int(raw.get("max_disk_busy_percent"), 80, 0, 100)
+    queue_lease = _bounded_int(raw.get("queue_lease_minutes"), 60, 1, 24 * 60)
+    queue_extension = _bounded_int(
+        raw.get("queue_success_extension_minutes"), 30, 0, 24 * 60
+    )
     profiles = normalize_ocr_profile_ids(raw.get("model_profiles")) or ["fast"]
     return {
         "enabled_slots": slots,
@@ -81,5 +87,7 @@ def normalize_ocr_settings(value: object) -> dict[str, object]:
         "max_memory_percent": memory_percent,
         "max_memory_gb": memory_gb,
         "max_disk_busy_percent": disk_busy,
+        "queue_lease_minutes": queue_lease,
+        "queue_success_extension_minutes": queue_extension,
         "model_profiles": profiles,
     }

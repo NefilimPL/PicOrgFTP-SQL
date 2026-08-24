@@ -117,6 +117,12 @@ def test_update_settings_persists_bounded_ocr_collection_limits(monkeypatch):
         "idle_seconds": 0,
         "max_cpu_percent": 75,
         "pause_cpu_percent": 75,
+        "max_memory_mode": "percent",
+        "max_memory_percent": 30,
+        "max_memory_gb": 4.0,
+        "max_disk_busy_percent": 80,
+        "queue_lease_minutes": 60,
+        "queue_success_extension_minutes": 30,
         "model_profiles": ["fast"],
     }
 

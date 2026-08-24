@@ -15,6 +15,8 @@ def test_normalize_ocr_settings_bounds_idle_and_cpu_limits():
         "max_memory_percent": 30,
         "max_memory_gb": 4.0,
         "max_disk_busy_percent": 80,
+        "queue_lease_minutes": 60,
+        "queue_success_extension_minutes": 30,
         "model_profiles": ["fast"],
     }
 
