@@ -71,9 +71,10 @@ function Install-BuildDependencies {
         Invoke-Native $Python "-m" "pip" "install" "--disable-pip-version-check" "-r" (Join-Path $RepoRoot "requirements-web.txt")
     }
     if ($IncludeVisionDependencies) {
-        # The OpenCV wheels all own the cv2 package. Remove all variants so
-        # pip must restore cv2.pyd from the selected contrib wheel below.
-        Invoke-Native $Python "-m" "pip" "uninstall" "--yes" "opencv-python" "opencv-python-headless" "opencv-contrib-python"
+        # The OpenCV wheels all own the cv2 package. Remove only variants
+        # that conflict with the selected contrib wheel, preserving a known
+        # good cached contrib installation for offline rebuilds.
+        Invoke-Native $Python "-m" "pip" "uninstall" "--yes" "opencv-python" "opencv-python-headless"
         Invoke-Native $Python "-m" "pip" "install" "--disable-pip-version-check" "-r" (Join-Path $RepoRoot "requirements-vision.txt")
     }
 }
