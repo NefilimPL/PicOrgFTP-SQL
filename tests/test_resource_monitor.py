@@ -91,6 +91,28 @@ def _monitor(
     )
 
 
+def test_monitor_registers_external_ocr_worker_pid_for_backend_sampling() -> None:
+    class _PidReader(_ReaderSequence):
+        def __init__(self) -> None:
+            super().__init__(cpu=[1])
+            self.worker_pids: list[int | None] = []
+
+        def read_backend(self, worker_pid: int | None = None) -> dict[str, object]:
+            self.worker_pids.append(worker_pid)
+            return super().read_backend(worker_pid)
+
+    events: list[tuple[str, str, dict[str, object]]] = []
+    reader = _PidReader()
+    monitor = _monitor(reader, events)
+
+    monitor.register_ocr_worker_pid(4321)
+    snapshot = monitor.sample_once()
+
+    assert reader.worker_pids == [4321]
+    assert snapshot["backend"]["ocr_worker_registered"] is True
+    assert snapshot["backend"]["ocr_worker_pid"] == 4321
+
+
 def test_monitor_emits_one_alert_after_two_backend_cpu_breaches() -> None:
     events: list[tuple[str, str, dict[str, object]]] = []
     monitor = _monitor(

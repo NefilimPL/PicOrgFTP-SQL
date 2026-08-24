@@ -755,6 +755,12 @@ def analyze_image_values(
             message=f"Nie udalo sie uruchomic lokalnego OCR: {exc}",
         )
 
+    return diagnostics_for_boxes(boxes)
+
+
+def diagnostics_for_boxes(boxes: Iterable[OcrTextBox]) -> ImageOcrDiagnostics:
+    """Turn already-detected text boxes into value diagnostics."""
+
     candidates = [
         OcrDiagnosticCandidate(
             text=str(box.text),

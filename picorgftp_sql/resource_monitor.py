@@ -210,7 +210,10 @@ class ResourceMonitor:
         self._history: deque[dict[str, object]] = deque(maxlen=self.HISTORY_SIZE)
         self._latest: dict[str, object] = {
             "host": {},
-            "backend": {"test_worker_registered": False},
+            "backend": {
+                "test_worker_registered": False,
+                "ocr_worker_registered": False,
+            },
             "detector": self._detector.public_state(),
             "observed_at": self._utc_now(),
         }
@@ -232,6 +235,7 @@ class ResourceMonitor:
         self._worker_temp_dir: str | None = None
         self._worker_effective_thresholds: dict[str, float] = {}
         self._worker_failure_receiver: object | None = None
+        self._ocr_worker_pid: int | None = None
 
     def start(self) -> bool:
         with self._lifecycle_lock:
@@ -274,6 +278,13 @@ class ResourceMonitor:
     def latest_public_snapshot(self) -> dict[str, object]:
         with self._state_lock:
             return copy.deepcopy(self._latest)
+
+    def register_ocr_worker_pid(self, pid: int | None) -> None:
+        """Include the long-lived OCR child in ordinary backend telemetry."""
+
+        normalized = int(pid) if pid is not None and int(pid) > 0 else None
+        with self._state_lock:
+            self._ocr_worker_pid = normalized
 
     def sample_once(self) -> dict[str, object]:
         with self._sampling_lock:
@@ -603,6 +614,7 @@ class ResourceMonitor:
             detection_event = self._worker_detection_event
             persistence_failed_event = self._worker_persistence_failed_event
             effective_thresholds = dict(self._worker_effective_thresholds)
+            ocr_worker_pid = self._ocr_worker_pid
             registered = (
                 worker_process is not None or self._worker_temp_dir is not None
             )
@@ -627,7 +639,7 @@ class ResourceMonitor:
             ):
                 raw_backend = read_with_baseline(worker_pid, baseline_event)
             else:
-                raw_backend = self._readers.read_backend(worker_pid)
+                raw_backend = self._readers.read_backend(worker_pid or ocr_worker_pid)
             backend = _safe_metrics(
                 raw_backend, _BACKEND_PUBLIC_KEYS
             )
@@ -636,6 +648,9 @@ class ResourceMonitor:
         backend["test_worker_registered"] = registered
         if registered:
             backend["test_worker_kind"] = worker_kind
+        backend["ocr_worker_registered"] = ocr_worker_pid is not None
+        if ocr_worker_pid is not None:
+            backend["ocr_worker_pid"] = ocr_worker_pid
         return backend, sampled_worker
 
     def _record_real_test_trigger_persistence(
