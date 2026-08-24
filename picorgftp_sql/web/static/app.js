@@ -13856,8 +13856,8 @@ function renderSettingsOcr() {
     description: "Przed startem kolejnego zadania OCR sprawdzane jest aktualne uzycie calego systemu.",
   });
   const memoryMode = selectField("ocr_max_memory_mode", "Limit RAM", ocrSettings.max_memory_mode || "percent", [
-    { value: "percent", label: "Procent calego RAM" },
-    { value: "gigabytes", label: "GB aktualnego uzycia" },
+    ["percent", "Procent calego RAM"],
+    ["gigabytes", "GB aktualnego uzycia"],
   ]);
   const maxMemoryPercent = inputField("ocr_max_memory_percent", "Aktualne uzycie RAM (%)", ocrSettings.max_memory_percent ?? 30, {
     type: "range", min: 1, max: 100, step: 1,
