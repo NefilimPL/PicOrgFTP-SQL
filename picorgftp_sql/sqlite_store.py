@@ -43,7 +43,7 @@ from .sqlite_connection import (
     try_enable_wal,
 )
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 _WAL_FALLBACK_LOGGER = logging.getLogger("picorgftp_sql.sqlite.wal")
 _WAL_FALLBACK_LOGGER.setLevel(logging.WARNING)
 _WAL_FALLBACK_LOGGER.propagate = False
@@ -1628,6 +1628,28 @@ class SqliteStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_ocr_crop_jobs_pending
                     ON ocr_crop_jobs(status, created_at);
+
+                CREATE TABLE IF NOT EXISTS ocr_progress_runs (
+                    run_id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL CHECK (kind IN ('test', 'queue')),
+                    job_id TEXT NOT NULL DEFAULT '',
+                    state TEXT NOT NULL DEFAULT 'running',
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS ocr_progress_events (
+                    run_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (run_id, sequence),
+                    FOREIGN KEY (run_id) REFERENCES ocr_progress_runs(run_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_ocr_progress_events_run_sequence
+                    ON ocr_progress_events(run_id, sequence);
                 """
             )
             segment_columns = {
@@ -3876,6 +3898,73 @@ class SqliteStore:
             {**dict(row), "bbox": _json_loads(row["bbox_json"], []), "result": _json_loads(row["result_json"], [])}
             for row in rows
         ]
+
+    def create_ocr_progress_run(
+        self, run_id: str, *, kind: str, job_id: str | None
+    ) -> None:
+        self.initialize()
+        now = _now_iso()
+        with self.connection() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO ocr_progress_runs
+                   (run_id, kind, job_id, state, created_at, updated_at)
+                   VALUES (?, ?, ?, 'running', ?, ?)""",
+                (_text(run_id), _text(kind), _text(job_id), now, now),
+            )
+
+    def append_ocr_progress_event(
+        self, run_id: str, sequence: int, kind: str, payload: dict[str, object]
+    ) -> None:
+        self.initialize()
+        with self.connection() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO ocr_progress_events
+                   (run_id, sequence, kind, payload_json, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (_text(run_id), int(sequence), _text(kind), _json_dumps(payload), _now_iso()),
+            )
+
+    def list_ocr_progress_events(
+        self, run_id: str, *, after_sequence: int = 0
+    ) -> list[dict[str, object]]:
+        self.initialize()
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT sequence, kind, payload_json FROM ocr_progress_events
+                   WHERE run_id = ? AND sequence > ? ORDER BY sequence""",
+                (_text(run_id), int(after_sequence)),
+            ).fetchall()
+        return [
+            {
+                "sequence": int(row["sequence"]),
+                "kind": str(row["kind"]),
+                "payload": _json_loads(row["payload_json"], {}),
+            }
+            for row in rows
+        ]
+
+    def finalize_ocr_progress_run(
+        self,
+        run_id: str,
+        *,
+        state: str,
+        result: dict[str, object] | None,
+        error: str | None,
+    ) -> None:
+        self.initialize()
+        with self.connection() as conn:
+            conn.execute(
+                """UPDATE ocr_progress_runs
+                   SET state = ?, result_json = ?, error_message = ?, updated_at = ?
+                   WHERE run_id = ?""",
+                (
+                    _text(state),
+                    _json_dumps(result or {}),
+                    _text(error)[:2048],
+                    _now_iso(),
+                    _text(run_id),
+                ),
+            )
 
     def load_config(self) -> dict[str, Any]:
         """Return the stored config payload."""
