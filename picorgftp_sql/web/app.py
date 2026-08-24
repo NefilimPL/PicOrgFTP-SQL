@@ -5318,12 +5318,20 @@ def create_app() -> FastAPI:
             )
             execution_service = OcrExecutionService(
                 worker=ocr_worker,
-                registry=OcrProgressRegistry(store=observability_store()),
+                registry=OcrProgressRegistry(),
                 settings=lambda: normalize_ocr_settings(
                     config.CONFIG.get(OCR_SETTINGS_KEY, {})
                 ),
                 telemetry=_ocr_resource_telemetry,
-                on_worker_ready=_RESOURCE_MONITOR.register_ocr_worker_pid,
+                on_worker_ready=(
+                    callback
+                    if callable(
+                        callback := getattr(
+                            _RESOURCE_MONITOR, "register_ocr_worker_pid", None
+                        )
+                    )
+                    else None
+                ),
             )
             execution_service.start()
             app.state.ocr_execution_worker = ocr_worker

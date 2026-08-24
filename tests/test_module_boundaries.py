@@ -9,7 +9,7 @@ from picorgftp_sql.web.app import app
 
 SERVICE_MODULES = tuple((Path(__file__).parents[1] / "picorgftp_sql" / "services").glob("*.py"))
 DESKTOP_FTP_PREVIEW_MODULE = Path(__file__).parents[1] / "picorgftp_sql" / "desktop_ftp_preview.py"
-ROUTE_SNAPSHOT_SHA256 = "e0d2e2a6be9cdec1c5ba7e412cd4e1ff0b1dbfa0f2d8bfff347afc147bcd5966"
+ROUTE_SNAPSHOT_SHA256 = "c2416c0cb80f0420a1580aa5b86b1aacaed3331f001f169850770d405fbd6656"
 WEB_STATIC_DIRECTORY = Path(__file__).parents[1] / "picorgftp_sql" / "web" / "static"
 
 
