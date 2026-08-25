@@ -116,6 +116,19 @@ Testy monitora wymagają autoryzacji administracyjnej:
 
 Wynik testu rzeczywistego rozróżnia wykryte przekroczenie, brak wykrycia, błąd trwałego zapisu zdarzenia (`persistence_failed`), błąd uruchomienia lub wykonania, przekroczenie czasu, anulowanie i błąd sprzątania. Wynik **wykryto** oraz alert pojawiają się tylko wtedy, gdy detektor zwykłego próbnika sam zarejestruje rzeczywiste przekroczenie progu backendu w dwie kolejne próbki i trwale zapisze normalne zdarzenie `backend.resource_high`.
 
+## Diagnostyka OCR
+
+W `Ustawienia > OCR` tester łączy wynik szybkiego modelu z wynikiem dokładnego
+modelu dla tego samego wycinka. Dwie kolumny są widoczne podczas skanowania i
+po jego zakończeniu. Po najechaniu wiersza widoczne są surowe odczyty, pola,
+pewności, przyczyna decyzji i czasy etapów.
+
+Próg dokładnego skanowania ma zakres 0-100 i działa jako `pewność <= próg`.
+Domyślne `99` pomija tylko odczyty 100%; `100` skanuje wszystkie wycinki.
+Porównanie OCR zachowuje części dziesiętne i uznaje `23,4` oraz `23.4` za tę
+samą wartość. Wycinek dokładnego modelu powstaje z pola szybkiego modelu,
+z symetrycznym marginesem 25% dłuższego boku (minimum 8 px, maksimum 64 px).
+
 ## Bezpieczeństwo LAN
 
 Panel jest przeznaczony do zaufanej sieci LAN albo VPN. Nie wystawiaj tego panelu bezpośrednio do publicznego internetu bez dodatkowej warstwy zabezpieczeń, aktualizacji haseł, kontroli dostępu i przeglądu konfiguracji serwera.

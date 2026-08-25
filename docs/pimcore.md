@@ -32,7 +32,7 @@ Dostępne funkcje: `keep`, `trim`, `normalize_spaces`, `upper`, `lower`, `title`
 
 ### Walidacja OCR
 
-Przy mapowaniu pola zaznacz `Porównuj wynik z OCR`, aby kontrolować ręcznie wpisaną albo wyliczoną wartość względem wszystkich aktualnie wybranych slotów OCR. Porównanie normalizuje przecinek do kropki, ignoruje część po separatorze dziesiętnym i traktuje każdy znak specjalny jako `?`: `120/140` oraz `120-140` są więc zgodne, a `120--140` pozostaje odrębnym `120??140`.
+Przy mapowaniu pola zaznacz `Porównuj wynik z OCR`, aby kontrolować ręcznie wpisaną albo wyliczoną wartość względem wszystkich aktualnie wybranych slotów OCR. Porównanie normalizuje przecinek do kropki, ale zachowuje całą część dziesiętną: `23,4` i `23.4` są zgodne, natomiast `23,4` i `23` nie. Każdy znak specjalny jest traktowany jako `?`: `120/140` oraz `120-140` są więc zgodne, a `120--140` pozostaje odrębnym `120??140`.
 
 Gdy gotowy wynik OCR nie pasuje, pole jest oznaczone na czerwono. Podpowiedź pokazuje wszystkie wartości znalezione na zdjęciach, a przyciski ✓ i × odpowiednio potwierdzają wpis albo przywracają poprzednią wartość (lub czyszczą nowe pole). Obraz jest analizowany wyłącznie lokalnie; nie trafia do zewnętrznego API.
 
@@ -47,6 +47,10 @@ Jeżeli w slocie nie ma obrazu albo OCR nie jest dostępny, wynik pozostaje bez 
 ### Tester OCR i warianty EXE
 
 Administrator może sprawdzić jakość odczytu w `Ustawienia > OCR`, wskazać sloty do zbierania danych i uruchomić test obrazu. Tester pokazuje na żywo sektory wykryte przez profil szybki oraz kolejne wycinki przekazywane do profilu dokładnego; można poprosić o zatrzymanie po bezpiecznym zakończeniu bieżącego etapu. Ten sam proces OCR obsługuje tester, początkowe skanowanie slotów i dopracowywanie wycinków.
+
+Przy włączonych obu profilach każdy wiersz diagnostyki ma dwie sparowane kolumny: po lewej odczyt szybkiego modelu, a po prawej odczyty dokładnego modelu z **tego samego wycinka**. Widok na żywo i wynik końcowy mają ten sam układ. Najechanie kursorem lub fokus wiersza podświetla odpowiadające pola na obrazie i pokazuje surowy tekst, wartość porównawczą, pewność, pole źródłowe, faktyczny wycinek, pola wynikowe oraz czas szybkiego OCR, przygotowania wycinka, dokładnego OCR i całego przebiegu. Podpisy pól są rozmieszczane kolejno nad, pod, z prawej lub lewej strony, a następnie na wolnej krawędzi obrazu, aby się nie nakładały.
+
+Pole `Skanuj dokladnym modelem przy pewnosci szybkiego do (%)` ma suwak i pole liczbowe od 0 do 100; domyślna wartość to `99`. Dokładny model skanuje wycinek, gdy pewność szybkiego modelu jest **mniejsza lub równa** progowi. Dlatego `100` skanuje wszystkie wycinki (także odczyt o 100%), a `50` tylko odczyty do 50%. Wycinek zawsze pochodzi z regionu szybkiego modelu; otrzymuje symetryczny margines równy 25% dłuższego boku, zaokrąglony do pikseli i ograniczony do 8–64 px przed przycięciem do granic obrazu. Pominięcie przez próg, pusty wynik dokładnego modelu i niepoprawny region są wyświetlane z konkretną przyczyną, a nie jako pusta kolumna.
 
 Limit CPU jest twardym limitem procesu OCR przez Windows Job Object i obowiązuje przez całą pracę modelu. Próg `Nie uruchamiaj powyżej CPU` jest niezależną bramką dla następnego etapu/zadania. RAM można ustawić jako procent lub GB **aktualnego użycia**, a aktywność dysku jako procent czasu I/O (nie zajętego miejsca). Przekroczenie RAM/dysku spowalnia OCR między etapami; uruchomione wywołanie modelu nie jest brutalnie przerywane. Kolejka działa od ostatniej aktywności użytkownika przez 60 minut i każde zakończone zadanie dodaje następne 30 minut.
 
