@@ -11,7 +11,22 @@ import uuid
 from typing import Dict
 
 from openpyxl import Workbook, load_workbook
-from tkinter import messagebox
+
+try:
+    from tkinter import messagebox
+except ModuleNotFoundError:
+    class _HeadlessMessageBox:
+        """Keep Excel helpers importable by the web-only frozen EXE."""
+
+        @staticmethod
+        def showerror(*_args, **_kwargs) -> None:
+            return None
+
+        @staticmethod
+        def showwarning(*_args, **_kwargs) -> None:
+            return None
+
+    messagebox = _HeadlessMessageBox()
 
 from .common import DEFAULT_SLOT_DEFS, ELEMENT_PIC, NON_PIC, OPEN_FURNITURE
 from .logging_utils import log_error_loc, log_info_loc
