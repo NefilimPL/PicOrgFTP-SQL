@@ -61,6 +61,103 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
+    def test_ocr_background_queue_renders_safe_rows_in_workspace_position(self) -> None:
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        source = APP_JS.read_text(encoding="utf-8")
+        renderer = source[
+            source.index("function renderOcrBackgroundQueue") : source.index(
+                "function renderSettingsOcr", source.index("function renderOcrBackgroundQueue")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the OCR queue rendering contract")
+        script = f"""
+const makeNode = (tag) => ({{
+  tag, className: "", textContent: "", hidden: false, src: "", alt: "",
+  children: [],
+  append(...items) {{ this.children.push(...items); }},
+  appendChild(item) {{ this.children.push(item); return item; }},
+  replaceChildren(...items) {{ this.children = items; this.textContent = ""; }},
+  classList: {{ toggle() {{}}, add() {{}}, remove() {{}} }},
+}});
+const document = {{ createElement: makeNode }};
+const ocrBackgroundQueuePanel = makeNode("section");
+const ocrBackgroundQueueSummary = makeNode("span");
+const ocrBackgroundQueueList = makeNode("div");
+{renderer}
+renderOcrBackgroundQueue({{
+  jobs: [
+    {{ thumbnail_url: "/api/file?token=crop-1", status: "processing", result: [] }},
+    {{ thumbnail_url: "/api/file?token=crop-2", status: "completed", result: ["20kg \\u2192 20"] }},
+  ],
+  remaining_count: 7,
+}});
+console.log(JSON.stringify({{
+  hidden: ocrBackgroundQueuePanel.hidden,
+  summary: ocrBackgroundQueueSummary.textContent,
+  firstImage: ocrBackgroundQueueList.children[0]?.children[0]?.src || "",
+  secondImage: ocrBackgroundQueueList.children[1]?.children[0]?.src || "",
+  secondText: ocrBackgroundQueueList.children[1]?.children[1]?.textContent || "",
+}}));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertFalse(result["hidden"])
+        self.assertEqual(result["summary"], "+7 kolejnych")
+        self.assertEqual(result["firstImage"], "/api/file?token=crop-1")
+        self.assertEqual(result["secondImage"], "/api/file?token=crop-2")
+        self.assertIn("20kg → 20", result["secondText"])
+        self.assertIn('id="ocrBackgroundQueuePanel"', html)
+        self.assertGreater(html.index('id="ocrBackgroundQueuePanel"'), html.index('id="processQueuePanel"'))
+        self.assertLess(html.index('id="ocrBackgroundQueuePanel"'), html.index('id="slotsTitle"'))
+
+    def test_clearing_slot_reports_its_removed_file_token_to_ocr(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        clear_assignment = source[
+            source.index("function clearSlotAssignment") : source.index(
+                "function setSlotFile", source.index("function clearSlotAssignment")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the OCR slot activity contract")
+        script = f"""
+const state = {{
+  files: new Map(), loadedPhotos: new Map([["01", {{ token: "old-slot-token" }}]]),
+  slotFits: new Map(), slotSources: new Map(), userSelectedSlotSources: new Map(),
+}};
+const calls = [];
+const bumpSlotRevision = () => {{}};
+const markSlotDeletion = () => {{}};
+const revokeFilePreviewUrl = () => {{}};
+const dismissSimilarCandidate = () => {{}};
+const slotAssignmentToken = (prefix) => state.loadedPhotos.get(prefix)?.token || "";
+const recordOcrActivity = (payload) => calls.push(payload);
+{clear_assignment}
+clearSlotAssignment("01");
+console.log(JSON.stringify(calls));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            json.loads(completed.stdout),
+            [{"removedSlotToken": "old-slot-token"}],
+        )
+
     def test_settings_ocr_tab_has_diagnostic_controls_and_overlay_contract(self) -> None:
         html = _parse(INDEX_HTML)
         source = APP_JS.read_text(encoding="utf-8")
@@ -1105,6 +1202,8 @@ const createSlotFileUpload = (_prefix, file) => ({{ file }});
 const dismissSimilarCandidate = () => {{}};
 const updateSubmitButtonState = () => {{}};
 const uploadSlotFile = () => {{}};
+const slotAssignmentToken = () => "";
+const recordOcrActivity = () => {{}};
 let immediateRefreshes = 0;
 let debouncedRefreshes = 0;
 let occupiedAtRefresh = [];

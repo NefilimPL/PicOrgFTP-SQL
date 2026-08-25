@@ -319,6 +319,9 @@ const slotTemplate = document.querySelector("#slotTemplate");
 const processQueuePanel = document.querySelector("#processQueuePanel");
 const processQueueSummary = document.querySelector("#processQueueSummary");
 const processQueueList = document.querySelector("#processQueueList");
+const ocrBackgroundQueuePanel = document.querySelector("#ocrBackgroundQueuePanel");
+const ocrBackgroundQueueSummary = document.querySelector("#ocrBackgroundQueueSummary");
+const ocrBackgroundQueueList = document.querySelector("#ocrBackgroundQueueList");
 const productForm = document.querySelector("#productForm");
 const formStatus = document.querySelector("#formStatus");
 const resultOutput = document.querySelector("#resultOutput");
@@ -993,6 +996,24 @@ function slotFileType(value) {
 
 function slotFileToken(value) {
   return String(slotFileItem(value)?.token || "").trim();
+}
+
+function slotAssignmentToken(prefix) {
+  return (
+    slotFileToken(state.files.get(prefix)) ||
+    selectedPhotoToken(state.loadedPhotos.get(prefix), prefix)
+  );
+}
+
+function recordOcrActivity({ removedSlotToken = "", kind = "slot-change" } = {}) {
+  return requestJson("/api/ocr/activity", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      kind,
+      removed_slot_token: String(removedSlotToken || "").trim(),
+    }),
+  }).catch(() => {});
 }
 
 function slotUploadProgress(value) {
@@ -3568,8 +3589,10 @@ function renderSqlPreview(prefix, photo, preview, empty) {
 function clearSlotAssignment(prefix, options = {}) {
   bumpSlotRevision(prefix);
   const markDelete = options.markDelete !== false;
+  const removedSlotToken = markDelete ? slotAssignmentToken(prefix) : "";
   if (markDelete) {
     markSlotDeletion(prefix, state.loadedPhotos.get(prefix));
+    recordOcrActivity({ removedSlotToken });
   }
   revokeFilePreviewUrl(prefix);
   state.files.delete(prefix);
@@ -3582,6 +3605,7 @@ function clearSlotAssignment(prefix, options = {}) {
 
 function setSlotFile(prefix, file, options = {}) {
   const validationError = uploadFileValidationError(file);
+  const removedSlotToken = slotAssignmentToken(prefix);
   bumpSlotRevision(prefix);
   markSlotDeletion(prefix, state.loadedPhotos.get(prefix));
   revokeFilePreviewUrl(prefix);
@@ -3599,6 +3623,7 @@ function setSlotFile(prefix, file, options = {}) {
     updateSubmitButtonState();
     return item;
   }
+  recordOcrActivity({ removedSlotToken });
   uploadSlotFile(prefix, item);
   startSimilarFileLookup({ immediate: true });
   return item;
@@ -3660,6 +3685,7 @@ function moveSlotContent(sourcePrefix, targetPrefix) {
   if (!source) {
     return;
   }
+  recordOcrActivity();
   const target = getSlotAssignment(targetPrefix);
   if (target) {
     markSlotDeletion(targetPrefix, state.loadedPhotos.get(targetPrefix));
@@ -7115,6 +7141,7 @@ function startBackgroundPollers() {
   });
   state.runtimeStatusPoller.start().catch(() => {});
   createPoller("logs", 15000, pollLogStatus).schedule(15000);
+  createPoller("ocr-queue", 2000, refreshOcrBackgroundQueue).schedule(2000);
 }
 
 document.addEventListener("visibilitychange", () => {
@@ -7745,6 +7772,7 @@ function clearSelectedFiles() {
 }
 
 async function loadPhotosForEntry(entry, options = {}) {
+  recordOcrActivity({ kind: "data-load" });
   const started = performance.now();
   const progressive = options.progressive !== false;
   const targetPrefixes = new Set((options.prefixes || []).map((prefix) => String(prefix || "").trim()).filter(Boolean));
@@ -7945,6 +7973,7 @@ async function loadBootstrap(options = {}) {
   renderListEditor();
   updateRuntimeMetrics();
   refreshRuntimeDetailViews();
+  refreshOcrBackgroundQueue().catch(() => {});
 }
 
 async function refreshFileIndexStatus() {
@@ -13937,44 +13966,61 @@ function renderOcrDiagnostics(result) {
   return renderOcrDiagnosticView(result).element;
 }
 
-function renderOcrBackgroundQueue(jobs) {
-  const queue = document.createElement("div");
-  queue.className = "ocr-background-queue wide-field";
-  const heading = document.createElement("h3");
-  heading.textContent = "Kolejka dopracowywania OCR";
-  const items = Array.isArray(jobs) ? jobs : [];
-  if (!items.length) {
-    const empty = document.createElement("p");
-    empty.className = "settings-note";
-    empty.textContent = "Brak oczekujacych lub aktualnie skanowanych wycinkow.";
-    queue.append(heading, empty);
-    return queue;
+function renderOcrBackgroundQueue(payload = {}) {
+  if (!ocrBackgroundQueuePanel || !ocrBackgroundQueueSummary || !ocrBackgroundQueueList) {
+    return;
   }
-  const list = document.createElement("div");
-  list.className = "ocr-background-queue-list";
+  const items = Array.isArray(payload.jobs) ? payload.jobs : [];
+  const remaining = Math.max(0, Number(payload.remaining_count) || 0);
+  ocrBackgroundQueuePanel.hidden = false;
+  ocrBackgroundQueueSummary.textContent = remaining ? `+${remaining} kolejnych` : "";
+  ocrBackgroundQueueList.replaceChildren();
+  if (!items.length) {
+    ocrBackgroundQueueList.className = "ocr-background-queue-list empty-state";
+    ocrBackgroundQueueList.textContent = "Brak oczekujacych lub aktualnie skanowanych wycinkow.";
+    return;
+  }
+  ocrBackgroundQueueList.className = "ocr-background-queue-list";
   for (const job of items) {
     const card = document.createElement("article");
     card.className = `ocr-background-queue-item status-${String(job.status || "pending")}`;
     if (job.thumbnail_url) {
       const image = document.createElement("img");
       image.src = String(job.thumbnail_url);
-      image.alt = "Wycinek oczekujacy na OCR";
+      image.alt = "Wycinek OCR";
       card.appendChild(image);
     }
     const details = document.createElement("div");
     const state = String(job.status || "pending");
-    details.textContent = state === "processing"
+    const stateLabel = state === "processing"
       ? "Skanowanie w tle"
       : state === "pending"
         ? "Oczekuje na bezczynnosc uzytkownikow"
         : state === "completed"
           ? "Zakonczono"
           : state;
+    const result = Array.isArray(job.result)
+      ? job.result.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+    details.textContent = result.length ? `${stateLabel}: ${result.join(", ")}` : stateLabel;
     card.appendChild(details);
-    list.appendChild(card);
+    ocrBackgroundQueueList.appendChild(card);
   }
-  queue.append(heading, list);
-  return queue;
+}
+
+async function refreshOcrBackgroundQueue() {
+  if (!ocrBackgroundQueuePanel) {
+    return;
+  }
+  try {
+    renderOcrBackgroundQueue(await requestJson("/api/ocr/jobs"));
+  } catch (error) {
+    if (error?.status === 403) {
+      ocrBackgroundQueuePanel.hidden = true;
+      return;
+    }
+    ocrBackgroundQueuePanel.hidden = true;
+  }
 }
 
 function renderSettingsOcr() {
@@ -14068,6 +14114,12 @@ function renderSettingsOcr() {
     Boolean(ocrSettings.background_enabled),
     "Kolejka dziala dopiero po okresie bez aktywnosci uzytkownika."
   );
+  const queueVisibility = checkField(
+    "ocr_background_queue_visible_to_users",
+    "Pokaz kolejke dopracowywania OCR uzytkownikom",
+    Boolean(ocrSettings.background_queue_visible_to_users),
+    "Administrator widzi kolejke zawsze; zwykli uzytkownicy tylko po wlaczeniu tej opcji."
+  );
   const profiles = document.createElement("div");
   profiles.className = "ocr-profile-options wide-field";
   const profileHeading = document.createElement("div");
@@ -14143,11 +14195,10 @@ function renderSettingsOcr() {
   cancelAnalyze.hidden = true;
   const results = document.createElement("div");
   results.className = "wide-field";
-  const queueOutput = document.createElement("div");
-  queueOutput.className = "wide-field";
   const collection = settingsFieldGroup(
     "Zbieranie wartosci OCR",
     background,
+    queueVisibility,
     idleSeconds,
     maxCpu,
     pauseCpu,
@@ -14163,8 +14214,7 @@ function renderSettingsOcr() {
   collection.classList.add("ocr-collection-settings");
   form.append(
     collection,
-    settingsFieldGroup("Tester OCR", status, engineInfo, file, actionRow(analyze, cancelAnalyze), results),
-    queueOutput
+    settingsFieldGroup("Tester OCR", status, engineInfo, file, actionRow(analyze, cancelAnalyze), results)
   );
   analyze.addEventListener("click", async () => {
     const selected = fileInput.files?.[0];
@@ -14246,6 +14296,7 @@ function renderSettingsOcr() {
       enabled_slots: [...form.querySelectorAll('[name="ocr_enabled_slot"]:checked')].map((input) => input.value),
       model_profiles: [...form.querySelectorAll('[name="ocr_model_profile"]:checked')].map((input) => input.value),
       background_enabled: data.has("ocr_background_enabled"),
+      background_queue_visible_to_users: data.has("ocr_background_queue_visible_to_users"),
       idle_seconds: data.get("ocr_idle_seconds"),
       max_cpu_percent: data.get("ocr_max_cpu_percent"),
       pause_cpu_percent: data.get("ocr_pause_cpu_percent"),
@@ -14301,14 +14352,6 @@ function renderSettingsOcr() {
     })
     .catch((error) => {
       status.textContent = error.message || "Nie udalo sie odczytac statusu OCR.";
-    });
-  requestJson("/api/ocr/jobs")
-    .then((payload) => queueOutput.appendChild(renderOcrBackgroundQueue(payload.jobs)))
-    .catch((error) => {
-      const note = document.createElement("p");
-      note.className = "settings-note";
-      note.textContent = error.message || "Nie udalo sie odczytac kolejki OCR.";
-      queueOutput.appendChild(note);
     });
 }
 
@@ -14841,6 +14884,7 @@ function handleProductSubmitError(error) {
 
 async function submitProductForm() {
   clearResult();
+  recordOcrActivity();
   try {
     ensureSlotUploadsReady();
     setBusy(true, "Sprawdzanie list...");
