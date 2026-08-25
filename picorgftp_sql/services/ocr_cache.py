@@ -124,7 +124,11 @@ def enqueue_ocr_crop_jobs(
             top = max(0, min(source.height, top))
             right = max(left + 1, min(source.width, right))
             bottom = max(top + 1, min(source.height, bottom))
-            crop = source.crop((left, top, right, bottom)).convert("RGB")
+            crop_left = max(0, left - 8)
+            crop_top = max(0, top - 8)
+            crop_right = min(source.width, right + 8)
+            crop_bottom = min(source.height, bottom + 8)
+            crop = source.crop((crop_left, crop_top, crop_right, crop_bottom)).convert("RGB")
             crop = crop.resize((crop.width * 4, crop.height * 4), Image.Resampling.LANCZOS)
             crop = ImageEnhance.Sharpness(crop).enhance(1.8)
             job_id = f"ocr-{uuid.uuid4().hex}"
@@ -134,7 +138,7 @@ def enqueue_ocr_crop_jobs(
                 {
                     "id": job_id,
                     "image_hash": image_hash,
-                    "bbox": [left, top, right, bottom],
+                    "bbox": [crop_left, crop_top, crop_right, crop_bottom],
                     "thumbnail_path": str(crop_path),
                 }
             )

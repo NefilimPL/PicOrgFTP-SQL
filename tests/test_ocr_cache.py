@@ -71,6 +71,7 @@ def test_enqueue_ocr_crop_jobs_persists_a_real_crop_for_each_numeric_value(tmp_p
         dimensions={},
         candidates=[
             OcrDiagnosticCandidate("120/140", 0.91, (10, 12, 40, 30), None, "120?140", True),
+            OcrDiagnosticCandidate("4", 0.93, (0, 0, 4, 5), None, "4", True),
             OcrDiagnosticCandidate("tekst", 0.98, (42, 12, 70, 30), None, "", False),
         ],
     )
@@ -84,10 +85,14 @@ def test_enqueue_ocr_crop_jobs_persists_a_real_crop_for_each_numeric_value(tmp_p
     )
 
     jobs = store.list_ocr_crop_jobs()
-    assert len(job_ids) == 1
+    assert len(job_ids) == 2
     assert jobs[0]["image_hash"] == "a" * 64
-    assert jobs[0]["bbox"] == [10, 12, 40, 30]
-    assert (tmp_path / "ocr-crops" / f"{job_ids[0]}.png").is_file()
+    assert jobs[0]["bbox"] == [2, 4, 48, 38]
+    assert jobs[1]["bbox"] == [0, 0, 12, 13]
+    with Image.open(tmp_path / "ocr-crops" / f"{job_ids[0]}.png") as crop:
+        assert crop.size == (184, 136)
+    with Image.open(tmp_path / "ocr-crops" / f"{job_ids[1]}.png") as crop:
+        assert crop.size == (48, 52)
 
 
 def test_collect_image_values_passes_fresh_diagnostics_to_crop_queue_callback(tmp_path):

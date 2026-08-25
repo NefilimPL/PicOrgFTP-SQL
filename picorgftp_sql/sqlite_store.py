@@ -3908,6 +3908,38 @@ class SqliteStore:
             )
         return [str(row["thumbnail_path"] or "") for row in rows if row["thumbnail_path"]]
 
+    def cancel_pending_ocr_crop_jobs(self, image_hash: str) -> list[str]:
+        """Discard pending refinement rows for one removed image content hash."""
+
+        self.initialize()
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT thumbnail_path FROM ocr_crop_jobs
+                   WHERE status = 'pending' AND image_hash = ?""",
+                (_text(image_hash),),
+            ).fetchall()
+            conn.execute(
+                "DELETE FROM ocr_crop_jobs WHERE status = 'pending' AND image_hash = ?",
+                (_text(image_hash),),
+            )
+        return [str(row["thumbnail_path"] or "") for row in rows if row["thumbnail_path"]]
+
+    def purge_completed_ocr_crop_jobs(self, before: str) -> list[str]:
+        """Discard completed refinement rows older than an ISO-UTC cutoff."""
+
+        self.initialize()
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT thumbnail_path FROM ocr_crop_jobs
+                   WHERE status = 'completed' AND updated_at < ?""",
+                (_text(before),),
+            ).fetchall()
+            conn.execute(
+                "DELETE FROM ocr_crop_jobs WHERE status = 'completed' AND updated_at < ?",
+                (_text(before),),
+            )
+        return [str(row["thumbnail_path"] or "") for row in rows if row["thumbnail_path"]]
+
     def list_ocr_crop_jobs(self) -> list[dict[str, object]]:
         self.initialize()
         with self.connection() as conn:

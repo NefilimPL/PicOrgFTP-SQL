@@ -8,6 +8,7 @@ def test_normalize_ocr_settings_bounds_idle_and_cpu_limits():
     ) == {
         "enabled_slots": [],
         "background_enabled": False,
+        "background_queue_visible_to_users": False,
         "idle_seconds": 0,
         "max_cpu_percent": 100,
         "pause_cpu_percent": 100,
@@ -26,6 +27,12 @@ def test_normalize_ocr_settings_removes_duplicate_and_empty_slots():
     assert normalize_ocr_settings({"enabled_slots": ["15", "", "15", 16]})[
         "enabled_slots"
     ] == ["15", "16"]
+
+
+def test_normalize_ocr_settings_keeps_background_queue_visibility_flag():
+    assert normalize_ocr_settings({"background_queue_visible_to_users": True})[
+        "background_queue_visible_to_users"
+    ] is True
 
 
 def test_normalize_ocr_settings_keeps_known_profiles_in_requested_order():
