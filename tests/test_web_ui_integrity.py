@@ -225,6 +225,9 @@ console.log(JSON.stringify(calls));
         self.assertIn('requestJson(`/api/ocr/scan?token=${encodeURIComponent(token)}`)', source)
         self.assertIn("ocr-slot-open-overlay", css)
         self.assertIn('overlay.className = "ocr-slot-open-overlay";', source)
+        self.assertIn("function refreshOcrSlotStates", source)
+        self.assertIn('requestJson(`/api/ocr/scan?token=${encodeURIComponent(token)}`)', source)
+        self.assertIn('createPoller("ocr-slot-state", 1500, refreshOcrSlotStates)', source)
 
     def test_pimcore_export_selection_has_a_legacy_chrome_border_fallback(self) -> None:
         css = APP_CSS.read_text(encoding="utf-8")

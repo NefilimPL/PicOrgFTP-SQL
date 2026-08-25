@@ -69,6 +69,7 @@ from ..services.ocr_cache import (
     collect_image_values,
     enqueue_ocr_crop_jobs,
     enqueue_ocr_fast_image_job,
+    image_content_hash,
     restore_crop_bbox,
 )
 from ..services.ocr_queue import OcrQueueLease, OcrQueueScheduler
@@ -1501,6 +1502,19 @@ def _schedule_ocr_value_collection(slot: object, path: str) -> str:
     if str(slot or "").strip() not in enabled_slots:
         return "disabled"
     canonical_path = os.path.realpath(os.path.abspath(path))
+    try:
+        cached_scan = observability_store().get_ocr_scan(
+            image_content_hash(canonical_path)
+        )
+        if (
+            isinstance(cached_scan, dict)
+            and str(cached_scan.get("state") or "") == "completed"
+        ):
+            return "completed"
+    except Exception:
+        # Cache lookup must not make assigning a slot fail; collection below
+        # remains the source of truth and will record any OCR error.
+        pass
     with _OCR_COLLECTION_LOCK:
         if canonical_path in _OCR_COLLECTION_PATHS:
             return "scanning"

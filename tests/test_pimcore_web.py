@@ -2205,6 +2205,28 @@ def test_selected_ocr_slot_starts_background_value_collection(monkeypatch):
     assert callable(calls[0][5])
 
 
+def test_selected_ocr_slot_reports_completed_cached_scan_without_rescheduling(
+    tmp_path, monkeypatch
+):
+    from PIL import Image
+    from picorgftp_sql.services.ocr_cache import image_content_hash
+
+    image = tmp_path / "already-scanned.png"
+    Image.new("RGB", (20, 20), "white").save(image)
+    store = SqliteStore(str(tmp_path / "ocr.sqlite"))
+    store.upsert_ocr_scan(image_content_hash(str(image)), [], "completed")
+
+    monkeypatch.setitem(web_app.config.CONFIG, "ocr", {"enabled_slots": ["15"]})
+    monkeypatch.setattr(web_app, "observability_store", lambda: store)
+    monkeypatch.setattr(
+        web_app.threading,
+        "Thread",
+        lambda **_kwargs: pytest.fail("completed OCR scan must not start again"),
+    )
+
+    assert web_app._schedule_ocr_value_collection("15", str(image)) == "completed"
+
+
 def test_selected_ocr_slot_queues_full_image_before_accurate_crops(tmp_path, monkeypatch):
     from PIL import Image
 

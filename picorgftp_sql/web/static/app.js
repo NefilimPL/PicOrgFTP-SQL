@@ -7142,6 +7142,7 @@ function startBackgroundPollers() {
   state.runtimeStatusPoller.start().catch(() => {});
   createPoller("logs", 15000, pollLogStatus).schedule(15000);
   createPoller("ocr-queue", 2000, refreshOcrBackgroundQueue).schedule(2000);
+  createPoller("ocr-slot-state", 1500, refreshOcrSlotStates).schedule(1500);
 }
 
 document.addEventListener("visibilitychange", () => {
@@ -14024,6 +14025,36 @@ async function refreshOcrBackgroundQueue() {
     }
     ocrBackgroundQueuePanel.hidden = true;
   }
+}
+
+async function refreshOcrSlotStates() {
+  const pending = [];
+  for (const [prefix, item] of state.files.entries()) {
+    if (String(item?.ocr_state || "") === "scanning" && slotFileToken(item)) {
+      pending.push([prefix, item, slotFileToken(item)]);
+    }
+  }
+  for (const [prefix, photo] of state.loadedPhotos.entries()) {
+    if (
+      !state.files.has(prefix)
+      && String(photo?.ocr_state || "") === "scanning"
+      && String(photo?.token || "")
+    ) {
+      pending.push([prefix, photo, String(photo.token)]);
+    }
+  }
+  await Promise.all(pending.map(async ([prefix, item, token]) => {
+    try {
+      const scan = await requestJson(`/api/ocr/scan?token=${encodeURIComponent(token)}`);
+      const nextState = String(scan?.state || "");
+      if (nextState && nextState !== "missing" && nextState !== item.ocr_state) {
+        item.ocr_state = nextState;
+        updateSlotPreview(prefix);
+      }
+    } catch (_error) {
+      // A transient scan lookup must not remove the in-progress indication.
+    }
+  }));
 }
 
 function renderSettingsOcr() {
