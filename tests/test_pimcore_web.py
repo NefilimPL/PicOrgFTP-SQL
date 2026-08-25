@@ -2179,8 +2179,8 @@ def test_selected_ocr_slot_starts_background_value_collection(monkeypatch):
     monkeypatch.setattr(
         web_app,
         "collect_image_values",
-        lambda path, *, store, analyze, enqueue_crops=None: calls.append(
-            (path, store, analyze, enqueue_crops)
+        lambda path, *, store, analyze, enqueue_crops=None, start_fast_scan=None, finish_fast_scan=None: calls.append(
+            (path, store, analyze, enqueue_crops, start_fast_scan, finish_fast_scan)
         ),
         raising=False,
     )
@@ -2196,9 +2196,49 @@ def test_selected_ocr_slot_starts_background_value_collection(monkeypatch):
             store,
             web_app._analyze_image_values_with_configured_profiles,
             calls[0][3],
+            calls[0][4],
+            calls[0][5],
         )
     ]
     assert callable(calls[0][3])
+    assert callable(calls[0][4])
+    assert callable(calls[0][5])
+
+
+def test_selected_ocr_slot_queues_full_image_before_accurate_crops(tmp_path, monkeypatch):
+    from PIL import Image
+
+    class ImmediateThread:
+        def __init__(self, *, target, daemon, name):
+            self.target = target
+            self.daemon = daemon
+            self.name = name
+
+        def start(self):
+            self.target()
+
+    image = tmp_path / "slot.png"
+    Image.new("RGB", (80, 60), "white").save(image)
+    store = SqliteStore(str(tmp_path / "ocr.sqlite"))
+    diagnostics = ImageOcrDiagnostics(
+        available=True,
+        dimensions={},
+        candidates=[OcrDiagnosticCandidate("23,4", 0.97, (10, 12, 40, 30), None, "23.4", True)],
+    )
+    monkeypatch.setitem(web_app.config.CONFIG, "ocr", {"enabled_slots": ["15"]})
+    monkeypatch.setattr(web_app.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(web_app, "observability_store", lambda: store)
+    monkeypatch.setattr(web_app, "_ocr_crop_root", lambda: str(tmp_path / "ocr-crops"))
+    monkeypatch.setattr(web_app, "_analyze_image_values_with_configured_profiles", lambda _path: diagnostics)
+
+    assert web_app._schedule_ocr_value_collection("15", str(image)) == "scanning"
+
+    jobs = store.list_ocr_crop_jobs()
+    assert [job["kind"] for job in jobs] == ["fast", "accurate"]
+    assert [job["status"] for job in jobs] == ["completed", "pending"]
+    assert jobs[0]["result"] == [
+        {"text": "23,4", "comparison": "23.4", "confidence": 0.97, "bbox": [10, 12, 40, 30]}
+    ]
 
 
 def test_admin_can_read_ocr_slots_and_background_queue(tmp_path, monkeypatch):
@@ -2266,8 +2306,54 @@ def test_admin_can_read_ocr_slots_and_background_queue(tmp_path, monkeypatch):
     assert len(payload["jobs"]) == 5
     assert payload["remaining_count"] == 2
     assert payload["jobs"][0]["status"] == "processing"
-    assert payload["jobs"][-1]["result"] == ["20kg → 20"]
-    assert set(payload["jobs"][0]) == {"thumbnail_url", "status", "result"}
+    assert set(payload["jobs"][0]) == {"kind", "thumbnail_url", "status", "result"}
+
+
+def test_ocr_background_queue_keeps_fast_image_before_accurate_crops(tmp_path, monkeypatch):
+    store = SqliteStore(str(tmp_path / "ocr.sqlite"))
+    crop_root = tmp_path / "ocr-crops"
+    crop_root.mkdir()
+    full_image = crop_root / "full-image.png"
+    full_image.write_bytes(b"full-image")
+    accurate_crop = crop_root / "accurate-crop.png"
+    accurate_crop.write_bytes(b"accurate-crop")
+    store.enqueue_ocr_crop_job(
+        {
+            "id": "fast-image",
+            "image_hash": "fast-image-hash",
+            "bbox": [0, 0, 800, 600],
+            "thumbnail_path": str(full_image),
+            "kind": "fast",
+            "status": "processing",
+        }
+    )
+    store.complete_ocr_crop_job(
+        "fast-image", [{"text": "23,4", "comparison": "23.4"}]
+    )
+    store.enqueue_ocr_crop_job(
+        {
+            "id": "accurate-crop",
+            "image_hash": "fast-image-hash",
+            "bbox": [20, 30, 100, 60],
+            "thumbnail_path": str(accurate_crop),
+            "kind": "accurate",
+        }
+    )
+    monkeypatch.setitem(web_app.config.CONFIG, "ocr", {})
+    monkeypatch.setattr(web_app, "_ocr_crop_root", lambda: str(crop_root))
+    client = TestClient(web_app.app)
+
+    with (
+        patch.object(web_app, "_current_user_payload", return_value={"username": "admin", "role": "admin"}),
+        patch.object(web_app, "observability_store", return_value=store),
+    ):
+        response = client.get("/api/ocr/jobs")
+
+    assert response.status_code == 200
+    assert [job["kind"] for job in response.json()["jobs"]] == ["fast", "accurate"]
+    assert response.json()["jobs"][0]["status"] == "completed"
+    assert response.json()["jobs"][0]["thumbnail_url"].startswith("/api/file?token=")
+    assert set(response.json()["jobs"][0]) == {"kind", "thumbnail_url", "status", "result"}
 
 
 def test_ocr_background_queue_is_visible_to_users_only_when_enabled(tmp_path, monkeypatch):

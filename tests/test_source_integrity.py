@@ -95,13 +95,18 @@ class SourceIntegrityTests(unittest.TestCase):
         runtime_js_match = re.search(
             r'/static/runtime-status\.js\?v=([^"\s]+)', html_source
         )
+        diagnostics_js_match = re.search(
+            r'/static/ocr-diagnostics\.js\?v=([^"\s]+)', html_source
+        )
         js_match = re.search(r'/static/app\.js\?v=([^"\s]+)', html_source)
         self.assertIsNotNone(css_match)
         self.assertIsNotNone(runtime_js_match)
+        self.assertIsNotNone(diagnostics_js_match)
         self.assertIsNotNone(js_match)
         self.assertEqual(css_match.group(1), "20260825-ocr-queue-activity-css1")
         self.assertEqual(runtime_js_match.group(1), "20260728-runtime-poll1")
-        self.assertEqual(js_match.group(1), "20260825-ocr-queue-activity-js1")
+        self.assertEqual(diagnostics_js_match.group(1), "20260825-ocr-fast-stage-diagnostics1")
+        self.assertEqual(js_match.group(1), "20260825-ocr-fast-stage-js1")
         self.assertNotEqual(css_match.group(1), js_match.group(1))
 
     def test_resource_detail_copy_explains_clients_and_latch_stages(self) -> None:

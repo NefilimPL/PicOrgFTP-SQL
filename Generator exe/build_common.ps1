@@ -94,6 +94,7 @@ function Get-WebStaticDataArguments {
         "latest-request.js",
         "login.html",
         "login.js",
+        "ocr-diagnostics.js",
         "process-jobs.js",
         "runtime-status.js"
     )

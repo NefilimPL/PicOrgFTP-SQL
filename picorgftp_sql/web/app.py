@@ -68,6 +68,7 @@ from ..services.image_dimensions import (
 from ..services.ocr_cache import (
     collect_image_values,
     enqueue_ocr_crop_jobs,
+    enqueue_ocr_fast_image_job,
     restore_crop_bbox,
 )
 from ..services.ocr_queue import OcrQueueLease, OcrQueueScheduler
@@ -1507,17 +1508,41 @@ def _schedule_ocr_value_collection(slot: object, path: str) -> str:
 
     def collect() -> None:
         try:
+            store = observability_store()
+
+            def start_fast_scan(image_hash: str) -> str:
+                try:
+                    return enqueue_ocr_fast_image_job(
+                        canonical_path,
+                        image_hash=image_hash,
+                        store=store,
+                        crop_dir=_ocr_crop_root(),
+                    )
+                except Exception as exc:
+                    log_error(f"OCR fast-stage preview could not be queued: {exc}")
+                    return ""
+
+            def finish_fast_scan(
+                job_id: str, values: list[dict[str, object]], state: str
+            ) -> None:
+                if state == "completed":
+                    store.complete_ocr_crop_job(job_id, values)
+                else:
+                    store.fail_ocr_crop_job(job_id, "Szybki model OCR nie zakonczyl skanowania.")
+
             collect_image_values(
                 canonical_path,
-                store=observability_store(),
+                store=store,
                 analyze=_analyze_image_values_with_configured_profiles,
                 enqueue_crops=lambda image_hash, diagnostics: enqueue_ocr_crop_jobs(
                     canonical_path,
                     image_hash=image_hash,
                     diagnostics=diagnostics,
-                    store=observability_store(),
+                    store=store,
                     crop_dir=_ocr_crop_root(),
                 ),
+                start_fast_scan=start_fast_scan,
+                finish_fast_scan=finish_fast_scan,
             )
         except Exception as exc:
             log_error(f"OCR value collection failed: {exc}\n{traceback.format_exc()}")
@@ -6627,16 +6652,39 @@ def create_app() -> FastAPI:
                     continue
                 result.append(text if not comparison or comparison == text else f"{text} \u2192 {comparison}")
             return {
+                "kind": (
+                    "fast"
+                    if str(job.get("kind") or "").strip().lower() == "fast"
+                    else "accurate"
+                ),
                 "status": str(job.get("status") or ""),
                 "result": result,
                 "thumbnail_url": thumbnail_url,
             }
 
-        jobs = observability_store().list_ocr_crop_jobs()
-        processing = [job for job in jobs if str(job.get("status") or "") == "processing"]
-        pending = [job for job in jobs if str(job.get("status") or "") == "pending"]
-        completed = [job for job in jobs if str(job.get("status") or "") == "completed"]
-        ordered = processing + pending + list(reversed(completed))
+        grouped_jobs: dict[str, list[dict[str, object]]] = {}
+        for index, job in enumerate(observability_store().list_ocr_crop_jobs()):
+            image_hash = str(job.get("image_hash") or "").strip() or f"job-{index}"
+            grouped_jobs.setdefault(image_hash, []).append(job)
+
+        def group_rank(group: list[dict[str, object]]) -> int:
+            statuses = {str(job.get("status") or "") for job in group}
+            if "processing" in statuses:
+                return 0
+            if "pending" in statuses:
+                return 1
+            return 2
+
+        def group_updated_at(group: list[dict[str, object]]) -> str:
+            return max(
+                str(job.get("updated_at") or job.get("created_at") or "")
+                for job in group
+            )
+
+        ordered_groups = list(grouped_jobs.values())
+        ordered_groups.sort(key=group_updated_at, reverse=True)
+        ordered_groups.sort(key=group_rank)
+        ordered = [job for group in ordered_groups for job in group]
         visible = ordered[:OCR_QUEUE_VISIBLE_LIMIT]
         return {
             "jobs": [public_job(job) for job in visible],

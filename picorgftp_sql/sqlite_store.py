@@ -1620,6 +1620,7 @@ class SqliteStore:
                     image_hash TEXT NOT NULL,
                     bbox_json TEXT NOT NULL,
                     thumbnail_path TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL DEFAULT 'accurate' CHECK (kind IN ('fast', 'accurate')),
                     status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'completed', 'error')),
                     result_json TEXT NOT NULL DEFAULT '[]',
                     error_message TEXT NOT NULL DEFAULT '',
@@ -1656,6 +1657,14 @@ class SqliteStore:
                 str(row[1])
                 for row in conn.execute("PRAGMA table_info(file_index_segments)")
             }
+            ocr_crop_job_columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(ocr_crop_jobs)")
+            }
+            if "kind" not in ocr_crop_job_columns:
+                conn.execute(
+                    "ALTER TABLE ocr_crop_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'accurate'"
+                )
             if "generation_id" not in segment_columns:
                 conn.execute("DROP TABLE file_index_segments")
                 conn.execute(
@@ -3833,17 +3842,23 @@ class SqliteStore:
 
         self.initialize()
         job_id = _text(payload.get("id")) or f"ocr-{uuid.uuid4().hex}"
+        kind = _text(payload.get("kind")).lower()
+        if kind not in {"fast", "accurate"}:
+            kind = "accurate"
+        status = _text(payload.get("status")).lower()
+        if status not in {"pending", "processing", "completed", "error"}:
+            status = "pending"
         now = _now_iso()
         with self.connection() as conn:
             conn.execute(
                 """INSERT INTO ocr_crop_jobs
-                   (id, image_hash, bbox_json, thumbnail_path, status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, 'pending', ?, ?)""",
+                   (id, image_hash, bbox_json, thumbnail_path, kind, status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job_id,
                     _text(payload.get("image_hash")),
                     _json_dumps(payload.get("bbox") if isinstance(payload.get("bbox"), list) else []),
-                    _text(payload.get("thumbnail_path")), now, now,
+                    _text(payload.get("thumbnail_path")), kind, status, now, now,
                 ),
             )
         return job_id
@@ -3854,7 +3869,9 @@ class SqliteStore:
         self.initialize()
         with self.connection() as conn:
             row = conn.execute(
-                "SELECT * FROM ocr_crop_jobs WHERE status = 'pending' ORDER BY created_at, id LIMIT 1"
+                """SELECT * FROM ocr_crop_jobs
+                   WHERE status = 'pending' AND kind = 'accurate'
+                   ORDER BY created_at, id LIMIT 1"""
             ).fetchone()
             if row is None:
                 return None
@@ -3878,6 +3895,17 @@ class SqliteStore:
             conn.execute(
                 "UPDATE ocr_crop_jobs SET status = 'completed', result_json = ?, updated_at = ? WHERE id = ?",
                 (_json_dumps(values), _now_iso(), _text(job_id)),
+            )
+
+    def fail_ocr_crop_job(self, job_id: str, message: str) -> None:
+        """Record a terminal OCR-stage error without leaving it as processing."""
+
+        self.initialize()
+        with self.connection() as conn:
+            conn.execute(
+                """UPDATE ocr_crop_jobs
+                   SET status = 'error', error_message = ?, updated_at = ? WHERE id = ?""",
+                (_text(message), _now_iso(), _text(job_id)),
             )
 
     def requeue_ocr_crop_job(self, job_id: str) -> None:

@@ -88,8 +88,8 @@ const ocrBackgroundQueueList = makeNode("div");
 {renderer}
 renderOcrBackgroundQueue({{
   jobs: [
-    {{ thumbnail_url: "/api/file?token=crop-1", status: "processing", result: [] }},
-    {{ thumbnail_url: "/api/file?token=crop-2", status: "completed", result: ["20kg \\u2192 20"] }},
+    {{ kind: "fast", thumbnail_url: "/api/file?token=crop-1", status: "processing", result: [] }},
+    {{ kind: "accurate", thumbnail_url: "/api/file?token=crop-2", status: "completed", result: ["20kg \\u2192 20"] }},
   ],
   remaining_count: 7,
 }});
@@ -98,8 +98,11 @@ console.log(JSON.stringify({{
   summary: ocrBackgroundQueueSummary.textContent,
   firstImage: ocrBackgroundQueueList.children[0]?.children[0]?.src || "",
   secondImage: ocrBackgroundQueueList.children[1]?.children[0]?.src || "",
+  firstText: ocrBackgroundQueueList.children[0]?.children[1]?.textContent || "",
   secondText: ocrBackgroundQueueList.children[1]?.children[1]?.textContent || "",
 }}));
+renderOcrBackgroundQueue({{ jobs: [], remaining_count: 0 }});
+console.log(JSON.stringify({{ emptyText: ocrBackgroundQueueList.textContent }}));
 """
         completed = subprocess.run(
             [str(node), "-e", script],
@@ -108,12 +111,14 @@ console.log(JSON.stringify({{
             text=True,
             encoding="utf-8",
         )
-        result = json.loads(completed.stdout)
+        result, empty = [json.loads(line) for line in completed.stdout.splitlines()]
 
         self.assertFalse(result["hidden"])
         self.assertEqual(result["summary"], "+7 kolejnych")
         self.assertEqual(result["firstImage"], "/api/file?token=crop-1")
         self.assertEqual(result["secondImage"], "/api/file?token=crop-2")
+        self.assertIn("Szybki model", result["firstText"])
+        self.assertIn("zdjec", empty["emptyText"])
         self.assertIn("20kg → 20", result["secondText"])
         self.assertIn('id="ocrBackgroundQueuePanel"', html)
         self.assertGreater(html.index('id="ocrBackgroundQueuePanel"'), html.index('id="processQueuePanel"'))

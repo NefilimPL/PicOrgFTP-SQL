@@ -126,6 +126,7 @@ def test_web_build_explicitly_packages_all_composition_static_assets() -> None:
         "autocomplete.js",
         "runtime-status.js",
         "process-jobs.js",
+        "ocr-diagnostics.js",
         "app.js",
     ):
         assert asset in source

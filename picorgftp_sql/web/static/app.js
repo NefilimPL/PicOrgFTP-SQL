@@ -13977,7 +13977,7 @@ function renderOcrBackgroundQueue(payload = {}) {
   ocrBackgroundQueueList.replaceChildren();
   if (!items.length) {
     ocrBackgroundQueueList.className = "ocr-background-queue-list empty-state";
-    ocrBackgroundQueueList.textContent = "Brak oczekujacych lub aktualnie skanowanych wycinkow.";
+    ocrBackgroundQueueList.textContent = "Brak oczekujacych lub aktualnie skanowanych zdjec OCR.";
     return;
   }
   ocrBackgroundQueueList.className = "ocr-background-queue-list";
@@ -13991,6 +13991,7 @@ function renderOcrBackgroundQueue(payload = {}) {
       card.appendChild(image);
     }
     const details = document.createElement("div");
+    const modelLabel = job.kind === "fast" ? "Szybki model" : "Dokladny model OCR";
     const state = String(job.status || "pending");
     const stateLabel = state === "processing"
       ? "Skanowanie w tle"
@@ -14002,7 +14003,9 @@ function renderOcrBackgroundQueue(payload = {}) {
     const result = Array.isArray(job.result)
       ? job.result.map((value) => String(value || "").trim()).filter(Boolean)
       : [];
-    details.textContent = result.length ? `${stateLabel}: ${result.join(", ")}` : stateLabel;
+    details.textContent = result.length
+      ? `${modelLabel} - ${stateLabel}: ${result.join(", ")}`
+      : `${modelLabel} - ${stateLabel}`;
     card.appendChild(details);
     ocrBackgroundQueueList.appendChild(card);
   }
