@@ -5160,6 +5160,17 @@ def _is_ocr_progress_poll(request: Request) -> bool:
     )
 
 
+def _is_ocr_blocking_request(request: Request) -> bool:
+    """Return whether this request intentionally resets OCR idle time."""
+
+    return (str(request.method or "").upper(), str(request.url.path or "")) in {
+        ("POST", "/api/upload-cache"),
+        ("POST", "/api/web-images/cache"),
+        ("POST", "/api/process/background"),
+        ("POST", "/api/ocr/activity"),
+    }
+
+
 def create_app() -> FastAPI:
     """Create the LAN web backend."""
 
@@ -5363,19 +5374,19 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def _prioritize_interactive_work(request: Request, call_next):
-        is_progress_poll = _is_ocr_progress_poll(request)
-        with app.state.ocr_activity_lock:
-            app.state.ocr_active_requests += 1
-            if not is_progress_poll:
+        is_blocking_activity = _is_ocr_blocking_request(request)
+        if is_blocking_activity:
+            with app.state.ocr_activity_lock:
+                app.state.ocr_active_requests += 1
                 app.state.ocr_last_activity = time.monotonic()
         try:
             return await call_next(request)
         finally:
-            with app.state.ocr_activity_lock:
-                app.state.ocr_active_requests = max(
-                    0, app.state.ocr_active_requests - 1
-                )
-                if not is_progress_poll:
+            if is_blocking_activity:
+                with app.state.ocr_activity_lock:
+                    app.state.ocr_active_requests = max(
+                        0, app.state.ocr_active_requests - 1
+                    )
                     app.state.ocr_last_activity = time.monotonic()
 
     @app.on_event("startup")
@@ -6631,6 +6642,44 @@ def create_app() -> FastAPI:
             "jobs": [public_job(job) for job in visible],
             "remaining_count": max(0, len(ordered) - len(visible)),
         }
+
+    @app.post("/api/ocr/activity")
+    async def ocr_activity(request: Request) -> Dict[str, Any]:
+        """Record an explicit slot or data-load action for the idle OCR queue."""
+
+        _require_ocr_feature()
+        _require_user(request)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Niepoprawny sygnal aktywnosci OCR.")
+        kind = str(payload.get("kind") or "").strip()
+        if kind not in {"slot-change", "data-load"}:
+            raise HTTPException(status_code=400, detail="Niepoprawny rodzaj aktywnosci OCR.")
+        with app.state.ocr_activity_lock:
+            app.state.ocr_last_activity = time.monotonic()
+
+        cancelled = 0
+        removed_slot_token = str(payload.get("removed_slot_token") or "").strip()
+        if removed_slot_token:
+            image_path = _path_from_file_token(removed_slot_token)
+            image_hash = await run_in_threadpool(_image_sha256, image_path)
+            crop_paths = await run_in_threadpool(
+                observability_store().cancel_pending_ocr_crop_jobs, image_hash
+            )
+            cancelled = len(crop_paths)
+            crop_root = _ocr_crop_root()
+            for crop_path in crop_paths:
+                if not _path_is_under_root(crop_path, crop_root):
+                    continue
+                try:
+                    if os.path.isfile(crop_path):
+                        os.remove(crop_path)
+                except OSError as exc:
+                    log_error(f"OCR removed-slot crop cleanup failed: {exc}")
+        return {"ok": True, "cancelled": cancelled}
 
     @app.post("/api/ocr/approval")
     async def ocr_approval(request: Request) -> Dict[str, Any]:

@@ -1978,6 +1978,24 @@ def test_ocr_progress_poll_is_not_counted_as_a_new_user_action():
     assert web_app._is_ocr_progress_poll(user_action) is False
 
 
+def test_ocr_idle_activity_classifies_only_explicit_user_work():
+    def request(method, path):
+        return type(
+            "Request",
+            (),
+            {"method": method, "url": type("Url", (), {"path": path})()},
+        )()
+
+    assert web_app._is_ocr_blocking_request(request("POST", "/api/upload-cache")) is True
+    assert web_app._is_ocr_blocking_request(request("POST", "/api/process/background")) is True
+    assert web_app._is_ocr_blocking_request(request("POST", "/api/ocr/activity")) is True
+    assert web_app._is_ocr_blocking_request(request("GET", "/api/settings")) is False
+    assert web_app._is_ocr_blocking_request(
+        request("GET", "/api/settings/ocr/runs/run-1")
+    ) is False
+    assert web_app._is_ocr_blocking_request(request("GET", "/api/pimcore/objects")) is False
+
+
 def test_ocr_run_routes_start_then_return_incremental_live_snapshot():
     client = TestClient(web_app.app)
 
@@ -2308,6 +2326,49 @@ def test_ocr_background_queue_purges_completed_crop_after_ten_seconds(tmp_path, 
     assert response.json()["jobs"][0]["thumbnail_url"].startswith("/api/file?token=")
     assert not completed_crop.exists()
     assert pending_crop.exists()
+
+
+def test_ocr_slot_removal_cancels_only_matching_pending_crop(tmp_path, monkeypatch):
+    store = SqliteStore(str(tmp_path / "ocr.sqlite"))
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+    removed_image = upload_root / "removed.png"
+    removed_image.write_bytes(b"removed-image")
+    crop_root = tmp_path / "ocr-crops"
+    crop_root.mkdir()
+    matching_crop = crop_root / "matching.png"
+    matching_crop.write_bytes(b"crop")
+    other_crop = crop_root / "other.png"
+    other_crop.write_bytes(b"crop")
+
+    monkeypatch.setattr(web_app, "_upload_cache_root", lambda: str(upload_root))
+    monkeypatch.setattr(web_app, "_ocr_crop_root", lambda: str(crop_root))
+    removed_token = web_app._file_token(str(removed_image))
+    store.enqueue_ocr_crop_job(
+        {
+            "id": "matching",
+            "image_hash": web_app._image_sha256(str(removed_image)),
+            "thumbnail_path": str(matching_crop),
+        }
+    )
+    store.enqueue_ocr_crop_job(
+        {"id": "other", "image_hash": "other-hash", "thumbnail_path": str(other_crop)}
+    )
+
+    client = TestClient(web_app.app)
+    with (
+        patch.object(web_app, "_require_user", return_value="user"),
+        patch.object(web_app, "observability_store", return_value=store),
+    ):
+        response = client.post(
+            "/api/ocr/activity",
+            json={"kind": "slot-change", "removed_slot_token": removed_token},
+        )
+
+    assert response.json() == {"ok": True, "cancelled": 1}
+    assert not matching_crop.exists()
+    assert other_crop.exists()
+    assert [job["id"] for job in store.list_ocr_crop_jobs()] == ["other"]
 
 
 def test_admin_test_sample_route_returns_fresh_editable_values():
