@@ -125,6 +125,7 @@ def test_update_settings_persists_bounded_ocr_collection_limits(monkeypatch):
         "queue_lease_minutes": 60,
         "queue_success_extension_minutes": 30,
         "model_profiles": ["fast"],
+        "accurate_confidence_threshold": 99,
     }
 
 
@@ -1866,6 +1867,24 @@ def test_slot_ocr_analysis_uses_running_execution_service_when_available(monkeyp
                     "available": True,
                     "dimensions": {},
                     "message": "",
+                    "regions": [
+                        {
+                            "region_id": "region-1",
+                            "fast": {
+                                "text": "120",
+                                "value": "120",
+                                "confidence": 0.9,
+                                "bbox": [1, 2, 30, 20],
+                            },
+                            "source_bbox": [1, 2, 30, 20],
+                            "crop_bbox": [0, 0, 38, 28],
+                            "accurate": [],
+                            "status": "empty",
+                            "reason": "Dokladny model nie wykryl tekstu w wycinku.",
+                            "timings_ms": {"fast": 12, "crop": 3, "accurate": 28},
+                        }
+                    ],
+                    "timings_ms": {"total": 43},
                     "candidates": [
                         {
                             "text": "120",
@@ -1890,6 +1909,8 @@ def test_slot_ocr_analysis_uses_running_execution_service_when_available(monkeyp
 
     assert diagnostics.available is True
     assert diagnostics.candidates[0].value == "120"
+    assert diagnostics.regions[0]["region_id"] == "region-1"
+    assert diagnostics.timings_ms == {"total": 43}
 
 
 def test_ocr_startup_cleanup_discards_unfinished_crops_and_removes_their_cache(
@@ -2016,7 +2037,7 @@ def test_ocr_validation_compares_cached_signed_slot_images_without_exposing_path
         [
             {
                 "text": "120,4 mm",
-                "comparison": "120",
+                "comparison": "120.4",
                 "confidence": 0.91,
                 "bbox": [4, 8, 80, 28],
             }
@@ -2042,9 +2063,9 @@ def test_ocr_validation_compares_cached_signed_slot_images_without_exposing_path
     assert response.status_code == 200
     payload = response.json()
     assert payload["value"] == "120.8"
-    assert payload["comparison"] == "120"
-    assert payload["matches"] is True
-    assert payload["mismatch"] is False
+    assert payload["comparison"] == "120.8"
+    assert payload["matches"] is False
+    assert payload["mismatch"] is True
     assert payload["images"][0]["values"][0]["bbox"] == [4, 8, 80, 28]
     assert "C:/cache" not in response.text
 

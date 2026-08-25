@@ -1440,11 +1440,23 @@ def _analyze_image_values_with_configured_profiles(path: str) -> ImageOcrDiagnos
             for item in raw_candidates
             if isinstance(item, dict) and len(list(item.get("bbox") or [])) == 4
         ]
+        raw_regions = result.get("regions") if isinstance(result, dict) else []
+        regions = [dict(item) for item in raw_regions if isinstance(item, dict)]
+        timings_ms: dict[str, int] = {}
+        raw_timings = result.get("timings_ms") if isinstance(result, dict) else {}
+        if isinstance(raw_timings, dict):
+            for key, raw_value in raw_timings.items():
+                try:
+                    timings_ms[str(key)] = max(0, int(raw_value))
+                except (TypeError, ValueError):
+                    continue
         return ImageOcrDiagnostics(
             available=bool(result.get("available")),
             dimensions=dict(result.get("dimensions") or {}),
             candidates=candidates,
             message=str(result.get("message") or ""),
+            regions=regions,
+            timings_ms=timings_ms,
         )
     settings = normalize_ocr_settings(config.CONFIG.get(OCR_SETTINGS_KEY, {}))
     return analyze_image_values(path, profile_ids=settings.get("model_profiles", ["fast"]))

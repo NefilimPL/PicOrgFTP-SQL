@@ -105,6 +105,8 @@ class ImageOcrDiagnostics:
     candidates: list[OcrDiagnosticCandidate]
     message: str = ""
     attempts: dict[str, str] = field(default_factory=dict)
+    regions: list[dict[str, object]] = field(default_factory=list)
+    timings_ms: dict[str, int] = field(default_factory=dict)
 
 
 class ImageDimensionRecognizer(Protocol):

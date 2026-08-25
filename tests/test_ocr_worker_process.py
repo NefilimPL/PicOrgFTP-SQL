@@ -1,6 +1,8 @@
 import time
 
-from picorgftp_sql.services.ocr_worker_process import OcrWorkerProcess
+from picorgftp_sql.services.image_dimensions import OcrTextBox, diagnostics_for_boxes
+from picorgftp_sql.services.ocr_pipeline import OcrPipelineRegion, OcrPipelineReport
+from picorgftp_sql.services.ocr_worker_process import OcrWorkerProcess, _serialize_report
 from picorgftp_sql.services.windows_job_limits import WindowsJobLimits
 
 
@@ -94,3 +96,55 @@ def test_worker_process_forwards_a_serializable_job_result():
     result = next(event for event in events if event["kind"] == "result")
     assert result["run_id"] == "run-1"
     assert result["diagnostics"]["available"] is False
+
+
+def test_worker_serializes_region_pairing_and_timings():
+    fast = OcrTextBox("32,8", 0.93, (10, 10, 40, 25))
+    accurate = OcrTextBox("32.8", 0.98, (11, 11, 41, 26))
+    report = OcrPipelineReport(
+        regions=(
+            OcrPipelineRegion(
+                region_id="region-1",
+                fast_box=fast,
+                source_bbox=(10, 10, 40, 25),
+                crop_bbox=(2, 2, 48, 33),
+                accurate_boxes=(accurate,),
+                status="completed",
+                reason="",
+                fast_elapsed_ms=14,
+                crop_elapsed_ms=3,
+                accurate_elapsed_ms=28,
+            ),
+        ),
+        all_boxes=(fast, accurate),
+        total_elapsed_ms=45,
+    )
+
+    payload = _serialize_report(report, diagnostics_for_boxes(report.all_boxes))
+
+    assert payload["regions"] == [
+        {
+            "region_id": "region-1",
+            "fast": {
+                "text": "32,8",
+                "value": "32.8",
+                "confidence": 0.93,
+                "bbox": [10, 10, 40, 25],
+            },
+            "source_bbox": [10, 10, 40, 25],
+            "crop_bbox": [2, 2, 48, 33],
+            "accurate": [
+                {
+                    "text": "32.8",
+                    "value": "32.8",
+                    "confidence": 0.98,
+                    "bbox": [11, 11, 41, 26],
+                }
+            ],
+            "status": "completed",
+            "reason": "",
+            "timings_ms": {"fast": 14, "crop": 3, "accurate": 28},
+        }
+    ]
+    assert payload["timings_ms"] == {"total": 45}
+    assert payload["candidates"][0]["value"] == "32.8"
