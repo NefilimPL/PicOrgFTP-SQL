@@ -13,6 +13,7 @@ from PIL import Image
 
 from .image_dimensions import ImageDimensionRecognizer, OcrTextBox, PaddleImageDimensionRecognizer
 from .ocr_profiles import normalize_ocr_profile_ids
+from .ocr_values import comparison_key
 
 
 ProgressCallback = Callable[..., None]
@@ -120,6 +121,7 @@ def _elapsed_ms(clock: Callable[[], float], started_at: float) -> int:
 def _event_box(box: OcrTextBox) -> dict[str, object]:
     return {
         "text": box.text,
+        "value": comparison_key(box.text),
         "confidence": box.confidence,
         "bbox": list(box.bbox),
     }

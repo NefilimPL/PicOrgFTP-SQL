@@ -47,6 +47,16 @@ def test_both_profiles_send_only_fast_regions_to_accurate_model_and_translate_bo
     assert report.regions[0].accurate_elapsed_ms >= 0
     assert report.total_elapsed_ms >= 0
     assert {event["kind"] for event in events} >= {"candidate_regions", "crop_started"}
+    candidate_regions = next(event for event in events if event["kind"] == "candidate_regions")
+    assert candidate_regions["regions"] == [
+        {
+            "region_id": "region-1",
+            "text": "20 kg",
+            "value": "20",
+            "confidence": 0.8,
+            "bbox": [10, 12, 30, 22],
+        }
+    ]
     crop_started = next(event for event in events if event["kind"] == "crop_started")
     assert crop_started["region_id"] == "region-1"
     assert crop_started["source_bbox"] == [
