@@ -1537,6 +1537,20 @@ class WebManagerApp:
         self.root.mainloop()
 
 
+def _open_local_panel_after_service_starts(port: int) -> None:
+    """Open the web UI shortly after the Tk-less manager starts its service."""
+
+    def open_panel() -> None:
+        try:
+            webbrowser.open(local_url(port), new=2)
+        except Exception:
+            pass
+
+    timer = threading.Timer(0.8, open_panel)
+    timer.daemon = True
+    timer.start()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--service-run", action="store_true")
@@ -1548,7 +1562,13 @@ def main(argv: list[str] | None = None) -> int:
         return run_service_mode(args.port, args.host)
     if args.stop_panel:
         return 0 if stop_web(args.port).ok else 1
-    WebManagerApp().run()
+    try:
+        WebManagerApp().run()
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"tkinter", "_tkinter"}:
+            raise
+        _open_local_panel_after_service_starts(args.port)
+        return run_service_mode(args.port, args.host)
     return 0
 
 

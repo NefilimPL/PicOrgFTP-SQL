@@ -644,6 +644,39 @@ def test_main_stop_panel_mode_stops_the_panel_without_opening_the_gui(monkeypatc
     assert stopped_ports == [8123]
 
 
+def test_main_falls_back_to_browser_service_when_tkinter_is_unavailable(monkeypatch) -> None:
+    """A frozen EXE must still open the web panel if PyInstaller omitted Tk."""
+    started = []
+    opened_urls = []
+
+    class MissingTkManager:
+        def __init__(self) -> None:
+            raise ModuleNotFoundError("No module named 'tkinter'", name="tkinter")
+
+    class ImmediateTimer:
+        def __init__(self, _delay, callback) -> None:
+            self.callback = callback
+            self.daemon = False
+
+        def start(self) -> None:
+            self.callback()
+
+    monkeypatch.setattr(web_manager, "WebManagerApp", MissingTkManager)
+    monkeypatch.setattr(web_manager.threading, "Timer", ImmediateTimer)
+    monkeypatch.setattr(
+        web_manager.webbrowser, "open", lambda url, **_kwargs: opened_urls.append(url)
+    )
+    monkeypatch.setattr(
+        web_manager,
+        "run_service_mode",
+        lambda port, host: started.append((port, host)) or 0,
+    )
+
+    assert web_manager.main(["--port", "8123", "--host", "0.0.0.0"]) == 0
+    assert started == [(8123, "0.0.0.0")]
+    assert opened_urls == ["http://127.0.0.1:8123"]
+
+
 def test_stop_web_keeps_metadata_when_panel_port_stays_open(tmp_path, monkeypatch) -> None:
     """Catches removing runtime metadata before the web listener actually exits."""
     pid_path = tmp_path / ".picorg_web.pid"
