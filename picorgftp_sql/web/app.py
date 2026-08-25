@@ -226,6 +226,8 @@ ACTIVE_CLIENT_FLUSH_INTERVAL_SECONDS = 15
 PRESENCE_CLIENT_ID_HEADER = "x-picorg-client-id"
 WEB_UPLOAD_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
 WEB_UPLOAD_CACHE_CLEAN_INTERVAL_SECONDS = 30 * 60
+OCR_QUEUE_VISIBLE_LIMIT = 5
+OCR_QUEUE_COMPLETED_TTL_SECONDS = 10
 CSRF_HEADER = "x-picorg-csrf"
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _UPLOAD_CACHE_LAST_CLEANUP = 0.0
@@ -1281,6 +1283,31 @@ def _clear_ocr_crop_queue_on_startup() -> int:
         except OSError as exc:
             log_error(f"OCR startup crop cleanup failed: {exc}")
     return len(crop_paths)
+
+
+def _purge_expired_ocr_crop_jobs() -> int:
+    """Remove short-lived completed queue rows and trusted crop cache files."""
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=OCR_QUEUE_COMPLETED_TTL_SECONDS)).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+    try:
+        crop_paths = list(observability_store().purge_completed_ocr_crop_jobs(cutoff))
+    except Exception as exc:
+        log_error(f"OCR completed crop cleanup skipped: {exc}")
+        return 0
+    crop_root = _ocr_crop_root()
+    deleted = 0
+    for crop_path in crop_paths:
+        if not _path_is_under_root(crop_path, crop_root):
+            continue
+        try:
+            if os.path.isfile(crop_path):
+                os.remove(crop_path)
+                deleted += 1
+        except OSError as exc:
+            log_error(f"OCR completed crop cleanup failed: {exc}")
+    return deleted
 
 
 def _is_upload_cache_path(path: str) -> bool:
@@ -5232,6 +5259,7 @@ def create_app() -> FastAPI:
             store.upsert_ocr_scan(image_hash, combined, "completed")
 
     def _run_ocr_queue_once() -> str:
+        _purge_expired_ocr_crop_jobs()
         ocr_settings = normalize_ocr_settings(
             config.CONFIG.get(OCR_SETTINGS_KEY, {})
         )
@@ -6557,8 +6585,15 @@ def create_app() -> FastAPI:
 
     @app.get("/api/ocr/jobs")
     def ocr_jobs(request: Request) -> Dict[str, Any]:
-        _require_admin(request)
         _require_ocr_feature()
+        user = _current_user_payload(request)
+        ocr_settings = normalize_ocr_settings(config.CONFIG.get(OCR_SETTINGS_KEY, {}))
+        if (
+            str(user.get("role") or "") != "admin"
+            and not bool(ocr_settings.get("background_queue_visible_to_users"))
+        ):
+            raise HTTPException(status_code=403, detail="Kolejka OCR nie jest widoczna dla tego konta.")
+        _purge_expired_ocr_crop_jobs()
 
         def public_job(job: dict[str, object]) -> dict[str, object]:
             thumbnail_path = str(job.get("thumbnail_path") or "")
@@ -6571,19 +6606,30 @@ def create_app() -> FastAPI:
                     )
                 except HTTPException:
                     pass
+            result: list[str] = []
+            for value in list(job.get("result") or []):
+                if not isinstance(value, dict):
+                    continue
+                text = str(value.get("text") or "").strip()
+                comparison = str(value.get("comparison") or "").strip()
+                if not text and not comparison:
+                    continue
+                result.append(text if not comparison or comparison == text else f"{text} \u2192 {comparison}")
             return {
-                "id": str(job.get("id") or ""),
-                "image_hash": str(job.get("image_hash") or ""),
-                "bbox": list(job.get("bbox") or []),
                 "status": str(job.get("status") or ""),
-                "created_at": str(job.get("created_at") or ""),
-                "updated_at": str(job.get("updated_at") or ""),
-                "result": list(job.get("result") or []),
+                "result": result,
                 "thumbnail_url": thumbnail_url,
             }
 
+        jobs = observability_store().list_ocr_crop_jobs()
+        processing = [job for job in jobs if str(job.get("status") or "") == "processing"]
+        pending = [job for job in jobs if str(job.get("status") or "") == "pending"]
+        completed = [job for job in jobs if str(job.get("status") or "") == "completed"]
+        ordered = processing + pending + list(reversed(completed))
+        visible = ordered[:OCR_QUEUE_VISIBLE_LIMIT]
         return {
-            "jobs": [public_job(job) for job in observability_store().list_ocr_crop_jobs()]
+            "jobs": [public_job(job) for job in visible],
+            "remaining_count": max(0, len(ordered) - len(visible)),
         }
 
     @app.post("/api/ocr/approval")
