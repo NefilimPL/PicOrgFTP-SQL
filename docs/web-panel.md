@@ -129,6 +129,22 @@ Porównanie OCR zachowuje części dziesiętne i uznaje `23,4` oraz `23.4` za t�
 samą wartość. Wycinek dokładnego modelu powstaje z pola szybkiego modelu,
 z symetrycznym marginesem 25% dłuższego boku (minimum 8 px, maksimum 64 px).
 
+### Kolejka dopracowywania OCR
+
+Kolejka jest widoczna bezpośrednio pod zwykłą kolejką po lewej stronie głównego
+widoku. Pokazuje najwyżej pięć pozycji: sam wycinek i wynik OCR; licznik
+`+N kolejnych` informuje o dalszych zadaniach. Ukończony wynik oraz jego
+pomocniczy wycinek są usuwane po 10 sekundach, więc nie zalegają w panelu ani
+w cache. Wycinek zawiera dodatkowe 8 px kontekstu z każdej strony, gdy pozwala
+na to granica obrazu, a miniatura zachowuje proporcje bez przycinania.
+
+Administrator widzi tę kolejkę zawsze. W `Ustawienia > OCR` może włączyć
+widoczność także zwykłym użytkownikom. Samo przeglądanie danych, ustawień,
+Pimcore, logów i statusów nie zatrzymuje pracy kolejki. Bezczynność resetują
+wyłącznie upload lub zastąpienie zdjęcia, przeniesienie albo zamiana slotów,
+usunięcie slotu, `Synchronizuj`/`Aktualizuj` i rozpoczęcie wczytywania produktu
+lub jego zdjęć. Usunięcie slotu anuluje oczekujące wycinki tego samego obrazu.
+
 ## Bezpieczeństwo LAN
 
 Panel jest przeznaczony do zaufanej sieci LAN albo VPN. Nie wystawiaj tego panelu bezpośrednio do publicznego internetu bez dodatkowej warstwy zabezpieczeń, aktualizacji haseł, kontroli dostępu i przeglądu konfiguracji serwera.

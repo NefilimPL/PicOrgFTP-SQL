@@ -56,6 +56,22 @@ Limit CPU jest twardym limitem procesu OCR przez Windows Job Object i obowiązuj
 
 Karta pokazuje także wersję użytego silnika PaddleOCR, nazwę i wariant modelu (`lang=en`), stan modelu oraz odnośnik do oficjalnego projektu na GitHubie. Test używa wyłącznie lokalnego silnika i tymczasowego cache uploadu aplikacji.
 
+### Kolejka dopracowywania OCR
+
+W głównym widoku, pod zwykłą kolejką zadań po lewej stronie, widoczna jest
+krótka kolejka dopracowywania OCR. Ma najwyżej pięć pozycji i pokazuje tylko
+wycinek oraz wynik; `+N kolejnych` oznacza dalsze oczekujące pozycje. Wynik
+ukończonego wycinka i pomocniczy plik znikają po 10 sekundach. Wycinek dostaje
+8 px marginesu z każdej strony, jeżeli mieści się w obrazie, a jego podgląd nie
+jest obcinany do kwadratu.
+
+Administrator widzi kolejkę zawsze; przełącznik w `Ustawienia > OCR` pozwala
+pokazać ją zwykłym użytkownikom. Przeglądanie ustawień, danych i Pimcore nie
+blokuje skanowania w tle. Okres bezczynności resetują wyłącznie upload lub
+zamiana zdjęcia, przeniesienie slotu, usunięcie slotu, zapis przez
+`Synchronizuj`/`Aktualizuj` oraz rozpoczęcie wczytywania produktu albo zdjęć.
+Usunięty slot anuluje oczekujące wycinki tego samego obrazu.
+
 Są cztery proste pliki BAT do budowania:
 
 ```powershell

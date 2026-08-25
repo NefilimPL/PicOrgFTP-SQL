@@ -115,6 +115,7 @@ def test_update_settings_persists_bounded_ocr_collection_limits(monkeypatch):
     assert result["ocr"] == {
         "enabled_slots": ["15", "16"],
         "background_enabled": True,
+        "background_queue_visible_to_users": False,
         "idle_seconds": 0,
         "max_cpu_percent": 75,
         "pause_cpu_percent": 75,

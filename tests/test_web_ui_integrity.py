@@ -1580,6 +1580,7 @@ const hasPendingUserChanges = () => true;
 const pendingChangedSlotPrefixes = () => new Set();
 const FormData = class {{}};
 const requestJson = () => {{ requests += 1; return Promise.resolve({{}}); }};
+const recordOcrActivity = () => {{}};
 {submit_product}
 (async () => {{
   await submitProductForm();
