@@ -21,6 +21,7 @@ DEFAULT_OCR_SETTINGS: dict[str, object] = {
     "queue_lease_minutes": 60,
     "queue_success_extension_minutes": 30,
     "model_profiles": ["fast"],
+    "accurate_confidence_threshold": 99,
 }
 
 
@@ -76,6 +77,9 @@ def normalize_ocr_settings(value: object) -> dict[str, object]:
     queue_extension = _bounded_int(
         raw.get("queue_success_extension_minutes"), 30, 0, 24 * 60
     )
+    accurate_confidence_threshold = _bounded_int(
+        raw.get("accurate_confidence_threshold"), 99, 0, 100
+    )
     profiles = normalize_ocr_profile_ids(raw.get("model_profiles")) or ["fast"]
     return {
         "enabled_slots": slots,
@@ -90,4 +94,5 @@ def normalize_ocr_settings(value: object) -> dict[str, object]:
         "queue_lease_minutes": queue_lease,
         "queue_success_extension_minutes": queue_extension,
         "model_profiles": profiles,
+        "accurate_confidence_threshold": accurate_confidence_threshold,
     }

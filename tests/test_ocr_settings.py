@@ -18,6 +18,7 @@ def test_normalize_ocr_settings_bounds_idle_and_cpu_limits():
         "queue_lease_minutes": 60,
         "queue_success_extension_minutes": 30,
         "model_profiles": ["fast"],
+        "accurate_confidence_threshold": 99,
     }
 
 
@@ -31,6 +32,16 @@ def test_normalize_ocr_settings_keeps_known_profiles_in_requested_order():
     assert normalize_ocr_settings(
         {"model_profiles": ["accurate", "fast", "unknown", "accurate"]}
     )["model_profiles"] == ["accurate", "fast"]
+
+
+def test_normalize_ocr_settings_bounds_accurate_confidence_threshold():
+    assert normalize_ocr_settings({})["accurate_confidence_threshold"] == 99
+    assert normalize_ocr_settings({"accurate_confidence_threshold": -1})[
+        "accurate_confidence_threshold"
+    ] == 0
+    assert normalize_ocr_settings({"accurate_confidence_threshold": 101})[
+        "accurate_confidence_threshold"
+    ] == 100
 
 
 def test_normalize_ocr_settings_keeps_usage_limits_with_safe_defaults():
