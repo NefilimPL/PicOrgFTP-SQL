@@ -66,12 +66,11 @@ from ..services.image_dimensions import (
     image_ocr_runtime_info,
 )
 from ..services.ocr_cache import (
-    collect_image_values,
     enqueue_ocr_crop_jobs,
     enqueue_ocr_fast_image_job,
     image_content_hash,
-    restore_crop_bbox,
 )
+from ..services.ocr_slot_queue import process_slot_ocr_queue_job
 from ..services.ocr_queue import OcrQueueLease, OcrQueueScheduler
 from ..services.ocr_worker import OcrQueueWorker
 from ..services.ocr_worker_process import OcrWorkerProcess
@@ -233,8 +232,6 @@ OCR_QUEUE_COMPLETED_TTL_SECONDS = 10
 CSRF_HEADER = "x-picorg-csrf"
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _UPLOAD_CACHE_LAST_CLEANUP = 0.0
-_OCR_COLLECTION_LOCK = threading.Lock()
-_OCR_COLLECTION_PATHS: set[str] = set()
 _OCR_EXECUTION_SERVICE: OcrExecutionService | None = None
 OCR_FEATURE_ENABLED = os.getenv("PICORGFTP_SQL_OCR_ENABLED", "1").strip().lower() not in {
     "0",
@@ -1442,14 +1439,20 @@ def _image_sha256(path: str) -> str:
     return digest.hexdigest()
 
 
-def _analyze_image_values_with_configured_profiles(path: str) -> ImageOcrDiagnostics:
+def _analyze_image_values_with_configured_profiles(
+    path: str, *, profile_ids: list[object] | None = None
+) -> ImageOcrDiagnostics:
     """Use the same selected OCR profiles for testing and slot collection."""
 
     service = _OCR_EXECUTION_SERVICE
     if service is not None:
-        run_id = service.submit_queue(
-            job_id=f"scan-{secrets.token_hex(12)}", path=path
-        )
+        payload: dict[str, object] = {
+            "job_id": f"scan-{secrets.token_hex(12)}",
+            "path": path,
+        }
+        if profile_ids is not None:
+            payload["profile_ids"] = list(profile_ids)
+        run_id = service.submit_queue(**payload)
         snapshot = service.wait_for_terminal(run_id, timeout_seconds=30 * 60)
         if snapshot.state != "completed":
             return ImageOcrDiagnostics(False, {}, [], snapshot.error or snapshot.state)
@@ -1488,11 +1491,16 @@ def _analyze_image_values_with_configured_profiles(path: str) -> ImageOcrDiagnos
             timings_ms=timings_ms,
         )
     settings = normalize_ocr_settings(config.CONFIG.get(OCR_SETTINGS_KEY, {}))
-    return analyze_image_values(path, profile_ids=settings.get("model_profiles", ["fast"]))
+    selected_profiles = (
+        list(profile_ids)
+        if profile_ids is not None
+        else settings.get("model_profiles", ["fast"])
+    )
+    return analyze_image_values(path, profile_ids=selected_profiles)
 
 
 def _schedule_ocr_value_collection(slot: object, path: str) -> str:
-    """Start a non-blocking cache fill only for an admin-enabled OCR slot."""
+    """Queue the fast OCR stage only for an admin-enabled image slot."""
 
     if not OCR_FEATURE_ENABLED:
         return "disabled"
@@ -1502,74 +1510,35 @@ def _schedule_ocr_value_collection(slot: object, path: str) -> str:
     if str(slot or "").strip() not in enabled_slots:
         return "disabled"
     canonical_path = os.path.realpath(os.path.abspath(path))
+    image_hash = ""
     try:
+        image_hash = image_content_hash(canonical_path)
         cached_scan = observability_store().get_ocr_scan(
-            image_content_hash(canonical_path)
+            image_hash
         )
-        if (
-            isinstance(cached_scan, dict)
-            and str(cached_scan.get("state") or "") == "completed"
-        ):
-            return "completed"
+        if isinstance(cached_scan, dict):
+            cached_state = str(cached_scan.get("state") or "")
+            if cached_state in {"queued", "scanning", "refining", "completed"}:
+                return cached_state
     except Exception:
         # Cache lookup must not make assigning a slot fail; collection below
         # remains the source of truth and will record any OCR error.
         pass
-    with _OCR_COLLECTION_LOCK:
-        if canonical_path in _OCR_COLLECTION_PATHS:
-            return "scanning"
-        _OCR_COLLECTION_PATHS.add(canonical_path)
-
-    def collect() -> None:
-        try:
-            store = observability_store()
-
-            def start_fast_scan(image_hash: str) -> str:
-                try:
-                    return enqueue_ocr_fast_image_job(
-                        canonical_path,
-                        image_hash=image_hash,
-                        store=store,
-                        crop_dir=_ocr_crop_root(),
-                    )
-                except Exception as exc:
-                    log_error(f"OCR fast-stage preview could not be queued: {exc}")
-                    return ""
-
-            def finish_fast_scan(
-                job_id: str, values: list[dict[str, object]], state: str
-            ) -> None:
-                if state == "completed":
-                    store.complete_ocr_crop_job(job_id, values)
-                else:
-                    store.fail_ocr_crop_job(job_id, "Szybki model OCR nie zakonczyl skanowania.")
-
-            collect_image_values(
-                canonical_path,
-                store=store,
-                analyze=_analyze_image_values_with_configured_profiles,
-                enqueue_crops=lambda image_hash, diagnostics: enqueue_ocr_crop_jobs(
-                    canonical_path,
-                    image_hash=image_hash,
-                    diagnostics=diagnostics,
-                    store=store,
-                    crop_dir=_ocr_crop_root(),
-                ),
-                start_fast_scan=start_fast_scan,
-                finish_fast_scan=finish_fast_scan,
-            )
-        except Exception as exc:
-            log_error(f"OCR value collection failed: {exc}\n{traceback.format_exc()}")
-        finally:
-            with _OCR_COLLECTION_LOCK:
-                _OCR_COLLECTION_PATHS.discard(canonical_path)
-
-    threading.Thread(
-        target=collect,
-        daemon=True,
-        name="picorg-ocr-collect",
-    ).start()
-    return "scanning"
+    store = observability_store()
+    try:
+        if not image_hash:
+            image_hash = image_content_hash(canonical_path)
+        store.upsert_ocr_scan(image_hash, [], "queued")
+        enqueue_ocr_fast_image_job(
+            canonical_path,
+            image_hash=image_hash,
+            store=store,
+            crop_dir=_ocr_crop_root(),
+        )
+    except Exception as exc:
+        log_error(f"OCR fast-stage preview could not be queued: {exc}")
+        return "error"
+    return "queued"
 
 
 def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
@@ -5265,48 +5234,21 @@ def create_app() -> FastAPI:
         return service
 
     def _process_ocr_crop_job(job: dict[str, object]) -> None:
-        """Refine a persisted crop, keeping the result attached to its image hash."""
+        """Process both persisted slot stages through the isolated OCR worker."""
 
-        job_id = str(job.get("id") or "")
-        image_hash = str(job.get("image_hash") or "")
-        crop_path = str(job.get("thumbnail_path") or "")
-        if not job_id:
-            return
-        values: list[dict[str, object]] = []
-        source_bbox = list(job.get("bbox") or [])
-        if crop_path and os.path.isfile(crop_path):
-            run_id = _ocr_execution_service().submit_queue(
-                job_id=job_id, path=crop_path
-            )
-            snapshot = _ocr_execution_service().wait_for_terminal(
-                run_id, timeout_seconds=30 * 60
-            )
-            if snapshot.state != "completed":
-                raise RuntimeError(snapshot.error or f"OCR crop state: {snapshot.state}")
-            result = snapshot.result if isinstance(snapshot.result, dict) else {}
-            candidates = result.get("candidates") if isinstance(result, dict) else []
-            values = [
-                {
-                    "text": str(candidate.get("text") or ""),
-                    "comparison": str(candidate.get("value") or ""),
-                    "confidence": float(candidate.get("confidence") or 0),
-                    "bbox": (
-                        restore_crop_bbox(candidate.get("bbox") or [], source_bbox)
-                        if len(source_bbox) == 4
-                        else list(candidate.get("bbox") or [])
-                    ),
-                }
-                for candidate in candidates
-                if isinstance(candidate, dict)
-                and bool(candidate.get("accepted"))
-                and str(candidate.get("value") or "").strip()
-            ]
-        store = observability_store()
-        store.complete_ocr_crop_job(job_id, values)
-        existing = store.get_ocr_scan(image_hash) if image_hash else None
-        if isinstance(existing, dict):
-            combined = list(existing.get("values") or []) + values
-            store.upsert_ocr_scan(image_hash, combined, "completed")
+        ocr_settings = normalize_ocr_settings(
+            config.CONFIG.get(OCR_SETTINGS_KEY, {})
+        )
+        process_slot_ocr_queue_job(
+            job,
+            store=observability_store(),
+            analyze=lambda path, profile_ids: _analyze_image_values_with_configured_profiles(
+                path, profile_ids=profile_ids
+            ),
+            enqueue_crops=enqueue_ocr_crop_jobs,
+            crop_dir=_ocr_crop_root(),
+            settings=ocr_settings,
+        )
 
     def _run_ocr_queue_once() -> str:
         _purge_expired_ocr_crop_jobs()

@@ -52,6 +52,26 @@ def test_ocr_crop_job_is_claimed_once_and_completed(tmp_path):
     assert store.list_ocr_crop_jobs()[0]["status"] == "completed"
 
 
+def test_ocr_fast_image_job_is_claimed_by_background_worker(tmp_path):
+    store = initialized_store(tmp_path)
+    store.enqueue_ocr_crop_job(
+        {
+            "id": "fast-image",
+            "image_hash": "hash-fast",
+            "bbox": [0, 0, 800, 600],
+            "thumbnail_path": "image.png",
+            "kind": "fast",
+        }
+    )
+
+    job = store.claim_ocr_crop_job()
+
+    assert job is not None
+    assert job["id"] == "fast-image"
+    assert job["kind"] == "fast"
+    assert job["status"] == "processing"
+
+
 def test_ocr_crop_job_can_return_to_pending_when_user_activity_resumes(tmp_path):
     store = initialized_store(tmp_path)
     job_id = store.enqueue_ocr_crop_job({"image_hash": "a" * 64, "bbox": [1, 2, 3, 4]})

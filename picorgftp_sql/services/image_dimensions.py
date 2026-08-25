@@ -114,6 +114,38 @@ class ImageDimensionRecognizer(Protocol):
         """Return OCR candidates for one local image file."""
 
 
+def rotate_ocr_box_to_source(
+    box: OcrTextBox,
+    *,
+    rotation: str,
+    source_width: int,
+    source_height: int,
+) -> OcrTextBox:
+    """Map one OCR box from a 90-degree rotated image to its source image."""
+
+    width = max(1, int(source_width))
+    height = max(1, int(source_height))
+    left, top, right, bottom = (int(value) for value in box.bbox)
+    if rotation == "clockwise":
+        mapped = (top, height - right, bottom, height - left)
+        angle_offset = -90.0
+    elif rotation == "counterclockwise":
+        mapped = (width - bottom, left, width - top, right)
+        angle_offset = 90.0
+    else:
+        raise ValueError(f"Nieobslugiwana rotacja OCR: {rotation}")
+
+    mapped_left, mapped_top, mapped_right, mapped_bottom = mapped
+    mapped_bbox = (
+        max(0, min(width, mapped_left)),
+        max(0, min(height, mapped_top)),
+        max(0, min(width, mapped_right)),
+        max(0, min(height, mapped_bottom)),
+    )
+    angle = None if box.angle is None else float(box.angle) + angle_offset
+    return replace(box, bbox=mapped_bbox, angle=angle)
+
+
 def image_dimension_source_key(slot: str, dimension: str) -> str:
     return f"IMAGE_DIMENSION:{str(slot).strip()}:{str(dimension).upper()}"
 
@@ -894,20 +926,20 @@ class PaddleImageDimensionRecognizer:
         # PaddleOCR enables oneDNN by default on CPU.  PaddlePaddle 3.3 can
         # fail on OCR model PIR attributes in that backend, so prefer the
         # standard CPU executor for reliable local dimension extraction.
-        # Dimension drawings do not need document rotation, unwarping or
-        # text-line orientation. Disabling them makes OCR faster and preserves
-        # recognition coordinates relative to the uploaded original image.
+        # The orientation classifiers improve recognition of photos captured
+        # sideways and upside-down labels. Manual 90-degree passes below keep
+        # every returned box mapped to the coordinates of the original image.
         self._ocr = PaddleOCR(
             text_detection_model_name=self.profile.detector_model,
             text_recognition_model_name=self.profile.recognizer_model,
             enable_mkldnn=False,
-            use_doc_orientation_classify=False,
+            use_doc_orientation_classify=True,
             use_doc_unwarping=False,
-            use_textline_orientation=False,
+            use_textline_orientation=True,
         )
 
-    def detect(self, path: str) -> list[OcrTextBox]:  # pragma: no cover - optional runtime
-        raw = self._ocr.predict(path)
+    def _detect_boxes(self, source: object) -> list[OcrTextBox]:
+        raw = self._ocr.predict(source)
         boxes: list[OcrTextBox] = []
         for page in raw:
             payload = page.json if hasattr(page, "json") else page
@@ -933,9 +965,50 @@ class PaddleImageDimensionRecognizer:
                         angle,
                     )
                 )
+        return boxes
+
+    def _rotated_boxes(self, image: object) -> list[OcrTextBox]:
+        image_height, image_width = image.shape[:2]
+        profile_id = str(getattr(getattr(self, "profile", None), "id", ""))
+        rotations: list[tuple[str, object]] = []
+        clockwise = getattr(self._cv2, "ROTATE_90_CLOCKWISE", None)
+        counterclockwise = getattr(self._cv2, "ROTATE_90_COUNTERCLOCKWISE", None)
+        if profile_id == "fast":
+            if clockwise is not None:
+                rotations.append(("clockwise", clockwise))
+            if counterclockwise is not None:
+                rotations.append(("counterclockwise", counterclockwise))
+        elif image_height >= image_width * 1.35 and clockwise is not None:
+            # The accurate model normally receives a narrow crop. One turn is
+            # enough because Paddle's text-line classifier also handles 180°.
+            rotations.append(("clockwise", clockwise))
+
+        boxes: list[OcrTextBox] = []
+        for rotation, cv2_rotation in rotations:
+            try:
+                rotated = self._cv2.rotate(image, cv2_rotation)
+                detected = self._detect_boxes(rotated)
+            except Exception:
+                # A rotated in-memory input is optional. Keep the successful
+                # original-image pass if one accelerator rejects that input.
+                continue
+            boxes.extend(
+                rotate_ocr_box_to_source(
+                    box,
+                    rotation=rotation,
+                    source_width=image_width,
+                    source_height=image_height,
+                )
+                for box in detected
+            )
+        return boxes
+
+    def detect(self, path: str) -> list[OcrTextBox]:  # pragma: no cover - optional runtime
+        boxes = self._detect_boxes(path)
         image = self._cv2.imread(path)
         if image is None:
             return associate_dimension_hints(boxes, [])
+        boxes.extend(self._rotated_boxes(image))
         boxes = [
             _retry_low_confidence_dimension_label(
                 box, image, self._cv2, self._ocr.predict

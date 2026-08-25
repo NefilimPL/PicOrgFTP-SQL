@@ -134,8 +134,9 @@ def enqueue_ocr_fast_image_job(
             "image_hash": image_hash,
             "bbox": [0, 0, width, height],
             "thumbnail_path": str(preview_path),
+            "source_path": str(path),
             "kind": "fast",
-            "status": "processing",
+            "status": "pending",
         }
     )
     return job_id
@@ -148,6 +149,7 @@ def enqueue_ocr_crop_jobs(
     diagnostics: ImageOcrDiagnostics,
     store: OcrScanStore,
     crop_dir: str,
+    accurate_confidence_threshold: int = 100,
 ) -> list[str]:
     """Persist enlarged, sharpened numeric crops for idle-time refinement."""
 
@@ -155,10 +157,13 @@ def enqueue_ocr_crop_jobs(
         return []
     target_dir = Path(crop_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
+    threshold = max(0, min(100, int(accurate_confidence_threshold)))
     job_ids: list[str] = []
     with Image.open(path) as source:
         for candidate in diagnostics.candidates:
             if not candidate.accepted or not str(candidate.value).strip():
+                continue
+            if float(candidate.confidence) * 100 > threshold:
                 continue
             left, top, right, bottom = (int(value) for value in candidate.bbox)
             left = max(0, min(source.width, left))

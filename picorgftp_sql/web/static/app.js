@@ -3869,9 +3869,13 @@ function relocateProvisionalSlotFile(prefix) {
   return [prefix, targetPrefix];
 }
 
+function isOcrSlotStateInProgress(value) {
+  return ["queued", "scanning", "refining"].includes(String(value || ""));
+}
+
 function updateOcrSlotIndicator(card, selectedFile, loadedPhoto) {
   const state = String(selectedFile?.ocr_state || loadedPhoto?.ocr_state || "");
-  const collecting = state === "scanning";
+  const collecting = isOcrSlotStateInProgress(state);
   card.classList.toggle("ocr-collecting", collecting);
   let indicator = card.querySelector(".slot-ocr-state");
   if (!collecting) {
@@ -3883,8 +3887,14 @@ function updateOcrSlotIndicator(card, selectedFile, loadedPhoto) {
     indicator.className = "slot-ocr-state";
     card.querySelector(".slot-meta")?.appendChild(indicator);
   }
-  indicator.textContent = "OCR zbiera wartosci";
-  indicator.title = "Szybkie wykrywanie wartosci liczbowych trwa w tle.";
+  const details = {
+    queued: ["OCR oczekuje na skanowanie", "Obraz oczekuje w kolejce OCR na rozpoczecie szybkiego odczytu."],
+    scanning: ["OCR skanuje obraz", "Szybkie wykrywanie wartosci liczbowych trwa w tle."],
+    refining: ["OCR dopracowuje wycinki", "Dokladny model OCR analizuje wycinki wskazane przez szybki model."],
+  };
+  const [text, title] = details[state] || details.scanning;
+  indicator.textContent = text;
+  indicator.title = title;
 }
 
 function updateSlotPreview(prefix) {
@@ -13831,7 +13841,14 @@ function renderOcrDiagnosticView(result, options = {}) {
       addBox(region, region.fast, "fast");
       region.accurate.forEach((box, index) => addBox(region, box, "accurate", index));
     }
-    const placements = helpers.placeLabels(labels, { width, height });
+    const renderedWidth = Math.max(1, Number(image.clientWidth || stage.clientWidth || width));
+    const renderedHeight = Math.max(1, Number(image.clientHeight || stage.clientHeight || height));
+    const placements = helpers.placeLabelsForRenderedImage(labels, {
+      naturalWidth: width,
+      naturalHeight: height,
+      renderedWidth,
+      renderedHeight,
+    });
     placements.forEach((placement) => {
       const labelData = labels.find((label) => label.id === placement.id);
       if (!labelData) return;
@@ -13840,8 +13857,8 @@ function renderOcrDiagnosticView(result, options = {}) {
       label.setAttribute("data-ocr-region-id", labelData.region.region_id);
       label.setAttribute("data-ocr-label-position", placement.position);
       label.textContent = labelData.text;
-      label.style.left = `${(placement.left / width) * 100}%`;
-      label.style.top = `${(placement.top / height) * 100}%`;
+      label.style.left = `${(placement.left / renderedWidth) * 100}%`;
+      label.style.top = `${(placement.top / renderedHeight) * 100}%`;
       overlay.appendChild(label);
     });
   };
@@ -14030,14 +14047,14 @@ async function refreshOcrBackgroundQueue() {
 async function refreshOcrSlotStates() {
   const pending = [];
   for (const [prefix, item] of state.files.entries()) {
-    if (String(item?.ocr_state || "") === "scanning" && slotFileToken(item)) {
+    if (isOcrSlotStateInProgress(item?.ocr_state) && slotFileToken(item)) {
       pending.push([prefix, item, slotFileToken(item)]);
     }
   }
   for (const [prefix, photo] of state.loadedPhotos.entries()) {
     if (
       !state.files.has(prefix)
-      && String(photo?.ocr_state || "") === "scanning"
+      && isOcrSlotStateInProgress(photo?.ocr_state)
       && String(photo?.token || "")
     ) {
       pending.push([prefix, photo, String(photo.token)]);

@@ -58,12 +58,30 @@ class OcrExecutionService:
     def submit_test(self, *, path: str) -> str:
         return self._submit(kind="test", job_id=None, path=path)
 
-    def submit_queue(self, *, job_id: str, path: str) -> str:
+    def submit_queue(
+        self,
+        *,
+        job_id: str,
+        path: str,
+        profile_ids: list[object] | None = None,
+    ) -> str:
         """Submit a persisted crop through the exact same controlled pipeline."""
 
-        return self._submit(kind="queue", job_id=job_id, path=path)
+        return self._submit(
+            kind="queue",
+            job_id=job_id,
+            path=path,
+            profile_ids=profile_ids,
+        )
 
-    def _submit(self, *, kind: str, job_id: str | None, path: str) -> str:
+    def _submit(
+        self,
+        *,
+        kind: str,
+        job_id: str | None,
+        path: str,
+        profile_ids: list[object] | None = None,
+    ) -> str:
         settings = self._settings()
         run_id = self._registry.create_run(kind=kind, job_id=job_id)
         telemetry = self._telemetry()
@@ -84,7 +102,7 @@ class OcrExecutionService:
             )
             self._registry.finalize(run_id, state="paused")
             return run_id
-        profiles = settings.get("model_profiles")
+        profiles = profile_ids if isinstance(profile_ids, list) else settings.get("model_profiles")
         selected = [str(item) for item in profiles] if isinstance(profiles, list) else []
         if not selected:
             self._registry.publish(run_id, "error", message="No OCR profile selected.")

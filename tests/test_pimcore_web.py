@@ -1914,6 +1914,37 @@ def test_slot_ocr_analysis_uses_running_execution_service_when_available(monkeyp
     assert diagnostics.timings_ms == {"total": 43}
 
 
+def test_slot_ocr_analysis_can_limit_the_worker_to_the_fast_profile(monkeypatch):
+    class _Service:
+        def submit_queue(self, *, job_id: str, path: str, profile_ids: list[object]) -> str:
+            assert job_id.startswith("scan-")
+            assert path == "C:/cache/slot.png"
+            assert profile_ids == ["fast"]
+            return "run-fast"
+
+        def wait_for_terminal(self, run_id: str, *, timeout_seconds: float):
+            assert (run_id, timeout_seconds) == ("run-fast", 30 * 60)
+            return OcrRunSnapshot(
+                run_id=run_id,
+                kind="queue",
+                job_id="scan-fast",
+                state="completed",
+                latest_sequence=0,
+                cancel_requested=False,
+                events=[],
+                result={"available": True, "dimensions": {}, "candidates": [], "regions": []},
+                error=None,
+            )
+
+    monkeypatch.setattr(web_app, "_OCR_EXECUTION_SERVICE", _Service())
+
+    diagnostics = web_app._analyze_image_values_with_configured_profiles(
+        "C:/cache/slot.png", profile_ids=["fast"]
+    )
+
+    assert diagnostics.available is True
+
+
 def test_ocr_startup_cleanup_discards_unfinished_crops_and_removes_their_cache(
     tmp_path, monkeypatch
 ):
@@ -2162,47 +2193,28 @@ def test_ocr_approval_suppresses_a_cached_value_mismatch(tmp_path):
     assert validation.json()["mismatch"] is False
 
 
-def test_selected_ocr_slot_starts_background_value_collection(monkeypatch):
-    calls = []
+def test_selected_ocr_slot_queues_fast_image_without_direct_model_scan(tmp_path, monkeypatch):
+    from PIL import Image
 
-    class ImmediateThread:
-        def __init__(self, *, target, daemon, name):
-            self.target = target
-            self.daemon = daemon
-            self.name = name
-
-        def start(self):
-            self.target()
-
+    image = tmp_path / "slot.png"
+    Image.new("RGB", (80, 60), "white").save(image)
+    store = SqliteStore(str(tmp_path / "ocr.sqlite"))
     monkeypatch.setitem(web_app.config.CONFIG, "ocr", {"enabled_slots": ["15"]})
-    monkeypatch.setattr(web_app.threading, "Thread", ImmediateThread)
-    monkeypatch.setattr(
-        web_app,
-        "collect_image_values",
-        lambda path, *, store, analyze, enqueue_crops=None, start_fast_scan=None, finish_fast_scan=None: calls.append(
-            (path, store, analyze, enqueue_crops, start_fast_scan, finish_fast_scan)
-        ),
-        raising=False,
-    )
-    store = object()
     monkeypatch.setattr(web_app, "observability_store", lambda: store)
+    monkeypatch.setattr(web_app, "_ocr_crop_root", lambda: str(tmp_path / "ocr-crops"))
+    monkeypatch.setattr(
+        web_app.threading,
+        "Thread",
+        lambda **_kwargs: pytest.fail("slot OCR must be queued, not run in an app thread"),
+    )
 
-    status = web_app._schedule_ocr_value_collection("15", "C:/cache/15.png")
+    assert web_app._schedule_ocr_value_collection("15", str(image)) == "queued"
 
-    assert status == "scanning"
-    assert calls == [
-        (
-            os.path.realpath(os.path.abspath("C:/cache/15.png")),
-            store,
-            web_app._analyze_image_values_with_configured_profiles,
-            calls[0][3],
-            calls[0][4],
-            calls[0][5],
-        )
-    ]
-    assert callable(calls[0][3])
-    assert callable(calls[0][4])
-    assert callable(calls[0][5])
+    jobs = store.list_ocr_crop_jobs()
+    assert len(jobs) == 1
+    assert jobs[0]["kind"] == "fast"
+    assert jobs[0]["status"] == "pending"
+    assert jobs[0]["bbox"] == [0, 0, 80, 60]
 
 
 def test_selected_ocr_slot_reports_completed_cached_scan_without_rescheduling(
@@ -2225,42 +2237,6 @@ def test_selected_ocr_slot_reports_completed_cached_scan_without_rescheduling(
     )
 
     assert web_app._schedule_ocr_value_collection("15", str(image)) == "completed"
-
-
-def test_selected_ocr_slot_queues_full_image_before_accurate_crops(tmp_path, monkeypatch):
-    from PIL import Image
-
-    class ImmediateThread:
-        def __init__(self, *, target, daemon, name):
-            self.target = target
-            self.daemon = daemon
-            self.name = name
-
-        def start(self):
-            self.target()
-
-    image = tmp_path / "slot.png"
-    Image.new("RGB", (80, 60), "white").save(image)
-    store = SqliteStore(str(tmp_path / "ocr.sqlite"))
-    diagnostics = ImageOcrDiagnostics(
-        available=True,
-        dimensions={},
-        candidates=[OcrDiagnosticCandidate("23,4", 0.97, (10, 12, 40, 30), None, "23.4", True)],
-    )
-    monkeypatch.setitem(web_app.config.CONFIG, "ocr", {"enabled_slots": ["15"]})
-    monkeypatch.setattr(web_app.threading, "Thread", ImmediateThread)
-    monkeypatch.setattr(web_app, "observability_store", lambda: store)
-    monkeypatch.setattr(web_app, "_ocr_crop_root", lambda: str(tmp_path / "ocr-crops"))
-    monkeypatch.setattr(web_app, "_analyze_image_values_with_configured_profiles", lambda _path: diagnostics)
-
-    assert web_app._schedule_ocr_value_collection("15", str(image)) == "scanning"
-
-    jobs = store.list_ocr_crop_jobs()
-    assert [job["kind"] for job in jobs] == ["fast", "accurate"]
-    assert [job["status"] for job in jobs] == ["completed", "pending"]
-    assert jobs[0]["result"] == [
-        {"text": "23,4", "comparison": "23.4", "confidence": 0.97, "bbox": [10, 12, 40, 30]}
-    ]
 
 
 def test_admin_can_read_ocr_slots_and_background_queue(tmp_path, monkeypatch):

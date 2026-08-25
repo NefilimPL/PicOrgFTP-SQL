@@ -1605,7 +1605,7 @@ h2 {
 .ocr-diagnostic-focus-active .ocr-diagnostic-box.ocr-focused {
   z-index: 2;
   border-color: #ffd24a;
-  box-shadow: 0 0 0 9999px rgb(0 0 0 / 62%);
+  box-shadow: 0 0 0 3px rgb(255 210 74 / 35%), 0 0 14px rgb(255 210 74 / 75%);
 }
 
 .ocr-diagnostic-details,

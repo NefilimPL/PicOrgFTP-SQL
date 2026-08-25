@@ -87,3 +87,29 @@ test("places colliding labels in distinct usable positions", () => {
     assert.ok(placement.top + placement.height <= 240);
   }
 });
+
+test("places labels using the rendered image size, not the natural pixel size", () => {
+  const diagnostics = loadDiagnostics();
+  const placements = diagnostics.placeLabelsForRenderedImage([
+    { id: "fast", bbox: [800, 400, 920, 440], width: 78, height: 21 },
+    { id: "accurate", bbox: [804, 402, 924, 442], width: 86, height: 21 },
+  ], {
+    naturalWidth: 1600,
+    naturalHeight: 900,
+    renderedWidth: 400,
+    renderedHeight: 225,
+  });
+
+  assert.equal(placements.length, 2);
+  assert.notDeepEqual(
+    [placements[0].left, placements[0].top],
+    [placements[1].left, placements[1].top],
+  );
+  assert.notEqual(placements[0].position, placements[1].position);
+  for (const placement of placements) {
+    assert.ok(placement.left >= 0);
+    assert.ok(placement.top >= 0);
+    assert.ok(placement.left + placement.width <= 400);
+    assert.ok(placement.top + placement.height <= 225);
+  }
+});

@@ -182,6 +182,29 @@
     return placed;
   }
 
+  function placeLabelsForRenderedImage(labels, imageBounds) {
+    const naturalWidth = Math.max(1, finiteNumber(imageBounds?.naturalWidth, 1));
+    const naturalHeight = Math.max(1, finiteNumber(imageBounds?.naturalHeight, 1));
+    const renderedWidth = Math.max(1, finiteNumber(imageBounds?.renderedWidth, naturalWidth));
+    const renderedHeight = Math.max(1, finiteNumber(imageBounds?.renderedHeight, naturalHeight));
+    const scaleX = renderedWidth / naturalWidth;
+    const scaleY = renderedHeight / naturalHeight;
+    const renderedLabels = (Array.isArray(labels) ? labels : []).map((label) => {
+      const bbox = normalizeBbox(label?.bbox);
+      if (!bbox) return label;
+      return {
+        ...label,
+        bbox: [
+          bbox[0] * scaleX,
+          bbox[1] * scaleY,
+          bbox[2] * scaleX,
+          bbox[3] * scaleY,
+        ],
+      };
+    });
+    return placeLabels(renderedLabels, { width: renderedWidth, height: renderedHeight });
+  }
+
   function formatDuration(value) {
     const milliseconds = nonNegativeInt(value);
     return milliseconds >= 1000 ? `${(milliseconds / 1000).toFixed(2)} s` : `${milliseconds} ms`;
@@ -191,6 +214,7 @@
     normalizeReport,
     applyProgressEvent,
     placeLabels,
+    placeLabelsForRenderedImage,
     formatDuration,
   };
 })();

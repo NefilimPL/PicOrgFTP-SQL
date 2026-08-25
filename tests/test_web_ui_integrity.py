@@ -163,6 +163,32 @@ console.log(JSON.stringify(calls));
             [{"removedSlotToken": "old-slot-token"}],
         )
 
+    def test_ocr_slot_polling_keeps_queue_and_refinement_states_live(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        state_helpers = source[
+            source.index("function isOcrSlotStateInProgress") : source.index(
+                "function updateSlotPreview", source.index("function isOcrSlotStateInProgress")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the OCR slot state contract")
+        completed = subprocess.run(
+            [
+                str(node),
+                "-e",
+                f"{state_helpers}\nconsole.log(JSON.stringify([\"queued\", \"scanning\", \"refining\", \"completed\"].map(isOcrSlotStateInProgress)));",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        self.assertEqual(json.loads(completed.stdout), [True, True, True, False])
+        self.assertIn("isOcrSlotStateInProgress(item?.ocr_state)", source)
+        self.assertIn("isOcrSlotStateInProgress(photo?.ocr_state)", source)
+
     def test_settings_ocr_tab_has_diagnostic_controls_and_overlay_contract(self) -> None:
         html = _parse(INDEX_HTML)
         source = APP_JS.read_text(encoding="utf-8")
@@ -184,6 +210,7 @@ console.log(JSON.stringify(calls));
         self.assertIn("setOcrRegionFocus", source)
         self.assertIn("ocr-diagnostic-focus-active", css)
         self.assertIn("ocr-focused", css)
+        self.assertNotIn("0 0 0 9999px", css)
         self.assertIn("/api/settings/ocr/status", source)
         self.assertIn("/api/settings/ocr/runs", source)
         self.assertIn("ocr_max_memory_mode", source)

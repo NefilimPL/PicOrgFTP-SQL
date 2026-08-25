@@ -96,6 +96,34 @@ def test_enqueue_ocr_crop_jobs_persists_a_real_crop_for_each_numeric_value(tmp_p
         assert crop.size == (48, 52)
 
 
+def test_enqueue_ocr_crop_jobs_respects_the_accurate_confidence_threshold(tmp_path):
+    from PIL import Image
+
+    image = tmp_path / "slot.png"
+    Image.new("RGB", (100, 80), "white").save(image)
+    diagnostics = ImageOcrDiagnostics(
+        available=True,
+        dimensions={},
+        candidates=[
+            OcrDiagnosticCandidate("99", 0.99, (10, 12, 30, 28), None, "99", True),
+            OcrDiagnosticCandidate("95", 0.95, (40, 30, 60, 48), None, "95", True),
+        ],
+    )
+    store = SqliteStore(str(tmp_path / "ocr.sqlite"))
+
+    job_ids = enqueue_ocr_crop_jobs(
+        str(image),
+        image_hash="a" * 64,
+        diagnostics=diagnostics,
+        store=store,
+        crop_dir=str(tmp_path / "ocr-crops"),
+        accurate_confidence_threshold=95,
+    )
+
+    assert len(job_ids) == 1
+    assert store.list_ocr_crop_jobs()[0]["bbox"] == [32, 22, 68, 56]
+
+
 def test_fast_ocr_queue_job_keeps_the_full_image_before_its_crops(tmp_path):
     from PIL import Image
 
@@ -121,8 +149,9 @@ def test_fast_ocr_queue_job_keeps_the_full_image_before_its_crops(tmp_path):
     jobs = store.list_ocr_crop_jobs()
     assert [job["id"] for job in jobs] == [fast_job_id, crop_job_id]
     assert jobs[0]["kind"] == "fast"
-    assert jobs[0]["status"] == "processing"
+    assert jobs[0]["status"] == "pending"
     assert jobs[0]["bbox"] == [0, 0, 80, 60]
+    assert jobs[0]["source_path"] == str(image)
     assert (tmp_path / "ocr-crops" / f"{fast_job_id}.png").is_file()
     assert jobs[1]["kind"] == "accurate"
 
