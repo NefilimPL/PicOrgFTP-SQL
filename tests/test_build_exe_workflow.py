@@ -127,9 +127,17 @@ def test_web_build_explicitly_packages_all_composition_static_assets() -> None:
         "runtime-status.js",
         "process-jobs.js",
         "ocr-diagnostics.js",
+        "module-build-status.js",
         "app.js",
     ):
         assert asset in source
+
+
+def test_all_exe_builds_request_a_generated_module_manifest() -> None:
+    for build_script in (LOCAL_BUILD, WEB_BUILD):
+        source = build_script.read_text(encoding="utf-8")
+        assert "New-ModuleBuildManifestArguments" in source
+        assert "@ModuleBuildManifestArguments" in source
 
 
 def test_web_build_supports_opt_in_vision_engine_and_embedded_models() -> None:

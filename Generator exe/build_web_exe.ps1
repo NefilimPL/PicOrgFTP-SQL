@@ -37,6 +37,12 @@ Invoke-Native $Python "tools\generate_windows_version_info.py" `
     --file-description "PicOrgFTP-SQL web manager" `
     --internal-name $BuildName `
     --original-filename ($BuildName + ".exe")
+$ModuleBuildVariant = if ($IncludeVisionModels) { "web-ocr" } else { "web" }
+$ModuleBuildManifestArguments = New-ModuleBuildManifestArguments `
+    -Python $Python `
+    -RepoRoot $RepoRoot `
+    -WorkPath $WorkPath `
+    -BuildVariant $ModuleBuildVariant
 
 $env:PICORGFTP_SQL_HEADLESS = "1"
 $env:PYINSTALLER_BUILD = "1"
@@ -107,6 +113,7 @@ Invoke-Native $Python "-m" "PyInstaller" "--noconfirm" "--clean" "--log-level=WA
     --collect-data certifi `
     @VisionPyInstallerArguments `
     @WebStaticDataArguments `
+    @ModuleBuildManifestArguments `
     --add-data "picorgftp_sql\browser_extension;picorgftp_sql\browser_extension" `
     --add-data "picorgftp_sql\Localization;picorgftp_sql\Localization" `
     --add-data "picorgftp_sql\VERSION;picorgftp_sql" `
