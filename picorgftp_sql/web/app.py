@@ -17,6 +17,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -66,10 +67,15 @@ from ..services.image_dimensions import (
     image_ocr_runtime_info,
 )
 from ..services.ocr_cache import (
-    collect_image_values,
     enqueue_ocr_crop_jobs,
-    restore_crop_bbox,
+    enqueue_ocr_fast_image_job,
+    image_content_hash,
 )
+from ..services.module_build_status import (
+    load_packaged_module_manifest,
+    module_status_snapshot,
+)
+from ..services.ocr_slot_queue import process_slot_ocr_queue_job
 from ..services.ocr_queue import OcrQueueLease, OcrQueueScheduler
 from ..services.ocr_worker import OcrQueueWorker
 from ..services.ocr_worker_process import OcrWorkerProcess
@@ -226,11 +232,11 @@ ACTIVE_CLIENT_FLUSH_INTERVAL_SECONDS = 15
 PRESENCE_CLIENT_ID_HEADER = "x-picorg-client-id"
 WEB_UPLOAD_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
 WEB_UPLOAD_CACHE_CLEAN_INTERVAL_SECONDS = 30 * 60
+OCR_QUEUE_VISIBLE_LIMIT = 5
+OCR_QUEUE_COMPLETED_TTL_SECONDS = 10
 CSRF_HEADER = "x-picorg-csrf"
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _UPLOAD_CACHE_LAST_CLEANUP = 0.0
-_OCR_COLLECTION_LOCK = threading.Lock()
-_OCR_COLLECTION_PATHS: set[str] = set()
 _OCR_EXECUTION_SERVICE: OcrExecutionService | None = None
 OCR_FEATURE_ENABLED = os.getenv("PICORGFTP_SQL_OCR_ENABLED", "1").strip().lower() not in {
     "0",
@@ -1283,6 +1289,31 @@ def _clear_ocr_crop_queue_on_startup() -> int:
     return len(crop_paths)
 
 
+def _purge_expired_ocr_crop_jobs() -> int:
+    """Remove short-lived completed queue rows and trusted crop cache files."""
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=OCR_QUEUE_COMPLETED_TTL_SECONDS)).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+    try:
+        crop_paths = list(observability_store().purge_completed_ocr_crop_jobs(cutoff))
+    except Exception as exc:
+        log_error(f"OCR completed crop cleanup skipped: {exc}")
+        return 0
+    crop_root = _ocr_crop_root()
+    deleted = 0
+    for crop_path in crop_paths:
+        if not _path_is_under_root(crop_path, crop_root):
+            continue
+        try:
+            if os.path.isfile(crop_path):
+                os.remove(crop_path)
+                deleted += 1
+        except OSError as exc:
+            log_error(f"OCR completed crop cleanup failed: {exc}")
+    return deleted
+
+
 def _is_upload_cache_path(path: str) -> bool:
     return bool(path and _path_is_under_root(path, _upload_cache_root()))
 
@@ -1413,14 +1444,20 @@ def _image_sha256(path: str) -> str:
     return digest.hexdigest()
 
 
-def _analyze_image_values_with_configured_profiles(path: str) -> ImageOcrDiagnostics:
+def _analyze_image_values_with_configured_profiles(
+    path: str, *, profile_ids: list[object] | None = None
+) -> ImageOcrDiagnostics:
     """Use the same selected OCR profiles for testing and slot collection."""
 
     service = _OCR_EXECUTION_SERVICE
     if service is not None:
-        run_id = service.submit_queue(
-            job_id=f"scan-{secrets.token_hex(12)}", path=path
-        )
+        payload: dict[str, object] = {
+            "job_id": f"scan-{secrets.token_hex(12)}",
+            "path": path,
+        }
+        if profile_ids is not None:
+            payload["profile_ids"] = list(profile_ids)
+        run_id = service.submit_queue(**payload)
         snapshot = service.wait_for_terminal(run_id, timeout_seconds=30 * 60)
         if snapshot.state != "completed":
             return ImageOcrDiagnostics(False, {}, [], snapshot.error or snapshot.state)
@@ -1440,18 +1477,35 @@ def _analyze_image_values_with_configured_profiles(path: str) -> ImageOcrDiagnos
             for item in raw_candidates
             if isinstance(item, dict) and len(list(item.get("bbox") or [])) == 4
         ]
+        raw_regions = result.get("regions") if isinstance(result, dict) else []
+        regions = [dict(item) for item in raw_regions if isinstance(item, dict)]
+        timings_ms: dict[str, int] = {}
+        raw_timings = result.get("timings_ms") if isinstance(result, dict) else {}
+        if isinstance(raw_timings, dict):
+            for key, raw_value in raw_timings.items():
+                try:
+                    timings_ms[str(key)] = max(0, int(raw_value))
+                except (TypeError, ValueError):
+                    continue
         return ImageOcrDiagnostics(
             available=bool(result.get("available")),
             dimensions=dict(result.get("dimensions") or {}),
             candidates=candidates,
             message=str(result.get("message") or ""),
+            regions=regions,
+            timings_ms=timings_ms,
         )
     settings = normalize_ocr_settings(config.CONFIG.get(OCR_SETTINGS_KEY, {}))
-    return analyze_image_values(path, profile_ids=settings.get("model_profiles", ["fast"]))
+    selected_profiles = (
+        list(profile_ids)
+        if profile_ids is not None
+        else settings.get("model_profiles", ["fast"])
+    )
+    return analyze_image_values(path, profile_ids=selected_profiles)
 
 
 def _schedule_ocr_value_collection(slot: object, path: str) -> str:
-    """Start a non-blocking cache fill only for an admin-enabled OCR slot."""
+    """Queue the fast OCR stage only for an admin-enabled image slot."""
 
     if not OCR_FEATURE_ENABLED:
         return "disabled"
@@ -1461,37 +1515,35 @@ def _schedule_ocr_value_collection(slot: object, path: str) -> str:
     if str(slot or "").strip() not in enabled_slots:
         return "disabled"
     canonical_path = os.path.realpath(os.path.abspath(path))
-    with _OCR_COLLECTION_LOCK:
-        if canonical_path in _OCR_COLLECTION_PATHS:
-            return "scanning"
-        _OCR_COLLECTION_PATHS.add(canonical_path)
-
-    def collect() -> None:
-        try:
-            collect_image_values(
-                canonical_path,
-                store=observability_store(),
-                analyze=_analyze_image_values_with_configured_profiles,
-                enqueue_crops=lambda image_hash, diagnostics: enqueue_ocr_crop_jobs(
-                    canonical_path,
-                    image_hash=image_hash,
-                    diagnostics=diagnostics,
-                    store=observability_store(),
-                    crop_dir=_ocr_crop_root(),
-                ),
-            )
-        except Exception as exc:
-            log_error(f"OCR value collection failed: {exc}\n{traceback.format_exc()}")
-        finally:
-            with _OCR_COLLECTION_LOCK:
-                _OCR_COLLECTION_PATHS.discard(canonical_path)
-
-    threading.Thread(
-        target=collect,
-        daemon=True,
-        name="picorg-ocr-collect",
-    ).start()
-    return "scanning"
+    image_hash = ""
+    try:
+        image_hash = image_content_hash(canonical_path)
+        cached_scan = observability_store().get_ocr_scan(
+            image_hash
+        )
+        if isinstance(cached_scan, dict):
+            cached_state = str(cached_scan.get("state") or "")
+            if cached_state in {"queued", "scanning", "refining", "completed"}:
+                return cached_state
+    except Exception:
+        # Cache lookup must not make assigning a slot fail; collection below
+        # remains the source of truth and will record any OCR error.
+        pass
+    store = observability_store()
+    try:
+        if not image_hash:
+            image_hash = image_content_hash(canonical_path)
+        store.upsert_ocr_scan(image_hash, [], "queued")
+        enqueue_ocr_fast_image_job(
+            canonical_path,
+            image_hash=image_hash,
+            store=store,
+            crop_dir=_ocr_crop_root(),
+        )
+    except Exception as exc:
+        log_error(f"OCR fast-stage preview could not be queued: {exc}")
+        return "error"
+    return "queued"
 
 
 def _path_from_file_token(token: str, *, require_exists: bool = True) -> str:
@@ -5121,6 +5173,17 @@ def _is_ocr_progress_poll(request: Request) -> bool:
     )
 
 
+def _is_ocr_blocking_request(request: Request) -> bool:
+    """Return whether this request intentionally resets OCR idle time."""
+
+    return (str(request.method or "").upper(), str(request.url.path or "")) in {
+        ("POST", "/api/upload-cache"),
+        ("POST", "/api/web-images/cache"),
+        ("POST", "/api/process/background"),
+        ("POST", "/api/ocr/activity"),
+    }
+
+
 def create_app() -> FastAPI:
     """Create the LAN web backend."""
 
@@ -5176,50 +5239,24 @@ def create_app() -> FastAPI:
         return service
 
     def _process_ocr_crop_job(job: dict[str, object]) -> None:
-        """Refine a persisted crop, keeping the result attached to its image hash."""
+        """Process both persisted slot stages through the isolated OCR worker."""
 
-        job_id = str(job.get("id") or "")
-        image_hash = str(job.get("image_hash") or "")
-        crop_path = str(job.get("thumbnail_path") or "")
-        if not job_id:
-            return
-        values: list[dict[str, object]] = []
-        source_bbox = list(job.get("bbox") or [])
-        if crop_path and os.path.isfile(crop_path):
-            run_id = _ocr_execution_service().submit_queue(
-                job_id=job_id, path=crop_path
-            )
-            snapshot = _ocr_execution_service().wait_for_terminal(
-                run_id, timeout_seconds=30 * 60
-            )
-            if snapshot.state != "completed":
-                raise RuntimeError(snapshot.error or f"OCR crop state: {snapshot.state}")
-            result = snapshot.result if isinstance(snapshot.result, dict) else {}
-            candidates = result.get("candidates") if isinstance(result, dict) else []
-            values = [
-                {
-                    "text": str(candidate.get("text") or ""),
-                    "comparison": str(candidate.get("value") or ""),
-                    "confidence": float(candidate.get("confidence") or 0),
-                    "bbox": (
-                        restore_crop_bbox(candidate.get("bbox") or [], source_bbox)
-                        if len(source_bbox) == 4
-                        else list(candidate.get("bbox") or [])
-                    ),
-                }
-                for candidate in candidates
-                if isinstance(candidate, dict)
-                and bool(candidate.get("accepted"))
-                and str(candidate.get("value") or "").strip()
-            ]
-        store = observability_store()
-        store.complete_ocr_crop_job(job_id, values)
-        existing = store.get_ocr_scan(image_hash) if image_hash else None
-        if isinstance(existing, dict):
-            combined = list(existing.get("values") or []) + values
-            store.upsert_ocr_scan(image_hash, combined, "completed")
+        ocr_settings = normalize_ocr_settings(
+            config.CONFIG.get(OCR_SETTINGS_KEY, {})
+        )
+        process_slot_ocr_queue_job(
+            job,
+            store=observability_store(),
+            analyze=lambda path, profile_ids: _analyze_image_values_with_configured_profiles(
+                path, profile_ids=profile_ids
+            ),
+            enqueue_crops=enqueue_ocr_crop_jobs,
+            crop_dir=_ocr_crop_root(),
+            settings=ocr_settings,
+        )
 
     def _run_ocr_queue_once() -> str:
+        _purge_expired_ocr_crop_jobs()
         ocr_settings = normalize_ocr_settings(
             config.CONFIG.get(OCR_SETTINGS_KEY, {})
         )
@@ -5323,19 +5360,19 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def _prioritize_interactive_work(request: Request, call_next):
-        is_progress_poll = _is_ocr_progress_poll(request)
-        with app.state.ocr_activity_lock:
-            app.state.ocr_active_requests += 1
-            if not is_progress_poll:
+        is_blocking_activity = _is_ocr_blocking_request(request)
+        if is_blocking_activity:
+            with app.state.ocr_activity_lock:
+                app.state.ocr_active_requests += 1
                 app.state.ocr_last_activity = time.monotonic()
         try:
             return await call_next(request)
         finally:
-            with app.state.ocr_activity_lock:
-                app.state.ocr_active_requests = max(
-                    0, app.state.ocr_active_requests - 1
-                )
-                if not is_progress_poll:
+            if is_blocking_activity:
+                with app.state.ocr_activity_lock:
+                    app.state.ocr_active_requests = max(
+                        0, app.state.ocr_active_requests - 1
+                    )
                     app.state.ocr_last_activity = time.monotonic()
 
     @app.on_event("startup")
@@ -6350,6 +6387,18 @@ def create_app() -> FastAPI:
         _require_admin(request)
         return {"time_zones": config.available_display_time_zones()}
 
+    @app.get("/api/settings/module-status")
+    def settings_module_status(request: Request) -> Dict[str, Any]:
+        _require_admin(request)
+        runtime_root = (
+            Path(sys.executable).resolve().parent
+            if getattr(sys, "frozen", False)
+            else Path(__file__).resolve().parents[2]
+        )
+        return module_status_snapshot(
+            load_packaged_module_manifest(), runtime_root, os.environ
+        )
+
     @app.get("/api/settings/ocr/status")
     def settings_ocr_status(request: Request) -> Dict[str, Any]:
         _require_admin(request)
@@ -6545,8 +6594,15 @@ def create_app() -> FastAPI:
 
     @app.get("/api/ocr/jobs")
     def ocr_jobs(request: Request) -> Dict[str, Any]:
-        _require_admin(request)
         _require_ocr_feature()
+        user = _current_user_payload(request)
+        ocr_settings = normalize_ocr_settings(config.CONFIG.get(OCR_SETTINGS_KEY, {}))
+        if (
+            str(user.get("role") or "") != "admin"
+            and not bool(ocr_settings.get("background_queue_visible_to_users"))
+        ):
+            raise HTTPException(status_code=403, detail="Kolejka OCR nie jest widoczna dla tego konta.")
+        _purge_expired_ocr_crop_jobs()
 
         def public_job(job: dict[str, object]) -> dict[str, object]:
             thumbnail_path = str(job.get("thumbnail_path") or "")
@@ -6559,20 +6615,92 @@ def create_app() -> FastAPI:
                     )
                 except HTTPException:
                     pass
+            result: list[str] = []
+            for value in list(job.get("result") or []):
+                if not isinstance(value, dict):
+                    continue
+                text = str(value.get("text") or "").strip()
+                comparison = str(value.get("comparison") or "").strip()
+                if not text and not comparison:
+                    continue
+                result.append(text if not comparison or comparison == text else f"{text} \u2192 {comparison}")
             return {
-                "id": str(job.get("id") or ""),
-                "image_hash": str(job.get("image_hash") or ""),
-                "bbox": list(job.get("bbox") or []),
+                "kind": (
+                    "fast"
+                    if str(job.get("kind") or "").strip().lower() == "fast"
+                    else "accurate"
+                ),
                 "status": str(job.get("status") or ""),
-                "created_at": str(job.get("created_at") or ""),
-                "updated_at": str(job.get("updated_at") or ""),
-                "result": list(job.get("result") or []),
+                "result": result,
                 "thumbnail_url": thumbnail_url,
             }
 
+        grouped_jobs: dict[str, list[dict[str, object]]] = {}
+        for index, job in enumerate(observability_store().list_ocr_crop_jobs()):
+            image_hash = str(job.get("image_hash") or "").strip() or f"job-{index}"
+            grouped_jobs.setdefault(image_hash, []).append(job)
+
+        def group_rank(group: list[dict[str, object]]) -> int:
+            statuses = {str(job.get("status") or "") for job in group}
+            if "processing" in statuses:
+                return 0
+            if "pending" in statuses:
+                return 1
+            return 2
+
+        def group_updated_at(group: list[dict[str, object]]) -> str:
+            return max(
+                str(job.get("updated_at") or job.get("created_at") or "")
+                for job in group
+            )
+
+        ordered_groups = list(grouped_jobs.values())
+        ordered_groups.sort(key=group_updated_at, reverse=True)
+        ordered_groups.sort(key=group_rank)
+        ordered = [job for group in ordered_groups for job in group]
+        visible = ordered[:OCR_QUEUE_VISIBLE_LIMIT]
         return {
-            "jobs": [public_job(job) for job in observability_store().list_ocr_crop_jobs()]
+            "jobs": [public_job(job) for job in visible],
+            "remaining_count": max(0, len(ordered) - len(visible)),
         }
+
+    @app.post("/api/ocr/activity")
+    async def ocr_activity(request: Request) -> Dict[str, Any]:
+        """Record an explicit slot or data-load action for the idle OCR queue."""
+
+        _require_ocr_feature()
+        _require_user(request)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Niepoprawny sygnal aktywnosci OCR.")
+        kind = str(payload.get("kind") or "").strip()
+        if kind not in {"slot-change", "data-load"}:
+            raise HTTPException(status_code=400, detail="Niepoprawny rodzaj aktywnosci OCR.")
+        with app.state.ocr_activity_lock:
+            app.state.ocr_last_activity = time.monotonic()
+
+        cancelled = 0
+        removed_slot_token = str(payload.get("removed_slot_token") or "").strip()
+        if removed_slot_token:
+            image_path = _path_from_file_token(removed_slot_token)
+            image_hash = await run_in_threadpool(_image_sha256, image_path)
+            crop_paths = await run_in_threadpool(
+                observability_store().cancel_pending_ocr_crop_jobs, image_hash
+            )
+            cancelled = len(crop_paths)
+            crop_root = _ocr_crop_root()
+            for crop_path in crop_paths:
+                if not _path_is_under_root(crop_path, crop_root):
+                    continue
+                try:
+                    if os.path.isfile(crop_path):
+                        os.remove(crop_path)
+                except OSError as exc:
+                    log_error(f"OCR removed-slot crop cleanup failed: {exc}")
+        return {"ok": True, "cancelled": cancelled}
 
     @app.post("/api/ocr/approval")
     async def ocr_approval(request: Request) -> Dict[str, Any]:

@@ -61,6 +61,146 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
+    def test_settings_ui_contains_module_status_tab_and_refresh_contract(self) -> None:
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn('data-settings-tab="module-status"', html)
+        self.assertIn('src="/static/module-build-status.js', html)
+        self.assertIn('"/api/settings/module-status"', source)
+        self.assertIn("Odswiez porownanie", source)
+        self.assertIn("function renderSettingsModuleStatus()", source)
+        self.assertIn("utilities.commitUrl", source)
+        self.assertIn('link.target = "_blank"', source)
+
+    def test_ocr_background_queue_renders_safe_rows_in_workspace_position(self) -> None:
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        source = APP_JS.read_text(encoding="utf-8")
+        renderer = source[
+            source.index("function renderOcrBackgroundQueue") : source.index(
+                "function renderSettingsOcr", source.index("function renderOcrBackgroundQueue")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the OCR queue rendering contract")
+        script = f"""
+const makeNode = (tag) => ({{
+  tag, className: "", textContent: "", hidden: false, src: "", alt: "",
+  children: [],
+  append(...items) {{ this.children.push(...items); }},
+  appendChild(item) {{ this.children.push(item); return item; }},
+  replaceChildren(...items) {{ this.children = items; this.textContent = ""; }},
+  classList: {{ toggle() {{}}, add() {{}}, remove() {{}} }},
+}});
+const document = {{ createElement: makeNode }};
+const ocrBackgroundQueuePanel = makeNode("section");
+const ocrBackgroundQueueSummary = makeNode("span");
+const ocrBackgroundQueueList = makeNode("div");
+{renderer}
+renderOcrBackgroundQueue({{
+  jobs: [
+    {{ kind: "fast", thumbnail_url: "/api/file?token=crop-1", status: "processing", result: [] }},
+    {{ kind: "accurate", thumbnail_url: "/api/file?token=crop-2", status: "completed", result: ["20kg \\u2192 20"] }},
+  ],
+  remaining_count: 7,
+}});
+console.log(JSON.stringify({{
+  hidden: ocrBackgroundQueuePanel.hidden,
+  summary: ocrBackgroundQueueSummary.textContent,
+  firstImage: ocrBackgroundQueueList.children[0]?.children[0]?.src || "",
+  secondImage: ocrBackgroundQueueList.children[1]?.children[0]?.src || "",
+  firstText: ocrBackgroundQueueList.children[0]?.children[1]?.textContent || "",
+  secondText: ocrBackgroundQueueList.children[1]?.children[1]?.textContent || "",
+}}));
+renderOcrBackgroundQueue({{ jobs: [], remaining_count: 0 }});
+console.log(JSON.stringify({{ emptyText: ocrBackgroundQueueList.textContent }}));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result, empty = [json.loads(line) for line in completed.stdout.splitlines()]
+
+        self.assertFalse(result["hidden"])
+        self.assertEqual(result["summary"], "+7 kolejnych")
+        self.assertEqual(result["firstImage"], "/api/file?token=crop-1")
+        self.assertEqual(result["secondImage"], "/api/file?token=crop-2")
+        self.assertIn("Szybki model", result["firstText"])
+        self.assertIn("zdjec", empty["emptyText"])
+        self.assertIn("20kg → 20", result["secondText"])
+        self.assertIn('id="ocrBackgroundQueuePanel"', html)
+        self.assertGreater(html.index('id="ocrBackgroundQueuePanel"'), html.index('id="processQueuePanel"'))
+        self.assertLess(html.index('id="ocrBackgroundQueuePanel"'), html.index('id="slotsTitle"'))
+
+    def test_clearing_slot_reports_its_removed_file_token_to_ocr(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        clear_assignment = source[
+            source.index("function clearSlotAssignment") : source.index(
+                "function setSlotFile", source.index("function clearSlotAssignment")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the OCR slot activity contract")
+        script = f"""
+const state = {{
+  files: new Map(), loadedPhotos: new Map([["01", {{ token: "old-slot-token" }}]]),
+  slotFits: new Map(), slotSources: new Map(), userSelectedSlotSources: new Map(),
+}};
+const calls = [];
+const bumpSlotRevision = () => {{}};
+const markSlotDeletion = () => {{}};
+const revokeFilePreviewUrl = () => {{}};
+const dismissSimilarCandidate = () => {{}};
+const slotAssignmentToken = (prefix) => state.loadedPhotos.get(prefix)?.token || "";
+const recordOcrActivity = (payload) => calls.push(payload);
+{clear_assignment}
+clearSlotAssignment("01");
+console.log(JSON.stringify(calls));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            json.loads(completed.stdout),
+            [{"removedSlotToken": "old-slot-token"}],
+        )
+
+    def test_ocr_slot_polling_keeps_queue_and_refinement_states_live(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        state_helpers = source[
+            source.index("function isOcrSlotStateInProgress") : source.index(
+                "function updateSlotPreview", source.index("function isOcrSlotStateInProgress")
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the OCR slot state contract")
+        completed = subprocess.run(
+            [
+                str(node),
+                "-e",
+                f"{state_helpers}\nconsole.log(JSON.stringify([\"queued\", \"scanning\", \"refining\", \"completed\"].map(isOcrSlotStateInProgress)));",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        self.assertEqual(json.loads(completed.stdout), [True, True, True, False])
+        self.assertIn("isOcrSlotStateInProgress(item?.ocr_state)", source)
+        self.assertIn("isOcrSlotStateInProgress(photo?.ocr_state)", source)
+
     def test_settings_ocr_tab_has_diagnostic_controls_and_overlay_contract(self) -> None:
         html = _parse(INDEX_HTML)
         source = APP_JS.read_text(encoding="utf-8")
@@ -73,18 +213,23 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("showEvent(event)", source)
         self.assertIn("candidate_regions", source)
         self.assertIn("crop_started", source)
-        self.assertIn('const preview = document.createElement("canvas")', source)
+        self.assertIn("PicOrg.OcrDiagnostics", source)
+        self.assertIn("applyProgressEvent", source)
+        self.assertNotIn("createImageBitmap", source)
+        self.assertNotIn("data-ocr-candidate-index", source)
         self.assertIn("await renderOcrLivePreview(selected)", source)
-        self.assertIn("data-ocr-candidate-index", source)
-        self.assertIn("setOcrCandidateFocus", source)
+        self.assertIn("data-ocr-region-id", source)
+        self.assertIn("setOcrRegionFocus", source)
         self.assertIn("ocr-diagnostic-focus-active", css)
         self.assertIn("ocr-focused", css)
+        self.assertNotIn("0 0 0 9999px", css)
         self.assertIn("/api/settings/ocr/status", source)
         self.assertIn("/api/settings/ocr/runs", source)
         self.assertIn("ocr_max_memory_mode", source)
         self.assertIn("ocr_max_memory_percent", source)
         self.assertIn("ocr_max_memory_gb", source)
         self.assertIn("ocr_max_disk_busy_percent", source)
+        self.assertIn("ocr_accurate_confidence_threshold", source)
         self.assertIn(
             'selectField("ocr_max_memory_mode", "Miekki prog RAM systemu", ocrSettings.max_memory_mode || "percent", [\n'
             '    ["percent", "Procent calego RAM"],\n'
@@ -105,6 +250,9 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn("%", source)
         self.assertIn("ocr-diagnostic-overlay", css)
         self.assertIn("ocr-diagnostic-live-status", css)
+        self.assertIn("ocr-diagnostic-model-columns", css)
+        self.assertIn("ocr-diagnostic-detail-panel", css)
+        self.assertIn('data-ocr-label-position="rail"', css)
         self.assertIn('requestJson("/api/ocr/jobs")', source)
         self.assertIn("ocr-background-queue", css)
         self.assertIn("slot-ocr-state", source)
@@ -116,6 +264,9 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn('requestJson(`/api/ocr/scan?token=${encodeURIComponent(token)}`)', source)
         self.assertIn("ocr-slot-open-overlay", css)
         self.assertIn('overlay.className = "ocr-slot-open-overlay";', source)
+        self.assertIn("function refreshOcrSlotStates", source)
+        self.assertIn('requestJson(`/api/ocr/scan?token=${encodeURIComponent(token)}`)', source)
+        self.assertIn('createPoller("ocr-slot-state", 1500, refreshOcrSlotStates)', source)
 
     def test_pimcore_export_selection_has_a_legacy_chrome_border_fallback(self) -> None:
         css = APP_CSS.read_text(encoding="utf-8")
@@ -1098,6 +1249,8 @@ const createSlotFileUpload = (_prefix, file) => ({{ file }});
 const dismissSimilarCandidate = () => {{}};
 const updateSubmitButtonState = () => {{}};
 const uploadSlotFile = () => {{}};
+const slotAssignmentToken = () => "";
+const recordOcrActivity = () => {{}};
 let immediateRefreshes = 0;
 let debouncedRefreshes = 0;
 let occupiedAtRefresh = [];
@@ -1474,6 +1627,7 @@ const hasPendingUserChanges = () => true;
 const pendingChangedSlotPrefixes = () => new Set();
 const FormData = class {{}};
 const requestJson = () => {{ requests += 1; return Promise.resolve({{}}); }};
+const recordOcrActivity = () => {{}};
 {submit_product}
 (async () => {{
   await submitProductForm();

@@ -8,8 +8,64 @@ from queue import Empty
 import os
 from typing import Any
 
+from .ocr_values import comparison_key
 from .ocr_resource_policy import OcrResourcePolicy, ResourceTelemetry
 from .windows_job_limits import WindowsJobLimits
+
+
+def _serialize_box(box: Any) -> dict[str, object]:
+    return {
+        "text": str(box.text),
+        "value": comparison_key(box.text),
+        "confidence": float(box.confidence),
+        "bbox": [int(value) for value in box.bbox],
+    }
+
+
+def _serialize_diagnostics(diagnostics: Any) -> dict[str, object]:
+    return {
+        "available": bool(diagnostics.available),
+        "dimensions": dict(diagnostics.dimensions),
+        "message": str(diagnostics.message),
+        "candidates": [
+            {
+                "text": candidate.text,
+                "confidence": candidate.confidence,
+                "bbox": list(candidate.bbox),
+                "dimension": candidate.dimension,
+                "value": candidate.value,
+                "accepted": candidate.accepted,
+                "reason": candidate.reason,
+                "selected": candidate.selected,
+            }
+            for candidate in diagnostics.candidates
+        ],
+    }
+
+
+def _serialize_report(report: Any, diagnostics: Any) -> dict[str, object]:
+    """Convert the structured pipeline report to the worker's JSON protocol."""
+
+    payload = _serialize_diagnostics(diagnostics)
+    payload["regions"] = [
+        {
+            "region_id": region.region_id,
+            "fast": _serialize_box(region.fast_box),
+            "source_bbox": list(region.source_bbox),
+            "crop_bbox": list(region.crop_bbox) if region.crop_bbox else None,
+            "accurate": [_serialize_box(box) for box in region.accurate_boxes],
+            "status": region.status,
+            "reason": region.reason,
+            "timings_ms": {
+                "fast": region.fast_elapsed_ms,
+                "crop": region.crop_elapsed_ms,
+                "accurate": region.accurate_elapsed_ms,
+            },
+        }
+        for region in report.regions
+    ]
+    payload["timings_ms"] = {"total": report.total_elapsed_ms}
+    return payload
 
 
 def _worker_main(commands: Any, events: Any, cpu_percent: int, telemetry: Any) -> None:
@@ -65,16 +121,26 @@ def _worker_main(commands: Any, events: Any, cpu_percent: int, telemetry: Any) -
                     ImageOcrDiagnostics,
                     diagnostics_for_boxes,
                 )
-                from .ocr_pipeline import run_ocr_pipeline
+                from .ocr_pipeline import run_ocr_pipeline_report
 
                 try:
-                    boxes = run_ocr_pipeline(
+                    resource_settings = (
+                        command.get("resource_settings")
+                        if isinstance(command.get("resource_settings"), dict)
+                        else {}
+                    )
+                    try:
+                        threshold = int(
+                            resource_settings.get("accurate_confidence_threshold", 99)
+                        )
+                    except (TypeError, ValueError):
+                        threshold = 99
+                    report = run_ocr_pipeline_report(
                         str(command.get("path") or ""),
                         profile_ids=command.get("profile_ids") or [],
+                        accurate_confidence_threshold=threshold,
                         before_stage=lambda _stage: OcrResourcePolicy(
-                            command.get("resource_settings")
-                            if isinstance(command.get("resource_settings"), dict)
-                            else {}
+                            resource_settings
                         ).before_stage(
                             ResourceTelemetry(
                                 cpu_percent=float(telemetry[0]),
@@ -87,7 +153,8 @@ def _worker_main(commands: Any, events: Any, cpu_percent: int, telemetry: Any) -
                             {"kind": kind, "run_id": run_id, **payload}
                         ),
                     )
-                    diagnostics = diagnostics_for_boxes(boxes)
+                    diagnostics = diagnostics_for_boxes(report.all_boxes)
+                    payload = _serialize_report(report, diagnostics)
                 except ImageDimensionUnavailable as exc:
                     diagnostics = ImageOcrDiagnostics(
                         available=False,
@@ -95,6 +162,7 @@ def _worker_main(commands: Any, events: Any, cpu_percent: int, telemetry: Any) -
                         candidates=[],
                         message=str(exc) or "Local OCR is unavailable.",
                     )
+                    payload = _serialize_diagnostics(diagnostics)
                 except Exception as exc:
                     diagnostics = ImageOcrDiagnostics(
                         available=False,
@@ -102,24 +170,9 @@ def _worker_main(commands: Any, events: Any, cpu_percent: int, telemetry: Any) -
                         candidates=[],
                         message=f"Local OCR failed: {exc}",
                     )
-                payload = {
-                    "available": diagnostics.available,
-                    "dimensions": diagnostics.dimensions,
-                    "message": diagnostics.message,
-                    "candidates": [
-                        {
-                            "text": candidate.text,
-                            "confidence": candidate.confidence,
-                            "bbox": list(candidate.bbox),
-                            "dimension": candidate.dimension,
-                            "value": candidate.value,
-                            "accepted": candidate.accepted,
-                            "reason": candidate.reason,
-                            "selected": candidate.selected,
-                        }
-                        for candidate in diagnostics.candidates
-                    ],
-                }
+                    payload = _serialize_diagnostics(diagnostics)
+                payload.setdefault("regions", [])
+                payload.setdefault("timings_ms", {"total": 0})
                 events.put(
                     {
                         "kind": "result",

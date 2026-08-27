@@ -163,3 +163,21 @@ def test_execution_service_uses_the_same_worker_pipeline_for_background_job():
     assert worker.submissions[0]["run_id"] == run_id
     assert worker.submissions[0]["path"] == "C:/cache/crop.png"
     assert service.snapshot(run_id).kind == "queue"
+
+
+def test_execution_service_can_limit_a_queue_job_to_the_fast_profile():
+    worker = _FakeWorker()
+    service = OcrExecutionService(
+        worker=worker,
+        registry=OcrProgressRegistry(),
+        settings=lambda: {"model_profiles": ["fast", "accurate"], "pause_cpu_percent": 85},
+        telemetry=lambda: _telemetry(),
+    )
+
+    service.submit_queue(
+        job_id="ocr-full-image",
+        path="C:/cache/slot.png",
+        profile_ids=["fast"],
+    )
+
+    assert worker.submissions[0]["profile_ids"] == ["fast"]

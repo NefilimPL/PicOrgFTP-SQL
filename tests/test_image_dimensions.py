@@ -16,6 +16,7 @@ from picorgftp_sql.services.image_dimensions import (
     bundled_ocr_model_cache_path,
     image_ocr_runtime_info,
     ocr_model_cache_path,
+    rotate_ocr_box_to_source,
     resolve_image_dimensions,
 )
 
@@ -76,6 +77,349 @@ def test_paddle_recognizer_uses_selected_offline_performance_profile(tmp_path, m
 
     assert received_kwargs["text_detection_model_name"] == "PP-OCRv5_server_det"
     assert received_kwargs["text_recognition_model_name"] == "PP-OCRv5_server_rec"
+
+
+def test_rotated_ocr_box_is_mapped_back_to_the_original_image_coordinates():
+    clockwise = rotate_ocr_box_to_source(
+        OcrTextBox("123", 0.91, (15, 20, 35, 50), angle=0),
+        rotation="clockwise",
+        source_width=100,
+        source_height=60,
+    )
+    counterclockwise = rotate_ocr_box_to_source(
+        OcrTextBox("123", 0.91, (15, 20, 35, 50), angle=0),
+        rotation="counterclockwise",
+        source_width=100,
+        source_height=60,
+    )
+
+    assert clockwise.bbox == (20, 25, 50, 45)
+    assert clockwise.angle == -90
+    assert counterclockwise.bbox == (50, 15, 80, 35)
+    assert counterclockwise.angle == 90
+
+
+def test_fast_paddle_recognizer_scans_rotated_variants_for_vertical_text():
+    class FakeImage:
+        shape = (60, 100, 3)
+
+    class FakeCv2:
+        COLOR_BGR2GRAY = 1
+        ROTATE_90_CLOCKWISE = 2
+        ROTATE_90_COUNTERCLOCKWISE = 3
+
+        @staticmethod
+        def imread(_path):
+            return FakeImage()
+
+        @staticmethod
+        def rotate(image, mode):
+            return (image, mode)
+
+        @staticmethod
+        def cvtColor(image, _mode):
+            return image
+
+        @staticmethod
+        def Canny(_image, _low, _high):
+            return object()
+
+        @staticmethod
+        def HoughLinesP(*_args, **_kwargs):
+            return None
+
+    class FakeOcr:
+        def predict(self, source):
+            if source == "fixture.png":
+                return []
+            if isinstance(source, tuple) and source[1] == FakeCv2.ROTATE_90_CLOCKWISE:
+                return [{
+                    "res": {
+                        "rec_texts": ["123"],
+                        "rec_scores": [0.91],
+                        "rec_polys": [[[15, 20], [35, 20], [35, 50], [15, 50]]],
+                    }
+                }]
+            return []
+
+    recognizer = object.__new__(image_dimensions.PaddleImageDimensionRecognizer)
+    recognizer._cv2 = FakeCv2()
+    recognizer._ocr = FakeOcr()
+    recognizer.profile = types.SimpleNamespace(id="fast")
+
+    boxes = recognizer.detect("fixture.png")
+
+    assert boxes == [OcrTextBox("123", 0.91, (20, 25, 50, 45), "height", -90)]
+
+
+def test_fast_paddle_recognizer_keeps_the_base_result_when_a_rotated_pass_fails():
+    class FakeImage:
+        shape = (60, 100, 3)
+
+    class FakeCv2:
+        COLOR_BGR2GRAY = 1
+        ROTATE_90_CLOCKWISE = 2
+        ROTATE_90_COUNTERCLOCKWISE = 3
+
+        @staticmethod
+        def imread(_path):
+            return FakeImage()
+
+        @staticmethod
+        def rotate(image, mode):
+            return (image, mode)
+
+        @staticmethod
+        def cvtColor(image, _mode):
+            return image
+
+        @staticmethod
+        def Canny(_image, _low, _high):
+            return object()
+
+        @staticmethod
+        def HoughLinesP(*_args, **_kwargs):
+            return None
+
+    class FakeOcr:
+        def __init__(self):
+            self.sources = []
+
+        def predict(self, source):
+            self.sources.append(source)
+            if isinstance(source, tuple):
+                raise RuntimeError("rotated input is unavailable")
+            return [{
+                "res": {
+                    "rec_texts": ["123"],
+                    "rec_scores": [0.91],
+                    "rec_polys": [[[10, 10], [40, 10], [40, 30], [10, 30]]],
+                }
+            }]
+
+    recognizer = object.__new__(image_dimensions.PaddleImageDimensionRecognizer)
+    recognizer._cv2 = FakeCv2()
+    recognizer._ocr = FakeOcr()
+    recognizer.profile = types.SimpleNamespace(id="fast")
+
+    boxes = recognizer.detect("fixture.png")
+
+    assert [(box.text, box.bbox) for box in boxes] == [("123", (10, 10, 40, 30))]
+    assert recognizer._ocr.sources == ["fixture.png"]
+
+
+def test_fast_paddle_recognizer_retries_rotation_after_a_non_numeric_base_reading():
+    class FakeImage:
+        shape = (60, 100, 3)
+
+    class FakeCv2:
+        COLOR_BGR2GRAY = 1
+        ROTATE_90_CLOCKWISE = 2
+        ROTATE_90_COUNTERCLOCKWISE = 3
+
+        @staticmethod
+        def imread(_path):
+            return FakeImage()
+
+        @staticmethod
+        def rotate(image, mode):
+            return (image, mode)
+
+        @staticmethod
+        def cvtColor(image, _mode):
+            return image
+
+        @staticmethod
+        def Canny(_image, _low, _high):
+            return object()
+
+        @staticmethod
+        def HoughLinesP(*_args, **_kwargs):
+            return None
+
+    class FakeOcr:
+        def __init__(self):
+            self.sources = []
+
+        def predict(self, source):
+            self.sources.append(source)
+            if source == "fixture.png":
+                return [
+                    {
+                        "res": {
+                            "rec_texts": ["-"],
+                            "rec_scores": [0.0],
+                            "rec_polys": [[[10, 10], [40, 10], [40, 30], [10, 30]]],
+                        }
+                    }
+                ]
+            if isinstance(source, tuple) and source[1] == FakeCv2.ROTATE_90_CLOCKWISE:
+                return [
+                    {
+                        "res": {
+                            "rec_texts": ["52,4"],
+                            "rec_scores": [0.92],
+                            "rec_polys": [[[15, 20], [35, 20], [35, 50], [15, 50]]],
+                        }
+                    }
+                ]
+            return []
+
+    recognizer = object.__new__(image_dimensions.PaddleImageDimensionRecognizer)
+    recognizer._cv2 = FakeCv2()
+    recognizer._ocr = FakeOcr()
+    recognizer.profile = types.SimpleNamespace(id="fast")
+
+    boxes = recognizer.detect("fixture.png")
+
+    assert [(box.text, box.bbox) for box in boxes] == [
+        ("-", (10, 10, 40, 30)),
+        ("52,4", (20, 25, 50, 45)),
+    ]
+    assert [source[1] for source in recognizer._ocr.sources[1:]] == [
+        FakeCv2.ROTATE_90_CLOCKWISE,
+        FakeCv2.ROTATE_90_COUNTERCLOCKWISE,
+    ]
+
+
+def test_accurate_paddle_recognizer_scans_both_rotations_for_a_tall_crop():
+    class FakeImage:
+        shape = (100, 60, 3)
+
+    class FakeCv2:
+        ROTATE_90_CLOCKWISE = 2
+        ROTATE_90_COUNTERCLOCKWISE = 3
+
+        @staticmethod
+        def rotate(image, mode):
+            return (image, mode)
+
+    class FakeOcr:
+        @staticmethod
+        def predict(source):
+            if isinstance(source, tuple) and source[1] == FakeCv2.ROTATE_90_COUNTERCLOCKWISE:
+                return [
+                    {
+                        "res": {
+                            "rec_texts": ["52,4"],
+                            "rec_scores": [0.93],
+                            "rec_polys": [[[10, 20], [35, 20], [35, 50], [10, 50]]],
+                        }
+                    }
+                ]
+            return []
+
+    recognizer = object.__new__(image_dimensions.PaddleImageDimensionRecognizer)
+    recognizer._cv2 = FakeCv2()
+    recognizer._ocr = FakeOcr()
+    recognizer.profile = types.SimpleNamespace(id="accurate")
+
+    assert recognizer._rotated_boxes(FakeImage()) == [
+        OcrTextBox("52,4", 0.93, (10, 10, 40, 35), angle=90)
+    ]
+
+
+def test_restore_lost_decimal_separator_preserves_the_decimal_in_154_5():
+    components = [
+        (0, 0, 6, 12, 72),
+        (8, 0, 6, 12, 72),
+        (16, 0, 6, 12, 72),
+        (28, 0, 6, 12, 72),
+        (24, 10, 2, 2, 4),
+    ]
+
+    assert image_dimensions._restore_lost_decimal_separator("1545", components) == "154,5"
+
+
+def test_restore_lost_decimal_separator_keeps_four_digits_without_a_marker():
+    components = [
+        (0, 0, 6, 12, 72),
+        (8, 0, 6, 12, 72),
+        (16, 0, 6, 12, 72),
+        (28, 0, 6, 12, 72),
+    ]
+
+    assert image_dimensions._restore_lost_decimal_separator("1545", components) == "1545"
+
+
+def test_paddle_recognizer_restores_the_decimal_in_154_5_from_its_crop():
+    class FakeCrop:
+        shape = (20, 30, 3)
+
+    class FakeImage:
+        shape = (60, 100, 3)
+
+        def __getitem__(self, _slice):
+            return FakeCrop()
+
+    class FakeCv2:
+        COLOR_BGR2GRAY = 1
+        INTER_CUBIC = 2
+        THRESH_BINARY_INV = 4
+        THRESH_OTSU = 8
+
+        @staticmethod
+        def imread(_path):
+            return FakeImage()
+
+        @staticmethod
+        def cvtColor(image, _mode):
+            return image
+
+        @staticmethod
+        def resize(image, _size, interpolation):
+            assert interpolation == FakeCv2.INTER_CUBIC
+            return image
+
+        @staticmethod
+        def threshold(_image, _low, _high, _mode):
+            return None, object()
+
+        @staticmethod
+        def connectedComponentsWithStats(_binary, _connectivity):
+            return (
+                6,
+                None,
+                [
+                    (0, 0, 0, 0, 0),
+                    (0, 0, 6, 12, 72),
+                    (8, 0, 6, 12, 72),
+                    (16, 0, 6, 12, 72),
+                    (28, 0, 6, 12, 72),
+                    (24, 10, 2, 2, 4),
+                ],
+                None,
+            )
+
+        @staticmethod
+        def Canny(_image, _low, _high):
+            return object()
+
+        @staticmethod
+        def HoughLinesP(*_args, **_kwargs):
+            return None
+
+    class FakeOcr:
+        @staticmethod
+        def predict(source):
+            if source == "fixture.png":
+                return [
+                    {
+                        "res": {
+                            "rec_texts": ["1545"],
+                            "rec_scores": [1.0],
+                            "rec_polys": [[[10, 10], [40, 10], [40, 30], [10, 30]]],
+                        }
+                    }
+                ]
+            return []
+
+    recognizer = object.__new__(image_dimensions.PaddleImageDimensionRecognizer)
+    recognizer._cv2 = FakeCv2()
+    recognizer._ocr = FakeOcr()
+    recognizer.profile = types.SimpleNamespace(id="fast")
+
+    assert recognizer.detect("fixture.png")[0].text == "154,5"
 
 
 def test_multi_profile_recognizer_combines_profiles_and_keeps_the_best_duplicate():

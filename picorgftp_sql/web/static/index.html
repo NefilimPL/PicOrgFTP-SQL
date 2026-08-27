@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicOrgFTP-SQL Web</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260817-pimcore-export-drag-selection-css1">
+    <link rel="stylesheet" href="/static/app.css?v=20260825-ocr-queue-activity-css1">
   </head>
   <body class="app-screen">
     <header class="topbar">
@@ -139,6 +139,16 @@
             <span id="processQueueSummary">Brak zadan</span>
           </div>
           <div id="processQueueList" class="process-queue-list empty-state">Kolejka pusta.</div>
+        </div>
+      </section>
+
+      <section id="ocrBackgroundQueuePanel" class="ocr-background-queue-section" aria-labelledby="ocrBackgroundQueueTitle" hidden>
+        <div class="ocr-background-queue-panel" aria-live="polite">
+          <div class="ocr-background-queue-heading">
+            <h2 id="ocrBackgroundQueueTitle">Kolejka dopracowywania OCR</h2>
+            <span id="ocrBackgroundQueueSummary"></span>
+          </div>
+          <div id="ocrBackgroundQueueList" class="ocr-background-queue-list empty-state">Brak zadan OCR.</div>
         </div>
       </section>
 
@@ -455,6 +465,7 @@
         </div>
         <div class="settings-tabs">
           <button type="button" class="settings-tab active" data-settings-tab="app">Aplikacja</button>
+          <button type="button" class="settings-tab" data-settings-tab="module-status">Wersje modulow</button>
           <button type="button" class="settings-tab" data-settings-tab="processing">Obrobka</button>
           <button type="button" class="settings-tab" data-settings-tab="security">Bezpieczenstwo</button>
           <button type="button" class="settings-tab" data-settings-tab="ftp">FTP</button>
@@ -770,6 +781,8 @@
     <script src="/static/autocomplete.js?v=20260806-module-boundaries1"></script>
     <script src="/static/runtime-status.js?v=20260728-runtime-poll1"></script>
     <script src="/static/process-jobs.js?v=20260806-module-boundaries1"></script>
-    <script src="/static/app.js?v=20260824-ocr-worker-status-js1"></script>
+    <script src="/static/ocr-diagnostics.js?v=20260825-ocr-overlay-layout2"></script>
+    <script src="/static/module-build-status.js?v=20260827-module-build-status1"></script>
+    <script src="/static/app.js?v=20260825-ocr-slot-queue-live3"></script>
   </body>
 </html>

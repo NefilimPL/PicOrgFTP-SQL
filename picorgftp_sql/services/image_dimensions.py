@@ -105,11 +105,54 @@ class ImageOcrDiagnostics:
     candidates: list[OcrDiagnosticCandidate]
     message: str = ""
     attempts: dict[str, str] = field(default_factory=dict)
+    regions: list[dict[str, object]] = field(default_factory=list)
+    timings_ms: dict[str, int] = field(default_factory=dict)
 
 
 class ImageDimensionRecognizer(Protocol):
     def detect(self, path: str) -> list[OcrTextBox]:
         """Return OCR candidates for one local image file."""
+
+
+def _has_reliable_numeric_box(boxes: Iterable[OcrTextBox]) -> bool:
+    """Return whether a primary OCR pass found a usable numeric value."""
+
+    return any(
+        bool(comparison_key(box.text)) and float(box.confidence) >= 0.8
+        for box in boxes
+    )
+
+
+def rotate_ocr_box_to_source(
+    box: OcrTextBox,
+    *,
+    rotation: str,
+    source_width: int,
+    source_height: int,
+) -> OcrTextBox:
+    """Map one OCR box from a 90-degree rotated image to its source image."""
+
+    width = max(1, int(source_width))
+    height = max(1, int(source_height))
+    left, top, right, bottom = (int(value) for value in box.bbox)
+    if rotation == "clockwise":
+        mapped = (top, height - right, bottom, height - left)
+        angle_offset = -90.0
+    elif rotation == "counterclockwise":
+        mapped = (width - bottom, left, width - top, right)
+        angle_offset = 90.0
+    else:
+        raise ValueError(f"Nieobslugiwana rotacja OCR: {rotation}")
+
+    mapped_left, mapped_top, mapped_right, mapped_bottom = mapped
+    mapped_bbox = (
+        max(0, min(width, mapped_left)),
+        max(0, min(height, mapped_top)),
+        max(0, min(width, mapped_right)),
+        max(0, min(height, mapped_bottom)),
+    )
+    angle = None if box.angle is None else float(box.angle) + angle_offset
+    return replace(box, bbox=mapped_bbox, angle=angle)
 
 
 def image_dimension_source_key(slot: str, dimension: str) -> str:
@@ -165,33 +208,35 @@ def _restore_lost_decimal_separator(
     if not match:
         return source
     token = match.group(0)
-    if len(token) != 2 or not token.isdigit():
+    if len(token) < 2 or not token.isdigit():
         return source
     glyphs = [
         tuple(int(value) for value in component)
         for component in components
         if len(component) == 5 and int(component[4]) > 0
     ]
-    if len(glyphs) < 3:
+    if len(glyphs) <= len(token):
         return source
-    digit_glyphs = sorted(glyphs, key=lambda item: item[4], reverse=True)[:2]
-    left_digit, right_digit = sorted(
-        digit_glyphs, key=lambda item: item[0] + item[2] / 2
-    )
-    left_center = left_digit[0] + left_digit[2] / 2
-    right_center = right_digit[0] + right_digit[2] / 2
-    minimum_digit_area = min(left_digit[4], right_digit[4])
-    minimum_digit_height = min(left_digit[3], right_digit[3])
-    marker_found = any(
-        component not in digit_glyphs
-        and left_center < component[0] + component[2] / 2 < right_center
-        and component[4] <= minimum_digit_area * 0.45
-        and component[3] <= minimum_digit_height * 0.5
-        for component in glyphs
-    )
-    if not marker_found:
-        return source
-    return f"{source[:match.start()]}{token[0]},{token[1:]}{source[match.end():]}"
+    digit_glyphs = sorted(glyphs, key=lambda item: item[4], reverse=True)[: len(token)]
+    digit_glyphs.sort(key=lambda item: item[0] + item[2] / 2)
+    minimum_digit_area = min(component[4] for component in digit_glyphs)
+    minimum_digit_height = min(component[3] for component in digit_glyphs)
+    for index, (left_digit, right_digit) in enumerate(
+        zip(digit_glyphs, digit_glyphs[1:]), start=1
+    ):
+        left_center = left_digit[0] + left_digit[2] / 2
+        right_center = right_digit[0] + right_digit[2] / 2
+        marker_found = any(
+            component not in digit_glyphs
+            and left_center < component[0] + component[2] / 2 < right_center
+            and component[4] <= minimum_digit_area * 0.45
+            and component[3] <= minimum_digit_height * 0.5
+            for component in glyphs
+        )
+        if marker_found:
+            separator_at = match.start() + index
+            return f"{source[:separator_at]},{source[separator_at:]}"
+    return source
 
 
 def _text_components_from_crop(
@@ -892,9 +937,9 @@ class PaddleImageDimensionRecognizer:
         # PaddleOCR enables oneDNN by default on CPU.  PaddlePaddle 3.3 can
         # fail on OCR model PIR attributes in that backend, so prefer the
         # standard CPU executor for reliable local dimension extraction.
-        # Dimension drawings do not need document rotation, unwarping or
-        # text-line orientation. Disabling them makes OCR faster and preserves
-        # recognition coordinates relative to the uploaded original image.
+        # These optional classifiers require extra model files and otherwise
+        # make an offline runtime attempt a download. Rotated crop handling
+        # below stays fully local and preserves source-image coordinates.
         self._ocr = PaddleOCR(
             text_detection_model_name=self.profile.detector_model,
             text_recognition_model_name=self.profile.recognizer_model,
@@ -904,8 +949,8 @@ class PaddleImageDimensionRecognizer:
             use_textline_orientation=False,
         )
 
-    def detect(self, path: str) -> list[OcrTextBox]:  # pragma: no cover - optional runtime
-        raw = self._ocr.predict(path)
+    def _detect_boxes(self, source: object) -> list[OcrTextBox]:
+        raw = self._ocr.predict(source)
         boxes: list[OcrTextBox] = []
         for page in raw:
             payload = page.json if hasattr(page, "json") else page
@@ -931,9 +976,61 @@ class PaddleImageDimensionRecognizer:
                         angle,
                     )
                 )
+        return boxes
+
+    def _rotated_boxes(
+        self, image: object, *, fast_fallback: bool = False
+    ) -> list[OcrTextBox]:
+        image_height, image_width = image.shape[:2]
+        profile_id = str(getattr(getattr(self, "profile", None), "id", ""))
+        rotations: list[tuple[str, object]] = []
+        clockwise = getattr(self._cv2, "ROTATE_90_CLOCKWISE", None)
+        counterclockwise = getattr(self._cv2, "ROTATE_90_COUNTERCLOCKWISE", None)
+        if profile_id == "fast" and fast_fallback:
+            if clockwise is not None:
+                rotations.append(("clockwise", clockwise))
+            if counterclockwise is not None:
+                rotations.append(("counterclockwise", counterclockwise))
+        elif profile_id == "accurate" and image_height >= image_width * 1.35:
+            # The exact model normally receives a narrow crop. Keep its
+            # vertical-text correction off the fast-model critical path. The
+            # optional orientation classifier is disabled for offline use, so
+            # both rotations are needed to cover either reading direction.
+            if clockwise is not None:
+                rotations.append(("clockwise", clockwise))
+            if counterclockwise is not None:
+                rotations.append(("counterclockwise", counterclockwise))
+
+        boxes: list[OcrTextBox] = []
+        for rotation, cv2_rotation in rotations:
+            try:
+                rotated = self._cv2.rotate(image, cv2_rotation)
+                detected = self._detect_boxes(rotated)
+            except Exception:
+                # A rotated in-memory input is optional. Keep the successful
+                # original-image pass if one accelerator rejects that input.
+                continue
+            boxes.extend(
+                rotate_ocr_box_to_source(
+                    box,
+                    rotation=rotation,
+                    source_width=image_width,
+                    source_height=image_height,
+                )
+                for box in detected
+            )
+        return boxes
+
+    def detect(self, path: str) -> list[OcrTextBox]:  # pragma: no cover - optional runtime
+        boxes = self._detect_boxes(path)
         image = self._cv2.imread(path)
         if image is None:
             return associate_dimension_hints(boxes, [])
+        profile_id = str(getattr(getattr(self, "profile", None), "id", ""))
+        if profile_id == "fast" and not _has_reliable_numeric_box(boxes):
+            boxes.extend(self._rotated_boxes(image, fast_fallback=True))
+        elif profile_id == "accurate":
+            boxes.extend(self._rotated_boxes(image))
         boxes = [
             _retry_low_confidence_dimension_label(
                 box, image, self._cv2, self._ocr.predict
@@ -943,7 +1040,7 @@ class PaddleImageDimensionRecognizer:
         refined_boxes: list[OcrTextBox] = []
         for box in boxes:
             number = _NUMBER_PATTERN.search(box.text)
-            if number and len(number.group(0)) == 2 and number.group(0).isdigit():
+            if number and len(number.group(0)) >= 2 and number.group(0).isdigit():
                 text = _restore_lost_decimal_separator(
                     box.text,
                     _text_components_from_crop(image, box.bbox, self._cv2),

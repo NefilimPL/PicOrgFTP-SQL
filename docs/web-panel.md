@@ -116,6 +116,35 @@ Testy monitora wymagają autoryzacji administracyjnej:
 
 Wynik testu rzeczywistego rozróżnia wykryte przekroczenie, brak wykrycia, błąd trwałego zapisu zdarzenia (`persistence_failed`), błąd uruchomienia lub wykonania, przekroczenie czasu, anulowanie i błąd sprzątania. Wynik **wykryto** oraz alert pojawiają się tylko wtedy, gdy detektor zwykłego próbnika sam zarejestruje rzeczywiste przekroczenie progu backendu w dwie kolejne próbki i trwale zapisze normalne zdarzenie `backend.resource_high`.
 
+## Diagnostyka OCR
+
+W `Ustawienia > OCR` tester łączy wynik szybkiego modelu z wynikiem dokładnego
+modelu dla tego samego wycinka. Dwie kolumny są widoczne podczas skanowania i
+po jego zakończeniu. Po najechaniu wiersza widoczne są surowe odczyty, pola,
+pewności, przyczyna decyzji i czasy etapów.
+
+Próg dokładnego skanowania ma zakres 0-100 i działa jako `pewność <= próg`.
+Domyślne `99` pomija tylko odczyty 100%; `100` skanuje wszystkie wycinki.
+Porównanie OCR zachowuje części dziesiętne i uznaje `23,4` oraz `23.4` za tę
+samą wartość. Wycinek dokładnego modelu powstaje z pola szybkiego modelu,
+z symetrycznym marginesem 25% dłuższego boku (minimum 8 px, maksimum 64 px).
+
+### Kolejka dopracowywania OCR
+
+Kolejka jest widoczna bezpośrednio pod zwykłą kolejką po lewej stronie głównego
+widoku. Pokazuje najwyżej pięć pozycji: sam wycinek i wynik OCR; licznik
+`+N kolejnych` informuje o dalszych zadaniach. Ukończony wynik oraz jego
+pomocniczy wycinek są usuwane po 10 sekundach, więc nie zalegają w panelu ani
+w cache. Wycinek zawiera dodatkowe 8 px kontekstu z każdej strony, gdy pozwala
+na to granica obrazu, a miniatura zachowuje proporcje bez przycinania.
+
+Administrator widzi tę kolejkę zawsze. W `Ustawienia > OCR` może włączyć
+widoczność także zwykłym użytkownikom. Samo przeglądanie danych, ustawień,
+Pimcore, logów i statusów nie zatrzymuje pracy kolejki. Bezczynność resetują
+wyłącznie upload lub zastąpienie zdjęcia, przeniesienie albo zamiana slotów,
+usunięcie slotu, `Synchronizuj`/`Aktualizuj` i rozpoczęcie wczytywania produktu
+lub jego zdjęć. Usunięcie slotu anuluje oczekujące wycinki tego samego obrazu.
+
 ## Bezpieczeństwo LAN
 
 Panel jest przeznaczony do zaufanej sieci LAN albo VPN. Nie wystawiaj tego panelu bezpośrednio do publicznego internetu bez dodatkowej warstwy zabezpieczeń, aktualizacji haseł, kontroli dostępu i przeglądu konfiguracji serwera.

@@ -11,6 +11,7 @@ OCR_SETTINGS_KEY = "ocr"
 DEFAULT_OCR_SETTINGS: dict[str, object] = {
     "enabled_slots": [],
     "background_enabled": False,
+    "background_queue_visible_to_users": False,
     "idle_seconds": 5,
     "max_cpu_percent": 35,
     "pause_cpu_percent": 85,
@@ -21,6 +22,7 @@ DEFAULT_OCR_SETTINGS: dict[str, object] = {
     "queue_lease_minutes": 60,
     "queue_success_extension_minutes": 30,
     "model_profiles": ["fast"],
+    "accurate_confidence_threshold": 99,
 }
 
 
@@ -76,10 +78,16 @@ def normalize_ocr_settings(value: object) -> dict[str, object]:
     queue_extension = _bounded_int(
         raw.get("queue_success_extension_minutes"), 30, 0, 24 * 60
     )
+    accurate_confidence_threshold = _bounded_int(
+        raw.get("accurate_confidence_threshold"), 99, 0, 100
+    )
     profiles = normalize_ocr_profile_ids(raw.get("model_profiles")) or ["fast"]
     return {
         "enabled_slots": slots,
         "background_enabled": bool(raw.get("background_enabled", False)),
+        "background_queue_visible_to_users": bool(
+            raw.get("background_queue_visible_to_users", False)
+        ),
         "idle_seconds": idle,
         "max_cpu_percent": maximum,
         "pause_cpu_percent": pause,
@@ -90,4 +98,5 @@ def normalize_ocr_settings(value: object) -> dict[str, object]:
         "queue_lease_minutes": queue_lease,
         "queue_success_extension_minutes": queue_extension,
         "model_profiles": profiles,
+        "accurate_confidence_threshold": accurate_confidence_threshold,
     }

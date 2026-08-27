@@ -94,6 +94,8 @@ function Get-WebStaticDataArguments {
         "latest-request.js",
         "login.html",
         "login.js",
+        "module-build-status.js",
+        "ocr-diagnostics.js",
         "process-jobs.js",
         "runtime-status.js"
     )
@@ -107,6 +109,26 @@ function Get-WebStaticDataArguments {
         $arguments += "$sourcePath;picorgftp_sql\web\static"
     }
     return $arguments
+}
+
+function New-ModuleBuildManifestArguments {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Python,
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$WorkPath,
+        [Parameter(Mandatory = $true)]
+        [string]$BuildVariant
+    )
+
+    $manifestPath = Join-Path $WorkPath "module_build_manifest.json"
+    Invoke-Native $Python "tools\generate_module_build_manifest.py" `
+        "--repo-root" $RepoRoot `
+        "--build-variant" $BuildVariant `
+        "--output" $manifestPath
+    return @("--add-data", "$manifestPath;picorgftp_sql")
 }
 
 function Test-BuildEnvironment {

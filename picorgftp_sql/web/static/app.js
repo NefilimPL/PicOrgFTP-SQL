@@ -28,6 +28,9 @@ const state = {
   draggedSlotPrefix: "",
   lastLookupMs: null,
   activeSettingsTab: "app",
+  moduleBuildStatus: null,
+  moduleBuildStatusLoading: false,
+  moduleBuildStatusError: "",
   history: null,
   historyDetailGroup: null,
   historyDetailPage: 1,
@@ -319,6 +322,9 @@ const slotTemplate = document.querySelector("#slotTemplate");
 const processQueuePanel = document.querySelector("#processQueuePanel");
 const processQueueSummary = document.querySelector("#processQueueSummary");
 const processQueueList = document.querySelector("#processQueueList");
+const ocrBackgroundQueuePanel = document.querySelector("#ocrBackgroundQueuePanel");
+const ocrBackgroundQueueSummary = document.querySelector("#ocrBackgroundQueueSummary");
+const ocrBackgroundQueueList = document.querySelector("#ocrBackgroundQueueList");
 const productForm = document.querySelector("#productForm");
 const formStatus = document.querySelector("#formStatus");
 const resultOutput = document.querySelector("#resultOutput");
@@ -993,6 +999,24 @@ function slotFileType(value) {
 
 function slotFileToken(value) {
   return String(slotFileItem(value)?.token || "").trim();
+}
+
+function slotAssignmentToken(prefix) {
+  return (
+    slotFileToken(state.files.get(prefix)) ||
+    selectedPhotoToken(state.loadedPhotos.get(prefix), prefix)
+  );
+}
+
+function recordOcrActivity({ removedSlotToken = "", kind = "slot-change" } = {}) {
+  return requestJson("/api/ocr/activity", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      kind,
+      removed_slot_token: String(removedSlotToken || "").trim(),
+    }),
+  }).catch(() => {});
 }
 
 function slotUploadProgress(value) {
@@ -3568,8 +3592,10 @@ function renderSqlPreview(prefix, photo, preview, empty) {
 function clearSlotAssignment(prefix, options = {}) {
   bumpSlotRevision(prefix);
   const markDelete = options.markDelete !== false;
+  const removedSlotToken = markDelete ? slotAssignmentToken(prefix) : "";
   if (markDelete) {
     markSlotDeletion(prefix, state.loadedPhotos.get(prefix));
+    recordOcrActivity({ removedSlotToken });
   }
   revokeFilePreviewUrl(prefix);
   state.files.delete(prefix);
@@ -3582,6 +3608,7 @@ function clearSlotAssignment(prefix, options = {}) {
 
 function setSlotFile(prefix, file, options = {}) {
   const validationError = uploadFileValidationError(file);
+  const removedSlotToken = slotAssignmentToken(prefix);
   bumpSlotRevision(prefix);
   markSlotDeletion(prefix, state.loadedPhotos.get(prefix));
   revokeFilePreviewUrl(prefix);
@@ -3599,6 +3626,7 @@ function setSlotFile(prefix, file, options = {}) {
     updateSubmitButtonState();
     return item;
   }
+  recordOcrActivity({ removedSlotToken });
   uploadSlotFile(prefix, item);
   startSimilarFileLookup({ immediate: true });
   return item;
@@ -3660,6 +3688,7 @@ function moveSlotContent(sourcePrefix, targetPrefix) {
   if (!source) {
     return;
   }
+  recordOcrActivity();
   const target = getSlotAssignment(targetPrefix);
   if (target) {
     markSlotDeletion(targetPrefix, state.loadedPhotos.get(targetPrefix));
@@ -3843,9 +3872,13 @@ function relocateProvisionalSlotFile(prefix) {
   return [prefix, targetPrefix];
 }
 
+function isOcrSlotStateInProgress(value) {
+  return ["queued", "scanning", "refining"].includes(String(value || ""));
+}
+
 function updateOcrSlotIndicator(card, selectedFile, loadedPhoto) {
   const state = String(selectedFile?.ocr_state || loadedPhoto?.ocr_state || "");
-  const collecting = state === "scanning";
+  const collecting = isOcrSlotStateInProgress(state);
   card.classList.toggle("ocr-collecting", collecting);
   let indicator = card.querySelector(".slot-ocr-state");
   if (!collecting) {
@@ -3857,8 +3890,14 @@ function updateOcrSlotIndicator(card, selectedFile, loadedPhoto) {
     indicator.className = "slot-ocr-state";
     card.querySelector(".slot-meta")?.appendChild(indicator);
   }
-  indicator.textContent = "OCR zbiera wartosci";
-  indicator.title = "Szybkie wykrywanie wartosci liczbowych trwa w tle.";
+  const details = {
+    queued: ["OCR oczekuje na skanowanie", "Obraz oczekuje w kolejce OCR na rozpoczecie szybkiego odczytu."],
+    scanning: ["OCR skanuje obraz", "Szybkie wykrywanie wartosci liczbowych trwa w tle."],
+    refining: ["OCR dopracowuje wycinki", "Dokladny model OCR analizuje wycinki wskazane przez szybki model."],
+  };
+  const [text, title] = details[state] || details.scanning;
+  indicator.textContent = text;
+  indicator.title = title;
 }
 
 function updateSlotPreview(prefix) {
@@ -7115,6 +7154,8 @@ function startBackgroundPollers() {
   });
   state.runtimeStatusPoller.start().catch(() => {});
   createPoller("logs", 15000, pollLogStatus).schedule(15000);
+  createPoller("ocr-queue", 2000, refreshOcrBackgroundQueue).schedule(2000);
+  createPoller("ocr-slot-state", 1500, refreshOcrSlotStates).schedule(1500);
 }
 
 document.addEventListener("visibilitychange", () => {
@@ -7745,6 +7786,7 @@ function clearSelectedFiles() {
 }
 
 async function loadPhotosForEntry(entry, options = {}) {
+  recordOcrActivity({ kind: "data-load" });
   const started = performance.now();
   const progressive = options.progressive !== false;
   const targetPrefixes = new Set((options.prefixes || []).map((prefix) => String(prefix || "").trim()).filter(Boolean));
@@ -7945,6 +7987,7 @@ async function loadBootstrap(options = {}) {
   renderListEditor();
   updateRuntimeMetrics();
   refreshRuntimeDetailViews();
+  refreshOcrBackgroundQueue().catch(() => {});
 }
 
 async function refreshFileIndexStatus() {
@@ -13641,198 +13684,397 @@ function ocrConfidenceLabel(value) {
   return `${Math.round(Math.max(0, Math.min(1, Number(value) || 0)) * 100)}%`;
 }
 
-async function renderOcrLivePreview(file) {
-  const stage = document.createElement("div");
-  stage.className = "ocr-diagnostic-stage ocr-diagnostic-live-preview";
-  const preview = document.createElement("canvas");
-  preview.className = "ocr-diagnostic-image";
-  preview.setAttribute("role", "img");
-  preview.setAttribute("aria-label", "Obraz oczekujacy na wynik OCR");
-  const status = document.createElement("p");
-  status.className = "ocr-diagnostic-live-status";
-  status.textContent = "Ladowanie modelu OCR...";
-  let bitmap = null;
-  let context = null;
-  try {
-    bitmap = await createImageBitmap(file);
-    preview.width = bitmap.width;
-    preview.height = bitmap.height;
-    context = preview.getContext("2d");
-    if (!context) throw new Error("Brak kontekstu rysowania podgladu.");
-    context.drawImage(bitmap, 0, 0);
-  } catch (_error) {
-    preview.hidden = true;
-    status.textContent = "Podglad obrazu nie jest dostepny, ale analiza OCR trwa dalej.";
-  } finally {
-    bitmap?.close();
+function ocrDiagnosticsHelper() {
+  if (!window.PicOrg.OcrDiagnostics) {
+    throw new Error("Nie zaladowano modulu diagnostyki OCR.");
   }
-  stage.append(preview, status);
-  return {
-    element: stage,
-    setStatus(message) { status.textContent = message; },
-    showEvent(event) {
-      const kind = String(event?.kind || "");
-      const payload = event?.payload || {};
-      if (kind === "queued") {
-        status.textContent = "Zadanie przekazane do procesu OCR; oczekiwanie na rozpoczecie etapu.";
-      } else if (kind === "candidate_regions") {
-        const regions = Array.isArray(payload.regions) ? payload.regions : [];
-        for (const region of regions) this.drawBox(region?.bbox, "#3aa6ff", "Szybki");
-        status.textContent = `Szybki model wykryl ${regions.length} sektorow.`;
-      } else if (kind === "crop_started") {
-        this.drawBox(payload.bbox, "#ffd24a", "Dokladny");
-        status.textContent = `Dokladny model skanuje wycinek ${payload.crop_index || 1}/${payload.crop_total || 1}.`;
-      } else if (kind === "throttled" || kind === "paused") {
-        status.textContent = `OCR wstrzymany: ${payload.reason || payload.resource || "limit zasobow"}.`;
-      } else if (kind === "stage_started") {
-        const workerPid = Number(payload.worker_pid || 0);
-        const worker = workerPid > 0 ? `Proces OCR (PID ${workerPid})` : "Proces OCR";
-        status.textContent = `${worker} rozpoczal etap: ${payload.stage || "przetwarzanie"}.`;
-      }
-    },
-    drawBox(rawBbox, color, label) {
-      if (!context || preview.hidden || !Array.isArray(rawBbox) || rawBbox.length !== 4) return;
-      const [left, top, right, bottom] = rawBbox.map(Number);
-      if (![left, top, right, bottom].every(Number.isFinite)) return;
-      context.save();
-      context.strokeStyle = color;
-      context.lineWidth = Math.max(2, Math.round(Math.min(preview.width, preview.height) / 300));
-      context.strokeRect(left, top, Math.max(1, right - left), Math.max(1, bottom - top));
-      context.fillStyle = color;
-      context.font = `${Math.max(12, Math.round(preview.width / 60))}px sans-serif`;
-      context.fillText(label, left + 2, Math.max(14, top - 4));
-      context.restore();
-    },
-    dispose() {},
-  };
+  return window.PicOrg.OcrDiagnostics;
 }
 
-function renderOcrDiagnostics(result) {
+function ocrBboxLabel(bbox) {
+  if (!Array.isArray(bbox) || bbox.length !== 4) return "brak";
+  return `[${bbox.map((value) => Math.round(Number(value) || 0)).join(", ")}]`;
+}
+
+function ocrDiagnosticStatusLabel(status) {
+  const labels = {
+    detected: "wykryto szybkim modelem",
+    pending: "oczekuje na decyzje",
+    scanning: "trwa skanowanie dokladne",
+    completed: "zeskanowano dokladnie",
+    empty: "dokladny model nie wykryl tekstu",
+    skipped_threshold: "pominieto przez prog pewnosci",
+    skipped: "pominieto",
+    not_requested: "dokladny model jest wylaczony",
+    invalid_region: "niepoprawny obszar",
+    full_image: "pelny obraz",
+  };
+  return labels[String(status || "")] || String(status || "brak statusu");
+}
+
+function ocrDisplayRegions(report) {
+  if (report.regions.length) return report.regions;
+  return report.candidates
+    .filter((candidate) => Array.isArray(candidate.bbox) && candidate.bbox.length === 4)
+    .map((candidate, index) => ({
+      region_id: `full-image-${index + 1}`,
+      fast: null,
+      source_bbox: candidate.bbox.map(Number),
+      crop_bbox: null,
+      accurate: [{
+        text: String(candidate.text || ""),
+        value: String(candidate.value || ""),
+        confidence: Number(candidate.confidence) || 0,
+        bbox: candidate.bbox.map(Number),
+      }],
+      status: "full_image",
+      reason: "Brak regionu szybkiego modelu: wykonano odczyt pelnego obrazu.",
+      timings_ms: { fast: 0, crop: 0, accurate: 0 },
+    }));
+}
+
+function renderOcrDiagnosticView(result, options = {}) {
+  const helpers = ocrDiagnosticsHelper();
   const output = document.createElement("div");
   output.className = "ocr-diagnostic-result wide-field";
   const layout = document.createElement("div");
   layout.className = "ocr-diagnostic-layout";
   const stage = document.createElement("div");
-  stage.className = "ocr-diagnostic-stage";
+  stage.className = `ocr-diagnostic-stage${options.live ? " ocr-diagnostic-live-preview" : ""}`;
   const image = document.createElement("img");
   image.className = "ocr-diagnostic-image";
-  image.alt = "Obraz analizowany przez OCR";
-  image.src = String(result.image_url || "");
+  image.alt = options.live ? "Obraz analizowany na zywo przez OCR" : "Obraz analizowany przez OCR";
+  image.src = String(options.imageUrl || result.image_url || "");
   const overlay = document.createElement("div");
   overlay.className = "ocr-diagnostic-overlay";
-  const candidates = Array.isArray(result.candidates) ? result.candidates : [];
-  const setOcrCandidateFocus = (candidateIndex = null) => {
-    const activeIndex = candidateIndex === null ? "" : String(candidateIndex);
-    stage.classList.toggle("ocr-diagnostic-focus-active", Boolean(activeIndex));
-    output.querySelectorAll("[data-ocr-candidate-index]").forEach((element) => {
-      const focused = Boolean(activeIndex) && element.dataset.ocrCandidateIndex === activeIndex;
+  const status = document.createElement("p");
+  status.className = "ocr-diagnostic-live-status";
+  status.hidden = !options.live;
+  status.textContent = "Ladowanie modelu OCR...";
+  const details = document.createElement("div");
+  details.className = "ocr-diagnostic-details";
+  const heading = document.createElement("h3");
+  const modelHeadings = document.createElement("div");
+  modelHeadings.className = "ocr-diagnostic-model-columns ocr-diagnostic-model-headings";
+  const fastHeading = document.createElement("strong");
+  fastHeading.textContent = "Szybki model";
+  const accurateHeading = document.createElement("strong");
+  accurateHeading.textContent = "Dokladny model OCR";
+  modelHeadings.append(fastHeading, accurateHeading);
+  const pairList = document.createElement("div");
+  pairList.className = "ocr-diagnostic-pairs";
+  const detailPanel = document.createElement("div");
+  detailPanel.className = "ocr-diagnostic-detail-panel";
+  let report = helpers.normalizeReport(result);
+  let activeRegionId = "";
+
+  const setOcrRegionFocus = (regionId = "") => {
+    activeRegionId = String(regionId || "");
+    stage.classList.toggle("ocr-diagnostic-focus-active", Boolean(activeRegionId));
+    output.querySelectorAll("[data-ocr-region-id]").forEach((element) => {
+      const focused = Boolean(activeRegionId) && element.dataset.ocrRegionId === activeRegionId;
       element.classList.toggle("ocr-focused", focused);
-      element.classList.toggle("ocr-muted", Boolean(activeIndex) && !focused);
+      element.classList.toggle("ocr-muted", Boolean(activeRegionId) && !focused);
     });
   };
+
+  const renderDetailPanel = (region = null) => {
+    detailPanel.textContent = "";
+    if (!region) {
+      detailPanel.textContent = "Najedz kursorem lub ustaw fokus na wierszu, aby zobaczyc surowe odczyty, pola i czasy skanowania.";
+      return;
+    }
+    const title = document.createElement("strong");
+    title.textContent = `Diagnostyka ${region.region_id}`;
+    const statusLine = document.createElement("p");
+    statusLine.textContent = `Status: ${ocrDiagnosticStatusLabel(region.status)}.`;
+    const fastLine = document.createElement("p");
+    fastLine.textContent = region.fast
+      ? `Szybki: surowo "${region.fast.text || "-"}", porownanie "${region.fast.value || "-"}", pewnosc ${ocrConfidenceLabel(region.fast.confidence)}, pole ${ocrBboxLabel(region.fast.bbox)}.`
+      : "Szybki: brak odczytu regionu (skanowanie pelnego obrazu).";
+    const cropLine = document.createElement("p");
+    cropLine.textContent = `Zrodlo ${ocrBboxLabel(region.source_bbox)}; wycinek ${ocrBboxLabel(region.crop_bbox)}.`;
+    const accurateLine = document.createElement("p");
+    accurateLine.textContent = region.accurate.length
+      ? `Dokladny: ${region.accurate.map((box) => `"${box.text || "-"}" -> "${box.value || "-"}" (${ocrConfidenceLabel(box.confidence)}, ${ocrBboxLabel(box.bbox)})`).join("; ")}.`
+      : "Dokladny: brak odczytu dla tego wycinka.";
+    const timings = region.timings_ms || {};
+    const timingsLine = document.createElement("p");
+    timingsLine.textContent = `Czasy: szybki ${helpers.formatDuration(timings.fast)}, przygotowanie wycinka ${helpers.formatDuration(timings.crop)}, dokladny ${helpers.formatDuration(timings.accurate)}, caly przebieg ${helpers.formatDuration(report.timings_ms.total)}.`;
+    detailPanel.append(title, statusLine, fastLine, cropLine, accurateLine, timingsLine);
+    if (region.reason) {
+      const reason = document.createElement("p");
+      reason.textContent = `Powod: ${region.reason}`;
+      detailPanel.appendChild(reason);
+    }
+  };
+
   const drawOverlay = () => {
     overlay.textContent = "";
     const width = Number(image.naturalWidth || 0);
     const height = Number(image.naturalHeight || 0);
     if (!width || !height) return;
-    const labelRows = [];
-    for (const [candidateIndex, candidate] of candidates.entries()) {
-      const bbox = Array.isArray(candidate.bbox) ? candidate.bbox : [];
-      if (bbox.length !== 4) continue;
-      const [left, top, right, bottom] = bbox.map(Number);
-      if (![left, top, right, bottom].every(Number.isFinite)) continue;
+    const labels = [];
+    const addBox = (region, box, model, index = 0) => {
+      if (!box || !Array.isArray(box.bbox) || box.bbox.length !== 4) return;
+      const [left, top, right, bottom] = box.bbox.map(Number);
+      if (![left, top, right, bottom].every(Number.isFinite)) return;
       const rectangle = document.createElement("div");
-      rectangle.className = `ocr-diagnostic-box ${candidate.accepted ? "accepted" : "rejected"}`;
+      rectangle.className = `ocr-diagnostic-box ${model}`;
       rectangle.setAttribute("data-ocr-overlay", "true");
-      rectangle.setAttribute("data-ocr-candidate-index", String(candidateIndex));
+      rectangle.setAttribute("data-ocr-region-id", region.region_id);
+      rectangle.setAttribute("data-ocr-model", model);
       rectangle.style.left = `${Math.max(0, Math.min(100, (left / width) * 100))}%`;
       rectangle.style.top = `${Math.max(0, Math.min(100, (top / height) * 100))}%`;
       rectangle.style.width = `${Math.max(0.3, Math.min(100, ((right - left) / width) * 100))}%`;
       rectangle.style.height = `${Math.max(0.3, Math.min(100, ((bottom - top) / height) * 100))}%`;
-      const label = document.createElement("span");
-      label.className = "ocr-diagnostic-confidence";
-      label.textContent = ocrConfidenceLabel(candidate.confidence);
-      const collidingLabels = labelRows.filter((row) => Math.abs(row.top - top) < 28 && Math.abs(row.left - left) < 90);
-      label.style.left = `${-2 + collidingLabels.length * 42}px`;
-      label.setAttribute("data-ocr-label-offset", String(collidingLabels.length));
-      labelRows.push({ left, top });
-      rectangle.appendChild(label);
       overlay.appendChild(rectangle);
+      const labelText = `${model === "fast" ? "Szybki" : "Dokladny"} ${ocrConfidenceLabel(box.confidence)}`;
+      labels.push({
+        id: `${region.region_id}-${model}-${index}`,
+        region,
+        model,
+        text: labelText,
+        bbox: box.bbox,
+        width: Math.max(58, labelText.length * 7 + 12),
+        height: 21,
+      });
+    };
+    for (const region of ocrDisplayRegions(report)) {
+      addBox(region, region.fast, "fast");
+      region.accurate.forEach((box, index) => addBox(region, box, "accurate", index));
     }
+    const renderedWidth = Math.max(1, Number(image.clientWidth || stage.clientWidth || width));
+    const renderedHeight = Math.max(1, Number(image.clientHeight || stage.clientHeight || height));
+    const placements = helpers.placeLabelsForRenderedImage(labels, {
+      naturalWidth: width,
+      naturalHeight: height,
+      renderedWidth,
+      renderedHeight,
+    });
+    placements.forEach((placement) => {
+      const labelData = labels.find((label) => label.id === placement.id);
+      if (!labelData) return;
+      const label = document.createElement("span");
+      label.className = `ocr-diagnostic-confidence ${labelData.model}`;
+      label.setAttribute("data-ocr-region-id", labelData.region.region_id);
+      label.setAttribute("data-ocr-label-position", placement.position);
+      label.textContent = labelData.text;
+      label.style.left = `${(placement.left / renderedWidth) * 100}%`;
+      label.style.top = `${(placement.top / renderedHeight) * 100}%`;
+      overlay.appendChild(label);
+    });
   };
-  image.addEventListener("load", drawOverlay);
-  stage.append(image, overlay);
 
-  const details = document.createElement("div");
-  details.className = "ocr-diagnostic-details";
-  const heading = document.createElement("h3");
-  heading.textContent = result.available ? "Wykryte wartosci" : "OCR niedostepny";
-  const rawHeading = document.createElement("h3");
-  rawHeading.textContent = "Wszystkie odczyty";
-  const candidateList = document.createElement("div");
-  candidateList.className = "ocr-diagnostic-candidates";
-  for (const [candidateIndex, candidate] of candidates.entries()) {
-    const row = document.createElement("div");
-    row.className = `ocr-diagnostic-candidate ${candidate.accepted ? "accepted" : "rejected"}${candidate.selected ? " selected" : ""}`;
-    row.tabIndex = 0;
-    row.setAttribute("data-ocr-candidate-index", String(candidateIndex));
-    row.textContent = `${candidate.text || "—"} → ${candidate.value || "—"} (${ocrConfidenceLabel(candidate.confidence)}) — ${candidate.reason || "Brak szczegolowego powodu."}`;
-    row.addEventListener("mouseenter", () => setOcrCandidateFocus(candidateIndex));
-    row.addEventListener("mouseleave", () => setOcrCandidateFocus());
-    row.addEventListener("focus", () => setOcrCandidateFocus(candidateIndex));
-    row.addEventListener("blur", () => setOcrCandidateFocus());
-    candidateList.appendChild(row);
-  }
-  if (!candidates.length) {
-    const empty = document.createElement("p");
-    empty.className = "settings-note";
-    empty.textContent = String(result.message || "Nie znaleziono tekstu na obrazie.");
-    candidateList.appendChild(empty);
-  }
-  details.append(heading, rawHeading, candidateList);
+  const renderPairs = () => {
+    pairList.textContent = "";
+    const regions = ocrDisplayRegions(report);
+    heading.textContent = report.available ? `Wykryte wartosci (${regions.length})` : "OCR niedostepny";
+    if (!regions.length) {
+      const empty = document.createElement("p");
+      empty.className = "settings-note";
+      empty.textContent = report.message || "Nie znaleziono tekstu na obrazie.";
+      pairList.appendChild(empty);
+      renderDetailPanel();
+      return;
+    }
+    for (const region of regions) {
+      const row = document.createElement("article");
+      row.className = "ocr-diagnostic-pair-row";
+      row.tabIndex = 0;
+      row.setAttribute("data-ocr-region-id", region.region_id);
+      row.title = "Najedz, aby zobaczyc szczegoly diagnostyczne.";
+      const columns = document.createElement("div");
+      columns.className = "ocr-diagnostic-model-columns";
+      const appendModel = (model, title, boxes) => {
+        const cell = document.createElement("div");
+        cell.className = `ocr-diagnostic-model-cell ${model}`;
+        cell.setAttribute("data-ocr-region-id", region.region_id);
+        const modelTitle = document.createElement("strong");
+        modelTitle.textContent = title;
+        cell.appendChild(modelTitle);
+        if (!boxes.length) {
+          const empty = document.createElement("span");
+          empty.className = "ocr-diagnostic-empty-value";
+          empty.textContent = model === "fast" ? "Brak regionu" : "Brak odczytu";
+          cell.appendChild(empty);
+        } else {
+          for (const box of boxes) {
+            const value = document.createElement("span");
+            value.className = "ocr-diagnostic-value";
+            value.textContent = `${box.text || "-"} -> ${box.value || "-"} (${ocrConfidenceLabel(box.confidence)})`;
+            cell.appendChild(value);
+          }
+        }
+        return cell;
+      };
+      columns.append(
+        appendModel("fast", "Szybki", region.fast ? [region.fast] : []),
+        appendModel("accurate", "Dokladny", region.accurate),
+      );
+      const stateLine = document.createElement("small");
+      stateLine.className = "ocr-diagnostic-pair-status";
+      stateLine.textContent = ocrDiagnosticStatusLabel(region.status);
+      row.append(columns, stateLine);
+      const activate = () => {
+        setOcrRegionFocus(region.region_id);
+        renderDetailPanel(region);
+      };
+      row.addEventListener("mouseenter", activate);
+      row.addEventListener("focus", activate);
+      row.addEventListener("mouseleave", () => {
+        if (activeRegionId === region.region_id) setOcrRegionFocus();
+      });
+      row.addEventListener("blur", () => {
+        if (activeRegionId === region.region_id) setOcrRegionFocus();
+      });
+      pairList.appendChild(row);
+    }
+    const active = regions.find((region) => region.region_id === activeRegionId);
+    renderDetailPanel(active || null);
+  };
+
+  const update = (nextResult) => {
+    report = helpers.normalizeReport(nextResult);
+    renderPairs();
+    drawOverlay();
+  };
+
+  image.addEventListener("load", drawOverlay);
+  stage.append(image, overlay, status);
+  details.append(heading, modelHeadings, pairList, detailPanel);
   layout.append(stage, details);
   output.appendChild(layout);
-  return output;
+  update(result);
+  if (image.complete) drawOverlay();
+  return { element: output, update, setStatus: (message) => { status.textContent = message; } };
 }
 
-function renderOcrBackgroundQueue(jobs) {
-  const queue = document.createElement("div");
-  queue.className = "ocr-background-queue wide-field";
-  const heading = document.createElement("h3");
-  heading.textContent = "Kolejka dopracowywania OCR";
-  const items = Array.isArray(jobs) ? jobs : [];
-  if (!items.length) {
-    const empty = document.createElement("p");
-    empty.className = "settings-note";
-    empty.textContent = "Brak oczekujacych lub aktualnie skanowanych wycinkow.";
-    queue.append(heading, empty);
-    return queue;
+async function renderOcrLivePreview(file) {
+  const helpers = ocrDiagnosticsHelper();
+  const imageUrl = URL.createObjectURL(file);
+  const view = renderOcrDiagnosticView({ available: true, image_url: imageUrl }, { imageUrl, live: true });
+  let report = helpers.normalizeReport({ available: true });
+  return {
+    element: view.element,
+    setStatus(message) { view.setStatus(message); },
+    showEvent(event) {
+      report = helpers.applyProgressEvent(report, event);
+      view.update(report);
+      const kind = String(event?.kind || "");
+      const payload = event?.payload || {};
+      if (kind === "queued") {
+        view.setStatus("Zadanie przekazane do procesu OCR; oczekiwanie na rozpoczecie etapu.");
+      } else if (kind === "candidate_regions") {
+        view.setStatus(`Szybki model wykryl ${(payload.regions || []).length} sektorow.`);
+      } else if (kind === "crop_started") {
+        view.setStatus(`Dokladny model skanuje wycinek ${payload.crop_index || 1}/${payload.crop_total || 1}.`);
+      } else if (kind === "crop_finished") {
+        view.setStatus("Zaktualizowano wynik dokladnego modelu OCR.");
+      } else if (kind === "throttled" || kind === "paused") {
+        view.setStatus(`OCR wstrzymany: ${payload.reason || payload.resource || "limit zasobow"}.`);
+      } else if (kind === "stage_started") {
+        const workerPid = Number(payload.worker_pid || 0);
+        const worker = workerPid > 0 ? `Proces OCR (PID ${workerPid})` : "Proces OCR";
+        view.setStatus(`${worker} rozpoczal etap: ${payload.stage || "przetwarzanie"}.`);
+      }
+    },
+    dispose() { URL.revokeObjectURL(imageUrl); },
+  };
+}
+
+function renderOcrDiagnostics(result) {
+  return renderOcrDiagnosticView(result).element;
+}
+
+function renderOcrBackgroundQueue(payload = {}) {
+  if (!ocrBackgroundQueuePanel || !ocrBackgroundQueueSummary || !ocrBackgroundQueueList) {
+    return;
   }
-  const list = document.createElement("div");
-  list.className = "ocr-background-queue-list";
+  const items = Array.isArray(payload.jobs) ? payload.jobs : [];
+  const remaining = Math.max(0, Number(payload.remaining_count) || 0);
+  ocrBackgroundQueuePanel.hidden = false;
+  ocrBackgroundQueueSummary.textContent = remaining ? `+${remaining} kolejnych` : "";
+  ocrBackgroundQueueList.replaceChildren();
+  if (!items.length) {
+    ocrBackgroundQueueList.className = "ocr-background-queue-list empty-state";
+    ocrBackgroundQueueList.textContent = "Brak oczekujacych lub aktualnie skanowanych zdjec OCR.";
+    return;
+  }
+  ocrBackgroundQueueList.className = "ocr-background-queue-list";
   for (const job of items) {
     const card = document.createElement("article");
     card.className = `ocr-background-queue-item status-${String(job.status || "pending")}`;
     if (job.thumbnail_url) {
       const image = document.createElement("img");
       image.src = String(job.thumbnail_url);
-      image.alt = "Wycinek oczekujacy na OCR";
+      image.alt = "Wycinek OCR";
       card.appendChild(image);
     }
     const details = document.createElement("div");
+    const modelLabel = job.kind === "fast" ? "Szybki model" : "Dokladny model OCR";
     const state = String(job.status || "pending");
-    details.textContent = state === "processing"
+    const stateLabel = state === "processing"
       ? "Skanowanie w tle"
       : state === "pending"
         ? "Oczekuje na bezczynnosc uzytkownikow"
         : state === "completed"
           ? "Zakonczono"
           : state;
+    const result = Array.isArray(job.result)
+      ? job.result.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+    details.textContent = result.length
+      ? `${modelLabel} - ${stateLabel}: ${result.join(", ")}`
+      : `${modelLabel} - ${stateLabel}`;
     card.appendChild(details);
-    list.appendChild(card);
+    ocrBackgroundQueueList.appendChild(card);
   }
-  queue.append(heading, list);
-  return queue;
+}
+
+async function refreshOcrBackgroundQueue() {
+  if (!ocrBackgroundQueuePanel) {
+    return;
+  }
+  try {
+    renderOcrBackgroundQueue(await requestJson("/api/ocr/jobs"));
+  } catch (error) {
+    if (error?.status === 403) {
+      ocrBackgroundQueuePanel.hidden = true;
+      return;
+    }
+    ocrBackgroundQueuePanel.hidden = true;
+  }
+}
+
+async function refreshOcrSlotStates() {
+  const pending = [];
+  for (const [prefix, item] of state.files.entries()) {
+    if (isOcrSlotStateInProgress(item?.ocr_state) && slotFileToken(item)) {
+      pending.push([prefix, item, slotFileToken(item)]);
+    }
+  }
+  for (const [prefix, photo] of state.loadedPhotos.entries()) {
+    if (
+      !state.files.has(prefix)
+      && isOcrSlotStateInProgress(photo?.ocr_state)
+      && String(photo?.token || "")
+    ) {
+      pending.push([prefix, photo, String(photo.token)]);
+    }
+  }
+  await Promise.all(pending.map(async ([prefix, item, token]) => {
+    try {
+      const scan = await requestJson(`/api/ocr/scan?token=${encodeURIComponent(token)}`);
+      const nextState = String(scan?.state || "");
+      if (nextState && nextState !== "missing" && nextState !== item.ocr_state) {
+        item.ocr_state = nextState;
+        updateSlotPreview(prefix);
+      }
+    } catch (_error) {
+      // A transient scan lookup must not remove the in-progress indication.
+    }
+  }));
 }
 
 function renderSettingsOcr() {
@@ -13881,6 +14123,38 @@ function renderSettingsOcr() {
     type: "range", min: 0, max: 100, step: 1,
     description: "Przy wysokiej aktywnosci dysku OCR zwalnia miedzy etapami zamiast przerywac odczyt.",
   });
+  const accurateThreshold = document.createElement("label");
+  accurateThreshold.className = "ocr-accurate-threshold";
+  accurateThreshold.appendChild(document.createTextNode("Skanuj dokladnym modelem przy pewnosci szybkiego do (%)"));
+  const accurateThresholdControls = document.createElement("span");
+  accurateThresholdControls.className = "ocr-accurate-threshold-controls";
+  const accurateThresholdRange = document.createElement("input");
+  accurateThresholdRange.type = "range";
+  accurateThresholdRange.name = "ocr_accurate_confidence_threshold_range";
+  accurateThresholdRange.min = "0";
+  accurateThresholdRange.max = "100";
+  accurateThresholdRange.step = "1";
+  const accurateThresholdNumber = document.createElement("input");
+  accurateThresholdNumber.type = "number";
+  accurateThresholdNumber.name = "ocr_accurate_confidence_threshold";
+  accurateThresholdNumber.min = "0";
+  accurateThresholdNumber.max = "100";
+  accurateThresholdNumber.step = "1";
+  const initialAccurateThreshold = Math.round(Math.max(0, Math.min(100, Number(ocrSettings.accurate_confidence_threshold ?? 99) || 0)));
+  accurateThresholdRange.value = String(initialAccurateThreshold);
+  accurateThresholdNumber.value = String(initialAccurateThreshold);
+  const synchronizeAccurateThreshold = (source, target) => {
+    const value = Math.round(Math.max(0, Math.min(100, Number(source.value) || 0)));
+    source.value = String(value);
+    target.value = String(value);
+  };
+  accurateThresholdRange.addEventListener("input", () => synchronizeAccurateThreshold(accurateThresholdRange, accurateThresholdNumber));
+  accurateThresholdNumber.addEventListener("input", () => synchronizeAccurateThreshold(accurateThresholdNumber, accurateThresholdRange));
+  accurateThresholdControls.append(accurateThresholdRange, accurateThresholdNumber);
+  accurateThreshold.append(
+    accurateThresholdControls,
+    document.createTextNode(" Przy 100% dokladny model skanuje kazdy wykryty wycinek; przy 50% tylko odczyty do 50% pewnosci.")
+  );
   const updateMemoryMode = () => {
     const useGb = memoryMode.querySelector("select")?.value === "gigabytes";
     maxMemoryPercent.hidden = useGb;
@@ -13893,6 +14167,12 @@ function renderSettingsOcr() {
     "Wlacz kolejke dopracowywania OCR w tle",
     Boolean(ocrSettings.background_enabled),
     "Kolejka dziala dopiero po okresie bez aktywnosci uzytkownika."
+  );
+  const queueVisibility = checkField(
+    "ocr_background_queue_visible_to_users",
+    "Pokaz kolejke dopracowywania OCR uzytkownikom",
+    Boolean(ocrSettings.background_queue_visible_to_users),
+    "Administrator widzi kolejke zawsze; zwykli uzytkownicy tylko po wlaczeniu tej opcji."
   );
   const profiles = document.createElement("div");
   profiles.className = "ocr-profile-options wide-field";
@@ -13969,11 +14249,10 @@ function renderSettingsOcr() {
   cancelAnalyze.hidden = true;
   const results = document.createElement("div");
   results.className = "wide-field";
-  const queueOutput = document.createElement("div");
-  queueOutput.className = "wide-field";
   const collection = settingsFieldGroup(
     "Zbieranie wartosci OCR",
     background,
+    queueVisibility,
     idleSeconds,
     maxCpu,
     pauseCpu,
@@ -13982,14 +14261,14 @@ function renderSettingsOcr() {
     maxMemoryGb,
     maxDiskBusy,
     profiles,
+    accurateThreshold,
     slotsHeading,
     slots
   );
   collection.classList.add("ocr-collection-settings");
   form.append(
     collection,
-    settingsFieldGroup("Tester OCR", status, engineInfo, file, actionRow(analyze, cancelAnalyze), results),
-    queueOutput
+    settingsFieldGroup("Tester OCR", status, engineInfo, file, actionRow(analyze, cancelAnalyze), results)
   );
   analyze.addEventListener("click", async () => {
     const selected = fileInput.files?.[0];
@@ -14071,6 +14350,7 @@ function renderSettingsOcr() {
       enabled_slots: [...form.querySelectorAll('[name="ocr_enabled_slot"]:checked')].map((input) => input.value),
       model_profiles: [...form.querySelectorAll('[name="ocr_model_profile"]:checked')].map((input) => input.value),
       background_enabled: data.has("ocr_background_enabled"),
+      background_queue_visible_to_users: data.has("ocr_background_queue_visible_to_users"),
       idle_seconds: data.get("ocr_idle_seconds"),
       max_cpu_percent: data.get("ocr_max_cpu_percent"),
       pause_cpu_percent: data.get("ocr_pause_cpu_percent"),
@@ -14078,6 +14358,7 @@ function renderSettingsOcr() {
       max_memory_percent: data.get("ocr_max_memory_percent"),
       max_memory_gb: data.get("ocr_max_memory_gb"),
       max_disk_busy_percent: data.get("ocr_max_disk_busy_percent"),
+      accurate_confidence_threshold: data.get("ocr_accurate_confidence_threshold"),
     },
   }));
   settingsOutput.appendChild(form);
@@ -14126,14 +14407,200 @@ function renderSettingsOcr() {
     .catch((error) => {
       status.textContent = error.message || "Nie udalo sie odczytac statusu OCR.";
     });
-  requestJson("/api/ocr/jobs")
-    .then((payload) => queueOutput.appendChild(renderOcrBackgroundQueue(payload.jobs)))
-    .catch((error) => {
+}
+
+function moduleBuildStatusUtilities() {
+  return window.PicOrg?.ModuleBuildStatus || null;
+}
+
+function moduleBuildStatusValue(value) {
+  return String(value || "").trim() || "Brak danych";
+}
+
+function moduleBuildStatusCommitNode(value, utilities) {
+  const commit = moduleBuildStatusValue(value);
+  const url = utilities.commitUrl(value);
+  const node = document.createElement(url ? "a" : "span");
+  node.textContent = commit;
+  if (url) {
+    node.href = url;
+    node.target = "_blank";
+    node.rel = "noreferrer";
+    node.title = "Otworz commit na GitHub";
+  }
+  return node;
+}
+
+function appendModuleBuildStatusRow(tableBody, module, statusLabel, utilities) {
+  const row = document.createElement("tr");
+  const moduleCell = document.createElement("td");
+  const buildCell = document.createElement("td");
+  const localCell = document.createElement("td");
+  const statusCell = document.createElement("td");
+  const title = document.createElement("strong");
+  const identifier = document.createElement("small");
+  const buildDate = document.createElement("small");
+  const localDate = document.createElement("small");
+  const badge = document.createElement("span");
+
+  title.textContent = moduleBuildStatusValue(module.label);
+  identifier.textContent = moduleBuildStatusValue(module.id);
+  buildDate.textContent = moduleBuildStatusValue(module.build_committed_at);
+  localDate.textContent = moduleBuildStatusValue(module.local_committed_at);
+  badge.className = `module-build-status-badge ${module.status || "unknown"}`;
+  badge.textContent = statusLabel;
+  badge.setAttribute("aria-label", `Status: ${statusLabel}`);
+
+  moduleCell.append(title, identifier);
+  buildCell.append(moduleBuildStatusCommitNode(module.build_commit, utilities), buildDate);
+  localCell.append(moduleBuildStatusCommitNode(module.local_commit, utilities), localDate);
+  statusCell.appendChild(badge);
+  row.append(moduleCell, buildCell, localCell, statusCell);
+  tableBody.appendChild(row);
+}
+
+async function loadModuleBuildStatus() {
+  const utilities = moduleBuildStatusUtilities();
+  if (!utilities) {
+    throw new Error("Nie zaladowano modulu statusu buildu.");
+  }
+  state.moduleBuildStatusLoading = true;
+  state.moduleBuildStatusError = "";
+  try {
+    const payload = await requestJson("/api/settings/module-status");
+    state.moduleBuildStatus = utilities.normalizeSnapshot(payload);
+    return state.moduleBuildStatus;
+  } catch (error) {
+    state.moduleBuildStatusError = error.message || "Nie udalo sie odczytac statusu buildu.";
+    throw error;
+  } finally {
+    state.moduleBuildStatusLoading = false;
+  }
+}
+
+function renderSettingsModuleStatus() {
+  const utilities = moduleBuildStatusUtilities();
+  const panel = document.createElement("section");
+  const heading = document.createElement("div");
+  const title = document.createElement("h2");
+  const refresh = document.createElement("button");
+  const description = document.createElement("p");
+
+  panel.className = "settings-block module-build-status";
+  heading.className = "module-build-status-heading";
+  title.textContent = "Wersje modulow";
+  refresh.type = "button";
+  refresh.className = "secondary-button";
+  refresh.textContent = "Odswiez porownanie";
+  refresh.disabled = state.moduleBuildStatusLoading;
+  refresh.addEventListener("click", () => {
+    loadModuleBuildStatus()
+      .catch(() => {})
+      .finally(() => renderSettings());
+  });
+  description.className = "settings-note";
+  description.textContent = "Porownanie jest lokalne i tylko do odczytu. Nie wysyla danych do GitHub ani nie uruchamia builda.";
+  heading.append(title, refresh);
+  panel.append(heading, description);
+
+  if (state.moduleBuildStatusLoading) {
+    const loading = document.createElement("p");
+    loading.className = "settings-note";
+    loading.textContent = "Odczytywanie wersji modulow...";
+    panel.appendChild(loading);
+  } else if (state.moduleBuildStatusError) {
+    const error = document.createElement("p");
+    error.className = "error-text";
+    error.textContent = state.moduleBuildStatusError;
+    panel.appendChild(error);
+  } else if (!state.moduleBuildStatus) {
+    const loading = document.createElement("p");
+    loading.className = "settings-note";
+    loading.textContent = "Przygotowywanie porownania...";
+    panel.appendChild(loading);
+  } else if (!utilities) {
+    const error = document.createElement("p");
+    error.className = "error-text";
+    error.textContent = "Nie zaladowano modulu statusu buildu.";
+    panel.appendChild(error);
+  } else {
+    const snapshot = utilities.normalizeSnapshot(state.moduleBuildStatus);
+    const build = snapshot.build;
+    const summary = document.createElement("div");
+    summary.className = "module-build-status-summary";
+    if (build) {
+      for (const [label, value] of [
+        ["Wariant", build.build_variant],
+        ["Build", build.generated_at],
+        ["Commit repozytorium", build.repository_commit],
+      ]) {
+        const item = document.createElement("div");
+        const itemLabel = document.createElement("span");
+        const itemValue = document.createElement("strong");
+        itemLabel.textContent = label;
+        if (label === "Commit repozytorium") {
+          itemValue.appendChild(moduleBuildStatusCommitNode(value, utilities));
+        } else {
+          itemValue.textContent = moduleBuildStatusValue(value);
+        }
+        item.append(itemLabel, itemValue);
+        summary.appendChild(item);
+      }
+    } else {
+      summary.textContent = "Brak wbudowanych danych buildu. Ten program wymaga ponownego zbudowania.";
+    }
+    panel.appendChild(summary);
+
+    if (snapshot.repository_status !== "available") {
       const note = document.createElement("p");
       note.className = "settings-note";
-      note.textContent = error.message || "Nie udalo sie odczytac kolejki OCR.";
-      queueOutput.appendChild(note);
-    });
+      note.textContent = "Nie znaleziono lokalnego repozytorium Git, dlatego widoczne sa tylko dane wbudowane w program.";
+      panel.appendChild(note);
+    }
+
+    const tableWrapper = document.createElement("div");
+    const table = document.createElement("table");
+    const head = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    const body = document.createElement("tbody");
+    tableWrapper.className = "module-build-status-table-wrapper";
+    table.className = "module-build-status-table";
+    for (const label of ["Modul", "Wbudowany build", "Lokalne repozytorium", "Status"]) {
+      const cell = document.createElement("th");
+      cell.scope = "col";
+      cell.textContent = label;
+      headRow.appendChild(cell);
+    }
+    head.appendChild(headRow);
+    for (const module of snapshot.modules) {
+      appendModuleBuildStatusRow(
+        body,
+        module,
+        utilities.statusLabel(module.status),
+        utilities,
+      );
+    }
+    if (!snapshot.modules.length) {
+      const row = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.colSpan = 4;
+      cell.textContent = "Brak danych o modulach w tym buildzie.";
+      row.appendChild(cell);
+      body.appendChild(row);
+    }
+    table.append(head, body);
+    tableWrapper.appendChild(table);
+    panel.appendChild(tableWrapper);
+  }
+
+  settingsOutput.appendChild(panel);
+  if (!state.moduleBuildStatus && !state.moduleBuildStatusLoading && !state.moduleBuildStatusError) {
+    loadModuleBuildStatus()
+      .catch(() => {})
+      .finally(() => {
+        if (state.activeSettingsTab === "module-status") renderSettings();
+      });
+  }
 }
 
 function renderSettings() {
@@ -14153,6 +14620,7 @@ function renderSettings() {
     ? "Proces backendu ma uprawnienia administratora Windows. Rola web admin jest niezalezna."
     : "Proces backendu dziala bez uprawnien administratora Windows. Rola web admin jest niezalezna.";
   if (state.activeSettingsTab === "app") renderSettingsApp();
+  if (state.activeSettingsTab === "module-status") renderSettingsModuleStatus();
   if (state.activeSettingsTab === "processing") renderSettingsProcessing();
   if (state.activeSettingsTab === "security") renderSettingsSecurity();
   if (state.activeSettingsTab === "ftp") renderSettingsFtp();
@@ -14665,6 +15133,7 @@ function handleProductSubmitError(error) {
 
 async function submitProductForm() {
   clearResult();
+  recordOcrActivity();
   try {
     ensureSlotUploadsReady();
     setBusy(true, "Sprawdzanie list...");

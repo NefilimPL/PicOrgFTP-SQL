@@ -22,7 +22,7 @@ def normalize_entered_ocr_value(value: object) -> str:
 
 
 def comparison_key(value: object) -> str:
-    """Return the deliberately tolerant identity used for OCR comparisons."""
+    """Return a tolerant numeric identity without discarding decimal digits."""
 
     text = normalize_entered_ocr_value(value)
     result: list[str] = []
@@ -32,15 +32,18 @@ def comparison_key(value: object) -> str:
             start = index
             while index < len(text) and text[index].isdigit():
                 index += 1
-            result.append(text[start:index])
-            if (
+            number = text[start:index]
+            while (
                 index + 1 < len(text)
                 and text[index] == "."
                 and text[index + 1].isdigit()
             ):
                 index += 1
+                decimal_start = index
                 while index < len(text) and text[index].isdigit():
                     index += 1
+                number += f".{text[decimal_start:index]}"
+            result.append(number)
             continue
         if not text[index].isalpha() and not text[index].isspace():
             result.append("?")

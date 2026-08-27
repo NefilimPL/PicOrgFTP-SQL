@@ -609,6 +609,21 @@ class WebAppFileTests(unittest.TestCase):
             index_source.index(latest_request_asset), index_source.index(app_asset)
         )
 
+    def test_ocr_diagnostics_asset_precedes_app(self) -> None:
+        workspace = Path(__file__).resolve().parents[1]
+        index_source = (
+            workspace / "picorgftp_sql" / "web" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+        diagnostics_source = (
+            workspace / "picorgftp_sql" / "web" / "static" / "ocr-diagnostics.js"
+        ).read_text(encoding="utf-8")
+
+        diagnostics_asset = '<script src="/static/ocr-diagnostics.js'
+        app_asset = '<script src="/static/app.js'
+        self.assertIn(diagnostics_asset, index_source)
+        self.assertLess(index_source.index(diagnostics_asset), index_source.index(app_asset))
+        self.assertIn("root.OcrDiagnostics", diagnostics_source)
+
     def test_runtime_status_asset_precedes_app_and_replaces_named_runtime_pollers(
         self,
     ) -> None:

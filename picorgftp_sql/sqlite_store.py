@@ -1620,6 +1620,8 @@ class SqliteStore:
                     image_hash TEXT NOT NULL,
                     bbox_json TEXT NOT NULL,
                     thumbnail_path TEXT NOT NULL DEFAULT '',
+                    source_path TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL DEFAULT 'accurate' CHECK (kind IN ('fast', 'accurate')),
                     status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'completed', 'error')),
                     result_json TEXT NOT NULL DEFAULT '[]',
                     error_message TEXT NOT NULL DEFAULT '',
@@ -1656,6 +1658,18 @@ class SqliteStore:
                 str(row[1])
                 for row in conn.execute("PRAGMA table_info(file_index_segments)")
             }
+            ocr_crop_job_columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(ocr_crop_jobs)")
+            }
+            if "kind" not in ocr_crop_job_columns:
+                conn.execute(
+                    "ALTER TABLE ocr_crop_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'accurate'"
+                )
+            if "source_path" not in ocr_crop_job_columns:
+                conn.execute(
+                    "ALTER TABLE ocr_crop_jobs ADD COLUMN source_path TEXT NOT NULL DEFAULT ''"
+                )
             if "generation_id" not in segment_columns:
                 conn.execute("DROP TABLE file_index_segments")
                 conn.execute(
@@ -3833,17 +3847,28 @@ class SqliteStore:
 
         self.initialize()
         job_id = _text(payload.get("id")) or f"ocr-{uuid.uuid4().hex}"
+        kind = _text(payload.get("kind")).lower()
+        if kind not in {"fast", "accurate"}:
+            kind = "accurate"
+        status = _text(payload.get("status")).lower()
+        if status not in {"pending", "processing", "completed", "error"}:
+            status = "pending"
         now = _now_iso()
         with self.connection() as conn:
             conn.execute(
                 """INSERT INTO ocr_crop_jobs
-                   (id, image_hash, bbox_json, thumbnail_path, status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, 'pending', ?, ?)""",
+                   (id, image_hash, bbox_json, thumbnail_path, source_path, kind, status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job_id,
                     _text(payload.get("image_hash")),
                     _json_dumps(payload.get("bbox") if isinstance(payload.get("bbox"), list) else []),
-                    _text(payload.get("thumbnail_path")), now, now,
+                    _text(payload.get("thumbnail_path")),
+                    _text(payload.get("source_path")),
+                    kind,
+                    status,
+                    now,
+                    now,
                 ),
             )
         return job_id
@@ -3854,7 +3879,9 @@ class SqliteStore:
         self.initialize()
         with self.connection() as conn:
             row = conn.execute(
-                "SELECT * FROM ocr_crop_jobs WHERE status = 'pending' ORDER BY created_at, id LIMIT 1"
+                """SELECT * FROM ocr_crop_jobs
+                   WHERE status = 'pending'
+                   ORDER BY created_at, id LIMIT 1"""
             ).fetchone()
             if row is None:
                 return None
@@ -3878,6 +3905,30 @@ class SqliteStore:
             conn.execute(
                 "UPDATE ocr_crop_jobs SET status = 'completed', result_json = ?, updated_at = ? WHERE id = ?",
                 (_json_dumps(values), _now_iso(), _text(job_id)),
+            )
+
+    def has_active_ocr_crop_jobs(self, image_hash: str) -> bool:
+        """Return whether the image still has a queued or running OCR stage."""
+
+        self.initialize()
+        with self.connection() as conn:
+            row = conn.execute(
+                """SELECT 1 FROM ocr_crop_jobs
+                   WHERE image_hash = ? AND status IN ('pending', 'processing')
+                   LIMIT 1""",
+                (_text(image_hash),),
+            ).fetchone()
+        return row is not None
+
+    def fail_ocr_crop_job(self, job_id: str, message: str) -> None:
+        """Record a terminal OCR-stage error without leaving it as processing."""
+
+        self.initialize()
+        with self.connection() as conn:
+            conn.execute(
+                """UPDATE ocr_crop_jobs
+                   SET status = 'error', error_message = ?, updated_at = ? WHERE id = ?""",
+                (_text(message), _now_iso(), _text(job_id)),
             )
 
     def requeue_ocr_crop_job(self, job_id: str) -> None:
@@ -3905,6 +3956,38 @@ class SqliteStore:
             ).fetchall()
             conn.execute(
                 "DELETE FROM ocr_crop_jobs WHERE status IN ('pending', 'processing')"
+            )
+        return [str(row["thumbnail_path"] or "") for row in rows if row["thumbnail_path"]]
+
+    def cancel_pending_ocr_crop_jobs(self, image_hash: str) -> list[str]:
+        """Discard pending refinement rows for one removed image content hash."""
+
+        self.initialize()
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT thumbnail_path FROM ocr_crop_jobs
+                   WHERE status = 'pending' AND image_hash = ?""",
+                (_text(image_hash),),
+            ).fetchall()
+            conn.execute(
+                "DELETE FROM ocr_crop_jobs WHERE status = 'pending' AND image_hash = ?",
+                (_text(image_hash),),
+            )
+        return [str(row["thumbnail_path"] or "") for row in rows if row["thumbnail_path"]]
+
+    def purge_completed_ocr_crop_jobs(self, before: str) -> list[str]:
+        """Discard completed refinement rows older than an ISO-UTC cutoff."""
+
+        self.initialize()
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT thumbnail_path FROM ocr_crop_jobs
+                   WHERE status = 'completed' AND updated_at < ?""",
+                (_text(before),),
+            ).fetchall()
+            conn.execute(
+                "DELETE FROM ocr_crop_jobs WHERE status = 'completed' AND updated_at < ?",
+                (_text(before),),
             )
         return [str(row["thumbnail_path"] or "") for row in rows if row["thumbnail_path"]]
 
