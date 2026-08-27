@@ -38,3 +38,14 @@ test("keeps embedded build metadata when no local repository is available", () =
   assert.equal(snapshot.build.build_variant, "local");
   assert.equal(snapshot.build.repository_commit, "abc123");
 });
+
+test("creates a GitHub commit URL only for a complete commit hash", () => {
+  const status = loadModuleBuildStatus();
+  const commit = "a".repeat(40);
+
+  assert.equal(
+    status.commitUrl(commit),
+    `https://github.com/NefilimPL/PicOrgFTP-SQL/commit/${commit}`,
+  );
+  assert.equal(status.commitUrl("abc123"), "");
+});

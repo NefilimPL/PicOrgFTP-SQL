@@ -14417,7 +14417,21 @@ function moduleBuildStatusValue(value) {
   return String(value || "").trim() || "Brak danych";
 }
 
-function appendModuleBuildStatusRow(tableBody, module, statusLabel) {
+function moduleBuildStatusCommitNode(value, utilities) {
+  const commit = moduleBuildStatusValue(value);
+  const url = utilities.commitUrl(value);
+  const node = document.createElement(url ? "a" : "span");
+  node.textContent = commit;
+  if (url) {
+    node.href = url;
+    node.target = "_blank";
+    node.rel = "noreferrer";
+    node.title = "Otworz commit na GitHub";
+  }
+  return node;
+}
+
+function appendModuleBuildStatusRow(tableBody, module, statusLabel, utilities) {
   const row = document.createElement("tr");
   const moduleCell = document.createElement("td");
   const buildCell = document.createElement("td");
@@ -14425,25 +14439,21 @@ function appendModuleBuildStatusRow(tableBody, module, statusLabel) {
   const statusCell = document.createElement("td");
   const title = document.createElement("strong");
   const identifier = document.createElement("small");
-  const buildCommit = document.createElement("span");
   const buildDate = document.createElement("small");
-  const localCommit = document.createElement("span");
   const localDate = document.createElement("small");
   const badge = document.createElement("span");
 
   title.textContent = moduleBuildStatusValue(module.label);
   identifier.textContent = moduleBuildStatusValue(module.id);
-  buildCommit.textContent = moduleBuildStatusValue(module.build_commit);
   buildDate.textContent = moduleBuildStatusValue(module.build_committed_at);
-  localCommit.textContent = moduleBuildStatusValue(module.local_commit);
   localDate.textContent = moduleBuildStatusValue(module.local_committed_at);
   badge.className = `module-build-status-badge ${module.status || "unknown"}`;
   badge.textContent = statusLabel;
   badge.setAttribute("aria-label", `Status: ${statusLabel}`);
 
   moduleCell.append(title, identifier);
-  buildCell.append(buildCommit, buildDate);
-  localCell.append(localCommit, localDate);
+  buildCell.append(moduleBuildStatusCommitNode(module.build_commit, utilities), buildDate);
+  localCell.append(moduleBuildStatusCommitNode(module.local_commit, utilities), localDate);
   statusCell.appendChild(badge);
   row.append(moduleCell, buildCell, localCell, statusCell);
   tableBody.appendChild(row);
@@ -14528,7 +14538,11 @@ function renderSettingsModuleStatus() {
         const itemLabel = document.createElement("span");
         const itemValue = document.createElement("strong");
         itemLabel.textContent = label;
-        itemValue.textContent = moduleBuildStatusValue(value);
+        if (label === "Commit repozytorium") {
+          itemValue.appendChild(moduleBuildStatusCommitNode(value, utilities));
+        } else {
+          itemValue.textContent = moduleBuildStatusValue(value);
+        }
         item.append(itemLabel, itemValue);
         summary.appendChild(item);
       }
@@ -14559,7 +14573,12 @@ function renderSettingsModuleStatus() {
     }
     head.appendChild(headRow);
     for (const module of snapshot.modules) {
-      appendModuleBuildStatusRow(body, module, utilities.statusLabel(module.status));
+      appendModuleBuildStatusRow(
+        body,
+        module,
+        utilities.statusLabel(module.status),
+        utilities,
+      );
     }
     if (!snapshot.modules.length) {
       const row = document.createElement("tr");

@@ -47,5 +47,12 @@
     }[status] || "Nieznany status";
   }
 
-  root.ModuleBuildStatus = { normalizeSnapshot, statusLabel };
+  function commitUrl(value) {
+    const commit = text(value).trim();
+    return /^[0-9a-f]{40}$/i.test(commit)
+      ? `https://github.com/NefilimPL/PicOrgFTP-SQL/commit/${commit}`
+      : "";
+  }
+
+  root.ModuleBuildStatus = { normalizeSnapshot, statusLabel, commitUrl };
 })();

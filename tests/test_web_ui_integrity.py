@@ -70,6 +70,8 @@ class WebUiIntegrityTests(unittest.TestCase):
         self.assertIn('"/api/settings/module-status"', source)
         self.assertIn("Odswiez porownanie", source)
         self.assertIn("function renderSettingsModuleStatus()", source)
+        self.assertIn("utilities.commitUrl", source)
+        self.assertIn('link.target = "_blank"', source)
 
     def test_ocr_background_queue_renders_safe_rows_in_workspace_position(self) -> None:
         html = INDEX_HTML.read_text(encoding="utf-8")
