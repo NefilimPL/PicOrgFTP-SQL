@@ -114,6 +114,15 @@ class ImageDimensionRecognizer(Protocol):
         """Return OCR candidates for one local image file."""
 
 
+def _has_reliable_numeric_box(boxes: Iterable[OcrTextBox]) -> bool:
+    """Return whether a primary OCR pass found a usable numeric value."""
+
+    return any(
+        bool(comparison_key(box.text)) and float(box.confidence) >= 0.8
+        for box in boxes
+    )
+
+
 def rotate_ocr_box_to_source(
     box: OcrTextBox,
     *,
@@ -199,33 +208,35 @@ def _restore_lost_decimal_separator(
     if not match:
         return source
     token = match.group(0)
-    if len(token) != 2 or not token.isdigit():
+    if len(token) < 2 or not token.isdigit():
         return source
     glyphs = [
         tuple(int(value) for value in component)
         for component in components
         if len(component) == 5 and int(component[4]) > 0
     ]
-    if len(glyphs) < 3:
+    if len(glyphs) <= len(token):
         return source
-    digit_glyphs = sorted(glyphs, key=lambda item: item[4], reverse=True)[:2]
-    left_digit, right_digit = sorted(
-        digit_glyphs, key=lambda item: item[0] + item[2] / 2
-    )
-    left_center = left_digit[0] + left_digit[2] / 2
-    right_center = right_digit[0] + right_digit[2] / 2
-    minimum_digit_area = min(left_digit[4], right_digit[4])
-    minimum_digit_height = min(left_digit[3], right_digit[3])
-    marker_found = any(
-        component not in digit_glyphs
-        and left_center < component[0] + component[2] / 2 < right_center
-        and component[4] <= minimum_digit_area * 0.45
-        and component[3] <= minimum_digit_height * 0.5
-        for component in glyphs
-    )
-    if not marker_found:
-        return source
-    return f"{source[:match.start()]}{token[0]},{token[1:]}{source[match.end():]}"
+    digit_glyphs = sorted(glyphs, key=lambda item: item[4], reverse=True)[: len(token)]
+    digit_glyphs.sort(key=lambda item: item[0] + item[2] / 2)
+    minimum_digit_area = min(component[4] for component in digit_glyphs)
+    minimum_digit_height = min(component[3] for component in digit_glyphs)
+    for index, (left_digit, right_digit) in enumerate(
+        zip(digit_glyphs, digit_glyphs[1:]), start=1
+    ):
+        left_center = left_digit[0] + left_digit[2] / 2
+        right_center = right_digit[0] + right_digit[2] / 2
+        marker_found = any(
+            component not in digit_glyphs
+            and left_center < component[0] + component[2] / 2 < right_center
+            and component[4] <= minimum_digit_area * 0.45
+            and component[3] <= minimum_digit_height * 0.5
+            for component in glyphs
+        )
+        if marker_found:
+            separator_at = match.start() + index
+            return f"{source[:separator_at]},{source[separator_at:]}"
+    return source
 
 
 def _text_components_from_crop(
@@ -982,9 +993,13 @@ class PaddleImageDimensionRecognizer:
                 rotations.append(("counterclockwise", counterclockwise))
         elif profile_id == "accurate" and image_height >= image_width * 1.35:
             # The exact model normally receives a narrow crop. Keep its
-            # vertical-text correction off the fast-model critical path.
+            # vertical-text correction off the fast-model critical path. The
+            # optional orientation classifier is disabled for offline use, so
+            # both rotations are needed to cover either reading direction.
             if clockwise is not None:
                 rotations.append(("clockwise", clockwise))
+            if counterclockwise is not None:
+                rotations.append(("counterclockwise", counterclockwise))
 
         boxes: list[OcrTextBox] = []
         for rotation, cv2_rotation in rotations:
@@ -1012,7 +1027,7 @@ class PaddleImageDimensionRecognizer:
         if image is None:
             return associate_dimension_hints(boxes, [])
         profile_id = str(getattr(getattr(self, "profile", None), "id", ""))
-        if profile_id == "fast" and not boxes:
+        if profile_id == "fast" and not _has_reliable_numeric_box(boxes):
             boxes.extend(self._rotated_boxes(image, fast_fallback=True))
         elif profile_id == "accurate":
             boxes.extend(self._rotated_boxes(image))
@@ -1025,7 +1040,7 @@ class PaddleImageDimensionRecognizer:
         refined_boxes: list[OcrTextBox] = []
         for box in boxes:
             number = _NUMBER_PATTERN.search(box.text)
-            if number and len(number.group(0)) == 2 and number.group(0).isdigit():
+            if number and len(number.group(0)) >= 2 and number.group(0).isdigit():
                 text = _restore_lost_decimal_separator(
                     box.text,
                     _text_components_from_crop(image, box.bbox, self._cv2),
