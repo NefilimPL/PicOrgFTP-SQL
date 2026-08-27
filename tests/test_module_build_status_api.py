@@ -51,6 +51,7 @@ def test_module_status_route_is_admin_only_and_returns_snapshot():
 
 
 def test_module_status_route_rejects_anonymous_requests():
-    response = TestClient(web_app.app).get("/api/settings/module-status")
+    with patch.object(web_app, "_auth_enabled", return_value=True):
+        response = TestClient(web_app.app).get("/api/settings/module-status")
 
     assert response.status_code == 401
