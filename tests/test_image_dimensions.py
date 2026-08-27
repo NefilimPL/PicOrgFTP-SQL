@@ -52,9 +52,9 @@ def test_paddle_recognizer_disables_mkldnn_for_cpu_predictor(tmp_path, monkeypat
         "text_detection_model_name": "PP-OCRv5_mobile_det",
         "text_recognition_model_name": "PP-OCRv5_mobile_rec",
         "enable_mkldnn": False,
-        "use_doc_orientation_classify": True,
+        "use_doc_orientation_classify": False,
         "use_doc_unwarping": False,
-        "use_textline_orientation": True,
+        "use_textline_orientation": False,
     }
 
 
@@ -182,7 +182,11 @@ def test_fast_paddle_recognizer_keeps_the_base_result_when_a_rotated_pass_fails(
             return None
 
     class FakeOcr:
+        def __init__(self):
+            self.sources = []
+
         def predict(self, source):
+            self.sources.append(source)
             if isinstance(source, tuple):
                 raise RuntimeError("rotated input is unavailable")
             return [{
@@ -201,6 +205,7 @@ def test_fast_paddle_recognizer_keeps_the_base_result_when_a_rotated_pass_fails(
     boxes = recognizer.detect("fixture.png")
 
     assert [(box.text, box.bbox) for box in boxes] == [("123", (10, 10, 40, 30))]
+    assert recognizer._ocr.sources == ["fixture.png"]
 
 
 def test_multi_profile_recognizer_combines_profiles_and_keeps_the_best_duplicate():

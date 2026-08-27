@@ -71,9 +71,9 @@ if missing:
             text_detection_model_name=profile.detector_model,
             text_recognition_model_name=profile.recognizer_model,
             enable_mkldnn=False,
-            use_doc_orientation_classify=True,
+            use_doc_orientation_classify=False,
             use_doc_unwarping=False,
-            use_textline_orientation=True,
+            use_textline_orientation=False,
         )
 missing = [profile.id for profile in profiles if not _model_cache_has_profile(cache, profile)]
 if missing:

@@ -926,16 +926,16 @@ class PaddleImageDimensionRecognizer:
         # PaddleOCR enables oneDNN by default on CPU.  PaddlePaddle 3.3 can
         # fail on OCR model PIR attributes in that backend, so prefer the
         # standard CPU executor for reliable local dimension extraction.
-        # The orientation classifiers improve recognition of photos captured
-        # sideways and upside-down labels. Manual 90-degree passes below keep
-        # every returned box mapped to the coordinates of the original image.
+        # These optional classifiers require extra model files and otherwise
+        # make an offline runtime attempt a download. Rotated crop handling
+        # below stays fully local and preserves source-image coordinates.
         self._ocr = PaddleOCR(
             text_detection_model_name=self.profile.detector_model,
             text_recognition_model_name=self.profile.recognizer_model,
             enable_mkldnn=False,
-            use_doc_orientation_classify=True,
+            use_doc_orientation_classify=False,
             use_doc_unwarping=False,
-            use_textline_orientation=True,
+            use_textline_orientation=False,
         )
 
     def _detect_boxes(self, source: object) -> list[OcrTextBox]:
@@ -967,21 +967,24 @@ class PaddleImageDimensionRecognizer:
                 )
         return boxes
 
-    def _rotated_boxes(self, image: object) -> list[OcrTextBox]:
+    def _rotated_boxes(
+        self, image: object, *, fast_fallback: bool = False
+    ) -> list[OcrTextBox]:
         image_height, image_width = image.shape[:2]
         profile_id = str(getattr(getattr(self, "profile", None), "id", ""))
         rotations: list[tuple[str, object]] = []
         clockwise = getattr(self._cv2, "ROTATE_90_CLOCKWISE", None)
         counterclockwise = getattr(self._cv2, "ROTATE_90_COUNTERCLOCKWISE", None)
-        if profile_id == "fast":
+        if profile_id == "fast" and fast_fallback:
             if clockwise is not None:
                 rotations.append(("clockwise", clockwise))
             if counterclockwise is not None:
                 rotations.append(("counterclockwise", counterclockwise))
-        elif image_height >= image_width * 1.35 and clockwise is not None:
-            # The accurate model normally receives a narrow crop. One turn is
-            # enough because Paddle's text-line classifier also handles 180°.
-            rotations.append(("clockwise", clockwise))
+        elif profile_id == "accurate" and image_height >= image_width * 1.35:
+            # The exact model normally receives a narrow crop. Keep its
+            # vertical-text correction off the fast-model critical path.
+            if clockwise is not None:
+                rotations.append(("clockwise", clockwise))
 
         boxes: list[OcrTextBox] = []
         for rotation, cv2_rotation in rotations:
@@ -1008,7 +1011,11 @@ class PaddleImageDimensionRecognizer:
         image = self._cv2.imread(path)
         if image is None:
             return associate_dimension_hints(boxes, [])
-        boxes.extend(self._rotated_boxes(image))
+        profile_id = str(getattr(getattr(self, "profile", None), "id", ""))
+        if profile_id == "fast" and not boxes:
+            boxes.extend(self._rotated_boxes(image, fast_fallback=True))
+        elif profile_id == "accurate":
+            boxes.extend(self._rotated_boxes(image))
         boxes = [
             _retry_low_confidence_dimension_label(
                 box, image, self._cv2, self._ocr.predict
