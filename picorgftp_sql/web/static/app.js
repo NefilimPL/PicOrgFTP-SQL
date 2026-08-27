@@ -28,6 +28,9 @@ const state = {
   draggedSlotPrefix: "",
   lastLookupMs: null,
   activeSettingsTab: "app",
+  moduleBuildStatus: null,
+  moduleBuildStatusLoading: false,
+  moduleBuildStatusError: "",
   history: null,
   historyDetailGroup: null,
   historyDetailPage: 1,
@@ -14406,6 +14409,181 @@ function renderSettingsOcr() {
     });
 }
 
+function moduleBuildStatusUtilities() {
+  return window.PicOrg?.ModuleBuildStatus || null;
+}
+
+function moduleBuildStatusValue(value) {
+  return String(value || "").trim() || "Brak danych";
+}
+
+function appendModuleBuildStatusRow(tableBody, module, statusLabel) {
+  const row = document.createElement("tr");
+  const moduleCell = document.createElement("td");
+  const buildCell = document.createElement("td");
+  const localCell = document.createElement("td");
+  const statusCell = document.createElement("td");
+  const title = document.createElement("strong");
+  const identifier = document.createElement("small");
+  const buildCommit = document.createElement("span");
+  const buildDate = document.createElement("small");
+  const localCommit = document.createElement("span");
+  const localDate = document.createElement("small");
+  const badge = document.createElement("span");
+
+  title.textContent = moduleBuildStatusValue(module.label);
+  identifier.textContent = moduleBuildStatusValue(module.id);
+  buildCommit.textContent = moduleBuildStatusValue(module.build_commit);
+  buildDate.textContent = moduleBuildStatusValue(module.build_committed_at);
+  localCommit.textContent = moduleBuildStatusValue(module.local_commit);
+  localDate.textContent = moduleBuildStatusValue(module.local_committed_at);
+  badge.className = `module-build-status-badge ${module.status || "unknown"}`;
+  badge.textContent = statusLabel;
+  badge.setAttribute("aria-label", `Status: ${statusLabel}`);
+
+  moduleCell.append(title, identifier);
+  buildCell.append(buildCommit, buildDate);
+  localCell.append(localCommit, localDate);
+  statusCell.appendChild(badge);
+  row.append(moduleCell, buildCell, localCell, statusCell);
+  tableBody.appendChild(row);
+}
+
+async function loadModuleBuildStatus() {
+  const utilities = moduleBuildStatusUtilities();
+  if (!utilities) {
+    throw new Error("Nie zaladowano modulu statusu buildu.");
+  }
+  state.moduleBuildStatusLoading = true;
+  state.moduleBuildStatusError = "";
+  try {
+    const payload = await requestJson("/api/settings/module-status");
+    state.moduleBuildStatus = utilities.normalizeSnapshot(payload);
+    return state.moduleBuildStatus;
+  } catch (error) {
+    state.moduleBuildStatusError = error.message || "Nie udalo sie odczytac statusu buildu.";
+    throw error;
+  } finally {
+    state.moduleBuildStatusLoading = false;
+  }
+}
+
+function renderSettingsModuleStatus() {
+  const utilities = moduleBuildStatusUtilities();
+  const panel = document.createElement("section");
+  const heading = document.createElement("div");
+  const title = document.createElement("h2");
+  const refresh = document.createElement("button");
+  const description = document.createElement("p");
+
+  panel.className = "settings-block module-build-status";
+  heading.className = "module-build-status-heading";
+  title.textContent = "Wersje modulow";
+  refresh.type = "button";
+  refresh.className = "secondary-button";
+  refresh.textContent = "Odswiez porownanie";
+  refresh.disabled = state.moduleBuildStatusLoading;
+  refresh.addEventListener("click", () => {
+    loadModuleBuildStatus()
+      .catch(() => {})
+      .finally(() => renderSettings());
+  });
+  description.className = "settings-note";
+  description.textContent = "Porownanie jest lokalne i tylko do odczytu. Nie wysyla danych do GitHub ani nie uruchamia builda.";
+  heading.append(title, refresh);
+  panel.append(heading, description);
+
+  if (state.moduleBuildStatusLoading) {
+    const loading = document.createElement("p");
+    loading.className = "settings-note";
+    loading.textContent = "Odczytywanie wersji modulow...";
+    panel.appendChild(loading);
+  } else if (state.moduleBuildStatusError) {
+    const error = document.createElement("p");
+    error.className = "error-text";
+    error.textContent = state.moduleBuildStatusError;
+    panel.appendChild(error);
+  } else if (!state.moduleBuildStatus) {
+    const loading = document.createElement("p");
+    loading.className = "settings-note";
+    loading.textContent = "Przygotowywanie porownania...";
+    panel.appendChild(loading);
+  } else if (!utilities) {
+    const error = document.createElement("p");
+    error.className = "error-text";
+    error.textContent = "Nie zaladowano modulu statusu buildu.";
+    panel.appendChild(error);
+  } else {
+    const snapshot = utilities.normalizeSnapshot(state.moduleBuildStatus);
+    const build = snapshot.build;
+    const summary = document.createElement("div");
+    summary.className = "module-build-status-summary";
+    if (build) {
+      for (const [label, value] of [
+        ["Wariant", build.build_variant],
+        ["Build", build.generated_at],
+        ["Commit repozytorium", build.repository_commit],
+      ]) {
+        const item = document.createElement("div");
+        const itemLabel = document.createElement("span");
+        const itemValue = document.createElement("strong");
+        itemLabel.textContent = label;
+        itemValue.textContent = moduleBuildStatusValue(value);
+        item.append(itemLabel, itemValue);
+        summary.appendChild(item);
+      }
+    } else {
+      summary.textContent = "Brak wbudowanych danych buildu. Ten program wymaga ponownego zbudowania.";
+    }
+    panel.appendChild(summary);
+
+    if (snapshot.repository_status !== "available") {
+      const note = document.createElement("p");
+      note.className = "settings-note";
+      note.textContent = "Nie znaleziono lokalnego repozytorium Git, dlatego widoczne sa tylko dane wbudowane w program.";
+      panel.appendChild(note);
+    }
+
+    const tableWrapper = document.createElement("div");
+    const table = document.createElement("table");
+    const head = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    const body = document.createElement("tbody");
+    tableWrapper.className = "module-build-status-table-wrapper";
+    table.className = "module-build-status-table";
+    for (const label of ["Modul", "Wbudowany build", "Lokalne repozytorium", "Status"]) {
+      const cell = document.createElement("th");
+      cell.scope = "col";
+      cell.textContent = label;
+      headRow.appendChild(cell);
+    }
+    head.appendChild(headRow);
+    for (const module of snapshot.modules) {
+      appendModuleBuildStatusRow(body, module, utilities.statusLabel(module.status));
+    }
+    if (!snapshot.modules.length) {
+      const row = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.colSpan = 4;
+      cell.textContent = "Brak danych o modulach w tym buildzie.";
+      row.appendChild(cell);
+      body.appendChild(row);
+    }
+    table.append(head, body);
+    tableWrapper.appendChild(table);
+    panel.appendChild(tableWrapper);
+  }
+
+  settingsOutput.appendChild(panel);
+  if (!state.moduleBuildStatus && !state.moduleBuildStatusLoading && !state.moduleBuildStatusError) {
+    loadModuleBuildStatus()
+      .catch(() => {})
+      .finally(() => {
+        if (state.activeSettingsTab === "module-status") renderSettings();
+      });
+  }
+}
+
 function renderSettings() {
   if (!state.settings) {
     return;
@@ -14423,6 +14601,7 @@ function renderSettings() {
     ? "Proces backendu ma uprawnienia administratora Windows. Rola web admin jest niezalezna."
     : "Proces backendu dziala bez uprawnien administratora Windows. Rola web admin jest niezalezna.";
   if (state.activeSettingsTab === "app") renderSettingsApp();
+  if (state.activeSettingsTab === "module-status") renderSettingsModuleStatus();
   if (state.activeSettingsTab === "processing") renderSettingsProcessing();
   if (state.activeSettingsTab === "security") renderSettingsSecurity();
   if (state.activeSettingsTab === "ftp") renderSettingsFtp();

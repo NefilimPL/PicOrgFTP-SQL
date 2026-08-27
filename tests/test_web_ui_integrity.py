@@ -61,6 +61,16 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
+    def test_settings_ui_contains_module_status_tab_and_refresh_contract(self) -> None:
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn('data-settings-tab="module-status"', html)
+        self.assertIn('src="/static/module-build-status.js', html)
+        self.assertIn('"/api/settings/module-status"', source)
+        self.assertIn("Odswiez porownanie", source)
+        self.assertIn("function renderSettingsModuleStatus()", source)
+
     def test_ocr_background_queue_renders_safe_rows_in_workspace_position(self) -> None:
         html = INDEX_HTML.read_text(encoding="utf-8")
         source = APP_JS.read_text(encoding="utf-8")

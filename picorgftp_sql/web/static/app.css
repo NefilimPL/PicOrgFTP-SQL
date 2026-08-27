@@ -1124,6 +1124,107 @@ h2 {
   gap: 12px;
 }
 
+.module-build-status {
+  grid-column: 1 / -1;
+}
+
+.module-build-status-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.module-build-status-heading h2 {
+  margin: 0;
+}
+
+.module-build-status-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.module-build-status-summary > div {
+  display: grid;
+  gap: 3px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.module-build-status-summary span,
+.module-build-status-table small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.module-build-status-table-wrapper {
+  overflow-x: auto;
+}
+
+.module-build-status-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+}
+
+.module-build-status-table th,
+.module-build-status-table td {
+  padding: 8px;
+  border-top: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.module-build-status-table th {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.module-build-status-table td > strong,
+.module-build-status-table td > span,
+.module-build-status-table td > small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.module-build-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.module-build-status-badge::before {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+}
+
+.module-build-status-badge.matching {
+  color: var(--accent);
+}
+
+.module-build-status-badge.rebuild_required,
+.module-build-status-badge.uncommitted_changes {
+  color: var(--warn);
+}
+
+.module-build-status-badge.repository_unavailable,
+.module-build-status-badge.build_metadata_missing,
+.module-build-status-badge.unknown {
+  color: var(--muted);
+}
+
 .web-image-url-row {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) minmax(130px, auto) auto;
