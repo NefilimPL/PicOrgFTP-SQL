@@ -8528,10 +8528,27 @@ function importLegacyDataButton() {
     button.disabled = true;
     settingsStatus.textContent = "Wczytywanie danych starej konfiguracji...";
     try {
-      const payload = await requestJson("/api/settings/import-legacy", {
-        method: "POST",
-        timeoutMs: 120000,
-      });
+      let payload;
+      try {
+        payload = await requestJson("/api/settings/import-legacy", {
+          method: "POST",
+          timeoutMs: 120000,
+        });
+      } catch (error) {
+        const targetExists = error.status === 409
+          && String(error.message || "").startsWith("Docelowa baza PicSyncra juz istnieje");
+        if (!targetExists || !window.confirm(
+          "Docelowa baza PicSyncra zostanie najpierw zarchiwizowana w BACKUP/legacy-import, "
+          + "a potem zastapiona danymi starej konfiguracji. Kontynuowac?"
+        )) {
+          throw error;
+        }
+        settingsStatus.textContent = "Archiwizowanie obecnej bazy i wczytywanie starej konfiguracji...";
+        payload = await requestJson("/api/settings/import-legacy?replace_existing_target=true", {
+          method: "POST",
+          timeoutMs: 120000,
+        });
+      }
       if (payload.settings) {
         state.settings = payload.settings;
       }

@@ -830,7 +830,7 @@ class WebSmokeCiTests(unittest.TestCase):
             patch.object(web_app.config, "initialize_config"),
             patch.object(web_app, "settings_snapshot", return_value={"data_mode": "sqlite"}),
         ):
-            response = client.post("/api/settings/import-legacy")
+            response = client.post("/api/settings/import-legacy?replace_existing_target=true")
 
         self.assertEqual(response.status_code, 200)
         adopter.assert_called_once()
@@ -843,6 +843,7 @@ class WebSmokeCiTests(unittest.TestCase):
             adoption_call["legacy_database_path"],
             Path("C:/Data") / legacy_migration._LEGACY_SQLITE_FILENAME,
         )
+        self.assertTrue(adoption_call["replace_existing_target"])
         self.assertTrue(callable(adoption_call["finalize"]))
         save_bootstrap.assert_called_once_with(
             {

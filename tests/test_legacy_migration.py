@@ -148,6 +148,35 @@ def test_adoption_does_not_overwrite_an_existing_picsyncra_database(tmp_path: Pa
     assert source.exists()
 
 
+def test_adoption_archives_and_replaces_existing_target_after_explicit_confirmation(
+    tmp_path: Path,
+) -> None:
+    """A confirmed import must preserve the replaced database in the import archive."""
+
+    source = tmp_path / "picorgftp_sql.sqlite"
+    target = tmp_path / "picsyncra.sqlite"
+    SqliteStore(str(source)).save_config({"migration_marker": "legacy"})
+    SqliteStore(str(target)).save_config({"migration_marker": "current"})
+
+    result = legacy_migration.adopt_legacy_data(
+        application_root=tmp_path,
+        data_root=tmp_path,
+        database_path=target,
+        backup_root=tmp_path / "BACKUP",
+        replace_existing_target=True,
+    )
+
+    assert result.migrated is True
+    assert SqliteStore(str(target)).load_config()["migration_marker"] == "legacy"
+    assert (
+        SqliteStore(str(result.archive_dir / "previous-picsyncra.sqlite")).load_config()[
+            "migration_marker"
+        ]
+        == "current"
+    )
+    assert not source.exists()
+
+
 def test_adoption_replaces_an_empty_picsyncra_database(tmp_path: Path) -> None:
     """A database containing only PicSyncra's schema must not block first import."""
 

@@ -57,6 +57,7 @@ class MigrationResult:
     source_kind: str = ""
     archive_dir: Path | None = None
     error_code: str | None = None
+    replaced_target: bool = False
 
 
 def _unique_paths(paths: tuple[Path, ...]) -> tuple[Path, ...]:
@@ -267,6 +268,17 @@ def _copy_sources_to_archive(
             raise OSError(f"Nie udalo sie zweryfikowac kopii archiwalnej: {source.name}")
 
 
+def _archive_existing_target(target: Path, archive_dir: Path) -> Path:
+    """Store a verified SQLite snapshot before a confirmed target replacement."""
+
+    destination = archive_dir / f"previous-{target.name}"
+    if destination.exists():
+        raise FileExistsError(f"Archiwum docelowej bazy juz istnieje: {destination.name}")
+    _copy_sqlite_database(target, destination)
+    _validate_sqlite_database(destination)
+    return destination
+
+
 def _handover_sources_to_archive(
     sources: tuple[Path, ...],
     archive_dir: Path,
@@ -412,13 +424,11 @@ def _publish_staged_target(
     staging: Path,
     target: Path,
     *,
-    replace_empty_target: bool = False,
+    replace_target: bool = False,
 ) -> None:
-    """Publish without replacing a target created by another process."""
+    """Publish a staged database without replacing an unapproved target."""
 
-    if replace_empty_target and target.exists():
-        if not _is_empty_picsyncra_database(target):
-            raise _TargetAlreadyExistsError("Docelowa baza PicSyncra juz zawiera dane.")
+    if replace_target and target.exists():
         target.unlink()
     try:
         os.link(staging, target)
@@ -434,6 +444,7 @@ def adopt_legacy_data(
     backup_root: Path,
     legacy_database_path: Path | None = None,
     finalize: Callable[[Path], None] | None = None,
+    replace_existing_target: bool = False,
 ) -> MigrationResult:
     """Adopt historical data into one PicSyncra SQLite database and archive sources."""
 
@@ -464,6 +475,7 @@ def adopt_legacy_data(
         target.exists()
         and not resume_interrupted_adoption
         and not _is_empty_picsyncra_database(target)
+        and not replace_existing_target
     ):
         return MigrationResult(
             migrated=False,
@@ -480,6 +492,7 @@ def adopt_legacy_data(
     source_lock_path = sqlite_source if sqlite_source is not None else file_source_sets[0][0]
     source_lock_scope = "sqlite-source" if sqlite_source is not None else "files-source"
     target_published = False
+    target_replaced = False
     cleanup_error: str | None = None
     try:
         with _exclusive_path_lock(
@@ -496,12 +509,15 @@ def adopt_legacy_data(
                 scope="target",
                 protected_path=target,
             ):
-                replace_empty_target = (
+                replace_target = (
                     target.exists()
                     and not resume_interrupted_adoption
-                    and _is_empty_picsyncra_database(target)
+                    and (
+                        replace_existing_target
+                        or _is_empty_picsyncra_database(target)
+                    )
                 )
-                if target.exists() and not resume_interrupted_adoption and not replace_empty_target:
+                if target.exists() and not resume_interrupted_adoption and not replace_target:
                     return MigrationResult(
                         migrated=False,
                         skipped=False,
@@ -531,11 +547,20 @@ def adopt_legacy_data(
                                         sqlite_source=sqlite_source,
                                         sqlite_snapshot=staging,
                                     )
-                                    _publish_staged_target(
-                                        staging,
-                                        target,
-                                        replace_empty_target=replace_empty_target,
-                                    )
+                                    if replace_existing_target and target.exists():
+                                        _archive_existing_target(target, archive_dir)
+                                        _publish_staged_target(
+                                            staging,
+                                            target,
+                                            replace_target=True,
+                                        )
+                                        target_replaced = True
+                                    else:
+                                        _publish_staged_target(
+                                            staging,
+                                            target,
+                                            replace_target=replace_target,
+                                        )
                                     target_published = True
                                     if finalize is not None:
                                         finalize(target)
@@ -584,11 +609,16 @@ def adopt_legacy_data(
                         import_legacy_to_sqlite(str(staging_sources), str(staging))
                         _validate_sqlite_database(staging)
                         _copy_sources_to_archive(sources, archive_dir)
-                        _publish_staged_target(
-                            staging,
-                            target,
-                            replace_empty_target=replace_empty_target,
-                        )
+                        if replace_existing_target and target.exists():
+                            _archive_existing_target(target, archive_dir)
+                            _publish_staged_target(staging, target, replace_target=True)
+                            target_replaced = True
+                        else:
+                            _publish_staged_target(
+                                staging,
+                                target,
+                                replace_target=replace_target,
+                            )
                         target_published = True
                         if finalize is not None:
                             finalize(target)
@@ -630,4 +660,5 @@ def adopt_legacy_data(
         error=cleanup_error,
         source_kind=source_kind,
         archive_dir=archive_dir,
+        replaced_target=target_replaced,
     )

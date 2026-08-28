@@ -9057,6 +9057,31 @@ class App(BU.Tk):
                     finalize=_activate_adopted_database,
                 )
                 if not result.migrated:
+                    if result.error_code == "target_exists" and O.askyesno(
+                        SETTINGS_LABEL,
+                        "Docelowa baza PicSyncra zostanie najpierw zarchiwizowana w "
+                        "BACKUP/legacy-import, a potem zastapiona danymi starej konfiguracji. "
+                        "Kontynuowac?",
+                    ):
+                        result = adopt_legacy_data(
+                            application_root=Path(settings.BASE_DIR_SETTINGS_PATH).parent,
+                            data_root=Path(settings.AC),
+                            database_path=database_path,
+                            backup_root=Path(storage_settings.resolve_backup_dir()),
+                            legacy_database_path=Path(configured_database_path),
+                            finalize=_activate_adopted_database,
+                            replace_existing_target=True,
+                        )
+                    if result.migrated:
+                        database_path_var.set(str(database_path))
+                        data_store.reset_active_store_cache()
+                        config.initialize_config(interactive=False)
+                        message = (
+                            "Wczytano dane starej konfiguracji do SQLite. "
+                            f"Zrodlo: {result.source_kind}. Archiwum: {result.archive_dir}."
+                        )
+                        O.showinfo(SETTINGS_LABEL, message)
+                        return
                     O.showwarning(
                         SETTINGS_LABEL,
                         result.error or "Nie znaleziono danych starej konfiguracji.",

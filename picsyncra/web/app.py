@@ -7352,7 +7352,9 @@ def create_app() -> FastAPI:
         return JSONResponse(result)
 
     @app.post("/api/settings/import-legacy")
-    async def settings_import_legacy(request: Request) -> JSONResponse:
+    async def settings_import_legacy(
+        request: Request, replace_existing_target: bool = False
+    ) -> JSONResponse:
         _require_admin(request)
         bootstrap_settings = storage_settings.load_bootstrap_settings()
         database_path = storage_settings.resolve_sqlite_path(bootstrap_settings)
@@ -7380,6 +7382,7 @@ def create_app() -> FastAPI:
                 backup_root=Path(storage_settings.resolve_backup_dir()),
                 legacy_database_path=Path(database_path),
                 finalize=activate_adopted_database,
+                replace_existing_target=replace_existing_target,
             )
             if not result.migrated:
                 status_code = 404 if result.skipped else 409 if result.error_code in {
@@ -7410,9 +7413,12 @@ def create_app() -> FastAPI:
                 "archive_dir": str(result.archive_dir) if result.archive_dir else "",
                 "database_path": str(adopted_database_path),
                 "warning": result.error or "",
+                "replaced_target": result.replaced_target,
                 "settings": settings_snapshot(),
                 "message": (
-                    "Wczytano dane starej konfiguracji do SQLite."
+                    "Wczytano dane starej konfiguracji do SQLite i zarchiwizowano poprzednia baze."
+                    if result.replaced_target
+                    else "Wczytano dane starej konfiguracji do SQLite."
                     if result.error
                     else "Wczytano dane starej konfiguracji do SQLite i przeniesiono zrodla do BACKUP."
                 ),
