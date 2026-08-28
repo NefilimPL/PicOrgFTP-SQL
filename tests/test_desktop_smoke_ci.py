@@ -87,8 +87,9 @@ class DesktopSmokeCiTests(unittest.TestCase):
 
     def test_required_image_assets_exist_for_desktop_and_web(self) -> None:
         required_assets = [
-            ROOT / "pic" / "PIC_LOCAL.png",
-            ROOT / "pic" / "PIC_WEB.png",
+            ROOT / "pic" / "PIC9_LOCAL.png",
+            ROOT / "pic" / "PIC9_WEB.png",
+            ROOT / "pic" / "PIC9_WEB-OCR.png",
             ROOT / "picsyncra" / "VERSION",
             ROOT / "picsyncra" / "web" / "static" / "index.html",
             ROOT / "picsyncra" / "web" / "static" / "login.html",

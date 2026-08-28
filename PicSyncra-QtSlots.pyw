@@ -3,6 +3,7 @@
 import sys
 import traceback
 
+from picsyncra import brand
 from picsyncra.bootstrap import initialize_application_runtime
 
 
@@ -13,7 +14,7 @@ def _show_boot_error(message):
 
         root = tk.Tk()
         root.withdraw()
-        messagebox.showerror("PicSyncra Qt preview", message)
+        messagebox.showerror(f"{brand.APP_NAME} Qt preview", message)
         root.destroy()
     except Exception:
         print(message, file=sys.stderr)

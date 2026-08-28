@@ -22,13 +22,14 @@ from urllib.request import urlopen
 
 from .assets import set_tk_window_icon
 from .assets import pic_asset_path
+from .brand import WEB_APP_NAME, WEB_ICON
 from .version import get_display_version
 
 
 DEFAULT_PORT = int(os.environ.get("PICSYNCRA_WEB_PORT") or 8010)
 DEFAULT_HOST = os.environ.get("PICSYNCRA_WEB_HOST") or "0.0.0.0"
-TASK_NAME = "PicSyncra Web"
-FIREWALL_RULE_NAME = "PicSyncra Web"
+TASK_NAME = WEB_APP_NAME
+FIREWALL_RULE_NAME = WEB_APP_NAME
 
 
 @dataclass
@@ -998,11 +999,11 @@ class WebManagerApp:
         self.tk = tk
         self.ttk = ttk
         self.root = tk.Tk()
-        self.root.title(f"PicSyncra WEB {get_display_version()}")
+        self.root.title(f"{WEB_APP_NAME} {get_display_version()}")
         self.root.geometry("1040x760")
         self.root.minsize(860, 620)
         self.root.protocol("WM_DELETE_WINDOW", self.close_window)
-        set_tk_window_icon(self.root, "PIC_WEB.png")
+        set_tk_window_icon(self.root, WEB_ICON)
         self.port_var = tk.StringVar(value=str(DEFAULT_PORT))
         self.host_var = tk.StringVar(value=DEFAULT_HOST)
         self.status_var = tk.StringVar(value="Sprawdzam status...")
@@ -1028,7 +1029,7 @@ class WebManagerApp:
 
         header = ttk.Frame(main)
         header.pack(fill="x")
-        ttk.Label(header, text="PicSyncra WEB", font=("Segoe UI", 15, "bold")).pack(side="left")
+        ttk.Label(header, text=WEB_APP_NAME, font=("Segoe UI", 15, "bold")).pack(side="left")
         self.close_progress = ttk.Progressbar(header, mode="indeterminate", length=76)
         self.close_progress.pack(side="right", padx=(8, 0))
         self.close_progress.pack_forget()
@@ -1412,12 +1413,12 @@ class WebManagerApp:
             import pystray
             from PIL import Image
 
-            image = Image.open(pic_asset_path("PIC_WEB.png"))
+            image = Image.open(pic_asset_path(WEB_ICON))
             if self.tray_icon is None:
                 self.tray_icon = pystray.Icon(
-                    "PicSyncra WEB",
+                    WEB_APP_NAME,
                     image,
-                    "PicSyncra WEB",
+                    WEB_APP_NAME,
                     menu=pystray.Menu(
                         pystray.MenuItem("Pokaz okno", lambda _icon, _item: self.root.after(0, self.show_from_tray)),
                         pystray.MenuItem("Zamknij menedzer", lambda _icon, _item: self.root.after(0, self.close_window)),

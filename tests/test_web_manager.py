@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
-from picsyncra import web_manager
+from picsyncra import brand, web_manager
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -257,6 +257,41 @@ def _app_without_tk() -> web_manager.WebManagerApp:
     app.close_check_in_progress = False
     app._port = lambda: 8010
     return app
+
+
+def test_web_manager_tray_uses_the_picsyncra_web_icon(monkeypatch) -> None:
+    app = _app_without_tk()
+    app.root.withdraw = lambda: None
+    requested_assets: list[str] = []
+
+    class FakeImage:
+        @staticmethod
+        def open(path):
+            return path
+
+    class FakeIcon:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def run_detached(self) -> None:
+            pass
+
+    fake_pystray = types.SimpleNamespace(
+        Icon=FakeIcon,
+        Menu=lambda *items: items,
+        MenuItem=lambda *item: item,
+    )
+    monkeypatch.setitem(sys.modules, "pystray", fake_pystray)
+    monkeypatch.setitem(sys.modules, "PIL", types.SimpleNamespace(Image=FakeImage))
+    monkeypatch.setattr(
+        web_manager,
+        "pic_asset_path",
+        lambda filename: requested_assets.append(filename) or Path("icon.png"),
+    )
+
+    app.minimize_to_tray()
+
+    assert requested_assets == [brand.WEB_ICON]
 
 
 def test_service_environment_resets_pyinstaller_for_frozen_child_process() -> None:

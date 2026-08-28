@@ -6,6 +6,7 @@ import sys
 import traceback
 from datetime import datetime
 
+from picsyncra import brand
 from picsyncra.runtime_lock import SingleInstanceGuard, acquire_single_instance_lock
 
 
@@ -65,7 +66,7 @@ def _show_boot_info(message):
 
         root = tk.Tk()
         root.withdraw()
-        messagebox.showinfo("PicSyncra", message)
+        messagebox.showinfo(brand.APP_NAME, message)
         root.destroy()
     except Exception:
         pass
@@ -128,7 +129,7 @@ def main():
     instance_lock = acquire_single_instance_lock(instance_lock_path)
     if instance_lock is None:
         notice_lock = SingleInstanceGuard(
-            "PicSyncra-notice",
+            f"{brand.APP_NAME}-notice",
             scope=os.path.dirname(instance_lock_path),
         )
         if notice_lock.acquire():
@@ -165,7 +166,7 @@ def main():
             try:
                 from picsyncra.assets import set_tk_window_icon
 
-                set_tk_window_icon(app, "PIC_LOCAL.png")
+                set_tk_window_icon(app, brand.LOCAL_ICON)
             except Exception:
                 pass
             if BASE_DIR_OVERRIDE_WARNING:
