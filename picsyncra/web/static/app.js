@@ -11513,7 +11513,10 @@ async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
     : (schema || []).filter((mapping) => mapping.value_template).map((mapping) => mapping.source);
   if (form === pimcoreCreateForm) state.pimcoreCreateIntegrationContextId = "";
   if (form === pimcoreEditForm) state.pimcoreEditIntegrationContextId = "";
-  if (!selected.length) return { values: {}, warnings: [], calculated_values: {}, changed: {} };
+  if (!selected.length) {
+    await validatePimcoreOcrFields(form, schema);
+    return { values: {}, warnings: [], calculated_values: {}, changed: {} };
+  }
   const values = Object.fromEntries(new FormData(form).entries());
   if (form === pimcoreCreateForm) state.pimcoreCreateIntegrations = { sql_profiles: [] };
   if (form === pimcoreEditForm) state.pimcoreEditIntegrations = { sql_profiles: [] };
@@ -11551,7 +11554,7 @@ async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
     }
   }
   updatePimcoreRuntimeCalculatedState(form, result);
-  await validatePimcoreOcrFields(form, schema, selected);
+  await validatePimcoreOcrFields(form, schema);
   return result;
 }
 

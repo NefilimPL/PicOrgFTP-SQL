@@ -2692,6 +2692,7 @@ const document = {{ createElement: makeNode }};
 const window = {{ setTimeout, clearTimeout }};
 const state = {{ settings: {{ ocr_available: true }} }};
 const pimcoreSlotTokens = () => ({{ "20": "signed-slot" }});
+const pimcoreOcrSlotTokens = () => pimcoreSlotTokens();
 class FormData {{
   constructor(source) {{ this.source = source; }}
   entries() {{ return Object.entries(this.source.elements).map(([name, input]) => [name, input.value]); }}
@@ -2766,6 +2767,7 @@ const pimcoreCreateForm = form;
 const pimcoreEditForm = {{}};
 const state = {{ settings: {{ ocr_available: true }} }};
 const pimcoreSlotTokens = () => ({{ "20": "signed-slot" }});
+const pimcoreOcrSlotTokens = () => pimcoreSlotTokens();
 class FormData {{
   constructor(source) {{ this.source = source; }}
   entries() {{ return Object.entries(this.source.elements).map(([name, input]) => [name, input.value]); }}
