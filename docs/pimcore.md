@@ -1,6 +1,6 @@
 # Pimcore 6.6 REST
 
-PicOrgFTP-SQL może korzystać z Pimcore 6.6 REST do odczytu konfiguracji klas, wyszukiwania produktu po EAN oraz tworzenia brakujących obiektów produktu.
+PicSyncra może korzystać z Pimcore 6.6 REST do odczytu konfiguracji klas, wyszukiwania produktu po EAN oraz tworzenia brakujących obiektów produktu.
 
 ## Konfiguracja
 
@@ -9,7 +9,7 @@ PicOrgFTP-SQL może korzystać z Pimcore 6.6 REST do odczytu konfiguracji klas, 
 3. Nadaj temu użytkownikowi uprawnienia REST do odczytu informacji o serwerze, listy klas, definicji klasy, folderów i obiektów.
 4. Do pracy runtime dodaj uprawnienia tworzenia i aktualizacji obiektów.
 5. Uprawnienie usuwania jest potrzebne tylko dla testu zapisu z opcją `Usun po tescie`.
-6. W PicOrgFTP-SQL otwórz `Ustawienia > Pimcore`.
+6. W PicSyncra otwórz `Ustawienia > Pimcore`.
 7. Pierwsza konfiguracja jest czteroetapowym kreatorem dla administratora: połączenie, klasa i folder obiektów, pola produktu oraz test i zapis.
 
 Kreator potrafi pobrać klasy, foldery z drzewa `Objects` oraz pola klasy. Ręczne wpisanie klasy albo parenta jest tylko awaryjnym fallbackiem. Folder docelowy oznacza parent w drzewie obiektów Pimcore, a nie katalog zdjęć, assetów ani folder systemu plików.

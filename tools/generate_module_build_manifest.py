@@ -11,12 +11,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from picorgftp_sql.services.module_build_status import build_manifest
+from picsyncra.services.module_build_status import build_manifest
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate embedded PicOrgFTP-SQL module build metadata."
+        description="Generate embedded PicSyncra module build metadata."
     )
     parser.add_argument("--repo-root", required=True, type=Path)
     parser.add_argument("--build-variant", required=True)

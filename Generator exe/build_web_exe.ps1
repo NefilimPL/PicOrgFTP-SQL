@@ -14,8 +14,9 @@ $RepoRoot = Resolve-Path (Join-Path $ScriptDir "..")
 $VenvDir = Join-Path $RepoRoot ".venv-build"
 $Python = Join-Path $VenvDir "Scripts\python.exe"
 $IconDir = Join-Path $ScriptDir ".icons"
-$IconPath = Join-Path $IconDir "PIC_WEB.ico"
-$BuildName = if ($IncludeVisionModels) { "PicOrgFTP-SQL-WEB-OCR" } elseif ($IncludeVision) { "PicOrgFTP-SQL-WEB-OCR-ONLINE" } else { "PicOrgFTP-SQL-WEB" }
+$IconSource = if ($IncludeVision) { "PIC9_WEB-OCR.png" } else { "PIC9_WEB.png" }
+$IconPath = Join-Path $IconDir ([System.IO.Path]::GetFileNameWithoutExtension($IconSource) + ".ico")
+$BuildName = if ($IncludeVisionModels) { "PicSyncra-WEB-OCR" } elseif ($IncludeVision) { "PicSyncra-WEB-OCR-ONLINE" } else { "PicSyncra-WEB" }
 $WorkPath = Join-Path $RepoRoot ("build\\web-exe-" + $BuildName)
 $VersionInfoPath = Join-Path $WorkPath ($BuildName + ".version.txt")
 
@@ -31,10 +32,10 @@ Initialize-BuildEnvironment `
 
 New-Item -ItemType Directory -Path $IconDir -Force | Out-Null
 New-Item -ItemType Directory -Path $WorkPath -Force | Out-Null
-Invoke-Native $Python "-c" "from PIL import Image; Image.open(r'pic\PIC_WEB.png').save(r'$IconPath', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)])"
+Invoke-Native $Python "-c" "from PIL import Image; Image.open(r'pic\$IconSource').save(r'$IconPath', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)])"
 Invoke-Native $Python "tools\generate_windows_version_info.py" `
     --output $VersionInfoPath `
-    --file-description "PicOrgFTP-SQL web manager" `
+    --file-description "PicSyncra web manager" `
     --internal-name $BuildName `
     --original-filename ($BuildName + ".exe")
 $ModuleBuildVariant = if ($IncludeVisionModels) { "web-ocr" } else { "web" }
@@ -44,7 +45,7 @@ $ModuleBuildManifestArguments = New-ModuleBuildManifestArguments `
     -WorkPath $WorkPath `
     -BuildVariant $ModuleBuildVariant
 
-$env:PICORGFTP_SQL_HEADLESS = "1"
+$env:PICSYNCRA_HEADLESS = "1"
 $env:PYINSTALLER_BUILD = "1"
 $WebStaticDataArguments = Get-WebStaticDataArguments -RepoRoot $RepoRoot
 $VisionPyInstallerArguments = @()
@@ -64,8 +65,8 @@ if ($IncludeVisionModels) {
     $env:PADDLE_PDX_CACHE_HOME = $VisionModelCache
     $PrepareVisionModels = @"
 import os
-from picorgftp_sql.services.image_dimensions import _model_cache_has_profile
-from picorgftp_sql.services.ocr_profiles import available_ocr_profiles
+from picsyncra.services.image_dimensions import _model_cache_has_profile
+from picsyncra.services.ocr_profiles import available_ocr_profiles
 
 cache = os.environ['PADDLE_PDX_CACHE_HOME']
 profiles = available_ocr_profiles()
@@ -101,7 +102,7 @@ Invoke-Native $Python "-m" "PyInstaller" "--noconfirm" "--clean" "--log-level=WA
     --workpath $WorkPath `
     --icon $IconPath `
     --version-file $VersionInfoPath `
-    --collect-submodules picorgftp_sql `
+    --collect-submodules picsyncra `
     --collect-submodules mysql.connector `
     --collect-submodules uvicorn `
     --collect-submodules fastapi `
@@ -114,10 +115,11 @@ Invoke-Native $Python "-m" "PyInstaller" "--noconfirm" "--clean" "--log-level=WA
     @VisionPyInstallerArguments `
     @WebStaticDataArguments `
     @ModuleBuildManifestArguments `
-    --add-data "picorgftp_sql\browser_extension;picorgftp_sql\browser_extension" `
-    --add-data "picorgftp_sql\Localization;picorgftp_sql\Localization" `
-    --add-data "picorgftp_sql\VERSION;picorgftp_sql" `
-    --add-data "pic\PIC_WEB.png;pic" `
-    PicOrgFTP-SQL-WEB.pyw
+    --add-data "picsyncra\browser_extension;picsyncra\browser_extension" `
+    --add-data "picsyncra\Localization;picsyncra\Localization" `
+    --add-data "picsyncra\VERSION;picsyncra" `
+    --add-data "pic\PIC9_WEB.png;pic" `
+    --add-data "pic\PIC9_WEB-OCR.png;pic" `
+    PicSyncra-WEB.pyw
 
 Write-Host "OK. Wynik: $ScriptDir\$BuildName.exe"
