@@ -16,11 +16,11 @@ from unittest.mock import patch
 
 import pytest
 
-from picorgftp_sql import web_manager
+from picsyncra import brand, web_manager
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WEB_ENTRYPOINT = ROOT / "PicOrgFTP-SQL-WEB.pyw"
+WEB_ENTRYPOINT = ROOT / "PicSyncra-WEB.pyw"
 START_WEB_SCRIPT = ROOT / "tools" / "web" / "start_web.ps1"
 STOP_WEB_SCRIPT = ROOT / "tools" / "web" / "stop_web.ps1"
 POWERSHELL_HARNESS_TIMEOUT_SECONDS = 60
@@ -66,7 +66,7 @@ def test_web_entrypoint_calls_freeze_support_before_importing_manager() -> None:
         node
         for node in tree.body
         if isinstance(node, ast.ImportFrom)
-        and node.module == "picorgftp_sql.web_manager"
+        and node.module == "picsyncra.web_manager"
     )
 
     assert tree.body.index(freeze_guard) < tree.body.index(manager_import)
@@ -76,13 +76,13 @@ def test_web_entrypoint_runs_freeze_support_before_loading_manager(
     monkeypatch,
 ) -> None:
     calls: list[str] = []
-    fake_manager = types.ModuleType("picorgftp_sql.web_manager")
+    fake_manager = types.ModuleType("picsyncra.web_manager")
     fake_manager.main = lambda: calls.append("main")
-    monkeypatch.setitem(sys.modules, "picorgftp_sql.web_manager", fake_manager)
+    monkeypatch.setitem(sys.modules, "picsyncra.web_manager", fake_manager)
     original_import = builtins.__import__
 
     def track_manager_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "picorgftp_sql.web_manager":
+        if name == "picsyncra.web_manager":
             calls.append("web_manager_import")
         return original_import(name, globals, locals, fromlist, level)
 
@@ -109,7 +109,7 @@ def test_start_web_script_records_its_own_launcher_pid(tmp_path) -> None:
         """
 $Port = 8010
 $HostAddress = "0.0.0.0"
-$PidFile = Join-Path $PSScriptRoot "..\\..\\.picorg_web.pid"
+$PidFile = Join-Path $PSScriptRoot "..\\..\\.picsyncra_web.pid"
 """
         + write_metadata_function
         + """
@@ -259,6 +259,41 @@ def _app_without_tk() -> web_manager.WebManagerApp:
     return app
 
 
+def test_web_manager_tray_uses_the_picsyncra_web_icon(monkeypatch) -> None:
+    app = _app_without_tk()
+    app.root.withdraw = lambda: None
+    requested_assets: list[str] = []
+
+    class FakeImage:
+        @staticmethod
+        def open(path):
+            return path
+
+    class FakeIcon:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def run_detached(self) -> None:
+            pass
+
+    fake_pystray = types.SimpleNamespace(
+        Icon=FakeIcon,
+        Menu=lambda *items: items,
+        MenuItem=lambda *item: item,
+    )
+    monkeypatch.setitem(sys.modules, "pystray", fake_pystray)
+    monkeypatch.setitem(sys.modules, "PIL", types.SimpleNamespace(Image=FakeImage))
+    monkeypatch.setattr(
+        web_manager,
+        "pic_asset_path",
+        lambda filename: requested_assets.append(filename) or Path("icon.png"),
+    )
+
+    app.minimize_to_tray()
+
+    assert requested_assets == [brand.WEB_ICON]
+
+
 def test_service_environment_resets_pyinstaller_for_frozen_child_process() -> None:
     with (
         patch.object(web_manager.sys, "frozen", True, create=True),
@@ -266,9 +301,9 @@ def test_service_environment_resets_pyinstaller_for_frozen_child_process() -> No
     ):
         env = web_manager.service_environment(8010, "0.0.0.0")
 
-    assert env["PICORGFTP_SQL_HEADLESS"] == "1"
-    assert env["PICORG_WEB_PORT"] == "8010"
-    assert env["PICORG_WEB_HOST"] == "0.0.0.0"
+    assert env["PICSYNCRA_HEADLESS"] == "1"
+    assert env["PICSYNCRA_WEB_PORT"] == "8010"
+    assert env["PICSYNCRA_WEB_HOST"] == "0.0.0.0"
     assert env["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
 
 
@@ -290,7 +325,7 @@ def test_write_metadata_records_explicit_launcher_pid(tmp_path, monkeypatch) -> 
 
 def test_stop_web_terminates_launcher_tree_after_port_release(tmp_path, monkeypatch) -> None:
     """Catches stopping only the server child and leaving its launcher alive."""
-    (tmp_path / ".picorg_web.pid").write_text(
+    (tmp_path / ".picsyncra_web.pid").write_text(
         json.dumps({"pid": 102, "launcher_pid": 101}),
         encoding="ascii",
     )
@@ -304,7 +339,7 @@ def test_stop_web_terminates_launcher_tree_after_port_release(tmp_path, monkeypa
     monkeypatch.setattr(
         web_manager,
         "get_process_command_line",
-        lambda _pid: "PicOrgFTP-SQL-WEB --service-run",
+        lambda _pid: "PicSyncra-WEB --service-run",
     )
     monkeypatch.setattr(web_manager, "get_port_listeners", lambda _port: [])
     monkeypatch.setattr(
@@ -318,14 +353,14 @@ def test_stop_web_terminates_launcher_tree_after_port_release(tmp_path, monkeypa
 
     assert result.ok
     assert commands[0] == ["taskkill", "/PID", "101", "/T", "/F"]
-    assert not (tmp_path / ".picorg_web.pid").exists()
+    assert not (tmp_path / ".picsyncra_web.pid").exists()
 
 
 def test_stop_web_terminates_recorded_launcher_when_cim_hides_command_line(
     tmp_path, monkeypatch
 ) -> None:
     """Catches leaving the launcher alive when Windows denies CIM command-line access."""
-    (tmp_path / ".picorg_web.pid").write_text(
+    (tmp_path / ".picsyncra_web.pid").write_text(
         json.dumps({"pid": 102, "launcher_pid": 101, "launcher": "start_web.ps1"}),
         encoding="ascii",
     )
@@ -354,7 +389,7 @@ def test_stop_web_terminates_recorded_server_when_cim_hides_command_line(
     tmp_path, monkeypatch
 ) -> None:
     """Catches leaving a non-frozen service process alive after CIM access fails."""
-    (tmp_path / ".picorg_web.pid").write_text(
+    (tmp_path / ".picsyncra_web.pid").write_text(
         json.dumps({"pid": 102, "launcher": "service-run"}),
         encoding="ascii",
     )
@@ -382,14 +417,14 @@ def test_stop_web_terminates_recorded_server_when_cim_hides_command_line(
 def test_stop_web_kills_the_listener_before_ending_the_system_task(tmp_path, monkeypatch) -> None:
     """Catches blocking on schtasks /End while Uvicorn still owns the panel port."""
 
-    (tmp_path / ".picorg_web.pid").write_text(
+    (tmp_path / ".picsyncra_web.pid").write_text(
         json.dumps({"pid": 102, "launcher": "service-run"}), encoding="ascii"
     )
     events: list[str] = []
     listener = {
         "Pid": 102,
-        "ProcessName": "PicOrgFTP-SQL-WEB",
-        "CommandLine": "PicOrgFTP-SQL-WEB --service-run",
+        "ProcessName": "PicSyncra-WEB",
+        "CommandLine": "PicSyncra-WEB --service-run",
     }
     listener_queries = 0
 
@@ -403,7 +438,7 @@ def test_stop_web_kills_the_listener_before_ending_the_system_task(tmp_path, mon
     monkeypatch.setattr(
         web_manager,
         "get_process_command_line",
-        lambda _pid: "PicOrgFTP-SQL-WEB --service-run",
+        lambda _pid: "PicSyncra-WEB --service-run",
     )
     monkeypatch.setattr(
         web_manager,
@@ -427,7 +462,7 @@ def test_stop_web_kills_a_listener_identified_only_by_process_name(tmp_path, mon
     """Catches leaving the panel alive when CIM hides its command line."""
 
     events: list[str] = []
-    listener = {"Pid": 102, "ProcessName": "PicOrgFTP-SQL-WEB", "CommandLine": ""}
+    listener = {"Pid": 102, "ProcessName": "PicSyncra-WEB", "CommandLine": ""}
     listener_queries = 0
 
     def listeners(_port: int):
@@ -461,7 +496,7 @@ def test_frozen_service_records_its_pyinstaller_parent_as_launcher(tmp_path, mon
     metadata_calls = []
     fake_uvicorn = types.ModuleType("uvicorn")
     fake_uvicorn.run = lambda *_args, **_kwargs: None
-    fake_web_app = types.ModuleType("picorgftp_sql.web.app")
+    fake_web_app = types.ModuleType("picsyncra.web.app")
     fake_web_app.app = object()
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
@@ -473,7 +508,7 @@ def test_frozen_service_records_its_pyinstaller_parent_as_launcher(tmp_path, mon
     )
     monkeypatch.setattr(web_manager, "remove_metadata_for_current_process", lambda: None)
     monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
-    monkeypatch.setitem(sys.modules, "picorgftp_sql.web.app", fake_web_app)
+    monkeypatch.setitem(sys.modules, "picsyncra.web.app", fake_web_app)
     monkeypatch.setattr(web_manager.sys, "frozen", True, raising=False)
 
     assert web_manager.run_service_mode(8010, "0.0.0.0") == 0
@@ -483,7 +518,7 @@ def test_frozen_service_records_its_pyinstaller_parent_as_launcher(tmp_path, mon
 
 def test_stop_web_keeps_metadata_when_taskkill_fails(tmp_path, monkeypatch) -> None:
     """Catches reporting shutdown success after Windows rejected taskkill."""
-    pid_path = tmp_path / ".picorg_web.pid"
+    pid_path = tmp_path / ".picsyncra_web.pid"
     pid_path.write_text(json.dumps({"pid": 102}), encoding="ascii")
     monkeypatch.setattr(web_manager, "app_root", lambda: tmp_path)
     monkeypatch.setattr(
@@ -494,7 +529,7 @@ def test_stop_web_keeps_metadata_when_taskkill_fails(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(
         web_manager,
         "get_process_command_line",
-        lambda _pid: "PicOrgFTP-SQL-WEB --service-run",
+        lambda _pid: "PicSyncra-WEB --service-run",
     )
     monkeypatch.setattr(web_manager, "get_port_listeners", lambda _port: [])
     monkeypatch.setattr(
@@ -542,14 +577,14 @@ def test_stop_web_returns_system_service_failure_without_claiming_success(
     assert "Access denied" in result.message
 
 
-def test_start_web_reclaims_an_unhealthy_picorg_listener_before_restart(monkeypatch) -> None:
+def test_start_web_reclaims_an_unhealthy_picsyncra_listener_before_restart(monkeypatch) -> None:
     """Catches starting a second Uvicorn process while the first owns the port."""
 
     events: list[str] = []
     listener = {
         "Pid": 102,
-        "ProcessName": "PicOrgFTP-SQL-WEB",
-        "CommandLine": "PicOrgFTP-SQL-WEB --service-run",
+        "ProcessName": "PicSyncra-WEB",
+        "CommandLine": "PicSyncra-WEB --service-run",
     }
     listener_queries = 0
 
@@ -579,7 +614,7 @@ def test_start_web_reclaims_an_unhealthy_picorg_listener_before_restart(monkeypa
     assert events == ["stop", "start"]
 
 
-def test_start_web_refuses_to_start_on_a_busy_non_picorg_port(monkeypatch) -> None:
+def test_start_web_refuses_to_start_on_a_busy_non_picsyncra_port(monkeypatch) -> None:
     """Catches launching Uvicorn against an unrelated process that owns the configured port."""
 
     listener = {"Pid": 102, "ProcessName": "nginx", "CommandLine": "nginx: master process"}
@@ -679,12 +714,12 @@ def test_main_falls_back_to_browser_service_when_tkinter_is_unavailable(monkeypa
 
 def test_stop_web_keeps_metadata_when_panel_port_stays_open(tmp_path, monkeypatch) -> None:
     """Catches removing runtime metadata before the web listener actually exits."""
-    pid_path = tmp_path / ".picorg_web.pid"
+    pid_path = tmp_path / ".picsyncra_web.pid"
     pid_path.write_text(json.dumps({"pid": 102}), encoding="ascii")
     listener = {
         "Pid": 102,
-        "ProcessName": "PicOrgFTP-SQL-WEB",
-        "CommandLine": "PicOrgFTP-SQL-WEB --service-run",
+        "ProcessName": "PicSyncra-WEB",
+        "CommandLine": "PicSyncra-WEB --service-run",
     }
     listener_queries = 0
     slept = []
@@ -703,7 +738,7 @@ def test_stop_web_keeps_metadata_when_panel_port_stays_open(tmp_path, monkeypatc
     monkeypatch.setattr(
         web_manager,
         "get_process_command_line",
-        lambda _pid: "PicOrgFTP-SQL-WEB --service-run",
+        lambda _pid: "PicSyncra-WEB --service-run",
     )
     monkeypatch.setattr(web_manager, "get_port_listeners", listeners)
     monkeypatch.setattr(

@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 from openpyxl import Workbook
 
-from picorgftp_sql import excel_utils
+from picsyncra import excel_utils
 
 
 def test_excel_utils_imports_without_tkinter() -> None:
@@ -24,7 +24,7 @@ def block_tkinter(name, *args, **kwargs):
         raise ModuleNotFoundError(\"No module named 'tkinter'\", name='tkinter')
     return original_import(name, *args, **kwargs)
 builtins.__import__ = block_tkinter
-import picorgftp_sql.excel_utils
+import picsyncra.excel_utils
 """
     result = subprocess.run(
         [sys.executable, "-c", script],

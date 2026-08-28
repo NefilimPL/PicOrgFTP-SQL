@@ -10,10 +10,10 @@ import unittest
 from unittest.mock import patch
 
 try:
-    from picorgftp_sql import app as app_module
-    from picorgftp_sql.app import App, SLOT_GRID_COLUMNS, THUMBNAIL_MEMORY_ROWS
-    from picorgftp_sql.common import d, n
-    from picorgftp_sql.desktop_data_loader import DesktopDataSnapshot
+    from picsyncra import app as app_module
+    from picsyncra.app import App, SLOT_GRID_COLUMNS, THUMBNAIL_MEMORY_ROWS
+    from picsyncra.common import d, n
+    from picsyncra.desktop_data_loader import DesktopDataSnapshot
 except ModuleNotFoundError as exc:  # pragma: no cover - depends on local test env
     App = None
     APP_IMPORT_ERROR = exc

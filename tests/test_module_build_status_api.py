@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from picorgftp_sql.web import app as web_app
+from picsyncra.web import app as web_app
 
 
 ROOT = Path(__file__).resolve().parents[1]

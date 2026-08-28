@@ -5,15 +5,64 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 import re
+import subprocess
 import unittest
 
 
 WEB_PANEL_DOC = Path(__file__).resolve().parents[1] / "docs" / "web-panel.md"
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _live_branding_files() -> list[Path]:
+    allowed_legacy_files = {
+        ROOT / "picsyncra" / "legacy_migration.py",
+        ROOT / "picsyncra" / "web" / "static" / "legacy-migration.js",
+        ROOT / "tests" / "test_legacy_migration.py",
+        ROOT / "tests" / "js" / "legacy-migration.test.js",
+    }
+    skipped_directories = {
+        ".git",
+        ".venv",
+        ".pytest-tmp",
+        "pytest-temp",
+        "logs",
+        "docs/superpowers",
+        "pic",
+    }
+    result = subprocess.run(
+        ["git", "ls-files"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    files: list[Path] = []
+    for relative_path in result.stdout.splitlines():
+        path = ROOT / relative_path
+        if not path.is_file() or path in allowed_legacy_files:
+            continue
+        relative = path.relative_to(ROOT).as_posix()
+        if any(relative == directory or relative.startswith(f"{directory}/") for directory in skipped_directories):
+            continue
+        if path.suffix.lower() not in {".bat", ".css", ".html", ".js", ".json", ".md", ".ps1", ".py", ".pyw", ".txt", ".yml", ".yaml"}:
+            continue
+        files.append(path)
+    return files
 
 
 class SourceIntegrityTests(unittest.TestCase):
+    def test_live_product_files_do_not_use_the_obsolete_brand(self) -> None:
+        obsolete_prefix = "pic" + "org"
+        offenders = [
+            path.relative_to(ROOT).as_posix()
+            for path in _live_branding_files()
+            if obsolete_prefix in path.read_text(encoding="utf-8", errors="ignore").casefold()
+        ]
+
+        self.assertEqual(offenders, [])
+
     def test_desktop_list_usage_dialog_loads_the_selected_product(self) -> None:
-        source = (Path(__file__).resolve().parents[1] / "picorgftp_sql" / "app.py").read_text(encoding="utf-8")
+        source = (Path(__file__).resolve().parents[1] / "picsyncra" / "app.py").read_text(encoding="utf-8")
         self.assertIn("def _record_from_list_usage", source)
         self.assertIn("def _show_list_usage_dialog", source)
         self.assertIn('text="Wczytaj zaznaczony"', source)
@@ -34,7 +83,7 @@ class SourceIntegrityTests(unittest.TestCase):
 
     def test_bootstrap_exposes_only_the_normalized_web_display_setting(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        source = (root / "picorgftp_sql" / "web" / "app.py").read_text(
+        source = (root / "picsyncra" / "web" / "app.py").read_text(
             encoding="utf-8"
         )
         bootstrap_start = source.index("def bootstrap(request: Request)")
@@ -88,7 +137,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_web_static_asset_cache_key_matches_current_resource_bundle(self) -> None:
         root = Path(__file__).resolve().parents[1]
         html_source = (
-            root / "picorgftp_sql" / "web" / "static" / "index.html"
+            root / "picsyncra" / "web" / "static" / "index.html"
         ).read_text(encoding="utf-8")
 
         css_match = re.search(r'/static/app\.css\?v=([^"\s]+)', html_source)
@@ -112,7 +161,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_resource_detail_copy_explains_clients_and_latch_stages(self) -> None:
         root = Path(__file__).resolve().parents[1]
         source = (
-            root / "picorgftp_sql" / "web" / "static" / "app.js"
+            root / "picsyncra" / "web" / "static" / "app.js"
         ).read_text(encoding="utf-8")
 
         self.assertIn("Aktywni w ostatnich 3 min", source)
@@ -122,7 +171,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_resource_monitor_test_state_survives_settings_rerender(self) -> None:
         root = Path(__file__).resolve().parents[1]
         source = (
-            root / "picorgftp_sql" / "web" / "static" / "app.js"
+            root / "picsyncra" / "web" / "static" / "app.js"
         ).read_text(encoding="utf-8")
         renderer_start = source.index("function renderSettingsResourceMonitor")
         updater_start = source.index("function updateResourceMonitorTestUi", renderer_start)
@@ -175,13 +224,13 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_mail_settings_ui_wires_both_channels_rules_and_redacted_test(self) -> None:
         root = Path(__file__).resolve().parents[1]
         html_source = (
-            root / "picorgftp_sql" / "web" / "static" / "index.html"
+            root / "picsyncra" / "web" / "static" / "index.html"
         ).read_text(encoding="utf-8")
         js_source = (
-            root / "picorgftp_sql" / "web" / "static" / "app.js"
+            root / "picsyncra" / "web" / "static" / "app.js"
         ).read_text(encoding="utf-8")
         css_source = (
-            root / "picorgftp_sql" / "web" / "static" / "app.css"
+            root / "picsyncra" / "web" / "static" / "app.css"
         ).read_text(encoding="utf-8")
 
         pimcore_tab = html_source.index('data-settings-tab="pimcore"')
@@ -232,10 +281,10 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_mail_settings_renders_safe_entra_expiry_status_and_explicit_refresh(self) -> None:
         root = Path(__file__).resolve().parents[1]
         js_source = (
-            root / "picorgftp_sql" / "web" / "static" / "app.js"
+            root / "picsyncra" / "web" / "static" / "app.js"
         ).read_text(encoding="utf-8")
         css_source = (
-            root / "picorgftp_sql" / "web" / "static" / "app.css"
+            root / "picsyncra" / "web" / "static" / "app.css"
         ).read_text(encoding="utf-8")
 
         renderer_start = js_source.index("function renderEntraExpiryStatus")
@@ -271,10 +320,10 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_mail_settings_include_daily_summary_schedule_and_accessible_help_popovers(self) -> None:
         root = Path(__file__).resolve().parents[1]
         js_source = (
-            root / "picorgftp_sql" / "web" / "static" / "app.js"
+            root / "picsyncra" / "web" / "static" / "app.js"
         ).read_text(encoding="utf-8")
         css_source = (
-            root / "picorgftp_sql" / "web" / "static" / "app.css"
+            root / "picsyncra" / "web" / "static" / "app.css"
         ).read_text(encoding="utf-8")
 
         self.assertIn('"daily_summary_time"', js_source)
@@ -308,10 +357,10 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_header_contains_smoothed_backend_health_indicator(self) -> None:
         root = Path(__file__).resolve().parents[1]
         html_source = (
-            root / "picorgftp_sql" / "web" / "static" / "index.html"
+            root / "picsyncra" / "web" / "static" / "index.html"
         ).read_text(encoding="utf-8")
         js_source = (
-            root / "picorgftp_sql" / "web" / "static" / "app.js"
+            root / "picsyncra" / "web" / "static" / "app.js"
         ).read_text(encoding="utf-8")
 
         self.assertIn('id="backendHealthStatus"', html_source)
@@ -323,7 +372,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_backend_health_poll_ignores_hidden_aborted_and_stale_requests(self) -> None:
         root = Path(__file__).resolve().parents[1]
         js_source = (
-            root / "picorgftp_sql" / "web" / "static" / "app.js"
+            root / "picsyncra" / "web" / "static" / "app.js"
         ).read_text(encoding="utf-8")
 
         poll_start = js_source.index("async function pollBackendHealth")
@@ -342,7 +391,7 @@ class SourceIntegrityTests(unittest.TestCase):
             poll_source.index("healthSamples.push"),
         )
         self.assertIn(
-            "state.runtimeStatusPoller = new PicOrg.RuntimeStatusPoller",
+            "state.runtimeStatusPoller = new PicSyncra.RuntimeStatusPoller",
             js_source,
         )
         self.assertIn("fetchStatus: fetchRuntimeStatus", js_source)
@@ -355,7 +404,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_backend_health_offline_reuses_normalized_last_successful_components(self) -> None:
         root = Path(__file__).resolve().parents[1]
         js_source = (
-            root / "picorgftp_sql" / "web" / "static" / "app.js"
+            root / "picsyncra" / "web" / "static" / "app.js"
         ).read_text(encoding="utf-8")
         docs_source = (root / "docs" / "web-panel.md").read_text(encoding="utf-8")
 
@@ -370,7 +419,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_web_logs_use_durable_observability_apis(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -390,7 +439,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_web_logs_guard_stream_and_cursor_races(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -453,7 +502,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_live_filter_transition_invalidates_archive_and_stale_requests(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -511,7 +560,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_live_query_uses_explicit_server_aligned_search_projection(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -561,7 +610,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_web_logs_gate_reads_navigation_unread_and_filters(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -636,7 +685,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_web_client_reports_deduplicated_global_failures(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -651,7 +700,7 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("clientFailureFingerprints", source)
 
     def test_desktop_uses_generic_product_field_settings(self) -> None:
-        app_path = Path(__file__).resolve().parents[1] / "picorgftp_sql" / "app.py"
+        app_path = Path(__file__).resolve().parents[1] / "picsyncra" / "app.py"
         source = app_path.read_text(encoding="utf-8")
 
         self.assertIn("def _refresh_product_fields", source)
@@ -668,7 +717,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_web_process_applies_active_product_field_settings(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "app.py"
         )
@@ -679,7 +728,7 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("field_settings=field_settings", source)
 
     def test_app_imports_all_used_excel_header_constants(self) -> None:
-        app_path = Path(__file__).resolve().parents[1] / "picorgftp_sql" / "app.py"
+        app_path = Path(__file__).resolve().parents[1] / "picsyncra" / "app.py"
         source = app_path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(app_path))
 
@@ -717,7 +766,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_web_submit_only_marks_explicit_slot_changes_as_pending(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -731,7 +780,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_web_submit_removes_cached_slot_file_inputs(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -745,7 +794,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_web_has_background_ftp_lookup_without_forcing_slot_edits(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -760,7 +809,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_web_photo_loading_renders_only_changed_slots(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -778,7 +827,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_web_submit_uses_background_process_queue(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -792,13 +841,13 @@ class SourceIntegrityTests(unittest.TestCase):
 
     def test_web_has_global_process_queue_panel(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        app_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(
+        app_source = (root / "picsyncra" / "web" / "static" / "app.js").read_text(
             encoding="utf-8"
         )
         module_source = (
-            root / "picorgftp_sql" / "web" / "static" / "process-jobs.js"
+            root / "picsyncra" / "web" / "static" / "process-jobs.js"
         ).read_text(encoding="utf-8")
-        html_source = (root / "picorgftp_sql" / "web" / "static" / "index.html").read_text(
+        html_source = (root / "picsyncra" / "web" / "static" / "index.html").read_text(
             encoding="utf-8"
         )
 
@@ -806,8 +855,8 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn('class="process-queue-section"', html_source)
         self.assertNotIn('class="slots-layout"', html_source)
         self.assertIn("class ProcessJobsController", module_source)
-        self.assertIn("global.PicOrg.ProcessJobsController = ProcessJobsController", module_source)
-        self.assertIn("new PicOrg.ProcessJobsController({", app_source)
+        self.assertIn("global.PicSyncra.ProcessJobsController = ProcessJobsController", module_source)
+        self.assertIn("new PicSyncra.ProcessJobsController({", app_source)
         self.assertIn("onVersionChanged: refreshRuntimeDetailForVersion", app_source)
         self.assertIn("process_queue: () => refreshProcessQueue(version)", app_source)
         self.assertNotIn('createPoller("processQueue"', app_source)
@@ -818,8 +867,8 @@ class SourceIntegrityTests(unittest.TestCase):
 
     def test_web_history_has_search_pagination_and_timing_modal(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        js_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(encoding="utf-8")
-        html_source = (root / "picorgftp_sql" / "web" / "static" / "index.html").read_text(encoding="utf-8")
+        js_source = (root / "picsyncra" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+        html_source = (root / "picsyncra" / "web" / "static" / "index.html").read_text(encoding="utf-8")
 
         self.assertIn('id="historySearchInput"', html_source)
         self.assertIn('id="historyPrevButton"', html_source)
@@ -834,11 +883,11 @@ class SourceIntegrityTests(unittest.TestCase):
 
     def test_history_exposes_detailed_changes_modal(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        js_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(
+        js_source = (root / "picsyncra" / "web" / "static" / "app.js").read_text(
             encoding="utf-8"
         )
         html_source = (
-            root / "picorgftp_sql" / "web" / "static" / "index.html"
+            root / "picsyncra" / "web" / "static" / "index.html"
         ).read_text(encoding="utf-8")
 
         self.assertIn('id="historyChangesModal"', html_source)
@@ -851,10 +900,10 @@ class SourceIntegrityTests(unittest.TestCase):
 
     def test_history_changes_preserve_structured_values_and_pimcore_job_ids(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        js_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(
+        js_source = (root / "picsyncra" / "web" / "static" / "app.js").read_text(
             encoding="utf-8"
         )
-        web_data_source = (root / "picorgftp_sql" / "web_data.py").read_text(
+        web_data_source = (root / "picsyncra" / "web_data.py").read_text(
             encoding="utf-8"
         )
         pimcore_history_item = {
@@ -877,21 +926,21 @@ class SourceIntegrityTests(unittest.TestCase):
 
     def test_web_autocomplete_keeps_local_values_first(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        app_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(
+        app_source = (root / "picsyncra" / "web" / "static" / "app.js").read_text(
             encoding="utf-8"
         )
         module_source = (
-            root / "picorgftp_sql" / "web" / "static" / "autocomplete.js"
+            root / "picsyncra" / "web" / "static" / "autocomplete.js"
         ).read_text(encoding="utf-8")
-        html_source = (root / "picorgftp_sql" / "web" / "static" / "index.html").read_text(
+        html_source = (root / "picsyncra" / "web" / "static" / "index.html").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("class AutocompleteController", module_source)
-        self.assertIn("global.PicOrg.setupAutocomplete = setupAutocomplete", module_source)
+        self.assertIn("global.PicSyncra.setupAutocomplete = setupAutocomplete", module_source)
         self.assertIn("this.mergeSuggestions(local,", module_source)
         self.assertIn('panel.dataset.selecting === "1"', module_source)
-        self.assertIn("window.PicOrg.setupAutocomplete({", app_source)
+        self.assertIn("window.PicSyncra.setupAutocomplete({", app_source)
         self.assertIn("maxOptions: MAX_AUTOCOMPLETE_OPTIONS", app_source)
         self.assertLess(
             html_source.index('/static/latest-request.js'),
@@ -905,14 +954,14 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_web_settings_security_tab_owns_secret_and_upload_limits(self) -> None:
         root = Path(__file__).resolve().parents[1]
         app_path = (
-            root / "picorgftp_sql"
+            root / "picsyncra"
             / "web"
             / "static"
             / "app.js"
         )
         source = app_path.read_text(encoding="utf-8")
         html_source = (
-            root / "picorgftp_sql" / "web" / "static" / "index.html"
+            root / "picsyncra" / "web" / "static" / "index.html"
         ).read_text(encoding="utf-8")
         app_start = source.index("function renderSettingsApp")
         processing_start = source.index("function renderSettingsProcessing")
@@ -938,7 +987,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_web_settings_processing_groups_related_controls(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -970,7 +1019,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_web_settings_tabs_use_consistent_field_groups(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -1060,7 +1109,7 @@ class SourceIntegrityTests(unittest.TestCase):
 
     def test_web_sql_settings_show_placeholder_help(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+        source = (root / "picsyncra" / "web" / "static" / "app.js").read_text(encoding="utf-8")
         sql_start = source.index("function renderSettingsSql")
         slots_start = source.index("function renderSettingsSlots", sql_start)
         sql_body = source[sql_start:slots_start]
@@ -1073,7 +1122,7 @@ class SourceIntegrityTests(unittest.TestCase):
 
     def test_web_settings_include_sqlite_repair_and_backup_controls(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+        source = (root / "picsyncra" / "web" / "static" / "app.js").read_text(encoding="utf-8")
 
         self.assertIn("repairSqliteDatabaseButton", source)
         self.assertIn("manualSqliteBackupButton", source)
@@ -1088,7 +1137,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_pimcore_settings_wires_save_test_and_csv_import(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -1102,7 +1151,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_pimcore_compact_settings_hide_technical_controls(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -1117,7 +1166,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_pimcore_write_test_keeps_modal_open_and_polls_incrementally(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -1133,7 +1182,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_pimcore_live_log_history_uses_dedicated_endpoint(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -1146,7 +1195,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_pimcore_diagnostics_use_expandable_details(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -1159,7 +1208,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_pimcore_wizard_discovers_then_completes_setup(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -1175,7 +1224,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_pimcore_wizard_explains_product_field_controls(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -1192,7 +1241,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_ean_input_debounces_pimcore_lookup_and_rechecks_on_create(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -1207,7 +1256,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_pimcore_runtime_gates_lookup_and_cancel_does_not_create(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -1225,7 +1274,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_pimcore_edit_loads_selected_fields_and_cancel_does_not_put(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"
@@ -1241,8 +1290,8 @@ class SourceIntegrityTests(unittest.TestCase):
 
     def test_sqlite_backup_schedule_uses_day_hour_slots_and_nested_modal_layer(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        js_source = (root / "picorgftp_sql" / "web" / "static" / "app.js").read_text(encoding="utf-8")
-        css_source = (root / "picorgftp_sql" / "web" / "static" / "app.css").read_text(encoding="utf-8")
+        js_source = (root / "picsyncra" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+        css_source = (root / "picsyncra" / "web" / "static" / "app.css").read_text(encoding="utf-8")
 
         self.assertIn('input.name = "sqlite_backup_slot"', js_source)
         self.assertIn("input.value = `${key}:${hour}`", js_source)
@@ -1252,7 +1301,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_web_settings_field_groups_are_full_width_cards(self) -> None:
         css_path = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.css"
@@ -1276,7 +1325,7 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("grid-column: 1 / -1", settings_group_title)
 
     def test_desktop_settings_include_storage_controls(self) -> None:
-        app_path = Path(__file__).resolve().parents[1] / "picorgftp_sql" / "app.py"
+        app_path = Path(__file__).resolve().parents[1] / "picsyncra" / "app.py"
         source = app_path.read_text(encoding="utf-8")
 
         self.assertIn("data_mode_var", source)
@@ -1286,7 +1335,7 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("storage_settings.save_bootstrap_settings", source)
 
     def test_desktop_local_file_index_uses_active_cache_store(self) -> None:
-        app_path = Path(__file__).resolve().parents[1] / "picorgftp_sql" / "app.py"
+        app_path = Path(__file__).resolve().parents[1] / "picsyncra" / "app.py"
         source = app_path.read_text(encoding="utf-8")
         index_start = source.index("B._file_index = LocalFileIndex(")
         index_block = source[index_start : index_start + 500]
@@ -1297,7 +1346,7 @@ class SourceIntegrityTests(unittest.TestCase):
     def test_web_client_validates_slot_upload_format_before_xhr(self) -> None:
         app_path = (
             Path(__file__).resolve().parents[1]
-            / "picorgftp_sql"
+            / "picsyncra"
             / "web"
             / "static"
             / "app.js"

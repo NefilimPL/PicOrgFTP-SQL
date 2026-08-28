@@ -4,8 +4,8 @@ const { loadBrowserScript, resetBrowserGlobals } = require("./helpers");
 
 function loadModuleBuildStatus() {
   resetBrowserGlobals();
-  loadBrowserScript("picorgftp_sql/web/static/module-build-status.js");
-  return window.PicOrg.ModuleBuildStatus;
+  loadBrowserScript("picsyncra/web/static/module-build-status.js");
+  return window.PicSyncra.ModuleBuildStatus;
 }
 
 test("normalizes a rebuild-required module and translates its status", () => {
@@ -45,7 +45,7 @@ test("creates a GitHub commit URL only for a complete commit hash", () => {
 
   assert.equal(
     status.commitUrl(commit),
-    `https://github.com/NefilimPL/PicOrgFTP-SQL/commit/${commit}`,
+    `https://github.com/NefilimPL/PicSyncra/commit/${commit}`,
   );
   assert.equal(status.commitUrl("abc123"), "");
 });

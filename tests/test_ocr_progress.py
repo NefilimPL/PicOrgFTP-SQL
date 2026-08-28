@@ -1,5 +1,5 @@
-from picorgftp_sql.services.ocr_progress import OcrProgressRegistry
-from picorgftp_sql.sqlite_store import SqliteStore
+from picsyncra.services.ocr_progress import OcrProgressRegistry
+from picsyncra.sqlite_store import SqliteStore
 
 
 def test_progress_snapshot_returns_only_events_after_requested_sequence():

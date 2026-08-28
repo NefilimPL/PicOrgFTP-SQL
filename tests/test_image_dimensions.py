@@ -3,9 +3,9 @@ from __future__ import annotations
 import sys
 import types
 
-import picorgftp_sql.services.image_dimensions as image_dimensions
+import picsyncra.services.image_dimensions as image_dimensions
 
-from picorgftp_sql.services.image_dimensions import (
+from picsyncra.services.image_dimensions import (
     DimensionLine,
     ImageDimensionUnavailable,
     ImageDimensionRequest,

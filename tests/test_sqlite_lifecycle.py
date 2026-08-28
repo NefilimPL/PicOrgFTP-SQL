@@ -8,17 +8,17 @@ from threading import Lock
 
 import pytest
 
-from picorgftp_sql import logging_utils, storage_settings
-from picorgftp_sql import data_store
-from picorgftp_sql.data_store import (
+from picsyncra import logging_utils, storage_settings
+from picsyncra import data_store
+from picsyncra.data_store import (
     get_active_store,
     get_sqlite_store,
     invalidate_sqlite_store,
     reset_active_store_cache,
 )
-from picorgftp_sql.observability import observability_store
-from picorgftp_sql import sqlite_store
-from picorgftp_sql.sqlite_store import SqliteStore
+from picsyncra.observability import observability_store
+from picsyncra import sqlite_store
+from picsyncra.sqlite_store import SqliteStore
 
 
 def test_initialize_runs_schema_once_for_parallel_callers(tmp_path, monkeypatch):
@@ -84,7 +84,7 @@ def test_wal_fallback_initializes_and_logs_one_redacted_warning(tmp_path, monkey
     private_path = tmp_path / "private-user-record.sqlite"
     store = SqliteStore(str(private_path))
     legacy_log_path = tmp_path / "fallback-info.log"
-    logger = logging.getLogger("picorgftp_sql.sqlite.wal")
+    logger = logging.getLogger("picsyncra.sqlite.wal")
     records = []
 
     class RecordCapture(logging.Handler):

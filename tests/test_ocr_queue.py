@@ -1,5 +1,5 @@
-from picorgftp_sql.services.ocr_queue import OcrQueueLease, OcrQueueScheduler
-from picorgftp_sql.services.ocr_worker import OcrQueueWorker
+from picsyncra.services.ocr_queue import OcrQueueLease, OcrQueueScheduler
+from picsyncra.services.ocr_worker import OcrQueueWorker
 
 
 def test_scheduler_waits_for_configured_user_idle_period():

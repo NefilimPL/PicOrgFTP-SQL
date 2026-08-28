@@ -4,8 +4,8 @@ const { loadBrowserScript, resetBrowserGlobals } = require("./helpers");
 
 function loadDiagnostics() {
   resetBrowserGlobals();
-  loadBrowserScript("picorgftp_sql/web/static/ocr-diagnostics.js");
-  return window.PicOrg.OcrDiagnostics;
+  loadBrowserScript("picsyncra/web/static/ocr-diagnostics.js");
+  return window.PicSyncra.OcrDiagnostics;
 }
 
 test("normalizes paired OCR regions without truncating decimal values", () => {

@@ -1,5 +1,5 @@
-from picorgftp_sql.services.ocr_scanning import scan_image
-from picorgftp_sql.services.ocr_values import OcrValue
+from picsyncra.services.ocr_scanning import scan_image
+from picsyncra.services.ocr_values import OcrValue
 
 
 class FakeDiscovery:

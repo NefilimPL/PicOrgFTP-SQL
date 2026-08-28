@@ -8,16 +8,16 @@ import pytest
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
-from picorgftp_sql import web_data
-from picorgftp_sql.services.image_dimensions import (
+from picsyncra import web_data
+from picsyncra.services.image_dimensions import (
     ImageOcrDiagnostics,
     OcrDiagnosticCandidate,
 )
-from picorgftp_sql.services.ocr_progress import OcrRunSnapshot
-from picorgftp_sql.services.pimcore_service import PimcoreApiError, PimcoreConflictError
-from picorgftp_sql.services.translation_service import TranslationResult
-from picorgftp_sql.sqlite_store import SqliteStore
-from picorgftp_sql.web import app as web_app
+from picsyncra.services.ocr_progress import OcrRunSnapshot
+from picsyncra.services.pimcore_service import PimcoreApiError, PimcoreConflictError
+from picsyncra.services.translation_service import TranslationResult
+from picsyncra.sqlite_store import SqliteStore
+from picsyncra.web import app as web_app
 
 
 def test_settings_snapshot_hides_pimcore_api_key():
@@ -2120,7 +2120,7 @@ def test_ocr_run_routes_start_then_return_incremental_live_snapshot():
 
 
 def test_ocr_validation_compares_cached_signed_slot_images_without_exposing_paths(tmp_path):
-    from picorgftp_sql.sqlite_store import SqliteStore
+    from picsyncra.sqlite_store import SqliteStore
 
     store = SqliteStore(str(tmp_path / "ocr.sqlite"))
     store.initialize()
@@ -2163,7 +2163,7 @@ def test_ocr_validation_compares_cached_signed_slot_images_without_exposing_path
 
 
 def test_ocr_scan_route_returns_cached_boxes_for_a_signed_slot_image(tmp_path):
-    from picorgftp_sql.sqlite_store import SqliteStore
+    from picsyncra.sqlite_store import SqliteStore
 
     store = SqliteStore(str(tmp_path / "ocr.sqlite"))
     store.initialize()
@@ -2203,7 +2203,7 @@ def test_ocr_scan_route_returns_cached_boxes_for_a_signed_slot_image(tmp_path):
 
 
 def test_ocr_approval_suppresses_a_cached_value_mismatch(tmp_path):
-    from picorgftp_sql.sqlite_store import SqliteStore
+    from picsyncra.sqlite_store import SqliteStore
 
     store = SqliteStore(str(tmp_path / "ocr.sqlite"))
     store.initialize()
@@ -2263,7 +2263,7 @@ def test_selected_ocr_slot_reports_completed_cached_scan_without_rescheduling(
     tmp_path, monkeypatch
 ):
     from PIL import Image
-    from picorgftp_sql.services.ocr_cache import image_content_hash
+    from picsyncra.services.ocr_cache import image_content_hash
 
     image = tmp_path / "already-scanned.png"
     Image.new("RGB", (20, 20), "white").save(image)

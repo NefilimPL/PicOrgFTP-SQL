@@ -11,7 +11,7 @@ CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 WEB_REQUIREMENTS = ROOT / "requirements-web.txt"
 BUILD_REQUIREMENTS = ROOT / "requirements-build.txt"
 VISION_REQUIREMENTS = ROOT / "requirements-vision.txt"
-EMAIL_DELIVERY = ROOT / "picorgftp_sql" / "email_delivery.py"
+EMAIL_DELIVERY = ROOT / "picsyncra" / "email_delivery.py"
 BUILD_COMMON = ROOT / "Generator exe" / "build_common.ps1"
 WEB_BUILD = ROOT / "Generator exe" / "build_web_exe.ps1"
 WEB_BUILD_BATCH = ROOT / "Generator exe" / "BUILD_WEB_EXE.bat"
@@ -76,7 +76,7 @@ def test_self_hosted_build_uses_existing_python_instead_of_setup_python() -> Non
     assert "uses: actions/setup-python@v6" in source
     assert "if: needs.select-runner.outputs.using_self_hosted != 'true'" in source
     assert 'python-version: "3.14"' in source
-    assert "PICORGFTP_SQL_PYTHON" in source
+    assert "PICSYNCRA_PYTHON" in source
     assert '$versionsToTry = @("3.14", "3.13", "3.12", "3.11")' in source
     assert "HKLM:\\SOFTWARE\\Python\\PythonCore" in source
     assert "HKCU:\\SOFTWARE\\Python\\PythonCore" in source
@@ -92,12 +92,12 @@ def test_self_hosted_build_uses_existing_python_instead_of_setup_python() -> Non
 def test_build_dependencies_install_into_isolated_virtualenv() -> None:
     source = workflow_source()
 
-    assert "PICORGFTP_SQL_BASE_PYTHON" in source
+    assert "PICSYNCRA_BASE_PYTHON" in source
     assert "Create isolated build virtualenv" in source
     assert "RUNNER_TEMP" in source
-    assert "picorgftp-sql-build-${{ matrix.target }}" in source
+    assert "picsyncra-build-${{ matrix.target }}" in source
     assert "-m venv" in source
-    assert "PICORGFTP_SQL_PYTHON=$venvPython" in source
+    assert "PICSYNCRA_PYTHON=$venvPython" in source
     assert 'pip install "pyinstaller>=6.6,<7"' not in source
 
 
@@ -114,7 +114,7 @@ def test_web_build_installs_msal_before_static_pyinstaller_analysis() -> None:
     assert source.index("-m pip install -r requirements-web.txt") < source.index(
         "Build web manager EXE with PyInstaller"
     )
-    assert "--collect-submodules picorgftp_sql" in source
+    assert "--collect-submodules picsyncra" in source
     assert "import msal" in delivery_source
 
 
@@ -213,7 +213,7 @@ def test_plain_web_build_disables_ocr_at_runtime() -> None:
     workflow_source_text = workflow_source()
 
     assert OCR_DISABLE_HOOK.read_text(encoding="utf-8").count(
-        'PICORGFTP_SQL_OCR_ENABLED"] = "0"'
+        'PICSYNCRA_OCR_ENABLED"] = "0"'
     ) == 1
     assert "--runtime-hook" in build_source
     assert "disable_ocr_runtime.py" in build_source
@@ -224,7 +224,7 @@ def test_artifact_uploads_are_guarded_by_probe_and_non_fatal_per_target() -> Non
     source = workflow_source()
 
     assert "id: artifact-probe" in source
-    assert "name: PicOrgFTP-SQL-artifact-probe-${{ matrix.target }}-${{ github.run_id }}" in source
+    assert "name: PicSyncra-artifact-probe-${{ matrix.target }}-${{ github.run_id }}" in source
     assert "retention-days: 1" in source
     assert "steps.artifact-probe.outcome == 'success'" in source
     assert source.count("continue-on-error: true") >= 4

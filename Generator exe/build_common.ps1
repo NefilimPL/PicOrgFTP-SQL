@@ -85,7 +85,7 @@ function Get-WebStaticDataArguments {
         [string]$RepoRoot
     )
 
-    $staticDirectory = Join-Path $RepoRoot "picorgftp_sql\web\static"
+    $staticDirectory = Join-Path $RepoRoot "picsyncra\web\static"
     $staticAssets = @(
         "app.css",
         "app.js",
@@ -106,7 +106,7 @@ function Get-WebStaticDataArguments {
             throw "Brakuje wymaganego zasobu web: $sourcePath"
         }
         $arguments += "--add-data"
-        $arguments += "$sourcePath;picorgftp_sql\web\static"
+        $arguments += "$sourcePath;picsyncra\web\static"
     }
     return $arguments
 }
@@ -128,7 +128,7 @@ function New-ModuleBuildManifestArguments {
         "--repo-root" $RepoRoot `
         "--build-variant" $BuildVariant `
         "--output" $manifestPath
-    return @("--add-data", "$manifestPath;picorgftp_sql")
+    return @("--add-data", "$manifestPath;picsyncra")
 }
 
 function Test-BuildEnvironment {

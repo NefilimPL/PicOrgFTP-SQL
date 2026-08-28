@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from picorgftp_sql import storage_settings
+from picsyncra import storage_settings
 
 
 def test_sqlite_path_in_image_dir(tmp_path: Path) -> None:
@@ -18,7 +18,7 @@ def test_sqlite_path_in_image_dir(tmp_path: Path) -> None:
             {"database_location_mode": "image_dir"}
         )
 
-    assert resolved == str(image_dir / "picorgftp_sql.sqlite")
+    assert resolved == str(image_dir / "picsyncra.sqlite")
 
 
 def test_sqlite_path_in_custom_location(tmp_path: Path) -> None:
@@ -41,7 +41,7 @@ def test_sqlite_path_in_exe_dir(tmp_path: Path) -> None:
             {"database_location_mode": "exe_dir"}
         )
 
-    assert resolved == str(tmp_path / "picorgftp_sql.sqlite")
+    assert resolved == str(tmp_path / "picsyncra.sqlite")
 
 
 def test_load_bootstrap_settings_defaults_to_legacy(tmp_path: Path) -> None:

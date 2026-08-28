@@ -1,4 +1,4 @@
-from picorgftp_sql.pimcore_config import (
+from picsyncra.pimcore_config import (
     PIMCORE_API_KEY,
     PIMCORE_SETTINGS_KEY,
     field_mapping_issues,

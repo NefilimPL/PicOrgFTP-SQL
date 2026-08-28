@@ -1,4 +1,4 @@
-from picorgftp_sql.services.ocr_resource_policy import (
+from picsyncra.services.ocr_resource_policy import (
     OcrResourcePolicy,
     ResourceTelemetry,
 )

@@ -3,12 +3,12 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from picorgftp_sql.services.image_dimensions import OcrTextBox
-from picorgftp_sql.services.ocr_pipeline import (
+from picsyncra.services.image_dimensions import OcrTextBox
+from picsyncra.services.ocr_pipeline import (
     run_ocr_pipeline,
     run_ocr_pipeline_report,
 )
-from picorgftp_sql.services.ocr_resource_policy import ResourceDecision
+from picsyncra.services.ocr_resource_policy import ResourceDecision
 
 
 def test_both_profiles_send_only_fast_regions_to_accurate_model_and_translate_boxes(tmp_path):

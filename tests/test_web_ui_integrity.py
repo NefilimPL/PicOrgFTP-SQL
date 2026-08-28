@@ -11,10 +11,10 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-INDEX_HTML = ROOT / "picorgftp_sql" / "web" / "static" / "index.html"
-LOGIN_HTML = ROOT / "picorgftp_sql" / "web" / "static" / "login.html"
-APP_JS = ROOT / "picorgftp_sql" / "web" / "static" / "app.js"
-APP_CSS = ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+INDEX_HTML = ROOT / "picsyncra" / "web" / "static" / "index.html"
+LOGIN_HTML = ROOT / "picsyncra" / "web" / "static" / "login.html"
+APP_JS = ROOT / "picsyncra" / "web" / "static" / "app.js"
+APP_CSS = ROOT / "picsyncra" / "web" / "static" / "app.css"
 
 
 class _HtmlCollector(HTMLParser):
@@ -213,7 +213,7 @@ console.log(JSON.stringify(calls));
         self.assertIn("showEvent(event)", source)
         self.assertIn("candidate_regions", source)
         self.assertIn("crop_started", source)
-        self.assertIn("PicOrg.OcrDiagnostics", source)
+        self.assertIn("PicSyncra.OcrDiagnostics", source)
         self.assertIn("applyProgressEvent", source)
         self.assertNotIn("createImageBitmap", source)
         self.assertNotIn("data-ocr-candidate-index", source)
@@ -1692,7 +1692,7 @@ console.log(JSON.stringify(selectedSimilarSlotPrefixes(rows)));
 
     def test_header_stacks_latency_above_compact_system_status(self) -> None:
         markup = INDEX_HTML.read_text(encoding="utf-8")
-        css = (ROOT / "picorgftp_sql" / "web" / "static" / "app.css").read_text(
+        css = (ROOT / "picsyncra" / "web" / "static" / "app.css").read_text(
             encoding="utf-8"
         )
         source = APP_JS.read_text(encoding="utf-8")
@@ -1701,7 +1701,7 @@ console.log(JSON.stringify(selectedSimilarSlotPrefixes(rows)));
         location_start = markup.index('class="header-location"')
         stack_source = markup[stack_start:location_start]
 
-        self.assertLess(markup.index("PicOrgFTP-SQL Web"), stack_start)
+        self.assertLess(markup.index("PicSyncra Web"), stack_start)
         self.assertLess(stack_start, location_start)
         self.assertLess(
             stack_source.index('id="backendHealthStatus"'),
@@ -1810,7 +1810,7 @@ console.log(JSON.stringify({{
         ]
         self.assertIn("async function fetchRuntimeStatus()", source)
         self.assertIn('requestJson("/api/runtime-status")', source)
-        self.assertIn("new PicOrg.RuntimeStatusPoller", source)
+        self.assertIn("new PicSyncra.RuntimeStatusPoller", source)
         node = Path(r"C:\Program Files\nodejs\node.exe")
         if not node.exists():
             self.skipTest("Node.js is required for the browser health rerender contract test")
@@ -2012,7 +2012,7 @@ async function requestJson() {{
         html = _parse(INDEX_HTML)
         source = APP_JS.read_text(encoding="utf-8")
         css = (
-            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+            ROOT / "picsyncra" / "web" / "static" / "app.css"
         ).read_text(encoding="utf-8")
 
         self.assertTrue(html.has_tag("button", **{"data-settings-tab": "mail"}))
@@ -2048,7 +2048,7 @@ async function requestJson() {{
     def test_user_settings_forms_send_optional_email_fields(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         css = (
-            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+            ROOT / "picsyncra" / "web" / "static" / "app.css"
         ).read_text(encoding="utf-8")
         users_source = source[
             source.index("function renderSettingsUsers") : source.index(
@@ -2070,7 +2070,7 @@ async function requestJson() {{
         html_source = INDEX_HTML.read_text(encoding="utf-8")
         js_source = APP_JS.read_text(encoding="utf-8")
         css_source = (
-            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+            ROOT / "picsyncra" / "web" / "static" / "app.css"
         ).read_text(encoding="utf-8")
 
         brand_start = html_source.index('<div class="topbar-brand">')
@@ -2106,7 +2106,7 @@ async function requestJson() {{
         self.assertIn("pollBackendHealth().catch(() => {})", js_source)
         self.assertIn("async function fetchRuntimeStatus()", js_source)
         self.assertIn('requestJson("/api/runtime-status")', js_source)
-        self.assertIn("new PicOrg.RuntimeStatusPoller", js_source)
+        self.assertIn("new PicSyncra.RuntimeStatusPoller", js_source)
         self.assertNotIn("backendHealthDetailsList.innerHTML", js_source)
         self.assertIn("backendHealthDetailsList.replaceChildren", js_source)
         self.assertIn("observed_at", js_source)
@@ -2137,7 +2137,7 @@ async function requestJson() {{
         html_source = INDEX_HTML.read_text(encoding="utf-8")
         js_source = APP_JS.read_text(encoding="utf-8")
         css_source = (
-            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+            ROOT / "picsyncra" / "web" / "static" / "app.css"
         ).read_text(encoding="utf-8")
 
         self.assertIn('id="resourceStatus"', html_source)
@@ -2188,7 +2188,7 @@ async function requestJson() {{
         self.assertIn("resourceMonitorTestState.message", monitor_source)
         self.assertIn("await pollBackendHealth()", monitor_source)
         self.assertIn("async function fetchRuntimeStatus()", source)
-        self.assertIn("new PicOrg.RuntimeStatusPoller", source)
+        self.assertIn("new PicSyncra.RuntimeStatusPoller", source)
 
         self.assertIn("const FTP_PREVIEW_CACHE_LIMIT = 120;", source)
         helper_start = source.index("function setFtpPreviewCache")
@@ -2224,7 +2224,7 @@ async function requestJson() {{
         html_source = INDEX_HTML.read_text(encoding="utf-8")
         js_source = APP_JS.read_text(encoding="utf-8")
         css_source = (
-            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+            ROOT / "picsyncra" / "web" / "static" / "app.css"
         ).read_text(encoding="utf-8")
 
         for tab in ("live", "critical", "error", "warning", "jobs"):
@@ -2263,7 +2263,7 @@ async function requestJson() {{
     def test_incident_cards_render_safe_delivery_status_details(self) -> None:
         js_source = APP_JS.read_text(encoding="utf-8")
         css_source = (
-            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+            ROOT / "picsyncra" / "web" / "static" / "app.css"
         ).read_text(encoding="utf-8")
 
         for status, label in (
@@ -2402,7 +2402,7 @@ async function requestJson() {{
     def test_web_settings_builds_vertical_product_field_rows(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         css = (
-            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+            ROOT / "picsyncra" / "web" / "static" / "app.css"
         ).read_text(encoding="utf-8")
 
         self.assertIn("function productFieldSettingsList", source)
@@ -2436,7 +2436,7 @@ async function requestJson() {{
         source = INDEX_HTML.read_text(encoding="utf-8")
         html = _parse(INDEX_HTML)
         css = (
-            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+            ROOT / "picsyncra" / "web" / "static" / "app.css"
         ).read_text(encoding="utf-8")
 
         self.assertIn("githubStatusButton", html.button_ids)
@@ -2446,7 +2446,7 @@ async function requestJson() {{
         self.assertTrue(html.has_tag("button", id="githubStatusButton", type="button"))
         self.assertLess(
             source.index('id="githubStatusButton"'),
-            source.index("<strong>PicOrgFTP-SQL Web</strong>"),
+            source.index("<strong>PicSyncra Web</strong>"),
         )
         self.assertIn('viewBox="0 0 16 16" width="24" height="24"', source)
         self.assertIn(".github-status-button", css)
@@ -2458,7 +2458,7 @@ async function requestJson() {{
     def test_app_js_renders_active_user_presence(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         css = (
-            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+            ROOT / "picsyncra" / "web" / "static" / "app.css"
         ).read_text(encoding="utf-8")
 
         self.assertIn("function renderActiveUsersPresence", source)
@@ -2485,7 +2485,7 @@ async function requestJson() {{
     def test_app_js_marks_presence_client_and_leaves_on_pagehide(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
 
-        self.assertIn('CLIENT_ID_HEADER = "X-PicOrg-Client-Id"', source)
+        self.assertIn('CLIENT_ID_HEADER = "X-PicSyncra-Client-Id"', source)
         self.assertIn("function activePresenceClientId", source)
         self.assertIn("function notifyActiveUsersPresenceLeave", source)
         self.assertIn("/api/server/presence/leave", source)
@@ -2831,7 +2831,7 @@ console.log(JSON.stringify(calls.filter((call) => call.url === "/api/ocr/validat
 
     def test_sql_profile_ui_and_pimcore_sql_mapping_controls_exist(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
-        css = (ROOT / "picorgftp_sql" / "web" / "static" / "app.css").read_text(
+        css = (ROOT / "picsyncra" / "web" / "static" / "app.css").read_text(
             encoding="utf-8"
         )
         html = INDEX_HTML.read_text(encoding="utf-8")
@@ -2858,7 +2858,7 @@ console.log(JSON.stringify(calls.filter((call) => call.url === "/api/ocr/validat
 
     def test_pimcore_mapping_layout_controls_and_runtime_sections_exist(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
-        css = (ROOT / "picorgftp_sql" / "web" / "static" / "app.css").read_text(
+        css = (ROOT / "picsyncra" / "web" / "static" / "app.css").read_text(
             encoding="utf-8"
         )
 
@@ -2891,7 +2891,7 @@ console.log(JSON.stringify(calls.filter((call) => call.url === "/api/ocr/validat
 
     def test_pimcore_runtime_difference_actions_are_compact_icon_buttons(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
-        css = (ROOT / "picorgftp_sql" / "web" / "static" / "app.css").read_text(
+        css = (ROOT / "picsyncra" / "web" / "static" / "app.css").read_text(
             encoding="utf-8"
         )
 
@@ -2932,7 +2932,7 @@ console.log(JSON.stringify(calls.filter((call) => call.url === "/api/ocr/validat
 
     def test_pimcore_edit_recalculation_blocks_submit_until_resolved(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
-        css = (ROOT / "picorgftp_sql" / "web" / "static" / "app.css").read_text(
+        css = (ROOT / "picsyncra" / "web" / "static" / "app.css").read_text(
             encoding="utf-8"
         )
 
@@ -3089,7 +3089,7 @@ console.log(JSON.stringify(calls.filter((call) => call.url === "/api/ocr/validat
     def test_pimcore_ui_uses_example_placeholder_without_private_default(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         html_source = INDEX_HTML.read_text(encoding="utf-8")
-        css = (ROOT / "picorgftp_sql" / "web" / "static" / "app.css").read_text(
+        css = (ROOT / "picsyncra" / "web" / "static" / "app.css").read_text(
             encoding="utf-8"
         )
 
@@ -3193,9 +3193,9 @@ console.log(JSON.stringify(calls.filter((call) => call.url === "/api/ocr/validat
         self.assertNotIn('value="admin"', login_source)
 
     def test_login_js_remembers_last_successful_username(self) -> None:
-        source = (ROOT / "picorgftp_sql" / "web" / "static" / "login.js").read_text(encoding="utf-8")
+        source = (ROOT / "picsyncra" / "web" / "static" / "login.js").read_text(encoding="utf-8")
 
-        self.assertIn('LAST_LOGIN_USERNAME_KEY = "picorg-last-login-username"', source)
+        self.assertIn('LAST_LOGIN_USERNAME_KEY = "picsyncra-last-login-username"', source)
         self.assertIn("localStorage.getItem(LAST_LOGIN_USERNAME_KEY)", source)
         self.assertIn("localStorage.setItem(LAST_LOGIN_USERNAME_KEY, username)", source)
         self.assertLess(
@@ -3292,7 +3292,7 @@ console.log(JSON.stringify(calls.filter((call) => call.url === "/api/ocr/validat
         html_source = INDEX_HTML.read_text(encoding="utf-8")
         js_source = APP_JS.read_text(encoding="utf-8")
         css_source = (
-            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+            ROOT / "picsyncra" / "web" / "static" / "app.css"
         ).read_text(encoding="utf-8")
 
         for element_id in (
@@ -3353,7 +3353,7 @@ console.log(JSON.stringify(calls.filter((call) => call.url === "/api/ocr/validat
         renderer_end = source.index("function incidentValue", renderer_start)
         renderer = source[renderer_start:renderer_end]
         css_source = (
-            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+            ROOT / "picsyncra" / "web" / "static" / "app.css"
         ).read_text(encoding="utf-8")
 
         self.assertIn("log-event-compact", renderer)
@@ -3373,7 +3373,7 @@ console.log(JSON.stringify(calls.filter((call) => call.url === "/api/ocr/validat
     def test_history_changes_formats_structured_values_and_unknown_durations(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         css_source = (
-            ROOT / "picorgftp_sql" / "web" / "static" / "app.css"
+            ROOT / "picsyncra" / "web" / "static" / "app.css"
         ).read_text(encoding="utf-8")
         self.assertIn("function formatHistoryDuration", source)
         value_start = source.index("function historyChangeValue")

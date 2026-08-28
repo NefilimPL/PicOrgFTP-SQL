@@ -8,7 +8,7 @@ from pathlib import Path
 
 def test_build_manifest_includes_registered_ocr_and_generator_modules(monkeypatch, tmp_path):
     module_build_status = importlib.import_module(
-        "picorgftp_sql.services.module_build_status"
+        "picsyncra.services.module_build_status"
     )
     monkeypatch.setattr(
         module_build_status,
@@ -41,7 +41,7 @@ def test_build_manifest_includes_registered_ocr_and_generator_modules(monkeypatc
 
 def test_snapshot_marks_changed_module_for_rebuild(monkeypatch, tmp_path):
     module_build_status = importlib.import_module(
-        "picorgftp_sql.services.module_build_status"
+        "picsyncra.services.module_build_status"
     )
     manifest = {
         "schema_version": 1,
@@ -69,7 +69,7 @@ def test_snapshot_marks_changed_module_for_rebuild(monkeypatch, tmp_path):
 
 def test_snapshot_keeps_embedded_data_when_repository_is_unavailable():
     module_build_status = importlib.import_module(
-        "picorgftp_sql.services.module_build_status"
+        "picsyncra.services.module_build_status"
     )
     manifest = {
         "schema_version": 1,
@@ -87,7 +87,7 @@ def test_snapshot_keeps_embedded_data_when_repository_is_unavailable():
 
 def test_snapshot_prioritizes_uncommitted_changes(monkeypatch, tmp_path):
     module_build_status = importlib.import_module(
-        "picorgftp_sql.services.module_build_status"
+        "picsyncra.services.module_build_status"
     )
     manifest = {
         "schema_version": 1,
@@ -114,9 +114,9 @@ def test_snapshot_prioritizes_uncommitted_changes(monkeypatch, tmp_path):
 
 def test_load_packaged_manifest_reads_the_embedded_json(monkeypatch, tmp_path):
     module_build_status = importlib.import_module(
-        "picorgftp_sql.services.module_build_status"
+        "picsyncra.services.module_build_status"
     )
-    package_root = tmp_path / "picorgftp_sql"
+    package_root = tmp_path / "picsyncra"
     (package_root / "services").mkdir(parents=True)
     (package_root / "module_build_manifest.json").write_text(
         json.dumps({"schema_version": 1, "modules": []}), encoding="utf-8"

@@ -3,4 +3,4 @@
 import os
 
 
-os.environ["PICORGFTP_SQL_OCR_ENABLED"] = "0"
+os.environ["PICSYNCRA_OCR_ENABLED"] = "0"

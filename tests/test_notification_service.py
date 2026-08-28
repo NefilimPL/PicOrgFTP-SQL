@@ -6,9 +6,9 @@ import threading
 
 import pytest
 
-from picorgftp_sql import notification_service
-from picorgftp_sql.notification_scheduler import WakeableDeadlineScheduler
-from picorgftp_sql.sqlite_store import SqliteStore
+from picsyncra import notification_service
+from picsyncra.notification_scheduler import WakeableDeadlineScheduler
+from picsyncra.sqlite_store import SqliteStore
 
 
 UTC = timezone.utc
@@ -32,7 +32,7 @@ def _settings(**overrides: object) -> dict[str, object]:
             "username": "sender",
             "password": "secret",
             "from_address": "alerts@example.com",
-            "from_name": "PicOrgFTP-SQL",
+            "from_name": "PicSyncra",
         },
         "rules": {
             severity: {
@@ -552,7 +552,7 @@ def test_error_exception_is_sent_as_bounded_redacted_text_attachment() -> None:
     message = transport.messages[0]
     assert len(message.attachments) == 1
     attachment = message.attachments[0]
-    assert attachment.filename == "picorgftp-sql-exception.txt"
+    assert attachment.filename == "picsyncra-exception.txt"
     assert attachment.content_type == "text/plain"
     assert len(attachment.content.encode("utf-8")) <= 24 * 1024
     persisted_message = store.deliveries[str(queued["id"])]["message"]
