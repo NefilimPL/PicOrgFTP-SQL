@@ -829,6 +829,28 @@ def test_runtime_form_schema_includes_sql_mapping_metadata():
     assert schema[0]["sql_profile_id"] == "stock-db"
 
 
+def test_runtime_form_schema_includes_ocr_validation_metadata():
+    settings_payload = web_data.normalize_pimcore_settings(
+        {
+            "field_mappings": [
+                {
+                    "source": "HEIGHT",
+                    "label": "Wysokosc",
+                    "pimcore_field": "height",
+                    "type": "input",
+                    "parser": "decimal_comma",
+                    "ocr_validation": True,
+                }
+            ]
+        }
+    )
+
+    schema = web_data._pimcore_runtime_form_schema(settings_payload)
+
+    assert schema[0]["pimcore_field"] == "height"
+    assert schema[0]["ocr_validation"] is True
+
+
 def test_runtime_form_schema_includes_layout_and_display_order():
     settings_payload = web_data.normalize_pimcore_settings(
         {
@@ -903,6 +925,26 @@ def test_bootstrap_exposes_only_runtime_pimcore_flags():
         response = client.get("/api/bootstrap")
 
     assert response.json()["pimcore"] == {"enabled": True, "setup_complete": True}
+
+
+def test_bootstrap_exposes_enabled_ocr_slots(monkeypatch):
+    cfg = dict(web_app.config.CONFIG)
+    cfg[web_app.OCR_SETTINGS_KEY] = {"enabled_slots": ["15", "18"]}
+    monkeypatch.setattr(web_app.config, "CONFIG", cfg)
+    client = TestClient(web_app.app)
+    with (
+        patch.object(web_app, "_require_user", return_value="operator"),
+        patch.object(
+            web_app,
+            "_current_user_payload",
+            return_value={"username": "operator", "role": "user"},
+        ),
+        patch.object(web_app, "load_web_data", return_value={}),
+        patch.object(web_app, "pimcore_runtime_capabilities", return_value={}),
+    ):
+        response = client.get("/api/bootstrap")
+
+    assert response.json()["ocr_enabled_slots"] == ["15", "18"]
 
 
 def test_runtime_create_route_allows_logged_in_user_and_returns_created_object():

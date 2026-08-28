@@ -5633,6 +5633,9 @@ def create_app() -> FastAPI:
             "auth_enabled": _auth_enabled(),
             "current_user": _current_user_payload(request),
             "csrf_token": _csrf_token(request),
+            "ocr_enabled_slots": normalize_ocr_settings(
+                config.CONFIG.get(OCR_SETTINGS_KEY, {})
+            ).get("enabled_slots", []),
             **load_web_data(),
             "pimcore": pimcore_runtime_capabilities(),
         }
