@@ -9775,12 +9775,14 @@ function pimcoreSlotTokens() {
 }
 
 function pimcoreOcrSlotTokens() {
+  const allSlotTokens = pimcoreSlotTokens();
   const configuredSlots = Array.isArray(state.settings?.ocr?.enabled_slots)
     ? state.settings.ocr.enabled_slots
     : state.ocrEnabledSlots;
+  if (!Array.isArray(configuredSlots)) return allSlotTokens;
   const enabledSlots = new Set(configuredSlots.map(String));
   return Object.fromEntries(
-    Object.entries(pimcoreSlotTokens()).filter(([prefix]) => enabledSlots.has(prefix))
+    Object.entries(allSlotTokens).filter(([prefix]) => enabledSlots.has(prefix))
   );
 }
 
@@ -11554,7 +11556,7 @@ async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
     }
   }
   updatePimcoreRuntimeCalculatedState(form, result);
-  await validatePimcoreOcrFields(form, schema, selected);
+  await validatePimcoreOcrFields(form, schema, targets);
   return result;
 }
 
