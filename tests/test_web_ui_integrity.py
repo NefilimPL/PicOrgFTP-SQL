@@ -2655,6 +2655,92 @@ async function requestJson() {{
         self.assertIn("async function recalculateAllPimcoreEditFields", source)
         self.assertIn("pimcoreEditRecalculateAllButton", source)
 
+    def test_runtime_ocr_validation_uses_only_enabled_ocr_slot_tokens(self) -> None:
+        """An ordinary unscanned photo must not keep a completed OCR scan pending."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function pimcoreOcrSlotTokens()")
+        end = source.index("function renderPimcoreTemplateTokens", start)
+        helper = source[start:end]
+        node = Path(r"C:\\Program Files\\nodejs\\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the OCR slot filtering contract")
+        script = f"""
+const state = {{ settings: {{ ocr: {{ enabled_slots: ["15"] }} }} }};
+const pimcoreSlotTokens = () => ({{ "15": "ocr-token", "01": "ordinary-photo-token" }});
+{helper}
+console.log(JSON.stringify(pimcoreOcrSlotTokens()));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        self.assertEqual(json.loads(completed.stdout), {"15": "ocr-token"})
+
+    def test_recalculate_all_validates_manual_ocr_fields_without_templates(self) -> None:
+        """A manual field marked for OCR validation must not be skipped by an empty template."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("async function renderPimcoreRuntimeTemplates")
+        end = source.index("function pimcoreEditHasRuntimeTemplates", start)
+        renderer = source[start:end]
+        node = Path(r"C:\\Program Files\\nodejs\\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the Pimcore OCR recalculation contract")
+        script = f"""
+const pimcoreCreateForm = {{}};
+const pimcoreEditForm = {{}};
+const state = {{}};
+const calls = [];
+const validatePimcoreOcrFields = async (...args) => calls.push(args[1].map((item) => item.source));
+{renderer}
+(async () => {{
+  await renderPimcoreRuntimeTemplates({{}}, [{{ source: "HEIGHT", ocr_validation: true, value_template: "" }}]);
+  console.log(JSON.stringify(calls));
+}})();
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        self.assertEqual(json.loads(completed.stdout), [["HEIGHT"]])
+
+    def test_recalculate_all_is_available_for_manual_ocr_fields(self) -> None:
+        """An OCR-only form must provide a way to run its manual validation."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function pimcoreEditHasRuntimeTemplates")
+        end = source.index("async function recalculateAllPimcoreCreateFields", start)
+        availability = source[start:end]
+        node = Path(r"C:\\Program Files\\nodejs\\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the Pimcore OCR recalculation contract")
+        script = f"""
+const state = {{
+  pimcoreEditSchema: [{{ source: "HEIGHT", ocr_validation: true, value_template: "" }}],
+  pimcoreCreateSchema: [{{ source: "WIDTH", ocr_validation: true, value_template: "" }}],
+}};
+{availability}
+console.log(JSON.stringify([pimcoreEditHasRuntimeTemplates(), pimcoreCreateHasRuntimeTemplates()]));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        self.assertEqual(json.loads(completed.stdout), [True, True])
+
     def test_runtime_pimcore_create_modal_recalculates_and_reopens_for_missing_product(
         self,
     ) -> None:

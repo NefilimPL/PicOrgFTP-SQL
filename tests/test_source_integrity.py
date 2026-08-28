@@ -106,7 +106,7 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertEqual(css_match.group(1), "20260825-ocr-queue-activity-css1")
         self.assertEqual(runtime_js_match.group(1), "20260728-runtime-poll1")
         self.assertEqual(diagnostics_js_match.group(1), "20260825-ocr-overlay-layout2")
-        self.assertEqual(js_match.group(1), "20260825-ocr-slot-queue-live3")
+        self.assertEqual(js_match.group(1), "20260828-pimcore-ocr-validation2")
         self.assertNotEqual(css_match.group(1), js_match.group(1))
 
     def test_resource_detail_copy_explains_clients_and_latch_stages(self) -> None:
