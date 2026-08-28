@@ -2,16 +2,49 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import errno
+import hashlib
+import os
 import shutil
+import sqlite3
+import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from uuid import uuid4
 
 from .brand import SQLITE_FILENAME
+from .legacy_import import import_legacy_to_sqlite
+from .sqlite_coordination import database_maintenance, maintenance_state, retire_database
 
 
 _LEGACY_SQLITE_FILENAME = "picorgftp_sql.sqlite"
 _SQLITE_SIDECARS = ("-wal", "-shm")
+_LEGACY_DATA_FILENAMES = (
+    "config.json",
+    "lists.xlsx",
+    "web_users.json",
+    "web_history.json",
+    "file_index.json",
+)
+_TARGET_EXISTS = "target_exists"
+_ADOPTION_IN_PROGRESS = "adoption_in_progress"
+_MIXED_SOURCES = "mixed_sources"
+_SPLIT_FILE_SOURCES = "split_file_sources"
+_ADOPTION_FAILED = "adoption_failed"
+_PATH_LOCKS: dict[str, threading.Lock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+class _AdoptionInProgressError(RuntimeError):
+    """The target is currently guarded by another PicSyncra import action."""
+
+
+class _TargetAlreadyExistsError(FileExistsError):
+    """The target appeared while a staged database was being prepared."""
 
 
 @dataclass(frozen=True)
@@ -20,6 +53,9 @@ class MigrationResult:
     skipped: bool
     copied_paths: tuple[Path, ...] = ()
     error: str | None = None
+    source_kind: str = ""
+    archive_dir: Path | None = None
+    error_code: str | None = None
 
 
 def _unique_paths(paths: tuple[Path, ...]) -> tuple[Path, ...]:
@@ -73,3 +109,467 @@ def migrate_legacy_data(application_root: Path, data_root: Path) -> MigrationRes
     except OSError as exc:
         return MigrationResult(migrated=False, skipped=False, error=str(exc))
     return MigrationResult(migrated=True, skipped=False, copied_paths=copied_paths)
+
+
+def _legacy_sqlite_source(
+    application_root: Path,
+    data_root: Path,
+    legacy_database_path: Path | None = None,
+) -> Path | None:
+    configured = Path(legacy_database_path) if legacy_database_path else None
+    if (
+        configured is not None
+        and configured.name.casefold() == _LEGACY_SQLITE_FILENAME.casefold()
+        and configured.is_file()
+    ):
+        return configured
+    for root in _unique_paths((Path(data_root), Path(application_root))):
+        candidate = root / _LEGACY_SQLITE_FILENAME
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def adoption_database_path(database_path: Path) -> Path:
+    """Return the current database name when settings still point to the old one."""
+
+    candidate = Path(database_path)
+    if candidate.name.casefold() == _LEGACY_SQLITE_FILENAME.casefold():
+        return candidate.with_name(SQLITE_FILENAME)
+    return candidate
+
+
+def _legacy_file_source_sets(
+    application_root: Path, data_root: Path
+) -> tuple[tuple[Path, tuple[Path, ...]], ...]:
+    """Return complete per-directory source sets without combining directories."""
+
+    source_sets: list[tuple[Path, tuple[Path, ...]]] = []
+    for root in _unique_paths((Path(data_root), Path(application_root))):
+        sources = tuple(root / filename for filename in _LEGACY_DATA_FILENAMES if (root / filename).is_file())
+        if sources:
+            source_sets.append((root, sources))
+    return tuple(source_sets)
+
+
+def _sqlite_source_files(source: Path) -> tuple[Path, ...]:
+    return tuple(
+        path
+        for path in (source, *(source.with_name(source.name + suffix) for suffix in _SQLITE_SIDECARS))
+        if path.is_file()
+    )
+
+
+def _legacy_archive_dir(backup_root: Path) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return backup_root / "legacy-import" / f"{timestamp}-{uuid4().hex[:8]}"
+
+
+def _copy_sqlite_database(source: Path, target: Path) -> None:
+    connection = None
+    target_connection = None
+    try:
+        connection = sqlite3.connect(f"{source.resolve().as_uri()}?mode=ro", uri=True)
+        target_connection = sqlite3.connect(str(target))
+        connection.backup(target_connection)
+        integrity = target_connection.execute("PRAGMA integrity_check").fetchone()
+        if not integrity or str(integrity[0]).lower() != "ok":
+            raise sqlite3.DatabaseError("SQLite integrity check failed")
+    finally:
+        if target_connection is not None:
+            target_connection.close()
+        if connection is not None:
+            connection.close()
+
+
+@contextmanager
+def _locked_sqlite_source(source: Path) -> Iterator[None]:
+    """Prevent new legacy SQLite writes while its data is copied and archived."""
+
+    connection = sqlite3.connect(
+        f"{source.resolve().as_uri()}?mode=rw",
+        uri=True,
+        timeout=5,
+    )
+    try:
+        connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute("BEGIN IMMEDIATE")
+        yield
+    finally:
+        try:
+            connection.rollback()
+        except sqlite3.Error:
+            pass
+        connection.close()
+
+
+def _validate_sqlite_database(path: Path) -> None:
+    connection = None
+    try:
+        connection = sqlite3.connect(str(path))
+        integrity = connection.execute("PRAGMA integrity_check").fetchone()
+        if not integrity or str(integrity[0]).lower() != "ok":
+            raise sqlite3.DatabaseError("SQLite integrity check failed")
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _copy_sources_to_archive(
+    sources: tuple[Path, ...],
+    archive_dir: Path,
+    *,
+    sqlite_source: Path | None = None,
+    sqlite_snapshot: Path | None = None,
+) -> None:
+    archive_dir.mkdir(parents=True, exist_ok=False)
+    if sqlite_source is not None:
+        if sqlite_snapshot is None:
+            raise ValueError("Brakuje zweryfikowanego snapshotu SQLite do archiwizacji.")
+        destination = archive_dir / sqlite_source.name
+        shutil.copy2(sqlite_snapshot, destination)
+        _validate_sqlite_database(destination)
+        return
+    for source in sources:
+        destination = archive_dir / source.name
+        if destination.exists():
+            destination = archive_dir / f"{source.stem}-{uuid4().hex[:8]}{source.suffix}"
+        shutil.copy2(source, destination)
+        if destination.stat().st_size != source.stat().st_size:
+            raise OSError(f"Nie udalo sie zweryfikowac kopii archiwalnej: {source.name}")
+
+
+def _handover_sources_to_archive(
+    sources: tuple[Path, ...],
+    archive_dir: Path,
+    *,
+    sqlite_source: bool,
+) -> str | None:
+    """Move originals to the archive without a copy-then-delete race."""
+
+    errors: list[str] = []
+    source_files = tuple(source for source in sources if source.is_file())
+    if not source_files:
+        return "Nie znaleziono zrodlowych plikow do przeniesienia po imporcie."
+    destination_root = archive_dir / "legacy-source-files" if sqlite_source else archive_dir
+    destination_root.mkdir(parents=True, exist_ok=True)
+    changed_files = [
+        source.name
+        for source in source_files
+        if not sqlite_source
+        and (destination := destination_root / source.name).is_file()
+        and not _files_match(source, destination)
+    ]
+    try:
+        same_volume = all(
+            source.stat().st_dev == destination_root.stat().st_dev for source in source_files
+        )
+    except OSError as exc:
+        return f"Nie udalo sie sprawdzic plikow przed przeniesieniem: {exc}"
+    quarantine_dir: Path | None = None
+    if not same_volume:
+        quarantine_dir = source_files[0].parent / f".picsyncra-legacy-{uuid4().hex}"
+        quarantine_dir.mkdir()
+    moved_files: list[tuple[Path, Path]] = []
+    for source in source_files:
+        destination = (
+            destination_root / source.name
+            if quarantine_dir is None
+            else quarantine_dir / source.name
+        )
+        try:
+            os.replace(source, destination)
+            moved_files.append((source, destination))
+        except FileNotFoundError:
+            errors.append(f"{source.name}: plik zniknal przed przeniesieniem")
+        except OSError as exc:
+            errors.append(f"{source.name}: {exc}")
+    if quarantine_dir is not None and moved_files:
+        for _source, staged in moved_files:
+            destination = destination_root / staged.name
+            try:
+                shutil.copy2(staged, destination)
+                if destination.stat().st_size != staged.stat().st_size:
+                    raise OSError("nieudana weryfikacja kopii po przeniesieniu")
+            except OSError as exc:
+                errors.append(f"{staged.name}: {exc}")
+        if os.name == "nt" and not errors:
+            for _source, staged in moved_files:
+                try:
+                    staged.unlink()
+                except OSError as exc:
+                    errors.append(f"{staged.name}: {exc}")
+            try:
+                quarantine_dir.rmdir()
+            except OSError as exc:
+                errors.append(f"{quarantine_dir.name}: {exc}")
+        elif os.name != "nt":
+            errors.append(
+                f"{quarantine_dir.name}: zachowano kwarantanne dla bezpieczenstwa danych"
+            )
+    if changed_files:
+        errors.append(
+            "Zrodlo zmienilo sie podczas importu; najnowsza wersja zostala przeniesiona do archiwum: "
+            + ", ".join(changed_files)
+        )
+    return "; ".join(errors) or None
+
+
+def _files_match(first: Path, second: Path) -> bool:
+    try:
+        if first.stat().st_size != second.stat().st_size:
+            return False
+        return hashlib.sha256(first.read_bytes()).digest() == hashlib.sha256(second.read_bytes()).digest()
+    except OSError:
+        return False
+
+
+@contextmanager
+def _exclusive_path_lock(
+    *,
+    backup_root: Path,
+    scope: str,
+    protected_path: Path,
+) -> Iterator[None]:
+    """Use process- and OS-level locks that are released when a process exits."""
+
+    canonical_path = str(protected_path.resolve()).casefold()
+    lock_key = f"{scope}:{canonical_path}"
+    digest = hashlib.sha256(lock_key.encode("utf-8")).hexdigest()
+    lock_path = Path(backup_root) / "legacy-import" / ".locks" / f"{scope}-{digest}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _PATH_LOCKS_GUARD:
+        local_lock = _PATH_LOCKS.setdefault(lock_key, threading.Lock())
+    with local_lock:
+        descriptor = os.open(str(lock_path), os.O_RDWR | os.O_CREAT)
+        locked = False
+        try:
+            if os.fstat(descriptor).st_size == 0:
+                os.write(descriptor, b"0")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except OSError as exc:
+                if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                    raise _AdoptionInProgressError(
+                        "Trwa juz wczytywanie starej konfiguracji dla tej bazy."
+                    ) from exc
+                raise
+            yield
+        finally:
+            try:
+                if locked:
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    if os.name == "nt":
+                        import msvcrt
+
+                        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
+
+def _publish_staged_target(staging: Path, target: Path) -> None:
+    """Publish without replacing a target created by another process."""
+
+    try:
+        os.link(staging, target)
+    except FileExistsError as exc:
+        raise _TargetAlreadyExistsError("Docelowa baza PicSyncra juz istnieje.") from exc
+
+
+def adopt_legacy_data(
+    *,
+    application_root: Path,
+    data_root: Path,
+    database_path: Path,
+    backup_root: Path,
+    legacy_database_path: Path | None = None,
+    finalize: Callable[[Path], None] | None = None,
+) -> MigrationResult:
+    """Adopt historical data into one PicSyncra SQLite database and archive sources."""
+
+    sqlite_source = _legacy_sqlite_source(
+        application_root,
+        data_root,
+        legacy_database_path,
+    )
+    file_source_sets = _legacy_file_source_sets(application_root, data_root)
+    if len(file_source_sets) > 1:
+        return MigrationResult(
+            migrated=False,
+            skipped=False,
+            error="Znaleziono stare pliki danych w wiecej niz jednej lokalizacji.",
+            error_code=_SPLIT_FILE_SOURCES,
+        )
+    file_sources = file_source_sets[0][1] if file_source_sets else ()
+    if sqlite_source is None and not file_sources:
+        return MigrationResult(migrated=False, skipped=True)
+    if sqlite_source is not None and file_sources:
+        return MigrationResult(
+            migrated=False,
+            skipped=False,
+            error="Znaleziono jednoczesnie stara baze SQLite i pliki starej konfiguracji.",
+            error_code=_MIXED_SOURCES,
+        )
+
+    target = Path(database_path).resolve()
+    resume_interrupted_adoption = (
+        sqlite_source is not None
+        and target.exists()
+        and maintenance_state(sqlite_source) in {"active", "retired"}
+    )
+    if target.exists() and not resume_interrupted_adoption:
+        return MigrationResult(
+            migrated=False,
+            skipped=False,
+            error="Docelowa baza PicSyncra juz istnieje.",
+            error_code=_TARGET_EXISTS,
+        )
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    backup_root = Path(backup_root).resolve()
+    archive_dir = _legacy_archive_dir(backup_root)
+    source_kind = "sqlite" if sqlite_source is not None else "files"
+    sources = _sqlite_source_files(sqlite_source) if sqlite_source else file_sources
+    source_lock_path = sqlite_source if sqlite_source is not None else file_source_sets[0][0]
+    source_lock_scope = "sqlite-source" if sqlite_source is not None else "files-source"
+    target_published = False
+    cleanup_error: str | None = None
+    try:
+        with _exclusive_path_lock(
+            backup_root=backup_root,
+            scope=source_lock_scope,
+            protected_path=source_lock_path,
+        ):
+            if sqlite_source is not None and not sqlite_source.is_file():
+                return MigrationResult(migrated=False, skipped=True)
+            if sqlite_source is None and not all(source.is_file() for source in file_sources):
+                return MigrationResult(migrated=False, skipped=True)
+            with _exclusive_path_lock(
+                backup_root=backup_root,
+                scope="target",
+                protected_path=target,
+            ):
+                if target.exists() and not resume_interrupted_adoption:
+                    return MigrationResult(
+                        migrated=False,
+                        skipped=False,
+                        error="Docelowa baza PicSyncra juz istnieje.",
+                        error_code=_TARGET_EXISTS,
+                )
+                with TemporaryDirectory(prefix=".picsyncra-legacy-", dir=target.parent) as temporary_dir:
+                    staging = Path(temporary_dir) / target.name
+                    if sqlite_source is not None:
+                        with database_maintenance(sqlite_source):
+                            if resume_interrupted_adoption:
+                                _validate_sqlite_database(target)
+                                _copy_sources_to_archive(
+                                    sources,
+                                    archive_dir,
+                                    sqlite_source=sqlite_source,
+                                    sqlite_snapshot=target,
+                                )
+                                if finalize is not None:
+                                    finalize(target)
+                            else:
+                                with _locked_sqlite_source(sqlite_source):
+                                    _copy_sqlite_database(sqlite_source, staging)
+                                    _copy_sources_to_archive(
+                                        sources,
+                                        archive_dir,
+                                        sqlite_source=sqlite_source,
+                                        sqlite_snapshot=staging,
+                                    )
+                                    _publish_staged_target(staging, target)
+                                    target_published = True
+                                    if finalize is not None:
+                                        finalize(target)
+                            retire_database(sqlite_source)
+                        cleanup_error = _handover_sources_to_archive(
+                            _sqlite_source_files(sqlite_source),
+                            archive_dir,
+                            sqlite_source=True,
+                        )
+                        residual_sqlite_files = _sqlite_source_files(sqlite_source)
+                        if residual_sqlite_files:
+                            residual_error = _handover_sources_to_archive(
+                                residual_sqlite_files,
+                                archive_dir,
+                                sqlite_source=True,
+                            )
+                            residual_names = ", ".join(
+                                source.name for source in _sqlite_source_files(sqlite_source)
+                            )
+                            residual_warning = (
+                                f"Pozostaly zrodlowe pliki SQLite: {residual_names}"
+                                if residual_names
+                                else ""
+                            )
+                            cleanup_error = "; ".join(
+                                error
+                                for error in (cleanup_error, residual_error, residual_warning)
+                                if error
+                            ) or None
+                    else:
+                        staging_sources = Path(temporary_dir) / "legacy-files"
+                        staging_sources.mkdir()
+                        for source in file_sources:
+                            shutil.copy2(source, staging_sources / source.name)
+                        import_legacy_to_sqlite(str(staging_sources), str(staging))
+                        _validate_sqlite_database(staging)
+                        _copy_sources_to_archive(sources, archive_dir)
+                        _publish_staged_target(staging, target)
+                        target_published = True
+                        if finalize is not None:
+                            finalize(target)
+                        cleanup_error = _handover_sources_to_archive(
+                            sources,
+                            archive_dir,
+                            sqlite_source=False,
+                        )
+    except _AdoptionInProgressError as exc:
+        return MigrationResult(
+            migrated=False,
+            skipped=False,
+            error=str(exc),
+            error_code=_ADOPTION_IN_PROGRESS,
+        )
+    except _TargetAlreadyExistsError as exc:
+        return MigrationResult(
+            migrated=False,
+            skipped=False,
+            error=str(exc),
+            error_code=_TARGET_EXISTS,
+        )
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        if target_published:
+            try:
+                target.unlink()
+            except OSError:
+                pass
+        return MigrationResult(
+            migrated=False,
+            skipped=False,
+            error=str(exc),
+            error_code=_ADOPTION_FAILED,
+        )
+    return MigrationResult(
+        migrated=True,
+        skipped=False,
+        copied_paths=(target,),
+        error=cleanup_error,
+        source_kind=source_kind,
+        archive_dir=archive_dir,
+    )

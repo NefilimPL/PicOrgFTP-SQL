@@ -8523,10 +8523,10 @@ function importLegacyDataButton() {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "secondary-button";
-  button.textContent = "Importuj stare dane do SQLite";
+  button.textContent = "Wczytaj dane ze starej konfiguracji";
   button.addEventListener("click", async () => {
     button.disabled = true;
-    settingsStatus.textContent = "Importowanie danych legacy...";
+    settingsStatus.textContent = "Wczytywanie danych starej konfiguracji...";
     try {
       const payload = await requestJson("/api/settings/import-legacy", {
         method: "POST",
@@ -8535,10 +8535,13 @@ function importLegacyDataButton() {
       if (payload.settings) {
         state.settings = payload.settings;
       }
-      settingsStatus.textContent = payload.message || "Import zakonczony.";
+      const completionMessage = payload.message || "Wczytywanie danych zakonczone.";
+      settingsStatus.textContent = payload.warning
+        ? `${completionMessage} Ostrzezenie: ${payload.warning}`
+        : completionMessage;
       renderSettings();
     } catch (error) {
-      settingsStatus.textContent = error.message || "Nie udalo sie zaimportowac danych.";
+      settingsStatus.textContent = error.message || "Nie udalo sie wczytac danych starej konfiguracji.";
     } finally {
       button.disabled = false;
     }

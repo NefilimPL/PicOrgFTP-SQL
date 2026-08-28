@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import tempfile
 from typing import Any
 
 from . import common, settings
@@ -63,6 +64,26 @@ def _settings_path() -> Path:
     return Path(settings.BASE_DIR_SETTINGS_PATH)
 
 
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    """Publish bootstrap settings without exposing a partial JSON document."""
+
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=".picsyncra-settings-",
+        suffix=".json.tmp",
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=4, ensure_ascii=False)
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+
+
 def load_bootstrap_settings() -> dict[str, Any]:
     """Load startup-only settings from ``local_settings.json``."""
 
@@ -95,7 +116,7 @@ def save_bootstrap_settings(updates: dict[str, object]) -> dict[str, Any]:
     )
     path = _settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=4, ensure_ascii=False), encoding="utf-8")
+    _write_json_atomic(path, data)
     from .data_store import reset_active_store_cache
 
     reset_active_store_cache()

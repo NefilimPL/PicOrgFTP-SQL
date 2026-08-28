@@ -42,6 +42,7 @@ from .sqlite_connection import (
     configure_connection,
     try_enable_wal,
 )
+from .sqlite_coordination import database_activity
 
 SCHEMA_VERSION = 17
 _WAL_FALLBACK_LOGGER = logging.getLogger("picsyncra.sqlite.wal")
@@ -1219,12 +1220,13 @@ class SqliteStore:
     def connection(self):
         """Yield a SQLite connection and always close it afterwards."""
 
-        conn = self.connect()
-        try:
-            with conn:
-                yield conn
-        finally:
-            conn.close()
+        with database_activity(self.path):
+            conn = self.connect()
+            try:
+                with conn:
+                    yield conn
+            finally:
+                conn.close()
 
     def initialize(self) -> None:
         """Create schema tables when the database is first used."""

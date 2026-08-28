@@ -88,7 +88,7 @@ from ..services.ocr_values import (
     ocr_values_match,
 )
 from ..ocr_settings import OCR_SETTINGS_KEY, normalize_ocr_settings
-from ..legacy_import import import_legacy_to_sqlite
+from ..legacy_migration import adopt_legacy_data, adoption_database_path
 from ..logging_utils import log_error
 from ..email_settings import EMAIL_SETTINGS_KEY
 from ..entra_secret_monitor import entra_secret_status, refresh_entra_secret_status
@@ -7354,30 +7354,70 @@ def create_app() -> FastAPI:
     @app.post("/api/settings/import-legacy")
     async def settings_import_legacy(request: Request) -> JSONResponse:
         _require_admin(request)
-        database_path = storage_settings.resolve_sqlite_path()
+        bootstrap_settings = storage_settings.load_bootstrap_settings()
+        database_path = storage_settings.resolve_sqlite_path(bootstrap_settings)
         if not database_path:
             raise HTTPException(status_code=400, detail="Nie ustawiono sciezki bazy SQLite.")
+        adopted_database_path = adoption_database_path(Path(database_path))
+
+        def activate_adopted_database(target_path: Path) -> None:
+            storage_settings.save_bootstrap_settings(
+                {
+                    storage_settings.DATA_MODE_KEY: storage_settings.DATA_MODE_SQLITE,
+                    storage_settings.DATABASE_LOCATION_MODE_KEY: bootstrap_settings.get(
+                        storage_settings.DATABASE_LOCATION_MODE_KEY
+                    ),
+                    storage_settings.DATABASE_PATH_KEY: str(target_path),
+                }
+            )
+
         try:
             result = await run_in_threadpool(
-                import_legacy_to_sqlite,
-                legacy_dir=settings.AC,
-                database_path=database_path,
+                adopt_legacy_data,
+                application_root=Path(settings.BASE_DIR_SETTINGS_PATH).parent,
+                data_root=Path(settings.AC),
+                database_path=adopted_database_path,
+                backup_root=Path(storage_settings.resolve_backup_dir()),
+                legacy_database_path=Path(database_path),
+                finalize=activate_adopted_database,
             )
-            storage_settings.save_bootstrap_settings(
-                {storage_settings.DATA_MODE_KEY: storage_settings.DATA_MODE_SQLITE}
-            )
+            if not result.migrated:
+                status_code = 404 if result.skipped else 409 if result.error_code in {
+                    "target_exists",
+                    "adoption_in_progress",
+                    "mixed_sources",
+                    "split_file_sources",
+                } else 500
+                raise HTTPException(
+                    status_code=status_code,
+                    detail=result.error or "Nie znaleziono danych starej konfiguracji.",
+                )
             data_store.reset_active_store_cache()
             config.initialize_config(interactive=False)
+        except HTTPException:
+            raise
         except Exception as exc:
             log_error(f"WEB legacy import failed: {exc}\n{traceback.format_exc()}")
             raise HTTPException(
                 status_code=500,
-                detail=f"Nie udalo sie zaimportowac danych legacy: {exc}",
+                detail=f"Nie udalo sie wczytac danych starej konfiguracji: {exc}",
             ) from exc
         app.state.runtime_info = _runtime_info()
-        result["settings"] = settings_snapshot()
-        result["message"] = "Zaimportowano stare dane do SQLite i wlaczono tryb SQLite."
-        return JSONResponse(result)
+        return JSONResponse(
+            {
+                "ok": True,
+                "source_kind": result.source_kind,
+                "archive_dir": str(result.archive_dir) if result.archive_dir else "",
+                "database_path": str(adopted_database_path),
+                "warning": result.error or "",
+                "settings": settings_snapshot(),
+                "message": (
+                    "Wczytano dane starej konfiguracji do SQLite."
+                    if result.error
+                    else "Wczytano dane starej konfiguracji do SQLite i przeniesiono zrodla do BACKUP."
+                ),
+            }
+        )
 
     @app.post("/api/settings/sqlite/repair")
     async def settings_sqlite_repair(request: Request) -> JSONResponse:

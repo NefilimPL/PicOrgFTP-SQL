@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 import zipfile
 import io
+from pathlib import Path
 
 os.environ.setdefault("PICSYNCRA_HEADLESS", "1")
 os.environ.setdefault("PICSYNCRA_WEB_AUTH", "0")
@@ -24,6 +25,8 @@ else:
 
 from picsyncra import web_data
 from picsyncra import observability
+from picsyncra import legacy_migration
+from picsyncra.legacy_migration import MigrationResult
 from picsyncra.web import app as web_app
 
 
@@ -782,18 +785,46 @@ class WebSmokeCiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), payload)
 
-    def test_legacy_import_endpoint_switches_to_sqlite(self) -> None:
+    def test_legacy_import_endpoint_adopts_old_sqlite_into_picsyncra_path(self) -> None:
         client = TestClient(web_app.app)
         admin = {"username": "admin", "role": "admin"}
+        adoption = MigrationResult(
+            migrated=True,
+            skipped=False,
+            copied_paths=(Path("C:/Data/picsyncra.sqlite"),),
+            source_kind="sqlite",
+            archive_dir=Path("C:/Data/BACKUP/legacy-import/20260828-120000"),
+        )
+
+        def adopt_and_finalize(**kwargs):
+            kwargs["finalize"](kwargs["database_path"])
+            return adoption
+
         with (
             patch.object(web_app.settings, "AC", "C:/Photos"),
+            patch.object(web_app.settings, "BASE_DIR_SETTINGS_PATH", "C:/Program/local_settings.json"),
             patch.object(web_app, "_require_admin", return_value=admin),
-            patch.object(web_app.storage_settings, "resolve_sqlite_path", return_value="C:/Data/app.sqlite"),
+            patch.object(
+                web_app.storage_settings,
+                "resolve_sqlite_path",
+                return_value=str(Path("C:/Data") / legacy_migration._LEGACY_SQLITE_FILENAME),
+            ),
+            patch.object(
+                web_app.storage_settings,
+                "resolve_backup_dir",
+                return_value="C:/Data/BACKUP",
+            ),
+            patch.object(
+                web_app.storage_settings,
+                "load_bootstrap_settings",
+                return_value={"database_location_mode": "custom"},
+            ),
             patch.object(
                 web_app,
-                "import_legacy_to_sqlite",
-                return_value={"ok": True, "entries": 1},
-            ) as importer,
+                "adopt_legacy_data",
+                side_effect=adopt_and_finalize,
+                create=True,
+            ) as adopter,
             patch.object(web_app.storage_settings, "save_bootstrap_settings") as save_bootstrap,
             patch.object(web_app.data_store, "reset_active_store_cache") as reset_store,
             patch.object(web_app.config, "initialize_config"),
@@ -802,13 +833,27 @@ class WebSmokeCiTests(unittest.TestCase):
             response = client.post("/api/settings/import-legacy")
 
         self.assertEqual(response.status_code, 200)
-        importer.assert_called_once_with(
-            legacy_dir="C:/Photos",
-            database_path="C:/Data/app.sqlite",
+        adopter.assert_called_once()
+        adoption_call = adopter.call_args.kwargs
+        self.assertEqual(adoption_call["application_root"], Path("C:/Program"))
+        self.assertEqual(adoption_call["data_root"], Path("C:/Photos"))
+        self.assertEqual(adoption_call["database_path"], Path("C:/Data/picsyncra.sqlite"))
+        self.assertEqual(adoption_call["backup_root"], Path("C:/Data/BACKUP"))
+        self.assertEqual(
+            adoption_call["legacy_database_path"],
+            Path("C:/Data") / legacy_migration._LEGACY_SQLITE_FILENAME,
         )
-        save_bootstrap.assert_called_once_with({"data_mode": "sqlite"})
+        self.assertTrue(callable(adoption_call["finalize"]))
+        save_bootstrap.assert_called_once_with(
+            {
+                "data_mode": "sqlite",
+                "database_location_mode": "custom",
+                "database_path": "C:\\Data\\picsyncra.sqlite",
+            }
+        )
         reset_store.assert_called_once()
         self.assertEqual(response.json()["settings"]["data_mode"], "sqlite")
+        self.assertEqual(response.json()["source_kind"], "sqlite")
 
     def test_sqlite_repair_endpoint_returns_summary(self) -> None:
         client = TestClient(web_app.app)

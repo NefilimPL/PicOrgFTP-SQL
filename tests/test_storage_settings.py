@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from picsyncra import storage_settings
 
 
@@ -75,3 +77,26 @@ def test_save_bootstrap_settings_merges_existing_values(tmp_path: Path) -> None:
     assert saved["base_dir_override"] == "C:/Photos"
     assert saved["data_mode"] == "sqlite"
     assert saved["database_location_mode"] == "exe_dir"
+
+
+def test_save_bootstrap_settings_keeps_the_previous_file_if_publish_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The activation callback cannot leave a partially written configuration."""
+
+    settings_file = tmp_path / "local_settings.json"
+    original = {"language": "pl", "data_mode": "legacy"}
+    settings_file.write_text(json.dumps(original), encoding="utf-8")
+
+    def fail_replace(*_args) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(storage_settings.os, "replace", fail_replace)
+
+    with patch.object(
+        storage_settings.settings, "BASE_DIR_SETTINGS_PATH", str(settings_file)
+    ):
+        with pytest.raises(OSError, match="disk full"):
+            storage_settings.save_bootstrap_settings({"data_mode": "sqlite"})
+
+    assert json.loads(settings_file.read_text(encoding="utf-8")) == original

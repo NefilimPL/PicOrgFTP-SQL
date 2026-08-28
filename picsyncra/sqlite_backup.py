@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .sqlite_coordination import database_activity
+
 WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 SECRET_KEYWORDS = ("password", "pass", "secret", "token", "hash", "api_key")
 
@@ -82,11 +84,12 @@ def resolve_backup_path(backup_path: str, backup_dirs: Iterable[str] | str) -> P
 def _schema_version(path: str) -> int:
     conn = None
     try:
-        conn = sqlite3.connect(path)
-        row = conn.execute(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_version"
-        ).fetchone()
-        return int(row[0] or 0) if row else 0
+        with database_activity(path):
+            conn = sqlite3.connect(path)
+            row = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version"
+            ).fetchone()
+            return int(row[0] or 0) if row else 0
     except Exception:
         return 0
     finally:
@@ -97,9 +100,10 @@ def _schema_version(path: str) -> int:
 def _integrity_check(path: str) -> str:
     conn = None
     try:
-        conn = sqlite3.connect(path)
-        row = conn.execute("PRAGMA integrity_check").fetchone()
-        return str(row[0] if row else "")
+        with database_activity(path):
+            conn = sqlite3.connect(path)
+            row = conn.execute("PRAGMA integrity_check").fetchone()
+            return str(row[0] if row else "")
     except Exception as exc:
         return str(exc)
     finally:
@@ -125,9 +129,10 @@ def create_backup(
     src = None
     dst = None
     try:
-        src = sqlite3.connect(str(source))
-        dst = sqlite3.connect(str(target))
-        src.backup(dst)
+        with database_activity(source):
+            src = sqlite3.connect(str(source))
+            dst = sqlite3.connect(str(target))
+            src.backup(dst)
     except sqlite3.Error:
         method = "raw_copy"
         target.write_bytes(source.read_bytes())
@@ -321,11 +326,12 @@ def diff_databases(
         "web_history",
     ]
     safe_backup_path = resolve_backup_path(backup_path, allowed_backup_dirs)
-    with sqlite3.connect(active_path) as active, sqlite3.connect(str(safe_backup_path)) as backup:
-        active_counts = {table: _table_count(active, table) for table in tables}
-        backup_counts = {table: _table_count(backup, table) for table in tables}
-        active_config = _config_rows(active)
-        backup_config = _config_rows(backup)
+    with database_activity(active_path):
+        with sqlite3.connect(active_path) as active, sqlite3.connect(str(safe_backup_path)) as backup:
+            active_counts = {table: _table_count(active, table) for table in tables}
+            backup_counts = {table: _table_count(backup, table) for table in tables}
+            active_config = _config_rows(active)
+            backup_config = _config_rows(backup)
     config_added = sorted(set(backup_config) - set(active_config))
     config_removed = sorted(set(active_config) - set(backup_config))
     config_changed = sorted(

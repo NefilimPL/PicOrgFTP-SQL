@@ -8,6 +8,7 @@ import re
 import tempfile
 import traceback
 import tokenize
+from pathlib import Path
 
 from .common import *  # noqa: F401,F403
 from .excel_utils import (
@@ -40,7 +41,7 @@ from .database import connect_db
 from .file_index import LocalFileIndex
 from .config import save_config
 from . import config, localization, settings, common, encryption, storage_settings, data_store
-from .legacy_import import import_legacy_to_sqlite
+from .legacy_migration import adopt_legacy_data, adoption_database_path
 from .settings import BW, EXCEL_SHEETS, AN, l
 from .product_state import (
     ProductIdentity,
@@ -9030,32 +9031,50 @@ class App(BU.Tk):
                 }
             )
 
-        def _import_legacy_to_sqlite_desktop():
+        def _adopt_legacy_data_desktop():
             try:
-                database_path = _selected_sqlite_path()
-                if not database_path:
+                configured_database_path = _selected_sqlite_path()
+                if not configured_database_path:
                     O.showwarning(WARNING_LABEL, "Nie ustawiono sciezki bazy SQLite.")
                     return
-                result = import_legacy_to_sqlite(
-                    legacy_dir=settings.AC,
+                database_path = adoption_database_path(Path(configured_database_path))
+
+                def _activate_adopted_database(target_path: Path) -> None:
+                    storage_settings.save_bootstrap_settings(
+                        {
+                            storage_settings.DATA_MODE_KEY: storage_settings.DATA_MODE_SQLITE,
+                            storage_settings.DATABASE_LOCATION_MODE_KEY: database_location_mode_var.get(),
+                            storage_settings.DATABASE_PATH_KEY: str(target_path),
+                        }
+                    )
+
+                result = adopt_legacy_data(
+                    application_root=Path(settings.BASE_DIR_SETTINGS_PATH).parent,
+                    data_root=Path(settings.AC),
                     database_path=database_path,
+                    backup_root=Path(storage_settings.resolve_backup_dir()),
+                    legacy_database_path=Path(configured_database_path),
+                    finalize=_activate_adopted_database,
                 )
-                storage_settings.save_bootstrap_settings(
-                    {
-                        storage_settings.DATA_MODE_KEY: storage_settings.DATA_MODE_SQLITE,
-                        storage_settings.DATABASE_LOCATION_MODE_KEY: database_location_mode_var.get(),
-                        storage_settings.DATABASE_PATH_KEY: database_path_var.get(),
-                    }
-                )
+                if not result.migrated:
+                    O.showwarning(
+                        SETTINGS_LABEL,
+                        result.error or "Nie znaleziono danych starej konfiguracji.",
+                    )
+                    return
+                database_path_var.set(str(database_path))
                 data_store.reset_active_store_cache()
                 config.initialize_config(interactive=False)
-                O.showinfo(
-                    SETTINGS_LABEL,
-                    "Importuj stare dane do SQLite: zakonczono. "
-                    f"Wpisy: {result.get('entries', 0)}, uzytkownicy: {result.get('users', 0)}.",
+                message = (
+                    "Wczytano dane starej konfiguracji do SQLite. "
+                    f"Zrodlo: {result.source_kind}. Archiwum: {result.archive_dir}."
                 )
+                if result.error:
+                    O.showwarning(SETTINGS_LABEL, f"{message}\n\nOstrzezenie: {result.error}")
+                else:
+                    O.showinfo(SETTINGS_LABEL, message)
             except E as exc:
-                O.showerror(AK, f"Nie udalo sie zaimportowac danych do SQLite:\n{exc}")
+                O.showerror(AK, f"Nie udalo sie wczytac danych starej konfiguracji:\n{exc}")
 
         def _set_system_state(state):
             nonlocal system_unlocked
@@ -9069,7 +9088,7 @@ class App(BU.Tk):
                 database_location_mode_combo.configure(state="readonly")
                 database_path_entry.configure(state=X)
                 database_path_btn.configure(state=X)
-                import_legacy_btn.configure(state=X)
+                adopt_legacy_btn.configure(state=X)
             else:
                 app_secret_var.set(app_secret_mask)
                 app_secret_entry.configure(state=i_, show=Y)
@@ -9079,7 +9098,7 @@ class App(BU.Tk):
                 database_location_mode_combo.configure(state=V)
                 database_path_entry.configure(state=i_)
                 database_path_btn.configure(state=V)
-                import_legacy_btn.configure(state=V)
+                adopt_legacy_btn.configure(state=V)
 
         def _unlock_system_settings():
             if is_admin():
@@ -9171,13 +9190,13 @@ class App(BU.Tk):
             system_tab, text=CHOOSE_LABEL, command=_choose_database_path, state=V
         )
         database_path_btn.grid(row=8, column=2, padx=5, pady=4, sticky="w")
-        import_legacy_btn = C.Button(
+        adopt_legacy_btn = C.Button(
             system_tab,
-            text="Importuj stare dane do SQLite",
-            command=_import_legacy_to_sqlite_desktop,
+            text="Wczytaj dane ze starej konfiguracji",
+            command=_adopt_legacy_data_desktop,
             state=V,
         )
-        import_legacy_btn.grid(row=9, column=1, columnspan=2, padx=5, pady=(4, 8), sticky="w")
+        adopt_legacy_btn.grid(row=9, column=1, columnspan=2, padx=5, pady=(4, 8), sticky="w")
         file_index_toggle = C.Checkbutton(
             system_tab,
             text=LANG.get(

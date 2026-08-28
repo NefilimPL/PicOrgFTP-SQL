@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .sqlite_backup import create_backup
+from .sqlite_coordination import database_activity
 from .sqlite_store import SCHEMA_VERSION, SqliteStore
 
 
@@ -35,17 +36,19 @@ TIMESTAMP_COLUMNS = (
 
 
 def integrity_check(database_path: str) -> str:
-    with sqlite3.connect(database_path) as conn:
-        row = conn.execute("PRAGMA integrity_check").fetchone()
+    with database_activity(database_path):
+        with sqlite3.connect(database_path) as conn:
+            row = conn.execute("PRAGMA integrity_check").fetchone()
     return str(row[0] if row else "")
 
 
 def current_schema_version(database_path: str) -> int:
     try:
-        with sqlite3.connect(database_path) as conn:
-            row = conn.execute(
-                "SELECT COALESCE(MAX(version), 0) FROM schema_version"
-            ).fetchone()
+        with database_activity(database_path):
+            with sqlite3.connect(database_path) as conn:
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(version), 0) FROM schema_version"
+                ).fetchone()
         return int(row[0] or 0) if row else 0
     except sqlite3.Error:
         return 0
@@ -120,7 +123,7 @@ def rebuild_file_index_segments(store: SqliteStore) -> int:
     return store.save_file_index_segments(snapshot)
 
 
-def repair_sqlite_database(database_path: str, backup_dir: str) -> dict[str, Any]:
+def _repair_sqlite_database(database_path: str, backup_dir: str) -> dict[str, Any]:
     db_path = Path(database_path)
     if not db_path.exists():
         raise FileNotFoundError(str(db_path))
@@ -160,3 +163,10 @@ def repair_sqlite_database(database_path: str, backup_dir: str) -> dict[str, Any
         "removed_tables": removed_tables,
         "warnings": [],
     }
+
+
+def repair_sqlite_database(database_path: str, backup_dir: str) -> dict[str, Any]:
+    """Repair one database while respecting an ongoing legacy handover."""
+
+    with database_activity(database_path):
+        return _repair_sqlite_database(database_path, backup_dir)
