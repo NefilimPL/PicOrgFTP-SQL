@@ -49,6 +49,7 @@ const state = {
   pimcoreCreateSchema: [],
   pimcoreCreateIntegrations: { sql_profiles: [] },
   pimcoreCreateIntegrationContextId: "",
+  ocrEnabledSlots: [],
   pimcoreRuntimeEnabled: false,
   pimcoreExistingObject: null,
   pimcoreEditObjectId: 0,
@@ -7957,6 +7958,9 @@ async function loadBootstrap(options = {}) {
   };
   rerenderPanelTimestampViews();
   state.csrfToken = payload.csrf_token || state.csrfToken || "";
+  state.ocrEnabledSlots = Array.isArray(payload.ocr_enabled_slots)
+    ? payload.ocr_enabled_slots.map(String)
+    : state.ocrEnabledSlots;
   state.defaultSlotFit = Boolean(payload.auto_content_fit);
   state.processing = payload.processing || state.processing || {};
   state.security = payload.security || state.security || {};
@@ -9767,6 +9771,16 @@ function pimcoreSlotTokens() {
   return tokens;
 }
 
+function pimcoreOcrSlotTokens() {
+  const configuredSlots = Array.isArray(state.settings?.ocr?.enabled_slots)
+    ? state.settings.ocr.enabled_slots
+    : state.ocrEnabledSlots;
+  const enabledSlots = new Set(configuredSlots.map(String));
+  return Object.fromEntries(
+    Object.entries(pimcoreSlotTokens()).filter(([prefix]) => enabledSlots.has(prefix))
+  );
+}
+
 function renderPimcoreTemplateTokens(row) {
   pimcoreTemplateSources.textContent = "";
   pimcoreTemplateFunctions.textContent = "";
@@ -11128,10 +11142,13 @@ function populatePimcoreRuntimeForm(
         input.addEventListener("input", () => {
           if (mapping.ocr_validation) input.value = input.value.replace(/,/g, ".");
           updatePimcoreRuntimeFieldChangeState(input);
+          if (mapping.ocr_validation) {
+            schedulePimcoreOcrFieldValidation(form, schema, mapping.source);
+          }
         });
         if (mapping.ocr_validation) {
           input.addEventListener("change", () => {
-            validatePimcoreOcrFields(form, schema, [mapping.source]).catch(() => {});
+            schedulePimcoreOcrFieldValidation(form, schema, mapping.source, 0);
           });
         }
         fieldRow.className = "pimcore-runtime-field-row";
@@ -11162,6 +11179,65 @@ function populatePimcoreRuntimeForm(
       }
     }
   }
+}
+
+const pimcoreOcrValidationTimers = new WeakMap();
+const pimcoreOcrValidationRevisions = new WeakMap();
+
+function pimcoreOcrValidationState(form) {
+  let timers = pimcoreOcrValidationTimers.get(form);
+  if (!timers) {
+    timers = new Map();
+    pimcoreOcrValidationTimers.set(form, timers);
+  }
+  let revisions = pimcoreOcrValidationRevisions.get(form);
+  if (!revisions) {
+    revisions = new Map();
+    pimcoreOcrValidationRevisions.set(form, revisions);
+  }
+  return { timers, revisions };
+}
+
+function setPimcoreOcrChecking(field, checking) {
+  if (!field) return;
+  const existing = field.querySelector(".pimcore-runtime-ocr-checking");
+  if (!checking) {
+    existing?.remove();
+    return;
+  }
+  if (existing) return;
+  const indicator = document.createElement("span");
+  indicator.className = "pimcore-runtime-ocr pimcore-runtime-ocr-checking";
+  indicator.textContent = "Sprawdzanie OCR...";
+  field.appendChild(indicator);
+}
+
+function schedulePimcoreOcrFieldValidation(form, schema, source, delayMs = 300) {
+  const input = form?.elements?.[source];
+  if (!input) return;
+  const { timers, revisions } = pimcoreOcrValidationState(form);
+  window.clearTimeout(timers.get(source));
+  const revision = (revisions.get(source) || 0) + 1;
+  revisions.set(source, revision);
+  const field = typeof input.closest === "function"
+    ? input.closest(".pimcore-runtime-field")
+    : null;
+  clearPimcoreOcrMismatch(field);
+  timers.set(source, window.setTimeout(async () => {
+    setPimcoreOcrChecking(field, true);
+    try {
+      await validatePimcoreOcrFields(form, schema, [source], (candidate) => (
+        candidate === source && revisions.get(source) === revision
+      ));
+    } catch (_error) {
+      // The input remains editable; the next edit retries validation.
+    } finally {
+      if (revisions.get(source) === revision) {
+        timers.delete(source);
+        setPimcoreOcrChecking(field, false);
+      }
+    }
+  }, Math.max(0, Number(delayMs) || 0)));
 }
 
 function pimcoreRuntimeWarnings(warnings = []) {
@@ -11360,7 +11436,7 @@ function renderPimcoreOcrMismatch(form, mapping, input, result) {
         body: JSON.stringify({
           field_id: mapping.pimcore_field || mapping.source,
           value: input.value,
-          slot_tokens: Object.values(pimcoreSlotTokens()),
+          slot_tokens: Object.values(pimcoreOcrSlotTokens()),
         }),
       });
       clearPimcoreOcrMismatch(field);
@@ -11384,10 +11460,10 @@ function renderPimcoreOcrMismatch(form, mapping, input, result) {
   field.appendChild(info);
 }
 
-async function validatePimcoreOcrFields(form, schema, targets = null) {
+async function validatePimcoreOcrFields(form, schema, targets = null, isCurrent = null) {
   if (state.settings?.ocr_available === false) return;
   const selected = Array.isArray(targets) ? new Set(targets) : null;
-  const slotTokens = Object.values(pimcoreSlotTokens());
+  const slotTokens = Object.values(pimcoreOcrSlotTokens());
   if (!slotTokens.length) return;
   const mappings = (schema || []).filter((mapping) => (
     mapping?.ocr_validation && (!selected || selected.has(mapping.source))
@@ -11405,6 +11481,7 @@ async function validatePimcoreOcrFields(form, schema, targets = null) {
         slot_tokens: slotTokens,
       }),
     });
+    if (typeof isCurrent === "function" && !isCurrent(mapping.source)) return;
     renderPimcoreOcrMismatch(form, mapping, input, result);
   }));
   updatePimcoreCreateSubmitState();
@@ -11479,11 +11556,15 @@ async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
 }
 
 function pimcoreEditHasRuntimeTemplates() {
-  return (state.pimcoreEditSchema || []).some((mapping) => mapping.value_template);
+  return (state.pimcoreEditSchema || []).some(
+    (mapping) => mapping.value_template || mapping.ocr_validation
+  );
 }
 
 function pimcoreCreateHasRuntimeTemplates() {
-  return (state.pimcoreCreateSchema || []).some((mapping) => mapping.value_template);
+  return (state.pimcoreCreateSchema || []).some(
+    (mapping) => mapping.value_template || mapping.ocr_validation
+  );
 }
 
 async function recalculateAllPimcoreCreateFields() {

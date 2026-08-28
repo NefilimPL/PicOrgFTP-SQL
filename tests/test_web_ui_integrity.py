@@ -2655,6 +2655,153 @@ async function requestJson() {{
         self.assertIn("async function recalculateAllPimcoreEditFields", source)
         self.assertIn("pimcoreEditRecalculateAllButton", source)
 
+    def test_typing_in_an_ocr_validated_runtime_field_requests_validation(self) -> None:
+        """Catches manual fields that wait for blur instead of checking OCR."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        populate = source[
+            source.index("function populatePimcoreRuntimeForm") : source.index(
+                "function pimcoreRuntimeWarnings",
+                source.index("function populatePimcoreRuntimeForm"),
+            )
+        ]
+        validation = source[
+            source.index("async function validatePimcoreOcrFields") : source.index(
+                "function pimcoreRuntimeRecalculateStatus",
+                source.index("async function validatePimcoreOcrFields"),
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the Pimcore OCR interaction contract")
+        script = f"""
+let runtimeInput;
+const calls = [];
+const makeNode = (tag) => {{
+  const node = {{
+    tag, className: "", textContent: "", dataset: {{}}, value: "", id: "",
+    required: false, readOnly: false, autocomplete: "", children: [], listeners: {{}},
+    append(...items) {{ this.children.push(...items); }},
+    appendChild(item) {{ this.children.push(item); return item; }},
+    addEventListener(name, handler) {{ this.listeners[name] = handler; }},
+  }};
+  if (tag === "input") runtimeInput = node;
+  return node;
+}};
+const document = {{ createElement: makeNode }};
+const window = {{ setTimeout, clearTimeout }};
+const state = {{ settings: {{ ocr_available: true }} }};
+const pimcoreSlotTokens = () => ({{ "20": "signed-slot" }});
+class FormData {{
+  constructor(source) {{ this.source = source; }}
+  entries() {{ return Object.entries(this.source.elements).map(([name, input]) => [name, input.value]); }}
+}}
+const formPayload = () => ({{}});
+const requestJson = async (url, options) => {{
+  calls.push({{ url, body: JSON.parse(options.body) }});
+  return {{ mismatch: false, images: [] }};
+}};
+const renderPimcoreOcrMismatch = () => {{}};
+const clearPimcoreOcrMismatch = () => {{}};
+const updatePimcoreCreateSubmitState = () => {{}};
+const updatePimcoreEditSubmitState = () => {{}};
+const updatePimcoreRuntimeFieldChangeState = () => {{}};
+const pimcoreRuntimeLayoutGroups = (schema) => [{{ name: "", rows: [{{ fields: schema }}] }}];
+const pimcoreRuntimeSection = () => makeNode("section");
+const pimcoreRuntimeRow = () => makeNode("div");
+{validation}
+{populate}
+const form = {{ textContent: "", elements: {{}}, append() {{}} }};
+const schema = [{{ source: "HEIGHT", label: "Wysokosc", ocr_validation: true, value_template: "" }}];
+populatePimcoreRuntimeForm(form, schema, {{ HEIGHT: "22078978" }});
+form.elements.HEIGHT = runtimeInput;
+runtimeInput.listeners.input();
+runtimeInput.value = "22078979";
+runtimeInput.listeners.input();
+await new Promise((resolve) => setTimeout(resolve, 450));
+console.log(JSON.stringify(calls));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        calls = json.loads(completed.stdout)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["url"], "/api/ocr/validate")
+        self.assertEqual(calls[0]["body"]["field_id"], "HEIGHT")
+
+    def test_global_runtime_recalculation_validates_manual_ocr_fields(self) -> None:
+        """Catches global recalculation that validates only template-backed fields."""
+
+        source = APP_JS.read_text(encoding="utf-8")
+        validation = source[
+            source.index("async function validatePimcoreOcrFields") : source.index(
+                "function pimcoreRuntimeRecalculateStatus",
+                source.index("async function validatePimcoreOcrFields"),
+            )
+        ]
+        renderer = source[
+            source.index("async function renderPimcoreRuntimeTemplates") : source.index(
+                "function pimcoreEditHasRuntimeTemplates",
+                source.index("async function renderPimcoreRuntimeTemplates"),
+            )
+        ]
+        node = Path(r"C:\Program Files\nodejs\node.exe")
+        if not node.exists():
+            self.skipTest("Node.js is required for the Pimcore OCR interaction contract")
+        script = f"""
+const calls = [];
+const form = {{
+  dataset: {{ pimcoreMode: "create" }},
+  elements: {{
+    WIDTH: {{ value: "120", dataset: {{}} }},
+    HEIGHT: {{ value: "22078978", dataset: {{}} }},
+  }},
+}};
+const pimcoreCreateForm = form;
+const pimcoreEditForm = {{}};
+const state = {{ settings: {{ ocr_available: true }} }};
+const pimcoreSlotTokens = () => ({{ "20": "signed-slot" }});
+class FormData {{
+  constructor(source) {{ this.source = source; }}
+  entries() {{ return Object.entries(this.source.elements).map(([name, input]) => [name, input.value]); }}
+}}
+const formPayload = () => ({{}});
+const requestJson = async (url, options) => {{
+  calls.push({{ url, body: JSON.parse(options.body) }});
+  if (url === "/api/pimcore/render-templates") return {{ values: {{}}, integrations: {{}} }};
+  return {{ mismatch: false, images: [] }};
+}};
+const updatePimcoreRuntimeFieldChangeState = () => {{}};
+const updatePimcoreRuntimeCalculatedState = () => {{}};
+const renderPimcoreOcrMismatch = () => {{}};
+const updatePimcoreCreateSubmitState = () => {{}};
+const updatePimcoreEditSubmitState = () => {{}};
+{validation}
+{renderer}
+const schema = [
+  {{ source: "WIDTH", value_template: "{{WIDTH}}", ocr_validation: false }},
+  {{ source: "HEIGHT", pimcore_field: "height", value_template: "", ocr_validation: true }},
+];
+await renderPimcoreRuntimeTemplates(form, schema);
+console.log(JSON.stringify(calls.filter((call) => call.url === "/api/ocr/validate")));
+"""
+        completed = subprocess.run(
+            [str(node), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        calls = json.loads(completed.stdout)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["body"]["field_id"], "height")
+
     def test_runtime_pimcore_create_modal_recalculates_and_reopens_for_missing_product(
         self,
     ) -> None:

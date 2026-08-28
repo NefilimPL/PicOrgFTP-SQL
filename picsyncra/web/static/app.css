@@ -3006,6 +3006,10 @@ h2 {
   gap: 6px;
 }
 
+.pimcore-runtime-ocr-checking {
+  color: var(--muted, #64748b);
+}
+
 .similar-decision-result {
   padding: 5px 8px;
   border: 1px solid currentColor;

@@ -2043,6 +2043,7 @@ def _pimcore_runtime_form_schema(settings_payload: dict[str, object]) -> list[di
         {
             "source": item["source"],
             "label": item["label"],
+            "pimcore_field": item["pimcore_field"],
             "required": item["required"],
             "default": item["default"],
             "parser": item["parser"],
@@ -2051,6 +2052,7 @@ def _pimcore_runtime_form_schema(settings_payload: dict[str, object]) -> list[di
             "sql_profile_id": item.get("sql_profile_id", ""),
             "translate": item["translate"],
             "target_language": item["target_language"],
+            "ocr_validation": bool(item.get("ocr_validation", False)),
             "layout_group": item.get("layout_group", ""),
             "layout_order": item.get("layout_order", 0),
         }
