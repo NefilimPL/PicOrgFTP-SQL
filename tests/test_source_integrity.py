@@ -5,13 +5,62 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 import re
+import subprocess
 import unittest
 
 
 WEB_PANEL_DOC = Path(__file__).resolve().parents[1] / "docs" / "web-panel.md"
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _live_branding_files() -> list[Path]:
+    allowed_legacy_files = {
+        ROOT / "picsyncra" / "legacy_migration.py",
+        ROOT / "picsyncra" / "web" / "static" / "legacy-migration.js",
+        ROOT / "tests" / "test_legacy_migration.py",
+        ROOT / "tests" / "js" / "legacy-migration.test.js",
+    }
+    skipped_directories = {
+        ".git",
+        ".venv",
+        ".pytest-tmp",
+        "pytest-temp",
+        "logs",
+        "docs/superpowers",
+        "pic",
+    }
+    result = subprocess.run(
+        ["git", "ls-files"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    files: list[Path] = []
+    for relative_path in result.stdout.splitlines():
+        path = ROOT / relative_path
+        if not path.is_file() or path in allowed_legacy_files:
+            continue
+        relative = path.relative_to(ROOT).as_posix()
+        if any(relative == directory or relative.startswith(f"{directory}/") for directory in skipped_directories):
+            continue
+        if path.suffix.lower() not in {".bat", ".css", ".html", ".js", ".json", ".md", ".ps1", ".py", ".pyw", ".txt", ".yml", ".yaml"}:
+            continue
+        files.append(path)
+    return files
 
 
 class SourceIntegrityTests(unittest.TestCase):
+    def test_live_product_files_do_not_use_the_obsolete_brand(self) -> None:
+        obsolete_prefix = "pic" + "org"
+        offenders = [
+            path.relative_to(ROOT).as_posix()
+            for path in _live_branding_files()
+            if obsolete_prefix in path.read_text(encoding="utf-8", errors="ignore").casefold()
+        ]
+
+        self.assertEqual(offenders, [])
+
     def test_desktop_list_usage_dialog_loads_the_selected_product(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "picsyncra" / "app.py").read_text(encoding="utf-8")
         self.assertIn("def _record_from_list_usage", source)
