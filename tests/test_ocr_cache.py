@@ -1,15 +1,15 @@
-from picorgftp_sql.services.image_dimensions import (
+from picsyncra.services.image_dimensions import (
     ImageOcrDiagnostics,
     OcrDiagnosticCandidate,
 )
-from picorgftp_sql.services.ocr_cache import (
+from picsyncra.services.ocr_cache import (
     collect_image_values,
     enqueue_ocr_fast_image_job,
     image_content_hash,
     restore_crop_bbox,
 )
-from picorgftp_sql.services.ocr_cache import enqueue_ocr_crop_jobs
-from picorgftp_sql.sqlite_store import SqliteStore
+from picsyncra.services.ocr_cache import enqueue_ocr_crop_jobs
+from picsyncra.sqlite_store import SqliteStore
 
 
 def test_collect_image_values_persists_only_numeric_candidates(tmp_path):

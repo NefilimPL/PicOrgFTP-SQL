@@ -4,13 +4,13 @@ import ast
 import hashlib
 from pathlib import Path
 
-from picorgftp_sql.web.app import app
+from picsyncra.web.app import app
 
 
-SERVICE_MODULES = tuple((Path(__file__).parents[1] / "picorgftp_sql" / "services").glob("*.py"))
-DESKTOP_FTP_PREVIEW_MODULE = Path(__file__).parents[1] / "picorgftp_sql" / "desktop_ftp_preview.py"
+SERVICE_MODULES = tuple((Path(__file__).parents[1] / "picsyncra" / "services").glob("*.py"))
+DESKTOP_FTP_PREVIEW_MODULE = Path(__file__).parents[1] / "picsyncra" / "desktop_ftp_preview.py"
 ROUTE_SNAPSHOT_SHA256 = "42978a8703673bfd2f5ca2f4032777a72dd4dc9517bf419a7f23d7f778fbfb11"
-WEB_STATIC_DIRECTORY = Path(__file__).parents[1] / "picorgftp_sql" / "web" / "static"
+WEB_STATIC_DIRECTORY = Path(__file__).parents[1] / "picsyncra" / "web" / "static"
 
 
 def _route_snapshot() -> str:
@@ -24,8 +24,8 @@ def _route_snapshot() -> str:
 def test_services_do_not_import_composition_roots() -> None:
     for path in SERVICE_MODULES:
         source = path.read_text(encoding="utf-8")
-        assert "picorgftp_sql.web.app" not in source
-        assert "picorgftp_sql.app" not in source
+        assert "picsyncra.web.app" not in source
+        assert "picsyncra.app" not in source
 
 
 def test_desktop_ftp_preview_does_not_import_ui_or_composition_roots() -> None:
@@ -38,8 +38,8 @@ def test_desktop_ftp_preview_does_not_import_ui_or_composition_roots() -> None:
             imports.add(node.module)
 
     assert not any(name == "tkinter" or name.startswith("tkinter.") for name in imports)
-    assert "picorgftp_sql.web.app" not in imports
-    assert "picorgftp_sql.app" not in imports
+    assert "picsyncra.web.app" not in imports
+    assert "picsyncra.app" not in imports
 
 
 def test_route_contract_snapshot_is_stable() -> None:

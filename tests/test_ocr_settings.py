@@ -1,5 +1,5 @@
-from picorgftp_sql.ocr_settings import normalize_ocr_settings
-from picorgftp_sql.services.ocr_profiles import available_ocr_profiles
+from picsyncra.ocr_settings import normalize_ocr_settings
+from picsyncra.services.ocr_profiles import available_ocr_profiles
 
 
 def test_normalize_ocr_settings_bounds_idle_and_cpu_limits():

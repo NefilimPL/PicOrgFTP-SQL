@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from picorgftp_sql.file_tokens import FileTokenRegistry
+from picsyncra.file_tokens import FileTokenRegistry
 
 
 def test_registry_issues_an_opaque_token_for_a_trusted_path() -> None:

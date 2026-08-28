@@ -11,10 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from picorgftp_sql import sqlite_store
-from picorgftp_sql.excel_utils import ENTRY_RECORDS_KEY
-from picorgftp_sql.product_queries import ProductSearchCriteria
-from picorgftp_sql.sqlite_store import SCHEMA_VERSION, SqliteStore
+from picsyncra import sqlite_store
+from picsyncra.excel_utils import ENTRY_RECORDS_KEY
+from picsyncra.product_queries import ProductSearchCriteria
+from picsyncra.sqlite_store import SCHEMA_VERSION, SqliteStore
 
 
 def test_schema_creates_expected_tables(tmp_path: Path) -> None:
@@ -80,7 +80,7 @@ def test_entra_expiry_status_round_trip_returns_only_safe_metadata(
             "expires_at": "2026-08-01T10:00:00.000Z",
             "credential_name": "Primary",
             "credential_key_id": "internal-key",
-            "application_name": "PicOrg Mailer",
+            "application_name": "PicSyncra Mailer",
             "source": "graph",
             "last_checked_at": "2026-07-17T10:00:00.000Z",
             "last_success_at": "2026-07-17T10:00:00.000Z",
@@ -99,7 +99,7 @@ def test_entra_expiry_status_round_trip_returns_only_safe_metadata(
         "status": "ok",
         "expires_at": "2026-08-01T10:00:00.000Z",
         "credential_name": "Primary",
-        "application_name": "PicOrg Mailer",
+        "application_name": "PicSyncra Mailer",
         "source": "graph",
         "last_checked_at": "2026-07-17T10:00:00.000Z",
         "last_success_at": "2026-07-17T10:00:00.000Z",

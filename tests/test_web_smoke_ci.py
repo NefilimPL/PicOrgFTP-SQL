@@ -11,8 +11,8 @@ from unittest.mock import patch
 import zipfile
 import io
 
-os.environ.setdefault("PICORGFTP_SQL_HEADLESS", "1")
-os.environ.setdefault("PICORG_WEB_AUTH", "0")
+os.environ.setdefault("PICSYNCRA_HEADLESS", "1")
+os.environ.setdefault("PICSYNCRA_WEB_AUTH", "0")
 
 try:
     from fastapi.testclient import TestClient
@@ -22,9 +22,9 @@ except Exception as exc:  # pragma: no cover - depends on CI test dependencies
 else:
     TEST_CLIENT_IMPORT_ERROR = None
 
-from picorgftp_sql import web_data
-from picorgftp_sql import observability
-from picorgftp_sql.web import app as web_app
+from picsyncra import web_data
+from picsyncra import observability
+from picsyncra.web import app as web_app
 
 
 @unittest.skipIf(
@@ -56,7 +56,7 @@ class WebSmokeCiTests(unittest.TestCase):
         )
 
     def setUp(self) -> None:
-        os.environ["PICORG_WEB_AUTH"] = "0"
+        os.environ["PICSYNCRA_WEB_AUTH"] = "0"
         web_app._RATE_LIMITS.clear()
 
     def tearDown(self) -> None:
@@ -196,8 +196,8 @@ class WebSmokeCiTests(unittest.TestCase):
                     "notification_claim_at": "",
                 }
 
-        previous = os.environ.get("PICORG_WEB_AUTH")
-        os.environ["PICORG_WEB_AUTH"] = "1"
+        previous = os.environ.get("PICSYNCRA_WEB_AUTH")
+        os.environ["PICSYNCRA_WEB_AUTH"] = "1"
         store = EventStore()
         try:
             client = TestClient(web_app.app)
@@ -224,7 +224,7 @@ class WebSmokeCiTests(unittest.TestCase):
             forged = client.post(
                 "/api/observability/client-errors",
                 json=payload,
-                headers={"X-PicOrg-CSRF": "bad"},
+                headers={"X-PicSyncra-CSRF": "bad"},
             )
             self.assertEqual(forged.status_code, 403)
 
@@ -232,7 +232,7 @@ class WebSmokeCiTests(unittest.TestCase):
                 response = client.post(
                     "/api/observability/client-errors",
                     json=payload,
-                    headers={"X-PicOrg-CSRF": csrf},
+                    headers={"X-PicSyncra-CSRF": csrf},
                 )
 
             self.assertEqual(response.status_code, 200)
@@ -243,9 +243,9 @@ class WebSmokeCiTests(unittest.TestCase):
             self.assertEqual(event["details"]["token"], "[REDACTED]")
         finally:
             if previous is None:
-                os.environ.pop("PICORG_WEB_AUTH", None)
+                os.environ.pop("PICSYNCRA_WEB_AUTH", None)
             else:
-                os.environ["PICORG_WEB_AUTH"] = previous
+                os.environ["PICSYNCRA_WEB_AUTH"] = previous
 
     def test_unhandled_backend_error_returns_only_safe_correlation_payload(self) -> None:
         test_app = web_app.create_app()
@@ -359,7 +359,7 @@ class WebSmokeCiTests(unittest.TestCase):
         app_css = client.get("/static/app.css")
 
         self.assertEqual(index.status_code, 200)
-        self.assertIn("PicOrgFTP-SQL Web", index.text)
+        self.assertIn("PicSyncra Web", index.text)
         self.assertIn('id="productForm"', index.text)
         self.assertIn('id="slotGrid"', index.text)
         self.assertIn(login.status_code, {200, 303})
@@ -711,8 +711,8 @@ class WebSmokeCiTests(unittest.TestCase):
         sender.assert_not_called()
 
     def test_email_test_route_requires_admin_session_and_csrf(self) -> None:
-        previous = os.environ.get("PICORG_WEB_AUTH")
-        os.environ["PICORG_WEB_AUTH"] = "1"
+        previous = os.environ.get("PICSYNCRA_WEB_AUTH")
+        os.environ["PICSYNCRA_WEB_AUTH"] = "1"
         try:
             client = TestClient(web_app.app)
             request_payload = {
@@ -734,7 +734,7 @@ class WebSmokeCiTests(unittest.TestCase):
             forged = client.post(
                 "/api/settings/email/test",
                 json=request_payload,
-                headers={"X-PicOrg-CSRF": "bad"},
+                headers={"X-PicSyncra-CSRF": "bad"},
             )
             self.assertEqual(forged.status_code, 403)
 
@@ -750,22 +750,22 @@ class WebSmokeCiTests(unittest.TestCase):
                 accepted = client.post(
                     "/api/settings/email/test",
                     json=request_payload,
-                    headers={"X-PicOrg-CSRF": login.json()["csrf_token"]},
+                    headers={"X-PicSyncra-CSRF": login.json()["csrf_token"]},
                 )
             self.assertEqual(accepted.status_code, 200)
             self.assertTrue(accepted.json()["ok"])
         finally:
             if previous is None:
-                os.environ.pop("PICORG_WEB_AUTH", None)
+                os.environ.pop("PICSYNCRA_WEB_AUTH", None)
             else:
-                os.environ["PICORG_WEB_AUTH"] = previous
+                os.environ["PICSYNCRA_WEB_AUTH"] = previous
 
     def test_github_repository_endpoint_returns_status_payload(self) -> None:
         client = TestClient(web_app.app)
         payload = {
             "available": True,
             "private": False,
-            "repository": {"full_name": "NefilimPL/PicOrgFTP-SQL"},
+            "repository": {"full_name": "NefilimPL/PicSyncra"},
             "latest_release": {"tag_name": "v1.2.3"},
             "license": {"spdx_id": "MIT"},
             "owner": {"login": "NefilimPL"},
@@ -950,8 +950,8 @@ class WebSmokeCiTests(unittest.TestCase):
         save_config.assert_called_once()
 
     def test_auth_enabled_protects_routes_and_accepts_login_session(self) -> None:
-        previous = os.environ.get("PICORG_WEB_AUTH")
-        os.environ["PICORG_WEB_AUTH"] = "1"
+        previous = os.environ.get("PICSYNCRA_WEB_AUTH")
+        os.environ["PICSYNCRA_WEB_AUTH"] = "1"
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
                 with patch.object(web_app.settings, "AC", temp_dir):
@@ -966,21 +966,21 @@ class WebSmokeCiTests(unittest.TestCase):
                         headers={"X-Requested-With": "XMLHttpRequest"},
                     )
                     self.assertEqual(login.status_code, 200)
-                    csrf_headers = {"X-PicOrg-CSRF": login.json()["csrf_token"]}
+                    csrf_headers = {"X-PicSyncra-CSRF": login.json()["csrf_token"]}
                     presence = client.get("/api/server/presence")
                     self.assertEqual(presence.status_code, 200)
                     self.assertEqual(presence.json(), {"enabled": False, "users": []})
 
-                    forged = client.post("/api/logout", headers={"X-PicOrg-CSRF": "bad"})
+                    forged = client.post("/api/logout", headers={"X-PicSyncra-CSRF": "bad"})
                     self.assertEqual(forged.status_code, 403)
 
                     authenticated = client.post("/api/logout", headers=csrf_headers)
                     self.assertEqual(authenticated.status_code, 200)
         finally:
             if previous is None:
-                os.environ.pop("PICORG_WEB_AUTH", None)
+                os.environ.pop("PICSYNCRA_WEB_AUTH", None)
             else:
-                os.environ["PICORG_WEB_AUTH"] = previous
+                os.environ["PICSYNCRA_WEB_AUTH"] = previous
 
     def test_session_v2_payload_uses_user_id_not_username(self) -> None:
         user = {
@@ -1035,8 +1035,8 @@ class WebSmokeCiTests(unittest.TestCase):
         self.assertNotIn("unsafe-inline", csp)
 
     def test_login_rate_limit_is_per_ip(self) -> None:
-        previous = os.environ.get("PICORG_WEB_AUTH")
-        os.environ["PICORG_WEB_AUTH"] = "1"
+        previous = os.environ.get("PICSYNCRA_WEB_AUTH")
+        os.environ["PICSYNCRA_WEB_AUTH"] = "1"
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
                 with (
@@ -1065,13 +1065,13 @@ class WebSmokeCiTests(unittest.TestCase):
         finally:
             web_app._RATE_LIMITS.clear()
             if previous is None:
-                os.environ.pop("PICORG_WEB_AUTH", None)
+                os.environ.pop("PICSYNCRA_WEB_AUTH", None)
             else:
-                os.environ["PICORG_WEB_AUTH"] = previous
+                os.environ["PICSYNCRA_WEB_AUTH"] = previous
 
     def test_failed_admin_login_is_logged_and_locked_until_manual_unlock(self) -> None:
-        previous = os.environ.get("PICORG_WEB_AUTH")
-        os.environ["PICORG_WEB_AUTH"] = "1"
+        previous = os.environ.get("PICSYNCRA_WEB_AUTH")
+        os.environ["PICSYNCRA_WEB_AUTH"] = "1"
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
                 with (
@@ -1094,13 +1094,13 @@ class WebSmokeCiTests(unittest.TestCase):
                     self.assertIn("Konto administratora zablokowane", log_text)
         finally:
             if previous is None:
-                os.environ.pop("PICORG_WEB_AUTH", None)
+                os.environ.pop("PICSYNCRA_WEB_AUTH", None)
             else:
-                os.environ["PICORG_WEB_AUTH"] = previous
+                os.environ["PICSYNCRA_WEB_AUTH"] = previous
 
     def test_password_change_invalidates_current_session(self) -> None:
-        previous = os.environ.get("PICORG_WEB_AUTH")
-        os.environ["PICORG_WEB_AUTH"] = "1"
+        previous = os.environ.get("PICSYNCRA_WEB_AUTH")
+        os.environ["PICSYNCRA_WEB_AUTH"] = "1"
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
                 with patch.object(web_app.settings, "AC", temp_dir):
@@ -1111,7 +1111,7 @@ class WebSmokeCiTests(unittest.TestCase):
                         headers={"X-Requested-With": "XMLHttpRequest"},
                     )
                     self.assertEqual(login.status_code, 200)
-                    headers = {"X-PicOrg-CSRF": login.json()["csrf_token"]}
+                    headers = {"X-PicSyncra-CSRF": login.json()["csrf_token"]}
                     response = client.patch(
                         "/api/users/admin",
                         json={"password": "new-admin"},
@@ -1123,13 +1123,13 @@ class WebSmokeCiTests(unittest.TestCase):
                     self.assertEqual(client.get("/api/bootstrap").status_code, 401)
         finally:
             if previous is None:
-                os.environ.pop("PICORG_WEB_AUTH", None)
+                os.environ.pop("PICSYNCRA_WEB_AUTH", None)
             else:
-                os.environ["PICORG_WEB_AUTH"] = previous
+                os.environ["PICSYNCRA_WEB_AUTH"] = previous
 
     def test_browser_extension_token_version_can_be_revoked(self) -> None:
-        previous = os.environ.get("PICORG_WEB_AUTH")
-        os.environ["PICORG_WEB_AUTH"] = "1"
+        previous = os.environ.get("PICSYNCRA_WEB_AUTH")
+        os.environ["PICSYNCRA_WEB_AUTH"] = "1"
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
                 with patch.object(web_app.settings, "AC", temp_dir):
@@ -1140,12 +1140,12 @@ class WebSmokeCiTests(unittest.TestCase):
                         headers={"X-Requested-With": "XMLHttpRequest"},
                     )
                     self.assertEqual(login.status_code, 200)
-                    headers = {"X-PicOrg-CSRF": login.json()["csrf_token"]}
+                    headers = {"X-PicSyncra-CSRF": login.json()["csrf_token"]}
                     archive_response = client.get("/api/browser-extension/download")
                     self.assertEqual(archive_response.status_code, 200)
                     with zipfile.ZipFile(io.BytesIO(archive_response.content)) as archive:
                         defaults = archive.read(
-                            "picorgftp-sql-browser-extension/defaults.js"
+                            "picsyncra-browser-extension/defaults.js"
                         ).decode("utf-8")
                     self.assertIn("tokenVersion", defaults)
                     token = defaults.split('"apiToken": "', 1)[1].split('"', 1)[0]
@@ -1169,13 +1169,13 @@ class WebSmokeCiTests(unittest.TestCase):
                     self.assertEqual(rejected.status_code, 401)
         finally:
             if previous is None:
-                os.environ.pop("PICORG_WEB_AUTH", None)
+                os.environ.pop("PICSYNCRA_WEB_AUTH", None)
             else:
-                os.environ["PICORG_WEB_AUTH"] = previous
+                os.environ["PICSYNCRA_WEB_AUTH"] = previous
 
     def test_app_secret_change_returns_relogin_response_instead_of_401(self) -> None:
-        previous = os.environ.get("PICORG_WEB_AUTH")
-        os.environ["PICORG_WEB_AUTH"] = "1"
+        previous = os.environ.get("PICSYNCRA_WEB_AUTH")
+        os.environ["PICSYNCRA_WEB_AUTH"] = "1"
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
                 with patch.object(web_app.settings, "AC", temp_dir):
@@ -1187,7 +1187,7 @@ class WebSmokeCiTests(unittest.TestCase):
                             headers={"X-Requested-With": "XMLHttpRequest"},
                         )
                         self.assertEqual(login.status_code, 200)
-                        headers = {"X-PicOrg-CSRF": login.json()["csrf_token"]}
+                        headers = {"X-PicSyncra-CSRF": login.json()["csrf_token"]}
 
                         def fake_update_settings(_payload):
                             web_app.common.APP_SECRET = "new-session-secret"
@@ -1208,9 +1208,9 @@ class WebSmokeCiTests(unittest.TestCase):
             self.assertIn("Zaloguj", payload["session_message"])
         finally:
             if previous is None:
-                os.environ.pop("PICORG_WEB_AUTH", None)
+                os.environ.pop("PICSYNCRA_WEB_AUTH", None)
             else:
-                os.environ["PICORG_WEB_AUTH"] = previous
+                os.environ["PICSYNCRA_WEB_AUTH"] = previous
 
 
 if __name__ == "__main__":

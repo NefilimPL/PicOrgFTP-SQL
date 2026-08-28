@@ -1,6 +1,6 @@
-from picorgftp_sql.services.ocr_execution_service import OcrExecutionService
-from picorgftp_sql.services.ocr_progress import OcrProgressRegistry
-from picorgftp_sql.services.ocr_resource_policy import ResourceTelemetry
+from picsyncra.services.ocr_execution_service import OcrExecutionService
+from picsyncra.services.ocr_progress import OcrProgressRegistry
+from picsyncra.services.ocr_resource_policy import ResourceTelemetry
 
 
 class _FakeWorker:

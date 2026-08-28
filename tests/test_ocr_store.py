@@ -1,4 +1,4 @@
-from picorgftp_sql.sqlite_store import SqliteStore
+from picsyncra.sqlite_store import SqliteStore
 
 
 def initialized_store(tmp_path):

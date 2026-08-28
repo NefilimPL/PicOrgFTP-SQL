@@ -1,12 +1,12 @@
 from PIL import Image
 
-from picorgftp_sql.services.image_dimensions import (
+from picsyncra.services.image_dimensions import (
     ImageOcrDiagnostics,
     OcrDiagnosticCandidate,
 )
-from picorgftp_sql.services.ocr_cache import enqueue_ocr_fast_image_job
-from picorgftp_sql.services.ocr_slot_queue import process_slot_ocr_queue_job
-from picorgftp_sql.sqlite_store import SqliteStore
+from picsyncra.services.ocr_cache import enqueue_ocr_fast_image_job
+from picsyncra.services.ocr_slot_queue import process_slot_ocr_queue_job
+from picsyncra.sqlite_store import SqliteStore
 
 
 def test_fast_slot_queue_job_scans_original_once_then_queues_only_eligible_crops(tmp_path):

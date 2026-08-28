@@ -3,13 +3,13 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from picorgftp_sql import data_store, sqlite_maintenance
-from picorgftp_sql.sqlite_maintenance import (
+from picsyncra import data_store, sqlite_maintenance
+from picsyncra.sqlite_maintenance import (
     TIMESTAMP_COLUMNS,
     normalize_timestamp_columns,
     repair_sqlite_database,
 )
-from picorgftp_sql.sqlite_store import SqliteStore
+from picsyncra.sqlite_store import SqliteStore
 
 
 def test_repair_creates_backup_and_migrates_legacy_history(tmp_path: Path) -> None:

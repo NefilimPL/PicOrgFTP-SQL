@@ -7,10 +7,10 @@ from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 
-import picorgftp_sql.web_image_import as web_image_import
-from picorgftp_sql.web_image_import import discover_image_candidates
-from picorgftp_sql.web_image_import import fetch_page_html
-from picorgftp_sql.web_image_import import ImageImportError
+import picsyncra.web_image_import as web_image_import
+from picsyncra.web_image_import import discover_image_candidates
+from picsyncra.web_image_import import fetch_page_html
+from picsyncra.web_image_import import ImageImportError
 
 try:
     from PIL import Image

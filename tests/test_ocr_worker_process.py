@@ -1,9 +1,9 @@
 import time
 
-from picorgftp_sql.services.image_dimensions import OcrTextBox, diagnostics_for_boxes
-from picorgftp_sql.services.ocr_pipeline import OcrPipelineRegion, OcrPipelineReport
-from picorgftp_sql.services.ocr_worker_process import OcrWorkerProcess, _serialize_report
-from picorgftp_sql.services.windows_job_limits import WindowsJobLimits
+from picsyncra.services.image_dimensions import OcrTextBox, diagnostics_for_boxes
+from picsyncra.services.ocr_pipeline import OcrPipelineRegion, OcrPipelineReport
+from picsyncra.services.ocr_worker_process import OcrWorkerProcess, _serialize_report
+from picsyncra.services.windows_job_limits import WindowsJobLimits
 
 
 class _FakeWindowsJobApi:

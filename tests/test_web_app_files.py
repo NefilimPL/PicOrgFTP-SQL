@@ -20,12 +20,12 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 import pytest
 
-from picorgftp_sql import web_data
-from picorgftp_sql import common
-from picorgftp_sql.similar_product_files import SimilarFileCandidate
-from picorgftp_sql.web import active_clients
-from picorgftp_sql.web import app as web_app
-from picorgftp_sql.web.process_queue import (
+from picsyncra import web_data
+from picsyncra import common
+from picsyncra.similar_product_files import SimilarFileCandidate
+from picsyncra.web import active_clients
+from picsyncra.web import app as web_app
+from picsyncra.web.process_queue import (
     OwnerQueueLimit,
     ProcessQueueFull,
     ProcessQueueService,
@@ -361,7 +361,7 @@ def test_file_token_rejects_signed_symlink_escaping_photos_root(tmp_path, monkey
 def test_similar_files_endpoint_requires_login_and_hides_source_path(monkeypatch) -> None:
     """Catches a suggestions response that leaks a local filename path or skips auth."""
 
-    monkeypatch.setenv("PICORG_WEB_AUTH", "1")
+    monkeypatch.setenv("PICSYNCRA_WEB_AUTH", "1")
     with TestClient(web_app.app) as client:
         assert client.post("/api/similar-files", json=_similar_product_payload()).status_code == 401
 
@@ -599,7 +599,7 @@ class WebAppFileTests(unittest.TestCase):
     def test_latest_request_asset_precedes_app(self) -> None:
         workspace = Path(__file__).resolve().parents[1]
         index_source = (
-            workspace / "picorgftp_sql" / "web" / "static" / "index.html"
+            workspace / "picsyncra" / "web" / "static" / "index.html"
         ).read_text(encoding="utf-8")
 
         latest_request_asset = '<script src="/static/latest-request.js'
@@ -612,10 +612,10 @@ class WebAppFileTests(unittest.TestCase):
     def test_ocr_diagnostics_asset_precedes_app(self) -> None:
         workspace = Path(__file__).resolve().parents[1]
         index_source = (
-            workspace / "picorgftp_sql" / "web" / "static" / "index.html"
+            workspace / "picsyncra" / "web" / "static" / "index.html"
         ).read_text(encoding="utf-8")
         diagnostics_source = (
-            workspace / "picorgftp_sql" / "web" / "static" / "ocr-diagnostics.js"
+            workspace / "picsyncra" / "web" / "static" / "ocr-diagnostics.js"
         ).read_text(encoding="utf-8")
 
         diagnostics_asset = '<script src="/static/ocr-diagnostics.js'
@@ -629,17 +629,17 @@ class WebAppFileTests(unittest.TestCase):
     ) -> None:
         workspace = Path(__file__).resolve().parents[1]
         index_source = (
-            workspace / "picorgftp_sql" / "web" / "static" / "index.html"
+            workspace / "picsyncra" / "web" / "static" / "index.html"
         ).read_text(encoding="utf-8")
         app_source = (
-            workspace / "picorgftp_sql" / "web" / "static" / "app.js"
+            workspace / "picsyncra" / "web" / "static" / "app.js"
         ).read_text(encoding="utf-8")
 
         runtime_asset = '<script src="/static/runtime-status.js'
         app_asset = '<script src="/static/app.js'
         self.assertIn(runtime_asset, index_source)
         self.assertLess(index_source.index(runtime_asset), index_source.index(app_asset))
-        self.assertEqual(app_source.count("new PicOrg.RuntimeStatusPoller("), 1)
+        self.assertEqual(app_source.count("new PicSyncra.RuntimeStatusPoller("), 1)
         self.assertNotIn('createPoller("fileIndex"', app_source)
         self.assertNotIn('createPoller("processQueue"', app_source)
         self.assertNotIn('createPoller("activeUsers"', app_source)
@@ -2646,7 +2646,7 @@ class WebAppFileTests(unittest.TestCase):
     def test_log_payloads_are_newest_first_and_hide_successful_access_logs(self) -> None:
         workspace_tmp = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(dir=workspace_tmp) as temp_dir:
-            log_path = Path(temp_dir) / "picorg_web_out.log"
+            log_path = Path(temp_dir) / "picsyncra_web_out.log"
             log_path.write_text(
                 "\n".join(
                     [

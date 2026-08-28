@@ -1,4 +1,4 @@
-from picorgftp_sql.services.ocr_values import (
+from picsyncra.services.ocr_values import (
     comparison_key,
     normalize_entered_ocr_value,
     ocr_values_match,

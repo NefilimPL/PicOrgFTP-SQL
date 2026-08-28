@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from picorgftp_sql import data_store, sqlite_backup, storage_settings
+from picsyncra import data_store, sqlite_backup, storage_settings
 
 
 def _create_db(path: Path) -> None:
@@ -45,7 +45,7 @@ def test_backup_retention_keeps_newest_manual_and_scheduled(tmp_path: Path) -> N
     backup_dir = tmp_path / "BACKUP"
     backup_dir.mkdir()
     for index in range(4):
-        db = backup_dir / f"picorgftp_sql-20260625-130{index}00-manual.sqlite"
+        db = backup_dir / f"picsyncra-20260625-130{index}00-manual.sqlite"
         db.write_text("x", encoding="utf-8")
         db.with_suffix(".json").write_text(
             json.dumps(
@@ -62,8 +62,8 @@ def test_backup_retention_keeps_newest_manual_and_scheduled(tmp_path: Path) -> N
     assert removed["removed"] == 2
     remaining = sorted(path.name for path in backup_dir.glob("*.sqlite"))
     assert remaining == [
-        "picorgftp_sql-20260625-130200-manual.sqlite",
-        "picorgftp_sql-20260625-130300-manual.sqlite",
+        "picsyncra-20260625-130200-manual.sqlite",
+        "picsyncra-20260625-130300-manual.sqlite",
     ]
 
 
@@ -181,7 +181,7 @@ def test_mark_schedule_slots_run_keeps_recent_slots() -> None:
 
 def test_restore_backup_creates_pre_restore_backup_and_replaces_database(tmp_path: Path) -> None:
     active = tmp_path / "active.sqlite"
-    backup = tmp_path / "BACKUP" / "picorgftp_sql-20260625-130234-manual.sqlite"
+    backup = tmp_path / "BACKUP" / "picsyncra-20260625-130234-manual.sqlite"
     backup.parent.mkdir()
     _create_db(active)
     _create_db(backup)
