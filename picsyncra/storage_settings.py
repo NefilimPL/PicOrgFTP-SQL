@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from . import common, settings
+from .brand import SQLITE_FILENAME
 
 DATA_MODE_KEY = "data_mode"
 DATA_MODE_LEGACY = "legacy"
@@ -18,7 +19,7 @@ DATABASE_LOCATION_IMAGE_DIR = "image_dir"
 DATABASE_LOCATION_CUSTOM = "custom"
 DATABASE_LOCATION_EXE_DIR = "exe_dir"
 DATABASE_PATH_KEY = "database_path"
-DEFAULT_SQLITE_FILENAME = "picsyncra.sqlite"
+DEFAULT_SQLITE_FILENAME = SQLITE_FILENAME
 BACKUP_SETTINGS_KEY = "sqlite_backup"
 BACKUP_DEFAULTS = {
     "enabled": False,

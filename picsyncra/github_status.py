@@ -9,11 +9,12 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .brand import GITHUB_OWNER, GITHUB_REPOSITORY
 from .version import get_display_version
 
-GITHUB_REPO_OWNER = "NefilimPL"
-GITHUB_REPO_NAME = "PicSyncra"
-GITHUB_REPO_FULL_NAME = f"{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}"
+GITHUB_REPO_OWNER = GITHUB_OWNER
+GITHUB_REPO_NAME = GITHUB_REPOSITORY.rsplit("/", 1)[-1]
+GITHUB_REPO_FULL_NAME = GITHUB_REPOSITORY
 GITHUB_API_ROOT = "https://api.github.com"
 GITHUB_STATUS_CACHE_SECONDS = 15 * 60
 
