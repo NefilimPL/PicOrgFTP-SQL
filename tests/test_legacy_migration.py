@@ -176,6 +176,33 @@ def test_adoption_imports_legacy_files_and_archives_them(tmp_path: Path) -> None
     assert (result.archive_dir / "file_index.json").is_file()
 
 
+def test_adoption_uses_legacy_sqlite_and_archives_supplemental_legacy_files(
+    tmp_path: Path,
+) -> None:
+    """SQLite is the data source while leftover file settings are archived too."""
+
+    source = tmp_path / legacy_migration._LEGACY_SQLITE_FILENAME
+    config_path = tmp_path / "config.json"
+    target = tmp_path / "picsyncra.sqlite"
+    SqliteStore(str(source)).save_config({"migration_marker": "legacy-sqlite"})
+    config_path.write_text(json.dumps({"migration_marker": "legacy-file"}), encoding="utf-8")
+
+    result = legacy_migration.adopt_legacy_data(
+        application_root=tmp_path,
+        data_root=tmp_path,
+        database_path=target,
+        backup_root=tmp_path / "BACKUP",
+    )
+
+    assert result.migrated is True
+    assert result.source_kind == "sqlite"
+    assert SqliteStore(str(target)).load_config()["migration_marker"] == "legacy-sqlite"
+    assert not source.exists()
+    assert not config_path.exists()
+    assert (result.archive_dir / source.name).is_file()
+    assert (result.archive_dir / config_path.name).is_file()
+
+
 def test_adoption_archives_a_file_changed_during_handover(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -261,29 +288,6 @@ def test_adoption_keeps_legacy_data_in_place_when_archive_copy_fails(
     assert result.migrated is False
     assert result.error == "archive unavailable"
     assert source.exists()
-    assert not target.exists()
-
-
-def test_adoption_rejects_mixed_sqlite_and_file_sources(tmp_path: Path) -> None:
-    """Conflicting source formats must not silently discard either data set."""
-
-    source = tmp_path / legacy_migration._LEGACY_SQLITE_FILENAME
-    config_path = tmp_path / "config.json"
-    target = tmp_path / "picsyncra.sqlite"
-    SqliteStore(str(source)).save_config({"migration_marker": "legacy-sqlite"})
-    config_path.write_text(json.dumps({"migration_marker": "legacy-json"}), encoding="utf-8")
-
-    result = legacy_migration.adopt_legacy_data(
-        application_root=tmp_path,
-        data_root=tmp_path,
-        database_path=target,
-        backup_root=tmp_path / "BACKUP",
-    )
-
-    assert result.migrated is False
-    assert result.error is not None
-    assert source.exists()
-    assert config_path.exists()
     assert not target.exists()
 
 

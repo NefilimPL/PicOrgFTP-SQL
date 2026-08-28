@@ -32,7 +32,6 @@ _LEGACY_DATA_FILENAMES = (
 )
 _TARGET_EXISTS = "target_exists"
 _ADOPTION_IN_PROGRESS = "adoption_in_progress"
-_MIXED_SOURCES = "mixed_sources"
 _SPLIT_FILE_SOURCES = "split_file_sources"
 _ADOPTION_FAILED = "adoption_failed"
 _PATH_LOCKS: dict[str, threading.Lock] = {}
@@ -222,14 +221,13 @@ def _copy_sources_to_archive(
     sqlite_source: Path | None = None,
     sqlite_snapshot: Path | None = None,
 ) -> None:
-    archive_dir.mkdir(parents=True, exist_ok=False)
+    archive_dir.mkdir(parents=True, exist_ok=sqlite_source is not None)
     if sqlite_source is not None:
         if sqlite_snapshot is None:
             raise ValueError("Brakuje zweryfikowanego snapshotu SQLite do archiwizacji.")
         destination = archive_dir / sqlite_source.name
         shutil.copy2(sqlite_snapshot, destination)
         _validate_sqlite_database(destination)
-        return
     for source in sources:
         destination = archive_dir / source.name
         if destination.exists():
@@ -416,13 +414,6 @@ def adopt_legacy_data(
     file_sources = file_source_sets[0][1] if file_source_sets else ()
     if sqlite_source is None and not file_sources:
         return MigrationResult(migrated=False, skipped=True)
-    if sqlite_source is not None and file_sources:
-        return MigrationResult(
-            migrated=False,
-            skipped=False,
-            error="Znaleziono jednoczesnie stara baze SQLite i pliki starej konfiguracji.",
-            error_code=_MIXED_SOURCES,
-        )
 
     target = Path(database_path).resolve()
     resume_interrupted_adoption = (
@@ -476,7 +467,7 @@ def adopt_legacy_data(
                             if resume_interrupted_adoption:
                                 _validate_sqlite_database(target)
                                 _copy_sources_to_archive(
-                                    sources,
+                                    file_sources,
                                     archive_dir,
                                     sqlite_source=sqlite_source,
                                     sqlite_snapshot=target,
@@ -487,7 +478,7 @@ def adopt_legacy_data(
                                 with _locked_sqlite_source(sqlite_source):
                                     _copy_sqlite_database(sqlite_source, staging)
                                     _copy_sources_to_archive(
-                                        sources,
+                                        file_sources,
                                         archive_dir,
                                         sqlite_source=sqlite_source,
                                         sqlite_snapshot=staging,
@@ -502,6 +493,17 @@ def adopt_legacy_data(
                             archive_dir,
                             sqlite_source=True,
                         )
+                        if file_sources:
+                            supplemental_cleanup_error = _handover_sources_to_archive(
+                                file_sources,
+                                archive_dir,
+                                sqlite_source=False,
+                            )
+                            cleanup_error = "; ".join(
+                                error
+                                for error in (cleanup_error, supplemental_cleanup_error)
+                                if error
+                            ) or None
                         residual_sqlite_files = _sqlite_source_files(sqlite_source)
                         if residual_sqlite_files:
                             residual_error = _handover_sources_to_archive(
