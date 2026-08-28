@@ -148,6 +148,26 @@ def test_adoption_does_not_overwrite_an_existing_picsyncra_database(tmp_path: Pa
     assert source.exists()
 
 
+def test_adoption_replaces_an_empty_picsyncra_database(tmp_path: Path) -> None:
+    """A database containing only PicSyncra's schema must not block first import."""
+
+    source = tmp_path / legacy_migration._LEGACY_SQLITE_FILENAME
+    target = tmp_path / "picsyncra.sqlite"
+    SqliteStore(str(source)).save_config({"migration_marker": "legacy"})
+    SqliteStore(str(target)).initialize()
+
+    result = legacy_migration.adopt_legacy_data(
+        application_root=tmp_path,
+        data_root=tmp_path,
+        database_path=target,
+        backup_root=tmp_path / "BACKUP",
+    )
+
+    assert result.migrated is True
+    assert SqliteStore(str(target)).load_config()["migration_marker"] == "legacy"
+    assert not source.exists()
+
+
 def test_adoption_imports_legacy_files_and_archives_them(tmp_path: Path) -> None:
     """File-backed legacy data must move into SQLite before its source is archived."""
 

@@ -23,6 +23,8 @@ from .sqlite_coordination import database_maintenance, maintenance_state, retire
 
 _LEGACY_SQLITE_FILENAME = "picorgftp_sql.sqlite"
 _SQLITE_SIDECARS = ("-wal", "-shm")
+_EMPTY_TARGET_TABLES = frozenset({"schema_version", "operational_event_stream"})
+_EMPTY_TARGET_FTS_PREFIXES = ("product_entries_fts", "product_entries_short_fts")
 _LEGACY_DATA_FILENAMES = (
     "config.json",
     "lists.xlsx",
@@ -214,6 +216,34 @@ def _validate_sqlite_database(path: Path) -> None:
             connection.close()
 
 
+def _is_empty_picsyncra_database(path: Path) -> bool:
+    """Return whether a target contains only the schema made during first start."""
+
+    connection = None
+    try:
+        connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        table_rows = connection.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        )
+        for table_name, definition in table_rows:
+            table_name = str(table_name)
+            if table_name in _EMPTY_TARGET_TABLES:
+                continue
+            if table_name.startswith(_EMPTY_TARGET_FTS_PREFIXES):
+                continue
+            if str(definition or "").lstrip().upper().startswith("CREATE VIRTUAL TABLE"):
+                continue
+            quoted_name = table_name.replace('"', '""')
+            if connection.execute(f'SELECT 1 FROM "{quoted_name}" LIMIT 1').fetchone() is not None:
+                return False
+        return True
+    except (OSError, sqlite3.Error):
+        return False
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 def _copy_sources_to_archive(
     sources: tuple[Path, ...],
     archive_dir: Path,
@@ -378,9 +408,18 @@ def _exclusive_path_lock(
                 os.close(descriptor)
 
 
-def _publish_staged_target(staging: Path, target: Path) -> None:
+def _publish_staged_target(
+    staging: Path,
+    target: Path,
+    *,
+    replace_empty_target: bool = False,
+) -> None:
     """Publish without replacing a target created by another process."""
 
+    if replace_empty_target and target.exists():
+        if not _is_empty_picsyncra_database(target):
+            raise _TargetAlreadyExistsError("Docelowa baza PicSyncra juz zawiera dane.")
+        target.unlink()
     try:
         os.link(staging, target)
     except FileExistsError as exc:
@@ -421,7 +460,11 @@ def adopt_legacy_data(
         and target.exists()
         and maintenance_state(sqlite_source) in {"active", "retired"}
     )
-    if target.exists() and not resume_interrupted_adoption:
+    if (
+        target.exists()
+        and not resume_interrupted_adoption
+        and not _is_empty_picsyncra_database(target)
+    ):
         return MigrationResult(
             migrated=False,
             skipped=False,
@@ -453,7 +496,12 @@ def adopt_legacy_data(
                 scope="target",
                 protected_path=target,
             ):
-                if target.exists() and not resume_interrupted_adoption:
+                replace_empty_target = (
+                    target.exists()
+                    and not resume_interrupted_adoption
+                    and _is_empty_picsyncra_database(target)
+                )
+                if target.exists() and not resume_interrupted_adoption and not replace_empty_target:
                     return MigrationResult(
                         migrated=False,
                         skipped=False,
@@ -483,7 +531,11 @@ def adopt_legacy_data(
                                         sqlite_source=sqlite_source,
                                         sqlite_snapshot=staging,
                                     )
-                                    _publish_staged_target(staging, target)
+                                    _publish_staged_target(
+                                        staging,
+                                        target,
+                                        replace_empty_target=replace_empty_target,
+                                    )
                                     target_published = True
                                     if finalize is not None:
                                         finalize(target)
@@ -532,7 +584,11 @@ def adopt_legacy_data(
                         import_legacy_to_sqlite(str(staging_sources), str(staging))
                         _validate_sqlite_database(staging)
                         _copy_sources_to_archive(sources, archive_dir)
-                        _publish_staged_target(staging, target)
+                        _publish_staged_target(
+                            staging,
+                            target,
+                            replace_empty_target=replace_empty_target,
+                        )
                         target_published = True
                         if finalize is not None:
                             finalize(target)
