@@ -1042,7 +1042,7 @@ class WebSmokeCiTests(unittest.TestCase):
         self.assertEqual(cfg[web_app.SQL_AVAILABLE_COLUMNS_KEY], ["img_01", "img_02"])
         save_config.assert_called_once()
 
-    def test_auth_enabled_protects_routes_and_accepts_login_session(self) -> None:
+    def test_auth_enabled_protects_routes_and_logout_clears_a_stale_session(self) -> None:
         previous = os.environ.get("PICSYNCRA_WEB_AUTH")
         os.environ["PICSYNCRA_WEB_AUTH"] = "1"
         try:
@@ -1050,8 +1050,12 @@ class WebSmokeCiTests(unittest.TestCase):
                 with patch.object(web_app.settings, "AC", temp_dir):
                     client = TestClient(web_app.app)
 
-                    anonymous = client.post("/api/logout")
-                    self.assertEqual(anonymous.status_code, 401)
+                    stale_cookie = "stale-session-from-before-legacy-import"
+                    client.cookies.set(web_app.SESSION_COOKIE, stale_cookie)
+                    stale_logout = client.post("/api/logout")
+                    self.assertEqual(stale_logout.status_code, 200)
+                    self.assertIn("Max-Age=0", stale_logout.headers["set-cookie"])
+                    self.assertEqual(client.get("/api/bootstrap").status_code, 401)
 
                     login = client.post(
                         "/api/login",
@@ -1063,9 +1067,6 @@ class WebSmokeCiTests(unittest.TestCase):
                     presence = client.get("/api/server/presence")
                     self.assertEqual(presence.status_code, 200)
                     self.assertEqual(presence.json(), {"enabled": False, "users": []})
-
-                    forged = client.post("/api/logout", headers={"X-PicSyncra-CSRF": "bad"})
-                    self.assertEqual(forged.status_code, 403)
 
                     authenticated = client.post("/api/logout", headers=csrf_headers)
                     self.assertEqual(authenticated.status_code, 200)

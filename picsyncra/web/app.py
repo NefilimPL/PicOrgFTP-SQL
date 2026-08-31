@@ -642,6 +642,10 @@ def _validate_mutating_request(request: Request) -> None:
         if str(request.headers.get("x-requested-with") or "").lower() != "xmlhttprequest":
             raise HTTPException(status_code=403, detail="Brak naglowka requestu panelu.")
         return
+    # Logout is intentionally idempotent.  In particular, it must be able to
+    # remove a cookie whose account id was replaced by a legacy import.
+    if path == "/api/logout":
+        return
     if not _auth_enabled():
         return
     session_token = request.cookies.get(SESSION_COOKIE)
@@ -5605,8 +5609,9 @@ def create_app() -> FastAPI:
 
     @app.post("/api/logout")
     def logout(request: Request) -> JSONResponse:
-        username = _require_user(request)
-        _remove_active_client(username, _request_presence_client_id(request))
+        username = _current_user(request)
+        if username:
+            _remove_active_client(username, _request_presence_client_id(request))
         response = JSONResponse({"ok": True})
         response.delete_cookie(SESSION_COOKIE)
         return response
