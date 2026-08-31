@@ -650,6 +650,46 @@ def test_adoption_recovers_archived_legacy_users_after_an_earlier_import(
     assert (result.archive_dir / "previous-picsyncra.sqlite").is_file()
 
 
+def test_adoption_uses_a_new_target_when_windows_keeps_the_current_one_open(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A locked current SQLite file must not prevent importing old data."""
+
+    source = tmp_path / legacy_migration._LEGACY_SQLITE_FILENAME
+    target = tmp_path / "picsyncra.sqlite"
+    SqliteStore(str(source)).save_config({"migration_marker": "locked-target-source"})
+    SqliteStore(str(target)).save_config({"migration_marker": "current-target"})
+    original_unlink = Path.unlink
+
+    def deny_target_unlink(path: Path, *args, **kwargs) -> None:
+        if path == target:
+            error = PermissionError("target database is open")
+            error.winerror = 32  # type: ignore[attr-defined]
+            raise error
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", deny_target_unlink)
+    finalized: list[Path] = []
+
+    result = legacy_migration.adopt_legacy_data(
+        application_root=tmp_path,
+        data_root=tmp_path,
+        database_path=target,
+        backup_root=tmp_path / "BACKUP",
+        finalize=finalized.append,
+        replace_existing_target=True,
+    )
+
+    assert result.migrated is True
+    assert result.copied_paths[0] != target
+    assert result.copied_paths[0].is_file()
+    assert finalized == [result.copied_paths[0]]
+    assert result.error is not None
+    assert "byla uzywana" in result.error
+    assert SqliteStore(str(result.copied_paths[0])).load_config()["migration_marker"] == "locked-target-source"
+    assert SqliteStore(str(target)).load_config()["migration_marker"] == "current-target"
+
+
 def test_runtime_does_not_migrate_legacy_data_before_the_user_chooses_the_action(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -448,15 +448,29 @@ def _publish_staged_target(
     target: Path,
     *,
     replace_target: bool = False,
-) -> None:
+) -> tuple[Path, str | None]:
     """Publish a staged database without replacing an unapproved target."""
 
     if replace_target and target.exists():
-        target.unlink()
+        try:
+            target.unlink()
+        except PermissionError as exc:
+            if getattr(exc, "winerror", None) != 32:
+                raise
+            fallback = target.with_name(
+                f"{target.stem}-legacy-import-{uuid4().hex[:8]}{target.suffix}"
+            )
+            os.link(staging, fallback)
+            return (
+                fallback,
+                "Biezaca baza SQLite byla uzywana przez inny proces. "
+                f"Wczytane dane zostaly aktywowane w pliku {fallback.name}.",
+            )
     try:
         os.link(staging, target)
     except FileExistsError as exc:
         raise _TargetAlreadyExistsError("Docelowa baza PicSyncra juz istnieje.") from exc
+    return target, None
 
 
 def _restore_archived_legacy_data(
@@ -473,6 +487,7 @@ def _restore_archived_legacy_data(
     archived_database = archived_source / _LEGACY_SQLITE_FILENAME
     source_kind = "backup-sqlite+files" if archived_database.is_file() else "backup-files"
     target_replaced = target.exists()
+    publish_warning: str | None = None
     try:
         with _exclusive_path_lock(
             backup_root=backup_root,
@@ -493,7 +508,11 @@ def _restore_archived_legacy_data(
                 _validate_sqlite_database(staging)
                 if target.exists():
                     _archive_existing_target(target, archive_dir)
-                _publish_staged_target(staging, target, replace_target=target.exists())
+                target, publish_warning = _publish_staged_target(
+                    staging,
+                    target,
+                    replace_target=target.exists(),
+                )
                 if finalize is not None:
                     finalize(target)
     except _AdoptionInProgressError as exc:
@@ -514,6 +533,7 @@ def _restore_archived_legacy_data(
         migrated=True,
         skipped=False,
         copied_paths=(target,),
+        error=publish_warning,
         source_kind=source_kind,
         archive_dir=archive_dir,
         replaced_target=target_replaced,
@@ -598,6 +618,7 @@ def adopt_legacy_data(
     target_published = False
     target_replaced = False
     cleanup_error: str | None = None
+    publish_warning: str | None = None
     try:
         with _exclusive_path_lock(
             backup_root=backup_root,
@@ -664,14 +685,14 @@ def adopt_legacy_data(
                                     )
                                     if replace_existing_target and target.exists():
                                         _archive_existing_target(target, archive_dir)
-                                        _publish_staged_target(
+                                        target, publish_warning = _publish_staged_target(
                                             staging,
                                             target,
                                             replace_target=True,
                                         )
                                         target_replaced = True
                                     else:
-                                        _publish_staged_target(
+                                        target, publish_warning = _publish_staged_target(
                                             staging,
                                             target,
                                             replace_target=replace_target,
@@ -728,10 +749,14 @@ def adopt_legacy_data(
                         _copy_sources_to_archive(sources, archive_dir)
                         if replace_existing_target and target.exists():
                             _archive_existing_target(target, archive_dir)
-                            _publish_staged_target(staging, target, replace_target=True)
+                            target, publish_warning = _publish_staged_target(
+                                staging,
+                                target,
+                                replace_target=True,
+                            )
                             target_replaced = True
                         else:
-                            _publish_staged_target(
+                            target, publish_warning = _publish_staged_target(
                                 staging,
                                 target,
                                 replace_target=replace_target,
@@ -774,7 +799,7 @@ def adopt_legacy_data(
         migrated=True,
         skipped=False,
         copied_paths=(target,),
-        error=cleanup_error,
+        error="; ".join(error for error in (publish_warning, cleanup_error) if error) or None,
         source_kind=source_kind,
         archive_dir=archive_dir,
         replaced_target=target_replaced,

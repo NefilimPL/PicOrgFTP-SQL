@@ -7411,7 +7411,7 @@ def create_app() -> FastAPI:
                 "ok": True,
                 "source_kind": result.source_kind,
                 "archive_dir": str(result.archive_dir) if result.archive_dir else "",
-                "database_path": str(adopted_database_path),
+                "database_path": str(result.copied_paths[0]),
                 "warning": result.error or "",
                 "replaced_target": result.replaced_target,
                 "settings": settings_snapshot(),

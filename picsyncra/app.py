@@ -9073,7 +9073,7 @@ class App(BU.Tk):
                             replace_existing_target=True,
                         )
                     if result.migrated:
-                        database_path_var.set(str(database_path))
+                        database_path_var.set(str(result.copied_paths[0]))
                         data_store.reset_active_store_cache()
                         config.initialize_config(interactive=False)
                         message = (
@@ -9087,7 +9087,7 @@ class App(BU.Tk):
                         result.error or "Nie znaleziono danych starej konfiguracji.",
                     )
                     return
-                database_path_var.set(str(database_path))
+                database_path_var.set(str(result.copied_paths[0]))
                 data_store.reset_active_store_cache()
                 config.initialize_config(interactive=False)
                 message = (
