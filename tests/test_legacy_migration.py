@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import picsyncra.legacy_migration as legacy_migration
 import pytest
+from openpyxl import Workbook
 from picsyncra import bootstrap
 from picsyncra.sqlite_coordination import RetiredDatabaseError
-from picsyncra.sqlite_store import SqliteStore
+from picsyncra.sqlite_store import LIST_SHEETS, SqliteStore
 
 from picsyncra.legacy_migration import migrate_legacy_data
 
@@ -266,6 +268,97 @@ def test_adoption_uses_legacy_sqlite_and_imports_supplemental_legacy_files(
     assert not users_path.exists()
     assert (result.archive_dir / source.name).is_file()
     assert (result.archive_dir / users_path.name).is_file()
+
+
+def test_adoption_replaces_pre_rebrand_fts_triggers_before_importing_files(
+    tmp_path: Path,
+) -> None:
+    """Old trigger function names must not abort import of companion legacy files."""
+
+    source = tmp_path / legacy_migration._LEGACY_SQLITE_FILENAME
+    target = tmp_path / "picsyncra.sqlite"
+    SqliteStore(str(source)).initialize()
+    with sqlite3.connect(source) as connection:
+        connection.executescript(
+            """
+            DROP TRIGGER trg_product_entries_short_fts_insert;
+            DROP TRIGGER trg_product_entries_short_fts_delete;
+            DROP TRIGGER trg_product_entries_short_fts_update;
+
+            CREATE TRIGGER trg_product_entries_short_fts_insert
+            AFTER INSERT ON product_entries
+            BEGIN
+                INSERT INTO product_entries_short_fts(rowid, grams)
+                VALUES (new.rowid, picorg_product_short_grams(new.search_text_key));
+            END;
+
+            CREATE TRIGGER trg_product_entries_short_fts_delete
+            AFTER DELETE ON product_entries
+            BEGIN
+                INSERT INTO product_entries_short_fts(
+                    product_entries_short_fts, rowid, grams
+                )
+                VALUES (
+                    'delete', old.rowid,
+                    picorg_product_short_grams(old.search_text_key)
+                );
+            END;
+
+            CREATE TRIGGER trg_product_entries_short_fts_update
+            AFTER UPDATE OF search_text_key ON product_entries
+            BEGIN
+                INSERT INTO product_entries_short_fts(
+                    product_entries_short_fts, rowid, grams
+                )
+                VALUES (
+                    'delete', old.rowid,
+                    picorg_product_short_grams(old.search_text_key)
+                );
+                INSERT INTO product_entries_short_fts(rowid, grams)
+                VALUES (new.rowid, picorg_product_short_grams(new.search_text_key));
+            END;
+            """
+        )
+    (tmp_path / "config.json").write_text(
+        json.dumps({"migration_marker": "old-trigger-config"}), encoding="utf-8"
+    )
+    (tmp_path / "web_users.json").write_text(
+        json.dumps(
+            [
+                {
+                    "username": "admin",
+                    "role": "admin",
+                    "enabled": True,
+                    "password_hash": "legacy-password-hash",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "file_index.json").write_text(
+        json.dumps({"version": 1, "names": ["LEGACY"]}), encoding="utf-8"
+    )
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = LIST_SHEETS[0]
+    worksheet.append(["LEGACY"])
+    workbook.save(tmp_path / "lists.xlsx")
+    workbook.close()
+    SqliteStore(str(target)).initialize()
+
+    result = legacy_migration.adopt_legacy_data(
+        application_root=tmp_path,
+        data_root=tmp_path,
+        database_path=target,
+        backup_root=tmp_path / "BACKUP",
+    )
+
+    target_store = SqliteStore(str(target))
+    assert result.migrated is True
+    assert target_store.load_config()["migration_marker"] == "old-trigger-config"
+    assert target_store.load_users()[0]["role"] == "admin"
+    assert target_store.load_lists()[LIST_SHEETS[0]] == ["LEGACY"]
+    assert target_store.load_file_index_cache()["names"] == ["LEGACY"]
 
 
 def test_adoption_archives_a_file_changed_during_handover(

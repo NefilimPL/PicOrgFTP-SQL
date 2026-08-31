@@ -1014,6 +1014,28 @@ def _initialize_product_short_search_fts(
         )
         return False
 
+    legacy_trigger_rows = conn.execute(
+        """
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'trigger'
+          AND name IN (
+              'trg_product_entries_short_fts_insert',
+              'trg_product_entries_short_fts_delete',
+              'trg_product_entries_short_fts_update'
+          )
+        """
+    ).fetchall()
+    if any("picorg_product_short_grams" in _text(row["sql"]) for row in legacy_trigger_rows):
+        conn.executescript(
+            """
+            DROP TRIGGER IF EXISTS trg_product_entries_short_fts_insert;
+            DROP TRIGGER IF EXISTS trg_product_entries_short_fts_delete;
+            DROP TRIGGER IF EXISTS trg_product_entries_short_fts_update;
+            """
+        )
+        rebuild = True
+
     conn.executescript(
         f"""
         CREATE TRIGGER IF NOT EXISTS trg_product_entries_short_fts_insert
