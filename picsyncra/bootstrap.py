@@ -4,13 +4,21 @@ from pathlib import Path
 
 from . import config, settings
 from .brand import SQLITE_FILENAME
-from .legacy_migration import _LEGACY_SQLITE_FILENAME
+from .legacy_migration import (
+    _LEGACY_SQLITE_FILENAME,
+    process_pending_legacy_target_cleanups,
+)
 from .sqlite_coordination import clear_retired_database_marker
+from .storage_settings import resolve_backup_dir
 
 
 def _clear_completed_legacy_handover_markers() -> None:
     """Do not leave a completed handover marker in the user data directory."""
 
+    try:
+        process_pending_legacy_target_cleanups(Path(resolve_backup_dir()))
+    except OSError:
+        pass
     roots = (Path(settings.AC), Path(settings.BASE_DIR_SETTINGS_PATH).parent)
     for root in roots:
         legacy_database = root / _LEGACY_SQLITE_FILENAME

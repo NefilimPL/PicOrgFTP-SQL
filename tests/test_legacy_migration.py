@@ -660,6 +660,7 @@ def test_adoption_uses_a_new_target_when_windows_keeps_the_current_one_open(
     SqliteStore(str(source)).save_config({"migration_marker": "locked-target-source"})
     SqliteStore(str(target)).save_config({"migration_marker": "current-target"})
     original_unlink = Path.unlink
+    original_replace = legacy_migration.os.replace
 
     def deny_target_unlink(path: Path, *args, **kwargs) -> None:
         if path == target:
@@ -669,6 +670,20 @@ def test_adoption_uses_a_new_target_when_windows_keeps_the_current_one_open(
         original_unlink(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "unlink", deny_target_unlink)
+
+    def deny_target_move(source_path, destination_path) -> None:
+        if Path(source_path) == target:
+            error = PermissionError("target database is open")
+            error.winerror = 32  # type: ignore[attr-defined]
+            raise error
+        original_replace(source_path, destination_path)
+
+    monkeypatch.setattr(legacy_migration.os, "replace", deny_target_move)
+    monkeypatch.setattr(
+        legacy_migration,
+        "_schedule_pending_target_cleanup",
+        lambda *_args, **_kwargs: None,
+    )
     finalized: list[Path] = []
 
     result = legacy_migration.adopt_legacy_data(
@@ -686,8 +701,56 @@ def test_adoption_uses_a_new_target_when_windows_keeps_the_current_one_open(
     assert finalized == [result.copied_paths[0]]
     assert result.error is not None
     assert "byla uzywana" in result.error
+    assert "automatycznie przeniesiona" in result.error
     assert SqliteStore(str(result.copied_paths[0])).load_config()["migration_marker"] == "locked-target-source"
     assert SqliteStore(str(target)).load_config()["migration_marker"] == "current-target"
+    assert list((tmp_path / "BACKUP" / "legacy-import" / ".pending-target-cleanup").glob("*.json"))
+
+
+def test_pending_target_cleanup_moves_old_target_after_windows_releases_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A post-switch target is moved to BACKUP without a second import action."""
+
+    previous_target = tmp_path / "picsyncra.sqlite"
+    active_target = tmp_path / "picsyncra-legacy-import-active.sqlite"
+    archive_dir = tmp_path / "BACKUP" / "legacy-import" / "20260831-000000"
+    SqliteStore(str(previous_target)).save_config({"migration_marker": "old-target"})
+    SqliteStore(str(active_target)).save_config({"migration_marker": "active-target"})
+    original_replace = legacy_migration.os.replace
+
+    def deny_old_target_move(source_path, destination_path) -> None:
+        if Path(source_path) == previous_target:
+            error = PermissionError("target database is open")
+            error.winerror = 32  # type: ignore[attr-defined]
+            raise error
+        original_replace(source_path, destination_path)
+
+    monkeypatch.setattr(legacy_migration.os, "replace", deny_old_target_move)
+    monkeypatch.setattr(
+        legacy_migration,
+        "_schedule_pending_target_cleanup",
+        lambda *_args, **_kwargs: None,
+    )
+
+    warning = legacy_migration._archive_or_defer_replaced_target(
+        previous_target=previous_target,
+        active_target=active_target,
+        archive_dir=archive_dir,
+        backup_root=tmp_path / "BACKUP",
+    )
+
+    assert warning is not None
+    pending_dir = tmp_path / "BACKUP" / "legacy-import" / ".pending-target-cleanup"
+    assert list(pending_dir.glob("*.json"))
+    assert previous_target.is_file()
+
+    monkeypatch.setattr(legacy_migration.os, "replace", original_replace)
+    legacy_migration.process_pending_legacy_target_cleanups(tmp_path / "BACKUP")
+
+    assert not previous_target.exists()
+    assert (archive_dir / "legacy-source-files" / previous_target.name).is_file()
+    assert not list(pending_dir.glob("*.json"))
 
 
 def test_runtime_does_not_migrate_legacy_data_before_the_user_chooses_the_action(

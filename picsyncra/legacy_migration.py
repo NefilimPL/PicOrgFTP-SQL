@@ -8,10 +8,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import errno
 import hashlib
+import json
 import os
 import shutil
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
@@ -41,8 +43,12 @@ _TARGET_EXISTS = "target_exists"
 _ADOPTION_IN_PROGRESS = "adoption_in_progress"
 _SPLIT_FILE_SOURCES = "split_file_sources"
 _ADOPTION_FAILED = "adoption_failed"
+_PENDING_TARGET_CLEANUP_DIRNAME = ".pending-target-cleanup"
+_PENDING_TARGET_CLEANUP_RETRY_SECONDS = 1.0
 _PATH_LOCKS: dict[str, threading.Lock] = {}
 _PATH_LOCKS_GUARD = threading.Lock()
+_PENDING_TARGET_CLEANUPS: set[str] = set()
+_PENDING_TARGET_CLEANUPS_GUARD = threading.Lock()
 
 
 class _AdoptionInProgressError(RuntimeError):
@@ -347,6 +353,11 @@ def _handover_sources_to_archive(
             errors.append(f"{source.name}: plik zniknal przed przeniesieniem")
         except OSError as exc:
             errors.append(f"{source.name}: {exc}")
+            # A SQLite sidecar without its main database is not a useful archive.
+            # If Windows still keeps the database open, leave the whole set in
+            # place and let the deferred handover retry it together.
+            if sqlite_source and source == source_files[0]:
+                break
     if quarantine_dir is not None and moved_files:
         for _source, staged in moved_files:
             destination = destination_root / staged.name
@@ -376,6 +387,137 @@ def _handover_sources_to_archive(
             + ", ".join(changed_files)
         )
     return "; ".join(errors) or None
+
+
+def _pending_target_cleanup_dir(backup_root: Path) -> Path:
+    return Path(backup_root) / "legacy-import" / _PENDING_TARGET_CLEANUP_DIRNAME
+
+
+def _is_descendant(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _write_pending_target_cleanup(
+    *,
+    source: Path,
+    archive_dir: Path,
+    backup_root: Path,
+) -> Path:
+    """Persist a deferred move so an interrupted process can resume it later."""
+
+    pending_dir = _pending_target_cleanup_dir(backup_root)
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    manifest = pending_dir / f"{uuid4().hex}.json"
+    temporary = manifest.with_suffix(".tmp")
+    payload = {
+        "source": str(source.resolve()),
+        "archive_dir": str(archive_dir.resolve()),
+    }
+    temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    os.replace(temporary, manifest)
+    return manifest
+
+
+def _process_pending_target_cleanup(manifest: Path, backup_root: Path) -> bool:
+    """Return whether a persisted post-switch archive move has completed."""
+
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        source = Path(payload["source"]).resolve()
+        archive_dir = Path(payload["archive_dir"]).resolve()
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return False
+
+    legacy_backup_root = (Path(backup_root) / "legacy-import").resolve()
+    if not _is_descendant(archive_dir, legacy_backup_root):
+        return False
+
+    _handover_sources_to_archive(
+        _sqlite_source_files(source),
+        archive_dir,
+        sqlite_source=True,
+    )
+    return not _sqlite_source_files(source)
+
+
+def process_pending_legacy_target_cleanups(backup_root: Path) -> None:
+    """Finish any old-target moves left pending by a Windows file lock."""
+
+    pending_dir = _pending_target_cleanup_dir(backup_root)
+    if not pending_dir.is_dir():
+        return
+    for manifest in sorted(pending_dir.glob("*.json")):
+        if _process_pending_target_cleanup(manifest, backup_root):
+            try:
+                manifest.unlink()
+            except OSError:
+                pass
+
+
+def _schedule_pending_target_cleanup(manifest: Path, backup_root: Path) -> None:
+    """Retry a locked old database in the background without another import."""
+
+    key = str(manifest.resolve()).casefold()
+    with _PENDING_TARGET_CLEANUPS_GUARD:
+        if key in _PENDING_TARGET_CLEANUPS:
+            return
+        _PENDING_TARGET_CLEANUPS.add(key)
+
+    def retry() -> None:
+        try:
+            while manifest.exists():
+                if _process_pending_target_cleanup(manifest, backup_root):
+                    try:
+                        manifest.unlink()
+                    except OSError:
+                        pass
+                    return
+                time.sleep(_PENDING_TARGET_CLEANUP_RETRY_SECONDS)
+        finally:
+            with _PENDING_TARGET_CLEANUPS_GUARD:
+                _PENDING_TARGET_CLEANUPS.discard(key)
+
+    threading.Thread(
+        target=retry,
+        name="picsyncra-legacy-target-cleanup",
+        daemon=True,
+    ).start()
+
+
+def _archive_or_defer_replaced_target(
+    *,
+    previous_target: Path,
+    active_target: Path,
+    archive_dir: Path,
+    backup_root: Path,
+) -> str | None:
+    """Archive a replaced target now, or automatically after its handle closes."""
+
+    if previous_target.resolve() == active_target.resolve():
+        return None
+
+    _handover_sources_to_archive(
+        _sqlite_source_files(previous_target),
+        archive_dir,
+        sqlite_source=True,
+    )
+    if not _sqlite_source_files(previous_target):
+        return None
+
+    manifest = _write_pending_target_cleanup(
+        source=previous_target,
+        archive_dir=archive_dir,
+        backup_root=backup_root,
+    )
+    _schedule_pending_target_cleanup(manifest, backup_root)
+    return (
+        "Poprzednia baza SQLite jest jeszcze uzywana przez inny proces. "
+        "Zostanie automatycznie przeniesiona do BACKUP po zwolnieniu pliku."
+    )
 
 
 def _files_match(first: Path, second: Path) -> bool:
@@ -487,7 +629,9 @@ def _restore_archived_legacy_data(
     archived_database = archived_source / _LEGACY_SQLITE_FILENAME
     source_kind = "backup-sqlite+files" if archived_database.is_file() else "backup-files"
     target_replaced = target.exists()
+    previous_target = target
     publish_warning: str | None = None
+    deferred_cleanup_warning: str | None = None
     try:
         with _exclusive_path_lock(
             backup_root=backup_root,
@@ -529,11 +673,19 @@ def _restore_archived_legacy_data(
             error=str(exc),
             error_code=_ADOPTION_FAILED,
         )
+    deferred_cleanup_warning = _archive_or_defer_replaced_target(
+        previous_target=previous_target,
+        active_target=target,
+        archive_dir=archive_dir,
+        backup_root=backup_root,
+    )
     return MigrationResult(
         migrated=True,
         skipped=False,
         copied_paths=(target,),
-        error=publish_warning,
+        error="; ".join(
+            warning for warning in (publish_warning, deferred_cleanup_warning) if warning
+        ) or None,
         source_kind=source_kind,
         archive_dir=archive_dir,
         replaced_target=target_replaced,
@@ -567,6 +719,7 @@ def adopt_legacy_data(
         )
     file_sources = file_source_sets[0][1] if file_source_sets else ()
     target = Path(database_path).resolve()
+    previous_target = target
     backup_root = Path(backup_root).resolve()
     if sqlite_source is None and not file_sources:
         archived_source = _latest_archived_legacy_files(backup_root)
@@ -619,6 +772,7 @@ def adopt_legacy_data(
     target_replaced = False
     cleanup_error: str | None = None
     publish_warning: str | None = None
+    deferred_cleanup_warning: str | None = None
     try:
         with _exclusive_path_lock(
             backup_root=backup_root,
@@ -795,11 +949,22 @@ def adopt_legacy_data(
             error=str(exc),
             error_code=_ADOPTION_FAILED,
         )
+    deferred_cleanup_warning = _archive_or_defer_replaced_target(
+        previous_target=previous_target,
+        active_target=target,
+        archive_dir=archive_dir,
+        backup_root=backup_root,
+    )
     return MigrationResult(
         migrated=True,
         skipped=False,
         copied_paths=(target,),
-        error="; ".join(error for error in (publish_warning, cleanup_error) if error) or None,
+        error="; ".join(
+            error
+            for error in (publish_warning, cleanup_error, deferred_cleanup_warning)
+            if error
+        )
+        or None,
         source_kind=source_kind,
         archive_dir=archive_dir,
         replaced_target=target_replaced,
