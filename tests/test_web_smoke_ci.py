@@ -856,6 +856,53 @@ class WebSmokeCiTests(unittest.TestCase):
         self.assertEqual(response.json()["settings"]["data_mode"], "sqlite")
         self.assertEqual(response.json()["source_kind"], "sqlite")
 
+    def test_legacy_import_clears_the_session_before_imported_accounts_are_used(self) -> None:
+        """A replaced account id must not leave the browser with an unusable session."""
+
+        client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
+        adoption = MigrationResult(
+            migrated=True,
+            skipped=False,
+            copied_paths=(Path("C:/Data/picsyncra.sqlite"),),
+            source_kind="sqlite+files",
+            archive_dir=Path("C:/Data/BACKUP/legacy-import/20260831-120000"),
+        )
+
+        def adopt_and_finalize(**kwargs):
+            kwargs["finalize"](kwargs["database_path"])
+            return adoption
+
+        with (
+            patch.object(web_app, "_require_admin", return_value=admin),
+            patch.object(
+                web_app.storage_settings,
+                "resolve_sqlite_path",
+                return_value=str(Path("C:/Data") / legacy_migration._LEGACY_SQLITE_FILENAME),
+            ),
+            patch.object(
+                web_app.storage_settings,
+                "resolve_backup_dir",
+                return_value="C:/Data/BACKUP",
+            ),
+            patch.object(
+                web_app.storage_settings,
+                "load_bootstrap_settings",
+                return_value={"database_location_mode": "custom"},
+            ),
+            patch.object(web_app, "adopt_legacy_data", side_effect=adopt_and_finalize),
+            patch.object(web_app.storage_settings, "save_bootstrap_settings"),
+            patch.object(web_app.data_store, "reset_active_store_cache"),
+            patch.object(web_app.config, "initialize_config"),
+            patch.object(web_app, "settings_snapshot", return_value={"data_mode": "sqlite"}),
+        ):
+            response = client.post("/api/settings/import-legacy")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["reauthenticate"])
+        self.assertIn(f"{web_app.SESSION_COOKIE}=\"\"", response.headers["set-cookie"])
+        self.assertIn("Max-Age=0", response.headers["set-cookie"])
+
     def test_sqlite_repair_endpoint_returns_summary(self) -> None:
         client = TestClient(web_app.app)
         with (

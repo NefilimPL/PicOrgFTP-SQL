@@ -7406,7 +7406,7 @@ def create_app() -> FastAPI:
                 detail=f"Nie udalo sie wczytac danych starej konfiguracji: {exc}",
             ) from exc
         app.state.runtime_info = _runtime_info()
-        return JSONResponse(
+        response = JSONResponse(
             {
                 "ok": True,
                 "source_kind": result.source_kind,
@@ -7414,6 +7414,7 @@ def create_app() -> FastAPI:
                 "database_path": str(result.copied_paths[0]),
                 "warning": result.error or "",
                 "replaced_target": result.replaced_target,
+                "reauthenticate": True,
                 "settings": settings_snapshot(),
                 "message": (
                     "Wczytano dane starej konfiguracji do SQLite i zarchiwizowano poprzednia baze."
@@ -7421,9 +7422,14 @@ def create_app() -> FastAPI:
                     else "Wczytano dane starej konfiguracji do SQLite."
                     if result.error
                     else "Wczytano dane starej konfiguracji do SQLite i przeniesiono zrodla do BACKUP."
-                ),
+                )
+                + " Zaloguj sie ponownie kontem ze starej konfiguracji.",
             }
         )
+        # Legacy account records often have a different generated id.  A session
+        # issued before the replacement cannot identify the imported account.
+        response.delete_cookie(SESSION_COOKIE)
+        return response
 
     @app.post("/api/settings/sqlite/repair")
     async def settings_sqlite_repair(request: Request) -> JSONResponse:

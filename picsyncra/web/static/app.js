@@ -8556,6 +8556,13 @@ function importLegacyDataButton() {
       settingsStatus.textContent = payload.warning
         ? `${completionMessage} Ostrzezenie: ${payload.warning}`
         : completionMessage;
+      if (payload.reauthenticate) {
+        state.currentUser = null;
+        window.setTimeout(() => {
+          window.location.href = "/login";
+        }, 300);
+        return;
+      }
       renderSettings();
     } catch (error) {
       settingsStatus.textContent = error.message || "Nie udalo sie wczytac danych starej konfiguracji.";
