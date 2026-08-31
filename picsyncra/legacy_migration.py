@@ -42,13 +42,17 @@ _LEGACY_DATA_FILENAMES = (
 _TARGET_EXISTS = "target_exists"
 _ADOPTION_IN_PROGRESS = "adoption_in_progress"
 _SPLIT_FILE_SOURCES = "split_file_sources"
+_MIXED_SOURCES = "mixed_sources"
 _ADOPTION_FAILED = "adoption_failed"
 _PENDING_TARGET_CLEANUP_DIRNAME = ".pending-target-cleanup"
+_PENDING_SOURCE_CLEANUP_DIRNAME = ".pending-source-cleanup"
 _PENDING_TARGET_CLEANUP_RETRY_SECONDS = 1.0
 _PATH_LOCKS: dict[str, threading.Lock] = {}
 _PATH_LOCKS_GUARD = threading.Lock()
 _PENDING_TARGET_CLEANUPS: set[str] = set()
 _PENDING_TARGET_CLEANUPS_GUARD = threading.Lock()
+_PENDING_SOURCE_CLEANUPS: set[str] = set()
+_PENDING_SOURCE_CLEANUPS_GUARD = threading.Lock()
 
 
 class _AdoptionInProgressError(RuntimeError):
@@ -153,12 +157,23 @@ def adoption_database_path(database_path: Path) -> Path:
 
 
 def _legacy_file_source_sets(
-    application_root: Path, data_root: Path
+    application_root: Path,
+    data_root: Path,
+    *,
+    sqlite_source: Path | None = None,
 ) -> tuple[tuple[Path, tuple[Path, ...]], ...]:
-    """Return complete per-directory source sets without combining directories."""
+    """Return complete per-directory source sets without combining directories.
+
+    A configured legacy database defines the old configuration directory.  Its
+    companion JSON/XLSX files must be discovered there first: after a rebrand
+    the new application and image roots can contain unrelated, freshly-created
+    files.  Any second directory with legacy files is still reported as an
+    ambiguous import instead of silently combining configurations.
+    """
 
     source_sets: list[tuple[Path, tuple[Path, ...]]] = []
-    for root in _unique_paths((Path(data_root), Path(application_root))):
+    companion_root = sqlite_source.parent if sqlite_source is not None else Path(data_root)
+    for root in _unique_paths((companion_root, Path(data_root), Path(application_root))):
         sources = tuple(root / filename for filename in _LEGACY_DATA_FILENAMES if (root / filename).is_file())
         if sources:
             source_sets.append((root, sources))
@@ -393,6 +408,10 @@ def _pending_target_cleanup_dir(backup_root: Path) -> Path:
     return Path(backup_root) / "legacy-import" / _PENDING_TARGET_CLEANUP_DIRNAME
 
 
+def _pending_source_cleanup_dir(backup_root: Path) -> Path:
+    return Path(backup_root) / "legacy-import" / _PENDING_SOURCE_CLEANUP_DIRNAME
+
+
 def _is_descendant(path: Path, parent: Path) -> bool:
     try:
         path.resolve().relative_to(parent.resolve())
@@ -422,6 +441,31 @@ def _write_pending_target_cleanup(
     return manifest
 
 
+def _write_pending_source_cleanup(
+    *,
+    sources: tuple[Path, ...],
+    archive_dir: Path,
+    backup_root: Path,
+    sqlite_source: bool,
+    retired_database: Path | None = None,
+) -> Path:
+    """Persist a deferred legacy-source move after a temporary file lock."""
+
+    pending_dir = _pending_source_cleanup_dir(backup_root)
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    manifest = pending_dir / f"{uuid4().hex}.json"
+    temporary = manifest.with_suffix(".tmp")
+    payload = {
+        "sources": [str(source.resolve()) for source in sources],
+        "archive_dir": str(archive_dir.resolve()),
+        "sqlite_source": bool(sqlite_source),
+        "retired_database": str(retired_database.resolve()) if retired_database else "",
+    }
+    temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    os.replace(temporary, manifest)
+    return manifest
+
+
 def _process_pending_target_cleanup(manifest: Path, backup_root: Path) -> bool:
     """Return whether a persisted post-switch archive move has completed."""
 
@@ -444,18 +488,57 @@ def _process_pending_target_cleanup(manifest: Path, backup_root: Path) -> bool:
     return not _sqlite_source_files(source)
 
 
-def process_pending_legacy_target_cleanups(backup_root: Path) -> None:
-    """Finish any old-target moves left pending by a Windows file lock."""
+def _process_pending_source_cleanup(manifest: Path, backup_root: Path) -> bool:
+    """Retry an archived companion-file handover recorded after a file lock."""
 
-    pending_dir = _pending_target_cleanup_dir(backup_root)
-    if not pending_dir.is_dir():
-        return
-    for manifest in sorted(pending_dir.glob("*.json")):
-        if _process_pending_target_cleanup(manifest, backup_root):
-            try:
-                manifest.unlink()
-            except OSError:
-                pass
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        sources = tuple(Path(value).resolve() for value in payload["sources"])
+        archive_dir = Path(payload["archive_dir"]).resolve()
+        sqlite_source = bool(payload["sqlite_source"])
+        retired_text = str(payload.get("retired_database") or "")
+        retired_database = Path(retired_text).resolve() if retired_text else None
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return False
+
+    legacy_backup_root = (Path(backup_root) / "legacy-import").resolve()
+    if not sources or not _is_descendant(archive_dir, legacy_backup_root):
+        return False
+    if sqlite_source:
+        valid_source_names = {
+            _LEGACY_SQLITE_FILENAME,
+            *(
+                f"{_LEGACY_SQLITE_FILENAME}{suffix}"
+                for suffix in _SQLITE_SIDECARS
+            ),
+        }
+    else:
+        valid_source_names = set(_LEGACY_DATA_FILENAMES)
+    if any(source.name.casefold() not in valid_source_names for source in sources):
+        return False
+
+    _handover_sources_to_archive(sources, archive_dir, sqlite_source=sqlite_source)
+    completed = not any(source.is_file() for source in sources)
+    if completed and retired_database is not None:
+        clear_retired_database_marker(retired_database)
+    return completed
+
+
+def process_pending_legacy_target_cleanups(backup_root: Path) -> None:
+    """Finish old-target and companion-file moves left pending by file locks."""
+
+    for pending_dir, processor in (
+        (_pending_target_cleanup_dir(backup_root), _process_pending_target_cleanup),
+        (_pending_source_cleanup_dir(backup_root), _process_pending_source_cleanup),
+    ):
+        if not pending_dir.is_dir():
+            continue
+        for manifest in sorted(pending_dir.glob("*.json")):
+            if processor(manifest, backup_root):
+                try:
+                    manifest.unlink()
+                except OSError:
+                    pass
 
 
 def _schedule_pending_target_cleanup(manifest: Path, backup_root: Path) -> None:
@@ -486,6 +569,66 @@ def _schedule_pending_target_cleanup(manifest: Path, backup_root: Path) -> None:
         name="picsyncra-legacy-target-cleanup",
         daemon=True,
     ).start()
+
+
+def _schedule_pending_source_cleanup(manifest: Path, backup_root: Path) -> None:
+    """Retry a locked legacy companion move without another import action."""
+
+    key = str(manifest.resolve()).casefold()
+    with _PENDING_SOURCE_CLEANUPS_GUARD:
+        if key in _PENDING_SOURCE_CLEANUPS:
+            return
+        _PENDING_SOURCE_CLEANUPS.add(key)
+
+    def retry() -> None:
+        try:
+            while manifest.exists():
+                if _process_pending_source_cleanup(manifest, backup_root):
+                    try:
+                        manifest.unlink()
+                    except OSError:
+                        pass
+                    return
+                time.sleep(_PENDING_TARGET_CLEANUP_RETRY_SECONDS)
+        finally:
+            with _PENDING_SOURCE_CLEANUPS_GUARD:
+                _PENDING_SOURCE_CLEANUPS.discard(key)
+
+    threading.Thread(
+        target=retry,
+        name="picsyncra-legacy-source-cleanup",
+        daemon=True,
+    ).start()
+
+
+def _defer_remaining_source_cleanup(
+    *,
+    sources: tuple[Path, ...],
+    sqlite_source: bool,
+    retired_database: Path | None,
+    archive_dir: Path,
+    backup_root: Path,
+) -> str | None:
+    """Record and schedule a retry only for source files that still exist."""
+
+    remaining = tuple(source for source in sources if source.is_file())
+    if not remaining:
+        return None
+    try:
+        manifest = _write_pending_source_cleanup(
+            sources=remaining,
+            archive_dir=archive_dir,
+            backup_root=backup_root,
+            sqlite_source=sqlite_source,
+            retired_database=retired_database,
+        )
+        _schedule_pending_source_cleanup(manifest, backup_root)
+    except OSError as exc:
+        return f"Nie udalo sie zaplanowac przeniesienia pozostalych plikow: {exc}"
+    return (
+        "Niektore zrodlowe pliki sa jeszcze uzywane przez inny proces. "
+        "Zostana automatycznie przeniesione do BACKUP po zwolnieniu plikow."
+    )
 
 
 def _archive_or_defer_replaced_target(
@@ -709,7 +852,23 @@ def adopt_legacy_data(
         data_root,
         legacy_database_path,
     )
-    file_source_sets = _legacy_file_source_sets(application_root, data_root)
+    file_source_sets = _legacy_file_source_sets(
+        application_root,
+        data_root,
+        sqlite_source=sqlite_source,
+    )
+    if sqlite_source is not None:
+        sqlite_source_root = sqlite_source.parent.resolve()
+        if any(root.resolve() != sqlite_source_root for root, _sources in file_source_sets):
+            return MigrationResult(
+                migrated=False,
+                skipped=False,
+                error=(
+                    "Stare pliki danych nie znajduja sie obok wskazanej starej bazy SQLite. "
+                    "Import nie polaczy niezaleznych konfiguracji."
+                ),
+                error_code=_MIXED_SOURCES,
+            )
     if len(file_source_sets) > 1:
         return MigrationResult(
             migrated=False,
@@ -773,6 +932,7 @@ def adopt_legacy_data(
     cleanup_error: str | None = None
     publish_warning: str | None = None
     deferred_cleanup_warning: str | None = None
+    pending_source_cleanup_requests: list[tuple[tuple[Path, ...], bool, Path | None]] = []
     try:
         with _exclusive_path_lock(
             backup_root=backup_root,
@@ -891,7 +1051,19 @@ def adopt_legacy_data(
                                 for error in (cleanup_error, residual_error, residual_warning)
                                 if error
                             ) or None
-                        elif cleanup_error is None:
+                        remaining_sqlite_files = _sqlite_source_files(sqlite_source)
+                        remaining_file_sources = tuple(
+                            source for source in file_sources if source.is_file()
+                        )
+                        if remaining_sqlite_files:
+                            pending_source_cleanup_requests.append(
+                                (remaining_sqlite_files, True, sqlite_source)
+                            )
+                        if remaining_file_sources:
+                            pending_source_cleanup_requests.append(
+                                (remaining_file_sources, False, sqlite_source)
+                            )
+                        if not remaining_sqlite_files and not remaining_file_sources:
                             clear_retired_database_marker(sqlite_source)
                     else:
                         staging_sources = Path(temporary_dir) / "legacy-files"
@@ -923,6 +1095,7 @@ def adopt_legacy_data(
                             archive_dir,
                             sqlite_source=False,
                         )
+                        pending_source_cleanup_requests.append((sources, False, None))
     except _AdoptionInProgressError as exc:
         return MigrationResult(
             migrated=False,
@@ -949,6 +1122,19 @@ def adopt_legacy_data(
             error=str(exc),
             error_code=_ADOPTION_FAILED,
         )
+    deferred_source_cleanup_warning = "; ".join(
+        warning
+        for sources, is_sqlite_source, retired_database in pending_source_cleanup_requests
+        if (
+            warning := _defer_remaining_source_cleanup(
+                sources=sources,
+                sqlite_source=is_sqlite_source,
+                retired_database=retired_database,
+                archive_dir=archive_dir,
+                backup_root=backup_root,
+            )
+        )
+    ) or None
     deferred_cleanup_warning = _archive_or_defer_replaced_target(
         previous_target=previous_target,
         active_target=target,
@@ -961,7 +1147,12 @@ def adopt_legacy_data(
         copied_paths=(target,),
         error="; ".join(
             error
-            for error in (publish_warning, cleanup_error, deferred_cleanup_warning)
+            for error in (
+                publish_warning,
+                cleanup_error,
+                deferred_source_cleanup_warning,
+                deferred_cleanup_warning,
+            )
             if error
         )
         or None,

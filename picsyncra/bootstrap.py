@@ -9,7 +9,7 @@ from .legacy_migration import (
     process_pending_legacy_target_cleanups,
 )
 from .sqlite_coordination import clear_retired_database_marker
-from .storage_settings import resolve_backup_dir
+from .storage_settings import resolve_backup_dir, resolve_sqlite_path
 
 
 def _clear_completed_legacy_handover_markers() -> None:
@@ -19,11 +19,25 @@ def _clear_completed_legacy_handover_markers() -> None:
         process_pending_legacy_target_cleanups(Path(resolve_backup_dir()))
     except OSError:
         pass
-    roots = (Path(settings.AC), Path(settings.BASE_DIR_SETTINGS_PATH).parent)
+    configured_database: Path | None = None
+    roots = {
+        Path(settings.AC),
+        Path(settings.BASE_DIR_SETTINGS_PATH).parent,
+    }
+    try:
+        configured_database = Path(resolve_sqlite_path())
+        roots.add(configured_database.parent)
+    except (OSError, ValueError):
+        pass
     for root in roots:
         legacy_database = root / _LEGACY_SQLITE_FILENAME
         current_database = root / SQLITE_FILENAME
-        if current_database.is_file():
+        configured_database_is_here = (
+            configured_database is not None
+            and configured_database.parent == root
+            and configured_database.is_file()
+        )
+        if current_database.is_file() or configured_database_is_here:
             clear_retired_database_marker(legacy_database)
 
 

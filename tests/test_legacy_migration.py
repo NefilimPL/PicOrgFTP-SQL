@@ -9,7 +9,7 @@ from pathlib import Path
 import picsyncra.legacy_migration as legacy_migration
 import pytest
 from openpyxl import Workbook
-from picsyncra import bootstrap
+from picsyncra import bootstrap, web_data
 from picsyncra.sqlite_coordination import RetiredDatabaseError
 from picsyncra.sqlite_store import LIST_SHEETS, SqliteStore
 
@@ -420,6 +420,197 @@ def test_adoption_reads_a_legacy_database_from_the_configured_custom_path(
     assert result.migrated is True
     assert SqliteStore(str(target)).load_config()["migration_marker"] == "custom-path"
     assert not source.exists()
+
+
+def test_adoption_imports_accounts_next_to_a_custom_legacy_database(
+    tmp_path: Path,
+) -> None:
+    """Companion JSON must follow the configured legacy database, not the new roots."""
+
+    source_root = tmp_path / "previous-location"
+    source_root.mkdir()
+    source = source_root / "picorgftp_sql.sqlite"
+    users_path = source_root / "web_users.json"
+    target = tmp_path / "current-location" / "picsyncra.sqlite"
+    legacy_password = "previous-password"
+    legacy_password_hash = web_data._hash_password(legacy_password)
+    SqliteStore(str(source)).save_config({"migration_marker": "custom-path-users"})
+    users_path.write_text(
+        json.dumps(
+            [
+                {
+                    "username": "admin",
+                    "role": "admin",
+                    "enabled": True,
+                    "password_hash": legacy_password_hash,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = legacy_migration.adopt_legacy_data(
+        application_root=tmp_path / "new-application",
+        data_root=tmp_path / "new-data",
+        database_path=target,
+        backup_root=tmp_path / "BACKUP",
+        legacy_database_path=source,
+    )
+
+    assert result.migrated is True
+    assert result.source_kind == "sqlite+files"
+    imported_user = SqliteStore(str(target)).load_users()[0]
+    assert imported_user["username"] == "admin"
+    assert imported_user["role"] == "admin"
+    assert imported_user["password_hash"] == legacy_password_hash
+    assert web_data.verify_password(legacy_password, imported_user["password_hash"])
+    assert not users_path.exists()
+    assert (result.archive_dir / "web_users.json").is_file()
+
+
+@pytest.mark.parametrize("foreign_root_name", ("new-application", "new-data"))
+def test_adoption_rejects_companion_files_outside_a_custom_legacy_database(
+    tmp_path: Path,
+    foreign_root_name: str,
+) -> None:
+    """A custom old SQLite file must never be combined with a new-root JSON file."""
+
+    source_root = tmp_path / "previous-location"
+    application_root = tmp_path / "new-application"
+    data_root = tmp_path / "new-data"
+    source_root.mkdir()
+    application_root.mkdir()
+    data_root.mkdir()
+    source = source_root / "picorgftp_sql.sqlite"
+    target = tmp_path / "current-location" / "picsyncra.sqlite"
+    SqliteStore(str(source)).save_config({"migration_marker": "do-not-mix-roots"})
+    (tmp_path / foreign_root_name / "web_users.json").write_text("[]", encoding="utf-8")
+
+    result = legacy_migration.adopt_legacy_data(
+        application_root=application_root,
+        data_root=data_root,
+        database_path=target,
+        backup_root=tmp_path / "BACKUP",
+        legacy_database_path=source,
+    )
+
+    assert result.migrated is False
+    assert result.error_code == "mixed_sources"
+    assert source.exists()
+    assert not target.exists()
+
+
+def test_adoption_removes_a_retired_marker_when_all_sources_were_moved(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A non-fatal archive warning must not leave a root-level adoption marker."""
+
+    source = tmp_path / "picorgftp_sql.sqlite"
+    users_path = tmp_path / "web_users.json"
+    target = tmp_path / "picsyncra.sqlite"
+    SqliteStore(str(source)).save_config({"migration_marker": "marker-cleanup"})
+    users_path.write_text("[]", encoding="utf-8")
+    original_handover = legacy_migration._handover_sources_to_archive
+
+    def handover_with_warning(
+        sources: tuple[Path, ...],
+        archive_dir: Path,
+        *,
+        sqlite_source: bool,
+    ) -> str | None:
+        result = original_handover(sources, archive_dir, sqlite_source=sqlite_source)
+        if not sqlite_source and result is None:
+            return "source changed while importing"
+        return result
+
+    monkeypatch.setattr(
+        legacy_migration,
+        "_handover_sources_to_archive",
+        handover_with_warning,
+    )
+
+    result = legacy_migration.adopt_legacy_data(
+        application_root=tmp_path,
+        data_root=tmp_path,
+        database_path=target,
+        backup_root=tmp_path / "BACKUP",
+    )
+
+    assert result.migrated is True
+    assert result.error is not None
+    assert not source.exists()
+    assert not source.with_name(f".{source.name}.picsyncra-adoption").exists()
+
+
+def test_adoption_retries_a_companion_file_that_was_busy_during_handover(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A copied but busy JSON source must be moved later without another import."""
+
+    source = tmp_path / "picorgftp_sql.sqlite"
+    users_path = tmp_path / "web_users.json"
+    target = tmp_path / "picsyncra.sqlite"
+    SqliteStore(str(source)).save_config({"migration_marker": "busy-companion"})
+    users_path.write_text(
+        json.dumps(
+            [
+                {
+                    "username": "admin",
+                    "role": "admin",
+                    "enabled": True,
+                    "password_hash": "legacy-password-hash",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    original_handover = legacy_migration._handover_sources_to_archive
+
+    def leave_companion_busy(
+        sources: tuple[Path, ...],
+        archive_dir: Path,
+        *,
+        sqlite_source: bool,
+    ) -> str | None:
+        if not sqlite_source:
+            return "web_users.json: source busy"
+        return original_handover(sources, archive_dir, sqlite_source=sqlite_source)
+
+    monkeypatch.setattr(
+        legacy_migration,
+        "_handover_sources_to_archive",
+        leave_companion_busy,
+    )
+    monkeypatch.setattr(
+        legacy_migration,
+        "_schedule_pending_source_cleanup",
+        lambda *_args, **_kwargs: None,
+        raising=False,
+    )
+
+    result = legacy_migration.adopt_legacy_data(
+        application_root=tmp_path,
+        data_root=tmp_path,
+        database_path=target,
+        backup_root=tmp_path / "BACKUP",
+    )
+
+    assert result.migrated is True
+    assert result.error is not None
+    assert users_path.exists()
+    marker = source.with_name(f".{source.name}.picsyncra-adoption")
+    assert marker.is_file()
+    pending_dir = tmp_path / "BACKUP" / "legacy-import" / ".pending-source-cleanup"
+    assert list(pending_dir.glob("*.json"))
+    assert SqliteStore(str(target)).load_users()[0]["role"] == "admin"
+
+    monkeypatch.setattr(legacy_migration, "_handover_sources_to_archive", original_handover)
+    legacy_migration.process_pending_legacy_target_cleanups(tmp_path / "BACKUP")
+
+    assert not users_path.exists()
+    assert not marker.exists()
+    assert not list(pending_dir.glob("*.json"))
+    assert (result.archive_dir / "web_users.json").is_file()
 
 
 def test_adoption_keeps_legacy_data_in_place_when_archive_copy_fails(
@@ -866,3 +1057,29 @@ def test_runtime_does_not_migrate_legacy_data_before_the_user_chooses_the_action
     assert source.exists()
     assert not (data_root / "picsyncra.sqlite").exists()
     assert "migration" not in result
+
+
+def test_runtime_cleans_a_completed_marker_next_to_a_custom_active_database(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Completed custom-path adoptions must not leave legacy marker files behind."""
+
+    data_root = tmp_path / "data"
+    custom_root = tmp_path / "custom-sqlite"
+    data_root.mkdir()
+    custom_root.mkdir()
+    active_database = custom_root / "picsyncra-legacy-import-active.sqlite"
+    SqliteStore(str(active_database)).initialize()
+    legacy_database = custom_root / "picorgftp_sql.sqlite"
+    marker = legacy_database.with_name(f".{legacy_database.name}.picsyncra-adoption")
+    marker.write_text("retired", encoding="ascii")
+
+    monkeypatch.setattr(bootstrap.settings, "initialize_runtime", lambda **_kwargs: None)
+    monkeypatch.setattr(bootstrap.settings, "BASE_DIR_SETTINGS_PATH", str(tmp_path / "local_settings.json"))
+    monkeypatch.setattr(bootstrap.settings, "AC", str(data_root))
+    monkeypatch.setattr(bootstrap, "resolve_sqlite_path", lambda: str(active_database))
+    monkeypatch.setattr(bootstrap.config, "initialize_config", lambda **_kwargs: {})
+
+    bootstrap.initialize_application_runtime(interactive=False)
+
+    assert not marker.exists()
