@@ -241,3 +241,15 @@ def retire_database(path: str | Path) -> None:
     with gate.condition:
         _set_marker(path, "retired")
         gate.retired = True
+
+
+def clear_retired_database_marker(path: str | Path) -> None:
+    """Remove the persistent marker once the old database no longer exists."""
+
+    marker = _marker_path(path)
+    if maintenance_state(path) != "retired" or Path(path).exists():
+        return
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        pass

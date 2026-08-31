@@ -18,7 +18,12 @@ from uuid import uuid4
 
 from .brand import SQLITE_FILENAME
 from .legacy_import import import_legacy_to_sqlite
-from .sqlite_coordination import database_maintenance, maintenance_state, retire_database
+from .sqlite_coordination import (
+    clear_retired_database_marker,
+    database_maintenance,
+    maintenance_state,
+    retire_database,
+)
 
 
 _LEGACY_SQLITE_FILENAME = "picorgftp_sql.sqlite"
@@ -165,6 +170,24 @@ def _sqlite_source_files(source: Path) -> tuple[Path, ...]:
 def _legacy_archive_dir(backup_root: Path) -> Path:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     return backup_root / "legacy-import" / f"{timestamp}-{uuid4().hex[:8]}"
+
+
+def _latest_archived_legacy_files(backup_root: Path) -> Path | None:
+    """Find an archived JSON/XLSX source left by a completed earlier import."""
+
+    archive_root = Path(backup_root) / "legacy-import"
+    try:
+        candidates = sorted(
+            (path for path in archive_root.iterdir() if path.is_dir()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return None
+    for candidate in candidates:
+        if any((candidate / filename).is_file() for filename in _LEGACY_DATA_FILENAMES):
+            return candidate
+    return None
 
 
 def _copy_sqlite_database(source: Path, target: Path) -> None:
@@ -436,6 +459,67 @@ def _publish_staged_target(
         raise _TargetAlreadyExistsError("Docelowa baza PicSyncra juz istnieje.") from exc
 
 
+def _restore_archived_legacy_data(
+    *,
+    archived_source: Path,
+    target: Path,
+    backup_root: Path,
+    finalize: Callable[[Path], None] | None,
+) -> MigrationResult:
+    """Repair an earlier incomplete adoption from its immutable BACKUP copy."""
+
+    archive_dir = _legacy_archive_dir(backup_root)
+    archive_dir.mkdir(parents=True, exist_ok=False)
+    archived_database = archived_source / _LEGACY_SQLITE_FILENAME
+    source_kind = "backup-sqlite+files" if archived_database.is_file() else "backup-files"
+    target_replaced = target.exists()
+    try:
+        with _exclusive_path_lock(
+            backup_root=backup_root,
+            scope="target",
+            protected_path=target,
+        ):
+            with TemporaryDirectory(prefix=".picsyncra-legacy-recovery-", dir=target.parent) as temporary_dir:
+                staging = Path(temporary_dir) / target.name
+                if archived_database.is_file():
+                    _copy_sqlite_database(archived_database, staging)
+                elif target.exists():
+                    _copy_sqlite_database(target, staging)
+                import_legacy_to_sqlite(
+                    str(archived_source),
+                    str(staging),
+                    merge_existing=True,
+                )
+                _validate_sqlite_database(staging)
+                if target.exists():
+                    _archive_existing_target(target, archive_dir)
+                _publish_staged_target(staging, target, replace_target=target.exists())
+                if finalize is not None:
+                    finalize(target)
+    except _AdoptionInProgressError as exc:
+        return MigrationResult(
+            migrated=False,
+            skipped=False,
+            error=str(exc),
+            error_code=_ADOPTION_IN_PROGRESS,
+        )
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        return MigrationResult(
+            migrated=False,
+            skipped=False,
+            error=str(exc),
+            error_code=_ADOPTION_FAILED,
+        )
+    return MigrationResult(
+        migrated=True,
+        skipped=False,
+        copied_paths=(target,),
+        source_kind=source_kind,
+        archive_dir=archive_dir,
+        replaced_target=target_replaced,
+    )
+
+
 def adopt_legacy_data(
     *,
     application_root: Path,
@@ -462,10 +546,27 @@ def adopt_legacy_data(
             error_code=_SPLIT_FILE_SOURCES,
         )
     file_sources = file_source_sets[0][1] if file_source_sets else ()
+    target = Path(database_path).resolve()
+    backup_root = Path(backup_root).resolve()
     if sqlite_source is None and not file_sources:
+        archived_source = _latest_archived_legacy_files(backup_root)
+        if archived_source is not None:
+            if target.exists() and not replace_existing_target:
+                return MigrationResult(
+                    migrated=False,
+                    skipped=False,
+                    error="Docelowa baza PicSyncra juz istnieje.",
+                    error_code=_TARGET_EXISTS,
+                )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            return _restore_archived_legacy_data(
+                archived_source=archived_source,
+                target=target,
+                backup_root=backup_root,
+                finalize=finalize,
+            )
         return MigrationResult(migrated=False, skipped=True)
 
-    target = Path(database_path).resolve()
     resume_interrupted_adoption = (
         sqlite_source is not None
         and target.exists()
@@ -485,9 +586,12 @@ def adopt_legacy_data(
         )
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    backup_root = Path(backup_root).resolve()
     archive_dir = _legacy_archive_dir(backup_root)
-    source_kind = "sqlite" if sqlite_source is not None else "files"
+    source_kind = (
+        "sqlite+files" if sqlite_source is not None and file_sources
+        else "sqlite" if sqlite_source is not None
+        else "files"
+    )
     sources = _sqlite_source_files(sqlite_source) if sqlite_source else file_sources
     source_lock_path = sqlite_source if sqlite_source is not None else file_source_sets[0][0]
     source_lock_scope = "sqlite-source" if sqlite_source is not None else "files-source"
@@ -541,6 +645,17 @@ def adopt_legacy_data(
                             else:
                                 with _locked_sqlite_source(sqlite_source):
                                     _copy_sqlite_database(sqlite_source, staging)
+                                    if file_sources:
+                                        staging_sources = Path(temporary_dir) / "legacy-files"
+                                        staging_sources.mkdir()
+                                        for source in file_sources:
+                                            shutil.copy2(source, staging_sources / source.name)
+                                        import_legacy_to_sqlite(
+                                            str(staging_sources),
+                                            str(staging),
+                                            merge_existing=True,
+                                        )
+                                        _validate_sqlite_database(staging)
                                     _copy_sources_to_archive(
                                         file_sources,
                                         archive_dir,
@@ -601,6 +716,8 @@ def adopt_legacy_data(
                                 for error in (cleanup_error, residual_error, residual_warning)
                                 if error
                             ) or None
+                        elif cleanup_error is None:
+                            clear_retired_database_marker(sqlite_source)
                     else:
                         staging_sources = Path(temporary_dir) / "legacy-files"
                         staging_sources.mkdir()

@@ -114,28 +114,122 @@ def _read_workbook_payload(path: Path) -> dict[str, Any]:
     return payload
 
 
-def import_legacy_to_sqlite(legacy_dir: str, database_path: str) -> dict[str, Any]:
+def _merge_mapping(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    """Overlay legacy values while retaining keys held only by the SQLite source."""
+
+    merged = dict(existing)
+    for key, value in incoming.items():
+        previous = merged.get(key)
+        if isinstance(previous, dict) and isinstance(value, dict):
+            merged[key] = _merge_mapping(previous, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _merge_users(
+    existing: list[dict[str, Any]], incoming: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Keep accounts present only in one old store; JSON wins on the same login."""
+
+    users: list[dict[str, Any]] = []
+    index_by_username: dict[str, int] = {}
+    for item in [*existing, *incoming]:
+        if not isinstance(item, dict):
+            continue
+        username = str(item.get("username") or "").strip()
+        if not username:
+            continue
+        key = username.casefold()
+        if key in index_by_username:
+            users[index_by_username[key]] = dict(item)
+        else:
+            index_by_username[key] = len(users)
+            users.append(dict(item))
+    return users
+
+
+def _entry_key(record: dict[str, Any]) -> tuple[str, str]:
+    product_id = _cell(record.get(PRODUCT_ID_HEADER)).casefold()
+    if product_id:
+        return ("product_id", product_id)
+    ean = _cell(record.get(EAN_HEADER)).casefold()
+    return ("ean", ean) if ean else ("record", repr(sorted(record.items())))
+
+
+def _merge_lists_payload(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    """Combine old workbook values with entries already held in legacy SQLite."""
+
+    merged: dict[str, Any] = {}
+    for sheet in LIST_SHEETS:
+        values: list[Any] = []
+        seen: set[str] = set()
+        for value in [*(existing.get(sheet, []) or []), *(incoming.get(sheet, []) or [])]:
+            key = _cell(value).casefold()
+            if key and key not in seen:
+                seen.add(key)
+                values.append(value)
+        merged[sheet] = values
+
+    records: list[dict[str, Any]] = []
+    index_by_key: dict[tuple[str, str], int] = {}
+    for item in [
+        *(existing.get(ENTRY_RECORDS_KEY, []) or []),
+        *(incoming.get(ENTRY_RECORDS_KEY, []) or []),
+    ]:
+        if not isinstance(item, dict):
+            continue
+        key = _entry_key(item)
+        if key in index_by_key:
+            records[index_by_key[key]] = dict(item)
+        else:
+            index_by_key[key] = len(records)
+            records.append(dict(item))
+    merged[ENTRY_RECORDS_KEY] = records
+    return merged
+
+
+def import_legacy_to_sqlite(
+    legacy_dir: str,
+    database_path: str,
+    *,
+    merge_existing: bool = False,
+) -> dict[str, Any]:
     """Import supported legacy files from ``legacy_dir`` into ``database_path``."""
 
     source = Path(legacy_dir)
-    raw_config = _read_json(source / "config.json", {})
+    config_path = source / "config.json"
+    lists_path = source / "lists.xlsx"
+    users_path = source / "web_users.json"
+    history_path = source / "web_history.json"
+    file_index_path = source / "file_index.json"
+    raw_config = _read_json(config_path, {})
     config_imported = isinstance(raw_config, dict) and bool(raw_config)
-    lists_payload = _read_workbook_payload(source / "lists.xlsx")
-    users = _read_json(source / "web_users.json", [])
-    if not isinstance(users, list):
+    lists_imported = lists_path.is_file()
+    lists_payload = _read_workbook_payload(lists_path) if lists_imported else {}
+    users = _read_json(users_path, [])
+    users_imported = users_path.is_file() and isinstance(users, list)
+    if not users_imported:
         users = []
-    history = _read_json(source / "web_history.json", [])
-    if not isinstance(history, list):
+    history = _read_json(history_path, [])
+    history_imported = history_path.is_file() and isinstance(history, list)
+    if not history_imported:
         history = []
-    file_index = _read_json(source / "file_index.json", {})
+    file_index = _read_json(file_index_path, {})
     file_index_imported = isinstance(file_index, dict) and bool(file_index)
 
     store = SqliteStore(database_path)
-    store.validate_lists_payload(lists_payload)
+    if lists_imported:
+        store.validate_lists_payload(lists_payload)
     store.initialize()
 
     if config_imported:
-        store.save_config(raw_config)
+        config_payload = (
+            _merge_mapping(store.load_config(), raw_config)
+            if merge_existing
+            else raw_config
+        )
+        store.save_config(config_payload)
         columns = raw_config.get(SQL_AVAILABLE_COLUMNS_KEY, [])
         if isinstance(columns, list):
             store.save_sql_columns(columns)
@@ -144,14 +238,37 @@ def import_legacy_to_sqlite(legacy_dir: str, database_path: str) -> dict[str, An
         if isinstance(slot_defs, list) and isinstance(sql_map, dict):
             store.save_slots(slot_defs, sql_map)
 
-    store.save_lists(lists_payload)
+    if lists_imported:
+        list_payload = (
+            _merge_lists_payload(store.load_lists(), lists_payload)
+            if merge_existing
+            else lists_payload
+        )
+        store.save_lists(list_payload)
 
-    store.save_users([item for item in users if isinstance(item, dict)])
+    if users_imported:
+        incoming_users = [item for item in users if isinstance(item, dict)]
+        store.save_users(
+            _merge_users(store.load_users(), incoming_users)
+            if merge_existing
+            else incoming_users
+        )
 
-    store.save_history([item for item in history if isinstance(item, dict)])
+    if history_imported:
+        incoming_history = [item for item in history if isinstance(item, dict)]
+        store.save_history(
+            [*store.load_history(), *incoming_history]
+            if merge_existing
+            else incoming_history
+        )
 
     if file_index_imported:
-        store.save_file_index_cache(file_index)
+        index_payload = (
+            _merge_mapping(store.load_file_index_cache(), file_index)
+            if merge_existing
+            else file_index
+        )
+        store.save_file_index_cache(index_payload)
 
     records = lists_payload.get(ENTRY_RECORDS_KEY, [])
     return {
@@ -163,7 +280,7 @@ def import_legacy_to_sqlite(legacy_dir: str, database_path: str) -> dict[str, An
             if isinstance(lists_payload.get(sheet, []), list)
         ),
         "entries": len(records) if isinstance(records, list) else 0,
-        "users": len(users),
-        "history": len(history),
+        "users": len(users) if users_imported else 0,
+        "history": len(history) if history_imported else 0,
         "file_index": file_index_imported,
     }

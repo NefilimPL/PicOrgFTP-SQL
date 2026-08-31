@@ -104,6 +104,7 @@ def test_adoption_copies_legacy_sqlite_and_archives_its_source(tmp_path: Path) -
     assert SqliteStore(str(target)).load_config()["migration_marker"] == "legacy-sqlite"
     assert SqliteStore(str(target)).load_users()[0]["username"] == "legacy-operator"
     assert not source.exists()
+    assert not source.with_name(f".{source.name}.picsyncra-adoption").exists()
     assert (result.archive_dir / source.name).is_file()
 
 
@@ -225,16 +226,28 @@ def test_adoption_imports_legacy_files_and_archives_them(tmp_path: Path) -> None
     assert (result.archive_dir / "file_index.json").is_file()
 
 
-def test_adoption_uses_legacy_sqlite_and_archives_supplemental_legacy_files(
+def test_adoption_uses_legacy_sqlite_and_imports_supplemental_legacy_files(
     tmp_path: Path,
 ) -> None:
-    """SQLite is the data source while leftover file settings are archived too."""
+    """Supplemental JSON data must not be archived before it reaches SQLite."""
 
     source = tmp_path / legacy_migration._LEGACY_SQLITE_FILENAME
-    config_path = tmp_path / "config.json"
+    users_path = tmp_path / "web_users.json"
     target = tmp_path / "picsyncra.sqlite"
     SqliteStore(str(source)).save_config({"migration_marker": "legacy-sqlite"})
-    config_path.write_text(json.dumps({"migration_marker": "legacy-file"}), encoding="utf-8")
+    users_path.write_text(
+        json.dumps(
+            [
+                {
+                    "username": "admin",
+                    "role": "admin",
+                    "enabled": True,
+                    "password_hash": "legacy-password-hash",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
 
     result = legacy_migration.adopt_legacy_data(
         application_root=tmp_path,
@@ -244,12 +257,15 @@ def test_adoption_uses_legacy_sqlite_and_archives_supplemental_legacy_files(
     )
 
     assert result.migrated is True
-    assert result.source_kind == "sqlite"
+    assert result.source_kind == "sqlite+files"
     assert SqliteStore(str(target)).load_config()["migration_marker"] == "legacy-sqlite"
+    imported_users = SqliteStore(str(target)).load_users()
+    assert imported_users[0]["username"] == "admin"
+    assert imported_users[0]["role"] == "admin"
     assert not source.exists()
-    assert not config_path.exists()
+    assert not users_path.exists()
     assert (result.archive_dir / source.name).is_file()
-    assert (result.archive_dir / config_path.name).is_file()
+    assert (result.archive_dir / users_path.name).is_file()
 
 
 def test_adoption_archives_a_file_changed_during_handover(
@@ -412,7 +428,7 @@ def test_adoption_recovers_after_a_crash_between_publish_and_handover(tmp_path: 
     assert SqliteStore(str(target)).load_config()["migration_marker"] == "resume-handover"
     assert not source.exists()
     assert (result.archive_dir / source.name).is_file()
-    assert source.with_name(f".{source.name}.picsyncra-adoption").read_text(encoding="ascii") == "retired"
+    assert not source.with_name(f".{source.name}.picsyncra-adoption").exists()
 
 
 def test_adoption_publish_failure_does_not_leave_an_empty_target(
@@ -576,6 +592,62 @@ def test_adoption_keeps_sqlite_source_when_its_cleanup_fails(
     assert source.exists()
     assert SqliteStore(str(target)).load_config()["migration_marker"] == "cleanup-failure"
     assert SqliteStore(str(result.archive_dir / source.name)).load_config()["migration_marker"] == "cleanup-failure"
+
+
+def test_adoption_recovers_archived_legacy_users_after_an_earlier_import(
+    tmp_path: Path,
+) -> None:
+    """A confirmed retry can repair an already-created target from BACKUP."""
+
+    target = tmp_path / "picsyncra.sqlite"
+    SqliteStore(str(target)).save_users(
+        [
+            {
+                "username": "admin",
+                "role": "user",
+                "enabled": True,
+                "password_hash": "default-password-hash",
+            }
+        ]
+    )
+    archived_source = tmp_path / "BACKUP" / "legacy-import" / "20260831-previous"
+    archived_source.mkdir(parents=True)
+    (archived_source / "web_users.json").write_text(
+        json.dumps(
+            [
+                {
+                    "username": "admin",
+                    "role": "admin",
+                    "enabled": True,
+                    "password_hash": "legacy-password-hash",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    initial = legacy_migration.adopt_legacy_data(
+        application_root=tmp_path,
+        data_root=tmp_path,
+        database_path=target,
+        backup_root=tmp_path / "BACKUP",
+    )
+    result = legacy_migration.adopt_legacy_data(
+        application_root=tmp_path,
+        data_root=tmp_path,
+        database_path=target,
+        backup_root=tmp_path / "BACKUP",
+        replace_existing_target=True,
+    )
+
+    assert initial.error_code == "target_exists"
+    assert result.migrated is True
+    assert result.replaced_target is True
+    assert result.source_kind == "backup-files"
+    imported_user = SqliteStore(str(target)).load_users()[0]
+    assert imported_user["role"] == "admin"
+    assert imported_user["password_hash"] == "legacy-password-hash"
+    assert (result.archive_dir / "previous-picsyncra.sqlite").is_file()
 
 
 def test_runtime_does_not_migrate_legacy_data_before_the_user_chooses_the_action(

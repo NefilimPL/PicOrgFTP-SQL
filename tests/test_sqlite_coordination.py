@@ -16,6 +16,7 @@ from picsyncra.sqlite_coordination import (
     _database_file_lock,
     database_activity,
     database_maintenance,
+    clear_retired_database_marker,
     retire_database,
 )
 
@@ -42,6 +43,15 @@ def test_retired_database_keeps_its_marker(tmp_path: Path) -> None:
     with pytest.raises(RetiredDatabaseError):
         with database_activity(database_path):
             pass
+
+
+def test_completed_handover_marker_can_be_removed_after_source_is_gone(tmp_path: Path) -> None:
+    database_path = tmp_path / "retired.sqlite"
+    _marker_path(database_path).write_text("retired", encoding="ascii")
+
+    clear_retired_database_marker(database_path)
+
+    assert not _marker_path(database_path).exists()
 
 
 def test_failed_marker_update_preserves_the_previous_handover_state(
