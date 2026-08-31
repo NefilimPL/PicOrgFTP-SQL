@@ -91,6 +91,7 @@ class WebSmokeCiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertIs(payload["ok"], True)
+        self.assertEqual(payload["application"], "picsyncra")
         self.assertTrue(str(payload["version"]).strip())
         self.assertTrue(str(payload["time"]).strip())
         self.assertEqual(payload["components"]["backend"]["status"], "online")

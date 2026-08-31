@@ -560,6 +560,27 @@ def test_end_system_service_reports_scheduler_error(monkeypatch) -> None:
     assert "Access denied" in result.message
 
 
+def test_end_legacy_system_service_disables_old_autostart_before_stopping_it(monkeypatch) -> None:
+    """Catches the old PicOrgFTP service reclaiming port 8010 after a reboot."""
+
+    commands: list[list[str]] = []
+    monkeypatch.setattr(web_manager, "legacy_task_exists", lambda: True)
+    monkeypatch.setattr(
+        web_manager,
+        "_run_command",
+        lambda args, **_kwargs: commands.append(args)
+        or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    result = web_manager.end_legacy_system_service()
+
+    assert result.ok
+    assert commands == [
+        ["schtasks", "/Change", "/TN", "PicOrgFTP-SQL Web", "/DISABLE"],
+        ["schtasks", "/End", "/TN", "PicOrgFTP-SQL Web"],
+    ]
+
+
 def test_stop_web_returns_system_service_failure_without_claiming_success(
     tmp_path, monkeypatch
 ) -> None:
@@ -628,6 +649,91 @@ def test_start_web_refuses_to_start_on_a_busy_non_picsyncra_port(monkeypatch) ->
     assert "8010" in result.message
 
 
+def test_start_web_replaces_a_legacy_picorgftp_service_on_the_shared_port(monkeypatch) -> None:
+    """Catches opening the old PicOrgFTP backend after the PicSyncra rebrand."""
+
+    legacy_stopped = False
+    legacy_listener = {
+        "Pid": 102,
+        "ProcessName": "PicOrgFTP-SQL-WEB",
+        "CommandLine": "PicOrgFTP-SQL-WEB.exe --service-run --port 8010",
+    }
+
+    def listeners(_port: int):
+        return [] if legacy_stopped else [legacy_listener]
+
+    def stop_legacy(_port: int) -> web_manager.ActionResult:
+        nonlocal legacy_stopped
+        legacy_stopped = True
+        return web_manager.ActionResult(True, "Zatrzymano stary panel.")
+
+    monkeypatch.setattr(web_manager, "get_port_listeners", listeners)
+    monkeypatch.setattr(web_manager, "check_http_health", lambda _port: {"ok": True})
+    monkeypatch.setattr(web_manager, "stop_legacy_web", stop_legacy)
+    monkeypatch.setattr(web_manager, "task_exists", lambda: False)
+    monkeypatch.setattr(
+        web_manager,
+        "start_user_web",
+        lambda _port, _host, **_kwargs: web_manager.ActionResult(True, "Uruchomiono PicSyncra."),
+    )
+
+    result = web_manager.start_web(8010, "0.0.0.0")
+
+    assert result.ok
+    assert result.message == "Uruchomiono PicSyncra."
+    assert legacy_stopped
+
+
+def test_stop_legacy_web_accepts_a_service_process_ended_by_the_scheduler(monkeypatch) -> None:
+    """Catches failing takeover after schtasks /End already stopped the old process."""
+
+    listeners = [
+        {
+            "Pid": 102,
+            "ProcessName": "PicOrgFTP-SQL-WEB",
+            "CommandLine": "PicOrgFTP-SQL-WEB.exe --service-run --port 8010",
+        }
+    ]
+
+    def end_legacy_service() -> web_manager.ActionResult:
+        listeners.clear()
+        return web_manager.ActionResult(True, "")
+
+    monkeypatch.setattr(web_manager, "get_port_listeners", lambda _port: listeners)
+    monkeypatch.setattr(web_manager, "end_legacy_system_service", end_legacy_service)
+    monkeypatch.setattr(
+        web_manager,
+        "_taskkill_process_tree",
+        lambda _pid: pytest.fail("scheduler already ended the legacy process"),
+    )
+
+    result = web_manager.stop_legacy_web(8010)
+
+    assert result.ok
+
+
+def test_start_web_refuses_a_mismatched_backend_identity(monkeypatch) -> None:
+    """Catches accepting another product just because its process name looks similar."""
+
+    listener = {
+        "Pid": 102,
+        "ProcessName": "PicSyncra-WEB",
+        "CommandLine": "PicSyncra-WEB.exe --service-run --port 8010",
+    }
+    monkeypatch.setattr(web_manager, "get_port_listeners", lambda _port: [listener])
+    monkeypatch.setattr(
+        web_manager,
+        "check_http_health",
+        lambda _port: {"ok": True, "application": "picorgftp_sql"},
+    )
+    monkeypatch.setattr(web_manager, "start_user_web", lambda *_args, **_kwargs: pytest.fail("must not start"))
+
+    result = web_manager.start_web(8010, "0.0.0.0")
+
+    assert not result.ok
+    assert "inna aplikacja" in result.message
+
+
 def test_wait_web_ready_reports_each_startup_probe(monkeypatch) -> None:
     """The manager must show progress instead of appearing frozen during startup."""
     checks = iter([{"ok": False}, {"ok": True}])
@@ -637,6 +743,21 @@ def test_wait_web_ready_reports_each_startup_probe(monkeypatch) -> None:
 
     assert web_manager.wait_web_ready(8010, timeout=2, progress=messages.append)
     assert messages == ["Oczekiwanie na backend WWW (proba 1)...", "Backend WWW odpowiada."]
+
+
+def test_wait_web_ready_requires_picsyncra_identity_for_a_new_process(monkeypatch) -> None:
+    """Catches a new launch accepting a legacy backend that reclaimed its port."""
+
+    checks = iter(
+        [
+            {"ok": True, "application": "picorgftp_sql"},
+            {"ok": True, "application": "picsyncra"},
+        ]
+    )
+    monkeypatch.setattr(web_manager, "check_http_health", lambda *_args, **_kwargs: next(checks))
+    monkeypatch.setattr(web_manager.time, "sleep", lambda _seconds: None)
+
+    assert web_manager.wait_web_ready(8010, timeout=2, expected_application="picsyncra")
 
 
 def test_manager_stop_requests_an_elevated_stop_for_a_system_service(monkeypatch) -> None:

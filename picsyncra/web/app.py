@@ -34,7 +34,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
-from .. import common, config, data_store, settings, sqlite_backup, storage_settings
+from .. import brand, common, config, data_store, settings, sqlite_backup, storage_settings
 from ..bootstrap import initialize_application_runtime
 from ..common import (
     AUTO_CONTENT_FIT_KEY,
@@ -5021,6 +5021,7 @@ def _health_payload() -> Dict[str, Any]:
     )
     return {
         "ok": local_ready,
+        "application": brand.PACKAGE_NAME,
         "version": get_display_version(),
         "time": server_time,
         "components": components,

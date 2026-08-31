@@ -16,8 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 def _live_branding_files() -> list[Path]:
     allowed_legacy_files = {
         ROOT / "picsyncra" / "legacy_migration.py",
+        ROOT / "picsyncra" / "sqlite_store.py",
+        ROOT / "picsyncra" / "web_manager.py",
         ROOT / "picsyncra" / "web" / "static" / "legacy-migration.js",
         ROOT / "tests" / "test_legacy_migration.py",
+        ROOT / "tests" / "test_web_manager.py",
         ROOT / "tests" / "js" / "legacy-migration.test.js",
     }
     skipped_directories = {
