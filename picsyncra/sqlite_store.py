@@ -867,9 +867,39 @@ def _product_prefix_bounds(value: object) -> tuple[str, str]:
     return prefix, f"{prefix}\U0010ffff"
 
 
+def _drop_legacy_product_short_fts_triggers(conn: sqlite3.Connection) -> bool:
+    """Remove triggers that depend on the pre-rebrand SQLite function name."""
+
+    legacy_trigger_rows = conn.execute(
+        """
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'trigger'
+          AND name IN (
+              'trg_product_entries_short_fts_insert',
+              'trg_product_entries_short_fts_delete',
+              'trg_product_entries_short_fts_update'
+          )
+        """
+    ).fetchall()
+    if not any("picorg_product_short_grams" in _text(row["sql"]) for row in legacy_trigger_rows):
+        return False
+    conn.executescript(
+        """
+        DROP TRIGGER IF EXISTS trg_product_entries_short_fts_insert;
+        DROP TRIGGER IF EXISTS trg_product_entries_short_fts_delete;
+        DROP TRIGGER IF EXISTS trg_product_entries_short_fts_update;
+        """
+    )
+    return True
+
+
 def _migrate_product_entry_search_keys(conn: sqlite3.Connection) -> None:
     """Backfill persisted query keys without storing connection-local SQL code."""
 
+    # The backfill updates every product row.  Drop old triggers first, because
+    # they refer to a connection-local function whose obsolete name is absent.
+    _drop_legacy_product_short_fts_triggers(conn)
     conn.executescript(
         """
         DROP INDEX IF EXISTS idx_product_entries_product_id_fold;
@@ -1014,26 +1044,7 @@ def _initialize_product_short_search_fts(
         )
         return False
 
-    legacy_trigger_rows = conn.execute(
-        """
-        SELECT sql
-        FROM sqlite_master
-        WHERE type = 'trigger'
-          AND name IN (
-              'trg_product_entries_short_fts_insert',
-              'trg_product_entries_short_fts_delete',
-              'trg_product_entries_short_fts_update'
-          )
-        """
-    ).fetchall()
-    if any("picorg_product_short_grams" in _text(row["sql"]) for row in legacy_trigger_rows):
-        conn.executescript(
-            """
-            DROP TRIGGER IF EXISTS trg_product_entries_short_fts_insert;
-            DROP TRIGGER IF EXISTS trg_product_entries_short_fts_delete;
-            DROP TRIGGER IF EXISTS trg_product_entries_short_fts_update;
-            """
-        )
+    if _drop_legacy_product_short_fts_triggers(conn):
         rebuild = True
 
     conn.executescript(

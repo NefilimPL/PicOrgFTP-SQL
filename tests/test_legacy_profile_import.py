@@ -9,6 +9,7 @@ import sqlite3
 import pytest
 
 from picsyncra import web_data
+from picsyncra.excel_utils import ENTRY_RECORDS_KEY
 from picsyncra.legacy_profile import load_legacy_profile
 from picsyncra.sqlite_store import SqliteStore
 
@@ -216,18 +217,52 @@ def test_staged_import_rebuilds_pre_rebrand_sqlite_fts_triggers(tmp_path: Path) 
     source_root = tmp_path / "old-profile"
     source_root.mkdir()
     legacy_database = source_root / "picorgftp_sql.sqlite"
-    SqliteStore(str(legacy_database)).initialize()
+    legacy_store = SqliteStore(str(legacy_database))
+    legacy_store.initialize()
+    legacy_store.save_lists(
+        {
+            ENTRY_RECORDS_KEY: [
+                {
+                    "PRODUCT_ID": "P-LEGACY-1",
+                    "EAN": "5901234567890",
+                    "NAZWA": "LEGACY PRODUCT",
+                }
+            ]
+        }
+    )
     with sqlite3.connect(legacy_database) as connection:
-        connection.execute("DROP TRIGGER trg_product_entries_short_fts_insert")
-        connection.execute(
+        connection.executescript(
             """
+            DROP TRIGGER trg_product_entries_short_fts_insert;
+            DROP TRIGGER trg_product_entries_short_fts_delete;
+            DROP TRIGGER trg_product_entries_short_fts_update;
+
             CREATE TRIGGER trg_product_entries_short_fts_insert
             AFTER INSERT ON product_entries
             BEGIN
                 INSERT INTO product_entries_short_fts(rowid, grams)
                 VALUES (new.rowid, picorg_product_short_grams(new.search_text_key));
             END;
+
+            CREATE TRIGGER trg_product_entries_short_fts_delete
+            AFTER DELETE ON product_entries
+            BEGIN
+                INSERT INTO product_entries_short_fts(product_entries_short_fts, rowid, grams)
+                VALUES ('delete', old.rowid, picorg_product_short_grams(old.search_text_key));
+            END;
+
+            CREATE TRIGGER trg_product_entries_short_fts_update
+            AFTER UPDATE OF search_text_key ON product_entries
+            BEGIN
+                INSERT INTO product_entries_short_fts(product_entries_short_fts, rowid, grams)
+                VALUES ('delete', old.rowid, picorg_product_short_grams(old.search_text_key));
+                INSERT INTO product_entries_short_fts(rowid, grams)
+                VALUES (new.rowid, picorg_product_short_grams(new.search_text_key));
+            END;
             """
+        )
+        connection.execute(
+            "PRAGMA user_version = 15"
         )
     password = "old-trigger-admin-password"
     (source_root / "web_users.json").write_text(
@@ -253,6 +288,7 @@ def test_staged_import_rebuilds_pre_rebrand_sqlite_fts_triggers(tmp_path: Path) 
 
     staged_store = SqliteStore(str(tmp_path / "staging" / "picsyncra.sqlite"))
     assert staged_store.load_config()["trigger_migration"] is True
+    assert staged_store.load_lists()[ENTRY_RECORDS_KEY][0]["PRODUCT_ID"] == "P-LEGACY-1"
     assert web_data.verify_password(password, staged_store.load_users()[0]["password_hash"])
 
 
