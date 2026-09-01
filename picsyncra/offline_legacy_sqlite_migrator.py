@@ -64,6 +64,9 @@ class OfflineMigrationReport:
 def _configured_legacy_source(settings_path: Path, payload: dict[str, object]) -> Path:
     """Prefer the explicit old DB path retained in pre-rebrand configurations."""
 
+    mode = str(payload.get(DATABASE_LOCATION_MODE_KEY) or "").strip().lower()
+    if mode == "exe_dir":
+        return (settings_path.parent / LEGACY_SQLITE_FILENAME).resolve()
     configured = str(payload.get(DATABASE_PATH_KEY) or "").strip()
     if configured:
         expanded = os.path.expandvars(os.path.expanduser(configured.strip("\"'")))
@@ -73,9 +76,6 @@ def _configured_legacy_source(settings_path: Path, payload: dict[str, object]) -
         candidate = candidate.resolve()
         if candidate.name == LEGACY_SQLITE_FILENAME:
             return candidate
-    mode = str(payload.get(DATABASE_LOCATION_MODE_KEY) or "").strip().lower()
-    if mode == "exe_dir":
-        return (settings_path.parent / TARGET_SQLITE_FILENAME).resolve()
     if mode == "image_dir":
         base_dir = str(payload.get("base_dir_override") or "").strip()
         if base_dir:

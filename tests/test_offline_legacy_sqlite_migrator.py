@@ -54,21 +54,19 @@ def test_resolve_paths_uses_only_database_referenced_by_local_settings(
     assert paths.target == source_root / "picsyncra.sqlite"
 
 
-def test_resolve_paths_honours_explicit_legacy_path_from_old_exe_dir_settings(
+def test_resolve_paths_uses_selected_app_folder_for_old_exe_dir_settings(
     tmp_path: Path,
 ) -> None:
-    """Old exe_dir profiles retain their explicit picorgftp SQLite selection."""
+    """A copied old profile must not follow its former machine's absolute path."""
 
     app_root = tmp_path / "application"
-    source_root = tmp_path / "server-copy"
     app_root.mkdir()
-    source_root.mkdir()
-    source = _create_sqlite_database(source_root / "picorgftp_sql.sqlite")
+    source = _create_sqlite_database(app_root / "picorgftp_sql.sqlite")
     (app_root / "local_settings.json").write_text(
         json.dumps(
             {
                 "database_location_mode": "exe_dir",
-                "database_path": str(source),
+                "database_path": "C:/former-server/picorgftp_sql.sqlite",
             }
         ),
         encoding="utf-8",
