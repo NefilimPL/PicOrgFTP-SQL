@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 import zipfile
 import io
+from pathlib import Path
 
 os.environ.setdefault("PICSYNCRA_HEADLESS", "1")
 os.environ.setdefault("PICSYNCRA_WEB_AUTH", "0")
@@ -24,6 +25,9 @@ else:
 
 from picsyncra import web_data
 from picsyncra import observability
+from picsyncra import legacy_migration
+from picsyncra.legacy_profile import LegacyProfile, LegacyProfileManifest
+from picsyncra.legacy_migration import MigrationResult
 from picsyncra.web import app as web_app
 
 
@@ -57,10 +61,41 @@ class WebSmokeCiTests(unittest.TestCase):
 
     def setUp(self) -> None:
         os.environ["PICSYNCRA_WEB_AUTH"] = "0"
+        self._web_data_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._web_data_directory.cleanup)
+        data_path_patch = patch.object(
+            web_app.settings, "AC", self._web_data_directory.name
+        )
+        data_path_patch.start()
+        self.addCleanup(data_path_patch.stop)
+        bootstrap_settings_patch = patch.object(
+            web_app.storage_settings,
+            "load_bootstrap_settings",
+            return_value={"data_mode": "legacy"},
+        )
+        bootstrap_settings_patch.start()
+        self.addCleanup(bootstrap_settings_patch.stop)
+        web_app.data_store.reset_active_store_cache()
+        self.addCleanup(web_app.data_store.reset_active_store_cache)
         web_app._RATE_LIMITS.clear()
 
     def tearDown(self) -> None:
         web_app._RATE_LIMITS.clear()
+
+    def test_default_admin_can_log_in_with_isolated_test_storage(self) -> None:
+        """Authentication smoke tests must not depend on a developer's data path."""
+
+        with patch.dict(os.environ, {"PICSYNCRA_WEB_AUTH": "1"}):
+            client = TestClient(web_app.app)
+            response = client.post(
+                "/api/login",
+                data={"username": "admin", "password": "admin"},
+                headers={"X-Requested-With": "XMLHttpRequest"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"])
+        self.assertEqual(response.json()["user"]["role"], "admin")
 
     def test_health_endpoint_returns_versioned_ok_payload(self) -> None:
         client = TestClient(web_app.app)
@@ -88,6 +123,7 @@ class WebSmokeCiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertIs(payload["ok"], True)
+        self.assertEqual(payload["application"], "picsyncra")
         self.assertTrue(str(payload["version"]).strip())
         self.assertTrue(str(payload["time"]).strip())
         self.assertEqual(payload["components"]["backend"]["status"], "online")
@@ -782,33 +818,213 @@ class WebSmokeCiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), payload)
 
-    def test_legacy_import_endpoint_switches_to_sqlite(self) -> None:
+    def test_legacy_import_endpoint_adopts_old_sqlite_into_picsyncra_path(self) -> None:
         client = TestClient(web_app.app)
         admin = {"username": "admin", "role": "admin"}
+        adoption = MigrationResult(
+            migrated=True,
+            skipped=False,
+            copied_paths=(Path("C:/Data/picsyncra.sqlite"),),
+            source_kind="sqlite",
+            archive_dir=Path("C:/Data/BACKUP/legacy-import/20260828-120000"),
+        )
+        source_root = Path("C:/Data")
+        profile = LegacyProfile(
+            root=source_root,
+            sqlite_path=source_root / legacy_migration._LEGACY_SQLITE_FILENAME,
+            source_files=(source_root / legacy_migration._LEGACY_SQLITE_FILENAME,),
+            manifest=LegacyProfileManifest(
+                source_root=source_root,
+                source_names=(legacy_migration._LEGACY_SQLITE_FILENAME,),
+            ),
+        )
+
+        def adopt_and_finalize(**kwargs):
+            kwargs["finalize"](kwargs["database_path"])
+            return adoption
+
         with (
             patch.object(web_app.settings, "AC", "C:/Photos"),
+            patch.object(web_app.settings, "BASE_DIR_SETTINGS_PATH", "C:/Program/local_settings.json"),
             patch.object(web_app, "_require_admin", return_value=admin),
-            patch.object(web_app.storage_settings, "resolve_sqlite_path", return_value="C:/Data/app.sqlite"),
+            patch.object(
+                web_app.storage_settings,
+                "resolve_sqlite_path",
+                return_value=str(Path("C:/Data") / legacy_migration._LEGACY_SQLITE_FILENAME),
+            ),
+            patch.object(
+                web_app.storage_settings,
+                "resolve_backup_dir",
+                return_value="C:/Data/BACKUP",
+            ),
+            patch.object(
+                web_app.storage_settings,
+                "load_bootstrap_settings",
+                return_value={"database_location_mode": "image_dir"},
+            ),
             patch.object(
                 web_app,
-                "import_legacy_to_sqlite",
-                return_value={"ok": True, "entries": 1},
-            ) as importer,
+                "discover_legacy_profiles",
+                return_value=(profile,),
+            ),
+            patch.object(
+                web_app,
+                "adopt_legacy_profile",
+                side_effect=adopt_and_finalize,
+            ) as adopter,
             patch.object(web_app.storage_settings, "save_bootstrap_settings") as save_bootstrap,
             patch.object(web_app.data_store, "reset_active_store_cache") as reset_store,
+            patch.object(web_app.config, "initialize_config"),
+            patch.object(web_app, "settings_snapshot", return_value={"data_mode": "sqlite"}),
+        ):
+            response = client.post("/api/settings/import-legacy?replace_existing_target=true")
+
+        self.assertEqual(response.status_code, 200)
+        adopter.assert_called_once()
+        adoption_call = adopter.call_args.kwargs
+        self.assertEqual(adoption_call["source_root"], source_root)
+        self.assertEqual(adoption_call["database_path"], Path("C:/Data/picsyncra.sqlite"))
+        self.assertEqual(adoption_call["backup_root"], Path("C:/Data/BACKUP"))
+        self.assertEqual(adoption_call["preserve_source_paths"], ())
+        self.assertTrue(adoption_call["replace_existing_target"])
+        self.assertTrue(callable(adoption_call["finalize"]))
+        save_bootstrap.assert_called_once_with(
+            {
+                "data_mode": "sqlite",
+                "database_location_mode": "custom",
+                "database_path": "C:\\Data\\picsyncra.sqlite",
+            }
+        )
+        reset_store.assert_called_once()
+        self.assertEqual(response.json()["settings"]["data_mode"], "sqlite")
+        self.assertEqual(response.json()["source_kind"], "sqlite")
+
+    def test_legacy_import_endpoint_uses_one_profile_and_imported_bootstrap_values(self) -> None:
+        """The endpoint must never ask the migration layer to merge separate folders."""
+
+        client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
+        source_root = Path("C:/OldProfile")
+        profile = LegacyProfile(
+            root=source_root,
+            sqlite_path=source_root / legacy_migration._LEGACY_SQLITE_FILENAME,
+            source_files=(
+                source_root / legacy_migration._LEGACY_SQLITE_FILENAME,
+                source_root / "web_users.json",
+            ),
+            manifest=LegacyProfileManifest(
+                source_root=source_root,
+                source_names=(legacy_migration._LEGACY_SQLITE_FILENAME, "web_users.json"),
+            ),
+        )
+        adoption = MigrationResult(
+            migrated=True,
+            skipped=False,
+            copied_paths=(Path("C:/Data/picsyncra.sqlite"),),
+            source_kind="sqlite+files",
+            archive_dir=Path("C:/Data/BACKUP/legacy-import/20260901-120000"),
+            report={"component_counts": {"users": 1}},
+        )
+
+        def adopt_and_finalize(**kwargs):
+            kwargs["finalize"](
+                kwargs["database_path"],
+                {"language": "pl", "app_secret": "old-secret"},
+            )
+            return adoption
+
+        with (
+            patch.object(web_app, "_require_admin", return_value=admin),
+            patch.object(web_app.settings, "AC", "C:/Photos"),
+            patch.object(web_app.settings, "BASE_DIR_SETTINGS_PATH", "C:/Program/local_settings.json"),
+            patch.object(
+                web_app.storage_settings,
+                "resolve_sqlite_path",
+                return_value=str(Path("C:/Data") / legacy_migration._LEGACY_SQLITE_FILENAME),
+            ),
+            patch.object(web_app.storage_settings, "resolve_backup_dir", return_value="C:/Data/BACKUP"),
+            patch.object(web_app.storage_settings, "load_bootstrap_settings", return_value={"database_location_mode": "custom"}),
+            patch.object(web_app, "discover_legacy_profiles", return_value=(profile,), create=True),
+            patch.object(web_app, "adopt_legacy_profile", side_effect=adopt_and_finalize, create=True) as adopter,
+            patch.object(web_app.storage_settings, "save_bootstrap_settings") as save_bootstrap,
+            patch.object(web_app.data_store, "reset_active_store_cache"),
+            patch.object(web_app.config, "initialize_config"),
+            patch.object(web_app, "settings_snapshot", return_value={"data_mode": "sqlite"}),
+        ):
+            response = client.post("/api/settings/import-legacy", json={"source_directory": "C:/OldProfile"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(adopter.call_args.kwargs["source_root"], source_root)
+        self.assertEqual(adopter.call_args.kwargs["database_path"], Path("C:/Data/picsyncra.sqlite"))
+        self.assertEqual(adopter.call_args.kwargs["preserve_source_paths"], ())
+        save_bootstrap.assert_called_once_with(
+            {
+                "language": "pl",
+                "app_secret": "old-secret",
+                "data_mode": "sqlite",
+                "database_location_mode": "custom",
+                "database_path": "C:\\Data\\picsyncra.sqlite",
+            }
+        )
+        self.assertEqual(response.json()["report"], {"component_counts": {"users": 1}})
+
+    def test_legacy_import_clears_the_session_before_imported_accounts_are_used(self) -> None:
+        """A replaced account id must not leave the browser with an unusable session."""
+
+        client = TestClient(web_app.app)
+        admin = {"username": "admin", "role": "admin"}
+        adoption = MigrationResult(
+            migrated=True,
+            skipped=False,
+            copied_paths=(Path("C:/Data/picsyncra.sqlite"),),
+            source_kind="sqlite+files",
+            archive_dir=Path("C:/Data/BACKUP/legacy-import/20260831-120000"),
+        )
+        source_root = Path("C:/Data")
+        profile = LegacyProfile(
+            root=source_root,
+            sqlite_path=source_root / legacy_migration._LEGACY_SQLITE_FILENAME,
+            source_files=(source_root / legacy_migration._LEGACY_SQLITE_FILENAME,),
+            manifest=LegacyProfileManifest(
+                source_root=source_root,
+                source_names=(legacy_migration._LEGACY_SQLITE_FILENAME,),
+            ),
+        )
+
+        def adopt_and_finalize(**kwargs):
+            kwargs["finalize"](kwargs["database_path"])
+            return adoption
+
+        with (
+            patch.object(web_app, "_require_admin", return_value=admin),
+            patch.object(
+                web_app.storage_settings,
+                "resolve_sqlite_path",
+                return_value=str(Path("C:/Data") / legacy_migration._LEGACY_SQLITE_FILENAME),
+            ),
+            patch.object(
+                web_app.storage_settings,
+                "resolve_backup_dir",
+                return_value="C:/Data/BACKUP",
+            ),
+            patch.object(
+                web_app.storage_settings,
+                "load_bootstrap_settings",
+                return_value={"database_location_mode": "custom"},
+            ),
+            patch.object(web_app, "discover_legacy_profiles", return_value=(profile,)),
+            patch.object(web_app, "adopt_legacy_profile", side_effect=adopt_and_finalize),
+            patch.object(web_app.storage_settings, "save_bootstrap_settings"),
+            patch.object(web_app.data_store, "reset_active_store_cache"),
             patch.object(web_app.config, "initialize_config"),
             patch.object(web_app, "settings_snapshot", return_value={"data_mode": "sqlite"}),
         ):
             response = client.post("/api/settings/import-legacy")
 
         self.assertEqual(response.status_code, 200)
-        importer.assert_called_once_with(
-            legacy_dir="C:/Photos",
-            database_path="C:/Data/app.sqlite",
-        )
-        save_bootstrap.assert_called_once_with({"data_mode": "sqlite"})
-        reset_store.assert_called_once()
-        self.assertEqual(response.json()["settings"]["data_mode"], "sqlite")
+        self.assertTrue(response.json()["reauthenticate"])
+        self.assertIn(f"{web_app.SESSION_COOKIE}=\"\"", response.headers["set-cookie"])
+        self.assertIn("Max-Age=0", response.headers["set-cookie"])
 
     def test_sqlite_repair_endpoint_returns_summary(self) -> None:
         client = TestClient(web_app.app)
@@ -949,7 +1165,7 @@ class WebSmokeCiTests(unittest.TestCase):
         self.assertEqual(cfg[web_app.SQL_AVAILABLE_COLUMNS_KEY], ["img_01", "img_02"])
         save_config.assert_called_once()
 
-    def test_auth_enabled_protects_routes_and_accepts_login_session(self) -> None:
+    def test_auth_enabled_protects_routes_and_logout_clears_a_stale_session(self) -> None:
         previous = os.environ.get("PICSYNCRA_WEB_AUTH")
         os.environ["PICSYNCRA_WEB_AUTH"] = "1"
         try:
@@ -957,8 +1173,12 @@ class WebSmokeCiTests(unittest.TestCase):
                 with patch.object(web_app.settings, "AC", temp_dir):
                     client = TestClient(web_app.app)
 
-                    anonymous = client.post("/api/logout")
-                    self.assertEqual(anonymous.status_code, 401)
+                    stale_cookie = "stale-session-from-before-legacy-import"
+                    client.cookies.set(web_app.SESSION_COOKIE, stale_cookie)
+                    stale_logout = client.post("/api/logout")
+                    self.assertEqual(stale_logout.status_code, 200)
+                    self.assertIn("Max-Age=0", stale_logout.headers["set-cookie"])
+                    self.assertEqual(client.get("/api/bootstrap").status_code, 401)
 
                     login = client.post(
                         "/api/login",
@@ -970,9 +1190,6 @@ class WebSmokeCiTests(unittest.TestCase):
                     presence = client.get("/api/server/presence")
                     self.assertEqual(presence.status_code, 200)
                     self.assertEqual(presence.json(), {"enabled": False, "users": []})
-
-                    forged = client.post("/api/logout", headers={"X-PicSyncra-CSRF": "bad"})
-                    self.assertEqual(forged.status_code, 403)
 
                     authenticated = client.post("/api/logout", headers=csrf_headers)
                     self.assertEqual(authenticated.status_code, 200)

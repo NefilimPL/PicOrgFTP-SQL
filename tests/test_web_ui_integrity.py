@@ -2671,6 +2671,12 @@ async function requestJson() {{
                 source.index("async function validatePimcoreOcrFields"),
             )
         ]
+        ocr_slot_tokens = source[
+            source.index("function pimcoreOcrSlotTokens") : source.index(
+                "function renderPimcoreTemplateTokens",
+                source.index("function pimcoreOcrSlotTokens"),
+            )
+        ]
         node = Path(r"C:\Program Files\nodejs\node.exe")
         if not node.exists():
             self.skipTest("Node.js is required for the Pimcore OCR interaction contract")
@@ -2692,7 +2698,6 @@ const document = {{ createElement: makeNode }};
 const window = {{ setTimeout, clearTimeout }};
 const state = {{ settings: {{ ocr_available: true }} }};
 const pimcoreSlotTokens = () => ({{ "20": "signed-slot" }});
-const pimcoreOcrSlotTokens = () => pimcoreSlotTokens();
 class FormData {{
   constructor(source) {{ this.source = source; }}
   entries() {{ return Object.entries(this.source.elements).map(([name, input]) => [name, input.value]); }}
@@ -2710,6 +2715,7 @@ const updatePimcoreRuntimeFieldChangeState = () => {{}};
 const pimcoreRuntimeLayoutGroups = (schema) => [{{ name: "", rows: [{{ fields: schema }}] }}];
 const pimcoreRuntimeSection = () => makeNode("section");
 const pimcoreRuntimeRow = () => makeNode("div");
+{ocr_slot_tokens}
 {validation}
 {populate}
 const form = {{ textContent: "", elements: {{}}, append() {{}} }};
@@ -2745,6 +2751,12 @@ console.log(JSON.stringify(calls));
                 source.index("async function validatePimcoreOcrFields"),
             )
         ]
+        ocr_slot_tokens = source[
+            source.index("function pimcoreOcrSlotTokens") : source.index(
+                "function renderPimcoreTemplateTokens",
+                source.index("function pimcoreOcrSlotTokens"),
+            )
+        ]
         renderer = source[
             source.index("async function renderPimcoreRuntimeTemplates") : source.index(
                 "function pimcoreEditHasRuntimeTemplates",
@@ -2767,7 +2779,6 @@ const pimcoreCreateForm = form;
 const pimcoreEditForm = {{}};
 const state = {{ settings: {{ ocr_available: true }} }};
 const pimcoreSlotTokens = () => ({{ "20": "signed-slot" }});
-const pimcoreOcrSlotTokens = () => pimcoreSlotTokens();
 class FormData {{
   constructor(source) {{ this.source = source; }}
   entries() {{ return Object.entries(this.source.elements).map(([name, input]) => [name, input.value]); }}
@@ -2783,6 +2794,7 @@ const updatePimcoreRuntimeCalculatedState = () => {{}};
 const renderPimcoreOcrMismatch = () => {{}};
 const updatePimcoreCreateSubmitState = () => {{}};
 const updatePimcoreEditSubmitState = () => {{}};
+{ocr_slot_tokens}
 {validation}
 {renderer}
 const schema = [

@@ -201,14 +201,14 @@ def test_failed_storage_settings_write_preserves_store_cache(tmp_path, monkeypat
     )
     monkeypatch.setattr(storage_settings.settings, "BASE_DIR_SETTINGS_PATH", str(settings_path))
     reset_active_store_cache()
-    original_write_text = Path.write_text
+    original_replace = storage_settings.os.replace
 
-    def fail_settings_write(path, *args, **kwargs):
-        if path == settings_path:
+    def fail_settings_publish(_source, destination):
+        if Path(destination).resolve() == settings_path.resolve():
             raise OSError("disk full")
-        return original_write_text(path, *args, **kwargs)
+        return original_replace(_source, destination)
 
-    monkeypatch.setattr(Path, "write_text", fail_settings_write)
+    monkeypatch.setattr(storage_settings.os, "replace", fail_settings_publish)
     try:
         active_store = get_active_store().store
 
