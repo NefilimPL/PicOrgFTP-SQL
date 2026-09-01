@@ -32,7 +32,11 @@ konfigurację tak, aby następne uruchomienie głównego EXE otworzyło nową ba
 1. Użytkownik uruchamia migrator i wskazuje katalog głównej aplikacji.
    Domyślnie jest to katalog obok migratora, ale użytkownik może go zmienić.
 2. Migrator znajduje w tym katalogu plik `local_settings.json` utworzony przez
-   główną aplikację i rozwiązuje z niego skonfigurowaną ścieżkę bazy.
+   główną aplikację i rozwiązuje z niego skonfigurowaną ścieżkę bazy. Dla
+   zgodności ze starą konfiguracją, niepusta wartość `database_path` wskazująca
+   dokładnie na `picorgftp_sql.sqlite` ma pierwszeństwo także wtedy, gdy stary
+   plik ma `database_location_mode=exe_dir`; w pozostałych przypadkach
+   stosowana jest standardowa reguła lokalizacji z konfiguracji.
 3. Źródło jest poprawne tylko wtedy, gdy istnieje, ma nazwę
    `picorgftp_sql.sqlite` i przechodzi odczytowy `PRAGMA integrity_check`.
    Migrator nie szuka żadnych alternatywnych plików ani katalogów.
