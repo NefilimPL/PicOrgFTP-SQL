@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -77,7 +78,7 @@ def _configured_legacy_source(settings_path: Path, payload: dict[str, object]) -
 
 def _check_sqlite_integrity(source: Path) -> None:
     try:
-        with sqlite3.connect(f"{source.as_uri()}?mode=ro", uri=True) as connection:
+        with closing(sqlite3.connect(f"{source.as_uri()}?mode=ro", uri=True)) as connection:
             rows = connection.execute("PRAGMA integrity_check").fetchall()
     except sqlite3.Error as error:
         raise OfflineMigrationError(
@@ -209,7 +210,7 @@ def _validate_staging_copy(
     source_product_ids: tuple[str, ...],
     source_users: dict[str, tuple[str, bool, str]],
 ) -> OfflineMigrationReport:
-    with sqlite3.connect(staging) as connection:
+    with closing(sqlite3.connect(staging)) as connection:
         integrity = connection.execute("PRAGMA integrity_check").fetchall()
         if not integrity or any(str(row[0]).lower() != "ok" for row in integrity):
             raise OfflineMigrationError(
@@ -255,11 +256,11 @@ def build_validated_legacy_sqlite_copy(
     )
     staging = work_dir / TARGET_SQLITE_FILENAME
     try:
-        with _source_connection(paths.source) as source_connection:
+        with closing(_source_connection(paths.source)) as source_connection:
             source_counts = _application_table_counts(source_connection)
             source_product_ids = _product_ids(source_connection)
             source_users = _web_users(source_connection)
-            with sqlite3.connect(staging) as staging_connection:
+            with closing(sqlite3.connect(staging)) as staging_connection:
                 def report_backup(status: int, remaining: int, total: int) -> None:
                     progress(
                         MigrationProgress(
@@ -292,3 +293,91 @@ def build_validated_legacy_sqlite_copy(
     except Exception:
         shutil.rmtree(work_dir, ignore_errors=True)
         raise
+
+
+def _publish_staging_database(staging: Path, target: Path) -> None:
+    """Atomically create ``target`` without an overwrite-capable replace call."""
+
+    if target.exists():
+        raise OfflineMigrationError(
+            "target_exists",
+            "Plik picsyncra.sqlite już istnieje. Migrator nie nadpisuje istniejącej bazy.",
+        )
+    try:
+        os.link(staging, target)
+    except FileExistsError as error:
+        raise OfflineMigrationError(
+            "target_exists",
+            "Plik picsyncra.sqlite już istnieje. Migrator nie nadpisuje istniejącej bazy.",
+        ) from error
+    except OSError as error:
+        raise OfflineMigrationError(
+            "target_publish",
+            "Nie można opublikować zweryfikowanej bazy docelowej SQLite.",
+        ) from error
+    try:
+        staging.unlink()
+    except OSError as error:
+        try:
+            target.unlink()
+        except OSError:
+            pass
+        raise OfflineMigrationError(
+            "target_publish",
+            "Nie można zakończyć publikowania zweryfikowanej bazy docelowej SQLite.",
+        ) from error
+
+
+def _restore_settings_file(settings_path: Path, snapshot: bytes) -> None:
+    """Restore the exact pre-activation configuration after a final write error."""
+
+    storage_settings._write_bytes_atomic(settings_path, snapshot)
+
+
+def run_offline_legacy_migration(
+    app_root: Path,
+    progress: Callable[[MigrationProgress], None],
+) -> OfflineMigrationReport:
+    """Validate, publish and activate one configured SQLite migration safely."""
+
+    paths = resolve_offline_migration_paths(app_root)
+    from .offline_migrator_processes import stop_managed_processes
+
+    progress(MigrationProgress("process", 0, None, "Weryfikacja głównej aplikacji…"))
+    stop_managed_processes(
+        paths.app_root,
+        notify=lambda message: progress(MigrationProgress("process", None, None, message)),
+    )
+    staging: Path | None = None
+    settings_snapshot = paths.settings_path.read_bytes()
+    try:
+        staging, report = build_validated_legacy_sqlite_copy(paths, progress)
+        progress(MigrationProgress("activation", 0, None, "Publikowanie nowej bazy SQLite…"))
+        _publish_staging_database(staging, paths.target)
+        try:
+            storage_settings.update_bootstrap_settings_file(
+                paths.settings_path,
+                {
+                    storage_settings.DATA_MODE_KEY: storage_settings.DATA_MODE_SQLITE,
+                    storage_settings.DATABASE_LOCATION_MODE_KEY: storage_settings.DATABASE_LOCATION_CUSTOM,
+                    storage_settings.DATABASE_PATH_KEY: str(paths.target),
+                },
+            )
+        except Exception as error:
+            try:
+                paths.target.unlink()
+            except OSError:
+                pass
+            try:
+                _restore_settings_file(paths.settings_path, settings_snapshot)
+            except OSError:
+                pass
+            raise OfflineMigrationError(
+                "settings_update",
+                "Nie można aktywować nowej bazy w local_settings.json; baza docelowa została usunięta.",
+            ) from error
+        progress(MigrationProgress("activation", 1, 1, "Nowa baza została aktywowana."))
+        return report
+    finally:
+        if staging is not None:
+            shutil.rmtree(staging.parent, ignore_errors=True)

@@ -12,6 +12,7 @@ from picsyncra.offline_legacy_sqlite_migrator import (
     OfflineMigrationError,
     build_validated_legacy_sqlite_copy,
     resolve_offline_migration_paths,
+    run_offline_legacy_migration,
 )
 from picsyncra.excel_utils import ENTRY_RECORDS_KEY
 from picsyncra.sqlite_store import SqliteStore
@@ -246,3 +247,48 @@ def test_build_validated_copy_replaces_old_short_search_triggers(tmp_path: Path)
     assert len(trigger_sql) == 3
     assert all("picorg_product_short_grams" not in sql for sql in trigger_sql)
     assert all("picsyncra_product_short_grams" in sql for sql in trigger_sql)
+
+
+def test_successful_offline_migration_publishes_target_and_switches_settings(
+    tmp_path: Path,
+) -> None:
+    """Only a validated target becomes the next main application's database."""
+
+    paths = _configured_legacy_paths(tmp_path, products=2, users=1)
+    source_before = paths.source.read_bytes()
+
+    report = run_offline_legacy_migration(paths.app_root, progress=lambda _event: None)
+
+    assert report.target == paths.target
+    assert paths.target.is_file()
+    assert paths.source.read_bytes() == source_before
+    settings = json.loads(paths.settings_path.read_text(encoding="utf-8"))
+    assert settings["data_mode"] == "sqlite"
+    assert settings["database_location_mode"] == "custom"
+    assert settings["database_path"] == str(paths.target)
+
+
+def test_settings_failure_removes_only_newly_published_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed final config write cannot leave a target the app will not select."""
+
+    paths = _configured_legacy_paths(tmp_path, products=1, users=1)
+    settings_before = paths.settings_path.read_bytes()
+    from picsyncra import offline_legacy_sqlite_migrator
+
+    def fail_settings_write(*_args, **_kwargs) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(
+        offline_legacy_sqlite_migrator.storage_settings,
+        "update_bootstrap_settings_file",
+        fail_settings_write,
+    )
+
+    with pytest.raises(OfflineMigrationError) as error:
+        run_offline_legacy_migration(paths.app_root, progress=lambda _event: None)
+
+    assert error.value.code == "settings_update"
+    assert not paths.target.exists()
+    assert paths.settings_path.read_bytes() == settings_before
