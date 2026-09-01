@@ -14,7 +14,7 @@ Set-Location $RepoRoot
 Initialize-BuildEnvironment -RepoRoot $RepoRoot -VenvDir $VenvDir -Python $Python
 New-Item -ItemType Directory -Path $IconDir -Force | Out-Null
 New-Item -ItemType Directory -Path $WorkPath -Force | Out-Null
-Invoke-Native $Python "-c" "from PIL import Image; Image.open(r'pic\PIC9_LOCAL.png').save(r'$IconPath', sizes=[(256,128,64,48,32,16)])"
+Invoke-Native $Python "-c" "from PIL import Image; Image.open(r'pic\PIC9_LOCAL.png').save(r'$IconPath', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)])"
 Invoke-Native $Python "tools\generate_windows_version_info.py" --output $VersionInfoPath --file-description "PicSyncra legacy SQLite migrator" --internal-name "PicSyncra-Migrator" --original-filename "PicSyncra-Migrator.exe"
 $env:PICSYNCRA_HEADLESS = "1"
 $env:PYINSTALLER_BUILD = "1"
