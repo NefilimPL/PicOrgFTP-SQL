@@ -281,9 +281,7 @@ def test_settings_failure_removes_only_newly_published_target(
         raise OSError("disk full")
 
     monkeypatch.setattr(
-        offline_legacy_sqlite_migrator.storage_settings,
-        "update_bootstrap_settings_file",
-        fail_settings_write,
+        offline_legacy_sqlite_migrator, "_update_offline_settings", fail_settings_write
     )
 
     with pytest.raises(OfflineMigrationError) as error:

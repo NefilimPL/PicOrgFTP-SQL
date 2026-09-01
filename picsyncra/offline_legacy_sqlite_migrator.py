@@ -12,12 +12,14 @@ import shutil
 import tempfile
 from collections.abc import Callable
 
-from . import storage_settings
 from .sqlite_store import SqliteStore
 
 
 LEGACY_SQLITE_FILENAME = "picorgftp_sql.sqlite"
 TARGET_SQLITE_FILENAME = "picsyncra.sqlite"
+DATA_MODE_KEY = "data_mode"
+DATABASE_LOCATION_MODE_KEY = "database_location_mode"
+DATABASE_PATH_KEY = "database_path"
 
 
 class OfflineMigrationError(RuntimeError):
@@ -62,7 +64,7 @@ class OfflineMigrationReport:
 def _configured_legacy_source(settings_path: Path, payload: dict[str, object]) -> Path:
     """Prefer the explicit old DB path retained in pre-rebrand configurations."""
 
-    configured = str(payload.get(storage_settings.DATABASE_PATH_KEY) or "").strip()
+    configured = str(payload.get(DATABASE_PATH_KEY) or "").strip()
     if configured:
         expanded = os.path.expandvars(os.path.expanduser(configured.strip("\"'")))
         candidate = Path(expanded)
@@ -71,9 +73,38 @@ def _configured_legacy_source(settings_path: Path, payload: dict[str, object]) -
         candidate = candidate.resolve()
         if candidate.name == LEGACY_SQLITE_FILENAME:
             return candidate
-    return Path(
-        storage_settings.resolve_sqlite_path_for_settings_file(settings_path, payload)
-    ).resolve()
+    mode = str(payload.get(DATABASE_LOCATION_MODE_KEY) or "").strip().lower()
+    if mode == "exe_dir":
+        return (settings_path.parent / TARGET_SQLITE_FILENAME).resolve()
+    if mode == "image_dir":
+        base_dir = str(payload.get("base_dir_override") or "").strip()
+        if base_dir:
+            return (Path(os.path.expandvars(os.path.expanduser(base_dir))) / TARGET_SQLITE_FILENAME).resolve()
+    return Path()
+
+
+def _load_offline_settings(settings_path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as error:
+        raise OfflineMigrationError("settings_invalid", "Nie można odczytać local_settings.json.") from error
+    if not isinstance(payload, dict):
+        raise OfflineMigrationError("settings_invalid", "Plik local_settings.json nie zawiera ustawień aplikacji.")
+    return payload
+
+
+def _update_offline_settings(settings_path: Path, updates: dict[str, object]) -> None:
+    payload = _load_offline_settings(settings_path)
+    payload.update(updates)
+    temporary = settings_path.with_name(f".{settings_path.name}.migrator.tmp")
+    try:
+        temporary.write_text(json.dumps(payload, indent=4, ensure_ascii=False), encoding="utf-8")
+        os.replace(temporary, settings_path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _check_sqlite_integrity(source: Path) -> None:
@@ -103,7 +134,7 @@ def resolve_offline_migration_paths(app_root: Path) -> MigrationPaths:
             "W wybranym katalogu aplikacji nie znaleziono pliku local_settings.json.",
         )
 
-    payload = storage_settings.load_bootstrap_settings_file(settings_path)
+    payload = _load_offline_settings(settings_path)
     source = _configured_legacy_source(settings_path, payload)
     if source.name != LEGACY_SQLITE_FILENAME:
         raise OfflineMigrationError(
@@ -331,7 +362,15 @@ def _publish_staging_database(staging: Path, target: Path) -> None:
 def _restore_settings_file(settings_path: Path, snapshot: bytes) -> None:
     """Restore the exact pre-activation configuration after a final write error."""
 
-    storage_settings._write_bytes_atomic(settings_path, snapshot)
+    temporary = settings_path.with_name(f".{settings_path.name}.migrator.restore.tmp")
+    try:
+        temporary.write_bytes(snapshot)
+        os.replace(temporary, settings_path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def run_offline_legacy_migration(
@@ -355,12 +394,12 @@ def run_offline_legacy_migration(
         progress(MigrationProgress("activation", 0, None, "Publikowanie nowej bazy SQLite…"))
         _publish_staging_database(staging, paths.target)
         try:
-            storage_settings.update_bootstrap_settings_file(
+            _update_offline_settings(
                 paths.settings_path,
                 {
-                    storage_settings.DATA_MODE_KEY: storage_settings.DATA_MODE_SQLITE,
-                    storage_settings.DATABASE_LOCATION_MODE_KEY: storage_settings.DATABASE_LOCATION_CUSTOM,
-                    storage_settings.DATABASE_PATH_KEY: str(paths.target),
+                    DATA_MODE_KEY: "sqlite",
+                    DATABASE_LOCATION_MODE_KEY: "custom",
+                    DATABASE_PATH_KEY: str(paths.target),
                 },
             )
         except Exception as error:
