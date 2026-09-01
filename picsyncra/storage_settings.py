@@ -64,6 +64,26 @@ def _settings_path() -> Path:
     return Path(settings.BASE_DIR_SETTINGS_PATH)
 
 
+def _write_bytes_atomic(path: Path, content: bytes) -> None:
+    """Replace ``path`` atomically while retaining the exact supplied bytes."""
+
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=".picsyncra-settings-",
+        suffix=".json.tmp",
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+
+
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     """Publish bootstrap settings without exposing a partial JSON document."""
 
@@ -82,6 +102,33 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
                 os.unlink(temporary_path)
             except OSError:
                 pass
+
+
+def capture_bootstrap_settings() -> bytes | None:
+    """Capture the precise settings file before an activation transaction."""
+
+    path = _settings_path()
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def restore_bootstrap_settings(snapshot: bytes | None) -> None:
+    """Restore a bootstrap snapshot after an activation transaction fails."""
+
+    path = _settings_path()
+    if snapshot is None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_bytes_atomic(path, snapshot)
+    from .data_store import reset_active_store_cache
+
+    reset_active_store_cache()
 
 
 def load_bootstrap_settings() -> dict[str, Any]:

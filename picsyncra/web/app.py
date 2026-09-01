@@ -34,7 +34,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
-from .. import brand, common, config, data_store, settings, sqlite_backup, storage_settings
+from .. import brand, common, config, data_store, encryption, settings, sqlite_backup, storage_settings
 from ..bootstrap import initialize_application_runtime
 from ..common import (
     AUTO_CONTENT_FIT_KEY,
@@ -88,7 +88,8 @@ from ..services.ocr_values import (
     ocr_values_match,
 )
 from ..ocr_settings import OCR_SETTINGS_KEY, normalize_ocr_settings
-from ..legacy_migration import adopt_legacy_data, adoption_database_path
+from ..legacy_migration import adopt_legacy_profile, adoption_database_path
+from ..legacy_profile import LEGACY_SQLITE_FILENAME, discover_legacy_profiles
 from ..logging_utils import log_error
 from ..email_settings import EMAIL_SETTINGS_KEY
 from ..entra_secret_monitor import entra_secret_status, refresh_entra_secret_status
@@ -7362,40 +7363,106 @@ def create_app() -> FastAPI:
         request: Request, replace_existing_target: bool = False
     ) -> JSONResponse:
         _require_admin(request)
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            payload = {}
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Niepoprawne dane wyboru starej konfiguracji.")
+        source_directory = payload.get("source_directory")
+        if source_directory is not None and not isinstance(source_directory, str):
+            raise HTTPException(status_code=400, detail="Niepoprawny folder starej konfiguracji.")
+        source_directory = (source_directory or "").strip()
         bootstrap_settings = storage_settings.load_bootstrap_settings()
         database_path = storage_settings.resolve_sqlite_path(bootstrap_settings)
         if not database_path:
             raise HTTPException(status_code=400, detail="Nie ustawiono sciezki bazy SQLite.")
         adopted_database_path = adoption_database_path(Path(database_path))
 
-        def activate_adopted_database(target_path: Path) -> None:
-            storage_settings.save_bootstrap_settings(
+        configured_path = Path(database_path)
+        if source_directory:
+            candidate_roots = (Path(source_directory),)
+        else:
+            candidate_roots = (
+                configured_path.parent
+                if configured_path.name.casefold() == LEGACY_SQLITE_FILENAME.casefold()
+                else Path(settings.AC),
+                Path(settings.AC),
+                Path(settings.BASE_DIR_SETTINGS_PATH).parent,
+            )
+        profiles = discover_legacy_profiles(candidate_roots)
+        if not profiles:
+            raise HTTPException(status_code=404, detail="Nie znaleziono danych starej konfiguracji.")
+        if len(profiles) > 1:
+            directories = ", ".join(str(profile.root) for profile in profiles)
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Znaleziono wiecej niz jedna stara konfiguracje. "
+                    "Wskaz jej folder w polu importu: " + directories
+                ),
+            )
+        profile = profiles[0]
+        active_bootstrap_path = Path(settings.BASE_DIR_SETTINGS_PATH).resolve()
+        preserve_source_paths = (
+            (active_bootstrap_path,)
+            if active_bootstrap_path.parent == profile.root
+            and active_bootstrap_path.name.casefold() == "local_settings.json"
+            else ()
+        )
+        bootstrap_snapshot = storage_settings.capture_bootstrap_settings()
+        previous_app_secret = common.APP_SECRET
+        previous_template_secret = common.BASE_DIR_SETTINGS_TEMPLATE.get(common.APP_SECRET_KEY)
+        previous_encryption_secret = encryption.APP_SECRET
+
+        def activate_adopted_database(
+            target_path: Path, imported_bootstrap: dict[str, object] | None = None
+        ):
+            updates = dict(imported_bootstrap or {})
+            updates.update(
                 {
                     storage_settings.DATA_MODE_KEY: storage_settings.DATA_MODE_SQLITE,
-                    storage_settings.DATABASE_LOCATION_MODE_KEY: bootstrap_settings.get(
-                        storage_settings.DATABASE_LOCATION_MODE_KEY
-                    ),
+                    storage_settings.DATABASE_LOCATION_MODE_KEY: storage_settings.DATABASE_LOCATION_CUSTOM,
                     storage_settings.DATABASE_PATH_KEY: str(target_path),
                 }
             )
+            storage_settings.save_bootstrap_settings(
+                updates
+            )
+            imported_secret = updates.get(common.APP_SECRET_KEY)
+            if isinstance(imported_secret, str) and imported_secret.strip():
+                secret = common._decode_local_secret(imported_secret, common.APP_SECRET)
+                common.APP_SECRET = secret
+                common.BASE_DIR_SETTINGS_TEMPLATE[common.APP_SECRET_KEY] = common._encode_local_secret(
+                    secret
+                )
+                encryption.APP_SECRET = secret
+
+            def rollback_activation() -> None:
+                storage_settings.restore_bootstrap_settings(bootstrap_snapshot)
+                common.APP_SECRET = previous_app_secret
+                if previous_template_secret is None:
+                    common.BASE_DIR_SETTINGS_TEMPLATE.pop(common.APP_SECRET_KEY, None)
+                else:
+                    common.BASE_DIR_SETTINGS_TEMPLATE[common.APP_SECRET_KEY] = previous_template_secret
+                encryption.APP_SECRET = previous_encryption_secret
+
+            return rollback_activation
 
         try:
             result = await run_in_threadpool(
-                adopt_legacy_data,
-                application_root=Path(settings.BASE_DIR_SETTINGS_PATH).parent,
-                data_root=Path(settings.AC),
+                adopt_legacy_profile,
+                source_root=profile.root,
                 database_path=adopted_database_path,
                 backup_root=Path(storage_settings.resolve_backup_dir()),
-                legacy_database_path=Path(database_path),
                 finalize=activate_adopted_database,
                 replace_existing_target=replace_existing_target,
+                preserve_source_paths=preserve_source_paths,
             )
             if not result.migrated:
                 status_code = 404 if result.skipped else 409 if result.error_code in {
                     "target_exists",
                     "adoption_in_progress",
-                    "mixed_sources",
-                    "split_file_sources",
                 } else 500
                 raise HTTPException(
                     status_code=status_code,
@@ -7420,6 +7487,7 @@ def create_app() -> FastAPI:
                 "database_path": str(result.copied_paths[0]),
                 "warning": result.error or "",
                 "replaced_target": result.replaced_target,
+                "report": result.report or {},
                 "reauthenticate": True,
                 "settings": settings_snapshot(),
                 "message": (

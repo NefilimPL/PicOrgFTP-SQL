@@ -8528,11 +8528,20 @@ function importLegacyDataButton() {
     button.disabled = true;
     settingsStatus.textContent = "Wczytywanie danych starej konfiguracji...";
     try {
+      const sourceInput = settingsOutput.querySelector(
+        '[name="legacy_import_source_directory"]'
+      );
+      const sourceDirectory = String(sourceInput?.value || "").trim();
+      const importOptions = {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ "source_directory": sourceDirectory }),
+        timeoutMs: 120000,
+      };
       let payload;
       try {
         payload = await requestJson("/api/settings/import-legacy", {
-          method: "POST",
-          timeoutMs: 120000,
+          ...importOptions,
         });
       } catch (error) {
         const targetExists = error.status === 409
@@ -8545,8 +8554,7 @@ function importLegacyDataButton() {
         }
         settingsStatus.textContent = "Archiwizowanie obecnej bazy i wczytywanie starej konfiguracji...";
         payload = await requestJson("/api/settings/import-legacy?replace_existing_target=true", {
-          method: "POST",
-          timeoutMs: 120000,
+          ...importOptions,
         });
       }
       if (payload.settings) {
@@ -9014,6 +9022,11 @@ function renderSettingsApp() {
       inputField("database_path", "Plik SQLite", s.database_path || "", {
         placeholder: "np. C:\\PicSyncra\\picsyncra.sqlite",
         description: "Uzywane tylko dla lokalizacji: wskazana sciezka.",
+      }),
+      inputField("legacy_import_source_directory", "Folder starej konfiguracji", "", {
+        placeholder: "np. C:\\StaraKonfiguracja",
+        description:
+          "Opcjonalnie: wskaz jeden folder z dawnymi plikami. Puste pole uruchamia tylko jednoznaczne wykrywanie.",
       }),
       actionRow(
         importLegacyDataButton(),

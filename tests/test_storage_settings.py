@@ -100,3 +100,39 @@ def test_save_bootstrap_settings_keeps_the_previous_file_if_publish_fails(
             storage_settings.save_bootstrap_settings({"data_mode": "sqlite"})
 
     assert json.loads(settings_file.read_text(encoding="utf-8")) == original
+
+
+def test_restore_bootstrap_settings_restores_the_exact_pre_activation_file(
+    tmp_path: Path,
+) -> None:
+    """A failed profile switch must restore unknown bootstrap fields verbatim."""
+
+    settings_file = tmp_path / "local_settings.json"
+    original_bytes = b'{\n  "language": "pl",\n  "custom_previous_key": [1, 2]\n}\n'
+    settings_file.write_bytes(original_bytes)
+
+    with patch.object(
+        storage_settings.settings, "BASE_DIR_SETTINGS_PATH", str(settings_file)
+    ):
+        snapshot = storage_settings.capture_bootstrap_settings()
+        storage_settings.save_bootstrap_settings(
+            {"data_mode": "sqlite", "database_path": "new.sqlite"}
+        )
+        storage_settings.restore_bootstrap_settings(snapshot)
+
+    assert settings_file.read_bytes() == original_bytes
+
+
+def test_restore_bootstrap_settings_removes_a_file_that_did_not_previously_exist(
+    tmp_path: Path,
+) -> None:
+    settings_file = tmp_path / "local_settings.json"
+
+    with patch.object(
+        storage_settings.settings, "BASE_DIR_SETTINGS_PATH", str(settings_file)
+    ):
+        snapshot = storage_settings.capture_bootstrap_settings()
+        storage_settings.save_bootstrap_settings({"data_mode": "sqlite"})
+        storage_settings.restore_bootstrap_settings(snapshot)
+
+    assert not settings_file.exists()
