@@ -61,10 +61,41 @@ class WebSmokeCiTests(unittest.TestCase):
 
     def setUp(self) -> None:
         os.environ["PICSYNCRA_WEB_AUTH"] = "0"
+        self._web_data_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._web_data_directory.cleanup)
+        data_path_patch = patch.object(
+            web_app.settings, "AC", self._web_data_directory.name
+        )
+        data_path_patch.start()
+        self.addCleanup(data_path_patch.stop)
+        bootstrap_settings_patch = patch.object(
+            web_app.storage_settings,
+            "load_bootstrap_settings",
+            return_value={"data_mode": "legacy"},
+        )
+        bootstrap_settings_patch.start()
+        self.addCleanup(bootstrap_settings_patch.stop)
+        web_app.data_store.reset_active_store_cache()
+        self.addCleanup(web_app.data_store.reset_active_store_cache)
         web_app._RATE_LIMITS.clear()
 
     def tearDown(self) -> None:
         web_app._RATE_LIMITS.clear()
+
+    def test_default_admin_can_log_in_with_isolated_test_storage(self) -> None:
+        """Authentication smoke tests must not depend on a developer's data path."""
+
+        with patch.dict(os.environ, {"PICSYNCRA_WEB_AUTH": "1"}):
+            client = TestClient(web_app.app)
+            response = client.post(
+                "/api/login",
+                data={"username": "admin", "password": "admin"},
+                headers={"X-Requested-With": "XMLHttpRequest"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"])
+        self.assertEqual(response.json()["user"]["role"], "admin")
 
     def test_health_endpoint_returns_versioned_ok_payload(self) -> None:
         client = TestClient(web_app.app)
