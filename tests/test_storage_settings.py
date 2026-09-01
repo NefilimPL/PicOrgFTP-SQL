@@ -46,6 +46,42 @@ def test_sqlite_path_in_exe_dir(tmp_path: Path) -> None:
     assert resolved == str(tmp_path / "picsyncra.sqlite")
 
 
+def test_explicit_settings_path_helpers_do_not_use_process_global_settings(
+    tmp_path: Path,
+) -> None:
+    settings_file = tmp_path / "application" / "local_settings.json"
+    settings_file.parent.mkdir()
+    settings_file.write_text(
+        json.dumps({"database_location_mode": "exe_dir", "language": "pl"}),
+        encoding="utf-8",
+    )
+
+    payload = storage_settings.load_bootstrap_settings_file(settings_file)
+    resolved = storage_settings.resolve_sqlite_path_for_settings_file(
+        settings_file, payload
+    )
+
+    assert payload["language"] == "pl"
+    assert resolved == str(settings_file.parent / "picsyncra.sqlite")
+
+
+def test_update_explicit_settings_file_preserves_unknown_values(tmp_path: Path) -> None:
+    settings_file = tmp_path / "application" / "local_settings.json"
+    settings_file.parent.mkdir()
+    settings_file.write_text(
+        json.dumps({"language": "pl", "custom_previous_key": [1, 2]}),
+        encoding="utf-8",
+    )
+
+    saved = storage_settings.update_bootstrap_settings_file(
+        settings_file,
+        {"data_mode": "sqlite", "database_location_mode": "custom"},
+    )
+
+    assert saved["custom_previous_key"] == [1, 2]
+    assert json.loads(settings_file.read_text(encoding="utf-8"))["data_mode"] == "sqlite"
+
+
 def test_load_bootstrap_settings_defaults_to_legacy(tmp_path: Path) -> None:
     settings_file = tmp_path / "local_settings.json"
 
