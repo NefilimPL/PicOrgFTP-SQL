@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sqlite3
 
 import pytest
 
 from picsyncra.offline_legacy_sqlite_migrator import (
     OfflineMigrationError,
+    build_validated_legacy_sqlite_copy,
     resolve_offline_migration_paths,
 )
+from picsyncra.excel_utils import ENTRY_RECORDS_KEY
 from picsyncra.sqlite_store import SqliteStore
 
 
@@ -133,3 +136,113 @@ def test_resolve_paths_refuses_to_replace_an_existing_target(tmp_path: Path) -> 
         resolve_offline_migration_paths(app_root)
 
     assert error.value.code == "target_exists"
+
+
+def _configured_legacy_paths(tmp_path: Path, *, products: int, users: int):
+    app_root = tmp_path / "application"
+    source_root = tmp_path / "legacy"
+    app_root.mkdir()
+    source_root.mkdir()
+    source = source_root / "picorgftp_sql.sqlite"
+    store = SqliteStore(str(source))
+    store.save_lists(
+        {
+            ENTRY_RECORDS_KEY: [
+                {
+                    "PRODUCT_ID": f"P-{index}",
+                    "EAN": f"5901234567{index:03d}",
+                    "NAZWA": f"LEGACY PRODUCT {index}",
+                }
+                for index in range(products)
+            ]
+        }
+    )
+    store.save_users(
+        [
+            {
+                "username": f"user{index}",
+                "role": "admin" if index == 0 else "user",
+                "enabled": index % 2 == 0,
+                "password_hash": f"legacy-hash-{index}",
+            }
+            for index in range(users)
+        ]
+    )
+    (app_root / "local_settings.json").write_text(
+        json.dumps(
+            {
+                "database_location_mode": "custom",
+                "database_path": str(source),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return resolve_offline_migration_paths(app_root)
+
+
+def test_build_validated_copy_preserves_only_sqlite_data(tmp_path: Path) -> None:
+    """Broken companion files cannot affect the independent SQLite migration."""
+
+    paths = _configured_legacy_paths(tmp_path, products=2, users=1)
+    source_before = paths.source.read_bytes()
+    (paths.source.parent / "web_users.json").write_text("not valid JSON", encoding="utf-8")
+    (paths.source.parent / "lists.xlsx").write_bytes(b"not an xlsx")
+    progress_events = []
+
+    staging, report = build_validated_legacy_sqlite_copy(paths, progress_events.append)
+
+    assert staging.is_file()
+    assert report.source == paths.source
+    assert report.target == paths.target
+    assert report.product_count == 2
+    assert report.user_count == 1
+    assert paths.source.read_bytes() == source_before
+    assert {event.stage for event in progress_events} >= {"copy", "schema", "validation"}
+
+
+def test_build_validated_copy_replaces_old_short_search_triggers(tmp_path: Path) -> None:
+    """The copied DB must not retain trigger SQL that calls PicOrgFTP functions."""
+
+    paths = _configured_legacy_paths(tmp_path, products=1, users=1)
+    with sqlite3.connect(paths.source) as connection:
+        connection.executescript(
+            """
+            DROP TRIGGER trg_product_entries_short_fts_insert;
+            DROP TRIGGER trg_product_entries_short_fts_delete;
+            DROP TRIGGER trg_product_entries_short_fts_update;
+
+            CREATE TRIGGER trg_product_entries_short_fts_insert
+            AFTER INSERT ON product_entries BEGIN
+                INSERT INTO product_entries_short_fts(rowid, grams)
+                VALUES (new.rowid, picorg_product_short_grams(new.search_text_key));
+            END;
+            CREATE TRIGGER trg_product_entries_short_fts_delete
+            AFTER DELETE ON product_entries BEGIN
+                INSERT INTO product_entries_short_fts(product_entries_short_fts, rowid, grams)
+                VALUES ('delete', old.rowid, picorg_product_short_grams(old.search_text_key));
+            END;
+            CREATE TRIGGER trg_product_entries_short_fts_update
+            AFTER UPDATE OF search_text_key ON product_entries BEGIN
+                INSERT INTO product_entries_short_fts(product_entries_short_fts, rowid, grams)
+                VALUES ('delete', old.rowid, picorg_product_short_grams(old.search_text_key));
+                INSERT INTO product_entries_short_fts(rowid, grams)
+                VALUES (new.rowid, picorg_product_short_grams(new.search_text_key));
+            END;
+            PRAGMA user_version = 15;
+            """
+        )
+
+    staging, _report = build_validated_legacy_sqlite_copy(paths, lambda _event: None)
+
+    with sqlite3.connect(staging) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 17
+        trigger_sql = [
+            row[0]
+            for row in connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' "
+                "AND name LIKE 'trg_product_entries_short_fts_%'"
+            )
+        ]
+    assert len(trigger_sql) == 3
+    assert all("picorg_product_short_grams" not in sql for sql in trigger_sql)
+    assert all("picsyncra_product_short_grams" in sql for sql in trigger_sql)
