@@ -420,6 +420,25 @@ def test_profile_transaction_activates_validated_database_then_archives_all_sour
     )
 
 
+def test_profile_publish_moves_staging_database_before_the_finalizer_opens_it(
+    tmp_path: Path,
+) -> None:
+    """Windows cleanup must not retain a staging hard link after activation."""
+
+    from picsyncra import legacy_migration
+
+    staging = tmp_path / ".picsyncra-profile" / "picsyncra-import.sqlite"
+    destination = tmp_path / "current" / "picsyncra-import.sqlite"
+    SqliteStore(str(staging)).save_config({"legacy": True})
+    destination.parent.mkdir()
+
+    legacy_migration._publish_profile_staging(staging, destination)
+
+    with sqlite3.connect(destination) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert not staging.exists()
+
+
 def test_profile_transaction_keeps_sources_and_target_when_validation_fails(
     tmp_path: Path,
 ) -> None:

@@ -197,7 +197,7 @@ def _profile_publish_path(target: Path) -> Path:
 def _publish_profile_staging(staging: Path, destination: Path) -> None:
     if destination.exists():
         raise _TargetAlreadyExistsError("Docelowa baza PicSyncra juz istnieje.")
-    os.link(staging, destination)
+    os.replace(staging, destination)
 
 
 def _write_profile_import_report(archive_dir: Path, report: dict[str, object]) -> None:
