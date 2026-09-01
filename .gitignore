@@ -33,6 +33,7 @@ _ZDJECIA PRZEROBIONE_/
 .superpowers/
 \__pycache__/
 .pytest_cache/
+.pytest-tmp/
 .tmp-test/
 pytest-cache-files-*/
 pytest-temp/

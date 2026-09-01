@@ -2671,6 +2671,12 @@ async function requestJson() {{
                 source.index("async function validatePimcoreOcrFields"),
             )
         ]
+        ocr_slot_tokens = source[
+            source.index("function pimcoreOcrSlotTokens") : source.index(
+                "function renderPimcoreTemplateTokens",
+                source.index("function pimcoreOcrSlotTokens"),
+            )
+        ]
         node = Path(r"C:\Program Files\nodejs\node.exe")
         if not node.exists():
             self.skipTest("Node.js is required for the Pimcore OCR interaction contract")
@@ -2709,6 +2715,7 @@ const updatePimcoreRuntimeFieldChangeState = () => {{}};
 const pimcoreRuntimeLayoutGroups = (schema) => [{{ name: "", rows: [{{ fields: schema }}] }}];
 const pimcoreRuntimeSection = () => makeNode("section");
 const pimcoreRuntimeRow = () => makeNode("div");
+{ocr_slot_tokens}
 {validation}
 {populate}
 const form = {{ textContent: "", elements: {{}}, append() {{}} }};
@@ -2742,6 +2749,12 @@ console.log(JSON.stringify(calls));
             source.index("async function validatePimcoreOcrFields") : source.index(
                 "function pimcoreRuntimeRecalculateStatus",
                 source.index("async function validatePimcoreOcrFields"),
+            )
+        ]
+        ocr_slot_tokens = source[
+            source.index("function pimcoreOcrSlotTokens") : source.index(
+                "function renderPimcoreTemplateTokens",
+                source.index("function pimcoreOcrSlotTokens"),
             )
         ]
         renderer = source[
@@ -2781,6 +2794,7 @@ const updatePimcoreRuntimeCalculatedState = () => {{}};
 const renderPimcoreOcrMismatch = () => {{}};
 const updatePimcoreCreateSubmitState = () => {{}};
 const updatePimcoreEditSubmitState = () => {{}};
+{ocr_slot_tokens}
 {validation}
 {renderer}
 const schema = [

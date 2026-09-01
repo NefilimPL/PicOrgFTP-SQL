@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import tempfile
 from typing import Any
 
 from . import common, settings
@@ -63,18 +64,74 @@ def _settings_path() -> Path:
     return Path(settings.BASE_DIR_SETTINGS_PATH)
 
 
-def load_bootstrap_settings() -> dict[str, Any]:
-    """Load startup-only settings from ``local_settings.json``."""
+def _write_bytes_atomic(path: Path, content: bytes) -> None:
+    """Replace ``path`` atomically while retaining the exact supplied bytes."""
 
-    data: dict[str, Any] = dict(common.BASE_DIR_SETTINGS_TEMPLATE)
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=".picsyncra-settings-",
+        suffix=".json.tmp",
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    """Publish bootstrap settings without exposing a partial JSON document."""
+
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=".picsyncra-settings-",
+        suffix=".json.tmp",
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=4, ensure_ascii=False)
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+
+
+def capture_bootstrap_settings() -> bytes | None:
+    """Capture the precise settings file before an activation transaction."""
+
     path = _settings_path()
     try:
-        if path.exists():
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data.update(loaded)
-    except (OSError, ValueError, TypeError):
-        pass
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def restore_bootstrap_settings(snapshot: bytes | None) -> None:
+    """Restore a bootstrap snapshot after an activation transaction fails."""
+
+    path = _settings_path()
+    if snapshot is None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_bytes_atomic(path, snapshot)
+    from .data_store import reset_active_store_cache
+
+    reset_active_store_cache()
+
+
+def _normalize_bootstrap_settings(data: dict[str, Any]) -> dict[str, Any]:
     data[DATA_MODE_KEY] = normalize_data_mode(data.get(DATA_MODE_KEY))
     data[DATABASE_LOCATION_MODE_KEY] = normalize_database_location_mode(
         data.get(DATABASE_LOCATION_MODE_KEY)
@@ -83,19 +140,46 @@ def load_bootstrap_settings() -> dict[str, Any]:
     return data
 
 
+def load_bootstrap_settings_file(settings_path: Path) -> dict[str, Any]:
+    """Load startup settings from one explicit configuration file."""
+
+    data: dict[str, Any] = dict(common.BASE_DIR_SETTINGS_TEMPLATE)
+    path = Path(settings_path)
+    try:
+        if path.exists():
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data.update(loaded)
+    except (OSError, ValueError, TypeError):
+        pass
+    return _normalize_bootstrap_settings(data)
+
+
+def load_bootstrap_settings() -> dict[str, Any]:
+    """Load startup-only settings from the active ``local_settings.json``."""
+
+    return load_bootstrap_settings_file(_settings_path())
+
+
+def update_bootstrap_settings_file(
+    settings_path: Path, updates: dict[str, object]
+) -> dict[str, Any]:
+    """Atomically update one explicit bootstrap file, preserving unknown keys."""
+
+    path = Path(settings_path)
+    data = load_bootstrap_settings_file(path)
+    if isinstance(updates, dict):
+        data.update(updates)
+    _normalize_bootstrap_settings(data)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json_atomic(path, data)
+    return data
+
+
 def save_bootstrap_settings(updates: dict[str, object]) -> dict[str, Any]:
     """Persist startup-only settings while keeping existing unknown keys."""
 
-    data = load_bootstrap_settings()
-    if isinstance(updates, dict):
-        data.update(updates)
-    data[DATA_MODE_KEY] = normalize_data_mode(data.get(DATA_MODE_KEY))
-    data[DATABASE_LOCATION_MODE_KEY] = normalize_database_location_mode(
-        data.get(DATABASE_LOCATION_MODE_KEY)
-    )
-    path = _settings_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=4, ensure_ascii=False), encoding="utf-8")
+    data = update_bootstrap_settings_file(_settings_path(), updates)
     from .data_store import reset_active_store_cache
 
     reset_active_store_cache()
@@ -209,16 +293,36 @@ def _resolve_path(value: object) -> str:
     return str(Path(expanded).resolve())
 
 
+def _resolve_path_from_settings_file(settings_path: Path, value: object) -> str:
+    raw = _text(value).strip("\"'")
+    if not raw:
+        return ""
+    expanded = os.path.expandvars(os.path.expanduser(raw))
+    path = Path(expanded)
+    if not path.is_absolute():
+        path = Path(settings_path).resolve().parent / path
+    return str(path.resolve())
+
+
+def resolve_sqlite_path_for_settings_file(
+    settings_path: Path, payload: dict[str, object] | None = None
+) -> str:
+    """Resolve SQLite path using the supplied configuration file's directory."""
+
+    path = Path(settings_path)
+    data = payload if isinstance(payload, dict) else load_bootstrap_settings_file(path)
+    mode = normalize_database_location_mode(data.get(DATABASE_LOCATION_MODE_KEY))
+    if mode == DATABASE_LOCATION_CUSTOM:
+        return _resolve_path_from_settings_file(path, data.get(DATABASE_PATH_KEY))
+    if mode == DATABASE_LOCATION_EXE_DIR:
+        return str(path.resolve().parent / DEFAULT_SQLITE_FILENAME)
+    return str(Path(settings.AC).resolve() / DEFAULT_SQLITE_FILENAME)
+
+
 def resolve_sqlite_path(payload: dict[str, object] | None = None) -> str:
     """Return the active SQLite database path for ``payload`` or settings."""
 
-    data = payload if isinstance(payload, dict) else load_bootstrap_settings()
-    mode = normalize_database_location_mode(data.get(DATABASE_LOCATION_MODE_KEY))
-    if mode == DATABASE_LOCATION_CUSTOM:
-        return _resolve_path(data.get(DATABASE_PATH_KEY))
-    if mode == DATABASE_LOCATION_EXE_DIR:
-        return str(_settings_path().resolve().parent / DEFAULT_SQLITE_FILENAME)
-    return str(Path(settings.AC).resolve() / DEFAULT_SQLITE_FILENAME)
+    return resolve_sqlite_path_for_settings_file(_settings_path(), payload)
 
 
 def storage_summary() -> dict[str, Any]:

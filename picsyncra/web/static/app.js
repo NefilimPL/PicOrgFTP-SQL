@@ -8523,22 +8523,57 @@ function importLegacyDataButton() {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "secondary-button";
-  button.textContent = "Importuj stare dane do SQLite";
+  button.textContent = "Wczytaj dane ze starej konfiguracji";
   button.addEventListener("click", async () => {
     button.disabled = true;
-    settingsStatus.textContent = "Importowanie danych legacy...";
+    settingsStatus.textContent = "Wczytywanie danych starej konfiguracji...";
     try {
-      const payload = await requestJson("/api/settings/import-legacy", {
+      const sourceInput = settingsOutput.querySelector(
+        '[name="legacy_import_source_directory"]'
+      );
+      const sourceDirectory = String(sourceInput?.value || "").trim();
+      const importOptions = {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ "source_directory": sourceDirectory }),
         timeoutMs: 120000,
-      });
+      };
+      let payload;
+      try {
+        payload = await requestJson("/api/settings/import-legacy", {
+          ...importOptions,
+        });
+      } catch (error) {
+        const targetExists = error.status === 409
+          && String(error.message || "").startsWith("Docelowa baza PicSyncra juz istnieje");
+        if (!targetExists || !window.confirm(
+          "Docelowa baza PicSyncra zostanie najpierw zarchiwizowana w BACKUP/legacy-import, "
+          + "a potem zastapiona danymi starej konfiguracji. Kontynuowac?"
+        )) {
+          throw error;
+        }
+        settingsStatus.textContent = "Archiwizowanie obecnej bazy i wczytywanie starej konfiguracji...";
+        payload = await requestJson("/api/settings/import-legacy?replace_existing_target=true", {
+          ...importOptions,
+        });
+      }
       if (payload.settings) {
         state.settings = payload.settings;
       }
-      settingsStatus.textContent = payload.message || "Import zakonczony.";
+      const completionMessage = payload.message || "Wczytywanie danych zakonczone.";
+      settingsStatus.textContent = payload.warning
+        ? `${completionMessage} Ostrzezenie: ${payload.warning}`
+        : completionMessage;
+      if (payload.reauthenticate) {
+        state.currentUser = null;
+        window.setTimeout(() => {
+          window.location.href = "/login";
+        }, 300);
+        return;
+      }
       renderSettings();
     } catch (error) {
-      settingsStatus.textContent = error.message || "Nie udalo sie zaimportowac danych.";
+      settingsStatus.textContent = error.message || "Nie udalo sie wczytac danych starej konfiguracji.";
     } finally {
       button.disabled = false;
     }
@@ -8987,6 +9022,11 @@ function renderSettingsApp() {
       inputField("database_path", "Plik SQLite", s.database_path || "", {
         placeholder: "np. C:\\PicSyncra\\picsyncra.sqlite",
         description: "Uzywane tylko dla lokalizacji: wskazana sciezka.",
+      }),
+      inputField("legacy_import_source_directory", "Folder starej konfiguracji", "", {
+        placeholder: "np. C:\\StaraKonfiguracja",
+        description:
+          "Opcjonalnie: wskaz jeden folder z dawnymi plikami. Puste pole uruchamia tylko jednoznaczne wykrywanie.",
       }),
       actionRow(
         importLegacyDataButton(),
@@ -9772,12 +9812,14 @@ function pimcoreSlotTokens() {
 }
 
 function pimcoreOcrSlotTokens() {
+  const allSlotTokens = pimcoreSlotTokens();
   const configuredSlots = Array.isArray(state.settings?.ocr?.enabled_slots)
     ? state.settings.ocr.enabled_slots
     : state.ocrEnabledSlots;
+  if (!Array.isArray(configuredSlots)) return allSlotTokens;
   const enabledSlots = new Set(configuredSlots.map(String));
   return Object.fromEntries(
-    Object.entries(pimcoreSlotTokens()).filter(([prefix]) => enabledSlots.has(prefix))
+    Object.entries(allSlotTokens).filter(([prefix]) => enabledSlots.has(prefix))
   );
 }
 
@@ -11551,7 +11593,7 @@ async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
     }
   }
   updatePimcoreRuntimeCalculatedState(form, result);
-  await validatePimcoreOcrFields(form, schema, selected);
+  await validatePimcoreOcrFields(form, schema, targets);
   return result;
 }
 

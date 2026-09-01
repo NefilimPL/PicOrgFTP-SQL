@@ -16,8 +16,14 @@ ROOT = Path(__file__).resolve().parents[1]
 def _live_branding_files() -> list[Path]:
     allowed_legacy_files = {
         ROOT / "picsyncra" / "legacy_migration.py",
+        ROOT / "picsyncra" / "legacy_profile.py",
+        ROOT / "picsyncra" / "sqlite_store.py",
+        ROOT / "picsyncra" / "web_manager.py",
         ROOT / "picsyncra" / "web" / "static" / "legacy-migration.js",
         ROOT / "tests" / "test_legacy_migration.py",
+        ROOT / "tests" / "test_legacy_profile.py",
+        ROOT / "tests" / "test_legacy_profile_import.py",
+        ROOT / "tests" / "test_web_manager.py",
         ROOT / "tests" / "js" / "legacy-migration.test.js",
     }
     skipped_directories = {
@@ -155,7 +161,7 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertEqual(css_match.group(1), "20260827-pimcore-ocr-checking-css1")
         self.assertEqual(runtime_js_match.group(1), "20260728-runtime-poll1")
         self.assertEqual(diagnostics_js_match.group(1), "20260825-ocr-overlay-layout2")
-        self.assertEqual(js_match.group(1), "20260825-ocr-slot-queue-live3")
+        self.assertEqual(js_match.group(1), "20260828-legacy-adoption1")
         self.assertNotEqual(css_match.group(1), js_match.group(1))
 
     def test_resource_detail_copy_explains_clients_and_latch_stages(self) -> None:
@@ -1331,7 +1337,7 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("data_mode_var", source)
         self.assertIn("database_location_mode_var", source)
         self.assertIn("database_path_var", source)
-        self.assertIn("Importuj stare dane do SQLite", source)
+        self.assertIn("Wczytaj dane ze starej konfiguracji", source)
         self.assertIn("storage_settings.save_bootstrap_settings", source)
 
     def test_desktop_local_file_index_uses_active_cache_store(self) -> None:

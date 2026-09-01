@@ -22,7 +22,7 @@ from urllib.request import urlopen
 
 from .assets import set_tk_window_icon
 from .assets import pic_asset_path
-from .brand import WEB_APP_NAME, WEB_ICON
+from .brand import PACKAGE_NAME, WEB_APP_NAME, WEB_ICON
 from .version import get_display_version
 
 
@@ -30,6 +30,7 @@ DEFAULT_PORT = int(os.environ.get("PICSYNCRA_WEB_PORT") or 8010)
 DEFAULT_HOST = os.environ.get("PICSYNCRA_WEB_HOST") or "0.0.0.0"
 TASK_NAME = WEB_APP_NAME
 FIREWALL_RULE_NAME = WEB_APP_NAME
+LEGACY_TASK_NAME = "PicOrgFTP-SQL Web"
 
 
 @dataclass
@@ -285,9 +286,24 @@ def is_web_process(pid: int, command_line: str = "", process_name: str = "") -> 
         "picsyncra.web.app",
         "picsyncra-web",
         "picsyncra.web_manager",
-        "--service-run",
     )
     return any(marker in text for marker in markers)
+
+
+def is_legacy_web_process(pid: int, command_line: str = "", process_name: str = "") -> bool:
+    """Return whether a listener belongs to the pre-rebrand PicOrgFTP panel."""
+
+    text = f"{command_line} {process_name}".lower()
+    markers = (
+        "picorgftp_sql.web.app",
+        "picorgftp-sql-web",
+        "picorgftp_sql.web_manager",
+    )
+    return any(marker in text for marker in markers)
+
+
+def is_picsyncra_health(payload: dict[str, Any]) -> bool:
+    return str(payload.get("application") or "").strip().lower() == PACKAGE_NAME
 
 
 def is_controlled_web_launcher(
@@ -427,12 +443,16 @@ def wait_web_ready(
     *,
     timeout: float = 20.0,
     progress: Callable[[str], None] | None = None,
+    expected_application: str | None = None,
 ) -> bool:
     deadline = time.time() + timeout
     attempt = 0
     while time.time() < deadline:
         attempt += 1
-        if check_http_health(port, timeout=1.0).get("ok"):
+        health = check_http_health(port, timeout=1.0)
+        application = str(health.get("application") or "").strip().lower()
+        expected = str(expected_application or "").strip().lower()
+        if health.get("ok") and (not expected or application == expected):
             if progress is not None:
                 progress("Backend WWW odpowiada.")
             return True
@@ -610,6 +630,42 @@ def end_system_service() -> ActionResult:
     return ActionResult(True, "")
 
 
+def legacy_task_exists() -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        result = _run_command(["schtasks", "/Query", "/TN", LEGACY_TASK_NAME], timeout=10)
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def end_legacy_system_service() -> ActionResult:
+    """Stop the known pre-rebrand service so it cannot reclaim the shared port."""
+
+    if os.name != "nt" or not legacy_task_exists():
+        return ActionResult(True, "")
+    try:
+        disable = _run_command(
+            ["schtasks", "/Change", "/TN", LEGACY_TASK_NAME, "/DISABLE"],
+            timeout=15,
+        )
+        if disable.returncode != 0:
+            return ActionResult(
+                False,
+                (disable.stderr or disable.stdout or "Nie udalo sie wylaczyc starego autostartu.").strip(),
+            )
+        result = _run_command(["schtasks", "/End", "/TN", LEGACY_TASK_NAME], timeout=15)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return ActionResult(False, str(exc))
+    if result.returncode != 0:
+        return ActionResult(
+            False,
+            (result.stderr or result.stdout or "Nie udalo sie zatrzymac starej uslugi systemowej.").strip(),
+        )
+    return ActionResult(True, "")
+
+
 def start_user_web(
     port: int,
     host: str,
@@ -644,7 +700,7 @@ def start_user_web(
             err_handle.close()
         except OSError:
             pass
-    if wait_web_ready(port, progress=progress):
+    if wait_web_ready(port, progress=progress, expected_application=PACKAGE_NAME):
         return ActionResult(True, "Panel webowy zostal uruchomiony.")
     exit_code = process.poll()
     if exit_code is not None:
@@ -668,6 +724,25 @@ def start_web(
     if progress is not None:
         progress("Sprawdzam port i poprzedni proces panelu WWW...")
     listeners = get_port_listeners(port)
+    legacy_listeners = [
+        item
+        for item in listeners
+        if is_legacy_web_process(
+            _safe_int(item.get("Pid")),
+            str(item.get("CommandLine") or ""),
+            str(item.get("ProcessName") or ""),
+        )
+    ]
+    if legacy_listeners:
+        if progress is not None:
+            progress("Wykryto stary panel PicOrgFTP-SQL; zwalniam port dla PicSyncra...")
+        stopped = stop_legacy_web(port)
+        if not stopped.ok:
+            return ActionResult(
+                False,
+                f"Nie uruchomiono PicSyncra, aby nie otworzyc starego panelu: {stopped.message}",
+            )
+        listeners = get_port_listeners(port)
     web_listeners = [
         item
         for item in listeners
@@ -677,8 +752,16 @@ def start_web(
             str(item.get("ProcessName") or ""),
         )
     ]
-    if web_listeners and check_http_health(port).get("ok"):
-        return ActionResult(True, "Panel webowy juz dziala.")
+    if web_listeners:
+        health = check_http_health(port)
+        if health.get("ok"):
+            reported_application = str(health.get("application") or "").strip()
+            if not reported_application or is_picsyncra_health(health):
+                return ActionResult(True, "Panel webowy juz dziala.")
+            return ActionResult(
+                False,
+                f"Port {port} odpowiada jako inna aplikacja ({reported_application}), nie PicSyncra.",
+            )
     if listeners:
         if not web_listeners:
             pids = ", ".join(str(_safe_int(item.get("Pid"))) for item in listeners)
@@ -703,7 +786,7 @@ def start_web(
         if progress is not None:
             progress("Uruchamiam usluge SYSTEM...")
         result = run_system_service()
-        if result.ok and wait_web_ready(port, progress=progress):
+        if result.ok and wait_web_ready(port, progress=progress, expected_application=PACKAGE_NAME):
             return ActionResult(True, "Panel webowy dziala jako usluga systemowa.")
         if result.ok:
             return ActionResult(False, "Uruchomiono usluge, ale strona nie odpowiedziala w limicie czasu.")
@@ -728,6 +811,57 @@ def _taskkill_process_tree(pid: int) -> tuple[bool, str]:
         return True, ""
     detail = (result.stderr or result.stdout or "brak szczegolow z Windows").strip()
     return False, detail
+
+
+def stop_legacy_web(port: int) -> ActionResult:
+    """Stop only a positively identified PicOrgFTP-SQL listener on ``port``."""
+
+    listeners = [
+        item
+        for item in get_port_listeners(port)
+        if is_legacy_web_process(
+            _safe_int(item.get("Pid")),
+            str(item.get("CommandLine") or ""),
+            str(item.get("ProcessName") or ""),
+        )
+    ]
+    if not listeners:
+        return ActionResult(True, "")
+    service_stop = end_legacy_system_service()
+    if not service_stop.ok:
+        return ActionResult(
+            False,
+            f"Nie mozna zatrzymac starej uslugi PicOrgFTP-SQL: {service_stop.message}",
+        )
+    listeners = [
+        item
+        for item in get_port_listeners(port)
+        if is_legacy_web_process(
+            _safe_int(item.get("Pid")),
+            str(item.get("CommandLine") or ""),
+            str(item.get("ProcessName") or ""),
+        )
+    ]
+    failures: list[str] = []
+    for item in listeners:
+        pid = _safe_int(item.get("Pid"))
+        if pid <= 0:
+            continue
+        if os.name == "nt":
+            stopped, detail = _taskkill_process_tree(pid)
+        else:
+            try:
+                os.kill(pid, 15)
+                stopped, detail = True, ""
+            except OSError as exc:
+                stopped, detail = False, str(exc)
+        if not stopped:
+            failures.append(f"PID {pid}: {detail}")
+    if failures:
+        return ActionResult(False, f"Nie udalo sie zatrzymac starego panelu: {'; '.join(failures)}")
+    if not _wait_for_port_release(port):
+        return ActionResult(False, f"Stary panel PicOrgFTP-SQL nadal nasluchuje na porcie {port}.")
+    return ActionResult(True, "Zatrzymano stary panel PicOrgFTP-SQL.")
 
 
 def stop_web(port: int) -> ActionResult:
@@ -831,12 +965,22 @@ def current_status(port: int) -> dict[str, Any]:
             str(item.get("ProcessName") or ""),
         )
     ]
+    legacy_listeners = [
+        item
+        for item in listeners
+        if is_legacy_web_process(
+            _safe_int(item.get("Pid")),
+            str(item.get("CommandLine") or ""),
+            str(item.get("ProcessName") or ""),
+        )
+    ]
     return {
         "port": port,
         "listeners": listeners,
         "web_listeners": web_listeners,
+        "legacy_web_listeners": legacy_listeners,
         "health": health,
-        "running": bool(health.get("ok")),
+        "running": bool(web_listeners and health.get("ok")),
         "urls": [local_url(port), *lan_urls(port)],
         "task_exists": task_exists(),
         "task_enabled": task_enabled(),
