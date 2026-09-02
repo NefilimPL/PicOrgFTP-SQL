@@ -9639,7 +9639,7 @@ function updatePimcoreTemplateButton(row) {
   if (!button) return;
   const supported = ["input", "textarea", "select"].includes(pimcoreTemplateFieldType(row));
   button.disabled = !supported;
-  button.textContent = row.dataset.valueTemplate ? "Zmien szablon" : "Konstruuj";
+  button.textContent = pimcoreRowHasRuntimeTemplate(row) ? "Zmien szablon" : "Konstruuj";
   button.title = supported
     ? "Zbuduj automatyczna wartosc pola"
     : "Szablony sa dostepne tylko dla pol tekstowych";
@@ -9797,6 +9797,14 @@ function pimcoreOcrValidationFromRow(row) {
 
 function setPimcoreOcrValidationRow(row, value) {
   if (row) row.dataset.ocrValidation = value ? "true" : "false";
+}
+
+function pimcoreRowHasRuntimeTemplate(row) {
+  return Boolean(row?.dataset?.valueTemplate) || pimcoreOcrValidationFromRow(row);
+}
+
+function pimcoreMappingHasRuntimeTemplate(mapping) {
+  return Boolean(mapping?.value_template) || Boolean(mapping?.ocr_validation);
 }
 
 function pimcoreSlotTokens() {
@@ -11195,7 +11203,7 @@ function populatePimcoreRuntimeForm(
         }
         fieldRow.className = "pimcore-runtime-field-row";
         fieldRow.appendChild(input);
-        if (allowRecalculate && mapping.value_template) {
+        if (allowRecalculate && pimcoreMappingHasRuntimeTemplate(mapping)) {
           const recalculate = document.createElement("button");
           recalculate.type = "button";
           recalculate.className = "ghost-button icon-button pimcore-recalculate-field";
@@ -11388,7 +11396,7 @@ function updatePimcoreRuntimeFieldChangeState(input, { userInput = true } = {}) 
   updatePimcoreEditSubmitState();
 }
 
-function updatePimcoreRuntimeCalculatedState(form, result = {}) {
+function updatePimcoreRuntimeCalculatedState(form, result = {}, schema = []) {
   const calculated = result.calculated_values || {};
   const changed = result.changed || {};
   for (const [source, value] of Object.entries(calculated)) {
@@ -11396,6 +11404,7 @@ function updatePimcoreRuntimeCalculatedState(form, result = {}) {
     if (!input) continue;
     const field = input.closest(".pimcore-runtime-field");
     if (!field) continue;
+    const mapping = (schema || []).find((item) => item.source === source);
     input.dataset.calculatedValue = value ?? "";
     let info = field.querySelector(".pimcore-runtime-calculated");
     if (!info) {
@@ -11412,6 +11421,9 @@ function updatePimcoreRuntimeCalculatedState(form, result = {}) {
         input.value = input.dataset.calculatedValue || "";
         clearPimcoreRuntimeConflict(field);
         updatePimcoreRuntimeFieldChangeState(input, { userInput: false });
+        if (mapping?.ocr_validation) {
+          schedulePimcoreOcrFieldValidation(form, schema, source, 0);
+        }
         info.hidden = true;
       });
       const undo = document.createElement("button");
@@ -11550,13 +11562,18 @@ function blockPimcoreRuntimeSubmitIfNeeded(form, status) {
 }
 
 async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
-  const selected = Array.isArray(targets)
+  const hasExplicitTargets = Array.isArray(targets);
+  const selected = hasExplicitTargets
     ? targets
     : (schema || []).filter((mapping) => mapping.value_template).map((mapping) => mapping.source);
+  const renderedTargets = selected.filter((source) => (
+    (schema || []).some((mapping) => mapping.source === source && mapping.value_template)
+  ));
+  const validationTargets = hasExplicitTargets ? selected : null;
   if (form === pimcoreCreateForm) state.pimcoreCreateIntegrationContextId = "";
   if (form === pimcoreEditForm) state.pimcoreEditIntegrationContextId = "";
-  if (!selected.length) {
-    await validatePimcoreOcrFields(form, schema);
+  if (!renderedTargets.length) {
+    await validatePimcoreOcrFields(form, schema, validationTargets);
     return { values: {}, warnings: [], calculated_values: {}, changed: {} };
   }
   const values = Object.fromEntries(new FormData(form).entries());
@@ -11568,7 +11585,7 @@ async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
     body: JSON.stringify({
       product_values: formPayload(),
       values,
-      targets: selected,
+      targets: renderedTargets,
       mode: form.dataset.pimcoreMode || "create",
       object_id:
         form === pimcoreEditForm ? Number(state.pimcoreEditObjectId || 0) : null,
@@ -11584,7 +11601,7 @@ async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
   if (form === pimcoreEditForm) {
     state.pimcoreEditIntegrationContextId = String(result.integration_context_id || "");
   }
-  for (const source of selected) {
+  for (const source of renderedTargets) {
     const input = form.elements[source];
     if (input && Object.prototype.hasOwnProperty.call(result.values || {}, source)) {
       if (!input.value) {
@@ -11595,21 +11612,17 @@ async function renderPimcoreRuntimeTemplates(form, schema, targets = null) {
       updatePimcoreRuntimeFieldChangeState(input);
     }
   }
-  updatePimcoreRuntimeCalculatedState(form, result);
-  await validatePimcoreOcrFields(form, schema);
+  updatePimcoreRuntimeCalculatedState(form, result, schema);
+  await validatePimcoreOcrFields(form, schema, validationTargets);
   return result;
 }
 
 function pimcoreEditHasRuntimeTemplates() {
-  return (state.pimcoreEditSchema || []).some(
-    (mapping) => mapping.value_template || mapping.ocr_validation
-  );
+  return (state.pimcoreEditSchema || []).some(pimcoreMappingHasRuntimeTemplate);
 }
 
 function pimcoreCreateHasRuntimeTemplates() {
-  return (state.pimcoreCreateSchema || []).some(
-    (mapping) => mapping.value_template || mapping.ocr_validation
-  );
+  return (state.pimcoreCreateSchema || []).some(pimcoreMappingHasRuntimeTemplate);
 }
 
 async function recalculateAllPimcoreCreateFields() {
@@ -14173,6 +14186,17 @@ async function refreshOcrBackgroundQueue() {
   }
 }
 
+async function revalidateOpenPimcoreOcrFields() {
+  const validations = [];
+  if (pimcoreCreateModal?.classList.contains("active") && pimcoreCreateForm) {
+    validations.push(validatePimcoreOcrFields(pimcoreCreateForm, state.pimcoreCreateSchema));
+  }
+  if (pimcoreEditModal?.classList.contains("active") && pimcoreEditForm) {
+    validations.push(validatePimcoreOcrFields(pimcoreEditForm, state.pimcoreEditSchema));
+  }
+  await Promise.all(validations);
+}
+
 async function refreshOcrSlotStates() {
   const pending = [];
   for (const [prefix, item] of state.files.entries()) {
@@ -14189,18 +14213,27 @@ async function refreshOcrSlotStates() {
       pending.push([prefix, photo, String(photo.token)]);
     }
   }
-  await Promise.all(pending.map(async ([prefix, item, token]) => {
+  const completions = await Promise.all(pending.map(async ([prefix, item, token]) => {
     try {
       const scan = await requestJson(`/api/ocr/scan?token=${encodeURIComponent(token)}`);
       const nextState = String(scan?.state || "");
       if (nextState && nextState !== "missing" && nextState !== item.ocr_state) {
         item.ocr_state = nextState;
         updateSlotPreview(prefix);
+        return nextState === "completed";
       }
     } catch (_error) {
       // A transient scan lookup must not remove the in-progress indication.
     }
+    return false;
   }));
+  if (completions.some(Boolean)) {
+    try {
+      await revalidateOpenPimcoreOcrFields();
+    } catch (_error) {
+      // The next input, recalculation, or OCR completion retries validation.
+    }
+  }
 }
 
 function renderSettingsOcr() {
