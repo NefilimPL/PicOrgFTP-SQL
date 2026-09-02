@@ -59,6 +59,8 @@ class OfflineMigrationReport:
     table_counts: dict[str, int]
     product_count: int
     user_count: int
+    archive_dir: Path | None = None
+    archive_warning: str | None = None
 
 
 def _configured_legacy_source(settings_path: Path, payload: dict[str, object]) -> Path:
@@ -373,6 +375,40 @@ def _restore_settings_file(settings_path: Path, snapshot: bytes) -> None:
             pass
 
 
+def _archive_legacy_sqlite_files(paths: MigrationPaths) -> tuple[Path, str | None]:
+    """Move only the migrated legacy SQLite set into the selected app's BACKUP."""
+
+    from .legacy_migration import (
+        _defer_remaining_source_cleanup,
+        _handover_sources_to_archive,
+        _legacy_archive_dir,
+        _sqlite_source_files,
+    )
+
+    backup_root = paths.app_root / "BACKUP"
+    archive_dir = _legacy_archive_dir(backup_root)
+    try:
+        error = _handover_sources_to_archive(
+            _sqlite_source_files(paths.source), archive_dir, sqlite_source=True
+        )
+    except OSError as exc:
+        return archive_dir, f"Nie można utworzyć archiwum BACKUP: {exc}"
+    remaining = _sqlite_source_files(paths.source)
+    if not remaining:
+        return archive_dir, error
+    deferred_warning = _defer_remaining_source_cleanup(
+        sources=remaining,
+        sqlite_source=True,
+        retired_database=None,
+        archive_dir=archive_dir,
+        backup_root=backup_root,
+    )
+    warning = "; ".join(
+        item for item in (error, deferred_warning) if item
+    ) or "Nie udało się przenieść wszystkich plików legacy do BACKUP."
+    return archive_dir, warning
+
+
 def run_offline_legacy_migration(
     app_root: Path,
     progress: Callable[[MigrationProgress], None],
@@ -415,8 +451,24 @@ def run_offline_legacy_migration(
                 "settings_update",
                 "Nie można aktywować nowej bazy w local_settings.json; baza docelowa została usunięta.",
             ) from error
+        progress(MigrationProgress("cleanup", 0, None, "Archiwizowanie plików legacy…"))
+        archive_dir, archive_warning = _archive_legacy_sqlite_files(paths)
+        cleanup_message = (
+            "Niektóre pliki legacy oczekują na przeniesienie do BACKUP."
+            if archive_warning
+            else "Pliki legacy zostały przeniesione do BACKUP."
+        )
+        progress(MigrationProgress("cleanup", 1, 1, cleanup_message))
         progress(MigrationProgress("activation", 1, 1, "Nowa baza została aktywowana."))
-        return report
+        return OfflineMigrationReport(
+            source=report.source,
+            target=report.target,
+            table_counts=report.table_counts,
+            product_count=report.product_count,
+            user_count=report.user_count,
+            archive_dir=archive_dir,
+            archive_warning=archive_warning,
+        )
     finally:
         if staging is not None:
             shutil.rmtree(staging.parent, ignore_errors=True)

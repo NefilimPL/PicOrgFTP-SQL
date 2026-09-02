@@ -4,8 +4,9 @@
 
 Jednorazowo przekształcić wskazaną przez konfigurację głównej aplikacji bazę
 `picorgftp_sql.sqlite` w nową bazę `picsyncra.sqlite`. Narzędzie ma działać
-poza serwerem WEB, pokazywać postęp, nie modyfikować źródła i przygotować
-konfigurację tak, aby następne uruchomienie głównego EXE otworzyło nową bazę.
+poza serwerem WEB, pokazywać postęp, bezpiecznie archiwizować źródłowy zestaw
+SQLite po aktywacji i przygotować konfigurację tak, aby następne uruchomienie
+głównego EXE otworzyło nową bazę.
 
 ## Zakres
 
@@ -21,7 +22,6 @@ konfigurację tak, aby następne uruchomienie głównego EXE otworzyło nową ba
 ## Poza zakresem
 
 - Przeszukiwanie dysków lub zgadywanie katalogu ze starą bazą.
-- Modyfikacja, przenoszenie, archiwizacja lub usuwanie źródłowego profilu.
 - Import danych z plików JSON/XLSX do nowej bazy.
 - Przełączanie aktywnej bazy z wnętrza działającego backendu WEB.
 - Zatrzymywanie ogólnych procesów `python.exe` lub procesów spoza wskazanego
@@ -76,13 +76,19 @@ w konfiguracji.
 7. Atomowa aktualizacja `local_settings.json`: `data_mode=sqlite`, lokalizacja
    niestandardowa i ścieżka opublikowanej bazy. Pozostałe ustawienia lokalne
    są zachowane.
-8. Usunięcie wyłącznie własnego katalogu roboczego i pokazanie raportu
-   zakończenia. Główna aplikacja nie jest uruchamiana automatycznie; następne
-   jej uruchomienie korzysta z nowej SQLite.
+8. Przeniesienie wyłącznie migrowanego zestawu
+   `picorgftp_sql.sqlite`, `-wal` i `-shm` do
+   `BACKUP/legacy-import/<data-id>/legacy-source-files`, usunięcie własnego
+   katalogu roboczego i pokazanie raportu zakończenia. Główna aplikacja nie
+   jest uruchamiana automatycznie; następne jej uruchomienie korzysta z nowej
+   SQLite.
 
 Jeśli etap 1–5 zawiedzie, baza docelowa i ustawienia pozostają bez zmian.
 Jeśli aktualizacja ustawień zawiedzie po publikacji, migrator usuwa wyłącznie
 nowo opublikowany plik celu i raportuje błąd.
+Jeśli archiwizacja nie powiedzie się już po aktywacji, nowa baza i ustawienia
+pozostają aktywne, a migrator pokazuje ostrzeżenie; pliki tymczasowo zablokowane
+są rejestrowane do ponownego przeniesienia po zwolnieniu.
 
 ## GUI i postęp
 
@@ -102,8 +108,9 @@ błędem z bezpieczną wskazówką naprawczą.
   konta, tworzy bazę schema v17 oraz usuwa stare triggery.
 - Istniejący cel blokuje migrację bez nadpisania.
 - Po sukcesie odczyt ustawień głównej aplikacji wskazuje `picsyncra.sqlite`.
-- Pliki źródłowe pozostają niezmienione; znikają wyłącznie katalogi robocze
-  utworzone przez migrator.
+- Po sukcesie migrowane pliki źródłowe SQLite oraz ich sidecary są przeniesione
+  do `BACKUP/legacy-import`; znikają również katalogi robocze utworzone przez
+  migrator.
 
 ## Sprzątanie danych testowych
 

@@ -8,12 +8,26 @@ import sys
 import threading
 
 from .offline_legacy_sqlite_migrator import (
+    MigrationPaths,
     MigrationProgress,
     OfflineMigrationError,
     OfflineMigrationReport,
     resolve_offline_migration_paths,
     run_offline_legacy_migration,
 )
+
+
+def migration_confirmation_message(paths: MigrationPaths) -> str:
+    """Describe the target and the post-activation legacy archive handover."""
+
+    archive_root = paths.app_root / "BACKUP" / "legacy-import"
+    return (
+        f"Źródło:\n{paths.source}\n\n"
+        f"Nowy plik docelowy:\n{paths.target}\n\n"
+        "Po poprawnej aktywacji plik źródłowy SQLite i obecne pliki -wal/-shm "
+        f"zostaną przeniesione do:\n{archive_root}\n\n"
+        "Kontynuować?"
+    )
 
 
 class OfflineMigratorController:
@@ -33,11 +47,22 @@ class OfflineMigratorController:
         self._after(0, lambda: self._on_progress(event))
 
     def receive_success(self, report: OfflineMigrationReport) -> None:
+        archive_status = (
+            f" Archiwum plików legacy: {report.archive_dir}."
+            if report.archive_dir is not None
+            else ""
+        )
+        warning_status = (
+            f" Ostrzeżenie: {report.archive_warning}"
+            if report.archive_warning
+            else ""
+        )
         self._after(
             0,
             lambda: self._on_status(
                 f"Migracja zakończona. Nowa baza: {report.target}; "
                 f"produkty: {report.product_count}, konta: {report.user_count}."
+                f"{archive_status}{warning_status}"
             ),
         )
 
@@ -96,7 +121,7 @@ class OfflineMigratorWindow:
         self.target.set(f"Cel: {paths.target}")
         if not messagebox.askyesno(
             "Potwierdź migrację",
-            f"Źródło (bez zmian):\n{paths.source}\n\nNowy plik docelowy:\n{paths.target}\n\nKontynuować?",
+            migration_confirmation_message(paths),
             parent=self.root,
         ):
             return

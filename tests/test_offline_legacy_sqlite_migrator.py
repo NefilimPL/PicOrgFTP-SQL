@@ -259,11 +259,96 @@ def test_successful_offline_migration_publishes_target_and_switches_settings(
 
     assert report.target == paths.target
     assert paths.target.is_file()
-    assert paths.source.read_bytes() == source_before
+    assert report.archive_dir is not None
+    assert not paths.source.exists()
+    archived_source = report.archive_dir / "legacy-source-files" / paths.source.name
+    assert archived_source.read_bytes() == source_before
     settings = json.loads(paths.settings_path.read_text(encoding="utf-8"))
     assert settings["data_mode"] == "sqlite"
     assert settings["database_location_mode"] == "custom"
     assert settings["database_path"] == str(paths.target)
+
+
+def test_successful_offline_migration_archives_legacy_sqlite_files(
+    tmp_path: Path,
+) -> None:
+    """A completed migration must move the selected legacy SQLite set into BACKUP."""
+
+    paths = _configured_legacy_paths(tmp_path, products=1, users=1)
+    sidecars = tuple(
+        paths.source.with_name(f"{paths.source.name}{suffix}")
+        for suffix in ("-wal", "-shm")
+    )
+    for sidecar in sidecars:
+        sidecar.touch()
+    unrelated_pid = paths.source.parent / "picorg_web.pid"
+    unrelated_pid.write_text('{"pid": 1}', encoding="utf-8")
+
+    report = run_offline_legacy_migration(paths.app_root, progress=lambda _event: None)
+
+    archive_dir = report.archive_dir
+    assert archive_dir.parent == paths.app_root / "BACKUP" / "legacy-import"
+    assert not paths.source.exists()
+    assert all(not sidecar.exists() for sidecar in sidecars)
+    archive_files = archive_dir / "legacy-source-files"
+    assert (archive_files / "picorgftp_sql.sqlite").is_file()
+    assert (archive_files / "picorgftp_sql.sqlite-wal").is_file()
+    assert (archive_files / "picorgftp_sql.sqlite-shm").is_file()
+    assert unrelated_pid.is_file()
+
+
+def test_offline_migration_defers_a_locked_legacy_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A temporary sidecar lock must not undo an already activated migration."""
+
+    paths = _configured_legacy_paths(tmp_path, products=1, users=1)
+    locked_sidecar = paths.source.with_name(f"{paths.source.name}-wal")
+    locked_sidecar.touch()
+    from picsyncra import legacy_migration
+
+    original_replace = legacy_migration.os.replace
+
+    def deny_locked_sidecar(source: Path, target: Path) -> None:
+        if Path(source) == locked_sidecar:
+            raise PermissionError("legacy sidecar is still locked")
+        original_replace(source, target)
+
+    monkeypatch.setattr(legacy_migration.os, "replace", deny_locked_sidecar)
+    monkeypatch.setattr(
+        legacy_migration, "_schedule_pending_source_cleanup", lambda *_args: None
+    )
+
+    report = run_offline_legacy_migration(paths.app_root, progress=lambda _event: None)
+
+    assert paths.target.is_file()
+    assert report.archive_warning is not None
+    assert locked_sidecar.is_file()
+    pending = paths.app_root / "BACKUP" / "legacy-import" / ".pending-source-cleanup"
+    assert list(pending.glob("*.json"))
+
+
+def test_offline_migration_reports_backup_creation_failure_after_activation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unavailable BACKUP must not invalidate the already activated target."""
+
+    paths = _configured_legacy_paths(tmp_path, products=1, users=1)
+    from picsyncra import legacy_migration
+
+    def fail_archive_handover(*_args, **_kwargs) -> None:
+        raise OSError("BACKUP is unavailable")
+
+    monkeypatch.setattr(
+        legacy_migration, "_handover_sources_to_archive", fail_archive_handover
+    )
+
+    report = run_offline_legacy_migration(paths.app_root, progress=lambda _event: None)
+
+    assert paths.target.is_file()
+    assert paths.source.is_file()
+    assert report.archive_warning is not None
+    assert "BACKUP is unavailable" in report.archive_warning
 
 
 def test_settings_failure_removes_only_newly_published_target(
@@ -273,6 +358,13 @@ def test_settings_failure_removes_only_newly_published_target(
 
     paths = _configured_legacy_paths(tmp_path, products=1, users=1)
     settings_before = paths.settings_path.read_bytes()
+    source_before = paths.source.read_bytes()
+    sidecars = tuple(
+        paths.source.with_name(f"{paths.source.name}{suffix}")
+        for suffix in ("-wal", "-shm")
+    )
+    for sidecar in sidecars:
+        sidecar.touch()
     from picsyncra import offline_legacy_sqlite_migrator
 
     def fail_settings_write(*_args, **_kwargs) -> None:
@@ -288,3 +380,6 @@ def test_settings_failure_removes_only_newly_published_target(
     assert error.value.code == "settings_update"
     assert not paths.target.exists()
     assert paths.settings_path.read_bytes() == settings_before
+    assert paths.source.read_bytes() == source_before
+    assert all(sidecar.is_file() for sidecar in sidecars)
+    assert not (paths.app_root / "BACKUP").exists()
