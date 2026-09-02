@@ -17,12 +17,16 @@ def _live_branding_files() -> list[Path]:
     allowed_legacy_files = {
         ROOT / "picsyncra" / "legacy_migration.py",
         ROOT / "picsyncra" / "legacy_profile.py",
+        ROOT / "picsyncra" / "offline_legacy_sqlite_migrator.py",
+        ROOT / "picsyncra" / "offline_migrator_processes.py",
         ROOT / "picsyncra" / "sqlite_store.py",
         ROOT / "picsyncra" / "web_manager.py",
         ROOT / "picsyncra" / "web" / "static" / "legacy-migration.js",
         ROOT / "tests" / "test_legacy_migration.py",
         ROOT / "tests" / "test_legacy_profile.py",
         ROOT / "tests" / "test_legacy_profile_import.py",
+        ROOT / "tests" / "test_offline_legacy_sqlite_migrator.py",
+        ROOT / "tests" / "test_offline_migrator_processes.py",
         ROOT / "tests" / "test_web_manager.py",
         ROOT / "tests" / "js" / "legacy-migration.test.js",
     }
@@ -161,7 +165,7 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertEqual(css_match.group(1), "20260827-pimcore-ocr-checking-css1")
         self.assertEqual(runtime_js_match.group(1), "20260728-runtime-poll1")
         self.assertEqual(diagnostics_js_match.group(1), "20260825-ocr-overlay-layout2")
-        self.assertEqual(js_match.group(1), "20260828-legacy-adoption1")
+        self.assertEqual(js_match.group(1), "20260901-legacy-adoption-ocr-validation1")
         self.assertNotEqual(css_match.group(1), js_match.group(1))
 
     def test_resource_detail_copy_explains_clients_and_latch_stages(self) -> None:
