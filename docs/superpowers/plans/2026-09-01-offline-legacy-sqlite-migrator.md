@@ -3,8 +3,9 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Dostarczyć osobny migrator GUI/EXE, który przekształca wyłącznie
-konfigurowaną bazę `picorgftp_sql.sqlite` w `picsyncra.sqlite`, bez zmiany
-źródła i bez działania wewnątrz serwera WEB.
+konfigurowaną bazę `picorgftp_sql.sqlite` w `picsyncra.sqlite`, a po udanej
+aktywacji przenosi źródłowy zestaw SQLite do BACKUP, bez działania wewnątrz
+serwera WEB.
 
 **Architecture:** Czysty moduł domenowy otrzymuje jawne ścieżki pliku
 ustawień, źródła i celu; wykonuje kopię SQLite, aktualizację schematu,
@@ -23,11 +24,14 @@ PyInstaller, pytest.
   przeszukiwać katalogów ani używać nazwy `Nowy folder`.
 - Źródło musi mieć dokładną nazwę `picorgftp_sql.sqlite`; JSON/XLSX i inne
   pliki legacy nie uczestniczą w migracji.
-- Nigdy nie modyfikować, archiwizować ani usuwać źródła wraz z `-wal`/`-shm`.
+- Przed udaną aktywacją nigdy nie modyfikować, archiwizować ani usuwać źródła
+  wraz z `-wal`/`-shm`; po niej przenosić wyłącznie ten zestaw do BACKUP.
 - Nie nadpisywać istniejącego `picsyncra.sqlite`.
 - Nie kończyć ogólnych procesów Python ani procesów spoza katalogu aplikacji.
 - Raporty i komunikaty nie mogą ujawniać sekretów ani hashy haseł.
-- Usuwać wyłącznie katalogi robocze utworzone przez migrator.
+- Po udanej aktywacji przenosić wyłącznie migrowany zestaw SQLite do
+  `BACKUP/legacy-import`, a usuwać również katalogi robocze utworzone przez
+  migrator.
 
 ---
 
