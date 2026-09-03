@@ -5185,6 +5185,7 @@ def _is_ocr_blocking_request(request: Request) -> bool:
     return (str(request.method or "").upper(), str(request.url.path or "")) in {
         ("POST", "/api/upload-cache"),
         ("POST", "/api/web-images/cache"),
+        ("POST", "/api/ocr/slot-assignment"),
         ("POST", "/api/process/background"),
         ("POST", "/api/ocr/activity"),
     }
@@ -6508,6 +6509,28 @@ def create_app() -> FastAPI:
                 if isinstance(item, dict)
             ],
         }
+
+    @app.post("/api/ocr/slot-assignment")
+    async def ocr_slot_assignment(request: Request) -> Dict[str, str]:
+        """Queue OCR when an existing signed image becomes a slot's current value."""
+
+        _require_user(request)
+        _require_ocr_feature()
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Niepoprawne dane przypisania slotu OCR.")
+        prefix = str(payload.get("prefix") or "").strip()
+        token = str(payload.get("token") or "").strip()
+        if not prefix:
+            raise HTTPException(status_code=400, detail="Wymagany jest numer slotu OCR.")
+        if not token:
+            raise HTTPException(status_code=400, detail="Wymagany jest token obrazu OCR.")
+        path = _path_from_file_token(token)
+        state = await run_in_threadpool(_schedule_ocr_value_collection, prefix, path)
+        return {"state": state}
 
     @app.post("/api/ocr/validate")
     async def ocr_validate(request: Request) -> Dict[str, Any]:

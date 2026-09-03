@@ -61,6 +61,57 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
+    def test_pimcore_editor_exposes_a_compact_live_ocr_sidebar(self) -> None:
+        html = _parse(INDEX_HTML)
+        source = APP_JS.read_text(encoding="utf-8")
+        css = APP_CSS.read_text(encoding="utf-8")
+
+        self.assertEqual(html.ids.get("pimcoreCreateOcrPanel"), "aside")
+        self.assertEqual(html.ids.get("pimcoreEditOcrPanel"), "aside")
+        self.assertIn("function renderPimcoreOcrPanel", source)
+        self.assertIn("function refreshOpenPimcoreOcrPanels", source)
+        self.assertIn("pimcore-runtime-layout", css)
+        self.assertIn("pimcore-ocr-sidebar", css)
+
+    def test_cached_or_moved_slot_image_is_activated_for_ocr_in_its_destination(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        web_item = source[
+            source.index("function webImageCacheItem") : source.index(
+                "async function cacheWebImageForSlot",
+                source.index("function webImageCacheItem"),
+            )
+        ]
+        activation = source[
+            source.index("async function ensureSlotOcrCollection") : source.index(
+                "function acceptSimilarCandidate",
+                source.index("async function ensureSlotOcrCollection"),
+            )
+        ]
+        similar = source[
+            source.index("function acceptSimilarCandidate") : source.index(
+                "function pendingSimilarCandidatePrefixes",
+                source.index("function acceptSimilarCandidate"),
+            )
+        ]
+        assignment = source[
+            source.index("function setSlotAssignment") : source.index(
+                "function moveSlotContent",
+                source.index("function setSlotAssignment"),
+            )
+        ]
+        web_assignment = source[
+            source.index("async function addSelectedWebImagesToSlots") : source.index(
+                "function imageFromBrowserExtensionItem",
+                source.index("async function addSelectedWebImagesToSlots"),
+            )
+        ]
+
+        self.assertIn("ocr_state: payload.ocr_state", web_item)
+        self.assertIn('requestJson("/api/ocr/slot-assignment"', activation)
+        self.assertIn("ensureSlotOcrCollection(prefix", similar)
+        self.assertIn("ensureSlotOcrCollection(prefix", assignment)
+        self.assertIn("ensureSlotOcrCollection(prefix", web_assignment)
+
     def test_settings_ui_contains_module_status_tab_and_refresh_contract(self) -> None:
         html = INDEX_HTML.read_text(encoding="utf-8")
         source = APP_JS.read_text(encoding="utf-8")
@@ -885,6 +936,8 @@ const markSlotDeletion = () => {{}};
 const renderSlot = () => {{}};
 const pendingSimilarCandidatePrefixes = () => state.files.has("01") ? [] : ["01"];
 const openSimilarDecisionModal = () => {{}};
+const ensureSlotOcrCollection = () => Promise.resolve();
+const formStatus = {{ textContent: "" }};
 async function requestJson(_url, options) {{
   submittedForms.push(Object.fromEntries(options.body.entries()));
   return {{ job: {{}} }};
@@ -1421,7 +1474,13 @@ console.log(JSON.stringify({{
         self.assertIn("function renderSimilarDecisionModal()", source)
         helpers = source[
             source.index("function defaultSlotSource") : source.index(
-                "function selectedPhotoToken", source.index("function defaultSlotSource")
+                "async function ensureSlotOcrCollection", source.index("function defaultSlotSource")
+            )
+        ]
+        accept = source[
+            source.index("function acceptSimilarCandidate") : source.index(
+                "function pendingSimilarCandidatePrefixes",
+                source.index("function acceptSimilarCandidate"),
             )
         ]
         decision_helpers = source[
@@ -1466,7 +1525,10 @@ const similarDecisionModal = new Element();
 const document = {{ createElement: () => new Element() }};
 const markSlotDeletion = () => {{}};
 const renderSlot = () => {{}};
+const ensureSlotOcrCollection = () => Promise.resolve();
+const formStatus = {{ textContent: "" }};
 {helpers}
+{accept}
 {decision_helpers}
 state.similarCandidates.set("01", {{ id: "one", filename: "one.jpg", thumb_url: "/thumb/one", source_color: "Czarny" }});
 state.similarCandidates.set("02", {{ id: "two", filename: "two.pdf", url: "/file/two", is_pdf: true, source_color: "Biały" }});

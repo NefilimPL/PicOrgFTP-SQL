@@ -472,12 +472,14 @@ const pimcoreMissingContinueButton = document.querySelector("#pimcoreMissingCont
 const pimcoreMissingCancelButton = document.querySelector("#pimcoreMissingCancelButton");
 const pimcoreCreateModal = document.querySelector("#pimcoreCreateModal");
 const pimcoreCreateForm = document.querySelector("#pimcoreCreateForm");
+const pimcoreCreateOcrPanel = document.querySelector("#pimcoreCreateOcrPanel");
 const pimcoreCreateSubmitButton = document.querySelector("#pimcoreCreateSubmitButton");
 const pimcoreCreateRecalculateAllButton = document.querySelector("#pimcoreCreateRecalculateAllButton");
 const pimcoreCreateCancelButton = document.querySelector("#pimcoreCreateCancelButton");
 const pimcoreCreateStatus = document.querySelector("#pimcoreCreateStatus");
 const pimcoreEditModal = document.querySelector("#pimcoreEditModal");
 const pimcoreEditForm = document.querySelector("#pimcoreEditForm");
+const pimcoreEditOcrPanel = document.querySelector("#pimcoreEditOcrPanel");
 const pimcoreEditSubmitButton = document.querySelector("#pimcoreEditSubmitButton");
 const pimcoreEditRecalculateAllButton = document.querySelector("#pimcoreEditRecalculateAllButton");
 const pimcoreEditCancelButton = document.querySelector("#pimcoreEditCancelButton");
@@ -1485,6 +1487,7 @@ function webImageCacheItem(prefix, image, payload) {
     url: payload.url || "",
     thumb_url: payload.thumb_url || "",
     file_version: payload.file_version || "",
+    ocr_state: payload.ocr_state || "",
     preprocessed: Boolean(payload.preprocessed),
     cache_timing: payload.timing || null,
     client_preprocess_ms: 0,
@@ -1538,6 +1541,7 @@ async function addSelectedWebImagesToSlots() {
         throw new Error("Backend nie zwrocil tokenu cache dla zdjecia.");
       }
       state.files.set(prefix, webImageCacheItem(prefix, image, payload));
+      await ensureSlotOcrCollection(prefix, state.files.get(prefix));
       state.webImageSelected.delete(state.webImages.indexOf(image));
       assigned.push(prefix);
       renderSlot(prefix);
@@ -2209,6 +2213,31 @@ function dismissSimilarCandidate(prefix) {
   }
 }
 
+async function ensureSlotOcrCollection(prefix, item = null) {
+  if (state.settings?.ocr_available === false) return "disabled";
+  const token = slotFileToken(item) || slotAssignmentToken(prefix);
+  if (!prefix || !token) return "";
+  const payload = await requestJson("/api/ocr/slot-assignment", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prefix, token }),
+  });
+  if (slotAssignmentToken(prefix) !== token) return "";
+  const assigned = state.files.get(prefix) || state.loadedPhotos.get(prefix);
+  if (!assigned) return "";
+  assigned.ocr_state = String(payload?.state || "");
+  updateSlotPreview(prefix);
+  try {
+    await refreshOpenPimcoreOcrPanels();
+    if (assigned.ocr_state === "completed") {
+      await revalidateOpenPimcoreOcrFields();
+    }
+  } catch (_error) {
+    // A later OCR refresh retries the optional Pimcore view and comparison update.
+  }
+  return assigned.ocr_state;
+}
+
 function acceptSimilarCandidate(prefix) {
   const candidate = state.similarCandidates.get(prefix);
   if (!candidate || state.dismissedSimilarSlots.has(prefix)) return;
@@ -2228,6 +2257,9 @@ function acceptSimilarCandidate(prefix) {
   });
   state.slotSources.set(prefix, "similar");
   renderSlot(prefix);
+  ensureSlotOcrCollection(prefix, state.files.get(prefix)).catch((error) => {
+    formStatus.textContent = `Nie zlecono OCR dla slotu ${prefix}: ${error.message}`;
+  });
 }
 
 function pendingSimilarCandidatePrefixes() {
@@ -3671,6 +3703,11 @@ function setSlotAssignment(prefix, assignment, options = {}) {
     if (item?.file && !item.token && !item.uploading && !item.error) {
       uploadSlotFile(prefix, item);
     }
+    if (slotFileToken(item)) {
+      ensureSlotOcrCollection(prefix, item).catch((error) => {
+        formStatus.textContent = `Nie zlecono OCR dla slotu ${prefix}: ${error.message}`;
+      });
+    }
     return;
   }
   if (assignment.type === "loaded") {
@@ -3678,6 +3715,9 @@ function setSlotAssignment(prefix, assignment, options = {}) {
     state.slotFits.set(prefix, sourceFit);
     if (sourceType) state.slotSources.set(prefix, sourceType);
     state.userSelectedSlotSources.delete(prefix);
+    ensureSlotOcrCollection(prefix, state.loadedPhotos.get(prefix)).catch((error) => {
+      formStatus.textContent = `Nie zlecono OCR dla slotu ${prefix}: ${error.message}`;
+    });
   }
 }
 
@@ -12407,6 +12447,7 @@ function openPimcoreCreateModal(ean) {
   if (pimcoreCreateStatus) pimcoreCreateStatus.textContent = "";
   pimcoreMissingModal?.classList.remove("active");
   pimcoreCreateModal.classList.add("active");
+  refreshOpenPimcoreOcrPanels().catch(() => {});
   renderPimcoreRuntimeTemplates(pimcoreCreateForm, state.pimcoreCreateSchema)
     .then((result) => {
       if (pimcoreCreateStatus) {
@@ -12527,6 +12568,7 @@ async function openPimcoreEditModal() {
     if (pimcoreEditRecalculateAllButton) {
       pimcoreEditRecalculateAllButton.disabled = !pimcoreEditHasRuntimeTemplates();
     }
+    refreshOpenPimcoreOcrPanels().catch(() => {});
   } catch (error) {
     if (requestId !== state.pimcoreEditRequestId) return;
     pimcoreEditForm.textContent = "";
@@ -14186,6 +14228,133 @@ async function refreshOcrBackgroundQueue() {
   }
 }
 
+function pimcoreOcrStateLabel(value) {
+  const state = String(value || "missing");
+  const labels = {
+    queued: "Oczekuje",
+    scanning: "Skanowanie",
+    refining: "Dopracowywanie",
+    completed: "Gotowe",
+    disabled: "Wyłączone",
+    error: "Błąd OCR",
+    missing: "Brak wyniku",
+  };
+  return labels[state] || state;
+}
+
+function renderPimcoreOcrCrop(image, url, bbox, label) {
+  image.src = url;
+  image.alt = `Wycinek OCR: ${label}`;
+  const coordinates = Array.isArray(bbox) ? bbox.map(Number) : [];
+  if (coordinates.length !== 4 || coordinates.some((value) => !Number.isFinite(value))) return;
+  image.addEventListener("load", () => {
+    const [left, top, right, bottom] = coordinates;
+    const sourceWidth = image.naturalWidth;
+    const sourceHeight = image.naturalHeight;
+    const width = Math.max(1, right - left);
+    const height = Math.max(1, bottom - top);
+    if (!sourceWidth || !sourceHeight || width <= 0 || height <= 0) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = 92;
+    canvas.height = 68;
+    try {
+      canvas.getContext("2d")?.drawImage(
+        image,
+        Math.max(0, left),
+        Math.max(0, top),
+        Math.min(width, sourceWidth - left),
+        Math.min(height, sourceHeight - top),
+        0,
+        0,
+        canvas.width,
+        canvas.height,
+      );
+      image.src = canvas.toDataURL("image/jpeg", 0.86);
+    } catch (_error) {
+      // A thumbnail remains useful if a browser prevents local canvas cropping.
+    }
+  }, { once: true });
+}
+
+async function renderPimcoreOcrPanel(panel) {
+  const content = panel?.querySelector(".pimcore-ocr-sidebar-content");
+  if (!content) return;
+  const requestId = String(Number(panel.dataset.requestId || 0) + 1);
+  panel.dataset.requestId = requestId;
+  const slots = Object.entries(pimcoreOcrSlotTokens());
+  if (!slots.length) {
+    content.textContent = "Brak zdjęć w aktywnych slotach OCR.";
+    return;
+  }
+  content.textContent = "Odczytywanie danych OCR...";
+  const scans = await Promise.all(slots.map(async ([prefix, token]) => {
+    const item = state.files.get(prefix) || state.loadedPhotos.get(prefix);
+    let scan = { state: item?.ocr_state || "missing", values: [] };
+    try {
+      scan = await requestJson(`/api/ocr/scan?token=${encodeURIComponent(token)}`);
+    } catch (_error) {
+      // Keep the locally-known state and display it instead of hiding the slot.
+    }
+    return { prefix, token, item, scan };
+  }));
+  if (panel.dataset.requestId !== requestId) return;
+  content.replaceChildren();
+  for (const { prefix, item, scan } of scans) {
+    const card = document.createElement("article");
+    card.className = "pimcore-ocr-slot";
+    const heading = document.createElement("div");
+    heading.className = "pimcore-ocr-slot-heading";
+    const slot = document.createElement("strong");
+    slot.textContent = `Slot ${prefix}`;
+    const stateLabel = document.createElement("span");
+    stateLabel.className = "pimcore-ocr-slot-state";
+    stateLabel.textContent = pimcoreOcrStateLabel(scan?.state || item?.ocr_state);
+    heading.append(slot, stateLabel);
+    card.appendChild(heading);
+    const values = Array.isArray(scan?.values) ? scan.values : [];
+    if (!values.length) {
+      const empty = document.createElement("span");
+      empty.textContent = String(scan?.state || item?.ocr_state) === "completed"
+        ? "Nie wykryto wartości."
+        : "Wyniki pojawią się po skanowaniu.";
+      card.appendChild(empty);
+    }
+    const imageUrl = item?.url || item?.thumb_url || "";
+    for (const value of values) {
+      const row = document.createElement("div");
+      row.className = "pimcore-ocr-value";
+      if (imageUrl) {
+        const crop = document.createElement("img");
+        crop.className = "pimcore-ocr-crop";
+        renderPimcoreOcrCrop(crop, imageUrl, value?.bbox, String(value?.text || "wartość"));
+        row.appendChild(crop);
+      }
+      const text = document.createElement("span");
+      text.className = "pimcore-ocr-value-text";
+      const raw = String(value?.text || "");
+      const comparison = String(value?.comparison || "");
+      text.textContent = comparison && comparison !== raw ? `${raw} → ${comparison}` : raw || "—";
+      const confidence = document.createElement("span");
+      confidence.className = "pimcore-ocr-confidence";
+      confidence.textContent = `${Math.round(Number(value?.confidence || 0) * 100)}%`;
+      row.append(text, confidence);
+      card.appendChild(row);
+    }
+    content.appendChild(card);
+  }
+}
+
+async function refreshOpenPimcoreOcrPanels() {
+  const tasks = [];
+  if (pimcoreCreateModal?.classList.contains("active")) {
+    tasks.push(renderPimcoreOcrPanel(pimcoreCreateOcrPanel));
+  }
+  if (pimcoreEditModal?.classList.contains("active")) {
+    tasks.push(renderPimcoreOcrPanel(pimcoreEditOcrPanel));
+  }
+  await Promise.all(tasks);
+}
+
 async function revalidateOpenPimcoreOcrFields() {
   const validations = [];
   if (pimcoreCreateModal?.classList.contains("active") && pimcoreCreateForm) {
@@ -14213,12 +14382,14 @@ async function refreshOcrSlotStates() {
       pending.push([prefix, photo, String(photo.token)]);
     }
   }
+  let changed = false;
   const completions = await Promise.all(pending.map(async ([prefix, item, token]) => {
     try {
       const scan = await requestJson(`/api/ocr/scan?token=${encodeURIComponent(token)}`);
       const nextState = String(scan?.state || "");
       if (nextState && nextState !== "missing" && nextState !== item.ocr_state) {
         item.ocr_state = nextState;
+        changed = true;
         updateSlotPreview(prefix);
         return nextState === "completed";
       }
@@ -14227,6 +14398,13 @@ async function refreshOcrSlotStates() {
     }
     return false;
   }));
+  if (changed) {
+    try {
+      await refreshOpenPimcoreOcrPanels();
+    } catch (_error) {
+      // A later OCR refresh retries this optional live view.
+    }
+  }
   if (completions.some(Boolean)) {
     try {
       await revalidateOpenPimcoreOcrFields();
