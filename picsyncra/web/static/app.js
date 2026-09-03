@@ -8559,68 +8559,6 @@ function fileIndexRefreshButton() {
   return button;
 }
 
-function importLegacyDataButton() {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "secondary-button";
-  button.textContent = "Wczytaj dane ze starej konfiguracji";
-  button.addEventListener("click", async () => {
-    button.disabled = true;
-    settingsStatus.textContent = "Wczytywanie danych starej konfiguracji...";
-    try {
-      const sourceInput = settingsOutput.querySelector(
-        '[name="legacy_import_source_directory"]'
-      );
-      const sourceDirectory = String(sourceInput?.value || "").trim();
-      const importOptions = {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ "source_directory": sourceDirectory }),
-        timeoutMs: 120000,
-      };
-      let payload;
-      try {
-        payload = await requestJson("/api/settings/import-legacy", {
-          ...importOptions,
-        });
-      } catch (error) {
-        const targetExists = error.status === 409
-          && String(error.message || "").startsWith("Docelowa baza PicSyncra juz istnieje");
-        if (!targetExists || !window.confirm(
-          "Docelowa baza PicSyncra zostanie najpierw zarchiwizowana w BACKUP/legacy-import, "
-          + "a potem zastapiona danymi starej konfiguracji. Kontynuowac?"
-        )) {
-          throw error;
-        }
-        settingsStatus.textContent = "Archiwizowanie obecnej bazy i wczytywanie starej konfiguracji...";
-        payload = await requestJson("/api/settings/import-legacy?replace_existing_target=true", {
-          ...importOptions,
-        });
-      }
-      if (payload.settings) {
-        state.settings = payload.settings;
-      }
-      const completionMessage = payload.message || "Wczytywanie danych zakonczone.";
-      settingsStatus.textContent = payload.warning
-        ? `${completionMessage} Ostrzezenie: ${payload.warning}`
-        : completionMessage;
-      if (payload.reauthenticate) {
-        state.currentUser = null;
-        window.setTimeout(() => {
-          window.location.href = "/login";
-        }, 300);
-        return;
-      }
-      renderSettings();
-    } catch (error) {
-      settingsStatus.textContent = error.message || "Nie udalo sie wczytac danych starej konfiguracji.";
-    } finally {
-      button.disabled = false;
-    }
-  });
-  return button;
-}
-
 function repairSqliteDatabaseButton() {
   const button = document.createElement("button");
   button.type = "button";
@@ -9063,13 +9001,7 @@ function renderSettingsApp() {
         placeholder: "np. C:\\PicSyncra\\picsyncra.sqlite",
         description: "Uzywane tylko dla lokalizacji: wskazana sciezka.",
       }),
-      inputField("legacy_import_source_directory", "Folder starej konfiguracji", "", {
-        placeholder: "np. C:\\StaraKonfiguracja",
-        description:
-          "Opcjonalnie: wskaz jeden folder z dawnymi plikami. Puste pole uruchamia tylko jednoznaczne wykrywanie.",
-      }),
       actionRow(
-        importLegacyDataButton(),
         repairSqliteDatabaseButton(),
         manualSqliteBackupButton(),
         backupHistoryButton()

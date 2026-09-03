@@ -24,6 +24,9 @@ def _workspace_temp(name: str) -> Path:
 
 
 class WebDataUserTests(unittest.TestCase):
+    def setUp(self) -> None:
+        data_store.reset_active_store_cache()
+
     def tearDown(self) -> None:
         web_data._FILE_INDEX = None
         web_data._FILE_INDEX_KEY = None

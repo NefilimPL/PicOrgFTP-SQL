@@ -12,6 +12,7 @@ import shutil
 import tempfile
 from collections.abc import Callable
 
+from . import storage_settings
 from .sqlite_store import SqliteStore
 
 
@@ -361,20 +362,6 @@ def _publish_staging_database(staging: Path, target: Path) -> None:
         ) from error
 
 
-def _restore_settings_file(settings_path: Path, snapshot: bytes) -> None:
-    """Restore the exact pre-activation configuration after a final write error."""
-
-    temporary = settings_path.with_name(f".{settings_path.name}.migrator.restore.tmp")
-    try:
-        temporary.write_bytes(snapshot)
-        os.replace(temporary, settings_path)
-    finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
-
-
 def _archive_legacy_sqlite_files(paths: MigrationPaths) -> tuple[Path, str | None]:
     """Move only the migrated legacy SQLite set into the selected app's BACKUP."""
 
@@ -444,7 +431,9 @@ def run_offline_legacy_migration(
             except OSError:
                 pass
             try:
-                _restore_settings_file(paths.settings_path, settings_snapshot)
+                storage_settings.restore_bootstrap_settings_file(
+                    paths.settings_path, settings_snapshot
+                )
             except OSError:
                 pass
             raise OfflineMigrationError(

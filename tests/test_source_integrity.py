@@ -17,7 +17,9 @@ def _live_branding_files() -> list[Path]:
     allowed_legacy_files = {
         ROOT / "picsyncra" / "legacy_migration.py",
         ROOT / "picsyncra" / "legacy_profile.py",
+        ROOT / "picsyncra" / "offline_legacy_profile_migrator.py",
         ROOT / "picsyncra" / "offline_legacy_sqlite_migrator.py",
+        ROOT / "picsyncra" / "offline_migrator_gui.py",
         ROOT / "picsyncra" / "offline_migrator_processes.py",
         ROOT / "picsyncra" / "sqlite_store.py",
         ROOT / "picsyncra" / "web_manager.py",
@@ -25,7 +27,9 @@ def _live_branding_files() -> list[Path]:
         ROOT / "tests" / "test_legacy_migration.py",
         ROOT / "tests" / "test_legacy_profile.py",
         ROOT / "tests" / "test_legacy_profile_import.py",
+        ROOT / "tests" / "test_offline_legacy_profile_migrator.py",
         ROOT / "tests" / "test_offline_legacy_sqlite_migrator.py",
+        ROOT / "tests" / "test_offline_migrator_gui.py",
         ROOT / "tests" / "test_offline_migrator_processes.py",
         ROOT / "tests" / "test_web_manager.py",
         ROOT / "tests" / "js" / "legacy-migration.test.js",
@@ -1053,7 +1057,6 @@ class SourceIntegrityTests(unittest.TestCase):
                         '"image_dir"',
                         '"database_location_mode"',
                         '"database_path"',
-                        "importLegacyDataButton",
                     ],
                 ),
                 ("Indeks lokalny", ['"local_file_index"', "diagnosticButton", "fileIndexRefreshButton"]),
@@ -1341,7 +1344,7 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIn("data_mode_var", source)
         self.assertIn("database_location_mode_var", source)
         self.assertIn("database_path_var", source)
-        self.assertIn("Wczytaj dane ze starej konfiguracji", source)
+        self.assertNotIn("Wczytaj dane ze starej konfiguracji", source)
         self.assertIn("storage_settings.save_bootstrap_settings", source)
 
     def test_desktop_local_file_index_uses_active_cache_store(self) -> None:

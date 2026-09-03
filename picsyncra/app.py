@@ -41,8 +41,6 @@ from .database import connect_db
 from .file_index import LocalFileIndex
 from .config import save_config
 from . import config, localization, settings, common, encryption, storage_settings, data_store
-from .legacy_migration import adopt_legacy_profile, adoption_database_path
-from .legacy_profile import LEGACY_SQLITE_FILENAME, discover_legacy_profiles
 from .settings import BW, EXCEL_SHEETS, AN, l
 from .product_state import (
     ProductIdentity,
@@ -9032,166 +9030,6 @@ class App(BU.Tk):
                 }
             )
 
-        def _adopt_legacy_data_desktop():
-            try:
-                configured_database_path = _selected_sqlite_path()
-                if not configured_database_path:
-                    O.showwarning(WARNING_LABEL, "Nie ustawiono sciezki bazy SQLite.")
-                    return
-                database_path = adoption_database_path(Path(configured_database_path))
-
-                configured_path = Path(configured_database_path)
-                candidate_roots = (
-                    configured_path.parent
-                    if configured_path.name.casefold() == LEGACY_SQLITE_FILENAME.casefold()
-                    else Path(settings.AC),
-                    Path(settings.AC),
-                    Path(settings.BASE_DIR_SETTINGS_PATH).parent,
-                )
-                profiles = discover_legacy_profiles(candidate_roots)
-                if len(profiles) == 1:
-                    use_detected = O.askyesno(
-                        SETTINGS_LABEL,
-                        "Znaleziono stara konfiguracje w folderze:\n"
-                        f"{profiles[0].root}\n\nUzyc tego folderu?",
-                    )
-                    if not use_detected:
-                        selected = BT.askdirectory(
-                            parent=a_,
-                            title="Wybierz folder starej konfiguracji",
-                            initialdir=str(profiles[0].root),
-                        )
-                        if not selected:
-                            return
-                        profiles = discover_legacy_profiles((Path(selected),))
-                elif len(profiles) > 1:
-                    selected = BT.askdirectory(
-                        parent=a_,
-                        title="Wybierz folder starej konfiguracji",
-                        initialdir=str(profiles[0].root),
-                    )
-                    if not selected:
-                        return
-                    profiles = discover_legacy_profiles((Path(selected),))
-                else:
-                    selected = BT.askdirectory(
-                        parent=a_,
-                        title="Wybierz folder starej konfiguracji",
-                        initialdir=str(candidate_roots[0]),
-                    )
-                    if not selected:
-                        return
-                    profiles = discover_legacy_profiles((Path(selected),))
-                if len(profiles) != 1:
-                    O.showwarning(
-                        SETTINGS_LABEL,
-                        "Nie znaleziono jednej kompletnej starej konfiguracji w wybranym folderze.",
-                    )
-                    return
-                profile = profiles[0]
-                active_bootstrap_path = Path(settings.BASE_DIR_SETTINGS_PATH).resolve()
-                preserve_source_paths = (
-                    (active_bootstrap_path,)
-                    if active_bootstrap_path.parent == profile.root
-                    and active_bootstrap_path.name.casefold() == "local_settings.json"
-                    else ()
-                )
-                bootstrap_snapshot = storage_settings.capture_bootstrap_settings()
-                previous_app_secret = common.APP_SECRET
-                previous_template_secret = common.BASE_DIR_SETTINGS_TEMPLATE.get(APP_SECRET_KEY)
-                previous_encryption_secret = encryption.APP_SECRET
-
-                def _activate_adopted_database(
-                    target_path: Path, imported_bootstrap: dict[str, object] | None = None
-                ):
-                    nonlocal app_secret_value
-                    updates = dict(imported_bootstrap or {})
-                    updates.update(
-                        {
-                            storage_settings.DATA_MODE_KEY: storage_settings.DATA_MODE_SQLITE,
-                            storage_settings.DATABASE_LOCATION_MODE_KEY: storage_settings.DATABASE_LOCATION_CUSTOM,
-                            storage_settings.DATABASE_PATH_KEY: str(target_path),
-                        }
-                    )
-                    storage_settings.save_bootstrap_settings(
-                        updates
-                    )
-                    imported_secret = updates.get("app_secret")
-                    if isinstance(imported_secret, str) and imported_secret:
-                        app_secret_value = common._decode_local_secret(
-                            imported_secret, common.APP_SECRET
-                        )
-                        common.APP_SECRET = app_secret_value
-                        common.BASE_DIR_SETTINGS_TEMPLATE[APP_SECRET_KEY] = common._encode_local_secret(
-                            app_secret_value
-                        )
-                        encryption.APP_SECRET = app_secret_value
-                        if system_unlocked:
-                            app_secret_var.set(app_secret_value)
-
-                    def _rollback_activation() -> None:
-                        nonlocal app_secret_value
-                        storage_settings.restore_bootstrap_settings(bootstrap_snapshot)
-                        app_secret_value = previous_app_secret
-                        common.APP_SECRET = previous_app_secret
-                        if previous_template_secret is None:
-                            common.BASE_DIR_SETTINGS_TEMPLATE.pop(APP_SECRET_KEY, None)
-                        else:
-                            common.BASE_DIR_SETTINGS_TEMPLATE[APP_SECRET_KEY] = previous_template_secret
-                        encryption.APP_SECRET = previous_encryption_secret
-                        if system_unlocked:
-                            app_secret_var.set(app_secret_value)
-
-                    return _rollback_activation
-
-                def _run_adoption(replace_existing_target: bool = False):
-                    return adopt_legacy_profile(
-                        source_root=profile.root,
-                        database_path=database_path,
-                        backup_root=Path(storage_settings.resolve_backup_dir()),
-                        finalize=_activate_adopted_database,
-                        replace_existing_target=replace_existing_target,
-                        preserve_source_paths=preserve_source_paths,
-                    )
-
-                result = _run_adoption()
-                if not result.migrated:
-                    if result.error_code == "target_exists" and O.askyesno(
-                        SETTINGS_LABEL,
-                        "Docelowa baza PicSyncra zostanie najpierw zarchiwizowana w "
-                        "BACKUP/legacy-import, a potem zastapiona danymi starej konfiguracji. "
-                        "Kontynuowac?",
-                    ):
-                        result = _run_adoption(replace_existing_target=True)
-                    if result.migrated:
-                        database_path_var.set(str(result.copied_paths[0]))
-                        data_store.reset_active_store_cache()
-                        config.initialize_config(interactive=False)
-                        message = (
-                            "Wczytano dane starej konfiguracji do SQLite. "
-                            f"Zrodlo: {result.source_kind}. Archiwum: {result.archive_dir}."
-                        )
-                        O.showinfo(SETTINGS_LABEL, message)
-                        return
-                    O.showwarning(
-                        SETTINGS_LABEL,
-                        result.error or "Nie znaleziono danych starej konfiguracji.",
-                    )
-                    return
-                database_path_var.set(str(result.copied_paths[0]))
-                data_store.reset_active_store_cache()
-                config.initialize_config(interactive=False)
-                message = (
-                    "Wczytano dane starej konfiguracji do SQLite. "
-                    f"Zrodlo: {result.source_kind}. Archiwum: {result.archive_dir}."
-                )
-                if result.error:
-                    O.showwarning(SETTINGS_LABEL, f"{message}\n\nOstrzezenie: {result.error}")
-                else:
-                    O.showinfo(SETTINGS_LABEL, message)
-            except E as exc:
-                O.showerror(AK, f"Nie udalo sie wczytac danych starej konfiguracji:\n{exc}")
-
         def _set_system_state(state):
             nonlocal system_unlocked
             system_unlocked = state
@@ -9204,7 +9042,6 @@ class App(BU.Tk):
                 database_location_mode_combo.configure(state="readonly")
                 database_path_entry.configure(state=X)
                 database_path_btn.configure(state=X)
-                adopt_legacy_btn.configure(state=X)
             else:
                 app_secret_var.set(app_secret_mask)
                 app_secret_entry.configure(state=i_, show=Y)
@@ -9214,7 +9051,6 @@ class App(BU.Tk):
                 database_location_mode_combo.configure(state=V)
                 database_path_entry.configure(state=i_)
                 database_path_btn.configure(state=V)
-                adopt_legacy_btn.configure(state=V)
 
         def _unlock_system_settings():
             if is_admin():
@@ -9306,13 +9142,6 @@ class App(BU.Tk):
             system_tab, text=CHOOSE_LABEL, command=_choose_database_path, state=V
         )
         database_path_btn.grid(row=8, column=2, padx=5, pady=4, sticky="w")
-        adopt_legacy_btn = C.Button(
-            system_tab,
-            text="Wczytaj dane ze starej konfiguracji",
-            command=_adopt_legacy_data_desktop,
-            state=V,
-        )
-        adopt_legacy_btn.grid(row=9, column=1, columnspan=2, padx=5, pady=(4, 8), sticky="w")
         file_index_toggle = C.Checkbutton(
             system_tab,
             text=LANG.get(

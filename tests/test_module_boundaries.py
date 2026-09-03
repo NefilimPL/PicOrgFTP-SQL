@@ -9,7 +9,7 @@ from picsyncra.web.app import app
 
 SERVICE_MODULES = tuple((Path(__file__).parents[1] / "picsyncra" / "services").glob("*.py"))
 DESKTOP_FTP_PREVIEW_MODULE = Path(__file__).parents[1] / "picsyncra" / "desktop_ftp_preview.py"
-ROUTE_SNAPSHOT_SHA256 = "42978a8703673bfd2f5ca2f4032777a72dd4dc9517bf419a7f23d7f778fbfb11"
+ROUTE_SNAPSHOT_SHA256 = "756f9aab979e265418b7e38d27a40bf74565414d058f59338ce4caf85721ae19"
 WEB_STATIC_DIRECTORY = Path(__file__).parents[1] / "picsyncra" / "web" / "static"
 
 
