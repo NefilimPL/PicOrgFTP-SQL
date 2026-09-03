@@ -4029,7 +4029,7 @@ class SqliteStore:
     def list_ocr_crop_jobs(self) -> list[dict[str, object]]:
         self.initialize()
         with self.connection() as conn:
-            rows = conn.execute("SELECT * FROM ocr_crop_jobs ORDER BY created_at, id").fetchall()
+            rows = conn.execute("SELECT * FROM ocr_crop_jobs ORDER BY created_at, rowid").fetchall()
         return [
             {**dict(row), "bbox": _json_loads(row["bbox_json"], []), "result": _json_loads(row["result_json"], [])}
             for row in rows

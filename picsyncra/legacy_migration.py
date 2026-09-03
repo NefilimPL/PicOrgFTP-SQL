@@ -194,7 +194,15 @@ def _profile_publish_path(target: Path) -> Path:
     return target.with_name(f"{target.stem}-import-{uuid4().hex[:8]}{target.suffix}")
 
 
-def _publish_profile_staging(staging: Path, destination: Path) -> None:
+def _publish_profile_staging(
+    staging: Path, destination: Path, *, reject_existing_target: bool = False
+) -> None:
+    if reject_existing_target:
+        try:
+            os.link(staging, destination)
+        except FileExistsError as exc:
+            raise _TargetAlreadyExistsError("Docelowa baza PicSyncra juz istnieje.") from exc
+        return
     if destination.exists():
         raise _TargetAlreadyExistsError("Docelowa baza PicSyncra juz istnieje.")
     os.replace(staging, destination)
@@ -239,6 +247,7 @@ def adopt_legacy_profile(
     backup_root: Path,
     finalize: Callable[[Path, dict[str, object]], Callable[[], None] | None] | None = None,
     replace_existing_target: bool = False,
+    reject_existing_target: bool = False,
     preserve_source_paths: tuple[Path, ...] = (),
 ) -> MigrationResult:
     """Atomically activate data from one complete old-application profile."""
@@ -248,7 +257,9 @@ def adopt_legacy_profile(
         return MigrationResult(migrated=False, skipped=True)
     target = Path(database_path).resolve()
     backup = Path(backup_root).resolve()
-    if target.exists() and not _is_empty_picsyncra_database(target) and not replace_existing_target:
+    if target.exists() and (
+        reject_existing_target or not _is_empty_picsyncra_database(target)
+    ) and not replace_existing_target:
         return MigrationResult(
             migrated=False,
             skipped=False,
@@ -270,6 +281,7 @@ def adopt_legacy_profile(
     replaced_existing_target = False
     report: dict[str, object] | None = None
     activation_rollback: Callable[[], None] | None = None
+    temporary_cleanup_warning: str | None = None
     try:
         with _exclusive_path_lock(
             backup_root=backup,
@@ -281,8 +293,11 @@ def adopt_legacy_profile(
                 scope="profile-target",
                 protected_path=target,
             ):
-                with TemporaryDirectory(prefix=".picsyncra-profile-", dir=target.parent) as temporary_dir:
-                    temporary_root = Path(temporary_dir)
+                temporary_directory = TemporaryDirectory(
+                    prefix=".picsyncra-profile-", dir=target.parent
+                )
+                try:
+                    temporary_root = Path(temporary_directory.name)
                     snapshot_root = temporary_root / "profile-snapshot"
                     staging = temporary_root / publish_path.name
                     maintenance = (
@@ -303,9 +318,19 @@ def adopt_legacy_profile(
                             _archive_profile_snapshot(snapshot, archive_dir)
                             _write_profile_import_report(archive_dir, report)
                             if target.exists():
+                                if reject_existing_target and not replace_existing_target:
+                                    raise _TargetAlreadyExistsError(
+                                        "Docelowa baza PicSyncra juz istnieje."
+                                    )
                                 _archive_existing_target(target, archive_dir)
                                 replaced_existing_target = True
-                            _publish_profile_staging(staging, publish_path)
+                            _publish_profile_staging(
+                                staging,
+                                publish_path,
+                                reject_existing_target=(
+                                    reject_existing_target and not replace_existing_target
+                                ),
+                            )
                             published = True
                             if finalize is not None:
                                 activation_rollback = finalize(
@@ -313,12 +338,29 @@ def adopt_legacy_profile(
                                 )
                             if profile.sqlite_path is not None:
                                 retire_database(profile.sqlite_path)
+                finally:
+                    try:
+                        temporary_directory.cleanup()
+                    except OSError as cleanup_error:
+                        if not published:
+                            raise
+                        temporary_cleanup_warning = (
+                            "Nie udało się usunąć roboczego katalogu migracji: "
+                            f"{cleanup_error}"
+                        )
     except _AdoptionInProgressError as exc:
         return MigrationResult(
             migrated=False,
             skipped=False,
             error=str(exc),
             error_code=_ADOPTION_IN_PROGRESS,
+        )
+    except _TargetAlreadyExistsError as exc:
+        return MigrationResult(
+            migrated=False,
+            skipped=False,
+            error=str(exc),
+            error_code=_TARGET_EXISTS,
         )
     except Exception as exc:
         rollback_error: Exception | None = None
@@ -402,7 +444,14 @@ def adopt_legacy_profile(
         skipped=False,
         copied_paths=(publish_path,),
         error="; ".join(
-            item for item in (cleanup_error, *cleanup_warnings, replaced_target_warning) if item
+            item
+            for item in (
+                cleanup_error,
+                *cleanup_warnings,
+                replaced_target_warning,
+                temporary_cleanup_warning,
+            )
+            if item
         )
         or None,
         source_kind=source_kind,

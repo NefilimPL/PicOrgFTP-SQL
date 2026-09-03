@@ -131,6 +131,20 @@ def restore_bootstrap_settings(snapshot: bytes | None) -> None:
     reset_active_store_cache()
 
 
+def restore_bootstrap_settings_file(settings_path: Path, snapshot: bytes | None) -> None:
+    """Restore one explicit bootstrap file to an exact earlier snapshot."""
+
+    path = Path(settings_path)
+    if snapshot is None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_bytes_atomic(path, snapshot)
+
+
 def _normalize_bootstrap_settings(data: dict[str, Any]) -> dict[str, Any]:
     data[DATA_MODE_KEY] = normalize_data_mode(data.get(DATA_MODE_KEY))
     data[DATABASE_LOCATION_MODE_KEY] = normalize_database_location_mode(
@@ -316,6 +330,11 @@ def resolve_sqlite_path_for_settings_file(
         return _resolve_path_from_settings_file(path, data.get(DATABASE_PATH_KEY))
     if mode == DATABASE_LOCATION_EXE_DIR:
         return str(path.resolve().parent / DEFAULT_SQLITE_FILENAME)
+    configured_image_dir = _resolve_path_from_settings_file(
+        path, data.get("base_dir_override")
+    )
+    if configured_image_dir:
+        return str(Path(configured_image_dir) / DEFAULT_SQLITE_FILENAME)
     return str(Path(settings.AC).resolve() / DEFAULT_SQLITE_FILENAME)
 
 

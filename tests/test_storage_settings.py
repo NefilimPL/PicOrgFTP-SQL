@@ -65,6 +65,31 @@ def test_explicit_settings_path_helpers_do_not_use_process_global_settings(
     assert resolved == str(settings_file.parent / "picsyncra.sqlite")
 
 
+def test_explicit_settings_path_uses_its_saved_image_directory(
+    tmp_path: Path,
+) -> None:
+    """An offline tool must target the selected application's configured image directory."""
+
+    settings_file = tmp_path / "application" / "local_settings.json"
+    image_dir = tmp_path / "profile-images"
+    settings_file.parent.mkdir()
+    image_dir.mkdir()
+    settings_file.write_text(
+        json.dumps(
+            {
+                "database_location_mode": "image_dir",
+                "base_dir_override": str(image_dir),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with patch.object(storage_settings.settings, "AC", str(tmp_path / "wrong-process-dir")):
+        resolved = storage_settings.resolve_sqlite_path_for_settings_file(settings_file)
+
+    assert resolved == str(image_dir / "picsyncra.sqlite")
+
+
 def test_update_explicit_settings_file_preserves_unknown_values(tmp_path: Path) -> None:
     settings_file = tmp_path / "application" / "local_settings.json"
     settings_file.parent.mkdir()

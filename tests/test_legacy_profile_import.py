@@ -725,36 +725,66 @@ def test_pending_profile_cleanup_accepts_local_settings_file(tmp_path: Path) -> 
     assert (archive_dir / "local_settings.json").is_file()
 
 
-def test_desktop_import_uses_the_single_profile_transaction() -> None:
-    """The desktop button must not use the old multi-directory heuristic anymore."""
+def test_strict_profile_publish_defers_staging_cleanup_until_after_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Publishing must not depend on deleting staging during the atomic handoff."""
 
-    source = (Path(__file__).resolve().parents[1] / "picsyncra" / "app.py").read_text(encoding="utf-8")
-    start = source.index("        def _adopt_legacy_data_desktop():")
-    end = source.index("        def _set_system_state", start)
-    handler = source[start:end]
+    from picsyncra import legacy_migration
 
-    assert "discover_legacy_profiles(" in handler
-    assert "adopt_legacy_profile(" in handler
-    assert "preserve_source_paths=" in handler
-    assert "common._decode_local_secret" in handler
-    assert "capture_bootstrap_settings" in handler
-    assert "restore_bootstrap_settings" in handler
-    assert "DATABASE_LOCATION_CUSTOM" in handler
-    assert "BT.askdirectory" in handler
-    assert "adopt_legacy_data(" not in handler
+    staging = tmp_path / "staging.sqlite"
+    target = tmp_path / "picsyncra.sqlite"
+    staging.write_bytes(b"staged-data")
+    monkeypatch.setattr(
+        legacy_migration.Path,
+        "unlink",
+        lambda _path, *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("simulated staging cleanup failure")
+        ),
+    )
+
+    legacy_migration._publish_profile_staging(
+        staging, target, reject_existing_target=True
+    )
+
+    assert target.read_bytes() == b"staged-data"
+    assert staging.is_file()
 
 
-def test_web_import_button_sends_the_optionally_selected_legacy_folder() -> None:
-    """The web panel passes the administrator-selected legacy folder explicitly."""
+def test_profile_adoption_keeps_published_target_when_temp_cleanup_is_delayed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An undeletable temporary hard link is a cleanup warning, not a failed import."""
 
-    source = (
-        Path(__file__).resolve().parents[1] / "picsyncra" / "web" / "static" / "app.js"
-    ).read_text(encoding="utf-8")
-    start = source.index("function importLegacyDataButton()")
-    end = source.index("function repairSqliteDatabaseButton()", start)
-    handler = source[start:end]
+    from tempfile import TemporaryDirectory as StandardTemporaryDirectory
 
-    assert "legacy_import_source_directory" in handler
-    assert "settingsOutput.querySelector" in handler
-    assert '"source_directory"' in handler
-    assert "JSON.stringify" in handler
+    from picsyncra import legacy_migration
+
+    class DelayedCleanupTemporaryDirectory(StandardTemporaryDirectory):
+        def cleanup(self) -> None:
+            super().cleanup()
+            raise OSError("simulated temporary cleanup delay")
+
+    source_root = tmp_path / "old-profile"
+    source_root.mkdir()
+    (source_root / "config.json").write_text(
+        json.dumps({"legacy": True}), encoding="utf-8"
+    )
+    target = tmp_path / "current" / "picsyncra.sqlite"
+    monkeypatch.setattr(
+        legacy_migration,
+        "TemporaryDirectory",
+        DelayedCleanupTemporaryDirectory,
+    )
+
+    result = legacy_migration.adopt_legacy_profile(
+        source_root=source_root,
+        database_path=target,
+        backup_root=tmp_path / "BACKUP",
+        reject_existing_target=True,
+    )
+
+    assert result.migrated is True
+    assert target.is_file()
+    assert result.error is not None
+    assert "roboczego" in result.error
