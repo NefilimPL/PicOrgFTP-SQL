@@ -162,10 +162,10 @@ class SourceIntegrityTests(unittest.TestCase):
         self.assertIsNotNone(runtime_js_match)
         self.assertIsNotNone(diagnostics_js_match)
         self.assertIsNotNone(js_match)
-        self.assertEqual(css_match.group(1), "20260827-pimcore-ocr-checking-css1")
+        self.assertEqual(css_match.group(1), "20260902-pimcore-ocr-sidebar1")
         self.assertEqual(runtime_js_match.group(1), "20260728-runtime-poll1")
         self.assertEqual(diagnostics_js_match.group(1), "20260825-ocr-overlay-layout2")
-        self.assertEqual(js_match.group(1), "20260901-legacy-adoption-ocr-validation1")
+        self.assertEqual(js_match.group(1), "20260902-pimcore-ocr-slot-refresh2")
         self.assertNotEqual(css_match.group(1), js_match.group(1))
 
     def test_resource_detail_copy_explains_clients_and_latch_stages(self) -> None:

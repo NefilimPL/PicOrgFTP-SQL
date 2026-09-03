@@ -4126,6 +4126,13 @@ button.slot-badge.on:hover {
   width: min(980px, calc(100vw - 32px));
 }
 
+.pimcore-runtime-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
+  gap: 16px;
+  align-items: start;
+}
+
 .pimcore-runtime-fields {
   display: grid;
   grid-template-columns: 1fr;
@@ -4136,6 +4143,85 @@ button.slot-badge.on:hover {
 
 .pimcore-edit-panel .pimcore-runtime-fields {
   max-height: min(70vh, 760px);
+}
+
+.pimcore-ocr-sidebar {
+  position: sticky;
+  top: 0;
+  max-height: min(68vh, 720px);
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.pimcore-edit-panel .pimcore-ocr-sidebar {
+  max-height: min(70vh, 760px);
+}
+
+.pimcore-ocr-sidebar details > summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.pimcore-ocr-sidebar-content {
+  display: grid;
+  gap: 8px;
+  padding: 0 10px 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pimcore-ocr-slot {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 8px;
+}
+
+.pimcore-ocr-slot-heading,
+.pimcore-ocr-value {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.pimcore-ocr-slot-heading strong,
+.pimcore-ocr-value-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pimcore-ocr-slot-state {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.pimcore-ocr-value {
+  justify-content: flex-start;
+}
+
+.pimcore-ocr-crop {
+  width: 46px;
+  height: 34px;
+  flex: 0 0 auto;
+  border-radius: 4px;
+  background: var(--surface-2);
+  object-fit: cover;
+}
+
+.pimcore-ocr-confidence {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .pimcore-runtime-section {
@@ -4842,6 +4928,16 @@ body[data-theme="dark"] .pimcore-runtime-conflict input {
 }
 
 @media (max-width: 700px) {
+  .pimcore-runtime-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .pimcore-ocr-sidebar,
+  .pimcore-edit-panel .pimcore-ocr-sidebar {
+    position: static;
+    max-height: none;
+  }
+
   .pimcore-runtime-fields {
     grid-template-columns: 1fr;
   }

@@ -2202,6 +2202,25 @@ def test_ocr_scan_route_returns_cached_boxes_for_a_signed_slot_image(tmp_path):
     }
 
 
+def test_ocr_slot_assignment_queues_existing_signed_image_for_destination_slot():
+    """Moving or selecting a cached image must start OCR for its new slot."""
+
+    client = TestClient(web_app.app)
+    with (
+        patch.object(web_app, "_require_user", return_value="operator"),
+        patch.object(web_app, "_path_from_file_token", return_value="C:/cache/15.png"),
+        patch.object(web_app, "_schedule_ocr_value_collection", return_value="queued") as schedule,
+    ):
+        response = client.post(
+            "/api/ocr/slot-assignment",
+            json={"prefix": "02", "token": "signed-slot"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"state": "queued"}
+    schedule.assert_called_once_with("02", "C:/cache/15.png")
+
+
 def test_ocr_approval_suppresses_a_cached_value_mismatch(tmp_path):
     from picsyncra.sqlite_store import SqliteStore
 
