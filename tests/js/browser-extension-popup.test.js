@@ -26,6 +26,19 @@ function loadImageCollector(document) {
   });
 }
 
+function loadSafeImagePreviewUrl() {
+  const popupPath = path.resolve(__dirname, "../..", "picsyncra/browser_extension/popup.js");
+  const popupSource = fs.readFileSync(popupPath, "utf8");
+  const start = popupSource.indexOf("  function safeImagePreviewUrl(value) {");
+  const end = popupSource.indexOf("\n\n  function formatMs", start);
+
+  assert.notEqual(start, -1, "popup must define safeImagePreviewUrl");
+  assert.notEqual(end, -1, "safeImagePreviewUrl must end before formatMs");
+
+  const helperSource = popupSource.slice(start, end).replace(/^  /gm, "");
+  return vm.runInNewContext(`(${helperSource})`, { URL, String, encodeURI });
+}
+
 function textNode(tagName, textContent) {
   return {
     tagName,
@@ -40,11 +53,11 @@ test("collectImagesFromPage scans script text without serializing the DOM as HTM
   const document = {
     baseURI: "https://shop.example.test/product",
     title: "Product",
-    documentElement: {
-      get innerHTML() {
-        throw new Error("DOM HTML serialization must not be used while scanning");
+    documentElement: new Proxy({}, {
+      get: () => {
+        throw new Error("DOM root must not be inspected while scanning");
       },
-    },
+    }),
     querySelectorAll(selector) {
       if (selector === "script, style") {
         return [textNode("SCRIPT", 'const hero = "https:\\/\\/cdn.example.test/assets/hero.png?version=1";')];
@@ -67,4 +80,24 @@ test("collectImagesFromPage scans script text without serializing the DOM as HTM
       kind: "image",
     },
   ]);
+});
+
+test("safeImagePreviewUrl percent-encodes HTTP(S) image URLs", () => {
+  const safeImagePreviewUrl = loadSafeImagePreviewUrl();
+
+  assert.equal(
+    safeImagePreviewUrl("https://cdn.example.test/assets/hero image.png?alt=front view"),
+    "https://cdn.example.test/assets/hero%20image.png?alt=front%20view"
+  );
+  assert.equal(
+    safeImagePreviewUrl("https://cdn.example.test/assets/hero%20image.png?alt=front%20view"),
+    "https://cdn.example.test/assets/hero%20image.png?alt=front%20view"
+  );
+});
+
+test("safeImagePreviewUrl rejects non-HTTP(S) schemes", () => {
+  const safeImagePreviewUrl = loadSafeImagePreviewUrl();
+
+  assert.equal(safeImagePreviewUrl("javascript:alert(1)"), "");
+  assert.equal(safeImagePreviewUrl("data:text/html,<script>alert(1)</script>"), "");
 });

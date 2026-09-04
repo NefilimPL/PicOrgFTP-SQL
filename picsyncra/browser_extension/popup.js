@@ -72,6 +72,16 @@
     }
   }
 
+  function safeImagePreviewUrl(value) {
+    try {
+      const url = new URL(String(value || ""));
+      if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+      return encodeURI(decodeURI(url.href));
+    } catch (_error) {
+      return "";
+    }
+  }
+
   function formatMs(value) {
     const ms = Math.max(0, Math.round(Number(value || 0)));
     return `${ms} ms`;
@@ -362,7 +372,8 @@
         }
         renderImages();
       });
-      preview.src = image.url;
+      const previewUrl = safeImagePreviewUrl(image.url);
+      if (previewUrl) preview.src = previewUrl;
       preview.alt = "";
       title.textContent = image.filename || imageFilename(image.url);
       dimensions.textContent =
