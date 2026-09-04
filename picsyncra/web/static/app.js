@@ -13852,6 +13852,16 @@ function ocrDisplayRegions(report) {
     }));
 }
 
+function safeOcrDiagnosticImageUrl(value) {
+  try {
+    const url = new URL(String(value || ""), window.location.origin);
+    if (url.protocol !== "blob:" && url.protocol !== "http:" && url.protocol !== "https:") return "";
+    return decodeURI(url.href);
+  } catch (_error) {
+    return "";
+  }
+}
+
 function renderOcrDiagnosticView(result, options = {}) {
   const helpers = ocrDiagnosticsHelper();
   const output = document.createElement("div");
@@ -13863,7 +13873,8 @@ function renderOcrDiagnosticView(result, options = {}) {
   const image = document.createElement("img");
   image.className = "ocr-diagnostic-image";
   image.alt = options.live ? "Obraz analizowany na zywo przez OCR" : "Obraz analizowany przez OCR";
-  image.src = String(options.imageUrl || result.image_url || "");
+  const imageUrl = safeOcrDiagnosticImageUrl(options.imageUrl || result.image_url);
+  if (imageUrl) image.src = encodeURI(imageUrl);
   const overlay = document.createElement("div");
   overlay.className = "ocr-diagnostic-overlay";
   const status = document.createElement("p");

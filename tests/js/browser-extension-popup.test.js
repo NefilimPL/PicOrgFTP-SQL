@@ -30,7 +30,7 @@ function loadSafeImagePreviewUrl() {
   const popupPath = path.resolve(__dirname, "../..", "picsyncra/browser_extension/popup.js");
   const popupSource = fs.readFileSync(popupPath, "utf8");
   const start = popupSource.indexOf("  function safeImagePreviewUrl(value) {");
-  const end = popupSource.indexOf("\n\n  function formatMs", start);
+  const end = popupSource.indexOf("\n  function formatMs", start);
 
   assert.notEqual(start, -1, "popup must define safeImagePreviewUrl");
   assert.notEqual(end, -1, "safeImagePreviewUrl must end before formatMs");
