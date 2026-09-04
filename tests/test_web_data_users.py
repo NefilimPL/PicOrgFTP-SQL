@@ -11,8 +11,8 @@ import unittest
 from unittest.mock import Mock, patch
 import uuid
 
-from picorgftp_sql import data_store, email_settings, storage_settings, web_data
-from picorgftp_sql.sqlite_store import SqliteStore
+from picsyncra import data_store, email_settings, storage_settings, web_data
+from picsyncra.sqlite_store import SqliteStore
 
 
 def _workspace_temp(name: str) -> Path:
@@ -24,6 +24,9 @@ def _workspace_temp(name: str) -> Path:
 
 
 class WebDataUserTests(unittest.TestCase):
+    def setUp(self) -> None:
+        data_store.reset_active_store_cache()
+
     def tearDown(self) -> None:
         web_data._FILE_INDEX = None
         web_data._FILE_INDEX_KEY = None
@@ -849,7 +852,7 @@ class WebDataUserTests(unittest.TestCase):
             patch.object(web_data, "settings_snapshot", return_value={}),
         ):
             web_data.update_settings(
-                {"app": {"base_dir": "C:\\PicOrgFTP-SQL", web_data.LOCAL_FILE_INDEX_KEY: True}}
+                {"app": {"base_dir": "C:\\PicSyncra", web_data.LOCAL_FILE_INDEX_KEY: True}}
             )
 
         self.assertEqual(len(saved_configs), 1)
@@ -1502,8 +1505,8 @@ class WebDataUserTests(unittest.TestCase):
                 patch.object(web_data, "save_config"),
                 patch.object(web_data.config, "initialize_config", return_value=web_data.config.CONFIG),
                 patch.object(web_data, "settings_snapshot", return_value={}),
-                patch("picorgftp_sql.observability.observability_store", return_value=store),
-                patch("picorgftp_sql.entra_secret_monitor.refresh_entra_secret_status") as refresh,
+                patch("picsyncra.observability.observability_store", return_value=store),
+                patch("picsyncra.entra_secret_monitor.refresh_entra_secret_status") as refresh,
                 patch.object(web_data, "log_error") as log_error,
             ):
                 web_data.update_settings(
