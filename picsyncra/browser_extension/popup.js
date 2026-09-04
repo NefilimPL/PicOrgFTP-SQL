@@ -285,7 +285,6 @@
       }
     });
 
-    const html = document.documentElement.innerHTML.replace(/\\\//g, "/");
     const absoluteImageUrl = new RegExp(
       `(?:https?:)?//[^"'<>'\\s\\\\)]+?\\.(?:${imageExtensionPattern})(?:\\?[^"'<>'\\s\\\\)]*)?`,
       "gi"
@@ -294,12 +293,16 @@
       `["'](/[^"'<>'\\s\\\\]+?\\.(?:${imageExtensionPattern})(?:\\?[^"'<>'\\s\\\\]*)?)["']`,
       "gi"
     );
-    for (const match of html.matchAll(absoluteImageUrl)) {
-      add(match[0], "html.url");
-    }
-    for (const match of html.matchAll(relativeImageUrl)) {
-      add(match[1], "html.relative-url");
-    }
+    document.querySelectorAll("script, style").forEach((node) => {
+      const text = (node.textContent || "").replace(/\\\//g, "/");
+      const source = `${node.tagName.toLowerCase()}.text`;
+      for (const match of text.matchAll(absoluteImageUrl)) {
+        add(match[0], source);
+      }
+      for (const match of text.matchAll(relativeImageUrl)) {
+        add(match[1], source);
+      }
+    });
 
     return {
       pageUrl: location.href,
