@@ -18,6 +18,14 @@ except Exception:  # pragma: no cover - optional test dependency
     Image = None
 
 
+def test_cloudflare_challenge_detection_checks_the_parsed_host() -> None:
+    challenge_page = b'<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>'
+    unrelated_page = b'https://attacker.invalid/challenges.cloudflare.com/turnstile/v0/api.js'
+
+    assert web_image_import._is_cloudflare_challenge(403, body=challenge_page)
+    assert not web_image_import._is_cloudflare_challenge(403, body=unrelated_page)
+
+
 def test_discover_image_candidates_collects_gallery_sources_and_dimensions() -> None:
     html = """
     <html>

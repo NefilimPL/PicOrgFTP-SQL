@@ -91,6 +91,8 @@ QUOTED_IMAGE_URL_RE = re.compile(
     r"""["'](?P<url>(?:https?:)?//[^"'<>\s\\]+?\.(?:jpe?g|png|webp|gif|bmp|tiff?|avif)(?:\?[^"'<>\s\\]*)?|/[^"'<>\s\\]+?\.(?:jpe?g|png|webp|gif|bmp|tiff?|avif)(?:\?[^"'<>\s\\]*)?)["']""",
     re.IGNORECASE,
 )
+DOCUMENT_URL_RE = re.compile(r"(?:https?:)?//[^\s\"'<>\\]+", re.IGNORECASE)
+CLOUDFLARE_CHALLENGE_HOST = "challenges.cloudflare.com"
 
 
 class ImageImportError(ValueError):
@@ -264,7 +266,13 @@ def _is_cloudflare_challenge(
         if "cloudflare" in server and mitigated:
             return True
     lowered = body[:20_000].lower()
-    return b"challenges.cloudflare.com" in lowered or b"cf-mitigated" in lowered
+    if b"cf-mitigated" in lowered:
+        return True
+    document = _decode_html_bytes(body[:20_000], "text/html")
+    return any(
+        urlparse(candidate).hostname == CLOUDFLARE_CHALLENGE_HOST
+        for candidate in DOCUMENT_URL_RE.findall(document)
+    )
 
 
 def _decode_html_bytes(data: bytes, content_type: str = "", charset: str = "") -> str:
