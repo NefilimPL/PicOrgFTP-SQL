@@ -4087,6 +4087,9 @@ function createSlotNode(slot) {
     const candidate = similarCandidateForSlot(slot.prefix);
     const searching = state.similarFileLookupInFlight && isFreeSimilarSlot(slot.prefix);
     const overlay = document.createElement("div");
+    const loadingLabel = document.createElement("span");
+    const progressLine = document.createElement("div");
+    const progressIndicator = document.createElement("i");
     const controls = document.createElement("div");
     const fitButton = document.createElement("button");
     const openButton = document.createElement("button");
@@ -4122,7 +4125,10 @@ function createSlotNode(slot) {
       meta.appendChild(sourceInfo);
     }
     overlay.className = "slot-loading-overlay";
-    overlay.innerHTML = `<span>${photoLoadingText()}</span><div class="progress-line"><i></i></div>`;
+    loadingLabel.textContent = photoLoadingText();
+    progressLine.className = "progress-line";
+    progressLine.appendChild(progressIndicator);
+    overlay.append(loadingLabel, progressLine);
     if (state.photosLoading && !selectedFile && !loadedPhoto) {
       preview.appendChild(overlay);
     }

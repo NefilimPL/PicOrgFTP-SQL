@@ -61,6 +61,15 @@ def _parse(path: Path) -> _HtmlCollector:
 
 
 class WebUiIntegrityTests(unittest.TestCase):
+    def test_photo_loading_overlay_does_not_interpret_status_as_html(self) -> None:
+        js_source = APP_JS.read_text(encoding="utf-8")
+        renderer_start = js_source.index("function createSlotNode")
+        renderer_end = js_source.index("function renderSlot(prefix)", renderer_start)
+        renderer = js_source[renderer_start:renderer_end]
+
+        self.assertNotIn("overlay.innerHTML", renderer)
+        self.assertIn("textContent = photoLoadingText()", renderer)
+
     def test_pimcore_editor_exposes_a_compact_live_ocr_sidebar(self) -> None:
         html = _parse(INDEX_HTML)
         source = APP_JS.read_text(encoding="utf-8")

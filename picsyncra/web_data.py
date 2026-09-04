@@ -3748,7 +3748,8 @@ def test_local_paths() -> dict[str, object]:
             os.remove(temp_path)
             check["write"] = True
         except Exception as exc:
-            check["error"] = str(exc)
+            log_error(f"Local path diagnostics failed ({type(exc).__name__}).")
+            check["error"] = "Nie udalo sie sprawdzic folderu lokalnego."
         checks.append(check)
     return {"ok": all(item["read"] and item["write"] for item in checks), "checks": checks}
 
@@ -3762,7 +3763,11 @@ def test_ftp_connection() -> dict[str, object]:
         files = list_remote_files_for_ean(config.CONFIG.get(H, {}), "")
         return {"ok": True, "message": "Polaczenie FTP dziala.", "sample_count": len(files)}
     except Exception as exc:
-        return {"ok": False, "message": str(exc)}
+        log_error(f"FTP diagnostics failed ({type(exc).__name__}).")
+        return {
+            "ok": False,
+            "message": "Nie udalo sie polaczyc z FTP. Sprawdz konfiguracje i log serwera.",
+        }
 
 
 def test_sql_connection() -> dict[str, object]:
@@ -3787,7 +3792,11 @@ def test_sql_connection() -> dict[str, object]:
                 pass
         return {"ok": True, "message": "Polaczenie SQL dziala."}
     except Exception as exc:
-        return {"ok": False, "message": str(exc)}
+        log_error(f"SQL diagnostics failed ({type(exc).__name__}).")
+        return {
+            "ok": False,
+            "message": "Nie udalo sie polaczyc z SQL. Sprawdz konfiguracje i log serwera.",
+        }
 
 
 def test_sql_profile_connection(profile_id: object) -> dict[str, object]:
@@ -3809,7 +3818,11 @@ def test_sql_profile_connection(profile_id: object) -> dict[str, object]:
         cursor.fetchone()
         return {"ok": True, "message": "Polaczenie SQL dziala."}
     except Exception as exc:
-        return {"ok": False, "message": str(exc)}
+        log_error(f"SQL profile diagnostics failed ({type(exc).__name__}).")
+        return {
+            "ok": False,
+            "message": "Nie udalo sie polaczyc z SQL. Sprawdz konfiguracje i log serwera.",
+        }
     finally:
         if cursor is not None:
             try:
